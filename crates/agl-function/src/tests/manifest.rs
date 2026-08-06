@@ -1,4 +1,4 @@
-use agl_extension::ToolId;
+use agl_kernel::ToolId;
 
 use crate::loader::parse_function_document;
 use crate::*;
@@ -21,7 +21,7 @@ model:
   config: inference.toml
 runtime:
   tool_mode: write
-  max_capability_calls: 32
+  max_tool_calls: 32
 validation:
   runtime_identity:
     required: true
@@ -44,7 +44,7 @@ skills:
         front_matter.runtime_tool_mode(),
         Some(FunctionToolMode::Write)
     );
-    assert_eq!(front_matter.runtime_max_capability_calls(), Some(32));
+    assert_eq!(front_matter.runtime_max_tool_calls(), Some(32));
     assert_eq!(
         front_matter.runtime_identity_validation(),
         Some(RuntimeIdentityValidation {
@@ -58,8 +58,8 @@ skills:
 }
 
 #[test]
-fn validates_function_capability_call_boundaries() {
-    fn document(max_capability_calls: u32) -> String {
+fn validates_function_tool_call_boundaries() {
+    fn document(max_tool_calls: u32) -> String {
         format!(
             r#"---
 artifact:
@@ -74,7 +74,7 @@ artifact:
   requires: []
 title: Coding
 runtime:
-  max_capability_calls: {max_capability_calls}
+  max_tool_calls: {max_tool_calls}
 ---
 "#
         )
@@ -83,7 +83,7 @@ runtime:
     for accepted in [1, MAX_FUNCTION_CAPABILITY_CALLS] {
         let (front_matter, _) = parse_function_document(&document(accepted)).unwrap();
         front_matter.validate().unwrap();
-        assert_eq!(front_matter.runtime_max_capability_calls(), Some(accepted));
+        assert_eq!(front_matter.runtime_max_tool_calls(), Some(accepted));
     }
 
     for rejected in [0, MAX_FUNCTION_CAPABILITY_CALLS + 1] {
@@ -92,7 +92,7 @@ runtime:
         assert!(
             error
                 .to_string()
-                .contains("runtime.max_capability_calls must be between 1 and 64")
+                .contains("runtime.max_tool_calls must be between 1 and 64")
         );
     }
 }
@@ -103,9 +103,9 @@ fn runtime_function_preserves_function_tool_policy_states() {
         FunctionToolPolicy::new(
             allow
                 .iter()
-                .map(|id| ToolId::new(*id).expect("test capability ID is valid")),
+                .map(|id| ToolId::new(*id).expect("test tool ID is valid")),
             deny.iter()
-                .map(|id| ToolId::new(*id).expect("test capability ID is valid")),
+                .map(|id| ToolId::new(*id).expect("test tool ID is valid")),
         )
     }
 
@@ -128,10 +128,10 @@ fn runtime_function_preserves_function_tool_policy_states() {
         },
         Case {
             name: "allow-and-deny",
-            tools_yaml: "tools:\n  allow:\n    - core.workspace:fs.read\n    - repo.status\n  deny:\n    - repo.status\n",
+            tools_yaml: "tools:\n  allow:\n    - core.workspace:fs.read\n    - core.process:shell.exec\n  deny:\n    - core.process:shell.exec\n",
             expected: Some(policy(
-                &["core.workspace:fs.read", "repo.status"],
-                &["repo.status"],
+                &["core.workspace:fs.read", "core.process:shell.exec"],
+                &["core.process:shell.exec"],
             )),
         },
         Case {
@@ -154,7 +154,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
         std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Policy {index}\n{}---\n",
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - extension:core.process@^1.0\ntitle: Policy {index}\n{}---\n",
                 case.tools_yaml
             ),
         )

@@ -1675,7 +1675,7 @@ mod tests {
                         worker_build_id: format!("sha256:{}", "d".repeat(64)),
                         native_bundle_id: None,
                         composite_worker_build_id: None,
-                        capabilities: Vec::new(),
+                        tools: Vec::new(),
                     }),
                 ))
                 .unwrap(),

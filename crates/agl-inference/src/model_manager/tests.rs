@@ -747,7 +747,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
             ArtifactSensitivity::Sensitive,
             ArtifactSource {
                 kind: ArtifactSourceKind::ScreenCapture,
-                provider: Some("fake-portal".to_string()),
+                extension: Some("fake-portal".to_string()),
             },
             ArtifactRetention::RunScoped,
         )
@@ -842,7 +842,7 @@ fn text_only_profile_rejects_artifact_content_before_queue_admission() {
         ArtifactSensitivity::Sensitive,
         ArtifactSource {
             kind: ArtifactSourceKind::ScreenCapture,
-            provider: None,
+            extension: None,
         },
     )
     .unwrap();

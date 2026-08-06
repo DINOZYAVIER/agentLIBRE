@@ -3,7 +3,7 @@ artifact:
   schema: agentlibre.artifact/v1
   type: function
   id: gemma4-31b-32k
-  version: 1.0.0
+  version: 1.1.0
   payload_schema: agentlibre.function/v2
   agl:
     compatible: ">=1.0.0-alpha.12"
@@ -19,7 +19,7 @@ model:
 runtime:
   tool_mode: read-only
   max_output_tokens: 4096
-  max_capability_calls: 32
+  max_tool_calls: 32
 skills:
   use: []
 subagents:

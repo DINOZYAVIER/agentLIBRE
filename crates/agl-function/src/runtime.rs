@@ -35,7 +35,7 @@ pub struct RuntimeFunction {
     pub tool_mode: Option<FunctionToolMode>,
     pub tool_policy: Option<FunctionToolPolicy>,
     pub max_output_tokens: Option<u32>,
-    pub max_capability_calls: Option<u32>,
+    pub max_tool_calls: Option<u32>,
     pub skills: Vec<String>,
     pub extensions: Vec<String>,
     pub memory_enabled: bool,
@@ -216,7 +216,7 @@ pub(crate) fn runtime_function_from_loaded(
         tool_mode: loaded.front_matter.runtime_tool_mode(),
         tool_policy: loaded.front_matter.tool_policy(),
         max_output_tokens: loaded.front_matter.runtime_max_output_tokens(),
-        max_capability_calls: loaded.front_matter.runtime_max_capability_calls(),
+        max_tool_calls: loaded.front_matter.runtime_max_tool_calls(),
         skills: loaded.front_matter.selected_skills().to_vec(),
         extensions: loaded
             .front_matter

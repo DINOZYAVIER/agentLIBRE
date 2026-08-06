@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agl_exec::AuthorityFingerprint;
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_process::TerminalEndpoint;
@@ -16,11 +16,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
-pub const PROVIDER_ID: &str = "permission-tools";
-pub const PERMISSIONS_STATUS_TOOL_ID: &str = "permissions.status";
-pub const PERMISSIONS_REQUEST_TOOL_ID: &str = "permissions.request";
-pub const PERMISSIONS_GRANT_TOOL_ID: &str = "permissions.grant";
-pub const PERMISSIONS_REVOKE_TOOL_ID: &str = "permissions.revoke";
+pub const PROVIDER_ID: &str = "core.permission";
+pub const PERMISSIONS_STATUS_TOOL_ID: &str = "core.permission:status";
+pub const PERMISSIONS_REQUEST_TOOL_ID: &str = "core.permission:request";
+pub const PERMISSIONS_GRANT_TOOL_ID: &str = "core.permission:grant";
+pub const PERMISSIONS_REVOKE_TOOL_ID: &str = "core.permission:revoke";
 
 #[derive(Clone)]
 pub struct PermissionTools {
@@ -144,7 +144,7 @@ impl PermissionTools {
         let duration = args.duration.unwrap_or_default().as_str().to_string();
         let requester_ref = args
             .requester_ref
-            .unwrap_or_else(|| "tool:permissions.request".to_string());
+            .unwrap_or_else(|| "tool:core.permission:request".to_string());
         let store = self.open_store_writable()?;
         let request = store.create_permission_request(PermissionRequestDraft {
             requested_tools,
@@ -167,7 +167,7 @@ impl PermissionTools {
                 &args.request_id,
                 args.granted_by_ref
                     .as_deref()
-                    .unwrap_or("tool:permissions.grant"),
+                    .unwrap_or("tool:core.permission:grant"),
                 args.resolution_ref.as_deref(),
             )?,
             GrantArgs::Direct(args) => {
@@ -188,7 +188,7 @@ impl PermissionTools {
                         duration: args.duration.unwrap_or_default().as_str().to_string(),
                         granted_by_ref: args
                             .granted_by_ref
-                            .unwrap_or_else(|| "tool:permissions.grant".to_string()),
+                            .unwrap_or_else(|| "tool:core.permission:grant".to_string()),
                     })?,
                 ]
             }
@@ -222,7 +222,7 @@ impl PermissionTools {
     async fn revoke_live(
         &self,
         arguments: Value,
-        policy_hash: &agl_extension::PolicyHash,
+        policy_hash: &agl_kernel::PolicyHash,
     ) -> Result<Value> {
         let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
         let terminated_executions = if let Some(endpoint) = &self.terminal_endpoint {
@@ -272,14 +272,14 @@ impl PermissionTools {
 }
 
 impl ToolHandler for PermissionTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            let data = if invocation.capability_id.as_str() == PERMISSIONS_REVOKE_TOOL_ID {
+            let data = if invocation.tool_id.as_str() == PERMISSIONS_REVOKE_TOOL_ID {
                 self.revoke_live(invocation.arguments, &invocation.policy_hash)
                     .await?
             } else {
-                self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?
+                self.dispatch(invocation.tool_id.as_str(), invocation.arguments)?
             };
             Ok(ToolResult::new(data))
         })
@@ -288,11 +288,11 @@ impl ToolHandler for PermissionTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin permission provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin permission extension id is valid"),
         "Permission Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin permission provider declaration is valid")
+    .expect("builtin permission extension declaration is valid")
     .with_tool(action::<StatusArgs>(
         PERMISSIONS_STATUS_TOOL_ID,
         "Show pending permission requests and active grants.",
@@ -320,6 +320,10 @@ pub fn declaration() -> ExtensionDescriptor {
         OperationKind::Approve,
         &[EffectId::store_permission_grants()],
     ))
+    .with_effects([
+        EffectDeclaration::for_standard(EffectId::store_permission_requests()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::store_permission_grants()).unwrap(),
+    ])
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -343,14 +347,15 @@ fn action<T: JsonSchema>(
 
 fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
     if tools.is_empty() {
-        bail!("permissions.request tools cannot be empty");
+        bail!("core.permission:request tools cannot be empty");
     }
     let mut normalized = Vec::with_capacity(tools.len());
     let mut seen = std::collections::BTreeSet::new();
     for tool in tools {
-        let id = ToolId::new(tool.clone())
-            .with_context(|| format!("permissions.request requested tool id is invalid: {tool}"))?;
-        if id.as_str().starts_with("permissions.") {
+        let id = ToolId::new(tool.clone()).with_context(|| {
+            format!("core.permission:request requested tool id is invalid: {tool}")
+        })?;
+        if id.extension_namespace() == "core.permission" {
             bail!("permission tools cannot request or grant permission tools");
         }
         if seen.insert(id.as_str().to_string()) {
@@ -482,7 +487,7 @@ mod tests {
             .dispatch(
                 PERMISSIONS_REQUEST_TOOL_ID,
                 json!({
-                    "tools": ["notes.add"],
+                    "tools": ["core.note:add"],
                     "reason": "Create one explicit note.",
                     "requester_ref": "chat:turn-1"
                 }),
@@ -492,7 +497,7 @@ mod tests {
         assert_eq!(output["tool"], PERMISSIONS_REQUEST_TOOL_ID);
         assert_eq!(output["result"], "pending_approval");
         assert_eq!(output["duration"], "one_turn");
-        assert_eq!(output["tools"], json!(["notes.add"]));
+        assert_eq!(output["tools"], json!(["core.note:add"]));
 
         let status = tools
             .dispatch(PERMISSIONS_STATUS_TOOL_ID, json!({}))
@@ -501,7 +506,10 @@ mod tests {
         assert_eq!(status["dynamic_grants"], false);
         assert_eq!(status["pending_request_count"], 1);
         assert_eq!(status["active_grant_count"], 0);
-        assert_eq!(status["pending_requests"][0]["tools"], json!(["notes.add"]));
+        assert_eq!(
+            status["pending_requests"][0]["tools"],
+            json!(["core.note:add"])
+        );
     }
 
     #[test]
@@ -513,7 +521,7 @@ mod tests {
             .dispatch(
                 PERMISSIONS_REQUEST_TOOL_ID,
                 json!({
-                    "tools": ["permissions.grant"],
+                    "tools": ["core.permission:grant"],
                     "reason": "grant myself"
                 }),
             )
@@ -529,8 +537,8 @@ mod tests {
             current_mode: "read-only".to_string(),
             visible_tools: vec![
                 "core.workspace:fs.read".to_string(),
-                "permissions.status".to_string(),
-                "permissions.request".to_string(),
+                "core.permission:status".to_string(),
+                "core.permission:request".to_string(),
             ],
             dynamic_grants: false,
             granted_visible_tools: Vec::new(),
@@ -546,8 +554,8 @@ mod tests {
             status["visible_tools"],
             json!([
                 "core.workspace:fs.read",
-                "permissions.status",
-                "permissions.request"
+                "core.permission:status",
+                "core.permission:request"
             ])
         );
         assert_eq!(status["dynamic_grants"], false);
@@ -574,16 +582,20 @@ mod tests {
         assert!(
             schema
                 .validate(&json!({
-                    "tools": ["notes.add"],
+                    "tools": ["core.note:add"],
                     "reason": "Create one explicit note."
                 }))
                 .is_ok()
         );
-        assert!(schema.validate(&json!({"tools": ["notes.add"]})).is_err());
+        assert!(
+            schema
+                .validate(&json!({"tools": ["core.note:add"]}))
+                .is_err()
+        );
         assert!(
             schema
                 .validate(&json!({
-                    "tools": ["notes.add"],
+                    "tools": ["core.note:add"],
                     "reason": "Create one explicit note.",
                     "extra": true
                 }))
@@ -592,7 +604,7 @@ mod tests {
         assert!(
             schema
                 .validate(&json!({
-                    "tools": "notes.add",
+                    "tools": "core.note:add",
                     "reason": "Create one explicit note."
                 }))
                 .is_err()

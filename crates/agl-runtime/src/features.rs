@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use agl_extension::ExtensionDescriptor;
+use agl_kernel::ExtensionDescriptor;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP: usize = 512;
 
-/// Informational product-surface metadata; this is not an executable capability declaration.
+/// Informational product-surface metadata; this is not an executable tool declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeFeature {
     pub id: &'static str,
@@ -77,7 +77,7 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
                 "agl memory search",
             ],
             requires: &["agl-store"],
-            model_tools: &["memory.suggest"],
+            model_tools: &["core.memory:suggest"],
         },
         RuntimeFeature {
             id: "notes",
@@ -93,7 +93,7 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
                 "agl notes delete",
             ],
             requires: &["agl-store"],
-            model_tools: &["notes.add", "notes.search"],
+            model_tools: &["core.note:add", "core.note:search"],
         },
         RuntimeFeature {
             id: "store",
@@ -165,7 +165,7 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
             write_actions: &["grant", "revoke"],
             commands: &["agl --mode write"],
             requires: &["agl-store for durable request/grant evidence"],
-            model_tools: &["permissions.status", "permissions.request"],
+            model_tools: &["core.permission:status", "core.permission:request"],
         },
     ]
 }
@@ -325,22 +325,22 @@ mod tests {
             "core.workspace:fs.read",
             "core.workspace:fs.search",
         ];
-        let workspace_extension = agl_extension::ExtensionDescriptor::builtin(
-            agl_extension::ExtensionId::new("core.workspace").unwrap(),
+        let workspace_extension = agl_kernel::ExtensionDescriptor::builtin(
+            agl_kernel::ExtensionId::new("core.workspace").unwrap(),
             "Core Workspace",
             "1.0.0",
         )
         .unwrap()
         .with_tool(
-            agl_extension::ToolDeclaration::new(
-                agl_extension::ToolId::new("core.workspace:fs.read").unwrap(),
+            agl_kernel::ToolDeclaration::new(
+                agl_kernel::ToolId::new("core.workspace:fs.read").unwrap(),
                 "Read",
                 serde_json::json!({
                     "$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object",
                     "additionalProperties": false
                 }),
-                agl_extension::OperationKind::Read,
+                agl_kernel::OperationKind::Read,
             )
             .unwrap(),
         );

@@ -306,7 +306,7 @@ async fn deliver_outbox(_path: PathBuf, _store_root: PathBuf, _limit: usize) -> 
 
 #[cfg(unix)]
 fn print_outbox_delivery_report(report: &MatrixOutboxDeliveryReport) {
-    println!("tool=matrix.outbox.deliver");
+    println!("tool=matrix.bridge:outbox.deliver");
     println!("queued={}", report.queued);
     println!("sent={}", report.sent);
     println!("failed={}", report.failed);

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_memory::{
@@ -16,13 +16,13 @@ use serde_json::{Value, json};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
-pub const PROVIDER_ID: &str = "memory-tools";
-pub const MEMORY_SEARCH_TOOL_ID: &str = "memory.search";
-pub const MEMORY_LIST_TOOL_ID: &str = "memory.list";
-pub const MEMORY_SUGGEST_TOOL_ID: &str = "memory.suggest";
-pub const MEMORY_ADD_TOOL_ID: &str = "memory.add";
-pub const MEMORY_APPROVE_TOOL_ID: &str = "memory.approve";
-pub const MEMORY_REJECT_TOOL_ID: &str = "memory.reject";
+pub const PROVIDER_ID: &str = "core.memory";
+pub const MEMORY_SEARCH_TOOL_ID: &str = "core.memory:search";
+pub const MEMORY_LIST_TOOL_ID: &str = "core.memory:list";
+pub const MEMORY_SUGGEST_TOOL_ID: &str = "core.memory:suggest";
+pub const MEMORY_ADD_TOOL_ID: &str = "core.memory:add";
+pub const MEMORY_APPROVE_TOOL_ID: &str = "core.memory:approve";
+pub const MEMORY_REJECT_TOOL_ID: &str = "core.memory:reject";
 
 const DEFAULT_LIST_LIMIT: usize = 10;
 const MAX_LIST_LIMIT: usize = 50;
@@ -54,8 +54,8 @@ impl MemoryTools {
     fn search(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SearchArgs>(MEMORY_SEARCH_TOOL_ID, arguments)?;
         let store = self.open_store_read_only()?;
-        let memory = MemoryRepository::new(&store);
-        let entries = memory.search(&MemorySearchQuery {
+        let repository = MemoryRepository::new(&store);
+        let entries = repository.search(&MemorySearchQuery {
             scope: parse_optional_scope(
                 args.scope.as_ref().map(MemoryScopeArg::as_str),
                 args.scope_key,
@@ -166,10 +166,10 @@ impl MemoryTools {
 }
 
 impl ToolHandler for MemoryTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+            let data = self.dispatch(invocation.tool_id.as_str(), invocation.arguments)?;
             Ok(ToolResult::new(data))
         })
     }
@@ -177,11 +177,11 @@ impl ToolHandler for MemoryTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin memory provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin memory extension id is valid"),
         "Memory Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin memory provider declaration is valid")
+    .expect("builtin memory extension declaration is valid")
     .with_tool(action::<SearchArgs>(
         MEMORY_SEARCH_TOOL_ID,
         "Search approved local memories by scope and text.",
@@ -227,6 +227,10 @@ pub fn declaration() -> ExtensionDescriptor {
         )
         .with_state_effects([EffectId::store_memory_suggestions()]),
     )
+    .with_effects([
+        EffectDeclaration::for_standard(EffectId::store_memory_entries()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::store_memory_suggestions()).unwrap(),
+    ])
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

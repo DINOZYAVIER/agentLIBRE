@@ -1,18 +1,19 @@
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration, ToolId,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+    ToolId,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{ToolCatalog, ToolCatalogError};
 
-pub const PROVIDER_ID: &str = "skill-tools";
-pub const SKILL_LIST_TOOL_ID: &str = "skill.list";
-pub const SKILL_INSPECT_TOOL_ID: &str = "skill.inspect";
-pub const SKILL_STATUS_TOOL_ID: &str = "skill.status";
-pub const SKILL_VERIFY_TOOL_ID: &str = "skill.verify";
-pub const SKILL_TRUST_TOOL_ID: &str = "skill.trust";
-pub const SKILL_REVOKE_TOOL_ID: &str = "skill.revoke";
+pub const PROVIDER_ID: &str = "core.skill";
+pub const SKILL_LIST_TOOL_ID: &str = "core.skill:list";
+pub const SKILL_INSPECT_TOOL_ID: &str = "core.skill:inspect";
+pub const SKILL_STATUS_TOOL_ID: &str = "core.skill:status";
+pub const SKILL_VERIFY_TOOL_ID: &str = "core.skill:verify";
+pub const SKILL_TRUST_TOOL_ID: &str = "core.skill:trust";
+pub const SKILL_REVOKE_TOOL_ID: &str = "core.skill:revoke";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -93,11 +94,11 @@ fn default_true() -> bool {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin skill provider ID is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin skill extension ID is valid"),
         "Skill Host Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin skill provider declaration is valid")
+    .expect("builtin skill extension declaration is valid")
     .with_tool(action::<SkillListArgs>(
         SKILL_LIST_TOOL_ID,
         "List core and workspace skills with trust and routing summaries.",
@@ -134,6 +135,7 @@ pub fn declaration() -> ExtensionDescriptor {
         OperationKind::Approve,
         [EffectId::skill_trust()],
     ))
+    .with_effect(EffectDeclaration::for_standard(EffectId::skill_trust()).unwrap())
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -147,7 +149,7 @@ fn action<T: JsonSchema>(
     state_effects: impl IntoIterator<Item = EffectId>,
 ) -> ToolDeclaration {
     ToolDeclaration::from_schema::<T>(
-        ToolId::new(id).expect("builtin skill capability ID is valid"),
+        ToolId::new(id).expect("builtin skill tool ID is valid"),
         description,
         operation_kind,
     )

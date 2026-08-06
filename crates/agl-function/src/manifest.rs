@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use agl_artifact::{
     ArtifactEnvelope, EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
 };
-use agl_extension::{ExtensionId, ToolId};
 pub use agl_kernel::FunctionToolPolicy;
+use agl_kernel::{ExtensionId, ToolId};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -196,10 +196,10 @@ impl AgentFunctionFrontMatter {
             .and_then(|runtime| runtime.max_output_tokens)
     }
 
-    pub fn runtime_max_capability_calls(&self) -> Option<u32> {
+    pub fn runtime_max_tool_calls(&self) -> Option<u32> {
         self.runtime
             .as_ref()
-            .and_then(|runtime| runtime.max_capability_calls)
+            .and_then(|runtime| runtime.max_tool_calls)
     }
 
     pub fn tool_policy(&self) -> Option<FunctionToolPolicy> {
@@ -325,7 +325,7 @@ pub struct FunctionRuntime {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
-    pub max_capability_calls: Option<u32>,
+    pub max_tool_calls: Option<u32>,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
@@ -339,10 +339,10 @@ impl FunctionRuntime {
                 "runtime.max_output_tokens must be greater than zero"
             );
         }
-        if let Some(max_capability_calls) = self.max_capability_calls {
+        if let Some(max_tool_calls) = self.max_tool_calls {
             ensure!(
-                (1..=MAX_FUNCTION_CAPABILITY_CALLS).contains(&max_capability_calls),
-                "runtime.max_capability_calls must be between 1 and {MAX_FUNCTION_CAPABILITY_CALLS}"
+                (1..=MAX_FUNCTION_CAPABILITY_CALLS).contains(&max_tool_calls),
+                "runtime.max_tool_calls must be between 1 and {MAX_FUNCTION_CAPABILITY_CALLS}"
             );
         }
         Ok(())
@@ -381,7 +381,7 @@ impl FunctionTools {
         validate_unique_non_empty("tools.deny", &self.deny)?;
         for id in self.allow.iter().chain(&self.deny) {
             ToolId::new(id.clone())
-                .with_context(|| format!("invalid function tool capability ID `{id}`"))?;
+                .with_context(|| format!("invalid function tool tool ID `{id}`"))?;
         }
         Ok(())
     }
@@ -389,12 +389,10 @@ impl FunctionTools {
     fn to_runtime_policy(&self) -> FunctionToolPolicy {
         FunctionToolPolicy::new(
             self.allow.iter().map(|id| {
-                ToolId::new(id.clone())
-                    .expect("validated function allow capability ID must remain valid")
+                ToolId::new(id.clone()).expect("validated function allow tool ID must remain valid")
             }),
             self.deny.iter().map(|id| {
-                ToolId::new(id.clone())
-                    .expect("validated function deny capability ID must remain valid")
+                ToolId::new(id.clone()).expect("validated function deny tool ID must remain valid")
             }),
         )
     }

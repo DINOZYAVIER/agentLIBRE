@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use agl_extension::{EffectId, HookId, SkillId, ToolId};
 use agl_kernel::ToolCatalog;
 use agl_kernel::ToolExclusionReason;
+use agl_kernel::{EffectId, HookId, SkillId, ToolId};
 use serde::Serialize;
 
 use crate::{SkillRegistry, SkillRegistryError};
@@ -478,7 +478,7 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use agl_extension::OperationKind;
+    use agl_kernel::OperationKind;
     use agl_kernel::ToolCatalog;
 
     use super::*;
@@ -503,7 +503,7 @@ mod tests {
                     "core.workspace:fs.list",
                     "core.workspace:fs.read",
                     "core.workspace:fs.search",
-                    "repo.status",
+                    "core.repo:status",
                 ]),
                 [],
                 [],
@@ -525,16 +525,16 @@ mod tests {
         assert_eq!(
             bundle.evidence[0].callable_tools,
             vec![
+                "core.repo:status",
                 "core.workspace:fs.list",
                 "core.workspace:fs.read",
-                "core.workspace:fs.search",
-                "repo.status"
+                "core.workspace:fs.search"
             ]
         );
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: core.workspace:fs.list, core.workspace:fs.read, core.workspace:fs.search, repo.status")
+                .contains("directly_callable_tools: core.repo:status, core.workspace:fs.list, core.workspace:fs.read, core.workspace:fs.search")
         );
         assert!(bundle.content.contains("requestable_tools: []"));
         assert!(
@@ -564,15 +564,15 @@ mod tests {
             skill_id.clone(),
             SkillToolRouting::new(
                 tool_ids([
-                    "cron.preflight",
+                    "core.cron:preflight",
                     "core.workspace:fs.read",
                     "core.workspace:fs.search",
-                    "permissions.request",
-                    "permissions.status",
+                    "core.permission:request",
+                    "core.permission:status",
                 ]),
-                tool_ids(["cron.add", "matrix.outbox.enqueue"]),
+                tool_ids(["core.cron:add", "matrix.outbox:enqueue"]),
                 [(
-                    ToolId::new("matrix.outbox.deliver").unwrap(),
+                    ToolId::new("matrix.bridge:outbox.deliver").unwrap(),
                     ToolExclusionReason::SkillDenied,
                 )],
             ),
@@ -584,43 +584,43 @@ mod tests {
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: core.workspace:fs.read, core.workspace:fs.search, cron.preflight, permissions.request, permissions.status")
+                .contains("directly_callable_tools: core.cron:preflight, core.permission:request, core.permission:status, core.workspace:fs.read, core.workspace:fs.search")
         );
         assert!(
             bundle
                 .content
-                .contains("requestable_tools: cron.add, matrix.outbox.enqueue")
+                .contains("requestable_tools: core.cron:add, matrix.outbox:enqueue")
         );
         assert!(
             bundle
                 .content
-                .contains("unavailable_tools: matrix.outbox.deliver [skill_denied]")
+                .contains("unavailable_tools: matrix.bridge:outbox.deliver [skill_denied]")
         );
         assert!(bundle.content.contains("id: schedule-matrix-cron"));
         assert_eq!(
             bundle.evidence[0].callable_tools,
             vec![
+                "core.cron:preflight",
+                "core.permission:request",
+                "core.permission:status",
                 "core.workspace:fs.read",
-                "core.workspace:fs.search",
-                "cron.preflight",
-                "permissions.request",
-                "permissions.status"
+                "core.workspace:fs.search"
             ]
         );
         assert_eq!(
             bundle.evidence[0].requestable_tools,
-            vec!["cron.add", "matrix.outbox.enqueue"]
+            vec!["core.cron:add", "matrix.outbox:enqueue"]
         );
         assert_eq!(
             bundle.evidence[0].unavailable_tools,
             vec![SkillUnavailableToolEvidence {
-                tool_id: "matrix.outbox.deliver".to_string(),
+                tool_id: "matrix.bridge:outbox.deliver".to_string(),
                 reason: "skill_denied".to_string(),
             }]
         );
         assert_eq!(
             bundle.evidence[0].permission_request_templates[0].tools,
-            vec!["cron.add", "matrix.outbox.enqueue"]
+            vec!["core.cron:add", "matrix.outbox:enqueue"]
         );
     }
 
@@ -637,17 +637,17 @@ mod tests {
                 pack: "test".to_string(),
                 required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
                 allowed_tools: tool_ids([
-                    "cron.preflight",
+                    "core.cron:preflight",
                     "core.workspace:fs.read",
                     "core.workspace:fs.search",
-                    "permissions.request",
-                    "permissions.status",
+                    "core.permission:request",
+                    "core.permission:status",
                 ]),
-                requestable_tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
-                denied_tools: tool_ids(["matrix.outbox.deliver"]),
+                requestable_tools: tool_ids(["core.cron:add", "matrix.outbox:enqueue"]),
+                denied_tools: tool_ids(["matrix.bridge:outbox.deliver"]),
                 permission_request_templates: vec![SkillPermissionRequestTemplate {
                     id: "schedule-matrix-cron".to_string(),
-                    tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
+                    tools: tool_ids(["core.cron:add", "matrix.outbox:enqueue"]),
                     max_operation_kind: Some(OperationKind::Write),
                     state_effects: vec![EffectId::store_cron(), EffectId::matrix_outbox()],
                     default_duration: "one_turn".to_string(),

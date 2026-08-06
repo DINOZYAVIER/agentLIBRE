@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use agl_config::ResolvedInferenceConfig;
 use agl_content::Content;
-use agl_extension::ToolId;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
-use agl_loop::{EffectOutcome, TurnEffect, TurnEffectResult};
+use agl_kernel::ToolId;
+use agl_kernel::{TurnRequest, TurnRequestOutcome, TurnRequestResult};
 use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunKind, RunState, RunUsage};
 use agl_supervisor::{
     DriverEffectError, DriverSnapshot, DurableRunDriver, DurableRunDriverFactory,
@@ -52,7 +52,7 @@ pub enum ChatRunInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChatDriverCheckpoint {
-    turn: agl_loop::TurnCheckpoint,
+    turn: agl_kernel::TurnCheckpoint,
     effective_policy_hash: String,
     delegation_authority_ceiling: BTreeSet<ToolId>,
 }
@@ -451,7 +451,7 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                 && service.effective_policy_hash() != expected_policy_hash
             {
                 return Err(SupervisorError::Driver(format!(
-                    "effective capability policy differs from the {label} snapshot"
+                    "effective tool policy differs from the {label} snapshot"
                 )));
             }
         }
@@ -559,20 +559,20 @@ impl DurableRunDriver for ChatSupervisorDriver {
                 },
             });
         }
-        let pending_effect = self
+        let pending_request = self
             .execution
-            .pending_effect()
-            .map(|effect| -> SupervisorResult<SupervisorEffect> {
+            .pending_request()
+            .map(|request| -> SupervisorResult<SupervisorEffect> {
                 Ok(SupervisorEffect {
-                    sequence: effect.key().sequence,
-                    kind: effect.kind().as_str().to_string(),
+                    sequence: request.key().sequence,
+                    kind: request.kind().as_str().to_string(),
                     delivery_class: effect_delivery_class(
                         self.service
                             .as_ref()
                             .expect("chat driver retains its service"),
-                        effect,
+                        request,
                     )?,
-                    request: serde_json::to_value(effect)?,
+                    request: serde_json::to_value(request)?,
                 })
             })
             .transpose()?;
@@ -592,7 +592,7 @@ impl DurableRunDriver for ChatSupervisorDriver {
         })?;
         Ok(DriverSnapshot {
             checkpoint,
-            pending_effect,
+            pending_request,
             events: self.execution.take_events(),
             terminal: self.terminal.clone(),
             usage: self.usage.clone(),
@@ -612,33 +612,33 @@ impl DurableRunDriver for ChatSupervisorDriver {
             .service
             .as_mut()
             .expect("chat driver retains its service");
-        let pending_kind = self.execution.pending_effect().map(TurnEffect::kind);
+        let pending_kind = self.execution.pending_request().map(TurnRequest::kind);
         let pending_is_delegation = matches!(
-            self.execution.pending_effect(),
-            Some(TurnEffect::CapabilityDispatch { request, .. })
-                if request.capability_id.as_str()
-                    == agl_extension::AGENT_DELEGATE_TOOL_ID
+            self.execution.pending_request(),
+            Some(TurnRequest::ToolDispatch { request, .. })
+                if request.tool_id.as_str()
+                    == crate::delegation_contract::AGENT_DELEGATE_TOOL_ID
         );
         let tokens_before = service.model_token_usage();
         if !self.cancellation.is_cancelled() {
             match pending_kind {
-                Some(agl_loop::TurnEffectKind::ModelGeneration) => {
+                Some(agl_kernel::TurnRequestKind::ModelGeneration) => {
                     self.usage.model_attempts = self.usage.model_attempts.saturating_add(1);
                 }
-                Some(agl_loop::TurnEffectKind::CapabilityDispatch) => {
+                Some(agl_kernel::TurnRequestKind::ToolDispatch) => {
                     if !pending_is_delegation || context.attempt == 1 {
-                        self.usage.capability_calls = self.usage.capability_calls.saturating_add(1);
+                        self.usage.tool_calls = self.usage.tool_calls.saturating_add(1);
                     }
                 }
                 Some(
-                    agl_loop::TurnEffectKind::HookBatch
-                    | agl_loop::TurnEffectKind::TranscriptAppend,
+                    agl_kernel::TurnRequestKind::HookBatch
+                    | agl_kernel::TurnRequestKind::TranscriptAppend,
                 )
                 | None => {}
             }
         }
         let result = service
-            .execute_user_turn_effect_with_step(&mut self.execution, Some(&context.step_id))
+            .execute_user_turn_request_with_step(&mut self.execution, Some(&context.step_id))
             .map_err(|error| {
                 DriverEffectError::new("chat.effect_execute", format!("{error:#}"), true)
             })?;
@@ -668,7 +668,7 @@ impl DurableRunDriver for ChatSupervisorDriver {
             DriverEffectError::new("chat.effect_evidence", error.to_string(), false)
         })?;
         service
-            .resume_user_turn_effect(&mut self.execution, result)
+            .resume_user_turn_request(&mut self.execution, result)
             .map_err(|error| {
                 DriverEffectError::new("chat.effect_resume", format!("{error:#}"), false)
             })?;
@@ -702,34 +702,34 @@ impl Drop for ChatSupervisorDriver {
 
 fn effect_delivery_class(
     service: &ChatService,
-    effect: &TurnEffect,
+    request: &TurnRequest,
 ) -> SupervisorResult<EffectDeliveryClass> {
-    match effect {
-        TurnEffect::HookBatch { .. }
-        | TurnEffect::ModelGeneration { .. }
-        | TurnEffect::TranscriptAppend { .. } => Ok(EffectDeliveryClass::ReplaySafe),
-        TurnEffect::CapabilityDispatch { request, .. } => service
-            .capability_delivery_class(&request.capability_id)
+    match request {
+        TurnRequest::HookBatch { .. }
+        | TurnRequest::ModelGeneration { .. }
+        | TurnRequest::TranscriptAppend { .. } => Ok(EffectDeliveryClass::ReplaySafe),
+        TurnRequest::ToolDispatch { request, .. } => service
+            .tool_delivery_class(&request.tool_id)
             .map_err(|error| SupervisorError::Driver(format!("{error:#}"))),
     }
 }
 
-fn retryable_failure(result: &TurnEffectResult) -> Option<&agl_loop::EffectFailure> {
+fn retryable_failure(result: &TurnRequestResult) -> Option<&agl_kernel::TurnRequestFailure> {
     match result {
-        TurnEffectResult::HookBatch {
-            outcome: EffectOutcome::Failed(failure),
+        TurnRequestResult::HookBatch {
+            outcome: TurnRequestOutcome::Failed(failure),
             ..
         }
-        | TurnEffectResult::ModelGeneration {
-            outcome: EffectOutcome::Failed(failure),
+        | TurnRequestResult::ModelGeneration {
+            outcome: TurnRequestOutcome::Failed(failure),
             ..
         }
-        | TurnEffectResult::TranscriptAppend {
-            outcome: EffectOutcome::Failed(failure),
+        | TurnRequestResult::TranscriptAppend {
+            outcome: TurnRequestOutcome::Failed(failure),
             ..
         } if failure.retryable => Some(failure),
-        TurnEffectResult::CapabilityDispatch { outcome, .. } => match outcome.as_ref() {
-            EffectOutcome::Failed(failure) if failure.retryable => Some(failure),
+        TurnRequestResult::ToolDispatch { outcome, .. } => match outcome.as_ref() {
+            TurnRequestOutcome::Failed(failure) if failure.retryable => Some(failure),
             _ => None,
         },
         _ => None,

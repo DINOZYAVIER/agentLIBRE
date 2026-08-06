@@ -681,8 +681,8 @@ fn print_loaded_function(function: &LoadedFunction) {
     if let Some(max_output_tokens) = function.front_matter.runtime_max_output_tokens() {
         println!("function.runtime.max_output_tokens={max_output_tokens}");
     }
-    if let Some(max_capability_calls) = function.front_matter.runtime_max_capability_calls() {
-        println!("function.runtime.max_capability_calls={max_capability_calls}");
+    if let Some(max_tool_calls) = function.front_matter.runtime_max_tool_calls() {
+        println!("function.runtime.max_tool_calls={max_tool_calls}");
     }
     let tool_policy = function.front_matter.tool_policy();
     print_function_tool_policy(tool_policy.as_ref());
@@ -937,7 +937,7 @@ mod tests {
             assert_eq!(profile.pci_device_id.as_deref(), Some("1002:744c"));
             assert_eq!(profile.pci_subsystem_id.as_deref(), Some("1da2:471e"));
             let identity = bundle.identity();
-            assert_eq!(identity.root, format!("function:{reference}@1.0.0"));
+            assert_eq!(identity.root, format!("function:{reference}@1.1.0"));
             assert_eq!(identity.model.as_deref(), Some("model:gemma4-31b@1.1.0"));
             assert_eq!(identity.nodes.len(), 4);
         }

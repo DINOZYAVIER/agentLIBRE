@@ -3,7 +3,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-use agl_extension::{
+use crate::{
     DeclarationDigest, DeclarationError, EffectId, ExtensionDescriptor, ExtensionId,
     ExtensionTrust, OperationKind, PolicyHash, SensitiveInput, SkillId, ToolDeclaration,
     ToolGrantProvenance, ToolId, ToolInvocation,
@@ -125,7 +125,7 @@ impl SkillToolPolicy {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolGrant {
-    pub capability_id: ToolId,
+    pub tool_id: ToolId,
     pub max_operation_kind: OperationKind,
     pub state_effects: BTreeSet<EffectId>,
     pub sensitive_inputs: BTreeSet<SensitiveInput>,
@@ -134,9 +134,9 @@ pub struct ToolGrant {
 }
 
 impl ToolGrant {
-    pub fn new(capability_id: ToolId, max_operation_kind: OperationKind) -> Self {
+    pub fn new(tool_id: ToolId, max_operation_kind: OperationKind) -> Self {
         Self {
-            capability_id,
+            tool_id,
             max_operation_kind,
             state_effects: BTreeSet::new(),
             sensitive_inputs: BTreeSet::new(),
@@ -188,7 +188,7 @@ impl ToolGrant {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyInput {
-    pub providers: Vec<ExtensionDescriptor>,
+    pub extensions: Vec<ExtensionDescriptor>,
     pub baseline: BTreeSet<ToolId>,
     pub selected_skills: Vec<SkillToolPolicy>,
     pub grants: Vec<ToolGrant>,
@@ -200,12 +200,12 @@ pub struct ToolPolicyInput {
 
 impl ToolPolicyInput {
     pub fn new(
-        providers: impl IntoIterator<Item = ExtensionDescriptor>,
+        extensions: impl IntoIterator<Item = ExtensionDescriptor>,
         baseline: impl IntoIterator<Item = ToolId>,
         tool_mode: ToolAccessMode,
     ) -> Self {
         Self {
-            providers: providers.into_iter().collect(),
+            extensions: extensions.into_iter().collect(),
             baseline: baseline.into_iter().collect(),
             selected_skills: Vec::new(),
             grants: Vec::new(),
@@ -231,9 +231,9 @@ impl ToolPolicyInput {
 
     pub fn with_unavailable_capabilities(
         mut self,
-        capabilities: impl IntoIterator<Item = ToolId>,
+        tools: impl IntoIterator<Item = ToolId>,
     ) -> Self {
-        self.unavailable_capabilities = capabilities.into_iter().collect();
+        self.unavailable_capabilities = tools.into_iter().collect();
         self
     }
 
@@ -242,11 +242,8 @@ impl ToolPolicyInput {
         self
     }
 
-    pub fn with_authority_ceiling(
-        mut self,
-        capabilities: impl IntoIterator<Item = ToolId>,
-    ) -> Self {
-        self.authority_ceiling = Some(capabilities.into_iter().collect());
+    pub fn with_authority_ceiling(mut self, tools: impl IntoIterator<Item = ToolId>) -> Self {
+        self.authority_ceiling = Some(tools.into_iter().collect());
         self
     }
 
@@ -259,8 +256,8 @@ impl ToolPolicyInput {
 #[serde(rename_all = "snake_case")]
 pub enum ToolExclusionReason {
     NotRouted,
-    UnknownCapability,
-    ProviderUntrusted,
+    UnknownTool,
+    ExtensionUntrusted,
     ToolModeDenied,
     FunctionAllowDenied,
     SkillDenied,
@@ -268,7 +265,7 @@ pub enum ToolExclusionReason {
     GrantOperationDenied,
     GrantStateEffectDenied,
     GrantSensitiveInputDenied,
-    ProviderUnavailable,
+    ExtensionUnavailable,
     ParentAuthorityDenied,
 }
 
@@ -276,8 +273,8 @@ impl ToolExclusionReason {
     pub fn code(self) -> &'static str {
         match self {
             Self::NotRouted => "not_routed",
-            Self::UnknownCapability => "unknown_capability",
-            Self::ProviderUntrusted => "provider_untrusted",
+            Self::UnknownTool => "unknown_tool",
+            Self::ExtensionUntrusted => "extension_untrusted",
             Self::ToolModeDenied => "tool_mode_denied",
             Self::FunctionAllowDenied => "function_allow_denied",
             Self::SkillDenied => "skill_denied",
@@ -285,7 +282,7 @@ impl ToolExclusionReason {
             Self::GrantOperationDenied => "grant_operation_denied",
             Self::GrantStateEffectDenied => "grant_state_effect_denied",
             Self::GrantSensitiveInputDenied => "grant_sensitive_input_denied",
-            Self::ProviderUnavailable => "provider_unavailable",
+            Self::ExtensionUnavailable => "extension_unavailable",
             Self::ParentAuthorityDenied => "parent_authority_denied",
         }
     }
@@ -304,15 +301,15 @@ impl ToolExclusionReason {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolExclusion {
-    pub capability_id: ToolId,
+    pub tool_id: ToolId,
     pub reason: ToolExclusionReason,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EffectiveTool {
-    provider_id: ExtensionId,
-    provider_trust: ExtensionTrust,
-    provider_digest: DeclarationDigest,
+    extension_id: ExtensionId,
+    extension_trust: ExtensionTrust,
+    extension_digest: DeclarationDigest,
     declaration_digest: DeclarationDigest,
     declaration: ToolDeclaration,
     authorized_state_effects: BTreeSet<EffectId>,
@@ -321,20 +318,20 @@ pub struct EffectiveTool {
 }
 
 impl EffectiveTool {
-    pub fn provider_id(&self) -> &ExtensionId {
-        &self.provider_id
+    pub fn extension_id(&self) -> &ExtensionId {
+        &self.extension_id
     }
 
-    pub fn provider_trust(&self) -> ExtensionTrust {
-        self.provider_trust
+    pub fn extension_trust(&self) -> ExtensionTrust {
+        self.extension_trust
     }
 
     pub fn declaration_digest(&self) -> &DeclarationDigest {
         &self.declaration_digest
     }
 
-    pub fn provider_digest(&self) -> &DeclarationDigest {
-        &self.provider_digest
+    pub fn extension_digest(&self) -> &DeclarationDigest {
+        &self.extension_digest
     }
 
     pub fn declaration(&self) -> &ToolDeclaration {
@@ -355,14 +352,14 @@ pub struct EffectiveToolSet {
     policy_hash: PolicyHash,
     catalog_digest: DeclarationDigest,
     tool_mode: ToolAccessMode,
-    capabilities: BTreeMap<ToolId, EffectiveTool>,
+    tools: BTreeMap<ToolId, EffectiveTool>,
     exclusions: BTreeMap<ToolId, ToolExclusion>,
 }
 
 impl EffectiveToolSet {
     pub fn resolve(input: ToolPolicyInput) -> Result<Self, PolicyResolutionError> {
-        let catalog = build_catalog(&input.providers)?;
-        let catalog_digest = provider_catalog_digest(&input.providers);
+        let catalog = build_catalog(&input.extensions)?;
+        let catalog_digest = extension_catalog_digest(&input.extensions);
         let mut routed = input.baseline.clone();
         let mut skill_denied = BTreeSet::new();
         for skill in &input.selected_skills {
@@ -372,10 +369,7 @@ impl EffectiveToolSet {
 
         let mut grants = BTreeMap::<ToolId, Vec<&ToolGrant>>::new();
         for grant in &input.grants {
-            grants
-                .entry(grant.capability_id.clone())
-                .or_default()
-                .push(grant);
+            grants.entry(grant.tool_id.clone()).or_default().push(grant);
         }
 
         let mut all_ids = catalog.keys().cloned().collect::<BTreeSet<_>>();
@@ -390,56 +384,52 @@ impl EffectiveToolSet {
         }
         all_ids.extend(skill_denied.iter().cloned());
 
-        let mut capabilities = BTreeMap::new();
+        let mut tools = BTreeMap::new();
         let mut exclusions = BTreeMap::new();
-        for capability_id in all_ids {
-            let Some((provider, declaration)) = catalog.get(&capability_id).copied() else {
-                exclude(
-                    &mut exclusions,
-                    capability_id,
-                    ToolExclusionReason::UnknownCapability,
-                );
+        for tool_id in all_ids {
+            let Some((extension, declaration)) = catalog.get(&tool_id).copied() else {
+                exclude(&mut exclusions, tool_id, ToolExclusionReason::UnknownTool);
                 continue;
             };
 
-            if input.unavailable_capabilities.contains(&capability_id) {
+            if input.unavailable_capabilities.contains(&tool_id) {
                 exclude(
                     &mut exclusions,
-                    capability_id,
-                    ToolExclusionReason::ProviderUnavailable,
+                    tool_id,
+                    ToolExclusionReason::ExtensionUnavailable,
                 );
                 continue;
             }
             if input
                 .authority_ceiling
                 .as_ref()
-                .is_some_and(|ceiling| !ceiling.contains(&capability_id))
+                .is_some_and(|ceiling| !ceiling.contains(&tool_id))
             {
                 exclude(
                     &mut exclusions,
-                    capability_id,
+                    tool_id,
                     ToolExclusionReason::ParentAuthorityDenied,
                 );
                 continue;
             }
 
-            let eligible_grant = grants.get(&capability_id).and_then(|candidates| {
+            let eligible_grant = grants.get(&tool_id).and_then(|candidates| {
                 candidates
                     .iter()
                     .find(|grant| grant.permits(declaration).is_ok())
             });
-            let mut reason = if !provider.trust.permits_execution() {
-                ToolExclusionReason::ProviderUntrusted
+            let mut reason = if !extension.trust.permits_execution() {
+                ToolExclusionReason::ExtensionUntrusted
             } else if !input.tool_mode.permits(declaration) {
                 ToolExclusionReason::ToolModeDenied
             } else if input
                 .function_policy
                 .as_ref()
-                .is_some_and(|policy| !policy.allow.contains(&capability_id))
+                .is_some_and(|policy| !policy.allow.contains(&tool_id))
             {
                 ToolExclusionReason::FunctionAllowDenied
             } else if !declaration.sensitive_inputs.is_empty() && eligible_grant.is_none() {
-                grants.get(&capability_id).map_or(
+                grants.get(&tool_id).map_or(
                     ToolExclusionReason::GrantSensitiveInputDenied,
                     |candidates| {
                         candidates
@@ -449,9 +439,9 @@ impl EffectiveToolSet {
                             .unwrap_or(ToolExclusionReason::GrantSensitiveInputDenied)
                     },
                 )
-            } else if !routed.contains(&capability_id) && eligible_grant.is_none() {
+            } else if !routed.contains(&tool_id) && eligible_grant.is_none() {
                 grants
-                    .get(&capability_id)
+                    .get(&tool_id)
                     .map_or(ToolExclusionReason::NotRouted, |candidates| {
                         candidates
                             .iter()
@@ -469,12 +459,12 @@ impl EffectiveToolSet {
                             .cloned(),
                     );
                 }
-                capabilities.insert(
-                    capability_id.clone(),
+                tools.insert(
+                    tool_id.clone(),
                     EffectiveTool {
-                        provider_id: provider.id.clone(),
-                        provider_trust: provider.trust,
-                        provider_digest: provider.digest(),
+                        extension_id: extension.id.clone(),
+                        extension_trust: extension.trust,
+                        extension_digest: extension.digest(),
                         declaration_digest: declaration.digest(),
                         declaration: declaration.clone(),
                         authorized_state_effects,
@@ -484,35 +474,31 @@ impl EffectiveToolSet {
                 continue;
             };
 
-            if skill_denied.contains(&capability_id) {
+            if skill_denied.contains(&tool_id) {
                 reason = ToolExclusionReason::SkillDenied;
             }
             if input
                 .function_policy
                 .as_ref()
-                .is_some_and(|policy| policy.deny.contains(&capability_id))
+                .is_some_and(|policy| policy.deny.contains(&tool_id))
             {
                 reason = ToolExclusionReason::FunctionDenied;
             }
-            exclude(&mut exclusions, capability_id, reason);
+            exclude(&mut exclusions, tool_id, reason);
         }
 
-        // Deny filters apply last, including capabilities admitted above.
-        for capability_id in skill_denied {
-            if capabilities.remove(&capability_id).is_some() {
-                exclude(
-                    &mut exclusions,
-                    capability_id,
-                    ToolExclusionReason::SkillDenied,
-                );
+        // Deny filters apply last, including tools admitted above.
+        for tool_id in skill_denied {
+            if tools.remove(&tool_id).is_some() {
+                exclude(&mut exclusions, tool_id, ToolExclusionReason::SkillDenied);
             }
         }
         if let Some(policy) = &input.function_policy {
-            for capability_id in &policy.deny {
-                if capabilities.remove(capability_id).is_some() {
+            for tool_id in &policy.deny {
+                if tools.remove(tool_id).is_some() {
                     exclude(
                         &mut exclusions,
-                        capability_id.clone(),
+                        tool_id.clone(),
                         ToolExclusionReason::FunctionDenied,
                     );
                 }
@@ -522,23 +508,23 @@ impl EffectiveToolSet {
         #[derive(Serialize)]
         struct HashMaterial<'a> {
             tool_mode: ToolAccessMode,
-            providers: BTreeMap<&'a ExtensionId, ProviderHashMaterial<'a>>,
+            extensions: BTreeMap<&'a ExtensionId, ExtensionHashMaterial<'a>>,
             baseline: &'a BTreeSet<ToolId>,
             selected_skills: BTreeMap<&'a SkillId, SkillHashMaterial<'a>>,
             grants: BTreeSet<&'a ToolGrant>,
             unavailable_capabilities: &'a BTreeSet<ToolId>,
             authority_ceiling: &'a Option<BTreeSet<ToolId>>,
             function_policy: &'a Option<FunctionToolPolicy>,
-            capabilities: &'a BTreeMap<ToolId, EffectiveTool>,
+            tools: &'a BTreeMap<ToolId, EffectiveTool>,
             exclusions: &'a BTreeMap<ToolId, ToolExclusion>,
         }
         #[derive(Serialize)]
-        struct ProviderHashMaterial<'a> {
+        struct ExtensionHashMaterial<'a> {
             name: &'a str,
             version: &'a str,
-            source: agl_extension::ExtensionSource,
+            source: crate::ExtensionSource,
             trust: ExtensionTrust,
-            hooks: BTreeMap<&'a agl_extension::HookId, &'a agl_extension::HookDeclaration>,
+            hooks: BTreeMap<&'a crate::HookId, &'a crate::HookDeclaration>,
             actions: BTreeMap<&'a ToolId, &'a ToolDeclaration>,
         }
         #[derive(Serialize)]
@@ -547,19 +533,23 @@ impl EffectiveToolSet {
             requestable: &'a BTreeSet<ToolId>,
             deny: &'a BTreeSet<ToolId>,
         }
-        let providers = input
-            .providers
+        let extensions = input
+            .extensions
             .iter()
-            .map(|provider| {
+            .map(|extension| {
                 (
-                    &provider.id,
-                    ProviderHashMaterial {
-                        name: &provider.name,
-                        version: &provider.version,
-                        source: provider.source,
-                        trust: provider.trust,
-                        hooks: provider.hooks.iter().map(|hook| (&hook.id, hook)).collect(),
-                        actions: provider
+                    &extension.id,
+                    ExtensionHashMaterial {
+                        name: &extension.name,
+                        version: &extension.version,
+                        source: extension.source,
+                        trust: extension.trust,
+                        hooks: extension
+                            .hooks
+                            .iter()
+                            .map(|hook| (&hook.id, hook))
+                            .collect(),
+                        actions: extension
                             .tools
                             .iter()
                             .map(|action| (&action.id, action))
@@ -588,14 +578,14 @@ impl EffectiveToolSet {
         }
         let material = serde_json::to_value(HashMaterial {
             tool_mode: input.tool_mode,
-            providers,
+            extensions,
             baseline: &input.baseline,
             selected_skills,
             grants: input.grants.iter().collect(),
             unavailable_capabilities: &input.unavailable_capabilities,
             authority_ceiling: &input.authority_ceiling,
             function_policy: &input.function_policy,
-            capabilities: &capabilities,
+            tools: &tools,
             exclusions: &exclusions,
         })
         .expect("policy hash material is serializable");
@@ -605,7 +595,7 @@ impl EffectiveToolSet {
             policy_hash,
             catalog_digest,
             tool_mode: input.tool_mode,
-            capabilities,
+            tools,
             exclusions,
         })
     }
@@ -622,16 +612,16 @@ impl EffectiveToolSet {
         self.tool_mode
     }
 
-    pub fn capabilities(&self) -> impl ExactSizeIterator<Item = &EffectiveTool> {
-        self.capabilities.values()
+    pub fn tools(&self) -> impl ExactSizeIterator<Item = &EffectiveTool> {
+        self.tools.values()
     }
 
-    pub fn capability(&self, id: &ToolId) -> Option<&EffectiveTool> {
-        self.capabilities.get(id)
+    pub fn tool(&self, id: &ToolId) -> Option<&EffectiveTool> {
+        self.tools.get(id)
     }
 
     pub fn contains(&self, id: &ToolId) -> bool {
-        self.capabilities.contains_key(id)
+        self.tools.contains_key(id)
     }
 
     pub fn exclusions(&self) -> impl ExactSizeIterator<Item = &ToolExclusion> {
@@ -645,35 +635,35 @@ impl EffectiveToolSet {
     pub fn authorize<'a>(
         &self,
         invocation: &ToolInvocation,
-        current_providers: &'a [ExtensionDescriptor],
+        current_extensions: &'a [ExtensionDescriptor],
     ) -> Result<&'a ToolDeclaration, DispatchDenial> {
         let deny = |code| DispatchDenial {
-            capability_id: invocation.capability_id.clone(),
+            tool_id: invocation.tool_id.clone(),
             code,
         };
         if invocation.policy_hash != self.policy_hash {
             return Err(deny(DispatchDenialCode::StalePolicy));
         }
         let effective = self
-            .capabilities
-            .get(&invocation.capability_id)
-            .ok_or_else(|| deny(DispatchDenialCode::CapabilityNotEffective))?;
-        if invocation.provider_id != effective.provider_id {
-            return Err(deny(DispatchDenialCode::ProviderMismatch));
+            .tools
+            .get(&invocation.tool_id)
+            .ok_or_else(|| deny(DispatchDenialCode::ToolNotEffective))?;
+        if invocation.extension_id != effective.extension_id {
+            return Err(deny(DispatchDenialCode::ExtensionMismatch));
         }
-        let current_provider = current_providers
+        let current_extension = current_extensions
             .iter()
-            .find(|provider| provider.id == effective.provider_id)
-            .ok_or_else(|| deny(DispatchDenialCode::CapabilityUnavailable))?;
-        if !current_provider.trust.permits_execution() {
-            return Err(deny(DispatchDenialCode::ProviderUntrusted));
+            .find(|extension| extension.id == effective.extension_id)
+            .ok_or_else(|| deny(DispatchDenialCode::ToolUnavailable))?;
+        if !current_extension.trust.permits_execution() {
+            return Err(deny(DispatchDenialCode::ExtensionUntrusted));
         }
-        if current_provider.trust != effective.provider_trust {
+        if current_extension.trust != effective.extension_trust {
             return Err(deny(DispatchDenialCode::ExtensionTrustChanged));
         }
-        let declaration = current_provider
-            .tool(&invocation.capability_id)
-            .ok_or_else(|| deny(DispatchDenialCode::CapabilityUnavailable))?;
+        let declaration = current_extension
+            .tool(&invocation.tool_id)
+            .ok_or_else(|| deny(DispatchDenialCode::ToolUnavailable))?;
         let current_digest = declaration.digest();
         if invocation.declaration_digest != effective.declaration_digest
             || current_digest != effective.declaration_digest
@@ -686,11 +676,8 @@ impl EffectiveToolSet {
         if !self.tool_mode.permits(declaration) {
             return Err(deny(DispatchDenialCode::ToolModeDenied));
         }
-        if current_provider.digest() != effective.provider_digest {
-            return Err(deny(DispatchDenialCode::ProviderChanged));
-        }
-        if provider_catalog_digest(current_providers) != self.catalog_digest {
-            return Err(deny(DispatchDenialCode::CatalogChanged));
+        if current_extension.digest() != effective.extension_digest {
+            return Err(deny(DispatchDenialCode::ExtensionChanged));
         }
         if !invocation.arguments.is_object() {
             return Err(deny(DispatchDenialCode::InvalidArguments));
@@ -706,40 +693,34 @@ impl EffectiveToolSet {
 
 fn exclude(
     exclusions: &mut BTreeMap<ToolId, ToolExclusion>,
-    capability_id: ToolId,
+    tool_id: ToolId,
     reason: ToolExclusionReason,
 ) {
-    exclusions.insert(
-        capability_id.clone(),
-        ToolExclusion {
-            capability_id,
-            reason,
-        },
-    );
+    exclusions.insert(tool_id.clone(), ToolExclusion { tool_id, reason });
 }
 
 type CatalogEntry<'a> = (&'a ExtensionDescriptor, &'a ToolDeclaration);
 
 fn build_catalog(
-    providers: &[ExtensionDescriptor],
+    extensions: &[ExtensionDescriptor],
 ) -> Result<BTreeMap<ToolId, CatalogEntry<'_>>, PolicyResolutionError> {
     let mut catalog = BTreeMap::new();
-    let mut provider_ids = BTreeSet::new();
-    for provider in providers {
-        provider
+    let mut extension_ids = BTreeSet::new();
+    for extension in extensions {
+        extension
             .validate()
             .map_err(PolicyResolutionError::InvalidDeclaration)?;
-        if !provider_ids.insert(provider.id.clone()) {
-            return Err(PolicyResolutionError::DuplicateProvider {
-                id: provider.id.clone(),
+        if !extension_ids.insert(extension.id.clone()) {
+            return Err(PolicyResolutionError::DuplicateExtension {
+                id: extension.id.clone(),
             });
         }
-        for declaration in &provider.tools {
+        for declaration in &extension.tools {
             if catalog
-                .insert(declaration.id.clone(), (provider, declaration))
+                .insert(declaration.id.clone(), (extension, declaration))
                 .is_some()
             {
-                return Err(PolicyResolutionError::DuplicateCapability {
+                return Err(PolicyResolutionError::DuplicateTool {
                     id: declaration.id.clone(),
                 });
             }
@@ -748,20 +729,20 @@ fn build_catalog(
     Ok(catalog)
 }
 
-fn provider_catalog_digest(providers: &[ExtensionDescriptor]) -> DeclarationDigest {
-    let material = providers
+fn extension_catalog_digest(extensions: &[ExtensionDescriptor]) -> DeclarationDigest {
+    let material = extensions
         .iter()
-        .map(|provider| (&provider.id, provider.digest()))
+        .map(|extension| (&extension.id, extension.digest()))
         .collect::<BTreeMap<_, _>>();
-    let value = serde_json::to_value(material).expect("provider catalog is serializable");
+    let value = serde_json::to_value(material).expect("extension catalog is serializable");
     DeclarationDigest::from_json(&value)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PolicyResolutionError {
     InvalidDeclaration(DeclarationError),
-    DuplicateProvider { id: ExtensionId },
-    DuplicateCapability { id: ToolId },
+    DuplicateExtension { id: ExtensionId },
+    DuplicateTool { id: ToolId },
     DuplicateSkill { id: SkillId },
 }
 
@@ -769,9 +750,9 @@ impl Display for PolicyResolutionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDeclaration(error) => Display::fmt(error, formatter),
-            Self::DuplicateProvider { id } => write!(formatter, "duplicate provider ID `{id}`"),
-            Self::DuplicateCapability { id } => {
-                write!(formatter, "duplicate capability ID `{id}`")
+            Self::DuplicateExtension { id } => write!(formatter, "duplicate extension ID `{id}`"),
+            Self::DuplicateTool { id } => {
+                write!(formatter, "duplicate tool ID `{id}`")
             }
             Self::DuplicateSkill { id } => write!(formatter, "duplicate selected skill ID `{id}`"),
         }
@@ -784,13 +765,13 @@ impl std::error::Error for PolicyResolutionError {}
 #[serde(rename_all = "snake_case")]
 pub enum DispatchDenialCode {
     StalePolicy,
-    CapabilityNotEffective,
-    ProviderMismatch,
+    ToolNotEffective,
+    ExtensionMismatch,
     ExtensionTrustChanged,
-    ProviderUntrusted,
-    ProviderChanged,
+    ExtensionUntrusted,
+    ExtensionChanged,
     CatalogChanged,
-    CapabilityUnavailable,
+    ToolUnavailable,
     StaleDeclaration,
     OperationChanged,
     ToolModeDenied,
@@ -803,13 +784,13 @@ impl DispatchDenialCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::StalePolicy => "stale_policy",
-            Self::CapabilityNotEffective => "capability_not_effective",
-            Self::ProviderMismatch => "provider_mismatch",
-            Self::ExtensionTrustChanged => "provider_trust_changed",
-            Self::ProviderUntrusted => "provider_untrusted",
-            Self::ProviderChanged => "provider_changed",
+            Self::ToolNotEffective => "tool_not_effective",
+            Self::ExtensionMismatch => "extension_mismatch",
+            Self::ExtensionTrustChanged => "extension_trust_changed",
+            Self::ExtensionUntrusted => "extension_untrusted",
+            Self::ExtensionChanged => "extension_changed",
             Self::CatalogChanged => "catalog_changed",
-            Self::CapabilityUnavailable => "capability_unavailable",
+            Self::ToolUnavailable => "tool_unavailable",
             Self::StaleDeclaration => "stale_declaration",
             Self::OperationChanged => "operation_changed",
             Self::ToolModeDenied => "tool_mode_denied",
@@ -823,7 +804,7 @@ impl DispatchDenialCode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchDenial {
-    pub capability_id: ToolId,
+    pub tool_id: ToolId,
     pub code: DispatchDenialCode,
 }
 
@@ -831,8 +812,8 @@ impl Display for DispatchDenial {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "capability `{}` denied: {}",
-            self.capability_id,
+            "tool `{}` denied: {}",
+            self.tool_id,
             self.code.as_str()
         )
     }

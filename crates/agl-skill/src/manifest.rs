@@ -6,7 +6,7 @@ use std::str;
 use agl_artifact::{
     ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
 };
-use agl_extension::{EffectId, HookId, OperationKind, SkillId, ToolId};
+use agl_kernel::{EffectId, HookId, OperationKind, SkillId, ToolId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1185,15 +1185,15 @@ required_hooks:
 allowed_tools:
   - core.workspace:fs.read
 requestable_tools:
-  - cron.add
-  - matrix.outbox.enqueue
+  - core.cron:add
+  - matrix.outbox:enqueue
 denied_tools:
-  - matrix.outbox.deliver
+  - matrix.bridge:outbox.deliver
 permission_request_templates:
   - id: schedule-matrix-cron
     tools:
-      - matrix.outbox.enqueue
-      - cron.add
+      - matrix.outbox:enqueue
+      - core.cron:add
     max_operation_kind: write
     state_effects:
       - agl:store.permission_requests
@@ -1224,7 +1224,7 @@ Body.
                 .iter()
                 .map(|tool| tool.as_str())
                 .collect::<Vec<_>>(),
-            vec!["cron.add", "matrix.outbox.enqueue"]
+            vec!["core.cron:add", "matrix.outbox:enqueue"]
         );
         assert_eq!(
             skill
@@ -1232,7 +1232,7 @@ Body.
                 .iter()
                 .map(|tool| tool.as_str())
                 .collect::<Vec<_>>(),
-            vec!["matrix.outbox.deliver"]
+            vec!["matrix.bridge:outbox.deliver"]
         );
         assert_eq!(skill.permission_request_templates.len(), 1);
         let template = &skill.permission_request_templates[0];
@@ -1243,7 +1243,7 @@ Body.
                 .iter()
                 .map(|tool| tool.as_str())
                 .collect::<Vec<_>>(),
-            vec!["cron.add", "matrix.outbox.enqueue"]
+            vec!["core.cron:add", "matrix.outbox:enqueue"]
         );
         assert_eq!(template.max_operation_kind, Some(OperationKind::Write));
     }
@@ -1311,11 +1311,11 @@ required_hooks:
   - core:task_spec.validate
 allowed_tools: []
 requestable_tools:
-  - cron.add
+  - core.cron:add
 permission_request_templates:
   - id: bad-template
     tools:
-      - matrix.outbox.enqueue
+      - matrix.outbox:enqueue
     default_duration: one_turn
     reason_template: Queue a Matrix message.
 context_budget_tokens: 128
@@ -1333,7 +1333,7 @@ Body.
             err,
             SkillManifestError::TemplateToolNotRequestable {
                 template_id: "bad-template".to_string(),
-                tool: "matrix.outbox.enqueue".to_string(),
+                tool: "matrix.outbox:enqueue".to_string(),
             }
         );
     }

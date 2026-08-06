@@ -369,7 +369,7 @@ pub struct HumanTerminalEnsureRequest {
 /// Explicit local-operator admission for one Human Host terminal lifetime.
 ///
 /// The confirmation is deliberately non-secret and carries no reusable model
-/// capability. The daemon additionally authenticates the local operator from
+/// tool. The daemon additionally authenticates the local operator from
 /// the private Unix-socket peer credentials.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -521,7 +521,7 @@ pub enum SessionPresentationItem {
     AgentAction {
         run_id: RunId,
         step_id: StepId,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         summary: String,
         state: ActionItemState,
     },
@@ -668,8 +668,8 @@ pub enum InferenceProductStageView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "capability", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CapabilityActivityDetail {
+#[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolActivityDetail {
     FilesystemList {
         path: SanitizedDisplayPath,
         entries: u32,
@@ -689,7 +689,7 @@ pub enum CapabilityActivityDetail {
         exit_status: Option<i32>,
     },
     PolicyCheck {
-        capability_id: String,
+        tool_id: String,
         outcome: ActivityPolicyOutcome,
     },
 }
@@ -734,11 +734,11 @@ pub struct ActivityAggregateDetail {
 pub enum ActivityDetailView {
     #[default]
     None,
-    Capability(CapabilityActivityDetail),
+    Tool(ToolActivityDetail),
     Inference(InferenceActivityDetail),
     Aggregate(ActivityAggregateDetail),
-    UnknownCapability {
-        capability_id: String,
+    UnknownTool {
+        tool_id: String,
     },
 }
 
@@ -1363,40 +1363,31 @@ impl ActivityNodeView {
 impl ActivityDetailView {
     fn validate(&self) -> Result<(), SurfaceValidationError> {
         let path = match self {
-            Self::Capability(CapabilityActivityDetail::FilesystemList { path, .. })
-            | Self::Capability(CapabilityActivityDetail::FilesystemRead { path, .. }) => Some(path),
-            Self::Capability(CapabilityActivityDetail::RepositorySearch { scope, .. }) => {
-                Some(scope)
-            }
+            Self::Tool(ToolActivityDetail::FilesystemList { path, .. })
+            | Self::Tool(ToolActivityDetail::FilesystemRead { path, .. }) => Some(path),
+            Self::Tool(ToolActivityDetail::RepositorySearch { scope, .. }) => Some(scope),
             _ => None,
         };
         if let Some(path) = path {
             path.validate()?;
-            if !is_redacted_capability_display_path(&path.text) {
+            if !is_redacted_tool_display_path(&path.text) {
                 return Err(SurfaceValidationError::new(
-                    "capability activity path must be a normalized workspace-relative display value",
+                    "tool activity path must be a normalized workspace-relative display value",
                 ));
             }
         }
-        let capability_id = match self {
-            Self::Capability(CapabilityActivityDetail::PolicyCheck { capability_id, .. })
-            | Self::UnknownCapability { capability_id } => Some(capability_id),
+        let tool_id = match self {
+            Self::Tool(ToolActivityDetail::PolicyCheck { tool_id, .. })
+            | Self::UnknownTool { tool_id } => Some(tool_id),
             _ => None,
         };
-        if let Some(capability_id) = capability_id {
-            bound_string(
-                capability_id,
-                MAX_IDENTIFIER_BYTES,
-                "activity capability ID",
-                false,
-            )?;
-            if capability_id
-                .chars()
-                .any(is_forbidden_presentation_character)
-                || contains_absolute_display_path(capability_id)
+        if let Some(tool_id) = tool_id {
+            bound_string(tool_id, MAX_IDENTIFIER_BYTES, "activity tool ID", false)?;
+            if tool_id.chars().any(is_forbidden_presentation_character)
+                || contains_absolute_display_path(tool_id)
             {
                 return Err(SurfaceValidationError::new(
-                    "activity capability identity contains unsafe display data",
+                    "activity tool identity contains unsafe display data",
                 ));
             }
         }
@@ -1782,7 +1773,7 @@ fn contains_absolute_display_path(value: &str) -> bool {
     })
 }
 
-fn is_redacted_capability_display_path(value: &str) -> bool {
+fn is_redacted_tool_display_path(value: &str) -> bool {
     !value.starts_with('/')
         && value
             .split('/')
@@ -2437,8 +2428,8 @@ fn validate_hello_event(event: &crate::HelloEvent) -> Result<(), SurfaceValidati
             ));
         }
     }
-    bound_count(event.capabilities.len(), 64, "daemon capabilities")?;
-    ensure_unique_copy(&event.capabilities, "daemon capabilities")
+    bound_count(event.tools.len(), 64, "daemon tools")?;
+    ensure_unique_copy(&event.tools, "daemon tools")
 }
 
 fn validate_runtime_generation_identity(
@@ -3017,15 +3008,9 @@ fn validate_item(item: &SessionPresentationItem) -> Result<(), SurfaceValidation
             )
         }
         SessionPresentationItem::AgentAction {
-            capability_id,
-            summary,
-            ..
+            tool_id, summary, ..
         } => {
-            bound_optional_string(
-                capability_id.as_deref(),
-                MAX_IDENTIFIER_BYTES,
-                "capability ID",
-            )?;
+            bound_optional_string(tool_id.as_deref(), MAX_IDENTIFIER_BYTES, "tool ID")?;
             bound_string(summary, MAX_DISPLAY_BYTES, "agent action summary", false)
         }
         SessionPresentationItem::ContextBoundary { reason, .. } => {
@@ -4154,7 +4139,7 @@ mod tests {
             finished_at_unix_ms: None,
             elapsed_ms: 0,
             summary: "turn".to_owned(),
-            detail: ActivityDetailView::Capability(CapabilityActivityDetail::FilesystemList {
+            detail: ActivityDetailView::Tool(ToolActivityDetail::FilesystemList {
                 path: display_path("src/lib.rs"),
                 entries: 1,
                 completeness: ActivityCompleteness::Complete,
@@ -4206,7 +4191,7 @@ mod tests {
         for path in ["/home/user/private", "src/../secret", "./src"] {
             let mut unsafe_path = graph.clone();
             unsafe_path.nodes[1].detail =
-                ActivityDetailView::Capability(CapabilityActivityDetail::FilesystemList {
+                ActivityDetailView::Tool(ToolActivityDetail::FilesystemList {
                     path: display_path(path),
                     entries: 1,
                     completeness: ActivityCompleteness::Complete,
@@ -4242,20 +4227,20 @@ mod tests {
         }
         assert!(
             serde_json::from_value::<ActivityDetailView>(serde_json::json!({
-                "kind": "unknown_capability",
+                "kind": "unknown_tool",
                 "detail": {
-                    "capability_id": "core.workspace:fs.list",
+                    "tool_id": "core.workspace:fs.list",
                     "raw_arguments": "super-secret-token"
                 }
             }))
             .is_err(),
             "closed activity detail must reject unreviewed raw fields"
         );
-        let mut unsafe_capability = graph.clone();
-        unsafe_capability.nodes[1].detail = ActivityDetailView::UnknownCapability {
-            capability_id: "/home/user/private".to_owned(),
+        let mut unsafe_tool = graph.clone();
+        unsafe_tool.nodes[1].detail = ActivityDetailView::UnknownTool {
+            tool_id: "/home/user/private".to_owned(),
         };
-        assert!(unsafe_capability.validate().is_err());
+        assert!(unsafe_tool.validate().is_err());
 
         let delta = ActivityGraphDeltaBatch {
             graph_revision: 2,

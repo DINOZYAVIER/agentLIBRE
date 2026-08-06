@@ -18,7 +18,7 @@ fn default_root_run_budget_covers_the_longest_admitted_inference_operation() {
     assert_eq!(budget.model_input_tokens, 1_000_000);
     assert_eq!(budget.model_output_tokens, 100_000);
     assert_eq!(budget.model_attempts, 32);
-    assert_eq!(budget.capability_calls, 64);
+    assert_eq!(budget.tool_calls, 64);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
     let step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: first.turn_id.clone(),
-        effect_sequence: 1,
+        request_sequence: 1,
         effect_kind: "model_generation".to_string(),
         delivery_class: EffectDeliveryClass::ReplaySafe,
         request: json!({"effect": "model_generation"}),
@@ -551,8 +551,8 @@ fn cancellation_cascades_through_the_child_tree() {
     let nested_step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: None,
-        effect_sequence: 1,
-        effect_kind: "capability_dispatch".to_string(),
+        request_sequence: 1,
+        effect_kind: "tool_dispatch".to_string(),
         delivery_class: EffectDeliveryClass::Idempotent,
         request: json!({"subagent_id": "nested", "task": "work"}),
     };
@@ -624,8 +624,8 @@ fn tree_budget_denials_do_not_create_or_reserve_children() {
         let second_step = RunStepDraft {
             step_id: StepId::generate(),
             turn_id: parent.turn_id.clone(),
-            effect_sequence: 2,
-            effect_kind: "capability_dispatch".to_string(),
+            request_sequence: 2,
+            effect_kind: "tool_dispatch".to_string(),
             delivery_class: EffectDeliveryClass::Idempotent,
             request: json!({"subagent_id": "reviewer", "task": "second"}),
         };
@@ -694,8 +694,8 @@ fn depth_budget_is_enforced_against_persisted_relationships() {
     let step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: None,
-        effect_sequence: 1,
-        effect_kind: "capability_dispatch".to_string(),
+        request_sequence: 1,
+        effect_kind: "tool_dispatch".to_string(),
         delivery_class: EffectDeliveryClass::Idempotent,
         request: json!({"subagent_id": "nested", "task": "work"}),
     };
@@ -819,7 +819,7 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     let safe_step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: None,
-        effect_sequence: 1,
+        request_sequence: 1,
         effect_kind: "hook_batch".to_string(),
         delivery_class: EffectDeliveryClass::ReplaySafe,
         request: json!({}),
@@ -877,8 +877,8 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     let uncertain_step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: None,
-        effect_sequence: 1,
-        effect_kind: "capability_dispatch".to_string(),
+        request_sequence: 1,
+        effect_kind: "tool_dispatch".to_string(),
         delivery_class: EffectDeliveryClass::AtMostOnce,
         request: json!({}),
     };
@@ -911,7 +911,7 @@ fn artifacts_are_private_deduplicated_and_run_scoped() {
     let bytes = b"validated-png-bytes";
     let source = ArtifactSource {
         kind: ArtifactSourceKind::ScreenCapture,
-        provider: Some("fake-portal".to_string()),
+        extension: Some("fake-portal".to_string()),
     };
     let first = store
         .write_artifact(
@@ -997,7 +997,7 @@ fn concurrent_identical_artifact_writes_share_one_complete_blob() {
                     ArtifactSensitivity::Sensitive,
                     ArtifactSource {
                         kind: ArtifactSourceKind::ScreenCapture,
-                        provider: Some("fake".to_string()),
+                        extension: Some("fake".to_string()),
                     },
                     ArtifactRetention::RunScoped,
                 )
@@ -1028,7 +1028,7 @@ fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
             ArtifactSensitivity::Sensitive,
             ArtifactSource {
                 kind: ArtifactSourceKind::ScreenCapture,
-                provider: Some("fake".to_string()),
+                extension: Some("fake".to_string()),
             },
             ArtifactRetention::RunScoped,
             failpoint,
@@ -1202,12 +1202,12 @@ fn status_reports_in_progress_idempotency_without_recovering_it() {
         &store,
         "INSERT INTO idempotency_keys
                  (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
-                 VALUES ('cron.run', 'job-1:unix:60', 'sha256:abc', 'in_progress', NULL, 'unix:1', 'unix:2')",
+                 VALUES ('core.cron:run', 'job-1:unix:60', 'sha256:abc', 'in_progress', NULL, 'unix:1', 'unix:2')",
     );
 
     let status = store.status().unwrap();
     let record = store
-        .idempotency_record("cron.run", "job-1:unix:60")
+        .idempotency_record("core.cron:run", "job-1:unix:60")
         .unwrap()
         .expect("idempotency record should remain present");
 
@@ -1375,7 +1375,10 @@ fn permission_requests_grants_and_revokes_are_persisted() {
 
     let request = store
         .create_permission_request(PermissionRequestDraft {
-            requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
+            requested_tools: vec![
+                "core.cron:add".to_string(),
+                "matrix.outbox:enqueue".to_string(),
+            ],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1519,7 +1522,10 @@ fn grant_permission_request_rolls_back_grants_when_resolution_fails() {
 
     let request = store
         .create_permission_request(PermissionRequestDraft {
-            requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
+            requested_tools: vec![
+                "core.cron:add".to_string(),
+                "matrix.outbox:enqueue".to_string(),
+            ],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1558,7 +1564,7 @@ fn permission_export_reports_pending_and_historical_records() {
     let (_root, store) = open_temp_store("permission-export");
     let request = store
         .create_permission_request(PermissionRequestDraft {
-            requested_tools: vec!["notes.add".to_string()],
+            requested_tools: vec!["core.note:add".to_string()],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_notes".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1626,7 +1632,7 @@ fn schema_v1_database_migrates_to_current() {
             VALUES (1, 'unix:1');
             INSERT INTO idempotency_keys
                 (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
-            VALUES ('cron.run', 'job-001:unix:1', 'sha256:abc', 'completed', 'run-001', 'unix:1', 'unix:1');
+            VALUES ('core.cron:run', 'job-001:unix:1', 'sha256:abc', 'completed', 'run-001', 'unix:1', 'unix:1');
             PRAGMA user_version = 1;
             "#,
     );
@@ -1637,18 +1643,18 @@ fn schema_v1_database_migrates_to_current() {
         CURRENT_SCHEMA_VERSION
     );
     let record = store
-        .idempotency_record("cron.run", "job-001:unix:1")
+        .idempotency_record("core.cron:run", "job-001:unix:1")
         .unwrap()
         .expect("v1 idempotency record should migrate");
     assert_eq!(record.status, IdempotencyStatus::Completed);
     assert_eq!(record.result_ref.as_deref(), Some("run-001"));
 
     let skipped = store
-        .begin_idempotency("cron.run", "job-002:unix:1", "sha256:def")
+        .begin_idempotency("core.cron:run", "job-002:unix:1", "sha256:def")
         .unwrap();
     assert!(matches!(skipped, IdempotencyOutcome::Inserted(_)));
     let skipped = store
-        .skip_idempotency("cron.run", "job-002:unix:1", Some("no-op"))
+        .skip_idempotency("core.cron:run", "job-002:unix:1", Some("no-op"))
         .unwrap();
     assert_eq!(skipped.status, IdempotencyStatus::Skipped);
 }
@@ -1758,14 +1764,14 @@ fn complete_idempotency_records_result_ref() {
 fn fail_idempotency_records_failed_status() {
     let (_root, store) = open_temp_store("idempotency-failed");
     store
-        .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+        .begin_idempotency("core.cron:run", "job-001:unix:1", "sha256:abc")
         .unwrap();
 
     let record = store
-        .fail_idempotency("cron.run", "job-001:unix:1", Some("error-001"))
+        .fail_idempotency("core.cron:run", "job-001:unix:1", Some("error-001"))
         .unwrap();
     let replay = store
-        .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+        .begin_idempotency("core.cron:run", "job-001:unix:1", "sha256:abc")
         .unwrap();
 
     assert_eq!(record.status, IdempotencyStatus::Failed);
@@ -1777,11 +1783,11 @@ fn fail_idempotency_records_failed_status() {
 fn skip_idempotency_records_skipped_status() {
     let (_root, store) = open_temp_store("idempotency-skipped");
     store
-        .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+        .begin_idempotency("core.cron:run", "job-001:unix:1", "sha256:abc")
         .unwrap();
 
     let record = store
-        .skip_idempotency("cron.run", "job-001:unix:1", Some("not-due"))
+        .skip_idempotency("core.cron:run", "job-001:unix:1", Some("not-due"))
         .unwrap();
 
     assert_eq!(record.status, IdempotencyStatus::Skipped);
@@ -1894,8 +1900,8 @@ fn running_delegation_step(
     let step = RunStepDraft {
         step_id: StepId::generate(),
         turn_id: parent.turn_id.clone(),
-        effect_sequence: 1,
-        effect_kind: "capability_dispatch".to_string(),
+        request_sequence: 1,
+        effect_kind: "tool_dispatch".to_string(),
         delivery_class: EffectDeliveryClass::Idempotent,
         request: json!({"subagent_id": "reviewer", "task": "review"}),
     };
@@ -1933,7 +1939,7 @@ fn child_run_draft(parent_run_id: &RunId, step_id: &StepId) -> ChildRunDraft {
             model_input_tokens: 1_000,
             model_output_tokens: 100,
             model_attempts: 4,
-            capability_calls: 8,
+            tool_calls: 8,
         },
         child_spec_digest: digest('b'),
         model_profile_digest: digest('c'),

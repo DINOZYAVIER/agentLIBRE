@@ -1,4 +1,4 @@
-use agl_extension::WorkflowEventId;
+use crate::WorkflowEventId;
 use serde::{Deserialize, Serialize};
 
 pub const TOOL_OBSERVATION_APPEND_EVENT_ID: &str = "agl:tool_observation.append";

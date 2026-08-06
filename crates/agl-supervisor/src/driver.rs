@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agl_events::SafeRuntimeEventEnvelope;
-use agl_extension::CancellationSignal;
 use agl_ids::{RunId, StepId};
+use agl_kernel::CancellationSignal;
 use agl_store::{DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +64,7 @@ pub struct SupervisorTerminal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriverSnapshot {
     pub checkpoint: serde_json::Value,
-    pub pending_effect: Option<SupervisorEffect>,
+    pub pending_request: Option<SupervisorEffect>,
     pub events: Vec<SafeRuntimeEventEnvelope>,
     pub terminal: Option<SupervisorTerminal>,
     pub usage: RunUsage,

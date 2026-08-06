@@ -52,7 +52,7 @@ impl TestRenderedContent for Option<Content> {
 fn effective_capabilities(ids: &[&str]) -> EffectiveToolSet {
     let catalog = full_tool_catalog();
     ToolPolicyInput::new(
-        catalog.providers().iter().cloned(),
+        catalog.extensions().iter().cloned(),
         tool_ids(ids),
         ToolAccessMode::Admin,
     )
@@ -61,7 +61,7 @@ fn effective_capabilities(ids: &[&str]) -> EffectiveToolSet {
 }
 
 #[test]
-fn external_same_id_extension_cannot_bind_the_builtin_provider() {
+fn external_same_id_extension_cannot_bind_the_builtin_extension() {
     let root =
         std::env::temp_dir().join(format!("agl-chat-extension-binding-{}", std::process::id()));
     let workspace = root.join("workspace");
@@ -113,7 +113,7 @@ doctor:
   },
   "requires": [],
   "api_major": 1,
-  "implementation": "builtin:agl-core-tools/fs"
+  "implementation": { "kind": "rust-static" }
 }
 "#,
     )
@@ -140,7 +140,7 @@ doctor:
     assert!(
         error
             .to_string()
-            .contains("cannot bind to a builtin provider")
+            .contains("cannot bind to a builtin extension")
     );
     assert!(error.to_string().contains("no Tool effect occurred"));
     std::fs::remove_dir_all(root).unwrap();
@@ -261,7 +261,7 @@ title: Evidence function
 runtime:
   tool_mode: read-only
   max_output_tokens: 64
-  max_capability_calls: 3
+  max_tool_calls: 3
 skills:
   use: []
 subagents:
@@ -346,9 +346,9 @@ tool_call_format = "hermes_json"
     );
     assert_eq!(
         record["extension_bindings"]["core.workspace"]["implementation"],
-        "builtin:agl-core-tools/fs"
+        serde_json::json!({"kind": "rust-static"})
     );
-    assert_eq!(record["function_policy"]["max_capability_calls"], 3);
+    assert_eq!(record["function_policy"]["max_tool_calls"], 3);
     assert_eq!(record["admission"]["fallback_allowed"], false);
     assert_eq!(record["admission"]["status"], "pre_effect_admitted");
     assert!(record["model_reuse_key"].as_str().is_some());
@@ -613,7 +613,7 @@ fn build_request_rejects_skill_routing_parity_failure_before_inference() {
     assert!(
         error
             .to_string()
-            .contains("callable routing differs from the effective capability set")
+            .contains("callable routing differs from the effective tool set")
     );
 }
 
@@ -818,7 +818,7 @@ fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
 fn rendered_tool_keeps_the_exact_input_schema() {
     let effective = effective_capabilities(&["core.workspace:fs.read"]);
     let declaration = effective
-        .capability(&ToolId::new("core.workspace:fs.read").unwrap())
+        .tool(&ToolId::new("core.workspace:fs.read").unwrap())
         .unwrap()
         .declaration();
     let config = ModelConfig {
@@ -898,7 +898,7 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
         Some(PathBuf::from(".agl/tasks/example.md"))
     );
     assert_eq!(
-        artifact_write_preflight_path_for_tool("skill.status", &selected_skills, &agl_args)
+        artifact_write_preflight_path_for_tool("core.skill:status", &selected_skills, &agl_args)
             .unwrap(),
         None
     );
@@ -1063,7 +1063,7 @@ fn foreground_process_and_shell_are_baseline_and_skill_routes_the_lifecycle_surf
         ToolAccessMode::Admin,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert!(baseline.contains(&ToolId::new(agl_core_tools::PROCESS_EXEC_TOOL_ID).unwrap()));
@@ -1085,13 +1085,13 @@ fn foreground_process_and_shell_are_baseline_and_skill_routes_the_lifecycle_surf
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert_eq!(
         read_only
-            .capabilities()
-            .map(|capability| capability.declaration().id.as_str())
+            .tools()
+            .map(|tool| tool.declaration().id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "core.process:process.pwd",
@@ -1110,16 +1110,16 @@ fn foreground_process_and_shell_are_baseline_and_skill_routes_the_lifecycle_surf
         ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert_eq!(
-        execute.capabilities().len(),
+        execute.tools().len(),
         agl_core_tools::PROCESS_TOOL_IDS.len() + 4
     );
     assert!(
         !execute
-            .capability(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
+            .tool(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
             .unwrap()
             .authorized_state_effects()
             .contains(&EffectId::host_process_execution())
@@ -1140,7 +1140,7 @@ fn omitted_function_extension_does_not_activate_its_core_tools() {
         ToolAccessMode::Admin,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: None,
             delegation_enabled: false,
             selected_extensions,
@@ -1166,7 +1166,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert!(inherited.contains(&fs_read));
@@ -1178,7 +1178,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::default()),
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert!(!empty_allow.contains(&fs_read));
@@ -1197,7 +1197,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
             [fs_read.clone()],
             [fs_read.clone()],
         )),
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert!(!denied.contains(&fs_read));
@@ -1211,7 +1211,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
 fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let delegate = ToolId::new(agl_extension::AGENT_DELEGATE_TOOL_ID).unwrap();
+    let delegate = ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID).unwrap();
 
     let disabled = resolve_effective_capabilities(
         &registry,
@@ -1220,7 +1220,7 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert!(!disabled.contains(&delegate));
@@ -1232,10 +1232,10 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: None,
             delegation_enabled: true,
-            ..RuntimeCapabilityBoundary::default()
+            ..RuntimeToolBoundary::default()
         },
     )
     .unwrap();
@@ -1248,10 +1248,10 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::default()),
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: None,
             delegation_enabled: true,
-            ..RuntimeCapabilityBoundary::default()
+            ..RuntimeToolBoundary::default()
         },
     )
     .unwrap();
@@ -1269,10 +1269,10 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: Some(&ceiling),
             delegation_enabled: true,
-            ..RuntimeCapabilityBoundary::default()
+            ..RuntimeToolBoundary::default()
         },
     )
     .unwrap();
@@ -1352,9 +1352,9 @@ tool_call_format = "hermes_json"
     };
     let catalog = full_tool_catalog();
     let catalog_ids = catalog
-        .providers()
+        .extensions()
         .iter()
-        .flat_map(|provider| provider.tools.iter())
+        .flat_map(|extension| extension.tools.iter())
         .map(|action| action.id.as_str())
         .collect::<BTreeSet<_>>();
 
@@ -1408,8 +1408,8 @@ tool_call_format = "hermes_json"
             .collect::<Vec<_>>();
         let effective_ids = session
             .effective_capabilities()
-            .capabilities()
-            .map(|capability| capability.declaration().id.as_str())
+            .tools()
+            .map(|tool| tool.declaration().id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(visible_ids, case.expected_ids, "{} visible", case.id);
         assert_eq!(effective_ids, case.expected_ids, "{} effective", case.id);
@@ -1452,17 +1452,17 @@ tool_call_format = "hermes_json"
             .find(|message| message.content.contains("<agentlibre_tool_context>"))
             .map(|message| message.content.as_str());
         assert!(tool_context.is_none(), "{} textual tool context", case.id);
-        for capability_id in &catalog_ids {
-            let marker = format!(r#""name":"{capability_id}""#);
+        for tool_id in &catalog_ids {
+            let marker = format!(r#""name":"{tool_id}""#);
             assert!(
                 request
                     .rendered
                     .messages
                     .iter()
                     .all(|message| !message.content.contains(&marker)),
-                "{} duplicated textual prompt capability {}",
+                "{} duplicated textual prompt tool {}",
                 case.id,
-                capability_id
+                tool_id
             );
         }
     }
@@ -1545,11 +1545,11 @@ title: Locked Function
 fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let cron_add = ToolId::new("cron.add").unwrap();
+    let cron_add = ToolId::new("core.cron:add").unwrap();
     let snapshot = RuntimePermissionGrantSnapshot {
         admitted: vec![AdmittedPermissionGrant {
             grant_id: "grant-1".to_string(),
-            capability_id: cron_add.clone(),
+            tool_id: cron_add.clone(),
             max_operation_kind: OperationKind::Write,
             state_effects: BTreeSet::from([EffectId::store_cron()]),
             sensitive_inputs: BTreeSet::new(),
@@ -1568,7 +1568,7 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
         ToolAccessMode::ReadOnly,
         &snapshot,
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
 
@@ -1647,7 +1647,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
     let grant = store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: "cron.add".to_string(),
+            tool_id: "core.cron:add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1675,9 +1675,9 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
         .iter()
         .map(|tool| tool.id.as_str())
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&"cron.add"));
-    assert!(!tool_names.contains(&"cron.delete"));
-    assert_eq!(snapshot.granted_visible_tools(), vec!["cron.add"]);
+    assert!(tool_names.contains(&"core.cron:add"));
+    assert!(!tool_names.contains(&"core.cron:delete"));
+    assert_eq!(snapshot.granted_visible_tools(), vec!["core.cron:add"]);
     assert!(snapshot.ignored_grants().is_empty());
     assert!(store.active_permission_grants().unwrap().is_empty());
     let consumed = store.permission_grant(&grant.id).unwrap().unwrap();
@@ -1732,20 +1732,19 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
         ToolAccessMode::Execute,
         &snapshot,
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     finalize_permission_grants(&root, &run_id, &effective, &mut snapshot).unwrap();
 
-    let capability = effective
-        .capability(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
+    let tool = effective
+        .tool(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
         .unwrap();
     assert!(
-        capability
-            .authorized_state_effects()
+        tool.authorized_state_effects()
             .contains(&EffectId::host_process_execution())
     );
-    let provenance = capability.grant_provenance().unwrap();
+    let provenance = tool.grant_provenance().unwrap();
     assert_eq!(provenance.grant_id, grant.id);
     assert_eq!(provenance.duration, "session");
     assert!(provenance.admitted_scope.contains(TEST_SESSION_ID));
@@ -1832,7 +1831,7 @@ fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
     store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: "cron.add".to_string(),
+            tool_id: "core.cron:add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1856,13 +1855,13 @@ fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
     )
     .unwrap();
 
-    assert!(!tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
+    assert!(!tools.iter().any(|tool| tool.id.as_str() == "core.cron:add"));
     assert!(snapshot.granted_visible_tools().is_empty());
     assert!(
         snapshot
             .ignored_grants()
             .iter()
-            .any(|grant| grant.contains("cron.add:tool_mode_denied"))
+            .any(|grant| grant.contains("core.cron:add:tool_mode_denied"))
     );
     assert_eq!(store.active_permission_grants().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(root);
@@ -1875,7 +1874,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
     store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: "notes.delete".to_string(),
+            tool_id: "core.note:delete".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_notes".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1899,10 +1898,14 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
     )
     .unwrap();
 
-    assert!(!tools.iter().any(|tool| tool.id.as_str() == "notes.delete"));
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool.id.as_str() == "core.note:delete")
+    );
     assert!(snapshot.granted_visible_tools().is_empty());
     assert!(
-        snapshot.ignored_grants()[0].contains("notes.delete:denied_by_selected_skill"),
+        snapshot.ignored_grants()[0].contains("core.note:delete:denied_by_selected_skill"),
         "{:?}",
         snapshot.ignored_grants()
     );
@@ -1918,7 +1921,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
     store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: "cron.add".to_string(),
+            tool_id: "core.cron:add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
             sensitive_inputs: Vec::new(),
@@ -1958,7 +1961,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
         snapshot
             .ignored_grants()
             .iter()
-            .any(|grant| grant.contains("cron.add:not_routed_by_selected_skill")),
+            .any(|grant| grant.contains("core.cron:add:not_routed_by_selected_skill")),
         "{:?}",
         snapshot.ignored_grants()
     );
@@ -1979,7 +1982,7 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
         ToolAccessMode::Write,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
@@ -1992,11 +1995,11 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
             .map(ToolId::as_str)
             .collect::<Vec<_>>(),
         vec![
+            "core.cron:preflight",
+            "core.permission:request",
+            "core.permission:status",
             "core.workspace:fs.read",
             "core.workspace:fs.search",
-            "cron.preflight",
-            "permissions.request",
-            "permissions.status",
         ]
     );
     assert_eq!(
@@ -2005,7 +2008,7 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
             .iter()
             .map(ToolId::as_str)
             .collect::<Vec<_>>(),
-        vec!["cron.add", "matrix.outbox.enqueue"]
+        vec!["core.cron:add", "matrix.outbox:enqueue"]
     );
     assert_eq!(
         route
@@ -2013,19 +2016,19 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
             .iter()
             .map(|(tool, reason)| (tool.as_str(), reason.code()))
             .collect::<Vec<_>>(),
-        vec![("matrix.outbox.deliver", "unknown_capability")]
+        vec![("matrix.bridge:outbox.deliver", "unknown_tool")]
     );
     ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
 
     let bundle =
         build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
     assert!(bundle.content.contains(
-        "directly_callable_tools: core.workspace:fs.read, core.workspace:fs.search, cron.preflight, permissions.request, permissions.status"
+        "directly_callable_tools: core.cron:preflight, core.permission:request, core.permission:status, core.workspace:fs.read, core.workspace:fs.search"
     ));
     assert!(
         bundle
             .content
-            .contains("requestable_tools: cron.add, matrix.outbox.enqueue")
+            .contains("requestable_tools: core.cron:add, matrix.outbox:enqueue")
     );
     assert!(bundle.content.contains("id: schedule-matrix-cron"));
 }
@@ -2043,18 +2046,18 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing = derive_skill_tool_routing(&skill_registry, &selected, &read_only).unwrap();
     let route = routing.route(&selected[0]).unwrap();
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        route.unavailable_tools()[&ToolId::new("core.cron:add").unwrap()],
         agl_kernel::ToolExclusionReason::ToolModeDenied
     );
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("matrix.outbox.enqueue").unwrap()],
+        route.unavailable_tools()[&ToolId::new("matrix.outbox:enqueue").unwrap()],
         agl_kernel::ToolExclusionReason::ToolModeDenied
     );
     let bundle =
@@ -2069,7 +2072,7 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
         ToolAccessMode::Write,
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::default()),
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing = derive_skill_tool_routing(&skill_registry, &selected, &function_denied).unwrap();
@@ -2077,11 +2080,11 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     assert!(route.callable_tools().is_empty());
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        route.unavailable_tools()[&ToolId::new("core.cron:add").unwrap()],
         agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("permissions.request").unwrap()],
+        route.unavailable_tools()[&ToolId::new("core.permission:request").unwrap()],
         agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
     ensure_skill_tool_routing_parity(&routing, &function_denied).unwrap();
@@ -2094,16 +2097,16 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::new(
             tool_ids(&[
-                "cron.add",
-                "cron.preflight",
+                "core.cron:add",
+                "core.cron:preflight",
                 "core.workspace:fs.read",
                 "core.workspace:fs.search",
-                "matrix.outbox.enqueue",
-                "permissions.status",
+                "matrix.outbox:enqueue",
+                "core.permission:status",
             ]),
             [],
         )),
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing =
@@ -2111,11 +2114,11 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     let route = routing.route(&selected[0]).unwrap();
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        route.unavailable_tools()[&ToolId::new("core.cron:add").unwrap()],
         agl_kernel::ToolExclusionReason::NotRouted
     );
     assert_eq!(
-        route.unavailable_tools()[&ToolId::new("permissions.request").unwrap()],
+        route.unavailable_tools()[&ToolId::new("core.permission:request").unwrap()],
         agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
 
@@ -2127,18 +2130,18 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::new(
             tool_ids(&[
-                "cron.add",
-                "cron.preflight",
+                "core.cron:add",
+                "core.cron:preflight",
                 "core.workspace:fs.read",
                 "core.workspace:fs.search",
-                "matrix.outbox.deliver",
-                "matrix.outbox.enqueue",
-                "permissions.request",
-                "permissions.status",
+                "matrix.bridge:outbox.deliver",
+                "matrix.outbox:enqueue",
+                "core.permission:request",
+                "core.permission:status",
             ]),
             tool_ids(&["core.workspace:fs.read"]),
         )),
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing =
@@ -2161,11 +2164,11 @@ fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let selected = [SkillId::new("cron-planner").unwrap()];
-    let cron_add = ToolId::new("cron.add").unwrap();
+    let cron_add = ToolId::new("core.cron:add").unwrap();
     let invalid_grant = RuntimePermissionGrantSnapshot {
         admitted: vec![AdmittedPermissionGrant {
             grant_id: "grant-invalid".to_string(),
-            capability_id: cron_add.clone(),
+            tool_id: cron_add.clone(),
             max_operation_kind: OperationKind::Read,
             state_effects: BTreeSet::new(),
             sensitive_inputs: BTreeSet::new(),
@@ -2183,7 +2186,7 @@ fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
         ToolAccessMode::Write,
         &invalid_grant,
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     assert_eq!(
@@ -2198,16 +2201,16 @@ fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
 }
 
 #[test]
-fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
+fn untrusted_extension_tools_are_unavailable_and_skill_instructions_remain() {
     let skill_registry = test_skill_registry();
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(agl_extension::delegation_provider())
+        .register(crate::delegation_contract::delegation_extension())
         .unwrap();
     agl_core_tools::guards::register(&mut catalog).unwrap();
     catalog
         .register(
-            agl_core_tools::cron::declaration().with_trust(agl_extension::ExtensionTrust::Revoked),
+            agl_core_tools::cron::declaration().with_trust(agl_kernel::ExtensionTrust::Revoked),
         )
         .unwrap();
     agl_core_tools::fs::register(&mut catalog).unwrap();
@@ -2227,21 +2230,21 @@ fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
         ToolAccessMode::Write,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
     let route = routing.route(&selected[0]).unwrap();
-    for capability in ["cron.add", "cron.preflight"] {
+    for tool in ["core.cron:add", "core.cron:preflight"] {
         assert_eq!(
-            route.unavailable_tools()[&ToolId::new(capability).unwrap()],
-            agl_kernel::ToolExclusionReason::ProviderUntrusted
+            route.unavailable_tools()[&ToolId::new(tool).unwrap()],
+            agl_kernel::ToolExclusionReason::ExtensionUntrusted
         );
     }
     assert!(
         !route
             .requestable_tools()
-            .contains(&ToolId::new("cron.add").unwrap())
+            .contains(&ToolId::new("core.cron:add").unwrap())
     );
     ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
 
@@ -2252,7 +2255,11 @@ fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
             .content
             .contains("Use this test-only cron-planner skill.")
     );
-    assert!(bundle.content.contains("cron.add [provider_untrusted]"));
+    assert!(
+        bundle
+            .content
+            .contains("core.cron:add [extension_untrusted]")
+    );
 }
 
 #[test]
@@ -2263,7 +2270,7 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
         .register(agl_skill::RegisteredSkill::trusted_builtin(test_skill(
             skill_id.as_str(),
             &["core:repo_path.validate"],
-            &["unknown.capability"],
+            &["example.unknown:tool"],
             &[],
             &[],
             Vec::new(),
@@ -2279,14 +2286,14 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )
     .unwrap();
     let routing = derive_skill_tool_routing(&registry, &selected, &effective).unwrap();
     assert_eq!(
         routing.route(&skill_id).unwrap().unavailable_tools()
-            [&ToolId::new("unknown.capability").unwrap()],
-        agl_kernel::ToolExclusionReason::UnknownCapability
+            [&ToolId::new("example.unknown:tool").unwrap()],
+        agl_kernel::ToolExclusionReason::UnknownTool
     );
 
     let bundle = build_verified_context_bundle(&registry, &catalog, &selected, &routing).unwrap();
@@ -2298,7 +2305,7 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
     assert!(
         bundle
             .content
-            .contains("unknown.capability [unknown_capability]")
+            .contains("example.unknown:tool [unknown_tool]")
     );
 }
 
@@ -2309,7 +2316,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
     store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: "cron.add".to_string(),
+            tool_id: "core.cron:add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
             sensitive_inputs: Vec::new(),
@@ -2333,8 +2340,8 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
     )
     .unwrap();
 
-    assert!(tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
-    assert_eq!(snapshot.granted_visible_tools(), vec!["cron.add"]);
+    assert!(tools.iter().any(|tool| tool.id.as_str() == "core.cron:add"));
+    assert_eq!(snapshot.granted_visible_tools(), vec!["core.cron:add"]);
     assert!(store.active_permission_grants().unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(root);
@@ -2343,7 +2350,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
 fn full_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(agl_extension::delegation_provider())
+        .register(crate::delegation_contract::delegation_extension())
         .unwrap();
     agl_core_tools::guards::register(&mut catalog).unwrap();
     agl_core_tools::cron::register(&mut catalog).unwrap();
@@ -2386,26 +2393,26 @@ fn test_skill_registry() -> agl_skill::SkillRegistry {
         test_skill(
             "notes-capture",
             &["core:repo_path.validate"],
-            &["notes.add", "notes.link"],
+            &["core.note:add", "core.note:link"],
             &[],
-            &["notes.delete"],
+            &["core.note:delete"],
             Vec::new(),
         ),
         test_skill(
             "cron-planner",
             &["core:repo_path.validate"],
             &[
-                "cron.preflight",
+                "core.cron:preflight",
                 "core.workspace:fs.read",
                 "core.workspace:fs.search",
-                "permissions.request",
-                "permissions.status",
+                "core.permission:request",
+                "core.permission:status",
             ],
-            &["cron.add", "matrix.outbox.enqueue"],
-            &["matrix.outbox.deliver"],
+            &["core.cron:add", "matrix.outbox:enqueue"],
+            &["matrix.bridge:outbox.deliver"],
             vec![agl_skill::SkillPermissionRequestTemplate {
                 id: "schedule-matrix-cron".to_string(),
-                tools: tool_ids(&["cron.add", "matrix.outbox.enqueue"]),
+                tools: tool_ids(&["core.cron:add", "matrix.outbox:enqueue"]),
                 max_operation_kind: Some(OperationKind::Write),
                 state_effects: vec![EffectId::store_cron(), EffectId::matrix_outbox()],
                 default_duration: "one_turn".to_string(),
@@ -2577,7 +2584,10 @@ fn embedded_function_profile_rejects_external_config_override() {
     .expect("external config must not replace an embedded Function profile");
 
     let rendered = format!("{error:#}");
-    assert!(rendered.contains("function:gemma4-31b-32k@1.0.0"));
+    assert!(
+        rendered.contains("function:gemma4-31b-32k@1.1.0"),
+        "{rendered}"
+    );
     assert!(rendered.contains("owns an embedded inference profile"));
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_repo::{
@@ -15,13 +15,13 @@ use serde_json::{Value, json};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
-pub const PROVIDER_ID: &str = "repo-tools";
-pub const REPO_STATUS_TOOL_ID: &str = "repo.status";
-pub const REPO_EXPORT_PROFILE_TOOL_ID: &str = "repo.export_profile";
-pub const REPO_HOOKS_STATUS_TOOL_ID: &str = "repo.hooks.status";
-pub const REPO_INIT_TOOL_ID: &str = "repo.init";
-pub const REPO_IMPORT_PROFILE_TOOL_ID: &str = "repo.import_profile";
-pub const REPO_INSTALL_HOOKS_TOOL_ID: &str = "repo.install_hooks";
+pub const PROVIDER_ID: &str = "core.repo";
+pub const REPO_STATUS_TOOL_ID: &str = "core.repo:status";
+pub const REPO_EXPORT_PROFILE_TOOL_ID: &str = "core.repo:export_profile";
+pub const REPO_HOOKS_STATUS_TOOL_ID: &str = "core.repo:hooks.status";
+pub const REPO_INIT_TOOL_ID: &str = "core.repo:init";
+pub const REPO_IMPORT_PROFILE_TOOL_ID: &str = "core.repo:import_profile";
+pub const REPO_INSTALL_HOOKS_TOOL_ID: &str = "core.repo:install_hooks";
 
 const DEFAULT_PROFILE_MAX_BYTES: usize = 16 * 1024;
 const MAX_PROFILE_BYTES: usize = 128 * 1024;
@@ -161,10 +161,10 @@ impl RepoTools {
 }
 
 impl ToolHandler for RepoTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
+            self.dispatch(invocation.tool_id.as_str(), invocation.arguments)
                 .map(ToolResult::new)
                 .map_err(Into::into)
         })
@@ -173,11 +173,11 @@ impl ToolHandler for RepoTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin repo provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin repo extension id is valid"),
         "Repo Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin repo provider declaration is valid")
+    .expect("builtin repo extension declaration is valid")
     .with_tool(action::<StatusArgs>(
         REPO_STATUS_TOOL_ID,
         "Inspect agentLIBRE workspace manifest and component health.",
@@ -217,6 +217,10 @@ pub fn declaration() -> ExtensionDescriptor {
         )
         .with_state_effects([EffectId::repo_hooks()]),
     )
+    .with_effects([
+        EffectDeclaration::for_standard(EffectId::repo_workspace()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::repo_hooks()).unwrap(),
+    ])
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

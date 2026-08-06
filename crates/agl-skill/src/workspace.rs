@@ -9,7 +9,7 @@ use agl_artifact::{
     ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
     StaticArtifactSource,
 };
-use agl_extension::{SkillId, ToolId};
+use agl_kernel::{SkillId, ToolId};
 use agl_repo::{
     ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceComponentKind,
     status_repo_workspace,

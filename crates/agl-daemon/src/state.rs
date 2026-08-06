@@ -42,7 +42,7 @@ use agl_inference::{
     WorkerRuntimeStatusHandle,
 };
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent,
+    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, DaemonTool, HelloEvent,
     HelloRequest, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
     InferenceStatusRequest, ModelReleaseOutcome, ModelReleaseReason, ModelUnloadEvent,
     ModelUnloadOutcome, ModelUnloadRequest, ModelUnloadTarget, PROTOCOL_VERSION, ProtocolError,
@@ -637,32 +637,32 @@ impl DaemonState {
             worker_build_id: WORKER_BUILD_ID.to_string(),
             native_bundle_id,
             composite_worker_build_id,
-            capabilities: vec![
-                DaemonCapability::SessionOpen,
-                DaemonCapability::SetupSmokeSessionOpen,
-                DaemonCapability::SessionClear,
-                DaemonCapability::SessionCancelActive,
-                DaemonCapability::SessionFinish,
-                DaemonCapability::SessionStatus,
-                DaemonCapability::SessionList,
-                DaemonCapability::SessionTranscript,
-                DaemonCapability::FinalAssistantMessage,
-                DaemonCapability::RuntimeEvents,
-                DaemonCapability::RunSubmit,
-                DaemonCapability::RunStatus,
-                DaemonCapability::RunTree,
-                DaemonCapability::RunCancel,
-                DaemonCapability::RunReplay,
-                DaemonCapability::RunSubscribe,
-                DaemonCapability::InferenceInventory,
-                DaemonCapability::InferenceStatus,
-                DaemonCapability::ModelUnload,
-                DaemonCapability::CommandCatalog,
-                DaemonCapability::CommandSuggestions,
-                DaemonCapability::ApplicationActions,
-                DaemonCapability::SessionPresentation,
-                DaemonCapability::HumanTerminal,
-                DaemonCapability::AssistantDeltas,
+            tools: vec![
+                DaemonTool::SessionOpen,
+                DaemonTool::SetupSmokeSessionOpen,
+                DaemonTool::SessionClear,
+                DaemonTool::SessionCancelActive,
+                DaemonTool::SessionFinish,
+                DaemonTool::SessionStatus,
+                DaemonTool::SessionList,
+                DaemonTool::SessionTranscript,
+                DaemonTool::FinalAssistantMessage,
+                DaemonTool::RuntimeEvents,
+                DaemonTool::RunSubmit,
+                DaemonTool::RunStatus,
+                DaemonTool::RunTree,
+                DaemonTool::RunCancel,
+                DaemonTool::RunReplay,
+                DaemonTool::RunSubscribe,
+                DaemonTool::InferenceInventory,
+                DaemonTool::InferenceStatus,
+                DaemonTool::ModelUnload,
+                DaemonTool::CommandCatalog,
+                DaemonTool::CommandSuggestions,
+                DaemonTool::ApplicationActions,
+                DaemonTool::SessionPresentation,
+                DaemonTool::HumanTerminal,
+                DaemonTool::AssistantDeltas,
             ],
         }))
     }
@@ -1181,7 +1181,7 @@ impl DaemonState {
                         model_input_tokens: request.budget.model_input_tokens,
                         model_output_tokens: request.budget.model_output_tokens,
                         model_attempts: request.budget.model_attempts,
-                        capability_calls: request.budget.capability_calls,
+                        tool_calls: request.budget.tool_calls,
                     },
                     not_before_ms: None,
                 },
@@ -2157,7 +2157,7 @@ impl DaemonState {
                 .ok_or_else(|| {
                     ApplicationError::new(
                         ApplicationErrorCode::Internal,
-                        "session effective capability policy is unavailable",
+                        "session effective tool policy is unavailable",
                     )
                 })?;
             let replay = ChatSessionStore::open_reverse_replay(
@@ -2345,7 +2345,7 @@ impl DaemonState {
                         model_input_tokens: budget.model_input_tokens,
                         model_output_tokens: budget.model_output_tokens,
                         model_attempts: budget.model_attempts,
-                        capability_calls: budget.capability_calls,
+                        tool_calls: budget.tool_calls,
                     },
                 },
             )
@@ -2433,13 +2433,13 @@ impl DaemonState {
             .ok_or_else(|| {
                 ApplicationError::new(
                     ApplicationErrorCode::Internal,
-                    "session effective capability policy is unavailable",
+                    "session effective tool policy is unavailable",
                 )
             })?;
         if current_policy_hash != source.policy_hash {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::NotAuthorized,
-                "incomplete output capability policy is no longer admitted",
+                "incomplete output tool policy is no longer admitted",
             ));
         }
 
@@ -3307,7 +3307,7 @@ impl DaemonState {
             .ok_or_else(|| {
                 ApplicationError::new(
                     ApplicationErrorCode::NotAuthorized,
-                    "session effective capability policy is unavailable",
+                    "session effective tool policy is unavailable",
                 )
             })?;
         self.terminal_bridge
@@ -5185,7 +5185,7 @@ pub(crate) fn run_status_event(outcome: RunOutcome) -> RunStatusEvent {
             model_input_tokens: status.usage.model_input_tokens,
             model_output_tokens: status.usage.model_output_tokens,
             model_attempts: status.usage.model_attempts,
-            capability_calls: status.usage.capability_calls,
+            tool_calls: status.usage.tool_calls,
         },
         cancellation_requested: status.cancellation_requested,
         attempts: status.attempts,
@@ -5227,7 +5227,7 @@ fn run_tree_node(status: SafeRunStatus) -> RunTreeNodeEvent {
             model_input_tokens: status.usage.model_input_tokens,
             model_output_tokens: status.usage.model_output_tokens,
             model_attempts: status.usage.model_attempts,
-            capability_calls: status.usage.capability_calls,
+            tool_calls: status.usage.tool_calls,
         },
         cancellation_requested: status.cancellation_requested,
         attempts: status.attempts,

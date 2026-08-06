@@ -6,11 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-extension.workspace = true
+agl-kernel.workspace = true
 agl-config.workspace = true
 agl-content.workspace = true
 agl-ids.workspace = true
-agl-turn.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

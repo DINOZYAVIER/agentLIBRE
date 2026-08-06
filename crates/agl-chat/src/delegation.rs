@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
-use agl_extension::{
-    DelegateActionArgs, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
-    ToolResult,
-};
 use agl_function::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
+use agl_kernel::{
+    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
+};
 use agl_store::{
     AglStore, ChildRunAdmission, ChildRunDraft, DelegationTreeBudget, DurableRunRecord, RunBudget,
     StoreError,
@@ -18,6 +17,7 @@ use agl_store::{
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
+use crate::delegation_contract::DelegateActionArgs;
 use crate::supervisor_driver::ChatRunInput;
 
 #[derive(Clone)]
@@ -80,7 +80,7 @@ impl DelegationHandler {
             .as_ref()
             .context("delegation is not enabled for this runtime node")?;
         let args: DelegateActionArgs = serde_json::from_value(invocation.arguments.clone())
-            .context("invalid agent.delegate arguments")?;
+            .context("invalid agent.supervisor:delegate arguments")?;
         args.validate().map_err(anyhow::Error::msg)?;
         ensure!(
             context.children.contains(&args.subagent_id),
@@ -91,7 +91,7 @@ impl DelegationHandler {
             .scope
             .step_id()
             .cloned()
-            .context("agent.delegate requires a durable run step")?;
+            .context("agent.supervisor:delegate requires a durable run step")?;
         let parent_run_id = invocation.scope.run_id().clone();
         let store = AglStore::open_current_at(&context.store_root)
             .context("failed to open delegation store")?;
@@ -164,7 +164,7 @@ impl DelegationHandler {
                 model_input_tokens: parent.budget.model_input_tokens,
                 model_output_tokens: spec.limits.max_output_tokens,
                 model_attempts: spec.limits.max_model_attempts,
-                capability_calls: spec.limits.max_capability_calls,
+                tool_calls: spec.limits.max_tool_calls,
             },
             child_spec_digest: spec.spec_digest.clone(),
             model_profile_digest: inference_config_digest(&inference_config)?,
@@ -198,7 +198,7 @@ impl DelegationHandler {
 }
 
 impl ToolHandler for DelegationHandler {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
             self.dispatch_inner(invocation)
@@ -311,13 +311,13 @@ fn delegation_result(child: &DurableRunRecord) -> Result<ToolResult> {
     Ok(result)
 }
 
-pub(crate) fn result_is_waiting(result: &agl_loop::TurnEffectResult) -> bool {
-    let agl_loop::TurnEffectResult::CapabilityDispatch { outcome, .. } = result else {
+pub(crate) fn result_is_waiting(result: &agl_kernel::TurnRequestResult) -> bool {
+    let agl_kernel::TurnRequestResult::ToolDispatch { outcome, .. } = result else {
         return false;
     };
     matches!(
         outcome.as_ref(),
-        agl_loop::EffectOutcome::Succeeded(response)
+        agl_kernel::TurnRequestOutcome::Succeeded(response)
             if response.result.data.as_ref()
                 .and_then(|data| data.get("status"))
                 .and_then(serde_json::Value::as_str)
@@ -347,7 +347,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn child_failure_is_a_safe_structured_capability_result() {
+    fn child_failure_is_a_safe_structured_tool_result() {
         let child = failed_child_record();
 
         let result = delegation_result(&child).unwrap();

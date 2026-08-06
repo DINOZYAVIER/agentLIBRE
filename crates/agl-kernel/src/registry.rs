@@ -3,21 +3,21 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::{
     AuthorityClass, DispatchDenial, DispatchDenialCode, EffectiveToolSet, KernelWorkflowEvent,
-    MemoryToolEffectJournal, ToolEffectJournal, ToolEffectJournalError, ToolEffectJournalRecord,
-    ToolEffectLifecycleState, ToolOutcome,
+    MemoryToolEffectJournal, ToolEffectJournal, ToolEffectJournalError, ToolEffectLifecycleState,
+    ToolEffectMachine, ToolOutcome,
 };
-use agl_extension::{
+use crate::{
     DeclarationError, EffectId, ExtensionDescriptor, ExtensionId, ExtensionRegistration,
-    ExtensionTrust, HookDeclaration, HookId, ToolDeclaration, ToolDispatchContext,
+    ExtensionTrust, HookDeclaration, HookHandler, HookId, ToolDeclaration, ToolDispatchContext,
     ToolDispatchControl, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ToolCatalog {
-    providers: Vec<ExtensionDescriptor>,
-    provider_index: BTreeMap<ExtensionId, usize>,
+    extensions: Vec<ExtensionDescriptor>,
+    extension_index: BTreeMap<ExtensionId, usize>,
     hook_index: BTreeMap<HookId, usize>,
-    capability_index: BTreeMap<ToolId, usize>,
+    tool_index: BTreeMap<ToolId, usize>,
     effect_authorities: BTreeMap<EffectId, AuthorityClass>,
     workflow_mappings: BTreeMap<(ToolId, String), KernelWorkflowEvent>,
 }
@@ -31,9 +31,9 @@ impl ToolCatalog {
         declaration
             .validate()
             .map_err(ToolCatalogError::InvalidDeclaration)?;
-        let provider_index = self.providers.len();
-        if self.provider_index.contains_key(&declaration.id) {
-            return Err(ToolCatalogError::DuplicateProvider {
+        let extension_index = self.extensions.len();
+        if self.extension_index.contains_key(&declaration.id) {
+            return Err(ToolCatalogError::DuplicateExtension {
                 id: declaration.id.clone(),
             });
         }
@@ -45,8 +45,8 @@ impl ToolCatalog {
             }
         }
         for action in &declaration.tools {
-            if self.capability_index.contains_key(&action.id) {
-                return Err(ToolCatalogError::DuplicateCapability {
+            if self.tool_index.contains_key(&action.id) {
+                return Err(ToolCatalogError::DuplicateTool {
                     id: action.id.clone(),
                 });
             }
@@ -85,68 +85,67 @@ impl ToolCatalog {
             }
         }
 
-        self.provider_index
-            .insert(declaration.id.clone(), provider_index);
+        self.extension_index
+            .insert(declaration.id.clone(), extension_index);
         for hook in &declaration.hooks {
-            self.hook_index.insert(hook.id.clone(), provider_index);
+            self.hook_index.insert(hook.id.clone(), extension_index);
         }
         for action in &declaration.tools {
-            self.capability_index
-                .insert(action.id.clone(), provider_index);
+            self.tool_index.insert(action.id.clone(), extension_index);
         }
         self.effect_authorities.extend(resolved_effects);
         self.workflow_mappings.extend(resolved_workflow);
-        self.providers.push(declaration);
+        self.extensions.push(declaration);
         Ok(())
     }
 
-    pub fn providers(&self) -> &[ExtensionDescriptor] {
-        &self.providers
+    pub fn extensions(&self) -> &[ExtensionDescriptor] {
+        &self.extensions
     }
 
-    pub fn provider(&self, id: &ExtensionId) -> Option<&ExtensionDescriptor> {
-        self.providers.get(*self.provider_index.get(id)?)
+    pub fn extension(&self, id: &ExtensionId) -> Option<&ExtensionDescriptor> {
+        self.extensions.get(*self.extension_index.get(id)?)
     }
 
     pub fn hook(&self, id: &HookId) -> Option<&HookDeclaration> {
-        let provider = self.providers.get(*self.hook_index.get(id)?)?;
-        provider.hooks.iter().find(|hook| &hook.id == id)
+        let extension = self.extensions.get(*self.hook_index.get(id)?)?;
+        extension.hooks.iter().find(|hook| &hook.id == id)
     }
 
-    pub fn provider_for_hook(&self, id: &HookId) -> Option<&ExtensionDescriptor> {
-        self.providers.get(*self.hook_index.get(id)?)
+    pub fn extension_for_hook(&self, id: &HookId) -> Option<&ExtensionDescriptor> {
+        self.extensions.get(*self.hook_index.get(id)?)
     }
 
     pub fn trusted_hook(&self, id: &HookId) -> Option<&HookDeclaration> {
-        self.provider_for_hook(id)?
+        self.extension_for_hook(id)?
             .permits_execution()
             .then(|| self.hook(id))
             .flatten()
     }
 
     pub fn tool(&self, id: &ToolId) -> Option<&ToolDeclaration> {
-        let provider = self.providers.get(*self.capability_index.get(id)?)?;
-        provider.tool(id)
+        let extension = self.extensions.get(*self.tool_index.get(id)?)?;
+        extension.tool(id)
     }
 
     pub fn extension_for_tool(&self, id: &ToolId) -> Option<&ExtensionDescriptor> {
-        self.providers.get(*self.capability_index.get(id)?)
+        self.extensions.get(*self.tool_index.get(id)?)
     }
 
     pub fn executable_tool(&self, id: &ToolId) -> Result<&ToolDeclaration, ToolDispatchError> {
         let action = self
             .tool(id)
-            .ok_or_else(|| ToolDispatchError::UnknownCapability { id: id.clone() })?;
-        let provider = self
+            .ok_or_else(|| ToolDispatchError::UnknownTool { id: id.clone() })?;
+        let extension = self
             .extension_for_tool(id)
-            .expect("capability index must reference its provider");
-        if provider.permits_execution() {
+            .expect("tool index must reference its extension");
+        if extension.permits_execution() {
             Ok(action)
         } else {
-            Err(ToolDispatchError::UntrustedProvider {
-                capability_id: id.clone(),
-                provider_id: provider.id.clone(),
-                trust: provider.trust,
+            Err(ToolDispatchError::UntrustedExtension {
+                tool_id: id.clone(),
+                extension_id: extension.id.clone(),
+                trust: extension.trust,
             })
         }
     }
@@ -155,8 +154,8 @@ impl ToolCatalog {
         self.hook_index.contains_key(id)
     }
 
-    pub fn capability_ids(&self) -> impl ExactSizeIterator<Item = &ToolId> {
-        self.capability_index.keys()
+    pub fn tool_ids(&self) -> impl ExactSizeIterator<Item = &ToolId> {
+        self.tool_index.keys()
     }
 
     pub fn authority_class(&self, effect_id: &EffectId) -> Option<AuthorityClass> {
@@ -177,6 +176,7 @@ impl ToolCatalog {
 pub struct ToolRuntime {
     catalog: ToolCatalog,
     handlers: BTreeMap<ToolId, std::sync::Arc<dyn ToolHandler>>,
+    hook_handlers: BTreeMap<HookId, std::sync::Arc<dyn HookHandler>>,
 }
 
 impl Default for ToolRuntime {
@@ -190,6 +190,7 @@ impl ToolRuntime {
         Self {
             catalog: ToolCatalog::new(),
             handlers: BTreeMap::new(),
+            hook_handlers: BTreeMap::new(),
         }
     }
 
@@ -232,7 +233,31 @@ impl ToolRuntime {
             return Err(ToolCatalogError::MissingHandler { id: id.clone() });
         }
 
-        let (descriptor, bindings) = registration.into_parts();
+        let declared_hooks = descriptor
+            .hooks
+            .iter()
+            .map(|hook| hook.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut bound_hooks = BTreeSet::new();
+        for binding in registration.hook_bindings() {
+            if !bound_hooks.insert(binding.hook_id().clone())
+                || self.hook_handlers.contains_key(binding.hook_id())
+            {
+                return Err(ToolCatalogError::DuplicateHookHandler {
+                    id: binding.hook_id().clone(),
+                });
+            }
+            if !declared_hooks.contains(binding.hook_id()) {
+                return Err(ToolCatalogError::UndeclaredHookHandler {
+                    id: binding.hook_id().clone(),
+                });
+            }
+        }
+        if let Some(id) = declared_hooks.difference(&bound_hooks).next() {
+            return Err(ToolCatalogError::MissingHookHandler { id: id.clone() });
+        }
+
+        let (descriptor, bindings, hook_bindings) = registration.into_parts();
         let mut next_catalog = self.catalog.clone();
         next_catalog.register(descriptor)?;
         let mut next_handlers = self.handlers.clone();
@@ -240,13 +265,23 @@ impl ToolRuntime {
             let (tool_id, handler) = binding.into_parts();
             next_handlers.insert(tool_id, handler);
         }
+        let mut next_hook_handlers = self.hook_handlers.clone();
+        for binding in hook_bindings {
+            let (hook_id, handler) = binding.into_parts();
+            next_hook_handlers.insert(hook_id, handler);
+        }
         self.catalog = next_catalog;
         self.handlers = next_handlers;
+        self.hook_handlers = next_hook_handlers;
         Ok(())
     }
 
     pub fn handler_ids(&self) -> impl ExactSizeIterator<Item = &ToolId> {
         self.handlers.keys()
+    }
+
+    pub fn hook_handler_ids(&self) -> impl ExactSizeIterator<Item = &HookId> {
+        self.hook_handlers.keys()
     }
 
     pub fn dispatch(
@@ -271,36 +306,33 @@ impl ToolRuntime {
             .step_id()
             .map(|step_id| format!("{}:{step_id}", invocation.scope.run_id()))
             .unwrap_or_else(|| invocation.scope.run_id().to_string());
-        let tool_id = invocation.capability_id.clone();
-        let extension_id = invocation.provider_id.clone();
+        let tool_id = invocation.tool_id.clone();
+        let extension_id = invocation.extension_id.clone();
         let schema_digest = invocation.declaration_digest.clone();
         let declaration = effective
-            .authorize(&invocation, self.catalog.providers())
+            .authorize(&invocation, self.catalog.extensions())
             .map_err(ToolDispatchError::Denied)?;
-        let handler = self
-            .handlers
-            .get(&invocation.capability_id)
-            .ok_or_else(|| ToolDispatchError::MissingHandler {
-                id: invocation.capability_id.clone(),
-            })?;
-        let effective_capability = effective
-            .capability(&invocation.capability_id)
-            .expect("authorized invocation must have an effective capability")
+        let handler = self.handlers.get(&invocation.tool_id).ok_or_else(|| {
+            ToolDispatchError::MissingHandler {
+                id: invocation.tool_id.clone(),
+            }
+        })?;
+        let effective_tool = effective
+            .tool(&invocation.tool_id)
+            .expect("authorized invocation must have an effective tool")
             .clone();
         let requested_effects = handler
             .preflight(&invocation)
             .map_err(ToolDispatchError::Handler)?;
-        if !requested_effects
-            .is_subset(&effective_capability.declaration().conditional_state_effects)
-        {
+        if !requested_effects.is_subset(&effective_tool.declaration().conditional_state_effects) {
             return Err(ToolDispatchError::Denied(DispatchDenial {
-                capability_id: invocation.capability_id.clone(),
+                tool_id: invocation.tool_id.clone(),
                 code: DispatchDenialCode::ConditionalEffectUndeclared,
             }));
         }
-        if !requested_effects.is_subset(effective_capability.authorized_state_effects()) {
+        if !requested_effects.is_subset(effective_tool.authorized_state_effects()) {
             return Err(ToolDispatchError::Denied(DispatchDenial {
-                capability_id: invocation.capability_id.clone(),
+                tool_id: invocation.tool_id.clone(),
                 code: DispatchDenialCode::ConditionalEffectDenied,
             }));
         }
@@ -310,13 +342,15 @@ impl ToolRuntime {
             .chain(&requested_effects)
             .cloned()
             .collect::<BTreeSet<_>>();
-        let effect_journal = EffectJournalContext {
-            call_id: &call_id,
-            tool_id: &tool_id,
-            extension_id: &extension_id,
-            schema_digest: &schema_digest,
-            delivery: declaration.delivery,
-            admitted_effects: &admitted_effects,
+        let mut effect_journal = EffectJournalContext {
+            machine: ToolEffectMachine::new(
+                call_id.clone(),
+                tool_id.clone(),
+                extension_id.clone(),
+                schema_digest.clone(),
+                declaration.delivery,
+                admitted_effects.clone(),
+            ),
         };
         let mut admitted_receipt_refs = Vec::new();
         if !admitted_effects.is_empty() {
@@ -348,7 +382,7 @@ impl ToolRuntime {
                 invocation,
                 control,
                 requested_effects,
-                effective_capability.grant_provenance().cloned(),
+                effective_tool.grant_provenance().cloned(),
             )),
             &handler_control,
         );
@@ -481,7 +515,7 @@ impl ToolRuntime {
                     });
                 };
                 if let Err(schema_error) =
-                    agl_extension::ToolSchema::compile(&error_declaration.data_schema)
+                    crate::ToolSchema::compile(&error_declaration.data_schema)
                         .map_err(|schema_error| ToolDispatchError::InvalidHandlerError {
                             id: declaration.id.clone(),
                             code: error.code.clone(),
@@ -509,7 +543,7 @@ impl ToolRuntime {
                 };
                 let terminal_receipt =
                     effect_journal.append_terminal(journal, lifecycle, &[], Some(&error.code))?;
-                if error_declaration.class == agl_extension::ToolErrorClass::Recoverable {
+                if error_declaration.class == crate::ToolErrorClass::Recoverable {
                     let workflow_event = self
                         .catalog
                         .workflow_event(&tool_id, &error.code)
@@ -575,50 +609,43 @@ fn block_on_handler<T>(
     }
 }
 
-struct EffectJournalContext<'a> {
-    call_id: &'a str,
-    tool_id: &'a ToolId,
-    extension_id: &'a ExtensionId,
-    schema_digest: &'a agl_extension::DeclarationDigest,
-    delivery: agl_extension::ToolDelivery,
-    admitted_effects: &'a BTreeSet<agl_extension::EffectId>,
+struct EffectJournalContext {
+    machine: ToolEffectMachine,
 }
 
-impl EffectJournalContext<'_> {
+impl EffectJournalContext {
     fn append(
-        &self,
+        &mut self,
         journal: &mut dyn ToolEffectJournal,
         state: ToolEffectLifecycleState,
-        observed_effects: &[agl_extension::ObservedEffect],
+        observed_effects: &[crate::ObservedEffect],
         outcome_code: Option<&str>,
     ) -> Result<String, ToolEffectJournalError> {
-        journal.append(&ToolEffectJournalRecord {
-            call_id: self.call_id.to_owned(),
-            tool_id: self.tool_id.clone(),
-            extension_id: self.extension_id.clone(),
-            schema_digest: self.schema_digest.clone(),
-            delivery: self.delivery,
-            state,
-            admitted_effects: self.admitted_effects.clone(),
-            observed_effects: observed_effects.to_vec(),
-            outcome_code: outcome_code.map(str::to_owned),
-        })
+        let record = self
+            .machine
+            .apply(
+                state,
+                observed_effects.to_vec(),
+                outcome_code.map(str::to_owned),
+            )
+            .map_err(|error| ToolEffectJournalError::new(error.to_string()))?;
+        journal.append(&record)
     }
 
     fn append_terminal(
-        &self,
+        &mut self,
         journal: &mut dyn ToolEffectJournal,
         state: ToolEffectLifecycleState,
-        observed_effects: &[agl_extension::ObservedEffect],
+        observed_effects: &[crate::ObservedEffect],
         outcome_code: Option<&str>,
     ) -> Result<Option<String>, ToolDispatchError> {
-        if self.admitted_effects.is_empty() {
+        if self.machine.admitted_effects().is_empty() {
             return Ok(None);
         }
         self.append(journal, state, observed_effects, outcome_code)
             .map(Some)
             .map_err(|error| ToolDispatchError::OutcomeUnknown {
-                id: self.tool_id.clone(),
+                id: self.machine.tool_id().clone(),
                 message: format!("effect completed but terminal journal append failed: {error}"),
             })
     }
@@ -627,13 +654,13 @@ impl EffectJournalContext<'_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolCatalogError {
     InvalidDeclaration(DeclarationError),
-    DuplicateProvider {
+    DuplicateExtension {
         id: ExtensionId,
     },
     DuplicateHook {
         id: HookId,
     },
-    DuplicateCapability {
+    DuplicateTool {
         id: ToolId,
     },
     DuplicateHandler {
@@ -645,6 +672,15 @@ pub enum ToolCatalogError {
     UndeclaredHandler {
         id: ToolId,
     },
+    DuplicateHookHandler {
+        id: HookId,
+    },
+    MissingHookHandler {
+        id: HookId,
+    },
+    UndeclaredHookHandler {
+        id: HookId,
+    },
     UnknownAuthorityClass {
         effect_id: EffectId,
         authority_class: String,
@@ -655,7 +691,7 @@ pub enum ToolCatalogError {
         requested: AuthorityClass,
     },
     UnknownWorkflowEvent {
-        event_id: agl_extension::WorkflowEventId,
+        event_id: crate::WorkflowEventId,
     },
 }
 
@@ -663,10 +699,10 @@ impl Display for ToolCatalogError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDeclaration(error) => Display::fmt(error, formatter),
-            Self::DuplicateProvider { id } => write!(formatter, "duplicate provider ID `{id}`"),
+            Self::DuplicateExtension { id } => write!(formatter, "duplicate extension ID `{id}`"),
             Self::DuplicateHook { id } => write!(formatter, "duplicate hook ID `{id}`"),
-            Self::DuplicateCapability { id } => {
-                write!(formatter, "duplicate capability ID `{id}`")
+            Self::DuplicateTool { id } => {
+                write!(formatter, "duplicate tool ID `{id}`")
             }
             Self::DuplicateHandler { id } => {
                 write!(formatter, "duplicate tool handler for `{id}`")
@@ -676,6 +712,15 @@ impl Display for ToolCatalogError {
             }
             Self::UndeclaredHandler { id } => {
                 write!(formatter, "tool handler `{id}` has no declaration")
+            }
+            Self::DuplicateHookHandler { id } => {
+                write!(formatter, "duplicate hook handler for `{id}`")
+            }
+            Self::MissingHookHandler { id } => {
+                write!(formatter, "hook declaration `{id}` has no handler")
+            }
+            Self::UndeclaredHookHandler { id } => {
+                write!(formatter, "hook handler `{id}` has no declaration")
             }
             Self::UnknownAuthorityClass {
                 effect_id,
@@ -705,15 +750,15 @@ impl std::error::Error for ToolCatalogError {}
 
 #[derive(Debug)]
 pub enum ToolDispatchError {
-    UnknownCapability {
+    UnknownTool {
         id: ToolId,
     },
     MissingHandler {
         id: ToolId,
     },
-    UntrustedProvider {
-        capability_id: ToolId,
-        provider_id: ExtensionId,
+    UntrustedExtension {
+        tool_id: ToolId,
+        extension_id: ExtensionId,
         trust: ExtensionTrust,
     },
     Denied(DispatchDenial),
@@ -757,15 +802,15 @@ impl ToolDispatchError {
 impl Display for ToolDispatchError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownCapability { id } => write!(formatter, "unknown capability `{id}`"),
-            Self::MissingHandler { id } => write!(formatter, "capability `{id}` has no handler"),
-            Self::UntrustedProvider {
-                capability_id,
-                provider_id,
+            Self::UnknownTool { id } => write!(formatter, "unknown tool `{id}`"),
+            Self::MissingHandler { id } => write!(formatter, "tool `{id}` has no handler"),
+            Self::UntrustedExtension {
+                tool_id,
+                extension_id,
                 trust,
             } => write!(
                 formatter,
-                "capability `{capability_id}` provider `{provider_id}` is not trusted: {}",
+                "tool `{tool_id}` extension `{extension_id}` is not trusted: {}",
                 trust.as_str()
             ),
             Self::Denied(denial) => Display::fmt(denial, formatter),
@@ -814,11 +859,7 @@ impl std::error::Error for ToolDispatchError {
 }
 
 pub fn verify_handler_coverage(runtime: &ToolRuntime) -> Result<(), HandlerCoverageError> {
-    let declared = runtime
-        .catalog
-        .capability_ids()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let declared = runtime.catalog.tool_ids().cloned().collect::<BTreeSet<_>>();
     let registered = runtime.handler_ids().cloned().collect::<BTreeSet<_>>();
     if declared == registered {
         Ok(())
@@ -848,1107 +889,3 @@ impl Display for HandlerCoverageError {
 }
 
 impl std::error::Error for HandlerCoverageError {}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use agl_extension::{
-        EffectDeclaration, EffectId, ExtensionSource, ExtensionWorkflowFragment, HookEvent,
-        OperationKind, SensitiveInput, ToolBinding, ToolDeclaration, ToolErrorDeclaration,
-        ToolHandlerFuture, ToolResult, ToolWorkflowMapping, WorkflowEventId,
-    };
-    use agl_ids::{ExecutionScope, RunId};
-    use serde_json::json;
-
-    use super::*;
-    use crate::{ToolAccessMode, ToolGrant, ToolPolicyInput};
-
-    #[derive(Clone)]
-    struct CountingHandler(Arc<AtomicUsize>);
-
-    impl ToolHandler for CountingHandler {
-        fn dispatch(&self, context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
-            Box::pin(async move {
-                let invocation = context.into_invocation();
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(ToolResult::new(json!({
-                    "echo": invocation.arguments["value"]
-                })))
-            })
-        }
-    }
-
-    #[derive(Clone)]
-    struct ConditionalHandler {
-        requested: EffectId,
-        dispatch_count: Arc<AtomicUsize>,
-    }
-
-    impl ToolHandler for ConditionalHandler {
-        fn preflight(
-            &self,
-            _invocation: &ToolInvocation,
-        ) -> Result<BTreeSet<EffectId>, ToolHandlerError> {
-            Ok([self.requested.clone()].into_iter().collect())
-        }
-
-        fn dispatch(&self, context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
-            Box::pin(async move {
-                assert!(
-                    context
-                        .authorized_conditional_effects()
-                        .contains(&self.requested)
-                );
-                self.dispatch_count.fetch_add(1, Ordering::SeqCst);
-                Ok(ToolResult::new(json!({"ok": true})).with_observed_effects([
-                    agl_extension::ObservedEffect::new(
-                        self.requested.clone(),
-                        [("profile".to_owned(), "host".to_owned())],
-                    ),
-                ]))
-            })
-        }
-    }
-
-    #[derive(Clone)]
-    struct ObservedReceiptHandler {
-        requested: EffectId,
-        observed: Vec<agl_extension::ObservedEffect>,
-    }
-
-    impl ToolHandler for ObservedReceiptHandler {
-        fn preflight(
-            &self,
-            _invocation: &ToolInvocation,
-        ) -> Result<BTreeSet<EffectId>, ToolHandlerError> {
-            Ok([self.requested.clone()].into_iter().collect())
-        }
-
-        fn dispatch(&self, _context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
-            Box::pin(std::future::ready(Ok(
-                ToolResult::new(json!({"ok": true})).with_observed_effects(self.observed.clone())
-            )))
-        }
-    }
-
-    #[derive(Clone)]
-    struct ReturningHandler(Result<ToolResult, ToolHandlerError>);
-
-    impl ToolHandler for ReturningHandler {
-        fn dispatch(&self, _context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
-            Box::pin(std::future::ready(self.0.clone()))
-        }
-    }
-
-    #[derive(Clone)]
-    struct PendingHandler {
-        requested: EffectId,
-    }
-
-    struct NotCancelled;
-
-    impl agl_extension::CancellationSignal for NotCancelled {
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-    }
-
-    impl ToolHandler for PendingHandler {
-        fn preflight(
-            &self,
-            _invocation: &ToolInvocation,
-        ) -> Result<BTreeSet<EffectId>, ToolHandlerError> {
-            Ok([self.requested.clone()].into_iter().collect())
-        }
-
-        fn dispatch(&self, _context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    #[test]
-    fn provider_qualified_hooks_keep_local_names_isolated_from_model_tools() {
-        let mut catalog = ToolCatalog::new();
-        for provider in ["alpha", "beta"] {
-            catalog
-                .register(
-                    ExtensionDescriptor::new(
-                        ExtensionId::new(provider).unwrap(),
-                        format!("{provider} provider"),
-                        "1",
-                        ExtensionSource::TestFixture,
-                        ExtensionTrust::TrustedRegistered,
-                    )
-                    .unwrap()
-                    .with_hook(HookDeclaration {
-                        id: HookId::new(format!("{provider}:validate")).unwrap(),
-                        event: HookEvent::ArtifactWrite,
-                        required: true,
-                    }),
-                )
-                .unwrap();
-        }
-
-        for provider in ["alpha", "beta"] {
-            let hook_id = HookId::new(format!("{provider}:validate")).unwrap();
-            assert_eq!(
-                catalog.provider_for_hook(&hook_id).unwrap().id.as_str(),
-                provider
-            );
-            assert!(catalog.trusted_hook(&hook_id).is_some());
-        }
-        assert_eq!(catalog.capability_ids().count(), 0);
-    }
-
-    #[test]
-    fn catalog_rejects_invalid_hook_ownership_and_reserved_core_claims() {
-        let duplicate = ExtensionDescriptor {
-            id: ExtensionId::new("duplicate").unwrap(),
-            name: "Duplicate".to_string(),
-            version: "1".to_string(),
-            source: ExtensionSource::TestFixture,
-            trust: ExtensionTrust::TrustedRegistered,
-            hooks: vec![
-                HookDeclaration {
-                    id: HookId::new("duplicate:validate").unwrap(),
-                    event: HookEvent::ArtifactWrite,
-                    required: true,
-                },
-                HookDeclaration {
-                    id: HookId::new("duplicate:validate").unwrap(),
-                    event: HookEvent::ModelResponse,
-                    required: false,
-                },
-            ],
-            effects: Vec::new(),
-            tools: Vec::new(),
-            workflow: None,
-        };
-        assert!(matches!(
-            ToolCatalog::new().register(duplicate),
-            Err(ToolCatalogError::InvalidDeclaration(
-                DeclarationError::DuplicateId { kind: "hook", .. }
-            ))
-        ));
-
-        let mismatched = ExtensionDescriptor {
-            id: ExtensionId::new("alpha").unwrap(),
-            name: "Alpha".to_string(),
-            version: "1".to_string(),
-            source: ExtensionSource::TestFixture,
-            trust: ExtensionTrust::TrustedRegistered,
-            hooks: vec![HookDeclaration {
-                id: HookId::new("beta:validate").unwrap(),
-                event: HookEvent::ArtifactWrite,
-                required: true,
-            }],
-            effects: Vec::new(),
-            tools: Vec::new(),
-            workflow: None,
-        };
-        assert!(matches!(
-            ToolCatalog::new().register(mismatched),
-            Err(ToolCatalogError::InvalidDeclaration(
-                DeclarationError::HookProviderMismatch { .. }
-            ))
-        ));
-
-        let core_shadow = ExtensionDescriptor {
-            id: ExtensionId::new("core").unwrap(),
-            name: "Core shadow".to_string(),
-            version: "1".to_string(),
-            source: ExtensionSource::ThirdPartyRegistered,
-            trust: ExtensionTrust::TrustedRegistered,
-            hooks: vec![HookDeclaration {
-                id: HookId::new("core:validate").unwrap(),
-                event: HookEvent::ArtifactWrite,
-                required: true,
-            }],
-            effects: Vec::new(),
-            tools: Vec::new(),
-            workflow: None,
-        };
-        assert!(matches!(
-            ToolCatalog::new().register(core_shadow),
-            Err(ToolCatalogError::InvalidDeclaration(
-                DeclarationError::ReservedProviderNamespace { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn failed_extension_registration_leaves_catalog_and_handlers_unchanged() {
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut runtime = runtime(provider("Echo"), count);
-        let providers_before = runtime.catalog().providers().to_vec();
-        let handlers_before = runtime.handler_ids().cloned().collect::<Vec<_>>();
-        let declared_id = ToolId::new("second:declared").unwrap();
-        let undeclared_id = ToolId::new("second:undeclared").unwrap();
-        let second = ExtensionDescriptor::new(
-            ExtensionId::new("second").unwrap(),
-            "Second",
-            "1",
-            ExtensionSource::TestFixture,
-            ExtensionTrust::TrustedRegistered,
-        )
-        .unwrap()
-        .with_tool(
-            ToolDeclaration::new(
-                declared_id.clone(),
-                "Declared",
-                json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "additionalProperties": false
-                }),
-                OperationKind::Read,
-            )
-            .unwrap(),
-        );
-
-        let error = runtime
-            .register_extension(ExtensionRegistration::new(second.clone(), []))
-            .unwrap_err();
-        assert_eq!(
-            error,
-            ToolCatalogError::MissingHandler {
-                id: declared_id.clone()
-            }
-        );
-        assert_eq!(runtime.catalog().providers(), providers_before);
-        assert_eq!(
-            runtime.handler_ids().cloned().collect::<Vec<_>>(),
-            handlers_before
-        );
-
-        let error = runtime
-            .register_extension(ExtensionRegistration::new(
-                second,
-                [ToolBinding::new(
-                    undeclared_id.clone(),
-                    ReturningHandler(Ok(ToolResult::new(json!({})))),
-                )],
-            ))
-            .unwrap_err();
-        assert_eq!(
-            error,
-            ToolCatalogError::UndeclaredHandler { id: undeclared_id }
-        );
-        assert_eq!(runtime.catalog().providers(), providers_before);
-        assert_eq!(
-            runtime.handler_ids().cloned().collect::<Vec<_>>(),
-            handlers_before
-        );
-    }
-
-    #[test]
-    fn dispatch_rejects_result_outside_declared_output_schema() {
-        let mut provider = provider("Strict output");
-        provider.tools[0].output_schema = json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"ok": {"type": "boolean"}},
-            "required": ["ok"],
-            "additionalProperties": false
-        });
-        provider.validate().unwrap();
-        let effective = policy(&provider, true);
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ReturningHandler(Ok(ToolResult::new(json!({"unexpected": true})))),
-                )],
-            ))
-            .unwrap();
-
-        let error = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "hello"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap_err();
-        assert!(matches!(error, ToolDispatchError::InvalidResult { .. }));
-    }
-
-    #[test]
-    fn dispatch_rejects_undeclared_success_outcome() {
-        let provider = provider("Echo");
-        let effective = policy(&provider, true);
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ReturningHandler(Ok(
-                        ToolResult::new(json!({"echo": "hello"})).with_outcome_code("partial")
-                    )),
-                )],
-            ))
-            .unwrap();
-
-        let error = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "hello"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ToolDispatchError::UndeclaredOutcome { code, .. } if code == "partial"
-        ));
-    }
-
-    #[test]
-    fn kernel_validates_and_selects_extension_workflow_mapping() {
-        let mut provider = provider("Echo");
-        provider =
-            provider.with_workflow(ExtensionWorkflowFragment::new([ToolWorkflowMapping::new(
-                capability_id(),
-                "success",
-                WorkflowEventId::new(crate::TOOL_OBSERVATION_APPEND_EVENT_ID).unwrap(),
-            )]));
-        let effective = policy(&provider, true);
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ReturningHandler(Ok(ToolResult::new(json!({"echo": "hello"})))),
-                )],
-            ))
-            .unwrap();
-
-        let outcome = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "hello"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap();
-        assert_eq!(
-            outcome.workflow_event.as_ref().map(WorkflowEventId::as_str),
-            Some(crate::TOOL_OBSERVATION_APPEND_EVENT_ID)
-        );
-    }
-
-    #[test]
-    fn kernel_rejects_unknown_extension_workflow_event() {
-        let provider = provider("Echo").with_workflow(ExtensionWorkflowFragment::new([
-            ToolWorkflowMapping::new(
-                capability_id(),
-                "success",
-                WorkflowEventId::new("third-party:take_over_fsm").unwrap(),
-            ),
-        ]));
-        let error = ToolCatalog::new().register(provider).unwrap_err();
-        assert!(matches!(
-            error,
-            ToolCatalogError::UnknownWorkflowEvent { event_id }
-                if event_id.as_str() == "third-party:take_over_fsm"
-        ));
-    }
-
-    #[test]
-    fn undeclared_handler_error_is_terminal_kernel_failure() {
-        let provider = provider("Echo");
-        let effective = policy(&provider, true);
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ReturningHandler(Err(ToolHandlerError::new(
-                        "conflict",
-                        "stale value",
-                        json!({}),
-                    ))),
-                )],
-            ))
-            .unwrap();
-
-        let error = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "hello"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ToolDispatchError::UndeclaredHandlerError { code, .. } if code == "conflict"
-        ));
-    }
-
-    #[test]
-    fn declared_recoverable_error_becomes_typed_outcome() {
-        let mut provider = provider("Echo");
-        provider.tools[0] = provider.tools[0]
-            .clone()
-            .with_errors([
-                ToolErrorDeclaration::recoverable("conflict"),
-                ToolErrorDeclaration::terminal("execution_failed"),
-            ])
-            .unwrap();
-        let effective = policy(&provider, true);
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ReturningHandler(Err(ToolHandlerError::new(
-                        "conflict",
-                        "stale value",
-                        json!({"expected": "one", "actual": "two"}),
-                    ))),
-                )],
-            ))
-            .unwrap();
-
-        let outcome = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "hello"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap();
-        assert_eq!(outcome.status, crate::ToolOutcomeStatus::RecoverableError);
-        assert_eq!(outcome.outcome_code, "conflict");
-        assert_eq!(outcome.error.unwrap().code, "conflict");
-    }
-
-    #[test]
-    fn invalid_arguments_are_denied_before_handler_execution() {
-        let provider = provider("Echo");
-        let effective = policy(&provider, true);
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(provider.clone(), count.clone());
-        let invocation = invocation(&provider, &effective, json!({"value": 7, "extra": true}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::InvalidArguments)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn hidden_capability_is_denied_before_handler_execution() {
-        let provider = provider("Echo");
-        let effective = policy(&provider, false);
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(provider.clone(), count.clone());
-        let invocation = invocation(&provider, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::CapabilityNotEffective)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn changed_provider_trust_invalidates_snapshot_before_handler_execution() {
-        let trusted = provider("Echo");
-        let effective = policy(&trusted, true);
-        let changed = trusted.clone().with_trust(ExtensionTrust::Changed);
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(changed, count.clone());
-        let invocation = invocation(&trusted, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::ProviderUntrusted)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn executable_trust_change_also_invalidates_snapshot() {
-        let trusted = provider("Echo");
-        let effective = policy(&trusted, true);
-        let changed = trusted.clone().with_trust(ExtensionTrust::TrustedByBinary);
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(changed, count.clone());
-        let invocation = invocation(&trusted, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::ExtensionTrustChanged)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn changed_declaration_invalidates_snapshot_before_handler_execution() {
-        let original = provider("Echo");
-        let effective = policy(&original, true);
-        let current = provider("Changed description");
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(current, count.clone());
-        let invocation = invocation(&original, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::StaleDeclaration)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn changed_operation_or_effect_invalidates_snapshot_before_handler_execution() {
-        let original = provider("Echo");
-        let effective = policy(&original, true);
-        let operation_changed = {
-            let mut provider = original.clone();
-            provider.tools[0] = ToolDeclaration::new(
-                capability_id(),
-                "Echo",
-                original.tools[0].input_schema.clone(),
-                OperationKind::Request,
-            )
-            .unwrap();
-            provider
-        };
-        let effect_changed = {
-            let mut provider = original.clone();
-            provider.tools[0] = provider.tools[0]
-                .clone()
-                .with_state_effects([EffectId::host_screen_capture()])
-                .with_sensitive_inputs([SensitiveInput::ScreenCapture]);
-            provider.effects.push(EffectDeclaration::new(
-                EffectId::host_screen_capture(),
-                AuthorityClass::HostObservation.as_str(),
-            ));
-            provider
-        };
-
-        for current in [operation_changed, effect_changed] {
-            let count = Arc::new(AtomicUsize::new(0));
-            let runtime = runtime(current, count.clone());
-            let invocation = invocation(&original, &effective, json!({"value": "hello"}));
-
-            let error = runtime
-                .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-                .unwrap_err();
-
-            assert_eq!(
-                error.denial().map(|denial| denial.code),
-                Some(DispatchDenialCode::StaleDeclaration)
-            );
-            assert_eq!(count.load(Ordering::SeqCst), 0);
-        }
-    }
-
-    #[test]
-    fn changed_provider_declaration_invalidates_snapshot() {
-        let original = provider("Echo");
-        let effective = policy(&original, true);
-        let mut current = original.clone();
-        current.version = "2".to_owned();
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = runtime(current, count.clone());
-        let invocation = invocation(&original, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::ProviderChanged)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn unrelated_catalog_change_invalidates_snapshot() {
-        let primary = provider("Echo");
-        let secondary = ExtensionDescriptor::new(
-            ExtensionId::new("secondary-provider").unwrap(),
-            "Secondary Provider",
-            "1",
-            ExtensionSource::TestFixture,
-            ExtensionTrust::TrustedRegistered,
-        )
-        .unwrap();
-        let effective = ToolPolicyInput::new(
-            [primary.clone(), secondary.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .resolve()
-        .unwrap();
-        let mut changed_secondary = secondary;
-        changed_secondary.version = "2".to_owned();
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut runtime = runtime(primary.clone(), count.clone());
-        runtime
-            .register_extension(ExtensionRegistration::new(changed_secondary, []))
-            .unwrap();
-        let invocation = invocation(&primary, &effective, json!({"value": "hello"}));
-
-        let error = runtime
-            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
-            .unwrap_err();
-
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::CatalogChanged)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn conditional_effect_requires_declaration_and_effective_grant_before_dispatch() {
-        let provider = conditional_provider(EffectId::host_process_execution());
-        let denied = policy(&provider, true);
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = conditional_runtime(
-            provider.clone(),
-            EffectId::host_process_execution(),
-            count.clone(),
-        );
-        let error = runtime
-            .dispatch(
-                invocation(&provider, &denied, json!({"value": "host"})),
-                &denied,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap_err();
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::ConditionalEffectDenied)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-
-        let admitted = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([EffectId::host_process_execution()])])
-        .resolve()
-        .unwrap();
-        runtime
-            .dispatch(
-                invocation(&provider, &admitted, json!({"value": "host"})),
-                &admitted,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn mutating_dispatch_journals_admitted_started_and_committed_in_order() {
-        let provider = conditional_provider(EffectId::host_process_execution());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([EffectId::host_process_execution()])])
-        .resolve()
-        .unwrap();
-        let runtime = conditional_runtime(
-            provider.clone(),
-            EffectId::host_process_execution(),
-            Arc::new(AtomicUsize::new(0)),
-        );
-        let mut journal = crate::MemoryToolEffectJournal::default();
-
-        let outcome = runtime
-            .dispatch_with_journal(
-                invocation(&provider, &effective, json!({"value": "journal"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-                &mut journal,
-            )
-            .unwrap();
-
-        assert_eq!(
-            journal
-                .records()
-                .iter()
-                .map(|record| record.state)
-                .collect::<Vec<_>>(),
-            vec![
-                ToolEffectLifecycleState::Admitted,
-                ToolEffectLifecycleState::Started,
-                ToolEffectLifecycleState::Committed,
-            ]
-        );
-        assert_eq!(outcome.admitted_effect_receipt_refs.len(), 1);
-        assert_eq!(outcome.observed_effect_receipt_refs.len(), 1);
-        assert!(journal.records()[0].observed_effects.is_empty());
-        assert_eq!(
-            journal.records()[2].observed_effects[0].scope["profile"],
-            "host"
-        );
-    }
-
-    #[test]
-    fn terminal_journal_loss_after_handler_is_outcome_unknown() {
-        struct FailTerminalJournal {
-            appends: usize,
-        }
-
-        impl ToolEffectJournal for FailTerminalJournal {
-            fn append(
-                &mut self,
-                _record: &ToolEffectJournalRecord,
-            ) -> Result<String, ToolEffectJournalError> {
-                self.appends += 1;
-                if self.appends == 3 {
-                    Err(ToolEffectJournalError::new("injected terminal loss"))
-                } else {
-                    Ok(format!("effect:test:{}", self.appends))
-                }
-            }
-        }
-
-        let provider = conditional_provider(EffectId::host_process_execution());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([EffectId::host_process_execution()])])
-        .resolve()
-        .unwrap();
-        let runtime = conditional_runtime(
-            provider.clone(),
-            EffectId::host_process_execution(),
-            Arc::new(AtomicUsize::new(0)),
-        );
-        let mut journal = FailTerminalJournal { appends: 0 };
-
-        let error = runtime
-            .dispatch_with_journal(
-                invocation(&provider, &effective, json!({"value": "journal"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-                &mut journal,
-            )
-            .unwrap_err();
-        assert!(matches!(error, ToolDispatchError::OutcomeUnknown { .. }));
-    }
-
-    #[test]
-    fn invalid_receipt_after_started_effect_is_outcome_unknown() {
-        let effect = EffectId::host_process_execution();
-        let provider = conditional_provider(effect.clone());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([effect.clone()])])
-        .resolve()
-        .unwrap();
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ObservedReceiptHandler {
-                        requested: effect.clone(),
-                        observed: vec![agl_extension::ObservedEffect::new(effect, [])],
-                    },
-                )],
-            ))
-            .unwrap();
-        let mut journal = MemoryToolEffectJournal::default();
-
-        let error = runtime
-            .dispatch_with_journal(
-                invocation(&provider, &effective, json!({"value": "invalid"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-                &mut journal,
-            )
-            .unwrap_err();
-
-        assert!(matches!(error, ToolDispatchError::OutcomeUnknown { .. }));
-        assert_eq!(
-            journal.records().last().unwrap().state,
-            ToolEffectLifecycleState::OutcomeUnknown
-        );
-    }
-
-    #[test]
-    fn repeated_observed_effect_id_can_report_distinct_scopes() {
-        let effect = EffectId::host_process_execution();
-        let provider = conditional_provider(effect.clone());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([effect.clone()])])
-        .resolve()
-        .unwrap();
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    ObservedReceiptHandler {
-                        requested: effect.clone(),
-                        observed: ["first", "second"]
-                            .into_iter()
-                            .map(|path| {
-                                agl_extension::ObservedEffect::new(
-                                    effect.clone(),
-                                    [("path".to_owned(), path.to_owned())],
-                                )
-                            })
-                            .collect(),
-                    },
-                )],
-            ))
-            .unwrap();
-        let mut journal = MemoryToolEffectJournal::default();
-
-        runtime
-            .dispatch_with_journal(
-                invocation(&provider, &effective, json!({"value": "scoped"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-                &mut journal,
-            )
-            .unwrap();
-
-        assert_eq!(journal.records().last().unwrap().observed_effects.len(), 2);
-    }
-
-    #[test]
-    fn deadline_during_started_async_effect_is_outcome_unknown() {
-        let effect = EffectId::host_process_execution();
-        let provider = conditional_provider(effect.clone());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([ToolGrant::new(capability_id(), OperationKind::Read)
-            .with_state_effects([effect.clone()])])
-        .resolve()
-        .unwrap();
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider.clone(),
-                [ToolBinding::new(
-                    capability_id(),
-                    PendingHandler { requested: effect },
-                )],
-            ))
-            .unwrap();
-        let mut journal = MemoryToolEffectJournal::default();
-
-        let error = runtime
-            .dispatch_with_journal(
-                invocation(&provider, &effective, json!({"value": "pending"})),
-                &effective,
-                ToolDispatchControl::new(
-                    Arc::new(NotCancelled),
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(20)),
-                ),
-                &mut journal,
-            )
-            .unwrap_err();
-
-        assert!(matches!(error, ToolDispatchError::OutcomeUnknown { .. }));
-        assert_eq!(
-            journal
-                .records()
-                .iter()
-                .map(|record| record.state)
-                .collect::<Vec<_>>(),
-            [
-                ToolEffectLifecycleState::Admitted,
-                ToolEffectLifecycleState::Started,
-                ToolEffectLifecycleState::OutcomeUnknown,
-            ]
-        );
-    }
-
-    #[test]
-    fn handler_cannot_request_an_undeclared_conditional_effect() {
-        let provider = conditional_provider(EffectId::shell_login_startup());
-        let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id()],
-            ToolAccessMode::ReadOnly,
-        )
-        .with_grants([
-            ToolGrant::new(capability_id(), OperationKind::Read).with_state_effects([
-                EffectId::host_process_execution(),
-                EffectId::shell_login_startup(),
-            ]),
-        ])
-        .resolve()
-        .unwrap();
-        let count = Arc::new(AtomicUsize::new(0));
-        let runtime = conditional_runtime(
-            provider.clone(),
-            EffectId::host_process_execution(),
-            count.clone(),
-        );
-
-        let error = runtime
-            .dispatch(
-                invocation(&provider, &effective, json!({"value": "forged"})),
-                &effective,
-                ToolDispatchControl::uncancellable(),
-            )
-            .unwrap_err();
-        assert_eq!(
-            error.denial().map(|denial| denial.code),
-            Some(DispatchDenialCode::ConditionalEffectUndeclared)
-        );
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    fn capability_id() -> ToolId {
-        ToolId::new("example.echo").unwrap()
-    }
-
-    fn provider(description: &str) -> ExtensionDescriptor {
-        ExtensionDescriptor::new(
-            ExtensionId::new("example-provider").unwrap(),
-            "Example Provider",
-            "1",
-            ExtensionSource::TestFixture,
-            ExtensionTrust::TrustedRegistered,
-        )
-        .unwrap()
-        .with_tool(
-            ToolDeclaration::new(
-                capability_id(),
-                description,
-                json!({
-                    "$schema": "https://json-schema.org/draft/2020-12/schema",
-                    "type": "object",
-                    "properties": {"value": {}},
-                    "required": ["value"],
-                    "additionalProperties": false
-                }),
-                OperationKind::Read,
-            )
-            .unwrap(),
-        )
-    }
-
-    fn conditional_provider(effect: EffectId) -> ExtensionDescriptor {
-        let mut provider = provider("Conditional echo");
-        provider.tools[0] = provider.tools[0]
-            .clone()
-            .with_conditional_state_effects([effect.clone()]);
-        let authority = match effect.as_str() {
-            "agl:process.host_execution" => AuthorityClass::HostExecution,
-            "agl:process.shell_login_startup" => AuthorityClass::ShellStartup,
-            other => panic!("test effect `{other}` has no authority mapping"),
-        };
-        provider
-            .effects
-            .push(EffectDeclaration::new(effect, authority.as_str()));
-        provider
-    }
-
-    fn policy(provider: &ExtensionDescriptor, routed: bool) -> EffectiveToolSet {
-        ToolPolicyInput::new(
-            [provider.clone()],
-            routed.then(capability_id),
-            ToolAccessMode::ReadOnly,
-        )
-        .resolve()
-        .unwrap()
-    }
-
-    fn runtime(provider: ExtensionDescriptor, count: Arc<AtomicUsize>) -> ToolRuntime {
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider,
-                [ToolBinding::new(capability_id(), CountingHandler(count))],
-            ))
-            .unwrap();
-        runtime
-    }
-
-    fn conditional_runtime(
-        provider: ExtensionDescriptor,
-        requested: EffectId,
-        dispatch_count: Arc<AtomicUsize>,
-    ) -> ToolRuntime {
-        let mut runtime = ToolRuntime::new();
-        runtime
-            .register_extension(ExtensionRegistration::new(
-                provider,
-                [ToolBinding::new(
-                    capability_id(),
-                    ConditionalHandler {
-                        requested,
-                        dispatch_count,
-                    },
-                )],
-            ))
-            .unwrap();
-        runtime
-    }
-
-    fn invocation(
-        provider: &ExtensionDescriptor,
-        effective: &EffectiveToolSet,
-        arguments: serde_json::Value,
-    ) -> ToolInvocation {
-        ToolInvocation::new(
-            ExecutionScope::builder(RunId::generate()).build().unwrap(),
-            capability_id(),
-            provider.id.clone(),
-            provider.tool(&capability_id()).unwrap().digest(),
-            effective.policy_hash().clone(),
-            arguments,
-        )
-    }
-}

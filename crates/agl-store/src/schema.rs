@@ -60,7 +60,7 @@ impl AglStore {
             return Err(StoreError::InvalidValue {
                 field: "store",
                 value: status.database_path.display().to_string(),
-                reason: "store database does not exist; run store.migrate first",
+                reason: "store database does not exist; run core.store:migrate first",
             });
         }
         if status.migration_required {
@@ -70,7 +70,7 @@ impl AglStore {
                     "schema_version={:?}, current_schema_version={}",
                     status.schema_version, status.current_schema_version
                 ),
-                reason: "store schema migration required; run store.migrate first",
+                reason: "store schema migration required; run core.store:migrate first",
             });
         }
         Ok(status)

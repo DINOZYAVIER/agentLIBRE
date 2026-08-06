@@ -249,7 +249,7 @@ pub enum SessionPresentationItem {
     AgentAction {
         run_id: RunId,
         step_id: StepId,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         summary: String,
         state: ActionItemState,
     },
@@ -413,8 +413,8 @@ pub enum InferenceProductStageView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "capability", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CapabilityActivityDetail {
+#[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolActivityDetail {
     FilesystemList {
         path: SanitizedDisplayPath,
         entries: u32,
@@ -434,7 +434,7 @@ pub enum CapabilityActivityDetail {
         exit_status: Option<i32>,
     },
     PolicyCheck {
-        capability_id: String,
+        tool_id: String,
         outcome: ActivityPolicyOutcome,
     },
 }
@@ -479,11 +479,11 @@ pub struct ActivityAggregateDetail {
 pub enum ActivityDetailView {
     #[default]
     None,
-    Capability(CapabilityActivityDetail),
+    Tool(ToolActivityDetail),
     Inference(InferenceActivityDetail),
     Aggregate(ActivityAggregateDetail),
-    UnknownCapability {
-        capability_id: String,
+    UnknownTool {
+        tool_id: String,
     },
 }
 
@@ -591,28 +591,26 @@ impl ActivityNodeView {
 impl ActivityDetailView {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         let path = match self {
-            Self::Capability(CapabilityActivityDetail::FilesystemList { path, .. })
-            | Self::Capability(CapabilityActivityDetail::FilesystemRead { path, .. }) => Some(path),
-            Self::Capability(CapabilityActivityDetail::RepositorySearch { scope, .. }) => {
-                Some(scope)
-            }
+            Self::Tool(ToolActivityDetail::FilesystemList { path, .. })
+            | Self::Tool(ToolActivityDetail::FilesystemRead { path, .. }) => Some(path),
+            Self::Tool(ToolActivityDetail::RepositorySearch { scope, .. }) => Some(scope),
             _ => None,
         };
         if let Some(path) = path {
             path.validate()?;
-            if !is_redacted_capability_display_path(&path.text) {
+            if !is_redacted_tool_display_path(&path.text) {
                 return Err(ApplicationError::new(
                     ApplicationErrorCode::InvalidArguments,
-                    "capability activity path must be a normalized workspace-relative display value",
+                    "tool activity path must be a normalized workspace-relative display value",
                 ));
             }
         }
-        let capability_id = match self {
-            Self::Capability(CapabilityActivityDetail::PolicyCheck { capability_id, .. })
-            | Self::UnknownCapability { capability_id } => Some(capability_id),
+        let tool_id = match self {
+            Self::Tool(ToolActivityDetail::PolicyCheck { tool_id, .. })
+            | Self::UnknownTool { tool_id } => Some(tool_id),
             _ => None,
         };
-        if capability_id.is_some_and(|value| {
+        if tool_id.is_some_and(|value| {
             value.is_empty()
                 || value.len() > 256
                 || value.chars().any(is_forbidden_presentation_character)
@@ -620,7 +618,7 @@ impl ActivityDetailView {
         }) {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::InvalidArguments,
-                "activity capability identity exceeds its safe display bound",
+                "activity tool identity exceeds its safe display bound",
             ));
         }
         if let Self::Inference(detail) = self
@@ -1041,7 +1039,7 @@ fn contains_absolute_display_path(value: &str) -> bool {
     })
 }
 
-fn is_redacted_capability_display_path(value: &str) -> bool {
+fn is_redacted_tool_display_path(value: &str) -> bool {
     !value.starts_with('/')
         && value
             .split('/')

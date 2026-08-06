@@ -134,7 +134,11 @@ mod tests {
             .filter(|package| package.type_id == "function")
         {
             assert_eq!(function.type_id, "function");
-            assert_eq!(function.version, "1.0.0");
+            let expected_version = match function.id {
+                "gemma4-31b-32k" | "gemma4-31b-64k" => "1.1.0",
+                _ => "1.0.0",
+            };
+            assert_eq!(function.version, expected_version);
             assert_eq!(function.entrypoint, "FUNCTION.md");
             assert_eq!(function.digest.len(), "sha256:".len() + 64);
             assert!(function.files.iter().any(|file| file.path == "SYSTEM.md"));
@@ -296,7 +300,7 @@ tool_call_format = "gemma_function_call"
     fn builtin_catalog_identity_is_canonical_sha256() {
         assert_eq!(
             BUILTIN_ARTIFACT_CATALOG_DIGEST,
-            "sha256:0a9fa9f4d96509792e1da0473164798e09f5c58e2e2a4bc6e1d5885d79205754"
+            "sha256:ca020837f6c2d90cb568cd5bf0d32fc8e17696b73a094af9377982b91f05e9da"
         );
     }
 

@@ -885,14 +885,14 @@ fn disable_process_dumping() -> Result<()> {
 }
 
 #[repr(C)]
-struct CapabilityHeader {
+struct ToolHeader {
     version: u32,
     pid: i32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CapabilityData {
+struct ToolData {
     effective: u32,
     permitted: u32,
     inheritable: u32,
@@ -900,11 +900,11 @@ struct CapabilityData {
 
 fn drop_process_capabilities() -> Result<()> {
     const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-    let mut header = CapabilityHeader {
+    let mut header = ToolHeader {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,
     };
-    let empty = [CapabilityData {
+    let empty = [ToolData {
         effective: 0,
         permitted: 0,
         inheritable: 0,
@@ -912,7 +912,7 @@ fn drop_process_capabilities() -> Result<()> {
     if unsafe { libc::syscall(libc::SYS_capset, &mut header, empty.as_ptr()) } != 0 {
         return Err(SandboxError::last_os_error(
             SandboxErrorCode::KernelEnforcement,
-            "failed to clear inference worker capabilities",
+            "failed to clear inference worker tools",
         ));
     }
     if unsafe {
@@ -927,7 +927,7 @@ fn drop_process_capabilities() -> Result<()> {
     {
         return Err(SandboxError::last_os_error(
             SandboxErrorCode::KernelEnforcement,
-            "failed to clear inference worker ambient capabilities",
+            "failed to clear inference worker ambient tools",
         ));
     }
     Ok(())

@@ -39,10 +39,10 @@ fn parses_valid_gemma_tool_call() {
 fn parses_gemma_scalar_arguments() {
     assert_eq!(
         parse_model_output(
-            r#"<|tool_call>call:memory.search{query:<|"|>rust<|"|>,limit:5,exact:false,after:null}<tool_call|>"#
+            r#"<|tool_call>call:core.memory:search{query:<|"|>rust<|"|>,limit:5,exact:false,after:null}<tool_call|>"#
         ),
         ParsedModelOutput::ToolCall(ToolCall {
-            name: "memory.search".to_string(),
+            name: "core.memory:search".to_string(),
             arguments: json!({
                 "query": "rust",
                 "limit": 5,
@@ -70,10 +70,10 @@ fn parses_gemma_json_quoted_string_argument() {
 fn parses_gemma_mixed_json_quoted_and_scalar_arguments() {
     assert_eq!(
         parse_model_output(
-            r#"<|tool_call>call:memory.search{query:"rust",limit:5,exact:false,after:null}<tool_call|>"#
+            r#"<|tool_call>call:core.memory:search{query:"rust",limit:5,exact:false,after:null}<tool_call|>"#
         ),
         ParsedModelOutput::ToolCall(ToolCall {
-            name: "memory.search".to_string(),
+            name: "core.memory:search".to_string(),
             arguments: json!({
                 "query": "rust",
                 "limit": 5,

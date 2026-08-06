@@ -1,5 +1,6 @@
-use agl_extension::{
-    ExtensionDescriptor, ExtensionId, HookDeclaration, HookEvent, HookId, HookInput, HookResult,
+use agl_kernel::{
+    ExtensionDescriptor, ExtensionId, HookDeclaration, HookEvent, HookHandler, HookHandlerError,
+    HookId, HookInput, HookResult,
 };
 
 use crate::{ToolCatalog, ToolCatalogError};
@@ -22,6 +23,13 @@ pub const RUNTIME_IDENTITY_REQUIRE_HOOK_ID: &str = "core:runtime.identity.requir
 #[derive(Clone, Debug)]
 pub struct CoreGuards {
     declaration: ExtensionDescriptor,
+}
+
+impl HookHandler for CoreGuards {
+    fn invoke(&self, input: HookInput) -> Result<serde_json::Value, HookHandlerError> {
+        serde_json::to_value(self.run_hook(input))
+            .map_err(|error| HookHandlerError::new(error.to_string()))
+    }
 }
 
 impl Default for CoreGuards {
@@ -68,12 +76,12 @@ impl CoreGuards {
 
 pub fn declaration() -> ExtensionDescriptor {
     let mut declaration = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("core guard provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("core guard extension id is valid"),
         "Core Guards",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("core guard declaration is valid")
-    .with_hook(hook(JSON_VALIDATE_HOOK_ID, HookEvent::ModelResponse, false));
+    .with_hook(hook(JSON_VALIDATE_HOOK_ID, HookEvent::ModelResponse));
     for id in [
         REPO_PATH_VALIDATE_HOOK_ID,
         TASK_SPEC_VALIDATE_HOOK_ID,
@@ -86,7 +94,7 @@ pub fn declaration() -> ExtensionDescriptor {
         RUNTIME_IDENTITY_VALIDATE_HOOK_ID,
         RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
     ] {
-        declaration = declaration.with_hook(hook(id, HookEvent::ArtifactWrite, true));
+        declaration = declaration.with_hook(hook(id, HookEvent::ArtifactWrite));
     }
     declaration
 }
@@ -95,12 +103,8 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn hook(id: &str, event: HookEvent, required: bool) -> HookDeclaration {
-    HookDeclaration {
-        id: HookId::new(id).expect("core guard hook id is valid"),
-        event,
-        required,
-    }
+fn hook(id: &str, event: HookEvent) -> HookDeclaration {
+    HookDeclaration::new(HookId::new(id).expect("core guard hook id is valid"), event)
 }
 
 #[cfg(test)]

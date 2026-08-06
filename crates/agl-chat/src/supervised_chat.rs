@@ -394,7 +394,7 @@ mod tests {
             .unwrap()
             .create_permission_grant(agl_store::PermissionGrantDraft {
                 request_id: None,
-                tool_id: "cron.add".to_string(),
+                tool_id: "core.cron:add".to_string(),
                 max_operation_kind: "write".to_string(),
                 state_effects: vec!["store_cron".to_string()],
                 sensitive_inputs: Vec::new(),
@@ -491,7 +491,7 @@ subagents:
 limits:
   max_model_attempts: 2
   max_output_tokens: 64
-  max_capability_calls: 2
+  max_tool_calls: 2
   timeout_seconds: 20
 ---
 
@@ -556,7 +556,7 @@ tool_call_format = "hermes_json"
         };
         let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
-                r#"<tool_call>{"name":"agent.delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
+                r#"<tool_call>{"name":"agent.supervisor:delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
                 "Child verdict CHILD_VERDICT_PRIVATE_SENTINEL".to_string(),
                 "Final parent answer".to_string(),
             ]))),
@@ -618,7 +618,7 @@ tool_call_format = "hermes_json"
             root_record.checkpoint.as_ref().unwrap()["delegation_authority_ceiling"]
                 .as_array()
                 .unwrap();
-        assert!(!frozen_authority.iter().any(|id| id == "cron.add"));
+        assert!(!frozen_authority.iter().any(|id| id == "core.cron:add"));
         let child_record = store.run(&tree[1].run_id).unwrap().unwrap();
         let presentation_events = presentation.events.lock().unwrap().clone();
         let child_started = presentation_events
@@ -649,10 +649,10 @@ tool_call_format = "hermes_json"
         assert!(presentation_events.iter().any(|event| matches!(
             event,
             crate::TurnPresentationEvent::ToolActionFinished {
-                capability_id,
+                tool_id,
                 outcome: crate::ToolActionOutcome::Waiting,
                 ..
-            } if capability_id.as_str() == agl_extension::AGENT_DELEGATE_TOOL_ID
+            } if tool_id.as_str() == crate::delegation_contract::AGENT_DELEGATE_TOOL_ID
         )));
         assert!(presentation_events.iter().any(|event| matches!(
             event,
@@ -685,7 +685,7 @@ tool_call_format = "hermes_json"
         else {
             panic!("durable child has root input");
         };
-        assert!(!authority_ceiling.contains(&agl_extension::ToolId::new("cron.add").unwrap()));
+        assert!(!authority_ceiling.contains(&agl_kernel::ToolId::new("core.cron:add").unwrap()));
 
         let jobs = state.jobs.lock().unwrap().clone();
         assert_eq!(jobs.len(), 3);
@@ -694,8 +694,13 @@ tool_call_format = "hermes_json"
         assert_eq!(jobs[0].model_path, root.join("missing.gguf"));
         assert_eq!(jobs[1].model_path, root.join("missing-child.gguf"));
         assert_eq!(jobs[2].model_path, root.join("missing.gguf"));
-        assert!(jobs[0].tools.iter().any(|tool| tool == "agent.delegate"));
-        assert!(!jobs[0].tools.iter().any(|tool| tool == "cron.add"));
+        assert!(
+            jobs[0]
+                .tools
+                .iter()
+                .any(|tool| tool == "agent.supervisor:delegate")
+        );
+        assert!(!jobs[0].tools.iter().any(|tool| tool == "core.cron:add"));
         assert!(jobs[1].tools.is_empty());
         assert!(!jobs[0].rendered.contains("Only return the child verdict"));
         assert!(jobs[1].rendered.contains("Only return the child verdict"));

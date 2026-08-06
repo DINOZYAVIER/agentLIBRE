@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_notes::{NoteRepository, NoteSearchQuery, NoteUpdate};
@@ -20,14 +20,14 @@ use crate::{
     parse_tool_args as parse_args,
 };
 
-pub const PROVIDER_ID: &str = "notes-tools";
-pub const NOTES_ADD_TOOL_ID: &str = "notes.add";
-pub const NOTES_SEARCH_TOOL_ID: &str = "notes.search";
-pub const NOTES_SHOW_TOOL_ID: &str = "notes.show";
-pub const NOTES_UPDATE_TOOL_ID: &str = "notes.update";
-pub const NOTES_LINK_TOOL_ID: &str = "notes.link";
-pub const NOTES_DELETE_TOOL_ID: &str = "notes.delete";
-pub const NOTES_REMEMBER_TOOL_ID: &str = "notes.remember";
+pub const PROVIDER_ID: &str = "core.note";
+pub const NOTES_ADD_TOOL_ID: &str = "core.note:add";
+pub const NOTES_SEARCH_TOOL_ID: &str = "core.note:search";
+pub const NOTES_SHOW_TOOL_ID: &str = "core.note:show";
+pub const NOTES_UPDATE_TOOL_ID: &str = "core.note:update";
+pub const NOTES_LINK_TOOL_ID: &str = "core.note:link";
+pub const NOTES_DELETE_TOOL_ID: &str = "core.note:delete";
+pub const NOTES_REMEMBER_TOOL_ID: &str = "core.note:remember";
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
@@ -74,7 +74,7 @@ impl NotesTools {
         let args = parse_args::<SearchArgs>(NOTES_SEARCH_TOOL_ID, arguments)?;
         ensure!(
             !args.query.trim().is_empty(),
-            "notes.search query cannot be blank"
+            "core.note:search query cannot be blank"
         );
         let limit = args
             .limit
@@ -214,10 +214,10 @@ impl NotesTools {
 }
 
 impl ToolHandler for NotesTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+            let data = self.dispatch(invocation.tool_id.as_str(), invocation.arguments)?;
             Ok(ToolResult::new(data))
         })
     }
@@ -225,11 +225,11 @@ impl ToolHandler for NotesTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin notes provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin notes extension id is valid"),
         "Notes Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin notes provider declaration is valid")
+    .expect("builtin notes extension declaration is valid")
     .with_tool(action::<AddArgs>(
         NOTES_ADD_TOOL_ID,
         "Create an explicit local note.",
@@ -271,6 +271,11 @@ pub fn declaration() -> ExtensionDescriptor {
             EffectId::store_note_links(),
         ]),
     )
+    .with_effects([
+        EffectDeclaration::for_standard(EffectId::store_notes()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::store_note_links()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::store_memory_entries()).unwrap(),
+    ])
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

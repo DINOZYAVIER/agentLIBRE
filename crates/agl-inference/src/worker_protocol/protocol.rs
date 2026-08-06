@@ -360,7 +360,7 @@ pub struct Ready {
     identity: WorkerIdentity,
     native_bundle_id: String,
     limits: ProtocolLimits,
-    capabilities: WorkerCapabilities,
+    tools: WorkerCapabilities,
     device_snapshot: DeviceSnapshot,
 }
 
@@ -392,7 +392,7 @@ impl Ready {
             identity: WorkerIdentity::current(),
             native_bundle_id: native_bundle_id.into(),
             limits: ProtocolLimits::current(),
-            capabilities: WorkerCapabilities::current(),
+            tools: WorkerCapabilities::current(),
             device_snapshot,
         };
         validate_sha256_identity("native_bundle_id", &ready.native_bundle_id)?;
@@ -411,8 +411,8 @@ impl Ready {
         self.limits
     }
 
-    pub const fn capabilities(&self) -> WorkerCapabilities {
-        self.capabilities
+    pub const fn tools(&self) -> WorkerCapabilities {
+        self.tools
     }
 
     pub fn device_snapshot(&self) -> &DeviceSnapshot {
@@ -428,10 +428,10 @@ impl Ready {
                 "inference worker protocol limits do not match the host generation",
             ));
         }
-        if self.capabilities != WorkerCapabilities::current() {
+        if self.tools != WorkerCapabilities::current() {
             return Err(WorkerProtocolError::new(
                 WorkerProtocolErrorCode::IdentityMismatch,
-                "inference worker capabilities do not match the host generation",
+                "inference worker tools do not match the host generation",
             ));
         }
         self.device_snapshot.validate()

@@ -147,7 +147,7 @@ pub fn llama_cpp_device_inventory(native_library_dir: &Path) -> Vec<LlamaCppDevi
 /// Convert native backend enumeration into the host-safe runtime contract.
 ///
 /// CPU execution is scoped to the exact worker build. GPU PCI identity and
-/// native capability are reported only when llama.cpp exposes them. Untrusted
+/// native tool are reported only when llama.cpp exposes them. Untrusted
 /// ggml GPU memory counters are represented as `0/0` (unknown); the host must
 /// merge fresh sysfs memory and driver evidence before admission. Display
 /// names are never substituted for authority identity.
@@ -209,7 +209,7 @@ fn map_inference_device_inventory(
                     format!("pci:{pci_bdf}"),
                     // This exact marker proves the worker build, not the GPU
                     // driver. The host replaces it with matching sysfs driver
-                    // evidence before using this native capability.
+                    // evidence before using this native tool.
                     WORKER_BUILD_ID.to_string(),
                     device.usable,
                     device.supports_gpu_offload,
@@ -969,7 +969,7 @@ mod tests {
             ArtifactSensitivity::Sensitive,
             ArtifactSource {
                 kind: ArtifactSourceKind::ScreenCapture,
-                provider: Some("test".to_string()),
+                extension: Some("test".to_string()),
             },
         )
         .unwrap();

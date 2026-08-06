@@ -21,7 +21,7 @@ fn default_prompt_budget_covers_the_longest_admitted_inference_operation() {
     assert_eq!(budget.model_input_tokens, 1_000_000);
     assert_eq!(budget.model_output_tokens, 100_000);
     assert_eq!(budget.model_attempts, 32);
-    assert_eq!(budget.capability_calls, 64);
+    assert_eq!(budget.tool_calls, 64);
 }
 
 fn display_path(text: &str) -> SanitizedDisplayPath {
@@ -844,7 +844,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 attempt_id: Some(retry_attempt_id.clone()),
                 provisional_message_id: Some(message_id.clone()),
                 step_id: step_id.clone(),
-                capability_id: agl_extension::ToolId::new("core.workspace:fs.list").unwrap(),
+                tool_id: agl_kernel::ToolId::new("core.workspace:fs.list").unwrap(),
             },
         ),
         agl_chat::PresentationDelivery::Delivered,
@@ -877,12 +877,12 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 attempt_id: Some(retry_attempt_id.clone()),
                 provisional_message_id: Some(message_id.clone()),
                 step_id,
-                capability_id: agl_extension::ToolId::new("core.workspace:fs.list").unwrap(),
+                tool_id: agl_kernel::ToolId::new("core.workspace:fs.list").unwrap(),
                 outcome: agl_chat::ToolActionOutcome::Succeeded,
-                detail: Some(agl_chat::CapabilityPresentationDetail::FilesystemList {
+                detail: Some(agl_chat::ToolPresentationDetail::FilesystemList {
                     path: "crates".to_owned(),
                     entries: 17,
-                    completeness: agl_chat::CapabilityPresentationCompleteness::Truncated,
+                    completeness: agl_chat::ToolPresentationCompleteness::Truncated,
                 }),
             },
         ),
@@ -1124,7 +1124,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
+            tool_id: agl_kernel::ToolId::new("agent.supervisor:delegate").unwrap(),
         },
         agl_chat::TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
@@ -1133,7 +1133,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
+            tool_id: agl_kernel::ToolId::new("agent.supervisor:delegate").unwrap(),
             outcome: agl_chat::ToolActionOutcome::Waiting,
             detail: None,
         },
@@ -1241,7 +1241,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
+            tool_id: agl_kernel::ToolId::new("agent.supervisor:delegate").unwrap(),
         },
         agl_chat::TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
@@ -1250,7 +1250,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id),
             provisional_message_id: Some(root_message_id),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
+            tool_id: agl_kernel::ToolId::new("agent.supervisor:delegate").unwrap(),
             outcome: agl_chat::ToolActionOutcome::Succeeded,
             detail: None,
         },

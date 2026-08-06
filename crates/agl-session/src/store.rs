@@ -10,7 +10,7 @@ use agl_ids::{MessageId, RequestId, RunId, SessionId, TurnId};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::fsm::{
+use agl_kernel::{
     ChatSessionMachine, ChatSessionPhase, ChatSessionTransition, ChatSessionTransitionRecord,
 };
 
@@ -36,13 +36,7 @@ pub struct SessionRuntimeSelection {
     pub revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentLibreSessionFinishReason {
-    Eof,
-    ExitCommand,
-    HostShutdown,
-}
+use agl_kernel::AgentLibreSessionFinishReason;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionReplay {

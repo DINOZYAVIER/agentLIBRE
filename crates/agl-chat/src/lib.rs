@@ -1,4 +1,5 @@
 mod delegation;
+mod delegation_contract;
 mod execution_owner;
 mod inference_client;
 mod options;
@@ -13,14 +14,14 @@ mod tools;
 mod turn_runtime;
 
 pub use agl_inference::{InferenceProductStage, InferenceProgressUnit, InferenceStageEvent};
-pub use agl_turn::IncompleteOutputReason;
+pub use agl_kernel::IncompleteOutputReason;
 pub use inference_client::{ChatInferenceJob, InferenceClient, InferenceClientHandle};
 pub use options::{ChatOptions, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions, ToolAccessMode};
 pub use presentation::{
-    CapabilityPresentationCompleteness, CapabilityPresentationDetail,
-    CapabilityPresentationExecutionProfile, ChildRunPresentation, ModelAttemptOutcome,
-    NoopTurnPresentationSink, PolicyPresentationOutcome, PresentationDelivery, ToolActionOutcome,
-    TurnPresentationEvent, TurnPresentationOutcome, TurnPresentationSink,
+    ChildRunPresentation, ModelAttemptOutcome, NoopTurnPresentationSink, PolicyPresentationOutcome,
+    PresentationDelivery, ToolActionOutcome, ToolPresentationCompleteness, ToolPresentationDetail,
+    ToolPresentationExecutionProfile, TurnPresentationEvent, TurnPresentationOutcome,
+    TurnPresentationSink,
 };
 pub use service::{
     ChatService, ChatSessionSummary, ChatTurnExecution, ChatTurnOutput, ChatTurnStatus,

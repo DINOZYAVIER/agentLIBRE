@@ -66,17 +66,20 @@ fn rendered_message_content_serializes_tool_calls_without_text() {
 fn rendered_message_content_keeps_canonical_text_when_tool_calls_are_structured() {
     let message = RenderedMessage {
         role: RenderedMessageRole::Assistant,
-        content: text("<|tool_call>call:screen.capture{}<tool_call|>"),
-        name: Some("screen.capture".to_string()),
+        content: text("<|tool_call>call:host.screen:capture{}<tool_call|>"),
+        name: Some("host.screen:capture".to_string()),
         tool_calls: vec![RenderedToolCall {
-            name: "screen.capture".to_string(),
+            name: "host.screen:capture".to_string(),
             arguments: json!({}),
         }],
     };
 
     let content = rendered_message_content(&message).unwrap();
 
-    assert_eq!(content, "<|tool_call>call:screen.capture{}<tool_call|>");
+    assert_eq!(
+        content,
+        "<|tool_call>call:host.screen:capture{}<tool_call|>"
+    );
 }
 
 #[test]
@@ -356,17 +359,17 @@ fn prepared_gemma_messages_preserve_tool_call_and_observation_fields() {
     let messages = vec![
         RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: text("<|tool_call>call:screen.capture{}<tool_call|>"),
-            name: Some("screen.capture".to_string()),
+            content: text("<|tool_call>call:host.screen:capture{}<tool_call|>"),
+            name: Some("host.screen:capture".to_string()),
             tool_calls: vec![RenderedToolCall {
-                name: "screen.capture".to_string(),
+                name: "host.screen:capture".to_string(),
                 arguments: json!({}),
             }],
         },
         RenderedMessage {
             role: RenderedMessageRole::Tool,
             content: text(r#"{"status":"ok"}<__media__>"#),
-            name: Some("screen.capture".to_string()),
+            name: Some("host.screen:capture".to_string()),
             tool_calls: Vec::new(),
         },
     ];
@@ -386,7 +389,7 @@ fn prepared_gemma_messages_preserve_tool_call_and_observation_fields() {
         unsafe { CStr::from_ptr(prepared_tool_call.name) }
             .to_str()
             .unwrap(),
-        "screen.capture"
+        "host.screen:capture"
     );
     assert_eq!(
         unsafe { CStr::from_ptr(prepared_tool_call.arguments) }
@@ -398,7 +401,7 @@ fn prepared_gemma_messages_preserve_tool_call_and_observation_fields() {
         unsafe { CStr::from_ptr(prepared.messages[1].name) }
             .to_str()
             .unwrap(),
-        "screen.capture"
+        "host.screen:capture"
     );
     assert_eq!(
         unsafe { CStr::from_ptr(prepared.messages[1].content) }
@@ -711,7 +714,7 @@ fn constrained_output_corpus_never_enters_repair() {
         "plain answer",
         r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"README.md"}}</tool_call>"#,
         r#"<tool_call>{"name":"nested","arguments":{"request":{"path":"README.md","flags":["a","b"]}}}</tool_call>"#,
-        r#"<|tool_call>call:screen.capture{}<tool_call|>"#,
+        r#"<|tool_call>call:host.screen:capture{}<tool_call|>"#,
     ];
 
     for output in corpus {

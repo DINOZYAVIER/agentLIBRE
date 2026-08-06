@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use agl_artifact::{ArtifactLock, LockedWorkspaceComponent};
-use agl_extension::{HookId, SkillId, ToolId};
+use agl_kernel::{HookId, SkillId, ToolId};
 
 use super::*;
 use crate::SkillReferencePolicy;

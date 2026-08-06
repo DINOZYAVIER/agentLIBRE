@@ -12,10 +12,6 @@ use agl_config::{
     resolve_inference_preset_with_bindings,
 };
 use agl_content::Content;
-use agl_extension::{
-    EffectDeclaration, EffectId, ExtensionId, ExtensionSource, ExtensionTrust, HookEvent, HookId,
-    OperationKind, SensitiveInput, SkillId, ToolGrantProvenance, ToolId, render_canonical_json,
-};
 use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
     RuntimeSubagentSpec,
@@ -29,8 +25,13 @@ use agl_inference::{
 };
 use agl_kernel::ToolCatalog;
 use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionId, ExtensionSource, ExtensionTrust, HookEvent, HookId,
+    OperationKind, SensitiveInput, SkillId, ToolGrantProvenance, ToolId, render_canonical_json,
+};
+use agl_kernel::{
     EffectiveToolSet, FunctionToolPolicy, SkillToolPolicy, ToolGrant, ToolPolicyInput,
 };
+use agl_kernel::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_model::{
     HostResources, LlamaDeviceInfo, LlamaDeviceKind, RuntimePlanSet, RuntimePlanner,
@@ -49,7 +50,6 @@ use agl_skill::{
     trusted_workspace_registry,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
-use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -78,7 +78,7 @@ pub struct InferenceSession {
     function_context: Option<String>,
     function_skills: Vec<String>,
     function_extensions: Vec<ExtensionId>,
-    extension_bindings: BTreeMap<String, RuntimeExtensionProviderBinding>,
+    extension_bindings: BTreeMap<String, RuntimeExtensionExtensionBinding>,
     runtime_identity: Option<RuntimeIdentityEvidence>,
     runtime_identity_validation: Option<RuntimeIdentityValidation>,
     skill_context: Option<String>,
@@ -145,15 +145,15 @@ struct RuntimeIdentityFunction {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeExtensionProviderBinding {
+struct RuntimeExtensionExtensionBinding {
     artifact_reference: String,
     artifact_version: String,
     package_digest: String,
     source_tier: ArtifactSourceTier,
     source_id: String,
-    implementation: String,
+    implementation: agl_artifact::ExtensionImplementation,
     declaration_digest: String,
-    provider_version: String,
+    extension_version: String,
     runtime_generation_id: String,
     runtime_executable_digest: String,
     tools: Vec<String>,
@@ -175,7 +175,7 @@ struct RuntimeResolutionWorkspaceIdentity {
 struct RuntimeResolutionFunctionPolicy {
     reference: String,
     max_output_tokens: Option<u32>,
-    max_capability_calls: Option<u32>,
+    max_tool_calls: Option<u32>,
     tool_mode: Option<FunctionToolMode>,
     tool_policy: Option<FunctionToolPolicy>,
     delegation: Option<agl_function::FunctionDelegationBudget>,
@@ -233,7 +233,7 @@ struct RuntimeResolutionRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     model_plan: Option<&'a RuntimePlanSet>,
     effective_inference_config: &'a ResolvedInferenceConfig,
-    extension_bindings: &'a BTreeMap<String, RuntimeExtensionProviderBinding>,
+    extension_bindings: &'a BTreeMap<String, RuntimeExtensionExtensionBinding>,
     skills: Vec<RuntimeResolutionSkillIdentity>,
     admission: RuntimeResolutionAdmissionPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,7 +505,7 @@ impl InferenceSession {
         let runtime_identity_validation =
             effective_runtime_identity_validation(runtime_function.as_ref());
         let delegation_authority_ceiling =
-            delegable_capability_ids(&skill_context.effective_capabilities);
+            delegable_tool_ids(&skill_context.effective_capabilities);
         let mut hook_batches = skill_context.hook_batches;
         add_identity_hook_batch(&mut hook_batches, runtime_identity_validation.as_ref())?;
         let runtime_features = build_runtime_feature_context(
@@ -646,7 +646,7 @@ impl InferenceSession {
             &skill_context.visible_tools,
         )?;
         let delegation_authority_ceiling =
-            delegable_capability_ids(&skill_context.effective_capabilities);
+            delegable_tool_ids(&skill_context.effective_capabilities);
         let config_path = spec
             .model
             .profile_path
@@ -765,7 +765,7 @@ impl InferenceSession {
 
     pub(crate) fn freeze_delegation_authority(&mut self, persisted: Option<BTreeSet<ToolId>>) {
         self.delegation_authority_ceiling =
-            persisted.unwrap_or_else(|| delegable_capability_ids(&self.effective_capabilities));
+            persisted.unwrap_or_else(|| delegable_tool_ids(&self.effective_capabilities));
     }
 
     pub(crate) fn dynamic_grants_enabled(&self) -> bool {
@@ -799,13 +799,6 @@ impl InferenceSession {
             );
         }
         serde_json::Value::Object(payload)
-    }
-
-    pub fn max_hook_repair_attempts(&self) -> usize {
-        self.runtime_identity_validation
-            .as_ref()
-            .map(|validation| validation.repair_attempts as usize)
-            .unwrap_or(0)
     }
 
     pub fn turn_visible_tools(&self) -> &[VisibleTool] {
@@ -991,10 +984,10 @@ impl InferenceSession {
         self.function_ref.clone()
     }
 
-    pub(crate) fn function_max_capability_calls(&self) -> Option<u32> {
+    pub(crate) fn function_max_tool_calls(&self) -> Option<u32> {
         self.runtime_function
             .as_ref()
-            .and_then(|function| function.max_capability_calls)
+            .and_then(|function| function.max_tool_calls)
     }
 
     pub(crate) fn context_limit_tokens(&self) -> u32 {
@@ -1255,7 +1248,7 @@ impl InferenceSession {
             function_policy: RuntimeResolutionFunctionPolicy {
                 reference: bundle.graph.root.clone(),
                 max_output_tokens: function.max_output_tokens,
-                max_capability_calls: function.max_capability_calls,
+                max_tool_calls: function.max_tool_calls,
                 tool_mode: function.tool_mode,
                 tool_policy: function.tool_policy.clone(),
                 delegation: function.delegation.clone(),
@@ -1360,7 +1353,7 @@ impl InferenceSession {
             && run.usage.wall_time_ms < run.budget.wall_time_ms
             && run.usage.model_input_tokens < run.budget.model_input_tokens
             && run.usage.model_attempts < run.budget.model_attempts
-            && run.usage.capability_calls < run.budget.capability_calls)
+            && run.usage.tool_calls < run.budget.tool_calls)
     }
 }
 
@@ -1551,7 +1544,7 @@ fn build_inference_request(
     }
     let effective_capabilities = contexts
         .effective_capabilities
-        .context("effective capability set is missing from inference request context")?;
+        .context("effective tool set is missing from inference request context")?;
     ensure_visible_tool_parity(&request.visible_tools, effective_capabilities)?;
     if non_empty_context(contexts.skill_context)
         .is_some_and(|context| context.contains("<agentlibre_skill_context>"))
@@ -1597,7 +1590,7 @@ fn build_runtime_feature_context(
             workspace_root: Some(workspace_root),
             tool_mode: tool_mode.as_str(),
             available_model_tools: &available_model_tools,
-            extension_descriptors: catalog.providers(),
+            extension_descriptors: catalog.extensions(),
             char_cap: agl_runtime::DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP,
         },
     ))
@@ -1637,36 +1630,36 @@ fn non_empty_context(context: Option<&str>) -> Option<&str> {
 
 fn ensure_visible_tool_parity(
     visible_tools: &[VisibleTool],
-    capabilities: &EffectiveToolSet,
+    tools: &EffectiveToolSet,
 ) -> Result<()> {
     let visible = visible_tools
         .iter()
         .map(|tool| tool.id.as_str())
         .collect::<BTreeSet<_>>();
-    let effective = capabilities
-        .capabilities()
-        .map(|capability| capability.declaration().id.as_str())
+    let effective = tools
+        .tools()
+        .map(|tool| tool.declaration().id.as_str())
         .collect::<BTreeSet<_>>();
     ensure!(
         visible == effective,
-        "model-visible tools differ from the effective capability set"
+        "model-visible tools differ from the effective tool set"
     );
     Ok(())
 }
 
 fn ensure_skill_tool_routing_parity(
     routing: &SkillToolRoutingView,
-    capabilities: &EffectiveToolSet,
+    tools: &EffectiveToolSet,
 ) -> Result<()> {
     for (skill_id, route) in routing.routes() {
         let expected = route
             .declared_tools()
             .into_iter()
-            .filter(|tool| capabilities.contains(tool))
+            .filter(|tool| tools.contains(tool))
             .collect::<BTreeSet<_>>();
         ensure!(
             &expected == route.callable_tools(),
-            "skill `{skill_id}` callable routing differs from the effective capability set"
+            "skill `{skill_id}` callable routing differs from the effective tool set"
         );
     }
     Ok(())
@@ -1693,7 +1686,7 @@ impl RuntimePermissionGrantSnapshot {
     pub(crate) fn granted_visible_tools(&self) -> Vec<String> {
         self.admitted
             .iter()
-            .map(|grant| grant.capability_id.as_str().to_string())
+            .map(|grant| grant.tool_id.as_str().to_string())
             .collect()
     }
 
@@ -1704,11 +1697,11 @@ impl RuntimePermissionGrantSnapshot {
             .collect()
     }
 
-    fn capability_grants(&self) -> Vec<ToolGrant> {
+    fn tool_grants(&self) -> Vec<ToolGrant> {
         self.admitted
             .iter()
             .map(|grant| {
-                ToolGrant::new(grant.capability_id.clone(), grant.max_operation_kind)
+                ToolGrant::new(grant.tool_id.clone(), grant.max_operation_kind)
                     .with_state_effects(grant.state_effects.iter().cloned())
                     .with_sensitive_inputs(grant.sensitive_inputs.iter().copied())
                     .with_provenance(ToolGrantProvenance::new(
@@ -1723,14 +1716,12 @@ impl RuntimePermissionGrantSnapshot {
 
     pub(crate) fn sensitive_input_run(
         &self,
-        capability_id: &ToolId,
+        tool_id: &ToolId,
         input: SensitiveInput,
     ) -> Option<&RunId> {
         self.admitted
             .iter()
-            .find(|grant| {
-                &grant.capability_id == capability_id && grant.sensitive_inputs.contains(&input)
-            })
+            .find(|grant| &grant.tool_id == tool_id && grant.sensitive_inputs.contains(&input))
             .map(|grant| &grant.run_id)
     }
 }
@@ -1738,7 +1729,7 @@ impl RuntimePermissionGrantSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmittedPermissionGrant {
     grant_id: String,
-    capability_id: ToolId,
+    tool_id: ToolId,
     max_operation_kind: OperationKind,
     state_effects: BTreeSet<EffectId>,
     sensitive_inputs: BTreeSet<SensitiveInput>,
@@ -2004,7 +1995,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         request.tool_mode,
         &permission_grants,
         request.function_policy.cloned(),
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: request.authority_ceiling,
             delegation_enabled: request.delegation_enabled,
             selected_extensions: request.selected_extensions.iter().cloned().collect(),
@@ -2019,7 +2010,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
                 &mut permission_grants,
             )?;
         }
-        write_capability_policy_evidence(request.artifact_root, run_id, &effective_capabilities)?;
+        write_tool_policy_evidence(request.artifact_root, run_id, &effective_capabilities)?;
     }
     let tool_routing =
         derive_skill_tool_routing(&skill_registry, &selected_skills, &effective_capabilities)?;
@@ -2082,50 +2073,48 @@ fn subagent_tool_mode(mode: FunctionToolMode) -> ToolAccessMode {
     }
 }
 
-fn delegable_capability_ids(effective: &EffectiveToolSet) -> BTreeSet<ToolId> {
-    let mut capabilities = effective
-        .capabilities()
-        .map(|capability| capability.declaration().id.clone())
+fn delegable_tool_ids(effective: &EffectiveToolSet) -> BTreeSet<ToolId> {
+    let mut tools = effective
+        .tools()
+        .map(|tool| tool.declaration().id.clone())
         .collect::<BTreeSet<_>>();
-    for capability in [
+    for tool in [
         agl_core_tools::PERMISSIONS_REQUEST_TOOL_ID,
         agl_core_tools::PERMISSIONS_GRANT_TOOL_ID,
         agl_core_tools::PERMISSIONS_REVOKE_TOOL_ID,
     ] {
-        capabilities.remove(
-            &ToolId::new(capability).expect("builtin permission capability IDs remain valid"),
-        );
+        tools.remove(&ToolId::new(tool).expect("builtin permission tool IDs remain valid"));
     }
-    capabilities
+    tools
 }
 
 fn subagent_tool_policy(spec: &RuntimeSubagentSpec) -> Result<FunctionToolPolicy> {
     let mut policy = spec.tool_policy.clone();
     let memory = spec.memory.as_ref();
     if memory.is_none_or(|memory| memory.read.is_empty()) {
-        for capability in [
+        for tool in [
             agl_core_tools::MEMORY_SEARCH_TOOL_ID,
             agl_core_tools::MEMORY_LIST_TOOL_ID,
         ] {
-            policy.deny.insert(ToolId::new(capability)?);
+            policy.deny.insert(ToolId::new(tool)?);
         }
     }
     if memory.is_none_or(|memory| memory.write.is_empty()) {
-        for capability in [
+        for tool in [
             agl_core_tools::MEMORY_SUGGEST_TOOL_ID,
             agl_core_tools::MEMORY_ADD_TOOL_ID,
             agl_core_tools::MEMORY_APPROVE_TOOL_ID,
             agl_core_tools::MEMORY_REJECT_TOOL_ID,
         ] {
-            policy.deny.insert(ToolId::new(capability)?);
+            policy.deny.insert(ToolId::new(tool)?);
         }
     }
-    for capability in [
+    for tool in [
         agl_core_tools::PERMISSIONS_REQUEST_TOOL_ID,
         agl_core_tools::PERMISSIONS_GRANT_TOOL_ID,
         agl_core_tools::PERMISSIONS_REVOKE_TOOL_ID,
     ] {
-        policy.deny.insert(ToolId::new(capability)?);
+        policy.deny.insert(ToolId::new(tool)?);
     }
     Ok(policy)
 }
@@ -2155,7 +2144,7 @@ pub(crate) fn resolve_subagent_effective_capabilities(
         subagent_tool_mode(spec.tool_mode),
         &RuntimePermissionGrantSnapshot::default(),
         Some(subagent_tool_policy(spec)?),
-        RuntimeCapabilityBoundary {
+        RuntimeToolBoundary {
             authority_ceiling: Some(authority_ceiling),
             delegation_enabled: !spec.children.is_empty(),
             selected_extensions: selected_extensions.into_iter().collect(),
@@ -2208,7 +2197,7 @@ fn selected_skill_visible_tools(
         tool_mode,
         &RuntimePermissionGrantSnapshot::default(),
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )?;
     Ok(visible_tools_from_effective(&effective))
 }
@@ -2239,20 +2228,20 @@ fn selected_skill_visible_tools_with_dynamic_grants(
         tool_mode,
         &grant_snapshot,
         None,
-        RuntimeCapabilityBoundary::default(),
+        RuntimeToolBoundary::default(),
     )?;
     finalize_permission_grants(store_root, run_id, &effective, &mut grant_snapshot)?;
     Ok((visible_tools_from_effective(&effective), grant_snapshot))
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeCapabilityBoundary<'a> {
+struct RuntimeToolBoundary<'a> {
     authority_ceiling: Option<&'a BTreeSet<ToolId>>,
     delegation_enabled: bool,
     selected_extensions: BTreeSet<ExtensionId>,
 }
 
-impl Default for RuntimeCapabilityBoundary<'_> {
+impl Default for RuntimeToolBoundary<'_> {
     fn default() -> Self {
         Self {
             authority_ceiling: None,
@@ -2262,6 +2251,20 @@ impl Default for RuntimeCapabilityBoundary<'_> {
                     .expect("core.workspace Extension ID is valid"),
                 ExtensionId::new(agl_core_tools::process::PROVIDER_ID)
                     .expect("core.process Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::cron::PROVIDER_ID)
+                    .expect("core.cron Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::memory::PROVIDER_ID)
+                    .expect("core.memory Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::notes::PROVIDER_ID)
+                    .expect("core.note Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::permissions::PROVIDER_ID)
+                    .expect("core.permission Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::repo::PROVIDER_ID)
+                    .expect("core.repo Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::store::PROVIDER_ID)
+                    .expect("core.store Extension ID is valid"),
+                ExtensionId::new(agl_core_tools::skills::PROVIDER_ID)
+                    .expect("core.skill Extension ID is valid"),
             ]
             .into_iter()
             .collect(),
@@ -2276,16 +2279,16 @@ fn resolve_effective_capabilities(
     tool_mode: ToolAccessMode,
     grant_snapshot: &RuntimePermissionGrantSnapshot,
     function_policy: Option<FunctionToolPolicy>,
-    boundary: RuntimeCapabilityBoundary<'_>,
+    boundary: RuntimeToolBoundary<'_>,
 ) -> Result<EffectiveToolSet> {
-    let RuntimeCapabilityBoundary {
+    let RuntimeToolBoundary {
         authority_ceiling,
         delegation_enabled,
         selected_extensions,
     } = boundary;
     let mut baseline = core_tool_ids(&selected_extensions)?;
     if delegation_enabled {
-        let delegation_id = ToolId::new(agl_extension::AGENT_DELEGATE_TOOL_ID)?;
+        let delegation_id = ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID)?;
         baseline.insert(delegation_id);
     }
     let mut skill_policies = Vec::with_capacity(selected_skills.len());
@@ -2310,17 +2313,19 @@ fn resolve_effective_capabilities(
         );
     }
     let mut input = ToolPolicyInput::new(
-        tool_catalog.providers().iter().cloned(),
+        tool_catalog.extensions().iter().cloned(),
         baseline,
         tool_mode,
     )
     .with_selected_skills(skill_policies)
-    .with_grants(grant_snapshot.capability_grants());
+    .with_grants(grant_snapshot.tool_grants());
     let mut unavailable = BTreeSet::new();
     if !delegation_enabled {
-        unavailable.insert(ToolId::new(agl_extension::AGENT_DELEGATE_TOOL_ID)?);
+        unavailable.insert(ToolId::new(
+            crate::delegation_contract::AGENT_DELEGATE_TOOL_ID,
+        )?);
     }
-    if !agl_host_tools::screen::provider_available() {
+    if !agl_host_tools::screen::extension_available() {
         unavailable.insert(ToolId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?);
     }
     if !unavailable.is_empty() {
@@ -2332,15 +2337,13 @@ fn resolve_effective_capabilities(
     if let Some(authority_ceiling) = authority_ceiling {
         input = input.with_authority_ceiling(authority_ceiling.iter().cloned());
     }
-    input
-        .resolve()
-        .context("failed to resolve capability policy")
+    input.resolve().context("failed to resolve tool policy")
 }
 
 fn visible_tools_from_effective(effective: &EffectiveToolSet) -> Vec<VisibleTool> {
     effective
-        .capabilities()
-        .map(|capability| VisibleTool::from_declaration(capability.declaration()))
+        .tools()
+        .map(|tool| VisibleTool::from_declaration(tool.declaration()))
         .collect()
 }
 
@@ -2373,26 +2376,26 @@ fn derive_skill_tool_routing(
         let mut requestable = BTreeSet::new();
         let mut unavailable = BTreeMap::new();
 
-        for capability_id in declared {
-            if effective.contains(&capability_id) {
-                callable.insert(capability_id);
+        for tool_id in declared {
+            if effective.contains(&tool_id) {
+                callable.insert(tool_id);
                 continue;
             }
             let reason = effective
-                .exclusion(&capability_id)
+                .exclusion(&tool_id)
                 .with_context(|| {
                     format!(
-                        "selected skill `{skill_id}` tool `{capability_id}` has no effective-policy outcome"
+                        "selected skill `{skill_id}` tool `{tool_id}` has no effective-policy outcome"
                     )
                 })?
                 .reason;
             if request_path_effective
-                && requestable_declarations.contains(&capability_id)
+                && requestable_declarations.contains(&tool_id)
                 && reason.is_grant_resolvable()
             {
-                requestable.insert(capability_id);
+                requestable.insert(tool_id);
             } else {
-                unavailable.insert(capability_id, reason);
+                unavailable.insert(tool_id, reason);
             }
         }
         routes.push((
@@ -2428,15 +2431,15 @@ fn admit_dynamic_permission_grants(
             run_id,
             session_id,
         ) {
-            Ok(capability_grant) => {
+            Ok(tool_grant) => {
                 let admitted_scope = render_canonical_json(&grant.scope);
                 let scope_digest = sha256_text(&admitted_scope);
                 snapshot.admitted.push(AdmittedPermissionGrant {
                     grant_id: grant.id,
-                    capability_id: capability_grant.capability_id,
-                    max_operation_kind: capability_grant.max_operation_kind,
-                    state_effects: capability_grant.state_effects,
-                    sensitive_inputs: capability_grant.sensitive_inputs,
+                    tool_id: tool_grant.tool_id,
+                    max_operation_kind: tool_grant.max_operation_kind,
+                    state_effects: tool_grant.state_effects,
+                    sensitive_inputs: tool_grant.sensitive_inputs,
                     run_id: run_id.clone(),
                     duration: grant.duration,
                     admitted_scope,
@@ -2464,18 +2467,18 @@ fn finalize_permission_grants(
         .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
     let mut admitted = Vec::new();
     for grant in std::mem::take(&mut snapshot.admitted) {
-        if effective.contains(&grant.capability_id) {
+        if effective.contains(&grant.tool_id) {
             store.admit_permission_grant(&grant.grant_id, run_id.as_str())?;
             admitted.push(grant);
         } else {
             let reason = effective
-                .exclusion(&grant.capability_id)
+                .exclusion(&grant.tool_id)
                 .map(|exclusion| exclusion.reason.code())
-                .unwrap_or("capability_not_effective")
+                .unwrap_or("tool_not_effective")
                 .to_string();
             snapshot.ignored.push(IgnoredPermissionGrant {
                 grant_id: grant.grant_id,
-                tool_id: grant.capability_id.as_str().to_string(),
+                tool_id: grant.tool_id.as_str().to_string(),
                 reason,
             });
         }
@@ -2520,8 +2523,7 @@ fn evaluate_permission_grant(
     run_id: &RunId,
     session_id: Option<&SessionId>,
 ) -> std::result::Result<ToolGrant, String> {
-    let capability_id =
-        ToolId::new(grant.tool_id.clone()).map_err(|_| "invalid_capability_id".to_string())?;
+    let tool_id = ToolId::new(grant.tool_id.clone()).map_err(|_| "invalid_tool_id".to_string())?;
     if let Some(workspace) = grant
         .scope
         .get("workspace_root")
@@ -2562,14 +2564,14 @@ fn evaluate_permission_grant(
         }
         duration => return Err(format!("unsupported_duration_{duration}")),
     }
-    if policy.denied_tools.contains(&capability_id) {
+    if policy.denied_tools.contains(&tool_id) {
         return Err("denied_by_selected_skill".to_string());
     }
     if !policy.selected.is_empty()
         && !policy
             .allowed_or_requestable
             .values()
-            .any(|tools| tools.contains(&capability_id))
+            .any(|tools| tools.contains(&tool_id))
     {
         return Err("not_routed_by_selected_skill".to_string());
     }
@@ -2582,14 +2584,14 @@ fn evaluate_permission_grant(
         if !policy
             .allowed_or_requestable
             .get(&skill_id)
-            .is_some_and(|tools| tools.contains(&capability_id))
+            .is_some_and(|tools| tools.contains(&tool_id))
         {
             return Err("skill_scope_not_routed".to_string());
         }
     }
     let declaration = tool_catalog
-        .executable_tool(&capability_id)
-        .map_err(|_| "capability_unavailable".to_string())?;
+        .executable_tool(&tool_id)
+        .map_err(|_| "tool_unavailable".to_string())?;
     let max_operation_kind = parse_operation_kind(&grant.max_operation_kind)?;
     if !max_operation_kind.permits(declaration.operation_kind) {
         return Err("operation_ceiling_denied".to_string());
@@ -2600,8 +2602,8 @@ fn evaluate_permission_grant(
             return Err("sensitive_input_denied".to_string());
         }
     }
-    let capability_grant = ToolGrant::new(capability_id, max_operation_kind)
-        .with_sensitive_inputs(granted_sensitive_inputs);
+    let tool_grant =
+        ToolGrant::new(tool_id, max_operation_kind).with_sensitive_inputs(granted_sensitive_inputs);
     if !grant.state_effects.is_empty() || !declaration.sensitive_inputs.is_empty() {
         let granted_effects = parse_state_effects(&grant.state_effects)?;
         for effect in &declaration.state_effects {
@@ -2609,9 +2611,9 @@ fn evaluate_permission_grant(
                 return Err("state_effect_denied".to_string());
             }
         }
-        return Ok(capability_grant.with_state_effects(granted_effects));
+        return Ok(tool_grant.with_state_effects(granted_effects));
     }
-    Ok(capability_grant)
+    Ok(tool_grant)
 }
 
 fn parse_operation_kind(value: &str) -> std::result::Result<OperationKind, String> {
@@ -2732,10 +2734,10 @@ fn runtime_function_extensions(function: &RuntimeFunction) -> Result<Vec<Extensi
 
 fn bind_runtime_extensions(
     bundle: &ResolvedRuntimeBundle,
-) -> Result<BTreeMap<String, RuntimeExtensionProviderBinding>> {
-    let providers = crate::tools::chat_tool_provider_declarations()
+) -> Result<BTreeMap<String, RuntimeExtensionExtensionBinding>> {
+    let extensions = crate::tools::chat_tool_extension_declarations()
         .into_iter()
-        .map(|provider| (provider.id.as_str().to_owned(), provider))
+        .map(|extension| (extension.id.as_str().to_owned(), extension))
         .collect::<BTreeMap<_, _>>();
     let mut bindings = BTreeMap::new();
     for (extension_id, extension) in &bundle.extensions {
@@ -2747,53 +2749,53 @@ fn bind_runtime_extensions(
         ensure!(
             node.candidate.tier == ArtifactSourceTier::Builtin
                 && node.candidate.kind == agl_artifact::ArtifactSourceKind::Embedded,
-            "Extension `{extension_id}` from source `{}` ({:?}) cannot bind to a builtin provider; no Tool effect occurred",
+            "Extension `{extension_id}` from source `{}` ({:?}) cannot bind to a builtin extension; no Tool effect occurred",
             node.candidate.source_id,
             node.candidate.tier
         );
-        let expected_implementation = match extension_id.as_str() {
-            "core.workspace" => "builtin:agl-core-tools/fs",
-            "core.process" => "builtin:agl-core-tools/process",
+        match extension_id.as_str() {
+            "core.workspace" | "core.process" => {}
             _ => {
                 bail!(
-                    "Extension `{extension_id}` has no exact executable provider in this runtime; no Tool effect occurred"
+                    "Extension `{extension_id}` has no exact executable extension in this runtime; no Tool effect occurred"
                 )
             }
         };
         ensure!(
-            extension.manifest.implementation == expected_implementation,
-            "Extension `{extension_id}` implementation `{}` does not match provider `{expected_implementation}`; no Tool effect occurred",
-            extension.manifest.implementation
+            extension.manifest.implementation == agl_artifact::ExtensionImplementation::RustStatic,
+            "Extension `{extension_id}` must use the rust-static implementation; no Tool effect occurred"
         );
-        let provider = providers.get(extension_id).with_context(|| {
+        let artifact_version = extension.manifest.artifact.version.to_string();
+        let implementation = extension.manifest.implementation.clone();
+        let extension = extensions.get(extension_id).with_context(|| {
             format!(
-                "Extension `{extension_id}` has no registered executable provider; no Tool effect occurred"
+                "Extension `{extension_id}` has no registered executable extension; no Tool effect occurred"
             )
         })?;
         ensure!(
-            provider.source == ExtensionSource::Builtin
-                && provider.trust == ExtensionTrust::TrustedByBinary,
-            "Extension `{extension_id}` provider is not trusted by the active binary; no Tool effect occurred"
+            extension.source == ExtensionSource::Builtin
+                && extension.trust == ExtensionTrust::TrustedByBinary,
+            "Extension `{extension_id}` extension is not trusted by the active binary; no Tool effect occurred"
         );
-        let mut tools = provider
+        let mut tools = extension
             .tools
             .iter()
             .map(|tool| tool.id.as_str().to_owned())
             .collect::<Vec<_>>();
         tools.sort();
-        let mut effects = provider.effects.clone();
+        let mut effects = extension.effects.clone();
         effects.sort_by(|left, right| left.id.cmp(&right.id));
         bindings.insert(
             extension_id.clone(),
-            RuntimeExtensionProviderBinding {
+            RuntimeExtensionExtensionBinding {
                 artifact_reference: node.key(),
-                artifact_version: extension.manifest.artifact.version.to_string(),
+                artifact_version,
                 package_digest: node.package_digest.to_string(),
                 source_tier: node.candidate.tier,
                 source_id: node.candidate.source_id.to_string(),
-                implementation: extension.manifest.implementation.clone(),
-                declaration_digest: provider.digest().to_string(),
-                provider_version: provider.version.clone(),
+                implementation,
+                declaration_digest: extension.digest().to_string(),
+                extension_version: extension.version.clone(),
                 runtime_generation_id: bundle.runtime.generation_id.clone(),
                 runtime_executable_digest: bundle.runtime.executable_digest.clone(),
                 tools,
@@ -3016,39 +3018,35 @@ fn write_runtime_feature_context_evidence(
     })
 }
 
-fn write_capability_policy_evidence(
+fn write_tool_policy_evidence(
     artifact_root: &std::path::Path,
     run_id: &RunId,
     effective: &EffectiveToolSet,
 ) -> Result<()> {
     let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
         .run_dir(run_id)
-        .join("capability-policy.json");
+        .join("tool-policy.json");
     let parent = path.parent().with_context(|| {
         format!(
-            "capability policy evidence path has no parent: {}",
+            "tool policy evidence path has no parent: {}",
             path.display()
         )
     })?;
     std::fs::create_dir_all(parent).with_context(|| {
         format!(
-            "failed to create capability policy evidence directory {}",
+            "failed to create tool policy evidence directory {}",
             parent.display()
         )
     })?;
     let mut bytes = serde_json::to_vec_pretty(effective).with_context(|| {
         format!(
-            "failed to serialize capability policy evidence {}",
+            "failed to serialize tool policy evidence {}",
             path.display()
         )
     })?;
     bytes.push(b'\n');
-    std::fs::write(&path, bytes).with_context(|| {
-        format!(
-            "failed to write capability policy evidence {}",
-            path.display()
-        )
-    })
+    std::fs::write(&path, bytes)
+        .with_context(|| format!("failed to write tool policy evidence {}", path.display()))
 }
 
 #[cfg(test)]

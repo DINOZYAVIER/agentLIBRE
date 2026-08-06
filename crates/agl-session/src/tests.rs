@@ -6,8 +6,8 @@ use agl_content::Content;
 use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, RuntimeEvent, RuntimeEventEnvelope};
 use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, TurnId};
 
-use crate::fsm::{ChatSessionMachine, ChatSessionPhase, ChatSessionTransition};
 use crate::*;
+use agl_kernel::{ChatSessionMachine, ChatSessionPhase, ChatSessionTransition};
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const TEST_SESSION_ID: &str = "ses_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b30";

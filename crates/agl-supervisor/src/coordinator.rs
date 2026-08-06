@@ -763,7 +763,7 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
             finish_terminal(&store, context, &snapshot, terminal)?;
             return Ok(());
         }
-        let effect = snapshot.pending_effect.clone().ok_or_else(|| {
+        let effect = snapshot.pending_request.clone().ok_or_else(|| {
             SupervisorError::Driver(
                 "driver snapshot has neither a pending effect nor a terminal state".to_string(),
             )
@@ -775,7 +775,7 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
             let draft = RunStepDraft {
                 step_id: StepId::generate(),
                 turn_id: run.turn_id.clone(),
-                effect_sequence: effect.sequence,
+                request_sequence: effect.sequence,
                 effect_kind: effect.kind.clone(),
                 delivery_class: effect.delivery_class,
                 request: effect.request.clone(),
@@ -967,22 +967,22 @@ fn budget_exhausted(run: &DurableRunRecord, snapshot: &DriverSnapshot, now_ms: i
         .saturating_add(run.delegation_used_output_tokens)
         .saturating_add(run.delegation_reserved_output_tokens);
     let pending_kind = snapshot
-        .pending_effect
+        .pending_request
         .as_ref()
         .map(|effect| effect.kind.as_str());
     elapsed > budget.wall_time_ms
         || usage.model_input_tokens > budget.model_input_tokens
         || aggregate_output_tokens > budget.model_output_tokens
         || usage.model_attempts > budget.model_attempts
-        || usage.capability_calls > budget.capability_calls
+        || usage.tool_calls > budget.tool_calls
         || (snapshot.terminal.is_none()
             && (elapsed >= budget.wall_time_ms
                 || (pending_kind == Some("model_generation")
                     && (usage.model_attempts >= budget.model_attempts
                         || usage.model_input_tokens >= budget.model_input_tokens
                         || aggregate_output_tokens >= budget.model_output_tokens))
-                || (pending_kind == Some("capability_dispatch")
-                    && usage.capability_calls >= budget.capability_calls)))
+                || (pending_kind == Some("tool_dispatch")
+                    && usage.tool_calls >= budget.tool_calls)))
 }
 
 fn refresh_wall_time(run: &DurableRunRecord, snapshot: &mut DriverSnapshot, now_ms: i64) {

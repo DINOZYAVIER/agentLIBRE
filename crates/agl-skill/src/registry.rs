@@ -4,7 +4,7 @@ use std::sync::Arc;
 use agl_artifact::{
     ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
 };
-use agl_extension::{HookId, SkillId, ToolId};
+use agl_kernel::{HookId, SkillId, ToolId};
 use agl_kernel::{ToolCatalog, ToolCatalogError};
 
 use crate::adapter::{builtin_source, skill_adapter_registry};
@@ -350,10 +350,10 @@ impl std::error::Error for SkillRegistryError {}
 
 #[cfg(test)]
 mod tests {
-    use agl_extension::{
+    use agl_kernel::ToolCatalog;
+    use agl_kernel::{
         ExtensionDescriptor, ExtensionId, ExtensionTrust, HookDeclaration, HookEvent,
     };
-    use agl_kernel::ToolCatalog;
 
     use super::*;
 
@@ -404,8 +404,8 @@ mod tests {
     #[test]
     fn minimal_builtin_registry_has_no_requestable_or_denied_tools() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let cron_add = ToolId::new("cron.add").unwrap();
-        let matrix_deliver = ToolId::new("matrix.outbox.deliver").unwrap();
+        let cron_add = ToolId::new("core.cron:add").unwrap();
+        let matrix_deliver = ToolId::new("matrix.bridge:outbox.deliver").unwrap();
 
         assert!(
             registry
@@ -546,20 +546,17 @@ mod tests {
     fn core_guard_declaration() -> ExtensionDescriptor {
         ExtensionDescriptor::builtin(ExtensionId::new("core").unwrap(), "Core Guards", "1")
             .unwrap()
-            .with_hook(HookDeclaration {
-                id: HookId::new("core:repo_path.validate").unwrap(),
-                event: HookEvent::ArtifactWrite,
-                required: true,
-            })
-            .with_hook(HookDeclaration {
-                id: HookId::new("core:secret_scan.validate").unwrap(),
-                event: HookEvent::ArtifactWrite,
-                required: true,
-            })
-            .with_hook(HookDeclaration {
-                id: HookId::new("core:skill_manifest.validate").unwrap(),
-                event: HookEvent::ArtifactWrite,
-                required: true,
-            })
+            .with_hook(HookDeclaration::new(
+                HookId::new("core:repo_path.validate").unwrap(),
+                HookEvent::ArtifactWrite,
+            ))
+            .with_hook(HookDeclaration::new(
+                HookId::new("core:secret_scan.validate").unwrap(),
+                HookEvent::ArtifactWrite,
+            ))
+            .with_hook(HookDeclaration::new(
+                HookId::new("core:skill_manifest.validate").unwrap(),
+                HookEvent::ArtifactWrite,
+            ))
     }
 }

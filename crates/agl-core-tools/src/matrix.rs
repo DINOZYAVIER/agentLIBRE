@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_store::{AglStore, MatrixNotificationOutboxDraft};
@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
-pub const PROVIDER_ID: &str = "matrix-tools";
-pub const MATRIX_OUTBOX_STATUS_TOOL_ID: &str = "matrix.outbox.status";
-pub const MATRIX_OUTBOX_ENQUEUE_TOOL_ID: &str = "matrix.outbox.enqueue";
+pub const PROVIDER_ID: &str = "matrix.outbox";
+pub const MATRIX_OUTBOX_STATUS_TOOL_ID: &str = "matrix.outbox:status";
+pub const MATRIX_OUTBOX_ENQUEUE_TOOL_ID: &str = "matrix.outbox:enqueue";
 
 const DEFAULT_OUTBOX_LIMIT: usize = 10;
 const MAX_OUTBOX_LIMIT: usize = 100;
@@ -107,10 +107,10 @@ impl MatrixTools {
 }
 
 impl ToolHandler for MatrixTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
+            self.dispatch(invocation.tool_id.as_str(), invocation.arguments)
                 .map(ToolResult::new)
                 .map_err(Into::into)
         })
@@ -119,11 +119,11 @@ impl ToolHandler for MatrixTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix extension id is valid"),
         "Matrix Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin Matrix provider declaration is valid")
+    .expect("builtin Matrix extension declaration is valid")
     .with_tool(
         ToolDeclaration::from_schema::<StatusArgs>(
             ToolId::new(MATRIX_OUTBOX_STATUS_TOOL_ID).expect("builtin Matrix action id is valid"),
@@ -141,6 +141,7 @@ pub fn declaration() -> ExtensionDescriptor {
         .expect("builtin Matrix enqueue schema is valid")
         .with_state_effects([EffectId::matrix_outbox()]),
     )
+    .with_effect(EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap())
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

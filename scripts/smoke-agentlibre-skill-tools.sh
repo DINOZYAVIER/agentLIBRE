@@ -98,7 +98,7 @@ require_contains "$skill_context" '"skill_id": "repo-status"'
 require_contains "$skill_context" '"fs.read"'
 require_contains "$skill_context" '"fs.list"'
 require_contains "$skill_context" '"fs.search"'
-require_contains "$skill_context" '"repo.status"'
+require_contains "$skill_context" '"core.repo:status"'
 require_not_contains "$skill_context" '"fs.edit"'
 require_contains "$request_1" "<agentlibre_tool_context>"
 require_contains "$request_1" "fs.read"
