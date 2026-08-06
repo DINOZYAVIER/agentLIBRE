@@ -57,6 +57,37 @@ Collect related open choices in the task's existing decision document, record
 the exported human result in the spec, and do not ask again for choices already
 recorded there.
 
+## Engineering output discipline
+
+The human is the sole authority for project decisions. The agent audits code,
+finds the decisions required to implement the task, explains their concrete
+consequences, and implements only the recorded human choice.
+
+Every normative statement in a task spec or review must be traceable to one of:
+
+- current code, tests, or repository configuration;
+- an existing accepted spec or decision record; or
+- an explicit human decision in the current work.
+
+Otherwise state it as an open question. Never turn an LLM inference into a
+requirement, non-goal, default, invariant, or claim that behavior stays
+unchanged.
+
+Ask only questions whose answers materially change code, public API, stored
+data, security, or observable behavior. State each question using concrete
+files, types, transitions, and consequences. Do not use project-management,
+marketing, legal, or unexplained abstract vocabulary when direct engineering
+language is available.
+
+Keep engineering output concise and exact. Remove repetition. Use repository
+identifiers where they improve precision, and explain any unavoidable term in
+plain language. Before sending or committing a spec, remove unsupported claims,
+unnecessary terminology, and speculative design presented as fact.
+
+Do not infer that a spec is complete because every currently listed choice has
+been selected. Close a planning or decision gate only after the human explicitly
+states that the spec and its decision set are complete.
+
 ## Review checkpoints and versions
 
 Git tags are the source of truth for project checkpoint versions. Do not derive
