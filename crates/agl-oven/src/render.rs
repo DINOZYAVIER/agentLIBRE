@@ -1,7 +1,7 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
 use agl_content::{Content, ContentPart};
 use agl_ids::{RunId, TurnId};
-use agl_turn::{ModelRequest, TurnMessage};
+use agl_kernel::{ModelRequest, TurnMessage};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -157,7 +157,7 @@ fn render_assistant_tool_call(
     }
 }
 
-fn tool_observation_content(result: &agl_extension::ToolResult) -> Result<Content> {
+fn tool_observation_content(result: &agl_kernel::ToolResult) -> Result<Content> {
     let mut parts = vec![ContentPart::text(result.render_observation())?];
     if let Some(content) = &result.content {
         parts.extend(content.parts.iter().cloned());

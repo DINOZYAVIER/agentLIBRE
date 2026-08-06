@@ -1501,7 +1501,14 @@ pub struct ExtensionArtifactManifest {
     #[serde(flatten)]
     pub artifact: ArtifactEnvelope,
     pub api_major: u32,
-    pub implementation: String,
+    pub implementation: ExtensionImplementation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ExtensionImplementation {
+    RustStatic,
+    Binary { path: String, digest: String },
 }
 
 impl ExtensionArtifactManifest {
@@ -1528,10 +1535,12 @@ impl ExtensionArtifactManifest {
                 reason: format!("unsupported Extension API major `{}`", self.api_major),
             });
         }
-        if self.implementation.trim().is_empty() {
+        if let ExtensionImplementation::Binary { path, digest } = &self.implementation
+            && (path.trim().is_empty() || digest.trim().is_empty())
+        {
             return Err(ArtifactError::AdapterPayload {
                 type_id: EXTENSION_TYPE.to_string(),
-                reason: "Extension implementation cannot be blank".to_string(),
+                reason: "Extension binary path and digest cannot be blank".to_string(),
             });
         }
         Ok(())

@@ -996,7 +996,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_success(&cron_export);
     assert_contains(
         &stdout(&cron_export),
-        "store.export.record_type.matrix_notification_outbox=1",
+        "core.store:export.record_type.matrix_notification_outbox=1",
     );
     let cron_exported = fs::read_to_string(&cron_out_path).unwrap_or_else(|err| {
         panic!(
@@ -1010,7 +1010,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     );
 
     let delete = run_agl(&["--home", &home_arg, "cron", "delete", &id]);
-    assert_success_stdout_contains(&delete, "cron.deleted=true");
+    assert_success_stdout_contains(&delete, "core.cron:deleted=true");
 
     let hidden = run_agl(&["--home", &home_arg, "cron", "list"]);
     assert_success(&hidden);
@@ -1088,9 +1088,12 @@ fn store_commands_report_status_and_export_jsonl() {
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
     assert_success(&export);
-    assert_contains(&stdout(&export), "store.exported=true");
-    assert_contains(&stdout(&export), "store.export.records=1");
-    assert_contains(&stdout(&export), "store.export.record_type.memory_entry=1");
+    assert_contains(&stdout(&export), "core.store:exported=true");
+    assert_contains(&stdout(&export), "core.store:export.records=1");
+    assert_contains(
+        &stdout(&export),
+        "core.store:export.record_type.memory_entry=1",
+    );
     let exported = fs::read_to_string(&out_path)
         .unwrap_or_else(|err| panic!("failed to read export {}: {err}", out_path.display()));
     assert_contains(&exported, "\"domain\":\"memory\"");
@@ -1157,11 +1160,11 @@ fn store_status_does_not_create_database_before_explicit_migrate() {
     let export = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
-    assert_failure_stderr_contains(&export, "run store.migrate first");
+    assert_failure_stderr_contains(&export, "run core.store:migrate first");
 
     let migrate = run_agl(&["--home", &home_arg, "store", "migrate"]);
     assert_success(&migrate);
-    assert_contains(&stdout(&migrate), "store.migrated=true");
+    assert_contains(&stdout(&migrate), "core.store:migrated=true");
     assert!(database_path.exists());
 }
 
@@ -2277,7 +2280,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         let show = run_agl(&["--home", &home_arg, "function", "show", function_id]);
         assert_success_no_stderr(&show);
         let stdout = stdout(&show);
-        assert_contains(&stdout, "function.runtime.max_capability_calls=32");
+        assert_contains(&stdout, "function.runtime.max_tool_calls=32");
         assert_contains(&stdout, "function.runtime.max_output_tokens=4096");
         assert_contains(&stdout, &format!("max_context_tokens = {context_tokens}"));
         assert_contains(&stdout, "device = \"vulkan0\"");
@@ -2440,7 +2443,7 @@ where
                     worker_build_id: format!("sha256:{}", "d".repeat(64)),
                     native_bundle_id: None,
                     composite_worker_build_id: None,
-                    capabilities: Vec::new(),
+                    tools: Vec::new(),
                 }),
             ),
         );
@@ -2503,7 +2506,7 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
     hf_home: &std::path::Path,
 ) -> Output {
     use agl_protocol::{
-        DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequestKind, HelloEvent,
+        DaemonEvent, DaemonEventKind, DaemonRequestKind, DaemonTool, HelloEvent,
         InferenceInventoryEvent, PROTOCOL_VERSION,
     };
 
@@ -2538,7 +2541,7 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
                     worker_build_id: format!("sha256:{}", "d".repeat(64)),
                     native_bundle_id: None,
                     composite_worker_build_id: None,
-                    capabilities: vec![DaemonCapability::InferenceInventory],
+                    tools: vec![DaemonTool::InferenceInventory],
                 }),
             ),
         );

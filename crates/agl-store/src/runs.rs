@@ -21,7 +21,7 @@ const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, concu
     delegation_reserved_descendants, delegation_reserved_output_tokens,
     delegation_used_output_tokens";
 
-const STEP_COLUMNS: &str = "id, run_id, turn_id, effect_sequence, effect_kind,
+const STEP_COLUMNS: &str = "id, run_id, turn_id, request_sequence, effect_kind,
     delivery_class, request_json, result_json, state, attempts, lease_owner,
     lease_generation, lease_expires_at_ms, not_before_ms, error_code, created_at_ms,
     updated_at_ms, finished_at_ms";
@@ -120,7 +120,7 @@ impl AglStore {
             let step = load_step(tx, &draft.spawned_by_step_id)?;
             if step.run_id != parent.run_id
                 || step.state != RunStepState::Running
-                || step.effect_kind != "capability_dispatch"
+                || step.effect_kind != "tool_dispatch"
             {
                 return delegation_denied("invalid_spawn_step");
             }
@@ -212,8 +212,8 @@ impl AglStore {
                 .saturating_sub(parent.usage.model_attempts);
             let parent_calls_remaining = parent
                 .budget
-                .capability_calls
-                .saturating_sub(parent.usage.capability_calls);
+                .tool_calls
+                .saturating_sub(parent.usage.tool_calls);
 
             let mut budget = draft.budget.clone();
             budget.wall_time_ms = budget
@@ -226,7 +226,7 @@ impl AglStore {
                 .min(parent_output_remaining)
                 .min(tree_output_remaining);
             budget.model_attempts = budget.model_attempts.min(parent_attempts_remaining);
-            budget.capability_calls = budget.capability_calls.min(parent_calls_remaining);
+            budget.tool_calls = budget.tool_calls.min(parent_calls_remaining);
             if budget.wall_time_ms == 0 {
                 return delegation_denied("wall_time_exhausted");
             }
@@ -239,8 +239,8 @@ impl AglStore {
             if budget.model_attempts == 0 {
                 return delegation_denied("model_attempts_exhausted");
             }
-            if budget.capability_calls == 0 {
-                return delegation_denied("capability_calls_exhausted");
+            if budget.tool_calls == 0 {
+                return delegation_denied("tool_calls_exhausted");
             }
 
             tx.execute(
@@ -720,7 +720,7 @@ impl AglStore {
             )?;
             tx.execute(
                 "INSERT INTO run_steps
-                 (id, run_id, turn_id, effect_sequence, effect_kind, delivery_class,
+                 (id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
                   request_json, result_json, state, attempts, lease_owner,
                   lease_generation, lease_expires_at_ms, not_before_ms, error_code,
                   created_at_ms, updated_at_ms, finished_at_ms)
@@ -730,7 +730,7 @@ impl AglStore {
                     step.step_id.as_str(),
                     lease.run_id.as_str(),
                     step.turn_id.as_ref().map(TurnId::as_str),
-                    step.effect_sequence,
+                    step.request_sequence,
                     step.effect_kind,
                     step.delivery_class.as_str(),
                     serde_json::to_string(&step.request)?,
@@ -977,7 +977,7 @@ impl AglStore {
 
     pub fn run_steps(&self, run_id: &RunId) -> Result<Vec<RunStepRecord>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {STEP_COLUMNS} FROM run_steps WHERE run_id = ?1 ORDER BY effect_sequence"
+            "SELECT {STEP_COLUMNS} FROM run_steps WHERE run_id = ?1 ORDER BY request_sequence"
         ))?;
         let rows = stmt.query_map([run_id.as_str()], read_step_row)?;
         rows.map(|row| decode_step(row?)).collect()
@@ -986,15 +986,15 @@ impl AglStore {
     pub fn run_step_by_sequence(
         &self,
         run_id: &RunId,
-        effect_sequence: u64,
+        request_sequence: u64,
     ) -> Result<Option<RunStepRecord>> {
         let sql = format!(
-            "SELECT {STEP_COLUMNS} FROM run_steps WHERE run_id = ?1 AND effect_sequence = ?2"
+            "SELECT {STEP_COLUMNS} FROM run_steps WHERE run_id = ?1 AND request_sequence = ?2"
         );
         self.conn
             .query_row(
                 &sql,
-                params![run_id.as_str(), effect_sequence],
+                params![run_id.as_str(), request_sequence],
                 read_step_row,
             )
             .optional()?
@@ -1198,7 +1198,7 @@ fn validate_child_run_draft(draft: &ChildRunDraft) -> Result<()> {
         || draft.budget.model_input_tokens == 0
         || draft.budget.model_output_tokens == 0
         || draft.budget.model_attempts == 0
-        || draft.budget.capability_calls == 0
+        || draft.budget.tool_calls == 0
     {
         return delegation_denied("invalid_child_budget");
     }
@@ -1415,8 +1415,8 @@ fn delegation_denied<T>(code: &'static str) -> Result<T> {
 }
 
 fn validate_step_draft(lease: &RunLease, step: &RunStepDraft) -> Result<()> {
-    if step.effect_sequence == 0 {
-        return invalid("run_steps.effect_sequence", 0, "must be positive");
+    if step.request_sequence == 0 {
+        return invalid("run_steps.request_sequence", 0, "must be positive");
     }
     validate_non_blank(&step.effect_kind, "run_steps.effect_kind")?;
     if step.turn_id.is_some() && lease.run_id.as_str().is_empty() {
@@ -1775,7 +1775,7 @@ struct RawStepRow {
     id: String,
     run_id: String,
     turn_id: Option<String>,
-    effect_sequence: u64,
+    request_sequence: u64,
     effect_kind: String,
     delivery_class: String,
     request_json: String,
@@ -1797,7 +1797,7 @@ fn read_step_row(row: &Row<'_>) -> rusqlite::Result<RawStepRow> {
         id: row.get(0)?,
         run_id: row.get(1)?,
         turn_id: row.get(2)?,
-        effect_sequence: row.get(3)?,
+        request_sequence: row.get(3)?,
         effect_kind: row.get(4)?,
         delivery_class: row.get(5)?,
         request_json: row.get(6)?,
@@ -1824,7 +1824,7 @@ fn decode_step(raw: RawStepRow) -> Result<RunStepRecord> {
             .as_deref()
             .map(|value| parse_turn_id(value, "run_steps.turn_id"))
             .transpose()?,
-        effect_sequence: raw.effect_sequence,
+        request_sequence: raw.request_sequence,
         effect_kind: raw.effect_kind,
         delivery_class: EffectDeliveryClass::parse(&raw.delivery_class)?,
         request: serde_json::from_str(&raw.request_json)?,

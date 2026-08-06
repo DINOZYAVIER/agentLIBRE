@@ -10,9 +10,9 @@ mod list;
 use list::{ListArgs, ListQueryRegistry};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
-    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolResult,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind,
+    ToolDeclaration, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolResult,
 };
 use agl_repo::{ArtifactAccess, ComponentPathHandleRequest};
 use anyhow::{Context, Result, bail, ensure};
@@ -732,11 +732,11 @@ fn workspace_mutation_lock(root: &Path) -> Arc<Mutex<()>> {
 }
 
 impl ToolHandler for CoreTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
             let run_id = invocation.scope.run_id().as_str().to_string();
-            let tool_id = invocation.capability_id.as_str().to_string();
+            let tool_id = invocation.tool_id.as_str().to_string();
             let is_patch = tool_id == FS_APPLY_PATCH_TOOL_ID;
             let data = if is_patch {
                 self.apply_patch(invocation.arguments)
@@ -806,7 +806,7 @@ fn requested_read_only_path<'a>(tool_id: &str, arguments: &'a Value) -> Option<&
 
 pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("core tool provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("core tool extension id is valid"),
         "Core Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -830,21 +830,23 @@ pub fn declaration() -> ExtensionDescriptor {
             OperationKind::Write,
         )
         .with_errors([
-            agl_extension::ToolErrorDeclaration::recoverable("invalid_patch")
+            agl_kernel::ToolErrorDeclaration::recoverable("invalid_patch")
                 .with_data_schema::<InvalidPatchErrorData>(),
-            agl_extension::ToolErrorDeclaration::recoverable("not_found")
+            agl_kernel::ToolErrorDeclaration::recoverable("not_found")
                 .with_data_schema::<PathNotFoundErrorData>(),
-            agl_extension::ToolErrorDeclaration::recoverable("conflict")
+            agl_kernel::ToolErrorDeclaration::recoverable("conflict")
                 .with_data_schema::<PatchConflictErrorData>(),
-            agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+            agl_kernel::ToolErrorDeclaration::terminal("execution_failed")
                 .with_data_schema::<EmptyToolErrorData>(),
-            agl_extension::ToolErrorDeclaration::terminal("outcome_unknown")
+            agl_kernel::ToolErrorDeclaration::terminal("outcome_unknown")
                 .with_data_schema::<EmptyToolErrorData>(),
         ])
         .expect("filesystem patch error declarations are valid")
         .with_state_effects([EffectId::repo_files()]),
     );
-    crate::with_observation_workflow(descriptor)
+    crate::with_observation_workflow(
+        descriptor.with_effect(EffectDeclaration::for_standard(EffectId::repo_files()).unwrap()),
+    )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -869,9 +871,9 @@ fn action<I: JsonSchema, O: JsonSchema>(
 fn read_only_action<I: JsonSchema, O: JsonSchema>(id: &str, description: &str) -> ToolDeclaration {
     action::<I, O>(id, description, OperationKind::Read)
         .with_errors([
-            agl_extension::ToolErrorDeclaration::recoverable("not_found")
+            agl_kernel::ToolErrorDeclaration::recoverable("not_found")
                 .with_data_schema::<PathNotFoundErrorData>(),
-            agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+            agl_kernel::ToolErrorDeclaration::terminal("execution_failed")
                 .with_data_schema::<EmptyToolErrorData>(),
         ])
         .expect("read-only filesystem Tool error declarations are valid")
@@ -1412,10 +1414,10 @@ impl std::error::Error for PatchError {}
 
 #[cfg(test)]
 mod tests {
-    use agl_extension::{
+    use agl_ids::{ExecutionScope, RunId, StepId};
+    use agl_kernel::{
         ExtensionRegistration, ToolBinding, ToolDispatchControl, ToolErrorClass, ToolInvocation,
     };
-    use agl_ids::{ExecutionScope, RunId, StepId};
     use agl_kernel::{ToolAccessMode, ToolOutcomeStatus, ToolPolicyInput};
     use serde_json::json;
 

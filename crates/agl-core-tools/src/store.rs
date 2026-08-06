@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
 use agl_store::{AglStore, StoreDomain, StoreExportOptions};
@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
-pub const PROVIDER_ID: &str = "store-tools";
-pub const STORE_STATUS_TOOL_ID: &str = "store.status";
-pub const STORE_EXPORT_TOOL_ID: &str = "store.export";
-pub const STORE_MIGRATE_TOOL_ID: &str = "store.migrate";
+pub const PROVIDER_ID: &str = "core.store";
+pub const STORE_STATUS_TOOL_ID: &str = "core.store:status";
+pub const STORE_EXPORT_TOOL_ID: &str = "core.store:export";
+pub const STORE_MIGRATE_TOOL_ID: &str = "core.store:migrate";
 
 const DEFAULT_EXPORT_MAX_BYTES: usize = 16 * 1024;
 const MAX_EXPORT_BYTES: usize = 128 * 1024;
@@ -159,10 +159,10 @@ impl StoreTools {
 }
 
 impl ToolHandler for StoreTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
+            self.dispatch(invocation.tool_id.as_str(), invocation.arguments)
                 .map(ToolResult::new)
                 .map_err(Into::into)
         })
@@ -171,11 +171,11 @@ impl ToolHandler for StoreTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin store provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin store extension id is valid"),
         "Store Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin store provider declaration is valid")
+    .expect("builtin store extension declaration is valid")
     .with_tool(
         ToolDeclaration::from_schema::<StatusArgs>(
             ToolId::new(STORE_STATUS_TOOL_ID).expect("builtin store action id is valid"),
@@ -201,6 +201,7 @@ pub fn declaration() -> ExtensionDescriptor {
         .expect("builtin store migration schema is valid")
         .with_state_effects([EffectId::store_schema()]),
     )
+    .with_effect(EffectDeclaration::for_standard(EffectId::store_schema()).unwrap())
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

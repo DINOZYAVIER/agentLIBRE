@@ -23,7 +23,7 @@ use agl_inference::{
     InferenceDeviceInfo, InferenceDeviceKind, ModelManager, ModelManagerOptions, WorkerModelRuntime,
 };
 use agl_protocol::{
-    AssistantItemState, DaemonCapability, InferenceStatusRequest, ModelReleaseOutcome,
+    AssistantItemState, DaemonTool, InferenceStatusRequest, ModelReleaseOutcome,
     ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState,
     ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
     RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionListRequest,
@@ -496,14 +496,14 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
             "preflight": report,
         }))?;
     } else {
-        println!("cron.preflight.ok=true");
+        println!("core.cron:preflight.ok=true");
         println!(
-            "cron.preflight.target={}:{}",
+            "core.cron:preflight.target={}:{}",
             job.target_kind.as_str(),
             job.target_ref
         );
-        println!("cron.preflight.records_run=false");
-        println!("cron.preflight.inference_config_present={inference_config_present}");
+        println!("core.cron:preflight.records_run=false");
+        println!("core.cron:preflight.inference_config_present={inference_config_present}");
     }
     Ok(())
 }
@@ -540,10 +540,13 @@ fn run_cron_tick_command(
             "notifications": report.notifications,
         }))?;
     } else {
-        println!("cron.tick.at={unix_seconds}");
-        println!("cron.tick.due_jobs={}", report.due_jobs);
-        println!("cron.tick.recorded_runs={}", report.recorded_runs.len());
-        println!("cron.tick.notifications={}", report.notifications);
+        println!("core.cron:tick.at={unix_seconds}");
+        println!("core.cron:tick.due_jobs={}", report.due_jobs);
+        println!(
+            "core.cron:tick.recorded_runs={}",
+            report.recorded_runs.len()
+        );
+        println!("core.cron:tick.notifications={}", report.notifications);
         print_cron_runs(&report.recorded_runs);
     }
     Ok(())
@@ -561,7 +564,7 @@ fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Res
         .delete_job(&options.id)
         .context("failed to delete cron job")?;
     crate::print_json_or(options.json, &job, || {
-        println!("cron.deleted=true");
+        println!("core.cron:deleted=true");
         print_cron_job_summary(&job);
     })
 }
@@ -1512,19 +1515,19 @@ fn daemon_first_cron_inference(runtime: &AgentLibreRuntimeConfig) -> Result<CliC
     match (authority, connection) {
         (InferenceAuthorityDecision::Daemon, Ok(client)) => {
             let required = [
-                DaemonCapability::SessionOpen,
-                DaemonCapability::RunSubmit,
-                DaemonCapability::RunSubscribe,
-                DaemonCapability::SessionPresentation,
-                DaemonCapability::SessionFinish,
+                DaemonTool::SessionOpen,
+                DaemonTool::RunSubmit,
+                DaemonTool::RunSubscribe,
+                DaemonTool::SessionPresentation,
+                DaemonTool::SessionFinish,
             ];
             let hello = client.hello().context("failed to read daemon identity")?;
             if let Some(missing) = required
                 .into_iter()
-                .find(|capability| !hello.capabilities.contains(capability))
+                .find(|tool| !hello.tools.contains(tool))
             {
                 bail!(
-                    "daemon at {} lacks required cron capability {missing:?}; refusing standalone inference while it is active",
+                    "daemon at {} lacks required cron tool {missing:?}; refusing standalone inference while it is active",
                     socket_path.display()
                 );
             }
@@ -1567,12 +1570,9 @@ pub(crate) fn daemon_first_inference_inventory(
     match (authority, connection) {
         (InferenceAuthorityDecision::Daemon, Ok(client)) => {
             let hello = client.hello().context("failed to read daemon identity")?;
-            if !hello
-                .capabilities
-                .contains(&DaemonCapability::InferenceInventory)
-            {
+            if !hello.tools.contains(&DaemonTool::InferenceInventory) {
                 bail!(
-                    "daemon at {} does not provide the current inference inventory capability; refusing process-local inference while a daemon is active",
+                    "daemon at {} does not provide the current inference inventory tool; refusing process-local inference while a daemon is active",
                     socket_path.display()
                 );
             }
@@ -1843,19 +1843,19 @@ async fn run_one_shot_via_daemon(
         );
     }
     let required = [
-        DaemonCapability::SessionOpen,
-        DaemonCapability::RunSubmit,
-        DaemonCapability::RunSubscribe,
-        DaemonCapability::SessionPresentation,
-        DaemonCapability::SessionFinish,
+        DaemonTool::SessionOpen,
+        DaemonTool::RunSubmit,
+        DaemonTool::RunSubscribe,
+        DaemonTool::SessionPresentation,
+        DaemonTool::SessionFinish,
     ];
     let hello = client.hello().context("failed to read daemon identity")?;
     if let Some(missing) = required
         .into_iter()
-        .find(|capability| !hello.capabilities.contains(capability))
+        .find(|tool| !hello.tools.contains(tool))
     {
         bail!(
-            "daemon at {} lacks required capability {missing:?}; refusing standalone inference while it is active",
+            "daemon at {} lacks required tool {missing:?}; refusing standalone inference while it is active",
             socket_path.display()
         );
     }
@@ -3207,7 +3207,7 @@ tool_call_format = "gemma_function_call"
                         worker_build_id: format!("sha256:{}", "d".repeat(64)),
                         native_bundle_id: None,
                         composite_worker_build_id: None,
-                        capabilities: Vec::new(),
+                        tools: Vec::new(),
                     }),
                 ),
             )
@@ -3229,7 +3229,7 @@ tool_call_format = "gemma_function_call"
             Err(error) => error,
         };
         let rendered = format!("{error:#}");
-        assert!(rendered.contains("lacks required cron capability SessionOpen"));
+        assert!(rendered.contains("lacks required cron tool SessionOpen"));
         assert!(rendered.contains("refusing standalone inference"));
         assert!(!runtime.paths.inference_worker_temp_root().exists());
         server.join().unwrap();

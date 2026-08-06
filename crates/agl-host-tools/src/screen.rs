@@ -11,19 +11,20 @@ use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
     ContentPart, ImageDimensions, MediaType,
 };
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, SensitiveInput, ToolDeclaration,
-    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
-};
 use agl_ids::RunId;
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, SensitiveInput,
+    ToolDeclaration, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
+    ToolResult,
+};
 use agl_store::AglStore;
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-pub const PROVIDER_ID: &str = "screen-tools";
-pub const SCREEN_CAPTURE_TOOL_ID: &str = "screen.capture";
+pub const PROVIDER_ID: &str = "host.screen";
+pub const SCREEN_CAPTURE_TOOL_ID: &str = "host.screen:capture";
 
 const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENCODED_BYTES: usize = 32 * 1024 * 1024;
@@ -124,8 +125,8 @@ impl ScreenTools {
     }
 
     pub fn capture(&self, invocation: &ToolInvocation) -> Result<ToolResult, ScreenCaptureError> {
-        if invocation.capability_id.as_str() != SCREEN_CAPTURE_TOOL_ID {
-            return Err(ScreenCaptureError::UnknownCapability);
+        if invocation.tool_id.as_str() != SCREEN_CAPTURE_TOOL_ID {
+            return Err(ScreenCaptureError::UnknownTool);
         }
         serde_json::from_value::<CaptureArgs>(invocation.arguments.clone())
             .map_err(|_| ScreenCaptureError::InvalidArguments)?;
@@ -156,7 +157,7 @@ impl ScreenTools {
                 ArtifactSensitivity::Sensitive,
                 ArtifactSource {
                     kind: ArtifactSourceKind::ScreenCapture,
-                    provider: Some("xdg-desktop-portal".to_string()),
+                    extension: Some("xdg-desktop-portal".to_string()),
                 },
                 ArtifactRetention::RunScoped,
             )
@@ -180,7 +181,7 @@ impl ScreenTools {
 }
 
 impl ToolHandler for ScreenTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
             self.capture(&invocation)
@@ -189,21 +190,21 @@ impl ToolHandler for ScreenTools {
     }
 }
 
-pub fn provider_available() -> bool {
+pub fn extension_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| PortalScreenCaptureBackend.probe().is_ok())
 }
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin screen provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin screen extension id is valid"),
         "Screen Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin screen provider declaration is valid")
+    .expect("builtin screen extension declaration is valid")
     .with_tool(
         ToolDeclaration::from_schema::<CaptureArgs>(
-            ToolId::new(SCREEN_CAPTURE_TOOL_ID).expect("builtin screen capability id is valid"),
+            ToolId::new(SCREEN_CAPTURE_TOOL_ID).expect("builtin screen tool id is valid"),
             "Capture one user-approved screen snapshot through the desktop portal.",
             OperationKind::Read,
         )
@@ -211,6 +212,7 @@ pub fn declaration() -> ExtensionDescriptor {
         .with_state_effects([EffectId::host_screen_capture()])
         .with_sensitive_inputs([SensitiveInput::ScreenCapture]),
     )
+    .with_effect(EffectDeclaration::for_standard(EffectId::host_screen_capture()).unwrap())
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -422,7 +424,7 @@ pub enum ScreenCaptureError {
     Unavailable,
     Cancelled,
     PermissionDenied,
-    UnknownCapability,
+    UnknownTool,
     InvalidArguments,
     InvalidPortalUri,
     SourceTooLarge,
@@ -444,7 +446,7 @@ impl Display for ScreenCaptureError {
             Self::PermissionDenied => {
                 formatter.write_str("screen capture has no sensitive-input grant for this run")
             }
-            Self::UnknownCapability => formatter.write_str("unknown screen capability"),
+            Self::UnknownTool => formatter.write_str("unknown screen tool"),
             Self::InvalidArguments => formatter.write_str("screen capture arguments are invalid"),
             Self::InvalidPortalUri => formatter.write_str("portal returned an invalid file URI"),
             Self::SourceTooLarge => formatter.write_str("captured image exceeds source byte limit"),
@@ -476,8 +478,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agl_extension::{DeclarationDigest, PolicyHash};
     use agl_ids::ExecutionScope;
+    use agl_kernel::{DeclarationDigest, PolicyHash};
     use agl_store::{DurableRunDraft, RunBudget, RunKind};
 
     use super::*;
@@ -579,14 +581,14 @@ mod tests {
     }
 
     fn invocation(run_id: &RunId) -> ToolInvocation {
-        let provider = declaration();
-        let action = provider
+        let extension = declaration();
+        let action = extension
             .tool(&ToolId::new(SCREEN_CAPTURE_TOOL_ID).unwrap())
             .unwrap();
         ToolInvocation::new(
             ExecutionScope::builder(run_id.clone()).build().unwrap(),
             ToolId::new(SCREEN_CAPTURE_TOOL_ID).unwrap(),
-            provider.id.clone(),
+            extension.id.clone(),
             DeclarationDigest::parse(action.digest().as_str()).unwrap(),
             PolicyHash::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
             json!({}),

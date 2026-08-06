@@ -1,5 +1,6 @@
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration, ToolId,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+    ToolId,
 };
 use schemars::JsonSchema;
 
@@ -14,11 +15,11 @@ use super::{
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin cron provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin cron extension id is valid"),
         "Cron Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin cron provider declaration is valid")
+    .expect("builtin cron extension declaration is valid")
     .with_tool(action::<ListArgs>(
         CRON_LIST_TOOL_ID,
         "List cron jobs.",
@@ -99,6 +100,11 @@ pub fn declaration() -> ExtensionDescriptor {
             EffectId::matrix_outbox(),
         ]),
     )
+    .with_effects([
+        EffectDeclaration::for_standard(EffectId::store_cron()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::store_idempotency()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap(),
+    ])
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

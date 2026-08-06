@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use agl_extension::{
+use agl_kernel::{
     ExtensionDescriptor, ExtensionWorkflowFragment, ToolErrorClass, ToolWorkflowMapping,
     WorkflowEventId,
 };
@@ -59,11 +59,11 @@ pub use skills::{
     SKILL_TRUST_TOOL_ID, SKILL_VERIFY_TOOL_ID,
 };
 pub use store::{STORE_EXPORT_TOOL_ID, STORE_MIGRATE_TOOL_ID, STORE_STATUS_TOOL_ID, StoreTools};
-pub(crate) fn parse_tool_args<T>(capability: &str, arguments: Value) -> Result<T>
+pub(crate) fn parse_tool_args<T>(tool: &str, arguments: Value) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_value(arguments).with_context(|| format!("{capability} arguments are invalid"))
+    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
 }
 
 pub fn builtin_tool_catalog() -> Result<ToolCatalog, ToolCatalogError> {

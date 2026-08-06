@@ -53,7 +53,7 @@ fn subagent_document(id: &str, children: &[&str]) -> String {
         .map(|child| format!("    - {child}\n"))
         .collect::<String>();
     format!(
-        "---\nschema: agentlibre/subagent/v1\nid: {id}\ntitle: {id}\ndescription: Handles {id} tasks.\nmodel:\n  inherit: true\ntools:\n  mode: read-only\n  allow: []\n  deny: []\nsubagents:\n  use:\n{selected}limits:\n  max_model_attempts: 2\n  max_output_tokens: 512\n  max_capability_calls: 4\n  timeout_seconds: 120\n---\n\n# Mission\n\nPrivate instructions for {id}.\n"
+        "---\nschema: agentlibre/subagent/v1\nid: {id}\ntitle: {id}\ndescription: Handles {id} tasks.\nmodel:\n  inherit: true\ntools:\n  mode: read-only\n  allow: []\n  deny: []\nsubagents:\n  use:\n{selected}limits:\n  max_model_attempts: 2\n  max_output_tokens: 512\n  max_tool_calls: 4\n  timeout_seconds: 120\n---\n\n# Mission\n\nPrivate instructions for {id}.\n"
     )
 }
 
@@ -114,7 +114,7 @@ subagents:
 limits:
   max_model_attempts: 2
   max_output_tokens: 512
-  max_capability_calls: 4
+  max_tool_calls: 4
   timeout_seconds: 120
 ---
 

@@ -36,7 +36,7 @@ fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -
 fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
     let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
     crate::print_json_or(options.json, &report, || {
-        println!("store.migrated=true");
+        println!("core.store:migrated=true");
         println!("store.path={}", report.database_path.display());
         println!(
             "store.schema_version.before={}",
@@ -108,13 +108,16 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
             "include_deleted": options.include_deleted,
         }))?;
     } else {
-        println!("store.exported=true");
-        println!("store.export.domain={}", domain.as_str());
-        println!("store.export.path={}", options.out.display());
-        println!("store.export.records={records}");
-        println!("store.export.include_deleted={}", options.include_deleted);
+        println!("core.store:exported=true");
+        println!("core.store:export.domain={}", domain.as_str());
+        println!("core.store:export.path={}", options.out.display());
+        println!("core.store:export.records={records}");
+        println!(
+            "core.store:export.include_deleted={}",
+            options.include_deleted
+        );
         for (record_type, count) in record_types {
-            println!("store.export.record_type.{record_type}={count}");
+            println!("core.store:export.record_type.{record_type}={count}");
         }
     }
     Ok(())

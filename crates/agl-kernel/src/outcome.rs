@@ -1,4 +1,4 @@
-use agl_extension::{
+use crate::{
     DeclarationDigest, ExtensionId, ToolErrorDeclaration, ToolHandlerError, ToolId, ToolResult,
     WorkflowEventId, render_canonical_json,
 };

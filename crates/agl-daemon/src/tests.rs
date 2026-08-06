@@ -22,7 +22,7 @@ use agl_inference::{
     WorkerRuntimeStatusHandle,
 };
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloRequest,
+    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, DaemonTool, HelloRequest,
     InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest, ModelUnloadTarget,
     PROTOCOL_VERSION, ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceWorkerState,
     ProtocolRunKind, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest,
@@ -78,13 +78,13 @@ fn default_root_run_budget_is_identical_across_protocol_application_and_store() 
             application.model_input_tokens,
             application.model_output_tokens,
             application.model_attempts,
-            application.capability_calls,
+            application.tool_calls,
         ),
         (
             protocol.model_input_tokens,
             protocol.model_output_tokens,
             protocol.model_attempts,
-            protocol.capability_calls,
+            protocol.tool_calls,
         )
     );
     assert_eq!(
@@ -92,13 +92,13 @@ fn default_root_run_budget_is_identical_across_protocol_application_and_store() 
             store.model_input_tokens,
             store.model_output_tokens,
             store.model_attempts,
-            store.capability_calls,
+            store.tool_calls,
         ),
         (
             protocol.model_input_tokens,
             protocol.model_output_tokens,
             protocol.model_attempts,
-            protocol.capability_calls,
+            protocol.tool_calls,
         )
     );
 }
@@ -1392,23 +1392,15 @@ fn hello_declares_strict_run_capabilities() {
                 hello.daemon_runtime.builtin_catalog_digest,
                 expected_runtime.builtin_catalog_digest
             );
-            assert!(hello.capabilities.contains(&DaemonCapability::RunSubmit));
-            assert!(hello.capabilities.contains(&DaemonCapability::RunStatus));
-            assert!(hello.capabilities.contains(&DaemonCapability::RunTree));
-            assert!(hello.capabilities.contains(&DaemonCapability::RunCancel));
-            assert!(hello.capabilities.contains(&DaemonCapability::RunReplay));
-            assert!(hello.capabilities.contains(&DaemonCapability::RunSubscribe));
-            assert!(
-                hello
-                    .capabilities
-                    .contains(&DaemonCapability::InferenceInventory)
-            );
-            assert!(
-                hello
-                    .capabilities
-                    .contains(&DaemonCapability::InferenceStatus)
-            );
-            assert!(hello.capabilities.contains(&DaemonCapability::ModelUnload));
+            assert!(hello.tools.contains(&DaemonTool::RunSubmit));
+            assert!(hello.tools.contains(&DaemonTool::RunStatus));
+            assert!(hello.tools.contains(&DaemonTool::RunTree));
+            assert!(hello.tools.contains(&DaemonTool::RunCancel));
+            assert!(hello.tools.contains(&DaemonTool::RunReplay));
+            assert!(hello.tools.contains(&DaemonTool::RunSubscribe));
+            assert!(hello.tools.contains(&DaemonTool::InferenceInventory));
+            assert!(hello.tools.contains(&DaemonTool::InferenceStatus));
+            assert!(hello.tools.contains(&DaemonTool::ModelUnload));
         }
         other => panic!("unexpected hello event: {other:?}"),
     }
@@ -1681,7 +1673,7 @@ subagents:
 limits:
   max_model_attempts: 2
   max_output_tokens: 64
-  max_capability_calls: 2
+  max_tool_calls: 2
   timeout_seconds: 20
 ---
 
@@ -1696,7 +1688,7 @@ Return the daemon child verdict.
         test.inference.clone(),
         InferenceClientHandle::new(ScriptedDelegationClient {
             responses: Mutex::new(VecDeque::from([
-                r#"<tool_call>{"name":"agent.delegate","arguments":{"subagent_id":"reviewer","task":"Review daemon patch"}}</tool_call>"#.to_string(),
+                r#"<tool_call>{"name":"agent.supervisor:delegate","arguments":{"subagent_id":"reviewer","task":"Review daemon patch"}}</tool_call>"#.to_string(),
                 "Daemon child verdict".to_string(),
                 "Daemon parent answer".to_string(),
             ])),
@@ -1832,7 +1824,7 @@ subagents:
 limits:
   max_model_attempts: 1
   max_output_tokens: 32
-  max_capability_calls: 1
+  max_tool_calls: 1
   timeout_seconds: 10
 ---
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub type Result<T> = std::result::Result<T, CronError>;
 
 const DEFAULT_TIMEZONE: &str = "UTC";
-const IDEMPOTENCY_NAMESPACE: &str = "cron.run";
+const IDEMPOTENCY_NAMESPACE: &str = "core.cron:run";
 
 pub const STORE_STATUS_BUILTIN_CRON_TARGET: &str = "store-status";
 

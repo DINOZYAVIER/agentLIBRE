@@ -5,7 +5,7 @@ use agl_cron::{
     CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun, CronRunAdmission, CronRunStatus,
     CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET, validate_job_draft,
 };
-use agl_extension::{ToolDispatchContext, ToolHandler, ToolResult};
+use agl_kernel::{ToolDispatchContext, ToolHandler, ToolResult};
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
@@ -18,18 +18,18 @@ mod declarations;
 
 pub use declarations::{declaration, register};
 
-pub const PROVIDER_ID: &str = "cron-tools";
-pub const CRON_LIST_TOOL_ID: &str = "cron.list";
-pub const CRON_SHOW_TOOL_ID: &str = "cron.show";
-pub const CRON_HISTORY_TOOL_ID: &str = "cron.history";
-pub const CRON_PREFLIGHT_TOOL_ID: &str = "cron.preflight";
-pub const CRON_ADD_TOOL_ID: &str = "cron.add";
-pub const CRON_UPDATE_TOOL_ID: &str = "cron.update";
-pub const CRON_DELETE_TOOL_ID: &str = "cron.delete";
-pub const CRON_ENABLE_TOOL_ID: &str = "cron.enable";
-pub const CRON_DISABLE_TOOL_ID: &str = "cron.disable";
-pub const CRON_RUN_TOOL_ID: &str = "cron.run";
-pub const CRON_TICK_TOOL_ID: &str = "cron.tick";
+pub const PROVIDER_ID: &str = "core.cron";
+pub const CRON_LIST_TOOL_ID: &str = "core.cron:list";
+pub const CRON_SHOW_TOOL_ID: &str = "core.cron:show";
+pub const CRON_HISTORY_TOOL_ID: &str = "core.cron:history";
+pub const CRON_PREFLIGHT_TOOL_ID: &str = "core.cron:preflight";
+pub const CRON_ADD_TOOL_ID: &str = "core.cron:add";
+pub const CRON_UPDATE_TOOL_ID: &str = "core.cron:update";
+pub const CRON_DELETE_TOOL_ID: &str = "core.cron:delete";
+pub const CRON_ENABLE_TOOL_ID: &str = "core.cron:enable";
+pub const CRON_DISABLE_TOOL_ID: &str = "core.cron:disable";
+pub const CRON_RUN_TOOL_ID: &str = "core.cron:run";
+pub const CRON_TICK_TOOL_ID: &str = "core.cron:tick";
 
 const DEFAULT_HISTORY_LIMIT: usize = 20;
 const MAX_HISTORY_LIMIT: usize = 100;
@@ -278,10 +278,10 @@ impl CronTools {
 }
 
 impl ToolHandler for CronTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
+            self.dispatch(invocation.tool_id.as_str(), invocation.arguments)
                 .map(ToolResult::new)
                 .map_err(Into::into)
         })
@@ -360,7 +360,7 @@ fn execute_tick_target(
     match job.target_kind {
         CronTargetKind::Builtin if job.target_ref == STORE_STATUS_BUILTIN_CRON_TARGET => (
             CronRunStatus::Succeeded,
-            Some(format!("tool:cron.tick:builtin:{}", job.target_ref)),
+            Some(format!("tool:core.cron:tick:builtin:{}", job.target_ref)),
             None,
         ),
         CronTargetKind::Builtin => (
@@ -373,13 +373,16 @@ fn execute_tick_target(
         ),
         CronTargetKind::Skill if mock_skill_execution => (
             CronRunStatus::Succeeded,
-            Some(format!("tool:cron.tick:mock-skill:{}", job.target_ref)),
+            Some(format!("tool:core.cron:tick:mock-skill:{}", job.target_ref)),
             None,
         ),
         CronTargetKind::Skill => (
             CronRunStatus::Failed,
             None,
-            Some("skill execution is daemon-owned and unavailable in cron.tick tool".to_string()),
+            Some(
+                "skill execution is daemon-owned and unavailable in core.cron:tick tool"
+                    .to_string(),
+            ),
         ),
     }
 }

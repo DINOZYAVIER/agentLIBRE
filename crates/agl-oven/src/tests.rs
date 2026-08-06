@@ -1,7 +1,7 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
 use agl_content::Content;
 use agl_ids::{RunId, TurnId};
-use agl_turn::{ModelRequest, TurnMessage, VisibleTool};
+use agl_kernel::{ModelRequest, TurnMessage, VisibleTool};
 use serde_json::json;
 
 use crate::{
@@ -59,7 +59,7 @@ fn read_file_schema() -> serde_json::Value {
 
 fn read_file_tool() -> VisibleTool {
     VisibleTool {
-        id: "read_file".parse().unwrap(),
+        id: "core.workspace:fs.read".parse().unwrap(),
         description: "Read a file".to_string(),
         input_schema: read_file_schema(),
     }
@@ -96,7 +96,7 @@ fn renders_user_messages_and_visible_tools() {
     assert_eq!(
         rendered.tools,
         [RenderedTool {
-            name: "read_file".to_string(),
+            name: "core.workspace:fs.read".to_string(),
             description: "Read a file".to_string(),
             input_schema: read_file_schema(),
         }]
@@ -196,7 +196,7 @@ fn renders_tool_observation_with_tool_name() {
         request_index: 1,
         messages: vec![TurnMessage::ToolObservation {
             name: "read_file".to_string(),
-            result: agl_extension::ToolResult::new(json!({"text": "agentLIBRE readme"})),
+            result: agl_kernel::ToolResult::new(json!({"text": "agentLIBRE readme"})),
         }],
         visible_tools: Vec::new(),
     };

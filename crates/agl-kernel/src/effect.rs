@@ -1,9 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use agl_extension::{
-    DeclarationDigest, EffectId, ExtensionId, ObservedEffect, ToolDelivery, ToolId,
-};
+use crate::{DeclarationDigest, EffectId, ExtensionId, ObservedEffect, ToolDelivery, ToolId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -90,16 +88,157 @@ impl ToolEffectLifecycleState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolEffectJournalRecord {
-    pub call_id: String,
-    pub tool_id: ToolId,
-    pub extension_id: ExtensionId,
-    pub schema_digest: DeclarationDigest,
-    pub delivery: ToolDelivery,
-    pub state: ToolEffectLifecycleState,
-    pub admitted_effects: BTreeSet<EffectId>,
-    pub observed_effects: Vec<ObservedEffect>,
-    pub outcome_code: Option<String>,
+    call_id: String,
+    tool_id: ToolId,
+    extension_id: ExtensionId,
+    schema_digest: DeclarationDigest,
+    delivery: ToolDelivery,
+    state: ToolEffectLifecycleState,
+    admitted_effects: BTreeSet<EffectId>,
+    observed_effects: Vec<ObservedEffect>,
+    outcome_code: Option<String>,
 }
+
+impl ToolEffectJournalRecord {
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+    pub fn tool_id(&self) -> &ToolId {
+        &self.tool_id
+    }
+    pub fn extension_id(&self) -> &ExtensionId {
+        &self.extension_id
+    }
+    pub fn schema_digest(&self) -> &DeclarationDigest {
+        &self.schema_digest
+    }
+    pub fn delivery(&self) -> ToolDelivery {
+        self.delivery
+    }
+    pub fn state(&self) -> ToolEffectLifecycleState {
+        self.state
+    }
+    pub fn admitted_effects(&self) -> &BTreeSet<EffectId> {
+        &self.admitted_effects
+    }
+    pub fn observed_effects(&self) -> &[ObservedEffect] {
+        &self.observed_effects
+    }
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code.as_deref()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolEffectMachine {
+    call_id: String,
+    tool_id: ToolId,
+    extension_id: ExtensionId,
+    schema_digest: DeclarationDigest,
+    delivery: ToolDelivery,
+    admitted_effects: BTreeSet<EffectId>,
+    state: Option<ToolEffectLifecycleState>,
+}
+
+impl ToolEffectMachine {
+    pub fn new(
+        call_id: impl Into<String>,
+        tool_id: ToolId,
+        extension_id: ExtensionId,
+        schema_digest: DeclarationDigest,
+        delivery: ToolDelivery,
+        admitted_effects: BTreeSet<EffectId>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_id,
+            extension_id,
+            schema_digest,
+            delivery,
+            admitted_effects,
+            state: None,
+        }
+    }
+
+    pub fn state(&self) -> Option<ToolEffectLifecycleState> {
+        self.state
+    }
+    pub fn tool_id(&self) -> &ToolId {
+        &self.tool_id
+    }
+    pub fn admitted_effects(&self) -> &BTreeSet<EffectId> {
+        &self.admitted_effects
+    }
+
+    pub fn apply(
+        &mut self,
+        next: ToolEffectLifecycleState,
+        observed_effects: Vec<ObservedEffect>,
+        outcome_code: Option<String>,
+    ) -> Result<ToolEffectJournalRecord, ToolEffectTransitionError> {
+        let legal = matches!(
+            (self.state, next),
+            (None, ToolEffectLifecycleState::Admitted)
+                | (
+                    Some(ToolEffectLifecycleState::Admitted),
+                    ToolEffectLifecycleState::Started
+                )
+                | (
+                    Some(ToolEffectLifecycleState::Started),
+                    ToolEffectLifecycleState::Committed
+                )
+                | (
+                    Some(ToolEffectLifecycleState::Started),
+                    ToolEffectLifecycleState::Failed
+                )
+                | (
+                    Some(ToolEffectLifecycleState::Started),
+                    ToolEffectLifecycleState::Cancelled
+                )
+                | (
+                    Some(ToolEffectLifecycleState::Started),
+                    ToolEffectLifecycleState::OutcomeUnknown
+                )
+        );
+        if !legal {
+            return Err(ToolEffectTransitionError {
+                from: self.state,
+                to: next,
+            });
+        }
+        self.state = Some(next);
+        Ok(ToolEffectJournalRecord {
+            call_id: self.call_id.clone(),
+            tool_id: self.tool_id.clone(),
+            extension_id: self.extension_id.clone(),
+            schema_digest: self.schema_digest.clone(),
+            delivery: self.delivery,
+            state: next,
+            admitted_effects: self.admitted_effects.clone(),
+            observed_effects,
+            outcome_code,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolEffectTransitionError {
+    from: Option<ToolEffectLifecycleState>,
+    to: ToolEffectLifecycleState,
+}
+
+impl Display for ToolEffectTransitionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "illegal tool effect transition from {:?} to {}",
+            self.from,
+            self.to.as_str()
+        )
+    }
+}
+
+impl std::error::Error for ToolEffectTransitionError {}
 
 pub trait ToolEffectJournal {
     fn append(
@@ -145,7 +284,7 @@ impl ToolEffectJournal for MemoryToolEffectJournal {
         &mut self,
         record: &ToolEffectJournalRecord,
     ) -> Result<String, ToolEffectJournalError> {
-        let reference = format!("effect:{}:{}", record.call_id, self.records.len() + 1);
+        let reference = format!("effect:{}:{}", record.call_id(), self.records.len() + 1);
         self.records.push(record.clone());
         Ok(reference)
     }

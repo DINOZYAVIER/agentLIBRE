@@ -255,20 +255,20 @@ fn incomplete_output_and_durable_item_have_stable_names_and_redact_content() {
 }
 
 #[test]
-fn invalid_capability_names_are_not_copied_into_safe_denial_events() {
-    let model_controlled_name = "SECRET invalid capability name";
-    let event = RuntimeEvent::CapabilityCallDenied {
+fn invalid_tool_names_are_not_copied_into_safe_denial_events() {
+    let model_controlled_name = "SECRET invalid tool name";
+    let event = RuntimeEvent::ToolCallDenied {
         policy_hash: format!("sha256:{}", "0".repeat(64)),
-        capability_id: None,
-        reason_code: "invalid_capability_id".to_string(),
+        tool_id: None,
+        reason_code: "invalid_tool_id".to_string(),
     };
 
     let safe = SafeRuntimeEvent::from(&event);
     let encoded = serde_json::to_string(&safe).unwrap();
 
     assert!(!encoded.contains(model_controlled_name));
-    assert!(encoded.contains(r#""capability_id":null"#));
-    assert!(encoded.contains("invalid_capability_id"));
+    assert!(encoded.contains(r#""tool_id":null"#));
+    assert!(encoded.contains("invalid_tool_id"));
 }
 
 #[test]

@@ -155,7 +155,7 @@ pub enum ArtifactSourceKind {
 pub struct ArtifactSource {
     pub kind: ArtifactSourceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub extension: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -226,11 +226,11 @@ impl ArtifactRef {
         }
         if self
             .source
-            .provider
+            .extension
             .as_ref()
-            .is_some_and(|provider| provider.trim().is_empty() || provider.len() > 128)
+            .is_some_and(|extension| extension.trim().is_empty() || extension.len() > 128)
         {
-            return Err(ContentError::InvalidSourceProvider);
+            return Err(ContentError::InvalidSourceExtension);
         }
         Ok(())
     }
@@ -393,7 +393,7 @@ pub enum ContentError {
     InvalidImageDimensions { width: u32, height: u32 },
     MissingImageDimensions,
     EmptyArtifact,
-    InvalidSourceProvider,
+    InvalidSourceExtension,
     EmptyContent,
     EmptyText,
     TooManyParts(usize),
@@ -413,7 +413,9 @@ impl Display for ContentError {
             }
             Self::MissingImageDimensions => formatter.write_str("image dimensions are required"),
             Self::EmptyArtifact => formatter.write_str("artifact byte length must be positive"),
-            Self::InvalidSourceProvider => formatter.write_str("invalid artifact source provider"),
+            Self::InvalidSourceExtension => {
+                formatter.write_str("invalid artifact source extension")
+            }
             Self::EmptyContent => formatter.write_str("content must contain at least one part"),
             Self::EmptyText => formatter.write_str("text content part cannot be empty"),
             Self::TooManyParts(count) => write!(formatter, "content has too many parts: {count}"),
@@ -442,7 +444,7 @@ mod tests {
             ArtifactSensitivity::Sensitive,
             ArtifactSource {
                 kind: ArtifactSourceKind::ScreenCapture,
-                provider: Some("xdg-desktop-portal".to_string()),
+                extension: Some("xdg-desktop-portal".to_string()),
             },
         )
         .unwrap();

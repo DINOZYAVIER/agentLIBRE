@@ -1,13 +1,14 @@
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration, ToolId,
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
+    ToolId,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{ToolCatalog, ToolCatalogError};
 
-pub const PROVIDER_ID: &str = "matrix-delivery-tools";
-pub const MATRIX_OUTBOX_DELIVER_TOOL_ID: &str = "matrix.outbox.deliver";
+pub const PROVIDER_ID: &str = "matrix.bridge";
+pub const MATRIX_OUTBOX_DELIVER_TOOL_ID: &str = "matrix.bridge:outbox.deliver";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -21,21 +22,22 @@ pub struct MatrixOutboxDeliverArgs {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix delivery provider ID is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix delivery extension ID is valid"),
         "Matrix Delivery Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin Matrix delivery provider declaration is valid")
+    .expect("builtin Matrix delivery extension declaration is valid")
     .with_tool(
         ToolDeclaration::from_schema::<MatrixOutboxDeliverArgs>(
             ToolId::new(MATRIX_OUTBOX_DELIVER_TOOL_ID)
-                .expect("builtin Matrix delivery capability ID is valid"),
+                .expect("builtin Matrix delivery tool ID is valid"),
             "Deliver queued Matrix notification outbox rows through the bridge-owned Matrix client.",
             OperationKind::Execute,
         )
         .expect("builtin Matrix delivery action schema is valid")
         .with_state_effects([EffectId::matrix_outbox()]),
     )
+    .with_effect(EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap())
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -50,9 +52,9 @@ mod tests {
 
     #[test]
     fn delivery_schema_is_complete_and_closed() {
-        let provider = declaration();
-        provider.validate().unwrap();
-        let action = &provider.tools[0];
+        let extension = declaration();
+        extension.validate().unwrap();
+        let action = &extension.tools[0];
         assert_eq!(action.input_schema["additionalProperties"], false);
         let schema = action.compile_schema().unwrap();
         schema

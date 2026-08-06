@@ -2,20 +2,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    CapabilityPresentationCompleteness, CapabilityPresentationDetail,
-    CapabilityPresentationExecutionProfile, ChildRunPresentation,
-    IncompleteOutputReason as ChatIncompleteOutputReason, ModelAttemptOutcome,
-    PolicyPresentationOutcome, PresentationDelivery, ToolActionOutcome, TurnPresentationEvent,
-    TurnPresentationOutcome, TurnPresentationSink,
+    ChildRunPresentation, IncompleteOutputReason as ChatIncompleteOutputReason,
+    ModelAttemptOutcome, PolicyPresentationOutcome, PresentationDelivery, ToolActionOutcome,
+    ToolPresentationCompleteness, ToolPresentationDetail, ToolPresentationExecutionProfile,
+    TurnPresentationEvent, TurnPresentationOutcome, TurnPresentationSink,
 };
 
 use crate::{
     ActionItemState, ActivityCacheDisposition, ActivityCompleteness, ActivityDetailView,
     ActivityGraphDeltaBatch, ActivityNodeKind, ActivityNodeState, ActivityNodeView, ActivityPhase,
     ActivityPolicyOutcome, ApplicationError, ApplicationErrorCode, ApplicationService,
-    AssistantItemState, CapabilityActivityDetail, ContinueActionView, IncompleteAssistantItemView,
-    IncompleteOutputReason, InferenceActivityDetail, InferenceProductStageView,
-    SanitizedDisplayPath, SessionPresentationEvent, SessionPresentationItem,
+    AssistantItemState, ContinueActionView, IncompleteAssistantItemView, IncompleteOutputReason,
+    InferenceActivityDetail, InferenceProductStageView, SanitizedDisplayPath,
+    SessionPresentationEvent, SessionPresentationItem, ToolActivityDetail,
 };
 
 const MAX_ACTION_SUMMARY_BYTES: usize = 1024;
@@ -271,7 +270,7 @@ fn application_events(
             turn_id,
             attempt_id,
             step_id,
-            capability_id,
+            tool_id,
             ..
         } => {
             let node = step_activity_node(
@@ -279,7 +278,7 @@ fn application_events(
                 &turn_id,
                 attempt_id.as_ref(),
                 &step_id,
-                capability_id.as_str(),
+                tool_id.as_str(),
                 ActivityNodeState::Running,
                 None,
                 None,
@@ -293,8 +292,8 @@ fn application_events(
                         item: SessionPresentationItem::AgentAction {
                             run_id: run_id.clone(),
                             step_id: step_id.clone(),
-                            capability_id: Some(capability_id.to_string()),
-                            summary: bounded_summary(capability_id.as_str()),
+                            tool_id: Some(tool_id.to_string()),
+                            summary: bounded_summary(tool_id.as_str()),
                             state: ActionItemState::Running,
                         },
                     },
@@ -308,7 +307,7 @@ fn application_events(
             turn_id,
             attempt_id,
             step_id,
-            capability_id,
+            tool_id,
             outcome,
             detail,
             ..
@@ -323,10 +322,10 @@ fn application_events(
                 &turn_id,
                 attempt_id.as_ref(),
                 &step_id,
-                capability_id.as_str(),
+                tool_id.as_str(),
                 state,
                 state.is_terminal().then(now_unix_ms),
-                detail.map(capability_activity_detail),
+                detail.map(tool_activity_detail),
             );
             let mut path = vec![run_node_id(&run_id), turn_node_id(&turn_id)];
             if !state.is_terminal() {
@@ -339,8 +338,8 @@ fn application_events(
                         item: SessionPresentationItem::AgentAction {
                             run_id: run_id.clone(),
                             step_id,
-                            capability_id: Some(capability_id.to_string()),
-                            summary: bounded_summary(capability_id.as_str()),
+                            tool_id: Some(tool_id.to_string()),
+                            summary: bounded_summary(tool_id.as_str()),
                             state: match outcome {
                                 ToolActionOutcome::Succeeded => ActionItemState::Succeeded,
                                 ToolActionOutcome::Waiting => ActionItemState::Running,
@@ -358,7 +357,7 @@ fn application_events(
             turn_id,
             attempt_id,
             step_id,
-            capability_id,
+            tool_id,
             outcome,
         } => {
             let state = match outcome {
@@ -370,7 +369,7 @@ fn application_events(
                 &turn_id,
                 attempt_id.as_ref(),
                 &step_id,
-                capability_id.as_str(),
+                tool_id.as_str(),
                 state,
                 outcome,
             );
@@ -581,7 +580,7 @@ fn step_activity_node(
     turn_id: &agl_ids::TurnId,
     attempt_id: Option<&agl_ids::AttemptId>,
     step_id: &agl_ids::StepId,
-    capability_id: &str,
+    tool_id: &str,
     state: ActivityNodeState,
     finished_at_unix_ms: Option<i64>,
     detail: Option<ActivityDetailView>,
@@ -602,9 +601,9 @@ fn step_activity_node(
         updated_at_unix_ms: now_unix_ms(),
         finished_at_unix_ms,
         elapsed_ms: 0,
-        summary: bounded_summary(capability_id),
-        detail: detail.unwrap_or_else(|| ActivityDetailView::UnknownCapability {
-            capability_id: bounded_summary(capability_id),
+        summary: bounded_summary(tool_id),
+        detail: detail.unwrap_or_else(|| ActivityDetailView::UnknownTool {
+            tool_id: bounded_summary(tool_id),
         }),
     }
 }
@@ -614,7 +613,7 @@ fn policy_activity_node(
     turn_id: &agl_ids::TurnId,
     attempt_id: Option<&agl_ids::AttemptId>,
     step_id: &agl_ids::StepId,
-    capability_id: &str,
+    tool_id: &str,
     state: ActivityNodeState,
     outcome: PolicyPresentationOutcome,
 ) -> ActivityNodeView {
@@ -635,9 +634,9 @@ fn policy_activity_node(
         updated_at_unix_ms: now,
         finished_at_unix_ms: Some(now),
         elapsed_ms: 0,
-        summary: bounded_summary(capability_id),
-        detail: ActivityDetailView::Capability(CapabilityActivityDetail::PolicyCheck {
-            capability_id: bounded_summary(capability_id),
+        summary: bounded_summary(tool_id),
+        detail: ActivityDetailView::Tool(ToolActivityDetail::PolicyCheck {
+            tool_id: bounded_summary(tool_id),
             outcome: match outcome {
                 PolicyPresentationOutcome::Allowed => ActivityPolicyOutcome::Allowed,
                 PolicyPresentationOutcome::Denied => ActivityPolicyOutcome::Denied,
@@ -646,44 +645,44 @@ fn policy_activity_node(
     }
 }
 
-fn capability_activity_detail(detail: CapabilityPresentationDetail) -> ActivityDetailView {
-    ActivityDetailView::Capability(match detail {
-        CapabilityPresentationDetail::FilesystemList {
+fn tool_activity_detail(detail: ToolPresentationDetail) -> ActivityDetailView {
+    ActivityDetailView::Tool(match detail {
+        ToolPresentationDetail::FilesystemList {
             path,
             entries,
             completeness,
-        } => CapabilityActivityDetail::FilesystemList {
+        } => ToolActivityDetail::FilesystemList {
             path: SanitizedDisplayPath::from_utf8(&path),
             entries,
             completeness: match completeness {
-                CapabilityPresentationCompleteness::Complete => ActivityCompleteness::Complete,
-                CapabilityPresentationCompleteness::Truncated => ActivityCompleteness::Truncated,
+                ToolPresentationCompleteness::Complete => ActivityCompleteness::Complete,
+                ToolPresentationCompleteness::Truncated => ActivityCompleteness::Truncated,
             },
         },
-        CapabilityPresentationDetail::FilesystemRead { path, bytes } => {
-            CapabilityActivityDetail::FilesystemRead {
+        ToolPresentationDetail::FilesystemRead { path, bytes } => {
+            ToolActivityDetail::FilesystemRead {
                 path: SanitizedDisplayPath::from_utf8(&path),
                 bytes,
             }
         }
-        CapabilityPresentationDetail::RepositorySearch {
+        ToolPresentationDetail::RepositorySearch {
             scope,
             matches,
             complete,
-        } => CapabilityActivityDetail::RepositorySearch {
+        } => ToolActivityDetail::RepositorySearch {
             scope: SanitizedDisplayPath::from_utf8(&scope),
             matches,
             complete,
         },
-        CapabilityPresentationDetail::ProcessExecution {
+        ToolPresentationDetail::ProcessExecution {
             profile,
             exit_status,
-        } => CapabilityActivityDetail::ProcessExecution {
+        } => ToolActivityDetail::ProcessExecution {
             profile: match profile {
-                CapabilityPresentationExecutionProfile::Workspace => {
+                ToolPresentationExecutionProfile::Workspace => {
                     agl_exec::ExecutionProfile::Workspace
                 }
-                CapabilityPresentationExecutionProfile::Host => agl_exec::ExecutionProfile::Host,
+                ToolPresentationExecutionProfile::Host => agl_exec::ExecutionProfile::Host,
             },
             exit_status,
         },
@@ -868,13 +867,13 @@ mod tests {
     }
 
     #[test]
-    fn capability_and_policy_events_map_only_closed_typed_details() {
+    fn tool_and_policy_events_map_only_closed_typed_details() {
         let session_id = SessionId::generate();
         let run_id = RunId::generate();
         let turn_id = TurnId::generate();
         let attempt_id = AttemptId::generate();
         let step_id = StepId::generate();
-        let capability_id = agl_extension::ToolId::new("core.workspace:fs.list").unwrap();
+        let tool_id = agl_kernel::ToolId::new("core.workspace:fs.list").unwrap();
         let (_, tool_events) = application_events(TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
             run_id: run_id.clone(),
@@ -882,12 +881,12 @@ mod tests {
             attempt_id: Some(attempt_id.clone()),
             provisional_message_id: None,
             step_id: step_id.clone(),
-            capability_id: capability_id.clone(),
+            tool_id: tool_id.clone(),
             outcome: ToolActionOutcome::Succeeded,
-            detail: Some(CapabilityPresentationDetail::FilesystemList {
+            detail: Some(ToolPresentationDetail::FilesystemList {
                 path: "crates".to_owned(),
                 entries: 42,
-                completeness: CapabilityPresentationCompleteness::Truncated,
+                completeness: ToolPresentationCompleteness::Truncated,
             }),
         });
         let tool_node = tool_events
@@ -900,7 +899,7 @@ mod tests {
         assert_eq!(tool_node.parent_node_id, Some(format!("turn:{turn_id}")));
         assert_eq!(
             tool_node.detail,
-            ActivityDetailView::Capability(CapabilityActivityDetail::FilesystemList {
+            ActivityDetailView::Tool(ToolActivityDetail::FilesystemList {
                 path: SanitizedDisplayPath::from_utf8("crates"),
                 entries: 42,
                 completeness: ActivityCompleteness::Truncated,
@@ -913,7 +912,7 @@ mod tests {
             turn_id,
             attempt_id: Some(attempt_id),
             step_id: step_id.clone(),
-            capability_id,
+            tool_id,
             outcome: PolicyPresentationOutcome::Denied,
         });
         let policy_node = policy_events
@@ -928,8 +927,8 @@ mod tests {
         assert_eq!(policy_node.phase, ActivityPhase::Policy);
         assert_eq!(
             policy_node.detail,
-            ActivityDetailView::Capability(CapabilityActivityDetail::PolicyCheck {
-                capability_id: "core.workspace:fs.list".to_owned(),
+            ActivityDetailView::Tool(ToolActivityDetail::PolicyCheck {
+                tool_id: "core.workspace:fs.list".to_owned(),
                 outcome: ActivityPolicyOutcome::Denied,
             })
         );

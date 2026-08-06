@@ -131,7 +131,7 @@ impl DurableRunDriver for FakeDriver {
                 "phase": self.phase,
                 "event_sequence": self.event_sequence,
             }),
-            pending_effect: self.terminal.is_none().then(|| SupervisorEffect {
+            pending_request: self.terminal.is_none().then(|| SupervisorEffect {
                 sequence: self.phase + 1,
                 kind: "fake_effect".to_string(),
                 delivery_class: self.behavior.delivery,

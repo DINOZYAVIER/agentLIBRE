@@ -4,7 +4,7 @@ use agl_core_tools::skills::{
     SkillInspectArgs, SkillListArgs, SkillListSource, SkillRevokeArgs, SkillStatusArgs,
     SkillTrustArgs, SkillVerifyArgs,
 };
-use agl_extension::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
+use agl_kernel::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
 use agl_skill::{
     SkillHarness, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
     revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
@@ -55,7 +55,7 @@ impl SkillTools {
             agl_core_tools::SKILL_REVOKE_TOOL_ID => {
                 self.revoke(parse_args(id.as_str(), arguments)?)?
             }
-            _ => anyhow::bail!("unknown skill capability `{id}`"),
+            _ => anyhow::bail!("unknown skill tool `{id}`"),
         };
         Ok(ToolResult::new(data))
     }
@@ -103,7 +103,7 @@ impl SkillTools {
         let total = skills.len();
         skills.truncate(limit);
         Ok(json!({
-            "capability_id": agl_core_tools::SKILL_LIST_TOOL_ID,
+            "tool_id": agl_core_tools::SKILL_LIST_TOOL_ID,
             "source": args.source.as_str(),
             "trusted_only": args.trusted_only,
             "limit": limit,
@@ -157,7 +157,7 @@ impl SkillTools {
         ensure!(!matches.is_empty(), "skill not found: {}", args.id);
 
         Ok(json!({
-            "capability_id": agl_core_tools::SKILL_INSPECT_TOOL_ID,
+            "tool_id": agl_core_tools::SKILL_INSPECT_TOOL_ID,
             "id": args.id,
             "include_body": args.include_body,
             "include_references": args.include_references,
@@ -188,7 +188,7 @@ impl SkillTools {
             },
         )?;
         Ok(json!({
-            "capability_id": agl_core_tools::SKILL_TRUST_TOOL_ID,
+            "tool_id": agl_core_tools::SKILL_TRUST_TOOL_ID,
             "report": report,
         }))
     }
@@ -197,30 +197,29 @@ impl SkillTools {
         let report =
             revoke_workspace_skill(&self.workspace_root, &self.trust_store_path, &args.name)?;
         Ok(json!({
-            "capability_id": agl_core_tools::SKILL_REVOKE_TOOL_ID,
+            "tool_id": agl_core_tools::SKILL_REVOKE_TOOL_ID,
             "report": report,
         }))
     }
 }
 
 impl ToolHandler for SkillTools {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch_action(&invocation.capability_id, invocation.arguments)
+            self.dispatch_action(&invocation.tool_id, invocation.arguments)
                 .map_err(Into::into)
         })
     }
 }
 
-fn parse_args<T: DeserializeOwned>(capability_id: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments)
-        .with_context(|| format!("{capability_id} arguments are invalid"))
+fn parse_args<T: DeserializeOwned>(tool_id: &str, arguments: Value) -> Result<T> {
+    serde_json::from_value(arguments).with_context(|| format!("{tool_id} arguments are invalid"))
 }
 
-fn report_value(capability_id: &str, report: &agl_skill::WorkspaceSkillReport) -> Result<Value> {
+fn report_value(tool_id: &str, report: &agl_skill::WorkspaceSkillReport) -> Result<Value> {
     Ok(json!({
-        "capability_id": capability_id,
+        "tool_id": tool_id,
         "report": report,
     }))
 }
@@ -353,10 +352,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            list.data["capability_id"],
-            agl_core_tools::SKILL_LIST_TOOL_ID
-        );
+        assert_eq!(list.data["tool_id"], agl_core_tools::SKILL_LIST_TOOL_ID);
         assert!(
             list.data["skills"]
                 .as_array()

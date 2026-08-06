@@ -81,7 +81,7 @@ impl DurableRunDriver for StoreStatusDriver {
         });
         Ok(DriverSnapshot {
             checkpoint: serde_json::json!({ "completed": self.completed }),
-            pending_effect: (!self.completed).then(|| SupervisorEffect {
+            pending_request: (!self.completed).then(|| SupervisorEffect {
                 sequence: 1,
                 kind: "store_status".to_string(),
                 delivery_class: EffectDeliveryClass::ReplaySafe,
@@ -106,9 +106,9 @@ impl DurableRunDriver for StoreStatusDriver {
         }
         let store = AglStore::open_current_read_only_at(&self.store_root)
             .map_err(|error| DriverEffectError::new("store.open", error.to_string(), true))?;
-        let health = store
-            .health()
-            .map_err(|error| DriverEffectError::new("store.status", error.to_string(), true))?;
+        let health = store.health().map_err(|error| {
+            DriverEffectError::new("core.store:status", error.to_string(), true)
+        })?;
         let result = serde_json::json!({
             "status": "succeeded",
             "target": STORE_STATUS_BUILTIN_CRON_TARGET,

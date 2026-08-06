@@ -88,23 +88,23 @@ pub enum RuntimeEvent {
     },
     #[serde(rename = "model.action_parsed")]
     ModelActionParsed { action: ParsedActionEvent },
-    #[serde(rename = "capability.policy_resolved")]
-    CapabilityPolicyResolved {
+    #[serde(rename = "tool.policy_resolved")]
+    ToolPolicyResolved {
         policy_hash: String,
-        capability_ids: Vec<String>,
+        tool_ids: Vec<String>,
         exclusions: Vec<ToolExclusionEvent>,
     },
-    #[serde(rename = "capability.call_admitted")]
-    CapabilityCallAdmitted {
+    #[serde(rename = "tool.call_admitted")]
+    ToolCallAdmitted {
         policy_hash: String,
-        capability_id: String,
-        provider_id: String,
+        tool_id: String,
+        extension_id: String,
         declaration_digest: String,
     },
-    #[serde(rename = "capability.call_denied")]
-    CapabilityCallDenied {
+    #[serde(rename = "tool.call_denied")]
+    ToolCallDenied {
         policy_hash: String,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         reason_code: String,
     },
     #[serde(rename = "tool.effect_lifecycle")]
@@ -233,9 +233,9 @@ impl RuntimeEvent {
             Self::ModelResponseReceived { .. } => "model.response_received",
             Self::ModelRequestFailed { .. } => "model.request_failed",
             Self::ModelActionParsed { .. } => "model.action_parsed",
-            Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
-            Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
-            Self::CapabilityCallDenied { .. } => "capability.call_denied",
+            Self::ToolPolicyResolved { .. } => "tool.policy_resolved",
+            Self::ToolCallAdmitted { .. } => "tool.call_admitted",
+            Self::ToolCallDenied { .. } => "tool.call_denied",
             Self::ToolEffectLifecycle { .. } => "tool.effect_lifecycle",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
@@ -336,23 +336,23 @@ pub enum SafeRuntimeEvent {
     },
     #[serde(rename = "model.action_parsed")]
     ModelActionParsed { action: SafeParsedActionEvent },
-    #[serde(rename = "capability.policy_resolved")]
-    CapabilityPolicyResolved {
+    #[serde(rename = "tool.policy_resolved")]
+    ToolPolicyResolved {
         policy_hash: String,
-        capability_ids: Vec<String>,
+        tool_ids: Vec<String>,
         exclusions: Vec<ToolExclusionEvent>,
     },
-    #[serde(rename = "capability.call_admitted")]
-    CapabilityCallAdmitted {
+    #[serde(rename = "tool.call_admitted")]
+    ToolCallAdmitted {
         policy_hash: String,
-        capability_id: String,
-        provider_id: String,
+        tool_id: String,
+        extension_id: String,
         declaration_digest: String,
     },
-    #[serde(rename = "capability.call_denied")]
-    CapabilityCallDenied {
+    #[serde(rename = "tool.call_denied")]
+    ToolCallDenied {
         policy_hash: String,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         reason_code: String,
     },
     #[serde(rename = "tool.effect_lifecycle")]
@@ -386,38 +386,38 @@ pub enum SafeRuntimeEvent {
     },
     #[serde(rename = "tool.args_validated")]
     ToolArgsValidated {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool.args_invalid")]
     ToolArgsInvalid {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         message_bytes: usize,
     },
     #[serde(rename = "tool.hidden_rejected")]
-    ToolHiddenRejected { capability_id: Option<String> },
+    ToolHiddenRejected { tool_id: Option<String> },
     #[serde(rename = "tool.limit_reached")]
     ToolLimitReached { limit: usize },
     #[serde(rename = "tool.call_started")]
     ToolCallStarted {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool.call_finished")]
     ToolCallFinished {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         data: JsonMetadata,
     },
     #[serde(rename = "tool.call_failed")]
     ToolCallFailed {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         message_bytes: usize,
     },
     #[serde(rename = "transcript.append_failed")]
     TranscriptAppendFailed { reason_code: String },
     #[serde(rename = "observation.appended")]
     ObservationAppended {
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         data: JsonMetadata,
     },
     #[serde(rename = "answer.final")]
@@ -460,13 +460,13 @@ pub enum SafeRuntimeEvent {
     #[serde(rename = "assistant_tool_call")]
     AssistantToolCall {
         message_id: MessageId,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool_message")]
     ToolMessage {
         message_id: MessageId,
-        capability_id: Option<String>,
+        tool_id: Option<String>,
         data: JsonMetadata,
     },
     #[serde(rename = "model_attempt_linked")]
@@ -502,9 +502,9 @@ impl SafeRuntimeEvent {
             Self::ModelResponseReceived { .. } => "model.response_received",
             Self::ModelRequestFailed { .. } => "model.request_failed",
             Self::ModelActionParsed { .. } => "model.action_parsed",
-            Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
-            Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
-            Self::CapabilityCallDenied { .. } => "capability.call_denied",
+            Self::ToolPolicyResolved { .. } => "tool.policy_resolved",
+            Self::ToolCallAdmitted { .. } => "tool.call_admitted",
+            Self::ToolCallDenied { .. } => "tool.call_denied",
             Self::ToolEffectLifecycle { .. } => "tool.effect_lifecycle",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
@@ -549,7 +549,7 @@ pub struct HookResultEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolExclusionEvent {
-    pub capability_id: String,
+    pub tool_id: String,
     pub reason_code: String,
 }
 
@@ -581,7 +581,7 @@ impl From<&Value> for JsonMetadata {
     }
 }
 
-fn safe_capability_id(value: &str) -> Option<String> {
+fn safe_tool_id(value: &str) -> Option<String> {
     let valid = !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase()
@@ -699,37 +699,37 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 action: match action {
                     ParsedActionEvent::Answer => SafeParsedActionEvent::Answer,
                     ParsedActionEvent::ToolCall { name } => SafeParsedActionEvent::ToolCall {
-                        capability_id: safe_capability_id(name),
+                        tool_id: safe_tool_id(name),
                     },
                 },
             },
-            RuntimeEvent::CapabilityPolicyResolved {
+            RuntimeEvent::ToolPolicyResolved {
                 policy_hash,
-                capability_ids,
+                tool_ids,
                 exclusions,
-            } => Self::CapabilityPolicyResolved {
+            } => Self::ToolPolicyResolved {
                 policy_hash: policy_hash.clone(),
-                capability_ids: capability_ids.clone(),
+                tool_ids: tool_ids.clone(),
                 exclusions: exclusions.clone(),
             },
-            RuntimeEvent::CapabilityCallAdmitted {
+            RuntimeEvent::ToolCallAdmitted {
                 policy_hash,
-                capability_id,
-                provider_id,
+                tool_id,
+                extension_id,
                 declaration_digest,
-            } => Self::CapabilityCallAdmitted {
+            } => Self::ToolCallAdmitted {
                 policy_hash: policy_hash.clone(),
-                capability_id: capability_id.clone(),
-                provider_id: provider_id.clone(),
+                tool_id: tool_id.clone(),
+                extension_id: extension_id.clone(),
                 declaration_digest: declaration_digest.clone(),
             },
-            RuntimeEvent::CapabilityCallDenied {
+            RuntimeEvent::ToolCallDenied {
                 policy_hash,
-                capability_id,
+                tool_id,
                 reason_code,
-            } => Self::CapabilityCallDenied {
+            } => Self::ToolCallDenied {
                 policy_hash: policy_hash.clone(),
-                capability_id: capability_id.clone(),
+                tool_id: tool_id.clone(),
                 reason_code: reason_code.clone(),
             },
             RuntimeEvent::ToolEffectLifecycle {
@@ -777,34 +777,34 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 }
             }
             RuntimeEvent::ToolArgsValidated { name, arguments } => Self::ToolArgsValidated {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
             RuntimeEvent::ToolArgsInvalid { name, message } => Self::ToolArgsInvalid {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 message_bytes: message.len(),
             },
             RuntimeEvent::ToolHiddenRejected { name } => Self::ToolHiddenRejected {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
             },
             RuntimeEvent::ToolLimitReached { limit } => Self::ToolLimitReached { limit: *limit },
             RuntimeEvent::ToolCallStarted { name, arguments } => Self::ToolCallStarted {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
             RuntimeEvent::ToolCallFinished { name, data } => Self::ToolCallFinished {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 data: JsonMetadata::from(data),
             },
             RuntimeEvent::ToolCallFailed { name, message } => Self::ToolCallFailed {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 message_bytes: message.len(),
             },
             RuntimeEvent::TranscriptAppendFailed { reason_code } => Self::TranscriptAppendFailed {
                 reason_code: reason_code.clone(),
             },
             RuntimeEvent::ObservationAppended { name, data } => Self::ObservationAppended {
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 data: JsonMetadata::from(data),
             },
             RuntimeEvent::AnswerFinal { answer } => Self::AnswerFinal {
@@ -863,7 +863,7 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 arguments,
             } => Self::AssistantToolCall {
                 message_id: message_id.clone(),
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
             RuntimeEvent::ToolMessage {
@@ -872,7 +872,7 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 data,
             } => Self::ToolMessage {
                 message_id: message_id.clone(),
-                capability_id: safe_capability_id(name),
+                tool_id: safe_tool_id(name),
                 data: JsonMetadata::from(data),
             },
             RuntimeEvent::ModelAttemptLinked => Self::ModelAttemptLinked,

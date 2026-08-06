@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agl_extension::{HookBatchRequest, HookBatchResult, HookEvent, HookId, HookInput, HookResult};
+use agl_kernel::{HookBatchRequest, HookBatchResult, HookEvent, HookId, HookInput, HookResult};
 use anyhow::{Result, bail};
 
 mod hash;

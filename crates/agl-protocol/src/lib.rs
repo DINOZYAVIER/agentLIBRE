@@ -292,7 +292,7 @@ pub struct HelloEvent {
     pub native_bundle_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub composite_worker_build_id: Option<String>,
-    pub capabilities: Vec<DaemonCapability>,
+    pub tools: Vec<DaemonTool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -434,7 +434,7 @@ pub struct ModelUnloadEvent {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DaemonCapability {
+pub enum DaemonTool {
     SessionOpen,
     SetupSmokeSessionOpen,
     SessionClear,
@@ -667,7 +667,7 @@ pub struct RunBudgetRequest {
     pub model_input_tokens: u64,
     pub model_output_tokens: u64,
     pub model_attempts: u32,
-    pub capability_calls: u32,
+    pub tool_calls: u32,
 }
 
 impl Default for RunBudgetRequest {
@@ -677,7 +677,7 @@ impl Default for RunBudgetRequest {
             model_input_tokens: 1_000_000,
             model_output_tokens: 100_000,
             model_attempts: 32,
-            capability_calls: 64,
+            tool_calls: 64,
         }
     }
 }
@@ -689,7 +689,7 @@ pub struct RunUsageEvent {
     pub model_input_tokens: u64,
     pub model_output_tokens: u64,
     pub model_attempts: u32,
-    pub capability_calls: u32,
+    pub tool_calls: u32,
 }
 
 fn default_event_replay_limit() -> usize {
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(budget.model_input_tokens, 1_000_000);
         assert_eq!(budget.model_output_tokens, 100_000);
         assert_eq!(budget.model_attempts, 32);
-        assert_eq!(budget.capability_calls, 64);
+        assert_eq!(budget.tool_calls, 64);
     }
 
     const REQUEST_ID: &str = "req_01890f17-4a00-7000-8000-000000000001";
@@ -1187,10 +1187,10 @@ mod tests {
                     "b".repeat(64),
                     "c".repeat(64)
                 )),
-                capabilities: vec![
-                    DaemonCapability::SessionOpen,
-                    DaemonCapability::RunSubmit,
-                    DaemonCapability::RunSubscribe,
+                tools: vec![
+                    DaemonTool::SessionOpen,
+                    DaemonTool::RunSubmit,
+                    DaemonTool::RunSubscribe,
                 ],
             }),
         );
@@ -1204,7 +1204,7 @@ mod tests {
             value["payload"]["daemon_runtime"]["generation_id"],
             format!("sha256:{}", "a".repeat(64))
         );
-        assert_eq!(value["payload"]["capabilities"][1], "run_submit");
+        assert_eq!(value["payload"]["tools"][1], "run_submit");
         assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
     }
 

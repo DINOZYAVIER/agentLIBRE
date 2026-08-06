@@ -10,7 +10,7 @@ use agl_function::{FunctionStatusReport, function_status_from_loaded};
 use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
 use agl_model::RuntimePlan;
 use agl_protocol::{
-    AssistantItemState, DaemonCapability, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
+    AssistantItemState, DaemonTool, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
     RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,
     SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest, SetupSmokeRuntimePlan,
     SetupSmokeSessionOpenRequest,
@@ -199,7 +199,7 @@ pub(crate) fn run_function_smoke(
         model_input_tokens: 32_768,
         model_output_tokens: u64::from(request.max_output_tokens),
         model_attempts: 2,
-        capability_calls: 0,
+        tool_calls: 0,
     };
     let started = Instant::now();
     let output = chat
@@ -255,22 +255,22 @@ async fn run_daemon_function_smoke(
     setup_request: Option<SetupSmokeSessionOpenRequest>,
 ) -> Result<String> {
     let mut required = vec![
-        DaemonCapability::RunSubmit,
-        DaemonCapability::RunSubscribe,
-        DaemonCapability::SessionPresentation,
-        DaemonCapability::SessionFinish,
+        DaemonTool::RunSubmit,
+        DaemonTool::RunSubscribe,
+        DaemonTool::SessionPresentation,
+        DaemonTool::SessionFinish,
     ];
     required.push(if setup_request.is_some() {
-        DaemonCapability::SetupSmokeSessionOpen
+        DaemonTool::SetupSmokeSessionOpen
     } else {
-        DaemonCapability::SessionOpen
+        DaemonTool::SessionOpen
     });
     let hello = client.hello().context("failed to read daemon identity")?;
     if let Some(missing) = required
         .into_iter()
-        .find(|capability| !hello.capabilities.contains(capability))
+        .find(|tool| !hello.tools.contains(tool))
     {
-        bail!("daemon lacks required function-smoke capability {missing:?}");
+        bail!("daemon lacks required function-smoke tool {missing:?}");
     }
     let opened = match setup_request {
         Some(request) => client.open_setup_smoke_session(request).await,
@@ -300,7 +300,7 @@ async fn run_daemon_function_smoke(
                     model_input_tokens: 32_768,
                     model_output_tokens: u64::from(max_output_tokens),
                     model_attempts: 2,
-                    capability_calls: 0,
+                    tool_calls: 0,
                 },
             })
             .await

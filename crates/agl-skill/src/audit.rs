@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use agl_extension::{EffectId, OperationKind, SkillId, ToolId};
 use agl_kernel::ToolCatalog;
+use agl_kernel::{EffectId, OperationKind, SkillId, ToolId};
 use serde::Deserialize;
 
 use crate::SkillRegistry;
@@ -35,9 +35,9 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
     let audit = read_audit();
     let catalog = agl_core_tools::builtin_tool_catalog().unwrap();
     let actual_tools = catalog
-        .providers()
+        .extensions()
         .iter()
-        .flat_map(|provider| provider.tools.iter().map(|action| action.id.clone()))
+        .flat_map(|extension| extension.tools.iter().map(|action| action.id.clone()))
         .collect::<BTreeSet<_>>();
 
     assert_eq!(audit.version, 1);
@@ -50,8 +50,8 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
         actual_tools
     );
 
-    for provider in catalog.providers() {
-        for action in &provider.tools {
+    for extension in catalog.extensions() {
+        for action in &extension.tools {
             let policy_owner = audit.tool_policy_owners.get(&action.id).unwrap();
             assert!(
                 !policy_owner.trim().is_empty(),
@@ -59,8 +59,8 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
                 action.id
             );
             assert!(
-                !provider.id.as_str().trim().is_empty(),
-                "{} must come from a named provider",
+                !extension.id.as_str().trim().is_empty(),
+                "{} must come from a named extension",
                 action.id
             );
         }
@@ -142,9 +142,9 @@ fn tool_lens_missing_tools_are_future_work_not_current_tools() {
     let audit = read_audit();
     let catalog = agl_core_tools::builtin_tool_catalog().unwrap();
     let current_tools = catalog
-        .providers()
+        .extensions()
         .iter()
-        .flat_map(|provider| provider.tools.iter().map(|action| action.id.clone()))
+        .flat_map(|extension| extension.tools.iter().map(|action| action.id.clone()))
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
 

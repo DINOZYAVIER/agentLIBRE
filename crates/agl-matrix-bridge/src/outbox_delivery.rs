@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use agl_core_tools::matrix_delivery::MatrixOutboxDeliverArgs;
-use agl_extension::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
+use agl_kernel::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
 use agl_store::{AglStore, MatrixNotificationOutboxItem};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -33,7 +33,7 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
     fn dispatch_action(&self, id: &ToolId, arguments: Value) -> Result<ToolResult> {
         ensure!(
             id.as_str() == agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
-            "unknown Matrix outbox delivery capability `{id}`"
+            "unknown Matrix outbox delivery tool `{id}`"
         );
         let args =
             serde_json::from_value::<MatrixOutboxDeliverArgs>(arguments).with_context(|| {
@@ -99,7 +99,7 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
             }
         }
         Ok(json!({
-            "capability_id": agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            "tool_id": agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
             "dry_run": args.dry_run,
             "limit": limit,
             "queued": queued_count,
@@ -112,10 +112,10 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
 }
 
 impl<T: MatrixOutboxTransport> ToolHandler for MatrixOutboxDeliveryTools<T> {
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            self.dispatch_action(&invocation.capability_id, invocation.arguments)
+            self.dispatch_action(&invocation.tool_id, invocation.arguments)
                 .map_err(Into::into)
         })
     }

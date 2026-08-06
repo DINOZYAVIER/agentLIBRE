@@ -1,7 +1,9 @@
 use std::path::Path;
 
-use agl_extension::{ExtensionDescriptor, ExtensionRegistration, ToolBinding, ToolHandler, ToolId};
 use agl_ids::RunId;
+use agl_kernel::{
+    ExtensionDescriptor, ExtensionRegistration, HookBinding, ToolBinding, ToolHandler, ToolId,
+};
 use agl_kernel::{ToolCatalog, ToolCatalogError, ToolRuntime};
 use anyhow::{Context, Result};
 
@@ -20,19 +22,26 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
     let mut catalog = ToolCatalog::new();
     catalog
         .register(agl_core_tools::guards::declaration())
-        .context("failed to register builtin core guard provider")?;
-    register_chat_tool_providers(&mut catalog)?;
+        .context("failed to register builtin core guard extension")?;
+    register_chat_tool_extensions(&mut catalog)?;
     Ok(catalog)
 }
 
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
     let mut runtime = ToolRuntime::new();
+    let guards = agl_core_tools::guards::CoreGuards::new();
+    let hook_bindings = guards
+        .declaration()
+        .hooks
+        .iter()
+        .map(|hook| HookBinding::new(hook.id.clone(), guards.clone()))
+        .collect::<Vec<_>>();
     runtime
-        .register_extension(ExtensionRegistration::new(
-            agl_core_tools::guards::declaration(),
-            [],
-        ))
-        .context("failed to register builtin core guard provider")?;
+        .register_extension(
+            ExtensionRegistration::new(guards.declaration().clone(), [])
+                .with_hook_bindings(hook_bindings),
+        )
+        .context("failed to register builtin core guard extension")?;
 
     register_extension(
         &mut runtime,
@@ -139,8 +148,8 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
     )?;
     register_extension(
         &mut runtime,
-        agl_extension::delegation_provider(),
-        &[agl_extension::AGENT_DELEGATE_TOOL_ID],
+        crate::delegation_contract::delegation_extension(),
+        &[crate::delegation_contract::AGENT_DELEGATE_TOOL_ID],
         config
             .delegation_handler
             .unwrap_or_else(crate::delegation::DelegationHandler::disabled),
@@ -150,14 +159,14 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
     Ok(runtime)
 }
 
-fn register_chat_tool_providers(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    for declaration in chat_tool_provider_declarations() {
+fn register_chat_tool_extensions(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
+    for declaration in chat_tool_extension_declarations() {
         catalog.register(declaration)?;
     }
     Ok(())
 }
 
-pub(crate) fn chat_tool_provider_declarations() -> Vec<ExtensionDescriptor> {
+pub(crate) fn chat_tool_extension_declarations() -> Vec<ExtensionDescriptor> {
     vec![
         agl_core_tools::cron::declaration(),
         agl_core_tools::fs::declaration(),
@@ -170,7 +179,7 @@ pub(crate) fn chat_tool_provider_declarations() -> Vec<ExtensionDescriptor> {
         agl_core_tools::skills::declaration(),
         agl_core_tools::store::declaration(),
         agl_host_tools::screen::declaration(),
-        agl_extension::delegation_provider(),
+        crate::delegation_contract::delegation_extension(),
     ]
 }
 
@@ -180,8 +189,8 @@ struct UnavailableProcessHandler;
 impl ToolHandler for UnavailableProcessHandler {
     fn dispatch(
         &self,
-        _context: agl_extension::ToolDispatchContext,
-    ) -> agl_extension::ToolHandlerFuture<'_> {
+        _context: agl_kernel::ToolDispatchContext,
+    ) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(std::future::ready(Err(anyhow::anyhow!(
             "process runtime is unavailable"
         )
@@ -293,8 +302,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use agl_extension::{DeclarationDigest, ToolInvocation};
     use agl_ids::{ExecutionScope, RunId};
+    use agl_kernel::{DeclarationDigest, ToolInvocation};
     use agl_kernel::{DispatchDenialCode, ToolAccessMode, ToolPolicyInput};
     use serde_json::json;
 
@@ -320,12 +329,12 @@ mod tests {
         let catalog_tools = tool_ids(&catalog);
         let runtime_catalog_tools = tool_ids(runtime.catalog());
         let handler_tools = runtime.handler_ids().cloned().collect::<BTreeSet<_>>();
-        let catalog_providers = provider_digests(&catalog);
-        let runtime_providers = provider_digests(runtime.catalog());
+        let catalog_extensions = extension_digests(&catalog);
+        let runtime_extensions = extension_digests(runtime.catalog());
 
         assert_eq!(runtime_catalog_tools, catalog_tools);
         assert_eq!(handler_tools, catalog_tools);
-        assert_eq!(runtime_providers, catalog_providers);
+        assert_eq!(runtime_extensions, catalog_extensions);
         assert!(
             !catalog_tools
                 .contains(&ToolId::new(agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap()),
@@ -335,40 +344,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn provider_digests(
+    fn extension_digests(
         catalog: &ToolCatalog,
     ) -> std::collections::BTreeMap<String, DeclarationDigest> {
         catalog
-            .providers()
+            .extensions()
             .iter()
-            .map(|provider| (provider.id.as_str().to_owned(), provider.digest()))
+            .map(|extension| (extension.id.as_str().to_owned(), extension.digest()))
             .collect()
     }
 
     #[test]
-    fn forged_hidden_capability_is_denied_before_its_handler_runs() {
+    fn forged_hidden_tool_is_denied_before_its_handler_runs() {
         let root = temp_root("hidden-dispatch");
         let path = root.join("README.MD");
         std::fs::write(&path, "old\n").unwrap();
         let core_tools = agl_core_tools::CoreTools::new(&root).unwrap();
         let runtime = test_runtime(&root, &core_tools);
         let effective = ToolPolicyInput::new(
-            runtime.catalog().providers().iter().cloned(),
+            runtime.catalog().extensions().iter().cloned(),
             [ToolId::new(agl_core_tools::FS_READ_TOOL_ID).unwrap()],
             ToolAccessMode::Admin,
         )
         .resolve()
         .unwrap();
-        let capability_id = ToolId::new(agl_core_tools::FS_APPLY_PATCH_TOOL_ID).unwrap();
-        let provider = runtime
-            .catalog()
-            .extension_for_tool(&capability_id)
-            .unwrap();
-        let declaration = provider.tool(&capability_id).unwrap();
+        let tool_id = ToolId::new(agl_core_tools::FS_APPLY_PATCH_TOOL_ID).unwrap();
+        let extension = runtime.catalog().extension_for_tool(&tool_id).unwrap();
+        let declaration = extension.tool(&tool_id).unwrap();
         let invocation = ToolInvocation::new(
             ExecutionScope::builder(RunId::generate()).build().unwrap(),
-            capability_id,
-            provider.id.clone(),
+            tool_id,
+            extension.id.clone(),
             declaration.digest(),
             effective.policy_hash().clone(),
             json!({"path": "README.MD", "old_text": "old", "new_text": "new"}),
@@ -378,13 +384,13 @@ mod tests {
             .dispatch(
                 invocation,
                 &effective,
-                agl_extension::ToolDispatchControl::uncancellable(),
+                agl_kernel::ToolDispatchControl::uncancellable(),
             )
             .unwrap_err();
 
         assert_eq!(
             error.denial().unwrap().code,
-            DispatchDenialCode::CapabilityNotEffective
+            DispatchDenialCode::ToolNotEffective
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "old\n");
         let _ = std::fs::remove_dir_all(root);
@@ -396,22 +402,19 @@ mod tests {
         std::fs::write(root.join("README.MD"), "content\n").unwrap();
         let core_tools = agl_core_tools::CoreTools::new(&root).unwrap();
         let runtime = test_runtime(&root, &core_tools);
-        let capability_id = ToolId::new(agl_core_tools::FS_READ_TOOL_ID).unwrap();
+        let tool_id = ToolId::new(agl_core_tools::FS_READ_TOOL_ID).unwrap();
         let effective = ToolPolicyInput::new(
-            runtime.catalog().providers().iter().cloned(),
-            [capability_id.clone()],
+            runtime.catalog().extensions().iter().cloned(),
+            [tool_id.clone()],
             ToolAccessMode::ReadOnly,
         )
         .resolve()
         .unwrap();
-        let provider = runtime
-            .catalog()
-            .extension_for_tool(&capability_id)
-            .unwrap();
+        let extension = runtime.catalog().extension_for_tool(&tool_id).unwrap();
         let invocation = ToolInvocation::new(
             ExecutionScope::builder(RunId::generate()).build().unwrap(),
-            capability_id,
-            provider.id.clone(),
+            tool_id,
+            extension.id.clone(),
             DeclarationDigest::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
             effective.policy_hash().clone(),
             json!({"path": "README.MD"}),
@@ -421,7 +424,7 @@ mod tests {
             .dispatch(
                 invocation,
                 &effective,
-                agl_extension::ToolDispatchControl::uncancellable(),
+                agl_kernel::ToolDispatchControl::uncancellable(),
             )
             .unwrap_err();
 
@@ -448,9 +451,9 @@ mod tests {
 
     fn tool_ids(catalog: &ToolCatalog) -> BTreeSet<ToolId> {
         catalog
-            .providers()
+            .extensions()
             .iter()
-            .flat_map(|provider| provider.tools.iter().map(|action| action.id.clone()))
+            .flat_map(|extension| extension.tools.iter().map(|action| action.id.clone()))
             .collect()
     }
 

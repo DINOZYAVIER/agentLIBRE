@@ -15,12 +15,12 @@ use agl_exec::{
 };
 #[cfg(test)]
 use agl_exec::{CallerOwner, CallerRole};
-use agl_extension::{
-    EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
-    ToolDispatchContext, ToolDispatchControl, ToolHandler, ToolHandlerError, ToolId,
-    ToolInvocation, ToolResult,
-};
 use agl_ids::{ExecutionScope, RunId, SessionId, StepId};
+use agl_kernel::{
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind,
+    ToolDeclaration, ToolDispatchContext, ToolDispatchControl, ToolHandler, ToolHandlerError,
+    ToolId, ToolInvocation, ToolResult,
+};
 use agl_process::TerminalEndpoint;
 use agl_terminal::environment::TerminalEnvironmentRequest;
 use agl_terminal::{
@@ -153,7 +153,7 @@ impl ProcessTools {
     }
 
     async fn execute(&self, context: ToolDispatchContext) -> Result<Value> {
-        let id = context.invocation().capability_id.as_str();
+        let id = context.invocation().tool_id.as_str();
         match id {
             PROCESS_PWD_TOOL_ID => self.pwd(context),
             PROCESS_CD_TOOL_ID => self.cd(context),
@@ -1525,9 +1525,9 @@ impl ToolHandler for ProcessTools {
         Ok(requested_conditional_effects(invocation)?)
     }
 
-    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
-            let tool_id = context.invocation().capability_id.as_str().to_owned();
+            let tool_id = context.invocation().tool_id.as_str().to_owned();
             let conditional_effects = context.authorized_conditional_effects().clone();
             match self.execute(context).await {
                 Ok(data) => {
@@ -1615,11 +1615,11 @@ fn observed_process_effects(
 
 pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("process provider id is valid"),
+        ExtensionId::new(PROVIDER_ID).expect("process extension id is valid"),
         "Core Process",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("process provider declaration is valid")
+    .expect("process extension declaration is valid")
     .with_tool(action::<EmptyArgs, PwdOutput>(
         PROCESS_PWD_TOOL_ID,
         "Return the caller's durable logical working directory.",
@@ -1704,22 +1704,29 @@ pub fn declaration() -> ExtensionDescriptor {
             ],
         )
         .with_errors([
-            agl_extension::ToolErrorDeclaration::recoverable("invalid_effect_envelope")
+            agl_kernel::ToolErrorDeclaration::recoverable("invalid_effect_envelope")
                 .with_data_schema::<EmptyToolErrorData>(),
-            agl_extension::ToolErrorDeclaration::recoverable("invalid_patch")
+            agl_kernel::ToolErrorDeclaration::recoverable("invalid_patch")
                 .with_data_schema::<EmptyToolErrorData>(),
-            agl_extension::ToolErrorDeclaration::recoverable("not_found")
+            agl_kernel::ToolErrorDeclaration::recoverable("not_found")
                 .with_data_schema::<PathNotFoundErrorData>(),
-            agl_extension::ToolErrorDeclaration::recoverable("conflict")
+            agl_kernel::ToolErrorDeclaration::recoverable("conflict")
                 .with_data_schema::<PatchConflictErrorData>(),
-            agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+            agl_kernel::ToolErrorDeclaration::terminal("execution_failed")
                 .with_data_schema::<EmptyToolErrorData>(),
-            agl_extension::ToolErrorDeclaration::terminal("outcome_unknown")
+            agl_kernel::ToolErrorDeclaration::terminal("outcome_unknown")
                 .with_data_schema::<EmptyToolErrorData>(),
         ])
         .expect("shell error declarations are valid"),
     );
-    crate::with_observation_workflow(descriptor)
+    crate::with_observation_workflow(descriptor.with_effects([
+        EffectDeclaration::for_standard(EffectId::session_working_directory()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::spawn_process()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::control_process()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::host_process_execution()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::shell_login_startup()).unwrap(),
+        EffectDeclaration::for_standard(EffectId::repo_workspace()).unwrap(),
+    ]))
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -1742,7 +1749,7 @@ fn action<I: JsonSchema, O: JsonSchema>(
     .with_output_schema::<O>()
     .expect("process result schema is valid")
     .with_errors([
-        agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+        agl_kernel::ToolErrorDeclaration::terminal("execution_failed")
             .with_data_schema::<EmptyToolErrorData>(),
     ])
     .expect("process error schema is valid")
@@ -1750,18 +1757,18 @@ fn action<I: JsonSchema, O: JsonSchema>(
     .with_conditional_state_effects(conditional_effects.iter().cloned())
 }
 
-fn process_launch_errors() -> Vec<agl_extension::ToolErrorDeclaration> {
+fn process_launch_errors() -> Vec<agl_kernel::ToolErrorDeclaration> {
     vec![
-        agl_extension::ToolErrorDeclaration::recoverable("not_found")
+        agl_kernel::ToolErrorDeclaration::recoverable("not_found")
             .with_data_schema::<ProgramNotFoundErrorData>(),
-        agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+        agl_kernel::ToolErrorDeclaration::terminal("execution_failed")
             .with_data_schema::<EmptyToolErrorData>(),
     ]
 }
 
 fn requested_conditional_effects(invocation: &ToolInvocation) -> Result<BTreeSet<EffectId>> {
     let mut effects = BTreeSet::new();
-    match invocation.capability_id.as_str() {
+    match invocation.tool_id.as_str() {
         PROCESS_CD_TOOL_ID => {
             let args = parse_args::<CdArgs>(PROCESS_CD_TOOL_ID, invocation.arguments.clone())?;
             if args.profile.unwrap_or_default() == ProfileArg::Host {
@@ -2635,9 +2642,9 @@ enum ShellOutput {
 mod tests {
     use std::sync::Mutex;
 
-    use agl_extension::{ExtensionRegistration, ToolBinding, ToolDispatchControl};
     use agl_ids::{RunId, StepId};
     use agl_kernel::{DispatchDenialCode, ToolAccessMode, ToolOutcomeStatus, ToolPolicyInput};
+    use agl_kernel::{ExtensionRegistration, ToolBinding, ToolDispatchControl};
 
     use super::*;
 
@@ -2674,7 +2681,7 @@ mod tests {
     }
 
     #[test]
-    fn declaration_has_exact_provider_actions_and_effect_classes() {
+    fn declaration_has_exact_extension_actions_and_effect_classes() {
         let declaration = declaration();
         assert_eq!(declaration.id.as_str(), PROVIDER_ID);
         assert_eq!(
@@ -2705,8 +2712,8 @@ mod tests {
 
     #[test]
     fn conditional_preflight_is_exact_and_login_implies_host() {
-        let provider = declaration();
-        let shell = provider
+        let extension = declaration();
+        let shell = extension
             .tools
             .iter()
             .find(|action| action.id.as_str() == SHELL_EXEC_TOOL_ID)
@@ -2716,9 +2723,9 @@ mod tests {
                 .build()
                 .unwrap(),
             shell.id.clone(),
-            provider.id.clone(),
+            extension.id.clone(),
             shell.digest(),
-            agl_extension::PolicyHash::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
+            agl_kernel::PolicyHash::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
             json!({
                 "command": "true",
                 "semantic_intent": "verify the host shell contract",
@@ -2832,14 +2839,14 @@ mod tests {
             .is_err()
         );
 
-        let provider = declaration();
+        let extension = declaration();
         let schema = |id: &str| {
-            let action = provider
+            let action = extension
                 .tools
                 .iter()
                 .find(|action| action.id.as_str() == id)
                 .unwrap();
-            agl_extension::ToolSchema::compile(&action.input_schema).unwrap()
+            agl_kernel::ToolSchema::compile(&action.input_schema).unwrap()
         };
         assert!(
             schema(PROCESS_EXEC_TOOL_ID)
@@ -3021,24 +3028,24 @@ mod tests {
             },
         )
         .unwrap();
-        let provider = declaration();
+        let extension = declaration();
         let mut runtime = agl_kernel::ToolRuntime::new();
         let bindings = PROCESS_TOOL_IDS
             .iter()
             .map(|id| ToolBinding::new(ToolId::new(*id).unwrap(), tools.clone()))
             .collect::<Vec<_>>();
         runtime
-            .register_extension(ExtensionRegistration::new(provider.clone(), bindings))
+            .register_extension(ExtensionRegistration::new(extension.clone(), bindings))
             .unwrap();
-        let capability_id = ToolId::new(PROCESS_CD_TOOL_ID).unwrap();
+        let tool_id = ToolId::new(PROCESS_CD_TOOL_ID).unwrap();
         let effective = ToolPolicyInput::new(
-            [provider.clone()],
-            [capability_id.clone()],
+            [extension.clone()],
+            [tool_id.clone()],
             ToolAccessMode::Write,
         )
         .resolve()
         .unwrap();
-        let action = provider.tool(&capability_id).unwrap();
+        let action = extension.tool(&tool_id).unwrap();
         let scope = ExecutionScope::builder(run_id)
             .step_id(StepId::generate())
             .build()
@@ -3046,8 +3053,8 @@ mod tests {
         let before = std::env::current_dir().unwrap();
         let invocation = ToolInvocation::new(
             scope.clone(),
-            capability_id.clone(),
-            provider.id.clone(),
+            tool_id.clone(),
+            extension.id.clone(),
             action.digest(),
             effective.policy_hash().clone(),
             json!({"path": "child"}),
@@ -3064,13 +3071,13 @@ mod tests {
 
         let exec_id = ToolId::new(PROCESS_EXEC_TOOL_ID).unwrap();
         let exec_effective = ToolPolicyInput::new(
-            [provider.clone()],
+            [extension.clone()],
             [exec_id.clone()],
             ToolAccessMode::Execute,
         )
         .resolve()
         .unwrap();
-        let exec_action = provider.tool(&exec_id).unwrap();
+        let exec_action = extension.tool(&exec_id).unwrap();
         let missing_program = root.join("definitely-missing-program");
         let exec_invocation = ToolInvocation::new(
             ExecutionScope::builder(RunId::generate())
@@ -3078,7 +3085,7 @@ mod tests {
                 .build()
                 .unwrap(),
             exec_id,
-            provider.id.clone(),
+            extension.id.clone(),
             exec_action.digest(),
             exec_effective.policy_hash().clone(),
             json!({"program": missing_program}),
@@ -3100,8 +3107,8 @@ mod tests {
 
         let host_invocation = ToolInvocation::new(
             scope,
-            capability_id,
-            provider.id.clone(),
+            tool_id,
+            extension.id.clone(),
             action.digest(),
             effective.policy_hash().clone(),
             json!({"path": root.clone(), "profile": "host"}),

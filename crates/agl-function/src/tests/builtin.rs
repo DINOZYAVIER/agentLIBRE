@@ -95,7 +95,7 @@ fn builtin_gemma4_31b_profiles_are_explicit_and_keep_extended_turn_limits() {
 
     for (function_id, context_tokens) in [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)] {
         let runtime = resolve_runtime_function(function_id, &workspace, &config).unwrap();
-        assert_eq!(runtime.max_capability_calls, Some(32));
+        assert_eq!(runtime.max_tool_calls, Some(32));
         assert_eq!(runtime.max_output_tokens, Some(4096));
         assert!(runtime.context.contains("including the `sha256:` prefix"));
         assert!(

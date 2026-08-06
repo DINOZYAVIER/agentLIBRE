@@ -138,7 +138,7 @@ pub struct PromptBudget {
     pub model_input_tokens: u64,
     pub model_output_tokens: u64,
     pub model_attempts: u32,
-    pub capability_calls: u32,
+    pub tool_calls: u32,
 }
 
 impl Default for PromptBudget {
@@ -148,7 +148,7 @@ impl Default for PromptBudget {
             model_input_tokens: 1_000_000,
             model_output_tokens: 100_000,
             model_attempts: 32,
-            capability_calls: 64,
+            tool_calls: 64,
         }
     }
 }

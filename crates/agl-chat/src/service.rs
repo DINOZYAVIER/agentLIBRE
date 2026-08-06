@@ -5,19 +5,19 @@ use std::time::Instant;
 
 use agl_content::{Content, ContentPart};
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_extension::ToolId;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
-use agl_loop::{
-    EffectFailure, EffectFailureCode, EffectOutcome, HookEffectOutput, IncompleteOutputReason,
-    TurnAdvance, TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor,
-    TurnInput, TurnOutput, TurnTerminal,
+use agl_kernel::ToolId;
+use agl_kernel::{
+    HookRequestOutput, IncompleteOutputReason, TurnAdvance, TurnAdvanceState, TurnCheckpoint,
+    TurnInput, TurnMachine, TurnOutput, TurnRequest, TurnRequestFailure, TurnRequestFailureCode,
+    TurnRequestOutcome, TurnRequestResult, TurnTerminal,
 };
+use agl_kernel::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use agl_model::RuntimePlanSet;
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
-use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
@@ -70,7 +70,7 @@ pub enum ChatTurnStatus {
 pub struct ChatTurnExecution {
     run_id: RunId,
     turn_id: TurnId,
-    executor: TurnExecutor,
+    executor: TurnMachine,
     advance: TurnAdvance,
     cancellation: InferenceCancellation,
     deadline: Option<Instant>,
@@ -96,9 +96,9 @@ impl ChatTurnExecution {
         self.executor.checkpoint()
     }
 
-    pub fn pending_effect(&self) -> Option<&TurnEffect> {
+    pub fn pending_request(&self) -> Option<&TurnRequest> {
         match &self.advance.state {
-            TurnAdvanceState::Pending { effect } => Some(effect),
+            TurnAdvanceState::Pending { request } => Some(request),
             TurnAdvanceState::Terminal { .. } => None,
         }
     }
@@ -137,11 +137,10 @@ pub(crate) struct TurnInputSpec<'a> {
     context_messages: &'a [TurnMessage],
     hook_batches: &'a [TurnHookBatch],
     hook_payload: serde_json::Value,
-    max_hook_repair_attempts: usize,
     repair_malformed_tool_calls: bool,
     max_tool_calls: usize,
     visible_tools: &'a [VisibleTool],
-    capability_policy_hash: Option<String>,
+    tool_policy_hash: Option<String>,
     user_input: &'a Content,
 }
 
@@ -214,7 +213,7 @@ impl ChatService {
             session_id.clone(),
             inference_client,
         )?;
-        let max_tool_calls = main_tool_call_limit(session.function_max_capability_calls());
+        let max_tool_calls = main_tool_call_limit(session.function_max_tool_calls());
         let (chat_history, replay, execution_context) = if history_enabled {
             if resumed_session {
                 let history =
@@ -292,7 +291,7 @@ impl ChatService {
         let workspace_root = config.workspace_root.clone();
         let execution_session_id = config.execution_session_id.clone();
         let max_tool_calls =
-            usize::try_from(config.spec.limits.max_capability_calls).unwrap_or(usize::MAX);
+            usize::try_from(config.spec.limits.max_tool_calls).unwrap_or(usize::MAX);
         let session = InferenceSession::new_subagent(config, runtime, inference_client)?;
         let tool_mode = session.tool_mode();
         let execution_context = runtime.execution.context_snapshot(&workspace_root)?;
@@ -385,11 +384,11 @@ impl ChatService {
             .install_execution_context(execution_context)
     }
 
-    pub(crate) fn capability_delivery_class(
+    pub(crate) fn tool_delivery_class(
         &self,
-        capability_id: &agl_extension::ToolId,
+        tool_id: &agl_kernel::ToolId,
     ) -> Result<agl_store::EffectDeliveryClass> {
-        self.turn_runtime.capability_delivery_class(capability_id)
+        self.turn_runtime.tool_delivery_class(tool_id)
     }
 
     pub(crate) fn model_token_usage(&self) -> (u64, u64) {
@@ -815,7 +814,7 @@ impl ChatService {
                 bail!("failed to record user message: {error:#}");
             }
         }
-        let capability_policy_hash = Some(self.turn_runtime.policy_hash()?);
+        let tool_policy_hash = Some(self.turn_runtime.policy_hash()?);
         let turn_input = build_turn_input(TurnInputSpec {
             run_id: &run_id,
             turn_id: &turn_id,
@@ -823,7 +822,6 @@ impl ChatService {
             context_messages: &self.messages,
             hook_batches: self.turn_runtime.session().turn_hook_batches(),
             hook_payload: self.turn_runtime.session().turn_hook_payload(),
-            max_hook_repair_attempts: self.turn_runtime.session().max_hook_repair_attempts(),
             repair_malformed_tool_calls: self
                 .turn_runtime
                 .session()
@@ -832,12 +830,12 @@ impl ChatService {
                 .repair_malformed_tool_calls,
             max_tool_calls: self.max_tool_calls,
             visible_tools: self.turn_runtime.session().turn_visible_tools(),
-            capability_policy_hash,
+            tool_policy_hash,
             user_input: &input,
         });
         let previous_message_count = self.messages.len();
-        let mut executor = TurnExecutor::new(turn_input);
-        let advance = executor.next_effect()?;
+        let mut executor = TurnMachine::new(turn_input);
+        let advance = executor.next_request()?;
         self.turn_runtime
             .append_executor_events(advance.events.clone())?;
         let emitted_events = self.turn_runtime.read_runtime_events_after(0)?;
@@ -907,8 +905,8 @@ impl ChatService {
             delegation_authority_ceiling,
         )?;
         let previous_message_count = checkpoint.state().input.context_messages.len();
-        let mut executor = TurnExecutor::from_checkpoint(checkpoint)?;
-        let advance = executor.next_effect()?;
+        let mut executor = TurnMachine::from_checkpoint(checkpoint)?;
+        let advance = executor.next_request()?;
         let mut execution = ChatTurnExecution {
             run_id,
             turn_id,
@@ -932,30 +930,30 @@ impl ChatService {
 
     #[cfg(test)]
     pub fn advance_user_turn(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
-        let result = self.execute_user_turn_effect(execution)?;
-        self.resume_user_turn_effect(execution, result)
+        let result = self.execute_user_turn_request(execution)?;
+        self.resume_user_turn_request(execution, result)
     }
 
-    pub fn execute_user_turn_effect(
+    pub fn execute_user_turn_request(
         &mut self,
         execution: &mut ChatTurnExecution,
-    ) -> Result<TurnEffectResult> {
-        self.execute_user_turn_effect_with_step(execution, None)
+    ) -> Result<TurnRequestResult> {
+        self.execute_user_turn_request_with_step(execution, None)
     }
 
-    pub(crate) fn execute_user_turn_effect_with_step(
+    pub(crate) fn execute_user_turn_request_with_step(
         &mut self,
         execution: &mut ChatTurnExecution,
         step_id: Option<&StepId>,
-    ) -> Result<TurnEffectResult> {
+    ) -> Result<TurnRequestResult> {
         if execution.is_terminal() {
-            bail!("cannot execute an effect for a terminal chat execution");
+            bail!("cannot execute an request for a terminal chat execution");
         }
-        let effect = match &execution.advance.state {
-            TurnAdvanceState::Pending { effect } => effect.clone(),
+        let request = match &execution.advance.state {
+            TurnAdvanceState::Pending { request } => request.clone(),
             TurnAdvanceState::Terminal { .. } => unreachable!("terminal state was rejected above"),
         };
-        let result = self.execute_turn_effect(execution, effect, step_id);
+        let result = self.execute_turn_request(execution, request, step_id);
         execution
             .attempt_ids
             .extend(self.turn_runtime.take_attempt_ids());
@@ -963,10 +961,10 @@ impl ChatService {
         Ok(result)
     }
 
-    pub fn resume_user_turn_effect(
+    pub fn resume_user_turn_request(
         &mut self,
         execution: &mut ChatTurnExecution,
-        result: TurnEffectResult,
+        result: TurnRequestResult,
     ) -> Result<()> {
         if execution.is_terminal() {
             bail!("cannot resume a terminal chat execution");
@@ -978,7 +976,7 @@ impl ChatService {
                 terminal: TurnTerminal::Failed { .. }
             }
         ) {
-            self.link_failed_attempts(&execution.attempt_ids, "turn effect failed")?;
+            self.link_failed_attempts(&execution.attempt_ids, "turn request failed")?;
         }
         self.turn_runtime
             .append_executor_events(advance.events.clone())?;
@@ -990,32 +988,32 @@ impl ChatService {
         Ok(())
     }
 
-    fn execute_turn_effect(
+    fn execute_turn_request(
         &mut self,
         execution: &mut ChatTurnExecution,
-        effect: TurnEffect,
+        request: TurnRequest,
         step_id: Option<&StepId>,
-    ) -> TurnEffectResult {
+    ) -> TurnRequestResult {
         if execution.cancellation.is_cancelled() {
-            return cancelled_effect_result(effect);
+            return cancelled_effect_result(request);
         }
-        match effect {
-            TurnEffect::HookBatch { key, request } => {
+        match request {
+            TurnRequest::HookBatch { key, request } => {
                 let started = Instant::now();
                 let outcome = match self.turn_runtime.execute_hooks(request) {
-                    Ok(result) => EffectOutcome::Succeeded(HookEffectOutput {
+                    Ok(result) => TurnRequestOutcome::Succeeded(HookRequestOutput {
                         result,
                         duration_ms: u64::try_from(started.elapsed().as_millis()).ok(),
                     }),
-                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
-                        EffectFailureCode::Hook,
+                    Err(error) => TurnRequestOutcome::Failed(TurnRequestFailure::new(
+                        TurnRequestFailureCode::Hook,
                         format!("{error:#}"),
                         false,
                     )),
                 };
-                TurnEffectResult::HookBatch { key, outcome }
+                TurnRequestResult::HookBatch { key, outcome }
             }
-            TurnEffect::ModelGeneration {
+            TurnRequest::ModelGeneration {
                 key,
                 provisional_message_id,
                 request,
@@ -1026,31 +1024,31 @@ impl ChatService {
                     execution.cancellation.clone(),
                     execution.deadline,
                 ) {
-                    Ok(response) => EffectOutcome::Succeeded(response),
+                    Ok(response) => TurnRequestOutcome::Succeeded(response),
                     Err(error) => model_effect_failure(error),
                 };
-                TurnEffectResult::ModelGeneration { key, outcome }
+                TurnRequestResult::ModelGeneration { key, outcome }
             }
-            TurnEffect::CapabilityDispatch { key, request } => {
-                let outcome = match self.turn_runtime.execute_capability(
+            TurnRequest::ToolDispatch { key, request } => {
+                let outcome = match self.turn_runtime.execute_tool(
                     request,
                     step_id,
                     execution.cancellation.clone(),
                     execution.deadline,
                 ) {
-                    Ok(response) => EffectOutcome::Succeeded(response),
-                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
-                        EffectFailureCode::Capability,
+                    Ok(response) => TurnRequestOutcome::Succeeded(response),
+                    Err(error) => TurnRequestOutcome::Failed(TurnRequestFailure::new(
+                        TurnRequestFailureCode::Tool,
                         format!("{error:#}"),
                         false,
                     )),
                 };
-                TurnEffectResult::CapabilityDispatch {
+                TurnRequestResult::ToolDispatch {
                     key,
                     outcome: Box::new(outcome),
                 }
             }
-            TurnEffect::TranscriptAppend {
+            TurnRequest::TranscriptAppend {
                 key,
                 assistant_message_id,
                 messages,
@@ -1062,14 +1060,14 @@ impl ChatService {
                     messages,
                     &output,
                 ) {
-                    Ok(()) => EffectOutcome::Succeeded(()),
-                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
-                        EffectFailureCode::Transcript,
+                    Ok(()) => TurnRequestOutcome::Succeeded(()),
+                    Err(error) => TurnRequestOutcome::Failed(TurnRequestFailure::new(
+                        TurnRequestFailureCode::Transcript,
                         format!("{error:#}"),
                         false,
                     )),
                 };
-                TurnEffectResult::TranscriptAppend { key, outcome }
+                TurnRequestResult::TranscriptAppend { key, outcome }
             }
         }
     }
@@ -1162,7 +1160,7 @@ impl ChatService {
     fn finish_execution(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
         let terminal = match &execution.advance.state {
             TurnAdvanceState::Terminal { terminal } => terminal.clone(),
-            TurnAdvanceState::Pending { .. } => bail!("chat execution still has a pending effect"),
+            TurnAdvanceState::Pending { .. } => bail!("chat execution still has a pending request"),
         };
         let generated_requests = self.turn_runtime.generated_requests();
         let output = match terminal {
@@ -1313,45 +1311,47 @@ impl Drop for ChatService {
     }
 }
 
-fn cancelled_effect_result(effect: TurnEffect) -> TurnEffectResult {
-    match effect {
-        TurnEffect::HookBatch { key, .. } => TurnEffectResult::HookBatch {
+fn cancelled_effect_result(request: TurnRequest) -> TurnRequestResult {
+    match request {
+        TurnRequest::HookBatch { key, .. } => TurnRequestResult::HookBatch {
             key,
-            outcome: EffectOutcome::Cancelled,
+            outcome: TurnRequestOutcome::Cancelled,
         },
-        TurnEffect::ModelGeneration { key, .. } => TurnEffectResult::ModelGeneration {
+        TurnRequest::ModelGeneration { key, .. } => TurnRequestResult::ModelGeneration {
             key,
-            outcome: EffectOutcome::Cancelled,
+            outcome: TurnRequestOutcome::Cancelled,
         },
-        TurnEffect::CapabilityDispatch { key, .. } => TurnEffectResult::CapabilityDispatch {
+        TurnRequest::ToolDispatch { key, .. } => TurnRequestResult::ToolDispatch {
             key,
-            outcome: Box::new(EffectOutcome::Cancelled),
+            outcome: Box::new(TurnRequestOutcome::Cancelled),
         },
-        TurnEffect::TranscriptAppend { key, .. } => TurnEffectResult::TranscriptAppend {
+        TurnRequest::TranscriptAppend { key, .. } => TurnRequestResult::TranscriptAppend {
             key,
-            outcome: EffectOutcome::Cancelled,
+            outcome: TurnRequestOutcome::Cancelled,
         },
     }
 }
 
-fn model_effect_failure(error: anyhow::Error) -> EffectOutcome<agl_turn::ModelResponse> {
+fn model_effect_failure(error: anyhow::Error) -> TurnRequestOutcome<agl_kernel::ModelResponse> {
     if let Some(manager_error) = error.downcast_ref::<ModelManagerError>() {
         return match manager_error {
-            ModelManagerError::Cancelled => EffectOutcome::Cancelled,
-            ModelManagerError::DeadlineExceeded => EffectOutcome::Failed(EffectFailure::new(
-                EffectFailureCode::Deadline,
-                format!("model request failed: {manager_error}"),
-                false,
-            )),
-            _ => EffectOutcome::Failed(EffectFailure::new(
-                EffectFailureCode::Inference,
+            ModelManagerError::Cancelled => TurnRequestOutcome::Cancelled,
+            ModelManagerError::DeadlineExceeded => {
+                TurnRequestOutcome::Failed(TurnRequestFailure::new(
+                    TurnRequestFailureCode::Deadline,
+                    format!("model request failed: {manager_error}"),
+                    false,
+                ))
+            }
+            _ => TurnRequestOutcome::Failed(TurnRequestFailure::new(
+                TurnRequestFailureCode::Inference,
                 format!("model request failed: {manager_error}"),
                 manager_error.retryable(),
             )),
         };
     }
-    EffectOutcome::Failed(EffectFailure::new(
-        EffectFailureCode::Inference,
+    TurnRequestOutcome::Failed(TurnRequestFailure::new(
+        TurnRequestFailureCode::Inference,
         format!("model request failed: {error:#}"),
         false,
     ))
@@ -1360,8 +1360,7 @@ fn model_effect_failure(error: anyhow::Error) -> EffectOutcome<agl_turn::ModelRe
 fn main_tool_call_limit(configured: Option<u32>) -> usize {
     configured
         .map(|limit| {
-            usize::try_from(limit)
-                .expect("validated function capability-call limit must fit in usize")
+            usize::try_from(limit).expect("validated function tool-call limit must fit in usize")
         })
         .unwrap_or(DEFAULT_MAX_TOOL_CALLS_PER_TURN)
 }
@@ -1375,10 +1374,9 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     .with_context_messages(spec.context_messages.to_vec())
     .with_request_index_start(spec.request_index)
     .with_hook_payload(spec.hook_payload)
-    .with_max_hook_repair_attempts(spec.max_hook_repair_attempts)
     .with_repair_malformed_tool_calls(spec.repair_malformed_tool_calls);
-    if let Some(policy_hash) = spec.capability_policy_hash {
-        input = input.with_capability_policy_hash(policy_hash);
+    if let Some(policy_hash) = spec.tool_policy_hash {
+        input = input.with_tool_policy_hash(policy_hash);
     }
     for hook_batch in spec.hook_batches {
         input = input.with_hook_batch(hook_batch.clone());
@@ -1564,9 +1562,9 @@ pub fn stopped_turn_context_message(
     let available = render_available_tool_names(available_tools);
     let permission_recovery = if available_tools
         .iter()
-        .any(|tool| tool.id.as_str() == "permissions.request")
+        .any(|tool| tool.id.as_str() == "core.permission:request")
     {
-        "request exact tool access with `permissions.request`, or answer with the CLI/daemon path"
+        "request exact tool access with `core.permission:request`, or answer with the CLI/daemon path"
     } else {
         "answer with the CLI/daemon path or ask for a write-capable/tool-enabled session"
     };
@@ -1595,6 +1593,22 @@ pub fn stopped_turn_context_message(
         (StopReason::InvalidToolArguments, _) => format!(
             "The previous turn stopped because the requested tool arguments were invalid. No tool was executed. Available tools in this session: {available}."
         ),
+        (
+            StopReason::RepairRequired,
+            Some(StopDetail::RepairRequired { event, messages }),
+        ) => {
+            let details = messages
+                .iter()
+                .map(|message| format!("{}: {}", message.code, message.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "The previous turn stopped because Hook event `{event}` requires repair: {details}. No regeneration was attempted."
+            )
+        }
+        (StopReason::RepairRequired, _) =>
+            "The previous turn stopped because a Hook requires repair. No regeneration was attempted."
+                .to_string(),
     }
 }
 
@@ -1645,7 +1659,7 @@ pub fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
                 RuntimeEvent::ToolMessage { name, data, .. } => {
                     messages.push(TurnMessage::ToolObservation {
                         name: name.clone(),
-                        result: agl_extension::ToolResult::new(data.clone()),
+                        result: agl_kernel::ToolResult::new(data.clone()),
                     });
                 }
                 _ => {}
@@ -1688,7 +1702,7 @@ fn log_action_result_metadata(
     role: &str,
     session_id: &SessionId,
     message_id: &MessageId,
-    result: &agl_extension::ToolResult,
+    result: &agl_kernel::ToolResult,
     runtime: &AgentLibreRuntimeConfig,
 ) {
     let data_bytes = serde_json::to_vec(&result.data)
@@ -1754,7 +1768,7 @@ mod tests {
 
     fn visible_tool(id: &str) -> VisibleTool {
         let catalog = crate::tools::chat_extension_catalog().unwrap();
-        let id = agl_extension::ToolId::new(id).unwrap();
+        let id = agl_kernel::ToolId::new(id).unwrap();
         VisibleTool::from_declaration(catalog.tool(&id).unwrap())
     }
 
@@ -1792,24 +1806,24 @@ mod tests {
             ModelManagerError::ManagerUnavailable,
         ] {
             let outcome = model_effect_failure(anyhow::Error::new(error.clone()));
-            let EffectOutcome::Failed(failure) = outcome else {
-                panic!("manager admission error did not remain a failed effect");
+            let TurnRequestOutcome::Failed(failure) = outcome else {
+                panic!("manager admission error did not remain a failed request");
             };
-            assert_eq!(failure.code, EffectFailureCode::Inference);
+            assert_eq!(failure.code, TurnRequestFailureCode::Inference);
             assert!(failure.retryable);
             assert!(failure.message.contains("model request failed"));
         }
 
         assert_eq!(
             model_effect_failure(anyhow::Error::new(ModelManagerError::Cancelled)),
-            EffectOutcome::Cancelled
+            TurnRequestOutcome::Cancelled
         );
-        let EffectOutcome::Failed(deadline) =
+        let TurnRequestOutcome::Failed(deadline) =
             model_effect_failure(anyhow::Error::new(ModelManagerError::DeadlineExceeded))
         else {
-            panic!("deadline did not remain a failed effect");
+            panic!("deadline did not remain a failed request");
         };
-        assert_eq!(deadline.code, EffectFailureCode::Deadline);
+        assert_eq!(deadline.code, TurnRequestFailureCode::Deadline);
         assert!(!deadline.retryable);
     }
 
@@ -2279,34 +2293,34 @@ tool_call_format = "hermes_json"
             .service
             .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), text("hello"))
             .unwrap();
-        let provisional_message_id = match execution.pending_effect().unwrap() {
-            TurnEffect::ModelGeneration {
+        let provisional_message_id = match execution.pending_request().unwrap() {
+            TurnRequest::ModelGeneration {
                 provisional_message_id,
                 ..
             } => provisional_message_id.clone(),
-            effect => panic!("expected model generation, got {:?}", effect.kind()),
+            request => panic!("expected model generation, got {:?}", request.kind()),
         };
 
         let abandoned_result = chat
             .service
-            .execute_user_turn_effect(&mut execution)
+            .execute_user_turn_request(&mut execution)
             .unwrap();
         assert!(matches!(
             abandoned_result,
-            TurnEffectResult::ModelGeneration {
-                outcome: EffectOutcome::Succeeded(_),
+            TurnRequestResult::ModelGeneration {
+                outcome: TurnRequestOutcome::Succeeded(_),
                 ..
             }
         ));
 
         let checkpoint: TurnCheckpoint =
             serde_json::from_slice(&serde_json::to_vec(&execution.checkpoint()).unwrap()).unwrap();
-        let mut executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
-        let advance = executor.next_effect().unwrap();
+        let mut executor = TurnMachine::from_checkpoint(checkpoint).unwrap();
+        let advance = executor.next_request().unwrap();
         let retry_message_id = match &advance.state {
             TurnAdvanceState::Pending {
-                effect:
-                    TurnEffect::ModelGeneration {
+                request:
+                    TurnRequest::ModelGeneration {
                         provisional_message_id,
                         ..
                     },
@@ -2319,28 +2333,28 @@ tool_call_format = "hermes_json"
 
         let retry_result = chat
             .service
-            .execute_user_turn_effect(&mut execution)
+            .execute_user_turn_request(&mut execution)
             .unwrap();
         chat.service
-            .resume_user_turn_effect(&mut execution, retry_result)
+            .resume_user_turn_request(&mut execution, retry_result)
             .unwrap();
-        let transcript_message_id = match execution.pending_effect().unwrap() {
-            TurnEffect::TranscriptAppend {
+        let transcript_message_id = match execution.pending_request().unwrap() {
+            TurnRequest::TranscriptAppend {
                 assistant_message_id,
                 ..
             } => assistant_message_id.as_ref(),
-            effect => panic!("expected transcript append, got {:?}", effect.kind()),
+            request => panic!("expected transcript append, got {:?}", request.kind()),
         };
         assert_eq!(transcript_message_id, Some(&provisional_message_id));
 
         let checkpoint: TurnCheckpoint =
             serde_json::from_slice(&serde_json::to_vec(&execution.checkpoint()).unwrap()).unwrap();
-        let mut executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
-        let advance = executor.next_effect().unwrap();
+        let mut executor = TurnMachine::from_checkpoint(checkpoint).unwrap();
+        let advance = executor.next_request().unwrap();
         let restored_message_id = match &advance.state {
             TurnAdvanceState::Pending {
-                effect:
-                    TurnEffect::TranscriptAppend {
+                request:
+                    TurnRequest::TranscriptAppend {
                         assistant_message_id,
                         ..
                     },
@@ -2421,8 +2435,8 @@ tool_call_format = "hermes_json"
                 .all(|event| !matches!(event.payload, SafeRuntimeEvent::TurnFinished { .. }))
         );
         assert!(matches!(
-            execution.pending_effect(),
-            Some(TurnEffect::ModelGeneration { .. })
+            execution.pending_request(),
+            Some(TurnRequest::ModelGeneration { .. })
         ));
 
         while !execution.is_terminal() {
@@ -2465,28 +2479,27 @@ tool_call_format = "hermes_json"
         );
         assert!(tool_output.runtime_events.iter().any(|event| matches!(
             event.payload,
-            SafeRuntimeEvent::ToolCallFinished { .. }
-                | SafeRuntimeEvent::CapabilityCallAdmitted { .. }
+            SafeRuntimeEvent::ToolCallFinished { .. } | SafeRuntimeEvent::ToolCallAdmitted { .. }
         )));
         let presentation_events = presentation.events.lock().unwrap().clone();
         assert!(presentation_events.iter().any(|event| matches!(
             event,
             crate::TurnPresentationEvent::PolicyCheck {
-                capability_id,
+                tool_id,
                 outcome: crate::PolicyPresentationOutcome::Allowed,
                 ..
-            } if capability_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
+            } if tool_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
         )));
         assert!(presentation_events.iter().any(|event| matches!(
             event,
             crate::TurnPresentationEvent::ToolActionFinished {
-                capability_id,
-                detail: Some(crate::CapabilityPresentationDetail::FilesystemRead {
+                tool_id,
+                detail: Some(crate::ToolPresentationDetail::FilesystemRead {
                     path,
                     bytes,
                 }),
                 ..
-            } if capability_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
+            } if tool_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
                 && path == "inference.toml"
                 && *bytes > 0
         )));
@@ -2781,7 +2794,7 @@ tool_call_format = "hermes_json"
             .as_str()
             .to_string();
 
-        let raw_name = "model-controlled-secret\ninvalid-capability";
+        let raw_name = "model-controlled-secret\ninvalid-tool";
         chat.service
             .turn_runtime
             .append_executor_events(vec![EventDraft::new(
@@ -2789,9 +2802,9 @@ tool_call_format = "hermes_json"
                     .turn_id(turn_id)
                     .build()
                     .unwrap(),
-                RuntimeEvent::CapabilityCallDenied {
+                RuntimeEvent::ToolCallDenied {
                     policy_hash: policy_hash.clone(),
-                    capability_id: None,
+                    tool_id: None,
                     reason_code: DispatchDenialCode::InvalidArguments.as_str().to_string(),
                 },
             )])
@@ -2801,11 +2814,11 @@ tool_call_format = "hermes_json"
         let denial = events
             .iter()
             .find_map(|event| match &event.payload {
-                SafeRuntimeEvent::CapabilityCallDenied {
+                SafeRuntimeEvent::ToolCallDenied {
                     policy_hash,
-                    capability_id,
+                    tool_id,
                     reason_code,
-                } => Some((policy_hash, capability_id, reason_code)),
+                } => Some((policy_hash, tool_id, reason_code)),
                 _ => None,
             })
             .unwrap();
@@ -2974,9 +2987,7 @@ tool_call_format = "hermes_json"
                 },
                 TurnMessage::ToolObservation {
                     name: "read_file".to_string(),
-                    result: agl_extension::ToolResult::new(
-                        serde_json::json!({"content": "content"})
-                    )
+                    result: agl_kernel::ToolResult::new(serde_json::json!({"content": "content"}))
                 }
             ]
         );
@@ -3029,8 +3040,8 @@ tool_call_format = "hermes_json"
         ];
 
         let hook_batches = vec![
-            TurnHookBatch::new(agl_loop::HookEvent::ArtifactWrite)
-                .with_required_hook(agl_loop::HookId::new("core:task_spec.validate").unwrap()),
+            TurnHookBatch::new(agl_kernel::HookEvent::ArtifactWrite)
+                .with_required_hook(agl_kernel::HookId::new("core:task_spec.validate").unwrap()),
         ];
 
         let visible_tools = vec![visible_tool("core.workspace:fs.read")];
@@ -3043,11 +3054,10 @@ tool_call_format = "hermes_json"
             context_messages: &context,
             hook_batches: &hook_batches,
             hook_payload: serde_json::json!({"runtime_identity": {"skills": []}}),
-            max_hook_repair_attempts: 1,
             repair_malformed_tool_calls: false,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &visible_tools,
-            capability_policy_hash: Some("sha256:test".to_string()),
+            tool_policy_hash: Some("sha256:test".to_string()),
             user_input: &user_input,
         });
 
@@ -3063,9 +3073,8 @@ tool_call_format = "hermes_json"
         assert_eq!(input.request_index_start, 7);
         assert_eq!(input.visible_tools, visible_tools);
         assert_eq!(input.max_tool_calls, DEFAULT_MAX_TOOL_CALLS_PER_TURN);
-        assert_eq!(input.max_hook_repair_attempts, 1);
         assert!(!input.repair_malformed_tool_calls);
-        assert_eq!(input.capability_policy_hash.as_deref(), Some("sha256:test"));
+        assert_eq!(input.tool_policy_hash.as_deref(), Some("sha256:test"));
     }
 
     #[test]
@@ -3090,11 +3099,10 @@ tool_call_format = "hermes_json"
             context_messages: &[],
             hook_batches: &[],
             hook_payload: serde_json::json!({}),
-            max_hook_repair_attempts: 0,
             repair_malformed_tool_calls: true,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &[],
-            capability_policy_hash: None,
+            tool_policy_hash: None,
             user_input: &user_input,
         });
 
@@ -3178,20 +3186,20 @@ tool_call_format = "hermes_json"
     fn hidden_tool_stop_message_mentions_permission_request_when_visible() {
         let visible_tools = vec![
             visible_tool("core.workspace:fs.list"),
-            visible_tool("permissions.request"),
-            visible_tool("permissions.status"),
+            visible_tool("core.permission:request"),
+            visible_tool("core.permission:status"),
         ];
         let message = stopped_turn_context_message(
             StopReason::HiddenTool,
             Some(&StopDetail::HiddenTool {
-                name: "matrix.outbox.enqueue".to_string(),
+                name: "matrix.outbox:enqueue".to_string(),
             }),
             &visible_tools,
         );
 
-        assert!(message.contains("unavailable tool `matrix.outbox.enqueue`"));
-        assert!(message.contains("`permissions.request`"));
+        assert!(message.contains("unavailable tool `matrix.outbox:enqueue`"));
+        assert!(message.contains("`core.permission:request`"));
         assert!(message.contains("request exact tool access"));
-        assert!(message.contains("do not call `matrix.outbox.enqueue` again"));
+        assert!(message.contains("do not call `matrix.outbox:enqueue` again"));
     }
 }

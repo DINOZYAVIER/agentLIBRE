@@ -11,7 +11,7 @@ pub enum ParsedActionEvent {
 #[serde(rename_all = "snake_case")]
 pub enum SafeParsedActionEvent {
     Answer,
-    ToolCall { capability_id: Option<String> },
+    ToolCall { tool_id: Option<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,7 @@ pub enum StopReasonEvent {
     ToolLimitReached,
     HiddenTool,
     InvalidToolArguments,
+    RepairRequired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use agl_content::Content;
-use agl_extension::ToolId;
 use agl_ids::{AttemptId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{
     InferenceOutputEvent, InferenceOutputSink, InferenceStageEvent, OutputDelivery,
 };
-use agl_turn::IncompleteOutputReason;
+use agl_kernel::IncompleteOutputReason;
+use agl_kernel::ToolId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildRunPresentation {
@@ -16,23 +16,23 @@ pub struct ChildRunPresentation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapabilityPresentationCompleteness {
+pub enum ToolPresentationCompleteness {
     Complete,
     Truncated,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapabilityPresentationExecutionProfile {
+pub enum ToolPresentationExecutionProfile {
     Workspace,
     Host,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CapabilityPresentationDetail {
+pub enum ToolPresentationDetail {
     FilesystemList {
         path: String,
         entries: u32,
-        completeness: CapabilityPresentationCompleteness,
+        completeness: ToolPresentationCompleteness,
     },
     FilesystemRead {
         path: String,
@@ -44,7 +44,7 @@ pub enum CapabilityPresentationDetail {
         complete: bool,
     },
     ProcessExecution {
-        profile: CapabilityPresentationExecutionProfile,
+        profile: ToolPresentationExecutionProfile,
         exit_status: Option<i32>,
     },
 }
@@ -143,7 +143,7 @@ pub enum TurnPresentationEvent {
         attempt_id: Option<AttemptId>,
         provisional_message_id: Option<MessageId>,
         step_id: StepId,
-        capability_id: ToolId,
+        tool_id: ToolId,
     },
     ToolActionFinished {
         session_id: SessionId,
@@ -152,9 +152,9 @@ pub enum TurnPresentationEvent {
         attempt_id: Option<AttemptId>,
         provisional_message_id: Option<MessageId>,
         step_id: StepId,
-        capability_id: ToolId,
+        tool_id: ToolId,
         outcome: ToolActionOutcome,
-        detail: Option<CapabilityPresentationDetail>,
+        detail: Option<ToolPresentationDetail>,
     },
     PolicyCheck {
         session_id: SessionId,
@@ -162,7 +162,7 @@ pub enum TurnPresentationEvent {
         turn_id: TurnId,
         attempt_id: Option<AttemptId>,
         step_id: StepId,
-        capability_id: ToolId,
+        tool_id: ToolId,
         outcome: PolicyPresentationOutcome,
     },
     TurnFinished {

@@ -7,7 +7,6 @@ repository.workspace = true
 
 [dependencies]
 agl-artifact.workspace = true
-agl-extension.workspace = true
 agl-assets.workspace = true
 agl-config.workspace = true
 agl-content.workspace = true
@@ -18,7 +17,6 @@ agl-host-tools.workspace = true
 agl-ids.workspace = true
 agl-inference.workspace = true
 agl-kernel.workspace = true
-agl-loop.workspace = true
 agl-memory.workspace = true
 agl-model.workspace = true
 agl-oven.workspace = true
@@ -30,9 +28,9 @@ agl-skill.workspace = true
 agl-store.workspace = true
 agl-supervisor.workspace = true
 agl-core-tools.workspace = true
-agl-turn.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 sha2.workspace = true
 tracing.workspace = true

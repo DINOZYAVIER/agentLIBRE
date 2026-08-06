@@ -2,7 +2,7 @@
   "schema": "agentlibre.artifact/v1",
   "type": "extension",
   "id": "core.process",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "payload_schema": "agentlibre.extension/v1",
   "agl": {
     "compatible": ">=1.0.0-alpha.12",
@@ -12,5 +12,5 @@
   },
   "requires": [],
   "api_major": 1,
-  "implementation": "builtin:agl-core-tools/process"
+  "implementation": { "kind": "rust-static" }
 }

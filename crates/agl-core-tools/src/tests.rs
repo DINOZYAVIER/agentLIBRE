@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use agl_extension::{EffectId, OperationKind, ToolId};
+use agl_kernel::{EffectId, OperationKind, ToolId};
 
 use super::*;
 
@@ -51,15 +51,15 @@ fn read_actions_do_not_create_or_migrate_an_absent_store() {
 fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
     let catalog = builtin_tool_catalog().unwrap();
     let actions = catalog
-        .providers()
+        .extensions()
         .iter()
-        .flat_map(|provider| provider.tools.iter())
+        .flat_map(|extension| extension.tools.iter())
         .collect::<Vec<_>>();
 
     assert_eq!(actions.len(), 60);
-    for provider in catalog.providers() {
-        provider.validate().unwrap();
-        for action in &provider.tools {
+    for extension in catalog.extensions() {
+        extension.validate().unwrap();
+        for action in &extension.tools {
             let schema = action.compile_schema().unwrap();
             assert!(
                 schema

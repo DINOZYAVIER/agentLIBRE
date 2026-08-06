@@ -44,7 +44,7 @@ pub(crate) async fn handle_prompt_submit_request(
                 model_input_tokens: request.budget.model_input_tokens,
                 model_output_tokens: request.budget.model_output_tokens,
                 model_attempts: request.budget.model_attempts,
-                capability_calls: request.budget.capability_calls,
+                tool_calls: request.budget.tool_calls,
             },
         })
         .await

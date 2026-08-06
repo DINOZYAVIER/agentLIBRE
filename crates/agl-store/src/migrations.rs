@@ -276,7 +276,7 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 id TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL,
                 turn_id TEXT,
-                effect_sequence INTEGER NOT NULL CHECK (effect_sequence > 0),
+                request_sequence INTEGER NOT NULL CHECK (request_sequence > 0),
                 effect_kind TEXT NOT NULL,
                 delivery_class TEXT NOT NULL CHECK (delivery_class IN ('replay_safe', 'idempotent', 'at_most_once')),
                 request_json TEXT NOT NULL,
@@ -292,7 +292,7 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 updated_at_ms INTEGER NOT NULL,
                 finished_at_ms INTEGER,
                 FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
-                UNIQUE(run_id, effect_sequence),
+                UNIQUE(run_id, request_sequence),
                 CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL))
             );
             CREATE INDEX run_steps_runnable_idx
@@ -300,7 +300,7 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             CREATE INDEX run_steps_lease_idx
                 ON run_steps(state, lease_expires_at_ms);
             CREATE INDEX run_steps_run_idx
-                ON run_steps(run_id, effect_sequence);
+                ON run_steps(run_id, request_sequence);
 
             CREATE TABLE run_events (
                 event_id TEXT PRIMARY KEY,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agl_artifact::{ArtifactPackageView, ArtifactRelativePath};
-use agl_extension::ToolId;
+use agl_kernel::ToolId;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +116,7 @@ impl SubagentTools {
         validate_unique_non_empty("subagent.tools.deny", &self.deny)?;
         for id in self.allow.iter().chain(&self.deny) {
             ToolId::new(id.clone())
-                .with_context(|| format!("invalid subagent tool capability ID `{id}`"))?;
+                .with_context(|| format!("invalid subagent tool tool ID `{id}`"))?;
         }
         Ok(())
     }
@@ -124,12 +124,10 @@ impl SubagentTools {
     pub(crate) fn to_runtime_policy(&self) -> FunctionToolPolicy {
         FunctionToolPolicy::new(
             self.allow.iter().map(|id| {
-                ToolId::new(id.clone())
-                    .expect("validated subagent allow capability ID must remain valid")
+                ToolId::new(id.clone()).expect("validated subagent allow tool ID must remain valid")
             }),
             self.deny.iter().map(|id| {
-                ToolId::new(id.clone())
-                    .expect("validated subagent deny capability ID must remain valid")
+                ToolId::new(id.clone()).expect("validated subagent deny tool ID must remain valid")
             }),
         )
     }
@@ -140,7 +138,7 @@ impl SubagentTools {
 pub struct SubagentLimits {
     pub max_model_attempts: u32,
     pub max_output_tokens: u64,
-    pub max_capability_calls: u32,
+    pub max_tool_calls: u32,
     pub timeout_seconds: u64,
 }
 
@@ -159,8 +157,8 @@ impl SubagentLimits {
             "subagent.limits.max_output_tokens exceeds the inference limit"
         );
         ensure!(
-            self.max_capability_calls > 0,
-            "subagent.limits.max_capability_calls must be greater than zero"
+            self.max_tool_calls > 0,
+            "subagent.limits.max_tool_calls must be greater than zero"
         );
         ensure!(
             self.timeout_seconds > 0,
