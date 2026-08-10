@@ -4,3 +4,6 @@
 [submodule "assets/core-skills"]
 	path = assets/core-skills
 	url = https://github.com/DINOZYAVIER/agl-core-skills.git
+[submodule "core.repo:tasks"]
+	path = .agl/tasks
+	url = rpi:/home/dinozyavier/git/agl-specs.git

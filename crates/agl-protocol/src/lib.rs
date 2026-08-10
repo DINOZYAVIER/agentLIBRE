@@ -1112,7 +1112,7 @@ mod tests {
                 "source_id": "test",
                 "source_tier": "workspace",
                 "source_kind": "directory",
-                "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             },
             "weights": [{
                 "role": "main",

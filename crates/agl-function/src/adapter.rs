@@ -1,172 +1,100 @@
-#[cfg(test)]
-use std::sync::Arc;
-
 use agl_package::{
-    ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactEntrypoint, ArtifactEnvelope,
-    ArtifactError, ArtifactPackageView, ArtifactTypeId, ErasedArtifactPayload,
-};
-#[cfg(test)]
-use agl_package::{
-    ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceKind,
-    ArtifactSourceTier, DirectoryArtifactSource, InMemoryPackageView, StaticArtifactSource,
+    ErasedPackagePayload, PackageAdapter, PackageAdapterDescriptor, PackageEntrypoint,
+    PackageEnvelope, PackageError, PackageTypeId, PackageView,
 };
 use anyhow::{Context, Result, ensure};
 
 use crate::loader::parse_function_document;
-#[cfg(test)]
-use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_FILE_NAME};
 
 #[derive(Clone, Debug)]
-pub struct FunctionArtifactAdapter {
-    descriptor: ArtifactAdapterDescriptor,
+pub struct FunctionPackageAdapter {
+    descriptor: PackageAdapterDescriptor,
 }
 
-impl FunctionArtifactAdapter {
-    pub fn new() -> Result<Self, ArtifactError> {
+impl FunctionPackageAdapter {
+    pub fn new() -> Result<Self, PackageError> {
         Ok(Self {
-            descriptor: ArtifactAdapterDescriptor::new(
-                ArtifactTypeId::new("function")?,
+            descriptor: PackageAdapterDescriptor::new(
+                PackageTypeId::new("function")?,
                 "functions",
-                ArtifactEntrypoint::new(FUNCTION_FILE_NAME)?,
+                PackageEntrypoint::new(FUNCTION_FILE_NAME)?,
             )?,
         })
     }
 }
 
-impl Default for FunctionArtifactAdapter {
+impl Default for FunctionPackageAdapter {
     fn default() -> Self {
         Self::new().expect("function adapter descriptor is valid")
     }
 }
 
-impl ArtifactAdapter for FunctionArtifactAdapter {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+impl PackageAdapter for FunctionPackageAdapter {
+    fn descriptor(&self) -> &PackageAdapterDescriptor {
         &self.descriptor
     }
 
-    fn extract_envelope(
-        &self,
-        package: &dyn ArtifactPackageView,
-    ) -> Result<ArtifactEnvelope, ArtifactError> {
-        let entrypoint: agl_package::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
+    fn extract_envelope(&self, package: &dyn PackageView) -> Result<PackageEnvelope, PackageError> {
+        let entrypoint: agl_package::PackageRelativePath = FUNCTION_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
-            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterEnvelope {
+            std::str::from_utf8(&content).map_err(|error| PackageError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("FUNCTION.md is not UTF-8: {error}"),
             })?;
         let (front_matter, body) =
-            parse_function_document(content).map_err(|error| ArtifactError::AdapterEnvelope {
+            parse_function_document(content).map_err(|error| PackageError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
         if !body.trim().is_empty() {
-            return Err(ArtifactError::AdapterPayload {
+            return Err(PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: "FUNCTION.md body is not supported".to_owned(),
             });
         }
         front_matter
             .validate()
-            .map_err(|error| ArtifactError::AdapterEnvelope {
+            .map_err(|error| PackageError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
-        Ok(front_matter.artifact)
+        Ok(front_matter.package)
     }
 
     fn validate_payload(
         &self,
-        package: &dyn ArtifactPackageView,
-        envelope: &ArtifactEnvelope,
-    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        package: &dyn PackageView,
+        envelope: &PackageEnvelope,
+    ) -> Result<ErasedPackagePayload, PackageError> {
         let extracted = self.extract_envelope(package)?;
         if &extracted != envelope {
-            return Err(ArtifactError::AdapterPayload {
+            return Err(PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: "FUNCTION.md envelope changed during validation".to_owned(),
             });
         }
-        let entrypoint: agl_package::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
+        let entrypoint: agl_package::PackageRelativePath = FUNCTION_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
-            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterPayload {
+            std::str::from_utf8(&content).map_err(|error| PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("FUNCTION.md is not UTF-8: {error}"),
             })?;
         let (front_matter, _) =
-            parse_function_document(content).map_err(|error| ArtifactError::AdapterPayload {
+            parse_function_document(content).map_err(|error| PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
         front_matter
             .validate()
-            .map_err(|error| ArtifactError::AdapterPayload {
+            .map_err(|error| PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
         Ok(Box::new(front_matter))
     }
-}
-
-#[cfg(test)]
-pub fn function_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterRegistry>> {
-    let adapters: [Arc<dyn ArtifactAdapter>; 3] = [
-        Arc::new(FunctionArtifactAdapter::default()),
-        Arc::new(agl_model::ModelArtifactAdapter::default()),
-        Arc::new(agl_extension::package::ExtensionPackageAdapter::default()),
-    ];
-    Ok(Arc::new(agl_package::ArtifactAdapterRegistry::from_dyn(
-        adapters,
-    )?))
-}
-
-#[cfg(test)]
-pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id: agl_package::ArtifactSourceId = "builtin".parse()?;
-    let mut candidates = Vec::new();
-    for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
-        let files = package
-            .files
-            .iter()
-            .map(|file| Ok::<_, ArtifactError>((file.path.parse()?, file.bytes.to_vec())))
-            .collect::<Result<Vec<_>, _>>()?;
-        candidates.push(
-            ArtifactCandidate::new(
-                package.type_id.parse()?,
-                package.id.parse()?,
-                package.version.parse()?,
-                source_id.clone(),
-                ArtifactSourceTier::Builtin,
-                ArtifactSourceKind::Embedded,
-                Arc::new(InMemoryPackageView::new(files)?),
-            )
-            .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
-        );
-    }
-    Ok(Arc::new(StaticArtifactSource::new(
-        source_id,
-        ArtifactSourceTier::Builtin,
-        ArtifactSourceKind::Embedded,
-        candidates,
-    )?))
-}
-
-#[cfg(test)]
-pub fn directory_function_source(
-    source_id: agl_package::ArtifactSourceId,
-    tier: ArtifactSourceTier,
-    root: impl Into<std::path::PathBuf>,
-    registry: Arc<agl_package::ArtifactAdapterRegistry>,
-) -> Arc<dyn ArtifactSource> {
-    Arc::new(DirectoryArtifactSource::new(
-        source_id,
-        tier,
-        ArtifactSourceKind::Directory,
-        root,
-        registry,
-    ))
 }
 
 pub fn parse_function_envelope(content: &str) -> Result<AgentFunctionFrontMatter> {
@@ -179,93 +107,14 @@ pub fn parse_function_envelope(content: &str) -> Result<AgentFunctionFrontMatter
     Ok(front_matter)
 }
 
-#[cfg(test)]
-pub fn validate_function_model_contract(
-    front_matter: &AgentFunctionFrontMatter,
-    inference_config: Option<&str>,
-    locator: &FunctionPackageLocation,
-) -> Result<()> {
-    let model_requirements = front_matter
-        .artifact
-        .requires
-        .iter()
-        .filter(|requirement| requirement.type_id().as_str() == "model")
-        .collect::<Vec<_>>();
-    let Some(inference_config) = inference_config else {
-        ensure!(
-            model_requirements.is_empty(),
-            "function `{}` declares a Model dependency without an inference config",
-            front_matter.id()
-        );
-        return Ok(());
-    };
-    ensure!(
-        model_requirements.len() == 1,
-        "function `{}` must declare exactly one Model dependency for its inference config",
-        front_matter.id()
-    );
-    let registry = function_adapter_registry()?;
-    let mut sources = Vec::new();
-    if locator.source != FunctionPackageSource::Builtin {
-        let (source_id, tier, root) = match locator.source {
-            FunctionPackageSource::Workspace => (
-                "workspace",
-                ArtifactSourceTier::Workspace,
-                locator
-                    .root_dir
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .context("workspace function path has no workspace root")?
-                    .to_path_buf(),
-            ),
-            FunctionPackageSource::Global => (
-                "global",
-                ArtifactSourceTier::User,
-                locator
-                    .root_dir
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .context("global function path has no config root")?
-                    .to_path_buf(),
-            ),
-            FunctionPackageSource::Explicit => {
-                anyhow::bail!(
-                    "explicit Function packages with Model dependencies require a workspace or global source"
-                )
-            }
-            FunctionPackageSource::Builtin => unreachable!(),
-        };
-        sources.push(directory_function_source(
-            source_id.parse()?,
-            tier,
-            root,
-            registry.clone(),
-        ));
-    }
-    sources.push(builtin_source()?);
-    let resolver = ArtifactResolver::new(registry.clone(), sources);
-    let reference = ArtifactPackageRef::parse(&format!(
-        "function:{}@{}",
-        front_matter.id(),
-        front_matter.artifact.version
-    ))?;
-    let graph = resolver.resolve_and_validate(&reference, None)?;
-    validate_resolved_function_model_contract(
-        front_matter,
-        Some(inference_config),
-        &graph,
-        &registry,
-    )
-}
-
 pub fn validate_resolved_function_model_contract(
     front_matter: &AgentFunctionFrontMatter,
     inference_config: Option<&str>,
-    graph: &agl_package::ResolvedArtifactGraph,
-    registry: &agl_package::ArtifactAdapterRegistry,
+    graph: &agl_package::ResolvedPackageGraph,
+    registry: &agl_package::PackageAdapterRegistry,
 ) -> Result<()> {
     let model_requirements = front_matter
-        .artifact
+        .package
         .requires
         .iter()
         .filter(|requirement| requirement.type_id().as_str() == "model")
@@ -303,7 +152,7 @@ pub fn validate_resolved_function_model_contract(
     let main = model
         .artifacts
         .iter()
-        .find(|artifact| artifact.model_id == preset.backend.model_id)
+        .find(|package| package.model_id == preset.backend.model_id)
         .with_context(|| {
             format!(
                 "function `{}` references missing Model weight `{}`",
@@ -321,7 +170,7 @@ pub fn validate_resolved_function_model_contract(
         let projector = model
             .artifacts
             .iter()
-            .find(|artifact| &artifact.model_id == projector_id)
+            .find(|package| &package.model_id == projector_id)
             .with_context(|| {
                 format!(
                     "function `{}` references missing Model projector `{projector_id}`",
@@ -342,7 +191,7 @@ pub fn validate_resolved_function_model_contract(
         let draft = model
             .artifacts
             .iter()
-            .find(|artifact| &artifact.model_id == draft_id)
+            .find(|package| &package.model_id == draft_id)
             .with_context(|| {
                 format!(
                     "function `{}` references missing Model draft `{draft_id}`",

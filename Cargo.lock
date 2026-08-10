@@ -78,6 +78,7 @@ name = "agl-artifact"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-kernel",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -98,6 +99,7 @@ dependencies = [
 name = "agl-chat"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-config",
  "agl-content",
@@ -134,11 +136,13 @@ name = "agl-cli"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-app",
+ "agl-artifact",
  "agl-assets",
  "agl-chat",
  "agl-client",
  "agl-config",
  "agl-content",
+ "agl-core-tools",
  "agl-cron",
  "agl-daemon",
  "agl-events",
@@ -211,6 +215,7 @@ dependencies = [
 name = "agl-core-tools"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-cron",
  "agl-exec",
  "agl-extension",
@@ -347,6 +352,7 @@ dependencies = [
  "agl-ids",
  "agl-kernel",
  "agl-process",
+ "agl-runtime",
  "agl-skill",
  "agl-store",
  "anyhow",
@@ -564,12 +570,15 @@ dependencies = [
 name = "agl-repo"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
+ "agl-kernel",
  "agl-package",
  "anyhow",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
  "toml",
 ]
 
@@ -630,6 +639,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
  "toml",
 ]
 
@@ -637,6 +647,7 @@ dependencies = [
 name = "agl-store"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-content",
  "agl-events",
  "agl-exec",

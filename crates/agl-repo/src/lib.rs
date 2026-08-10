@@ -1,27 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
+#![forbid(unsafe_code)]
+
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agl_package as artifact_contract;
+use agl_artifact::ArtifactHandle;
+use agl_package::{PackageLock, PackageSourceDeclaration, PackageSourceKind, WorkspaceManifest};
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
 
-mod artifacts;
-mod hooks;
-mod types;
-mod v2;
+mod git_artifact;
 
-pub use artifacts::{
-    lock_artifacts, resolve_component_path_handle, status_artifacts, sync_artifacts,
-};
-pub use hooks::install_repo_hooks;
-pub use types::*;
-pub use v2::{
-    read_artifact_lock_v2, read_optional_artifact_lock_v2, read_workspace_manifest_v2,
-    replace_artifact_lock_components_v2, replace_artifact_lock_packages_v2, write_artifact_lock_v2,
-    write_workspace_manifest_v2,
-};
+pub use git_artifact::*;
+
+pub const AGL_DIR: &str = ".agl";
+pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
+pub const PACKAGE_LOCK_PATH: &str = ".agl/package-lock.toml";
+pub const DEFAULT_FUNCTION: &str = "function:gemma4-e4b@^1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSourceProvenance {
@@ -29,1754 +23,268 @@ pub struct GitSourceProvenance {
     pub tree: String,
 }
 
-pub fn resolve_artifact_source_root(
-    workspace_root: impl AsRef<Path>,
-    name: &str,
-    source: &artifact_contract::ArtifactSourceDeclaration,
-) -> Result<PathBuf> {
-    let workspace_root = workspace_root
-        .as_ref()
-        .canonicalize()
-        .context("failed to resolve artifact workspace root")?;
-    resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
+pub fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start.as_ref())
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("failed to run git rev-parse")?;
+    if !output.status.success() {
+        bail!("not inside a Git repository");
+    }
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
 }
 
 pub fn git_source_provenance(root: impl AsRef<Path>) -> Result<GitSourceProvenance> {
     let root = root.as_ref();
-    let revision = git_output(root, ["rev-parse", "HEAD"])?.trim().to_owned();
-    let tree = git_output(root, ["rev-parse", "HEAD^{tree}"])?
-        .trim()
-        .to_owned();
-    ensure!(!revision.is_empty(), "Git artifact source has no revision");
-    ensure!(!tree.is_empty(), "Git artifact source has no tree");
-    Ok(GitSourceProvenance { revision, tree })
+    Ok(GitSourceProvenance {
+        revision: git_output(root, &["rev-parse", "HEAD"])?,
+        tree: git_output(root, &["rev-parse", "HEAD^{tree}"])?,
+    })
 }
 
-pub fn materialize_artifact_source(
-    start: impl AsRef<Path>,
-    name: &str,
-    source: &artifact_contract::ArtifactSourceDeclaration,
+pub fn verified_git_source_provenance(
+    root: impl AsRef<Path>,
+    revision: &str,
+) -> Result<GitSourceProvenance> {
+    let root = root.as_ref();
+    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    let revision = git_output(
+        root,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )?;
+    ensure!(
+        head == revision,
+        "Git package source HEAD `{head}` does not match declared revision `{revision}`"
+    );
+    let dirty = git_output(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    )?;
+    ensure!(
+        dirty.is_empty(),
+        "Git package source has uncommitted or ignored files"
+    );
+    git_source_provenance(root)
+}
+
+pub fn resolve_package_source_root(
+    workspace_root: impl AsRef<Path>,
+    source: &PackageSourceDeclaration,
 ) -> Result<PathBuf> {
-    let workspace_root = resolve_repo_root(start)?;
-    let source_id = artifact_contract::ArtifactSourceId::new(name.to_owned())?;
-    let target = workspace_root.join(".agl/sources").join(source_id.as_str());
+    let workspace_root = workspace_root.as_ref().canonicalize()?;
+    ensure!(
+        source.kind == PackageSourceKind::Directory,
+        "only a materialized directory package source has a direct root"
+    );
+    let relative = source
+        .path
+        .as_ref()
+        .context("package source path is missing")?;
+    let candidate = workspace_root.join(relative);
+    let canonical = candidate
+        .canonicalize()
+        .with_context(|| format!("failed to resolve package source {}", source.id))?;
+    ensure!(
+        canonical.starts_with(&workspace_root),
+        "package source escapes workspace"
+    );
+    Ok(canonical)
+}
+
+pub fn materialize_package_source(
+    workspace_root: impl AsRef<Path>,
+    source: &PackageSourceDeclaration,
+) -> Result<PathBuf> {
+    let workspace_root = workspace_root.as_ref().canonicalize()?;
     match source.kind {
-        artifact_contract::ArtifactSourceKind::Directory => {
-            resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
-        }
-        artifact_contract::ArtifactSourceKind::Git => {
+        PackageSourceKind::Directory => resolve_package_source_root(&workspace_root, source),
+        PackageSourceKind::Git => {
+            let workspace_root = resolve_repo_root(&workspace_root)?;
             let url = source
                 .url
                 .as_deref()
-                .context("Git artifact source is missing its URL")?;
+                .context("Git package source URL is missing")?;
             let rev = source
                 .rev
                 .as_deref()
-                .context("Git artifact source is missing its revision")?;
-            if let Ok(metadata) = fs::symlink_metadata(&target) {
-                ensure!(
-                    !metadata.file_type().is_symlink(),
-                    "artifact source path is a symlink"
-                );
-                ensure!(metadata.is_dir(), "artifact source path is not a directory");
-                git_run_with_file_protocol(&target, &["fetch", "--tags", "--quiet"])
-                    .with_context(|| format!("failed to fetch artifact source {name}"))?;
+                .context("Git package source revision is missing")?;
+            let target = workspace_root.join(".agl/sources").join(source.id.as_str());
+            if target.exists() {
+                git_output(&target, &["fetch", "--tags", "--quiet"])?;
             } else {
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                git_run_with_file_protocol(
-                    &workspace_root,
-                    &[
-                        "clone",
-                        "--quiet",
-                        url,
-                        &slash_path(&PathBuf::from(".agl/sources").join(name)),
-                    ],
-                )
-                .with_context(|| format!("failed to clone artifact source {name}"))?;
+                let output = Command::new("git")
+                    .arg("-c")
+                    .arg("protocol.file.allow=always")
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg(url)
+                    .arg(&target)
+                    .output()?;
+                if !output.status.success() {
+                    bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+                }
             }
-            git_run(&target, &["checkout", "--quiet", rev])
-                .with_context(|| format!("failed to checkout artifact source {name} at {rev}"))?;
-            resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
+            git_output(&target, &["checkout", "--quiet", rev])?;
+            Ok(target.canonicalize()?)
         }
-        artifact_contract::ArtifactSourceKind::Embedded => {
-            bail!("embedded artifact sources cannot be materialized")
-        }
+        PackageSourceKind::Embedded => bail!("embedded package sources cannot be materialized"),
     }
 }
 
-fn resolve_artifact_source_root_in_workspace(
-    workspace_root: &Path,
-    name: &str,
-    source: &artifact_contract::ArtifactSourceDeclaration,
-) -> Result<PathBuf> {
-    let unresolved = match source.kind {
-        artifact_contract::ArtifactSourceKind::Directory => {
-            let relative = source
-                .path
-                .as_ref()
-                .context("local artifact source is missing its path")?;
-            workspace_root.join(relative)
-        }
-        artifact_contract::ArtifactSourceKind::Git => {
-            workspace_root.join(".agl/sources").join(name)
-        }
-        artifact_contract::ArtifactSourceKind::Embedded => {
-            bail!("embedded artifact sources do not have a filesystem root")
-        }
-    };
-    let metadata = fs::symlink_metadata(&unresolved)
-        .with_context(|| format!("failed to resolve artifact source {name}"))?;
-    if metadata.file_type().is_symlink() {
-        return Err(anyhow::Error::new(
-            artifact_contract::ArtifactError::PathEscape {
-                path: unresolved.display().to_string(),
-            },
-        ));
-    }
-    ensure!(
-        metadata.is_dir(),
-        "artifact source {name} path is not a directory"
-    );
-    let canonical = unresolved
-        .canonicalize()
-        .with_context(|| format!("failed to resolve artifact source {name}"))?;
-    if !canonical.starts_with(workspace_root) {
-        return Err(anyhow::Error::new(
-            artifact_contract::ArtifactError::PathEscape {
-                path: canonical.display().to_string(),
-            },
-        ));
-    }
-    Ok(canonical)
+pub fn read_workspace_manifest(path: impl AsRef<Path>) -> Result<WorkspaceManifest> {
+    WorkspaceManifest::from_toml(&fs::read_to_string(path.as_ref())?).map_err(Into::into)
 }
 
-#[cfg(test)]
-pub(crate) use hooks::hook_content;
-
-pub fn init_repo_workspace(
-    start: impl AsRef<Path>,
-    options: &RepoInitOptions,
-) -> Result<RepoInitReport> {
-    init_repo_workspace_with_default(start, options, DEFAULT_FUNCTION)
-}
-
-pub fn init_repo_workspace_with_default(
-    start: impl AsRef<Path>,
-    options: &RepoInitOptions,
-    function_default: &str,
-) -> Result<RepoInitReport> {
-    if !is_valid_workspace_function_id(function_default) {
-        bail!("workspace default function has invalid id `{function_default}`");
-    }
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let mut changes = Vec::new();
-
-    let manifest = init_manifest(options, function_default)?;
-
-    create_dir_change(
-        &workspace_root,
-        Path::new(AGL_DIR),
-        options.dry_run,
-        &mut changes,
-    )?;
-
-    write_manifest_change(
-        &manifest_path,
-        &manifest,
-        options,
-        function_default,
-        &mut changes,
-    )?;
-
-    for artifact in manifest.artifacts.values() {
-        if artifact.create.iter().any(|path| path == Path::new(".")) {
-            create_dir_change(
-                &workspace_root,
-                &artifact.path,
-                options.dry_run,
-                &mut changes,
-            )?;
-        } else if artifact.kind == WorkspaceComponentKind::Submodule {
-            changes.push(RepoInitChange {
-                path: artifact.path.clone(),
-                action: RepoInitAction::DeclaredSubmodule,
-            });
-        } else if artifact.kind == WorkspaceComponentKind::Git {
-            changes.push(RepoInitChange {
-                path: artifact.path.clone(),
-                action: RepoInitAction::DeclaredGitComponent,
-            });
-        }
-    }
-
-    Ok(RepoInitReport {
-        workspace_root,
-        manifest_path,
-        dry_run: options.dry_run,
-        changes,
-        next_steps: vec!["agl status".to_string()],
-    })
-}
-
-pub fn read_workspace_profile(path: impl AsRef<Path>) -> Result<WorkspaceProfile> {
+pub fn write_workspace_manifest(
+    path: impl AsRef<Path>,
+    manifest: &WorkspaceManifest,
+) -> Result<()> {
     let path = path.as_ref();
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let profile: WorkspaceProfile =
-        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
-    validate_profile(&profile)?;
-    Ok(profile)
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, manifest.to_toml()?)?;
+    Ok(())
 }
 
-pub fn status_repo_workspace(
-    start: impl AsRef<Path>,
-    options: &RepoStatusOptions,
-) -> Result<RepoStatusReport> {
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-
-    let manifest = match read_manifest(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(err) if is_not_found(&err) => {
-            return Ok(RepoStatusReport {
-                state: RepoStatusState::Invalid,
-                workspace_root,
-                manifest_path,
-                components: Vec::new(),
-                warnings: Vec::new(),
-                errors: vec!["workspace_manifest_missing".to_string()],
-                next_steps: vec!["agl init".to_string()],
-            });
-        }
-        Err(err) => {
-            return Ok(RepoStatusReport {
-                state: RepoStatusState::Invalid,
-                workspace_root,
-                manifest_path,
-                components: Vec::new(),
-                warnings: Vec::new(),
-                errors: vec![format!("workspace_manifest_invalid: {err:#}")],
-                next_steps: vec!["fix .agl/workspace.toml".to_string()],
-            });
-        }
-    };
-
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
-    validate_manifest(&manifest, &mut errors);
-
-    let mut components = Vec::new();
-    for (name, artifact) in &manifest.artifacts {
-        if let Some(requested) = &options.component
-            && requested != name
-        {
-            continue;
-        }
-        let mut status = component_status(&workspace_root, name, artifact);
-        if !artifact.required && status.errors.iter().any(|error| error == "missing") {
-            status.errors.retain(|error| error != "missing");
-            status.warnings.push("missing_optional".to_string());
-            status.state = ComponentState::Warning;
-        }
-        components.push(status);
+pub fn read_optional_package_lock(path: impl AsRef<Path>) -> Result<Option<PackageLock>> {
+    match fs::read_to_string(path.as_ref()) {
+        Ok(value) => Ok(Some(PackageLock::from_toml(&value)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
-
-    if options.component.is_some() && components.is_empty() {
-        errors.push(format!(
-            "component_not_found: {}",
-            options.component.as_deref().unwrap_or_default()
-        ));
-    }
-
-    for component in &components {
-        warnings.extend(
-            component
-                .warnings
-                .iter()
-                .map(|warning| format!("component.{}.{}", component.name, warning)),
-        );
-        errors.extend(
-            component
-                .errors
-                .iter()
-                .map(|error| format!("component.{}.{}", component.name, error)),
-        );
-    }
-
-    let state = if !errors.is_empty() {
-        RepoStatusState::Invalid
-    } else if !warnings.is_empty() {
-        RepoStatusState::Warning
-    } else {
-        RepoStatusState::Ok
-    };
-
-    let mut next_steps = component_init_next_steps(&components);
-    if !errors.is_empty() {
-        next_steps.push("inspect agl status --json".to_string());
-    }
-
-    Ok(RepoStatusReport {
-        state,
-        workspace_root,
-        manifest_path,
-        components,
-        warnings,
-        errors,
-        next_steps,
-    })
 }
 
-fn component_init_next_steps(components: &[ComponentStatus]) -> Vec<String> {
-    let mut steps = BTreeSet::new();
-    for component in components {
-        if component.kind != WorkspaceComponentKind::Submodule {
-            continue;
-        }
-        let needs_init = matches!(component.state, ComponentState::Missing)
-            || component.warnings.iter().any(|warning| {
-                matches!(
-                    warning.as_str(),
-                    "not_registered_submodule" | "gitlink_missing"
-                )
-            });
-        if !needs_init {
-            continue;
-        }
-        if component.name == "skills" {
-            steps.insert("agl skill init".to_string());
-        } else {
-            steps.insert(format!("agl repo init-component {}", component.name));
-        }
+pub fn write_package_lock(path: impl AsRef<Path>, lock: &PackageLock) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    steps.into_iter().collect()
+    lock.write_atomic(path)?;
+    Ok(())
 }
 
-pub fn init_repo_component(
-    start: impl AsRef<Path>,
-    options: &RepoComponentInitOptions,
-) -> Result<RepoComponentInitReport> {
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let manifest = read_manifest(&manifest_path).with_context(|| {
-        format!(
-            "failed to read workspace manifest {}",
-            manifest_path.display()
-        )
-    })?;
-    let mut errors = Vec::new();
-    validate_manifest(&manifest, &mut errors);
-
-    let Some(artifact) = manifest.artifacts.get(&options.component) else {
-        errors.push(format!("component_not_found: {}", options.component));
-        return Ok(component_init_error_report(
-            workspace_root,
-            manifest_path,
-            options,
-            PathBuf::new(),
-            errors,
-        ));
-    };
-    let component = artifact.clone();
-    let component_path = component.path.clone();
-
-    if !matches!(
-        component.kind,
-        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
-    ) {
-        errors.push(format!(
-            "component_not_git_backed: {} is {:?}",
-            options.component, component.kind
-        ));
+pub fn read_workspace_default_function(start: impl AsRef<Path>) -> Result<Option<String>> {
+    let path = start.as_ref().join(WORKSPACE_MANIFEST_PATH);
+    if !path.exists() {
+        return Ok(None);
     }
-    if component.url.as_deref().is_none_or(str::is_empty) {
-        errors.push(format!("component_url_missing: {}", options.component));
-    }
-    if !errors.is_empty() {
-        return Ok(component_init_error_report(
-            workspace_root,
-            manifest_path,
-            options,
-            component_path,
-            errors,
-        ));
-    }
-
-    if component.kind == WorkspaceComponentKind::Git {
-        return init_git_component(workspace_root, manifest_path, options, &component);
-    }
-
-    let mut actions = Vec::new();
-    let registered = submodule_registered(&workspace_root, &component.path);
-    let gitlink = gitlink_present(&workspace_root, &component.path);
-    let exists = workspace_root.join(&component.path).exists();
-
-    if registered || gitlink {
-        if options.dry_run {
-            actions.push(RepoComponentInitAction::WouldUpdateSubmodule);
-        } else {
-            git_run_with_file_protocol(
-                &workspace_root,
-                &[
-                    "submodule",
-                    "update",
-                    "--init",
-                    "--recursive",
-                    "--",
-                    &slash_path(&component.path),
-                ],
-            )
-            .with_context(|| {
-                format!(
-                    "failed to initialize submodule {}",
-                    component.path.display()
-                )
-            })?;
-            actions.push(RepoComponentInitAction::UpdatedSubmodule);
-        }
-    } else if exists {
-        errors.push(format!(
-            "component_path_exists_not_submodule: {}",
-            component.path.display()
-        ));
-        return Ok(component_init_error_report(
-            workspace_root,
-            manifest_path,
-            options,
-            component_path,
-            errors,
-        ));
-    } else {
-        let url = component.url.as_deref().expect("url checked above");
-        if options.dry_run {
-            actions.push(RepoComponentInitAction::WouldAddSubmodule);
-        } else {
-            git_run_with_file_protocol(
-                &workspace_root,
-                &[
-                    "submodule",
-                    "add",
-                    "--name",
-                    &options.component,
-                    url,
-                    &slash_path(&component.path),
-                ],
-            )
-            .with_context(|| format!("failed to add submodule {}", component.path.display()))?;
-            actions.push(RepoComponentInitAction::AddedSubmodule);
-        }
-    }
-
-    if let Some(rev) = component.rev.as_deref().filter(|rev| !rev.is_empty()) {
-        if options.dry_run {
-            actions.push(RepoComponentInitAction::WouldCheckoutRev);
-        } else {
-            let submodule_root = workspace_root.join(&component.path);
-            git_run_with_file_protocol(&submodule_root, &["fetch", "--tags", "--quiet"])
-                .with_context(|| format!("failed to fetch {}", component.path.display()))?;
-            git_run(&submodule_root, &["checkout", "--quiet", rev]).with_context(|| {
-                format!(
-                    "failed to checkout rev {} in {}",
-                    rev,
-                    component.path.display()
-                )
-            })?;
-            actions.push(RepoComponentInitAction::CheckedOutRev);
-        }
-    }
-
-    if actions.is_empty() {
-        actions.push(RepoComponentInitAction::AlreadyInitialized);
-    }
-
-    Ok(RepoComponentInitReport {
-        workspace_root,
-        manifest_path,
-        component: options.component.clone(),
-        path: component_path,
-        dry_run: options.dry_run,
-        actions,
-        errors,
-    })
+    Ok(Some(
+        read_workspace_manifest(path)?.default_function.to_string(),
+    ))
 }
 
-fn init_git_component(
-    workspace_root: PathBuf,
-    manifest_path: PathBuf,
-    options: &RepoComponentInitOptions,
-    component: &WorkspaceComponent,
-) -> Result<RepoComponentInitReport> {
-    let component_path = component.path.clone();
-    let absolute_path = workspace_root.join(&component.path);
-    let mut actions = Vec::new();
-    let errors = Vec::new();
-
-    if absolute_path.exists() {
-        if options.dry_run {
-            actions.push(RepoComponentInitAction::WouldFetch);
-        } else {
-            git_run_with_file_protocol(&absolute_path, &["fetch", "--tags", "--quiet"])
-                .with_context(|| format!("failed to fetch {}", component.path.display()))?;
-            actions.push(RepoComponentInitAction::Fetched);
-        }
-    } else if options.dry_run {
-        actions.push(RepoComponentInitAction::WouldClone);
-    } else {
-        let url = component.url.as_deref().expect("url checked above");
-        git_run_with_file_protocol(
-            &workspace_root,
-            &["clone", "--quiet", url, &slash_path(&component.path)],
-        )
-        .with_context(|| format!("failed to clone {}", component.path.display()))?;
-        actions.push(RepoComponentInitAction::Cloned);
-    }
-
-    if let Some(rev) = component.rev.as_deref().filter(|rev| !rev.is_empty()) {
-        if options.dry_run {
-            actions.push(RepoComponentInitAction::WouldCheckoutRev);
-        } else {
-            git_run(&absolute_path, &["checkout", "--quiet", rev]).with_context(|| {
-                format!(
-                    "failed to checkout rev {} in {}",
-                    rev,
-                    component.path.display()
-                )
-            })?;
-            actions.push(RepoComponentInitAction::CheckedOutRev);
-        }
-    }
-
-    if actions.is_empty() {
-        actions.push(RepoComponentInitAction::AlreadyInitialized);
-    }
-    Ok(RepoComponentInitReport {
-        workspace_root,
-        manifest_path,
-        component: options.component.clone(),
-        path: component_path,
-        dry_run: options.dry_run,
-        actions,
-        errors,
-    })
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSpecVerifyOptions {
+    pub strict: bool,
 }
 
-pub fn verify_task_specs(
-    start: impl AsRef<Path>,
-    options: &TaskSpecVerifyOptions,
-) -> Result<TaskSpecVerifyReport> {
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let manifest = read_manifest(&manifest_path).with_context(|| {
-        format!(
-            "failed to read workspace manifest {}",
-            manifest_path.display()
-        )
-    })?;
-    let Some(tasks) = manifest.artifacts.get("tasks") else {
-        return Ok(TaskSpecVerifyReport {
-            state: TaskSpecVerifyState::NotConfigured,
-            workspace_root,
-            component: None,
-            root: PathBuf::new(),
-            files: Vec::new(),
-            warnings: Vec::new(),
-            errors: Vec::new(),
-        });
-    };
-    let status = status_repo_workspace(
-        &workspace_root,
-        &RepoStatusOptions {
-            component: Some("tasks".to_string()),
-            strict: options.strict,
-        },
-    )?;
-    let workspace_root = status.workspace_root;
-    let component = status.components.into_iter().next();
-    let root = component
-        .as_ref()
-        .map(|component| workspace_root.join(&component.path))
-        .unwrap_or_else(|| workspace_root.join(&tasks.path));
-    let warnings = status.warnings;
-    let mut errors = status.errors;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSpecValidation {
+    pub missing_sections: Vec<String>,
+}
 
-    let discovery = if root.is_dir() {
-        collect_planned_task_overviews(&root)?
-    } else {
-        TaskSpecDiscovery::default()
-    };
-    let files = discovery
-        .planned_overviews
-        .into_iter()
-        .map(|path| task_spec_file_status(&workspace_root, &path))
-        .collect::<Vec<_>>();
-
-    if root.exists() && discovery.task_directories == 0 {
-        errors.push("no_task_spec_markdown_files".to_string());
+impl TaskSpecValidation {
+    pub fn is_valid(&self) -> bool {
+        self.missing_sections.is_empty()
     }
-    for file in &files {
-        if !file.errors.is_empty() || !file.valid {
-            errors.push(format!("invalid_task_spec: {}", file.path.display()));
-        }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSpecVerifyReport {
+    pub files: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl TaskSpecVerifyReport {
+    pub fn should_fail(&self, strict: bool) -> bool {
+        !self.errors.is_empty() || (strict && self.files.is_empty())
     }
-
-    let state = if !errors.is_empty() {
-        TaskSpecVerifyState::Invalid
-    } else if !warnings.is_empty() || files.iter().any(|file| !file.warnings.is_empty()) {
-        TaskSpecVerifyState::Warning
-    } else {
-        TaskSpecVerifyState::Ok
-    };
-
-    Ok(TaskSpecVerifyReport {
-        state,
-        workspace_root,
-        component,
-        root,
-        files,
-        warnings,
-        errors,
-    })
 }
 
 pub fn validate_task_spec_markdown(markdown: &str) -> TaskSpecValidation {
-    let lower = markdown.to_ascii_lowercase();
-    let required = [
-        ("problem", &["problem"][..]),
-        ("goal", &["goal"][..]),
-        ("scope", &["scope"][..]),
-        ("non-goals", &["non-goals", "non goals"][..]),
-        (
-            "implementation",
-            &["implementation", "implementation steps"][..],
-        ),
-        (
-            "acceptance criteria",
-            &["acceptance criteria", "acceptance"][..],
-        ),
-        (
-            "verification",
-            &["verification", "verification commands"][..],
-        ),
+    const REQUIRED: [&str; 7] = [
+        "Problem",
+        "Goal",
+        "Scope",
+        "Non-goals",
+        "Implementation",
+        "Acceptance Criteria",
+        "Verification",
     ];
-    let missing_sections = required
-        .into_iter()
-        .filter(|(_canonical, aliases)| !aliases.iter().any(|alias| lower.contains(alias)))
-        .map(|(canonical, _aliases)| canonical.to_string())
-        .collect();
-    TaskSpecValidation { missing_sections }
-}
-
-pub fn export_repo_profile(
-    start: impl AsRef<Path>,
-    options: &RepoExportProfileOptions,
-) -> Result<RepoExportProfileReport> {
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let manifest = read_manifest(&manifest_path).with_context(|| {
-        format!(
-            "failed to read workspace manifest {}",
-            manifest_path.display()
-        )
-    })?;
-    let status = status_repo_workspace(
-        &workspace_root,
-        &RepoStatusOptions {
-            component: None,
-            strict: false,
-        },
-    )?;
-    let profile = profile_from_workspace_manifest(&manifest, &status);
-    validate_profile(&profile)?;
-
-    let content = toml::to_string_pretty(&profile).context("failed to render workspace profile")?;
-    if let Some(parent) = options.out.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-    let mut open = fs::OpenOptions::new();
-    open.write(true).create(true);
-    if options.force {
-        open.truncate(true);
-    } else {
-        open.create_new(true);
-    }
-    let mut file = open
-        .open(&options.out)
-        .with_context(|| format!("failed to create profile export {}", options.out.display()))?;
-    use std::io::Write;
-    file.write_all(content.as_bytes())
-        .with_context(|| format!("failed to write profile export {}", options.out.display()))?;
-
-    Ok(RepoExportProfileReport {
-        workspace_root,
-        profile_path: options.out.clone(),
-        wrote: true,
-        profile,
-    })
-}
-
-pub fn render_repo_profile(start: impl AsRef<Path>) -> Result<WorkspaceProfile> {
-    let workspace_root = resolve_repo_root(start)?;
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let manifest = read_manifest(&manifest_path).with_context(|| {
-        format!(
-            "failed to read workspace manifest {}",
-            manifest_path.display()
-        )
-    })?;
-    let status = status_repo_workspace(
-        &workspace_root,
-        &RepoStatusOptions {
-            component: None,
-            strict: false,
-        },
-    )?;
-    let profile = profile_from_workspace_manifest(&manifest, &status);
-    validate_profile(&profile)?;
-    Ok(profile)
-}
-
-pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
-    let profile = render_repo_profile(start)?;
-    toml::to_string_pretty(&profile).context("failed to render workspace profile")
-}
-
-fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<RepoManifest> {
-    let manifest = if let Some(profile_file) = &options.profile_file {
-        let profile = read_workspace_profile(profile_file)?;
-        if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
-            bail!(
-                "profile file name {} does not match requested profile {}",
-                profile.name,
-                options.profile
-            );
-        }
-        RepoManifest {
-            version: profile.version,
-            profile: profile.name,
-            functions: WorkspaceFunctions::default(),
-            sources: BTreeMap::new(),
-            artifacts: profile.components,
-        }
-    } else {
-        if options.profile != DEFAULT_PROFILE {
-            bail!("unsupported repo workflow profile: {}", options.profile);
-        }
-        default_manifest()
-    };
-
-    let mut manifest = manifest;
-    manifest.functions.default = function_default.to_string();
-    apply_init_component_overrides(&mut manifest, options)?;
-    Ok(manifest)
-}
-
-pub(crate) fn default_manifest() -> RepoManifest {
-    RepoManifest {
-        version: 2,
-        profile: DEFAULT_PROFILE.to_string(),
-        functions: WorkspaceFunctions::default(),
-        sources: BTreeMap::new(),
-        artifacts: BTreeMap::new(),
-    }
-}
-
-fn apply_init_component_overrides(
-    manifest: &mut RepoManifest,
-    options: &RepoInitOptions,
-) -> Result<()> {
-    if options.tasks_rev.is_some() && options.tasks_url.is_none() {
-        bail!("--tasks-rev requires --tasks-url");
-    }
-
-    let mut overrides = options.artifacts.clone();
-    if options.skills_url.is_some() || options.skills_rev.is_some() {
-        let url = options
-            .skills_url
-            .clone()
-            .or_else(|| {
-                manifest
-                    .artifacts
-                    .get("skills")
-                    .and_then(|artifact| artifact.url.clone())
-            })
-            .unwrap_or_else(|| DEFAULT_SKILLS_URL.to_string());
-        overrides.push(RepoArtifactOverride {
-            name: "skills".to_string(),
-            url,
-            rev: options.skills_rev.clone().or_else(|| {
-                manifest
-                    .artifacts
-                    .get("skills")
-                    .and_then(|artifact| artifact.rev.clone())
-            }),
-        });
-    }
-
-    if let Some(tasks_url) = &options.tasks_url {
-        overrides.push(RepoArtifactOverride {
-            name: "tasks".to_string(),
-            url: tasks_url.clone(),
-            rev: options.tasks_rev.clone(),
-        });
-    }
-
-    let mut seen = BTreeSet::new();
-    for override_source in overrides {
-        if !seen.insert(override_source.name.clone()) {
-            bail!(
-                "artifact specified more than once: {}",
-                override_source.name
-            );
-        }
-        apply_artifact_override(manifest, override_source)?;
-    }
-
-    Ok(())
-}
-
-fn apply_artifact_override(
-    manifest: &mut RepoManifest,
-    override_source: RepoArtifactOverride,
-) -> Result<()> {
-    validate_artifact_name(&override_source.name)?;
-
-    let path = manifest
-        .artifacts
-        .get(&override_source.name)
-        .map(|artifact| artifact.path.clone())
-        .unwrap_or_else(|| default_artifact_component_path(&override_source.name));
-    manifest.artifacts.insert(
-        override_source.name.clone(),
-        WorkspaceComponent {
-            kind: WorkspaceComponentKind::Git,
-            path,
-            url: Some(override_source.url.clone()),
-            rev: override_source.rev.clone(),
-            commit: None,
-            tree: None,
-            required: true,
-            access: ArtifactAccess::ReadWrite,
-            validation: (override_source.name == "tasks").then(|| "agl.task_spec.v1".to_string()),
-            create: Vec::new(),
-        },
-    );
-
-    Ok(())
-}
-
-fn validate_artifact_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        bail!("artifact name cannot be blank");
-    }
-    if !name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        bail!("artifact name contains invalid characters: {name}");
-    }
-    Ok(())
-}
-
-fn default_artifact_component_path(name: &str) -> PathBuf {
-    PathBuf::from(format!(".agl/{name}"))
-}
-
-fn profile_from_workspace_manifest(
-    manifest: &RepoManifest,
-    _status: &RepoStatusReport,
-) -> WorkspaceProfile {
-    WorkspaceProfile {
-        version: 1,
-        name: manifest.profile.clone(),
-        components: manifest.artifacts.clone(),
-        policy: WorkspaceProfilePolicy::default(),
-    }
-}
-
-pub(crate) fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
-    let start = start.as_ref().canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize repo root {}",
-            start.as_ref().display()
-        )
-    })?;
-    if !start.is_dir() {
-        bail!("repo root is not a directory: {}", start.display());
-    }
-    Ok(find_git_top(&start).unwrap_or(start))
-}
-
-fn find_git_top(start: &Path) -> Option<PathBuf> {
-    for candidate in start.ancestors() {
-        if candidate.join(".git").exists() {
-            return Some(candidate.to_path_buf());
-        }
-    }
-    None
-}
-
-fn create_dir_change(
-    workspace_root: &Path,
-    relative_path: &Path,
-    dry_run: bool,
-    changes: &mut Vec<RepoInitChange>,
-) -> Result<()> {
-    let path = workspace_root.join(relative_path);
-    if path.exists() {
-        changes.push(RepoInitChange {
-            path: relative_path.to_path_buf(),
-            action: RepoInitAction::Exists,
-        });
-        return Ok(());
-    }
-    if dry_run {
-        changes.push(RepoInitChange {
-            path: relative_path.to_path_buf(),
-            action: RepoInitAction::WouldCreateDir,
-        });
-        return Ok(());
-    }
-    fs::create_dir_all(&path)
-        .with_context(|| format!("failed to create directory {}", path.display()))?;
-    changes.push(RepoInitChange {
-        path: relative_path.to_path_buf(),
-        action: RepoInitAction::CreatedDir,
-    });
-    Ok(())
-}
-
-fn write_manifest_change(
-    manifest_path: &Path,
-    manifest: &RepoManifest,
-    options: &RepoInitOptions,
-    function_default: &str,
-    changes: &mut Vec<RepoInitChange>,
-) -> Result<()> {
-    let relative = PathBuf::from(WORKSPACE_MANIFEST_PATH);
-    if manifest_path.exists() && !options.force {
-        if repair_manifest_function_default(manifest_path, options.dry_run, function_default)? {
-            changes.push(RepoInitChange {
-                path: relative,
-                action: if options.dry_run {
-                    RepoInitAction::WouldOverwriteFile
-                } else {
-                    RepoInitAction::OverwroteFile
-                },
-            });
-            return Ok(());
-        }
-        changes.push(RepoInitChange {
-            path: relative,
-            action: RepoInitAction::Exists,
-        });
-        return Ok(());
-    }
-
-    let content = to_v2_manifest(manifest)
-        .and_then(|manifest| manifest.to_toml().map_err(|error| anyhow::anyhow!(error)))
-        .context("failed to render workspace manifest")?;
-    if options.dry_run {
-        changes.push(RepoInitChange {
-            path: relative,
-            action: if manifest_path.exists() {
-                RepoInitAction::WouldOverwriteFile
-            } else {
-                RepoInitAction::WouldWriteFile
-            },
-        });
-        return Ok(());
-    }
-
-    if let Some(parent) = manifest_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-    fs::write(manifest_path, content)
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
-    changes.push(RepoInitChange {
-        path: relative,
-        action: if options.force {
-            RepoInitAction::OverwroteFile
-        } else {
-            RepoInitAction::WroteFile
-        },
-    });
-    Ok(())
-}
-
-fn repair_manifest_function_default(
-    manifest_path: &Path,
-    dry_run: bool,
-    function_default: &str,
-) -> Result<bool> {
-    let content = fs::read_to_string(manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut value: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    if manifest_value_has_valid_function_default(&value) {
-        return Ok(false);
-    }
-    if dry_run {
-        return Ok(true);
-    }
-    let table = value.as_table_mut().with_context(|| {
-        format!(
-            "workspace manifest root must be a TOML table: {}",
-            manifest_path.display()
-        )
-    })?;
-    let default_function = format!("function:{function_default}@^1.0");
-    table.insert(
-        "default_function".to_string(),
-        toml::Value::String(default_function),
-    );
-    let repaired =
-        toml::to_string_pretty(&value).context("failed to render repaired workspace manifest")?;
-    fs::write(manifest_path, repaired)
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
-    Ok(true)
-}
-
-fn manifest_value_has_valid_function_default(value: &toml::Value) -> bool {
-    value
-        .get("default_function")
-        .and_then(toml::Value::as_str)
-        .and_then(|value| artifact_contract::ArtifactPackageRef::parse(value).ok())
-        .is_some_and(|reference| {
-            reference.type_id.as_str() == artifact_contract::FUNCTION_TYPE
-                && is_valid_workspace_function_id(reference.package_id.as_str())
-        })
-}
-
-pub(crate) fn read_manifest(path: &Path) -> Result<RepoManifest> {
-    let content = fs::read_to_string(path)?;
-    let manifest = artifact_contract::WorkspaceManifest::from_toml(&content)
-        .map_err(|error| anyhow::anyhow!("failed to parse {}: {error}", path.display()))?;
-    validate_manifest_source_paths(path, &manifest)?;
-    from_v2_manifest(manifest)
-}
-
-fn validate_manifest_source_paths(
-    manifest_path: &Path,
-    manifest: &artifact_contract::WorkspaceManifest,
-) -> Result<()> {
-    let workspace_root = manifest_path
-        .parent()
-        .and_then(Path::parent)
-        .with_context(|| {
-            format!(
-                "workspace manifest has no workspace root: {}",
-                manifest_path.display()
-            )
-        })?
-        .canonicalize()
-        .with_context(|| {
-            format!(
-                "failed to canonicalize workspace root for {}",
-                manifest_path.display()
-            )
-        })?;
-    for (name, source) in &manifest.sources {
-        let Some(path) = &source.path else {
-            continue;
-        };
-        let absolute = workspace_root.join(path);
-        if absolute.exists() {
-            let canonical = absolute.canonicalize().with_context(|| {
-                format!("failed to inspect source {name} at {}", absolute.display())
-            })?;
-            if !canonical.starts_with(&workspace_root) {
-                bail!(
-                    "source {name} path escapes workspace root: {}",
-                    path.display()
-                );
+    let headings = markdown
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let level = line.bytes().take_while(|byte| *byte == b'#').count();
+            if !(1..=6).contains(&level) || line.as_bytes().get(level) != Some(&b' ') {
+                return None;
             }
-        }
-    }
-    Ok(())
-}
-
-fn from_v2_manifest(manifest: artifact_contract::WorkspaceManifest) -> Result<RepoManifest> {
-    let artifacts = manifest
-        .components
-        .into_iter()
-        .map(|(name, component)| {
-            let kind = match component.kind {
-                artifact_contract::WorkspaceComponentKind::Git => WorkspaceComponentKind::Git,
-                artifact_contract::WorkspaceComponentKind::Submodule => {
-                    WorkspaceComponentKind::Submodule
-                }
-                artifact_contract::WorkspaceComponentKind::Local => WorkspaceComponentKind::Local,
-                artifact_contract::WorkspaceComponentKind::Generated => {
-                    WorkspaceComponentKind::Generated
-                }
-                artifact_contract::WorkspaceComponentKind::Ignored => {
-                    WorkspaceComponentKind::Ignored
-                }
-            };
-            let access = match component.access {
-                artifact_contract::ArtifactAccess::Read => ArtifactAccess::Read,
-                artifact_contract::ArtifactAccess::Write => ArtifactAccess::Write,
-                artifact_contract::ArtifactAccess::ReadWrite => ArtifactAccess::ReadWrite,
-            };
-            (
-                name,
-                WorkspaceComponent {
-                    kind,
-                    path: component.path,
-                    url: component.url,
-                    rev: component.rev,
-                    commit: component.commit,
-                    tree: component.tree,
-                    required: component.required,
-                    access,
-                    validation: component.validation,
-                    create: component.create,
-                },
-            )
+            Some(line[level + 1..].trim().to_ascii_lowercase())
         })
-        .collect();
-    Ok(RepoManifest {
-        version: manifest.version,
-        profile: DEFAULT_PROFILE.to_string(),
-        functions: WorkspaceFunctions {
-            default: manifest.default_function.package_id.to_string(),
-        },
-        sources: manifest.sources,
-        artifacts,
-    })
+        .collect::<std::collections::BTreeSet<_>>();
+    TaskSpecValidation {
+        missing_sections: REQUIRED
+            .into_iter()
+            .filter(|section| !headings.contains(&section.to_ascii_lowercase()))
+            .map(str::to_owned)
+            .collect(),
+    }
 }
 
-fn to_v2_manifest(manifest: &RepoManifest) -> Result<artifact_contract::WorkspaceManifest> {
-    let default_function = format!("function:{}@^1.0", manifest.functions.default)
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid default function: {error}"))?;
-    let components = manifest
-        .artifacts
-        .iter()
-        .map(|(name, component)| {
-            let kind = match component.kind {
-                WorkspaceComponentKind::Git => artifact_contract::WorkspaceComponentKind::Git,
-                WorkspaceComponentKind::Submodule => {
-                    artifact_contract::WorkspaceComponentKind::Submodule
-                }
-                WorkspaceComponentKind::Local => artifact_contract::WorkspaceComponentKind::Local,
-                WorkspaceComponentKind::Generated => {
-                    artifact_contract::WorkspaceComponentKind::Generated
-                }
-                WorkspaceComponentKind::Ignored => {
-                    artifact_contract::WorkspaceComponentKind::Ignored
-                }
-            };
-            let access = match component.access {
-                ArtifactAccess::Read => artifact_contract::ArtifactAccess::Read,
-                ArtifactAccess::Write => artifact_contract::ArtifactAccess::Write,
-                ArtifactAccess::ReadWrite => artifact_contract::ArtifactAccess::ReadWrite,
-            };
-            (
-                name.clone(),
-                artifact_contract::WorkspaceComponent {
-                    kind,
-                    path: component.path.clone(),
-                    url: component.url.clone(),
-                    rev: component.rev.clone(),
-                    commit: component.commit.clone(),
-                    tree: component.tree.clone(),
-                    required: component.required,
-                    access,
-                    validation: component.validation.clone(),
-                    create: component.create.clone(),
-                },
-            )
-        })
-        .collect();
-    let result = artifact_contract::WorkspaceManifest {
-        version: 2,
-        default_function,
-        sources: manifest.sources.clone(),
-        components,
-        policy: Default::default(),
-        config: Default::default(),
-    };
-    result.validate().map_err(|error| anyhow::anyhow!(error))?;
-    Ok(result)
-}
-
-pub fn read_workspace_default_function(workspace_root: impl AsRef<Path>) -> Result<Option<String>> {
-    let workspace_root = workspace_root.as_ref();
-    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
-    let manifest = match read_manifest(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(err) if is_not_found(&err) => return Ok(None),
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "failed to read workspace manifest {}",
-                    manifest_path.display()
-                )
-            });
+pub fn verify_task_specs(
+    handle: &ArtifactHandle,
+    options: &TaskSpecVerifyOptions,
+) -> Result<TaskSpecVerifyReport> {
+    ensure!(
+        handle.id().as_str() == "core.repo:tasks",
+        "task validator requires core.repo:tasks"
+    );
+    handle.require_access(agl_kernel::ArtifactAccess::ReadTree)?;
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in handle.files()? {
+        if !path.as_str().ends_with("/00_overview.md") {
+            continue;
         }
-    };
-    if manifest.functions.default.trim().is_empty() {
-        bail!(
-            "workspace default function cannot be empty; run agl init --force or edit .agl/workspace.toml"
-        );
-    }
-    if !is_valid_workspace_function_id(&manifest.functions.default) {
-        bail!(
-            "workspace default function has invalid id `{}`; run agl init --force or edit .agl/workspace.toml",
-            manifest.functions.default
-        );
-    }
-    Ok(Some(manifest.functions.default))
-}
-
-pub fn write_workspace_default_function(
-    workspace_root: impl AsRef<Path>,
-    function_id: &str,
-) -> Result<()> {
-    if !is_valid_workspace_function_id(function_id) {
-        bail!("workspace default function has invalid id `{function_id}`");
-    }
-    let manifest_path = workspace_root.as_ref().join(WORKSPACE_MANIFEST_PATH);
-    let content = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut manifest = artifact_contract::WorkspaceManifest::from_toml(&content)
-        .map_err(|error| anyhow::anyhow!("failed to parse {}: {error}", manifest_path.display()))?;
-    manifest.default_function = format!("function:{function_id}@^1.0")
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid workspace default function: {error}"))?;
-    let rendered = manifest.to_toml().map_err(|error| {
-        anyhow::anyhow!("failed to render workspace manifest with new default function: {error}")
-    })?;
-    atomic_replace(&manifest_path, rendered.as_bytes())
-        .with_context(|| format!("failed to update {}", manifest_path.display()))
-}
-
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
-    let parent = path
-        .parent()
-        .with_context(|| format!("{} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent)?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("workspace manifest filename must be UTF-8")?;
-    let temporary = parent.join(format!(
-        ".{filename}.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error.into());
-    }
-    if let Ok(directory) = fs::File::open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
-}
-
-pub(crate) fn is_not_found(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<std::io::Error>()
-        .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
-}
-
-fn validate_manifest(manifest: &RepoManifest, errors: &mut Vec<String>) {
-    if manifest.version != 2 {
-        errors.push(format!(
-            "unsupported_manifest_version: {}",
-            manifest.version
-        ));
-    }
-    if manifest.profile.trim().is_empty() {
-        errors.push("profile_empty".to_string());
-    }
-    if manifest.functions.default.trim().is_empty() {
-        errors.push("functions.default_empty".to_string());
-    } else if !is_valid_workspace_function_id(&manifest.functions.default) {
-        errors.push(format!(
-            "functions.default_invalid: {}",
-            manifest.functions.default
-        ));
-    }
-    let mut paths = BTreeMap::<PathBuf, String>::new();
-    for (name, artifact) in &manifest.artifacts {
-        if let Err(err) = validate_component_path(&artifact.path) {
-            errors.push(format!("artifact.{name}.invalid_path: {err}"));
+        let markdown = String::from_utf8(handle.read(path.clone())?)?;
+        if !markdown.contains("status: planned") {
+            continue;
         }
-        if let Some(previous) = paths.insert(artifact.path.clone(), name.clone()) {
+        let validation = validate_task_spec_markdown(&markdown);
+        if !validation.is_valid() {
             errors.push(format!(
-                "duplicate_artifact_path: {} used by {previous} and {name}",
-                artifact.path.display()
+                "{}: missing {}",
+                path,
+                validation.missing_sections.join(", ")
             ));
         }
-        for (other_name, other) in &manifest.artifacts {
-            if name != other_name
-                && (artifact.path.starts_with(&other.path)
-                    || other.path.starts_with(&artifact.path))
-            {
-                errors.push(format!(
-                    "overlapping_artifact_paths: {name}={} {other_name}={}",
-                    artifact.path.display(),
-                    other.path.display()
-                ));
-            }
-        }
+        files.push(path.to_string());
     }
+    if options.strict && files.is_empty() {
+        errors.push("core.repo:tasks contains no planned task overview".to_owned());
+    }
+    Ok(TaskSpecVerifyReport { files, errors })
 }
 
-fn is_valid_workspace_function_id(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-}
-
-fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
-    if profile.version != 1 {
-        bail!("unsupported workspace profile version: {}", profile.version);
-    }
-    if profile.name.trim().is_empty() {
-        bail!("workspace profile name cannot be blank");
-    }
-    if profile.policy.trust.import_local_trust {
-        bail!("workspace profile must not import local trust");
-    }
-    let mut errors = Vec::new();
-    validate_manifest(
-        &RepoManifest {
-            version: 2,
-            profile: profile.name.clone(),
-            functions: WorkspaceFunctions::default(),
-            sources: BTreeMap::new(),
-            artifacts: profile.components.clone(),
-        },
-        &mut errors,
-    );
-    if !errors.is_empty() {
-        bail!("workspace profile is invalid: {}", errors.join(", "));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
-    if path.as_os_str().is_empty() {
-        bail!("path cannot be empty");
-    }
-    if path.is_absolute() {
-        bail!("path must be relative");
-    }
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir => bail!("path cannot contain parent directory segments"),
-            _ => bail!("path contains unsupported component"),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn component_status(
-    workspace_root: &Path,
-    name: &str,
-    component: &WorkspaceComponent,
-) -> ComponentStatus {
-    let mut status = ComponentStatus {
-        name: name.to_string(),
-        path: component.path.clone(),
-        kind: component.kind,
-        exists: false,
-        state: ComponentState::Ok,
-        warnings: Vec::new(),
-        errors: Vec::new(),
-        expected_url: component.url.clone(),
-        actual_url: None,
-        expected_rev: component.rev.clone(),
-        expected_commit: component.commit.clone(),
-        actual_commit: None,
-        expected_tree: component.tree.clone(),
-        actual_tree: None,
-        submodule_registered: None,
-        gitlink_present: None,
-        nested_git_top: None,
-        tracked_dirty: None,
-        untracked_suspicious: None,
-    };
-
-    let absolute_path = workspace_root.join(&component.path);
-    if component.kind == WorkspaceComponentKind::Submodule {
-        let registered = submodule_registered(workspace_root, &component.path);
-        status.submodule_registered = Some(registered);
-        if !registered {
-            status.warnings.push("not_registered_submodule".to_string());
-        }
-
-        let gitlink = gitlink_present(workspace_root, &component.path);
-        status.gitlink_present = Some(gitlink);
-        if !gitlink {
-            status.warnings.push("gitlink_missing".to_string());
-        }
-    }
-
-    if !absolute_path.exists() {
-        status.state = match component.kind {
-            WorkspaceComponentKind::Submodule => ComponentState::Missing,
-            _ => ComponentState::Invalid,
-        };
-        let issue = "missing".to_string();
-        if component.kind == WorkspaceComponentKind::Submodule {
-            status.warnings.push(issue);
-        } else {
-            status.errors.push(issue);
-        }
-        return status;
-    }
-    status.exists = true;
-
-    if matches!(
-        component.kind,
-        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
-    ) {
-        fill_git_status(workspace_root, component, &mut status);
-    }
-
-    if !status.errors.is_empty() {
-        status.state = ComponentState::Invalid;
-    } else if !status.warnings.is_empty() {
-        status.state = ComponentState::Warning;
-    }
-
-    status
-}
-
-fn fill_git_status(
-    workspace_root: &Path,
-    component: &WorkspaceComponent,
-    status: &mut ComponentStatus,
-) {
-    let absolute_path = workspace_root.join(&component.path);
-    match git_output(&absolute_path, ["rev-parse", "--is-inside-work-tree"]) {
-        Ok(output) if output.trim() == "true" => {}
-        Ok(_) => {
-            status.errors.push("not_git_worktree".to_string());
-            return;
-        }
-        Err(err) => {
-            status.errors.push(format!("git_unavailable: {err:#}"));
-            return;
-        }
-    }
-
-    match git_output(&absolute_path, ["rev-parse", "--show-toplevel"]) {
-        Ok(output) => {
-            let top = PathBuf::from(output.trim());
-            status.nested_git_top = Some(top.clone());
-            let expected_top = absolute_path
-                .canonicalize()
-                .unwrap_or(absolute_path.clone());
-            let actual_top = top.canonicalize().unwrap_or(top);
-            if actual_top != expected_top {
-                status.errors.push("not_component_git_worktree".to_string());
-                return;
-            }
-        }
-        Err(err) => {
-            status.errors.push(format!("git_top_unavailable: {err:#}"));
-            return;
-        }
-    }
-
-    match git_output(&absolute_path, ["config", "--get", "remote.origin.url"]) {
-        Ok(output) => {
-            let actual = output.trim().to_string();
-            if !actual.is_empty() {
-                if let Some(expected) = &component.url
-                    && expected != &actual
-                {
-                    status.errors.push("remote_mismatch".to_string());
-                }
-                status.actual_url = Some(actual);
-            }
-        }
-        Err(_) => {
-            if component.url.is_some() {
-                status.errors.push("remote_missing".to_string());
-            }
-        }
-    }
-
-    match git_output(&absolute_path, ["rev-parse", "HEAD"]) {
-        Ok(output) => {
-            let actual = output.trim().to_string();
-            if let Some(expected) = &component.commit
-                && expected != &actual
-            {
-                status.errors.push("commit_mismatch".to_string());
-            }
-            status.actual_commit = Some(actual);
-        }
-        Err(err) => status.errors.push(format!("head_unavailable: {err:#}")),
-    }
-
-    match git_output(&absolute_path, ["rev-parse", "HEAD^{tree}"]) {
-        Ok(output) => {
-            let actual = output.trim().to_string();
-            if let Some(expected) = &component.tree
-                && expected != &actual
-            {
-                status.errors.push("tree_mismatch".to_string());
-            }
-            status.actual_tree = Some(actual);
-        }
-        Err(err) => status.errors.push(format!("tree_unavailable: {err:#}")),
-    }
-
-    match git_output(
-        &absolute_path,
-        ["status", "--porcelain=v1", "--untracked-files=all"],
-    ) {
-        Ok(output) => {
-            let mut tracked_dirty = false;
-            let mut untracked = false;
-            for line in output.lines() {
-                if line.starts_with("?? ") {
-                    untracked = true;
-                } else if !line.trim().is_empty() {
-                    tracked_dirty = true;
-                }
-            }
-            status.tracked_dirty = Some(tracked_dirty);
-            status.untracked_suspicious = Some(untracked);
-            if tracked_dirty {
-                status.errors.push("dirty_worktree".to_string());
-            }
-            if untracked {
-                status.errors.push("untracked_content".to_string());
-            }
-        }
-        Err(err) => status.errors.push(format!("status_unavailable: {err:#}")),
-    }
-}
-
-fn submodule_registered(workspace_root: &Path, component_path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(workspace_root.join(".gitmodules")) else {
-        return false;
-    };
-    let expected = format!("path = {}", component_path.display());
-    content.lines().any(|line| line.trim() == expected)
-}
-
-fn gitlink_present(workspace_root: &Path, component_path: &Path) -> bool {
-    let path = component_path.to_string_lossy();
-    let Ok(output) = git_output(workspace_root, ["ls-files", "--stage", "--", path.as_ref()])
-    else {
-        return false;
-    };
-    output.lines().any(|line| line.starts_with("160000 "))
-}
-
-fn component_init_error_report(
-    workspace_root: PathBuf,
-    manifest_path: PathBuf,
-    options: &RepoComponentInitOptions,
-    path: PathBuf,
-    errors: Vec<String>,
-) -> RepoComponentInitReport {
-    RepoComponentInitReport {
-        workspace_root,
-        manifest_path,
-        component: options.component.clone(),
-        path,
-        dry_run: options.dry_run,
-        actions: Vec::new(),
-        errors,
-    }
-}
-
-#[derive(Debug, Default)]
-struct TaskSpecDiscovery {
-    task_directories: usize,
-    planned_overviews: Vec<PathBuf>,
-}
-
-#[derive(Deserialize)]
-struct TaskSpecFrontMatter {
-    status: String,
-}
-
-fn collect_planned_task_overviews(root: &Path) -> Result<TaskSpecDiscovery> {
-    let mut discovery = TaskSpecDiscovery::default();
-    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() || !is_task_directory_name(&entry.file_name()) {
-            continue;
-        }
-
-        discovery.task_directories += 1;
-        let overview = entry.path().join("00_overview.md");
-        match fs::read_to_string(&overview) {
-            Ok(content) => match task_spec_status(&content) {
-                Ok(status) if status == "planned" => {
-                    discovery.planned_overviews.push(overview);
-                }
-                Ok(_) => {}
-                Err(_) => discovery.planned_overviews.push(overview),
-            },
-            Err(_) => discovery.planned_overviews.push(overview),
-        }
-    }
-    discovery.planned_overviews.sort();
-    Ok(discovery)
-}
-
-fn is_task_directory_name(name: &std::ffi::OsStr) -> bool {
-    let name = name.to_string_lossy();
-    let Some(suffix) = name.strip_prefix("AGL-") else {
-        return false;
-    };
-    let number = suffix.split(['_', '-']).next().unwrap_or_default();
-    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn task_spec_status(markdown: &str) -> std::result::Result<String, String> {
-    let mut lines = markdown.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return Err("task spec must start with YAML front matter".to_string());
-    }
-
-    let mut yaml = String::new();
-    let mut closed = false;
-    for line in &mut lines {
-        if line.trim() == "---" {
-            closed = true;
-            break;
-        }
-        yaml.push_str(line);
-        yaml.push('\n');
-    }
-    if !closed {
-        return Err("task spec YAML front matter is not closed".to_string());
-    }
-
-    let front_matter = serde_yaml::from_str::<TaskSpecFrontMatter>(&yaml)
-        .map_err(|err| format!("task spec YAML front matter is invalid: {err}"))?;
-    if matches!(
-        front_matter.status.as_str(),
-        "backlog" | "planned" | "implemented" | "done" | "superseded"
-    ) {
-        Ok(front_matter.status)
-    } else {
-        Err(format!(
-            "unsupported task spec status `{}`",
-            front_matter.status
-        ))
-    }
-}
-
-fn task_spec_file_status(workspace_root: &Path, path: &Path) -> TaskSpecFileStatus {
-    let relative = relative_path(workspace_root, path).unwrap_or_else(|| path.to_path_buf());
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let validation = validate_task_spec_markdown(&content);
-            let errors = task_spec_status(&content)
-                .err()
-                .into_iter()
-                .collect::<Vec<_>>();
-            TaskSpecFileStatus {
-                path: relative,
-                valid: validation.is_valid() && errors.is_empty(),
-                missing_sections: validation.missing_sections,
-                warnings: Vec::new(),
-                errors,
-            }
-        }
-        Err(err) => TaskSpecFileStatus {
-            path: relative,
-            valid: false,
-            missing_sections: Vec::new(),
-            warnings: Vec::new(),
-            errors: vec![format!("read_failed: {err}")],
-        },
-    }
-}
-
-fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
-    let root = root.canonicalize().ok()?;
-    let path = path.canonicalize().ok()?;
-    path.strip_prefix(root).ok().map(PathBuf::from)
-}
-
-fn slash_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn git_run(dir: &Path, args: &[&str]) -> Result<()> {
+fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(dir)
+        .arg(root)
         .args(args)
-        .output()
-        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+        .output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}", stderr.trim());
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(())
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
-
-fn git_run_with_file_protocol(dir: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .arg("-c")
-        .arg("protocol.file.allow=always")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run git in {}", dir.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}", stderr.trim());
-    }
-    Ok(())
-}
-
-fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run git in {}", dir.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{}", stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-#[cfg(test)]
-mod tests;

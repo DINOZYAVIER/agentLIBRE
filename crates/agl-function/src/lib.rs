@@ -8,10 +8,8 @@ mod status;
 mod subagent;
 mod validation;
 
-#[cfg(test)]
-pub(crate) use adapter::validate_function_model_contract;
 pub use adapter::{
-    FunctionArtifactAdapter, parse_function_envelope, validate_resolved_function_model_contract,
+    FunctionPackageAdapter, parse_function_envelope, validate_resolved_function_model_contract,
 };
 #[cfg(test)]
 pub(crate) use loader::load_function;

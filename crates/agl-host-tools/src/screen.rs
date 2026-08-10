@@ -149,7 +149,7 @@ impl ScreenTools {
         let store = AglStore::open_current_at(&self.store_root)
             .map_err(|error| ScreenCaptureError::Store(error.to_string()))?;
         let stored = store
-            .write_artifact(
+            .write_content_attachment(
                 invocation.scope.run_id(),
                 MediaType::ImagePng,
                 &normalized.png,
@@ -164,12 +164,12 @@ impl ScreenTools {
             .map_err(|error| ScreenCaptureError::Store(error.to_string()))?;
         let _ = self.backend.cleanup(&mut capture);
         let reference = stored.reference;
-        let content = Content::new([ContentPart::artifact(reference.clone())])
+        let content = Content::new([ContentPart::attachment(reference.clone())])
             .map_err(|error| ScreenCaptureError::InvalidImage(error.to_string()))?;
         Ok(ToolResult::new(json!({
             "tool": SCREEN_CAPTURE_TOOL_ID,
             "status": "captured",
-            "artifact_id": reference.artifact_id,
+            "content_attachment_id": reference.content_attachment_id,
             "digest": reference.digest,
             "media_type": reference.media_type.mime(),
             "byte_length": reference.byte_length,
@@ -642,11 +642,13 @@ mod tests {
 
         let result = tools.capture(&invocation(&run_id)).unwrap();
         let content = result.content.unwrap();
-        let reference = content.artifacts().next().unwrap();
+        let reference = content.attachments().next().unwrap();
         let store = AglStore::open_current_at(&root).unwrap();
-        let resolved = store.resolve_artifact(&run_id, reference).unwrap();
+        let resolved = store
+            .resolve_content_attachment(&run_id, reference)
+            .unwrap();
 
-        assert_eq!(content.artifact_count(), 1);
+        assert_eq!(content.attachment_count(), 1);
         assert_eq!(reference.media_type, MediaType::ImagePng);
         assert_eq!(reference.sensitivity, ArtifactSensitivity::Sensitive);
         assert_eq!(reference.image.unwrap().width, 3);

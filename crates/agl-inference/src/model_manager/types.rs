@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use agl_config::ResolvedInferenceConfig;
-use agl_content::{ArtifactRef, ContentPart};
+use agl_content::{ContentAttachmentRef, ContentPart};
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -534,11 +534,11 @@ impl InferenceJob {
                         ContentPart::Text { text } => {
                             parts.push(ResolvedContentPart::Text { text: text.clone() });
                         }
-                        ContentPart::Artifact { artifact } => {
+                        ContentPart::Attachment { attachment } => {
                             image_count = image_count.saturating_add(1);
                             if image_count > MAX_RESOLVED_IMAGES
-                                || artifact.byte_length > MAX_RESOLVED_IMAGE_BYTES
-                                || total_bytes.saturating_add(artifact.byte_length)
+                                || attachment.byte_length > MAX_RESOLVED_IMAGE_BYTES
+                                || total_bytes.saturating_add(attachment.byte_length)
                                     > MAX_RESOLVED_MEDIA_BYTES
                             {
                                 return Err(ModelManagerError::UnsupportedContent {
@@ -550,8 +550,10 @@ impl InferenceJob {
                                 store = Some(
                                     agl_store::AglStore::open_current_at(&self.content_store_root)
                                         .map_err(|error| {
-                                            ModelManagerError::ArtifactUnavailable {
-                                                artifact_id: artifact.artifact_id.to_string(),
+                                            ModelManagerError::ContentAttachmentUnavailable {
+                                                content_attachment_id: attachment
+                                                    .content_attachment_id
+                                                    .to_string(),
                                                 message: error.to_string(),
                                             }
                                         })?,
@@ -559,12 +561,12 @@ impl InferenceJob {
                             }
                             let resolved = store
                                 .as_ref()
-                                .expect("artifact store was initialized above")
-                                .resolve_artifact(&self.request.run_id, artifact)
-                                .map_err(|error| map_artifact_error(artifact, error))?;
-                            total_bytes = total_bytes.saturating_add(artifact.byte_length);
+                                .expect("content attachment store was initialized above")
+                                .resolve_content_attachment(&self.request.run_id, attachment)
+                                .map_err(|error| map_content_attachment_error(attachment, error))?;
+                            total_bytes = total_bytes.saturating_add(attachment.byte_length);
                             parts.push(ResolvedContentPart::Image {
-                                artifact: artifact.clone(),
+                                attachment: attachment.clone(),
                                 bytes: resolved.bytes,
                             });
                         }
@@ -609,7 +611,7 @@ pub enum ResolvedContentPart {
         text: String,
     },
     Image {
-        artifact: ArtifactRef,
+        attachment: ContentAttachmentRef,
         bytes: Vec<u8>,
     },
 }
@@ -622,9 +624,9 @@ fn valid_digest(value: &str) -> bool {
 }
 
 impl ResolvedContentPart {
-    pub fn image(&self) -> Option<(&ArtifactRef, &[u8])> {
+    pub fn image(&self) -> Option<(&ContentAttachmentRef, &[u8])> {
         match self {
-            Self::Image { artifact, bytes } => Some((artifact, bytes)),
+            Self::Image { attachment, bytes } => Some((attachment, bytes)),
             Self::Text { .. } => None,
         }
     }
@@ -634,9 +636,9 @@ impl fmt::Debug for ResolvedContentPart {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text { text } => formatter.debug_struct("Text").field("text", text).finish(),
-            Self::Image { artifact, bytes } => formatter
+            Self::Image { attachment, bytes } => formatter
                 .debug_struct("Image")
-                .field("artifact", artifact)
+                .field("attachment", attachment)
                 .field("byte_length", &bytes.len())
                 .finish(),
         }
@@ -652,7 +654,7 @@ fn validate_content_profile(
         .messages
         .iter()
         .filter_map(|message| message.content.as_ref())
-        .any(|content| content.has_artifacts());
+        .any(|content| content.has_attachments());
     if !has_media {
         return Ok(());
     }
@@ -669,16 +671,19 @@ fn validate_content_profile(
     Ok(())
 }
 
-fn map_artifact_error(artifact: &ArtifactRef, error: agl_store::StoreError) -> ModelManagerError {
+fn map_content_attachment_error(
+    attachment: &ContentAttachmentRef,
+    error: agl_store::StoreError,
+) -> ModelManagerError {
     match error {
-        agl_store::StoreError::ArtifactIntegrityFailed { reason, .. } => {
-            ModelManagerError::ArtifactIntegrityFailed {
-                artifact_id: artifact.artifact_id.to_string(),
+        agl_store::StoreError::ContentAttachmentIntegrityFailed { reason, .. } => {
+            ModelManagerError::ContentAttachmentIntegrityFailed {
+                content_attachment_id: attachment.content_attachment_id.to_string(),
                 message: reason,
             }
         }
-        other => ModelManagerError::ArtifactUnavailable {
-            artifact_id: artifact.artifact_id.to_string(),
+        other => ModelManagerError::ContentAttachmentUnavailable {
+            content_attachment_id: attachment.content_attachment_id.to_string(),
             message: other.to_string(),
         },
     }
@@ -847,12 +852,12 @@ pub enum ModelManagerError {
     UnsupportedContent {
         message: String,
     },
-    ArtifactUnavailable {
-        artifact_id: String,
+    ContentAttachmentUnavailable {
+        content_attachment_id: String,
         message: String,
     },
-    ArtifactIntegrityFailed {
-        artifact_id: String,
+    ContentAttachmentIntegrityFailed {
+        content_attachment_id: String,
         message: String,
     },
     MultimodalEncodeFailed {
@@ -885,8 +890,8 @@ impl ModelManagerError {
             Self::ContextFailed { .. } => "manager.context_failed",
             Self::GenerationFailed { .. } => "manager.generation_failed",
             Self::UnsupportedContent { .. } => "unsupported_content",
-            Self::ArtifactUnavailable { .. } => "artifact_unavailable",
-            Self::ArtifactIntegrityFailed { .. } => "artifact_integrity_failed",
+            Self::ContentAttachmentUnavailable { .. } => "content_attachment_unavailable",
+            Self::ContentAttachmentIntegrityFailed { .. } => "content_attachment_integrity_failed",
             Self::MultimodalEncodeFailed { .. } => "multimodal_encode_failed",
             Self::DeviceInventoryFailed { .. } => "manager.device_inventory_failed",
             Self::BackendLost { .. } => "manager.backend_lost",
@@ -940,19 +945,19 @@ impl fmt::Display for ModelManagerError {
             Self::UnsupportedContent { message } => {
                 write!(formatter, "unsupported inference content: {message}")
             }
-            Self::ArtifactUnavailable {
-                artifact_id,
+            Self::ContentAttachmentUnavailable {
+                content_attachment_id,
                 message,
             } => write!(
                 formatter,
-                "artifact {artifact_id} is unavailable: {message}"
+                "content attachment {content_attachment_id} is unavailable: {message}"
             ),
-            Self::ArtifactIntegrityFailed {
-                artifact_id,
+            Self::ContentAttachmentIntegrityFailed {
+                content_attachment_id,
                 message,
             } => write!(
                 formatter,
-                "artifact {artifact_id} failed integrity validation: {message}"
+                "content attachment {content_attachment_id} failed integrity validation: {message}"
             ),
             Self::MultimodalEncodeFailed { message } => {
                 write!(formatter, "multimodal encoding failed: {message}")

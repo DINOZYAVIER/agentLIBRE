@@ -50,7 +50,7 @@ fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIden
             "source_id": "test",
             "source_tier": "workspace",
             "source_kind": "directory",
-            "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
         "weights": [{
             "role": "main",
@@ -780,8 +780,8 @@ fn setup_smoke_session_uses_inline_staged_state_without_publishing_it() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: setup-smoke
   version: 1.0.0
@@ -812,7 +812,7 @@ doctor:
     std::fs::create_dir_all(model_root.join("evidence")).unwrap();
     std::fs::write(
         model_root.join("MODEL.toml"),
-        r#"artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "setup-smoke-model", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+        r#"package = { schema = "agentlibre.package/v1", type = "model", id = "setup-smoke-model", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
 
 display_name = "Setup smoke fixture"
 capabilities = ["text", "tools"]
@@ -1603,8 +1603,8 @@ fn daemon_delegation_uses_the_same_durable_child_path() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coordinator
   version: 1.0.0
@@ -1634,8 +1634,8 @@ delegation:
     std::fs::write(
         reviewer_function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: reviewer
   version: 1.0.0
@@ -1754,8 +1754,8 @@ fn oversized_activity_budget_is_rejected_before_root_run_persistence() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: wide-coordinator
   version: 1.0.0
@@ -1785,8 +1785,8 @@ delegation:
     std::fs::write(
         reviewer_function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: reviewer
   version: 1.0.0

@@ -7,11 +7,10 @@ use agl_kernel::{
     ExtensionWorkflowFragment, HookDeclaration, HostBindingRequirement, ToolDeclaration,
 };
 use agl_package::{
-    AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactEntrypoint,
-    ArtifactEnvelope, ArtifactError, ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView,
-    ArtifactRelativePath, ArtifactRequirement, ArtifactSchemaId, ArtifactTypeId, ArtifactVersion,
-    ArtifactVersionReq, ErasedArtifactPayload, InMemoryPackageView, PackageTreeDigest,
-    compute_package_digest,
+    AglCompatibility, ErasedPackagePayload, InMemoryPackageView, PackageAdapter,
+    PackageAdapterDescriptor, PackageEntrypoint, PackageEnvelope, PackageError, PackageId,
+    PackageRef, PackageRelativePath, PackageRequirement, PackageSchemaId, PackageTreeDigest,
+    PackageTypeId, PackageVersion, PackageVersionReq, PackageView, compute_package_digest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,7 +55,7 @@ pub struct ExtensionPackageReport {
     pub extension_id: ExtensionId,
     pub declaration_digest: DeclarationDigest,
     pub package_tree_digest: PackageTreeDigest,
-    pub files: Vec<ArtifactRelativePath>,
+    pub files: Vec<PackageRelativePath>,
 }
 
 pub struct ExtensionPackageBuilder;
@@ -120,8 +119,8 @@ pub struct ExtensionPackage {
 }
 
 impl ExtensionPackage {
-    pub fn parse(package: &dyn ArtifactPackageView) -> Result<Self, ExtensionPackageError> {
-        let root_path: ArtifactRelativePath = "extension-root.json".parse()?;
+    pub fn parse(package: &dyn PackageView) -> Result<Self, ExtensionPackageError> {
+        let root_path: PackageRelativePath = "extension-root.json".parse()?;
         let root_bytes =
             package
                 .read_file(&root_path)
@@ -198,59 +197,35 @@ impl ExtensionPackage {
 
 #[derive(Clone, Debug)]
 pub struct ExtensionPackageAdapter {
-    descriptor: ArtifactAdapterDescriptor,
+    descriptor: PackageAdapterDescriptor,
 }
 
 impl ExtensionPackageAdapter {
-    pub fn new() -> Result<Self, ArtifactError> {
+    pub fn new() -> Result<Self, PackageError> {
         Ok(Self {
-            descriptor: ArtifactAdapterDescriptor::new(
-                ArtifactTypeId::extension(),
+            descriptor: PackageAdapterDescriptor::new(
+                PackageTypeId::extension(),
                 agl_package::EXTENSION_ROOT,
-                ArtifactEntrypoint::new("extension-root.json")?,
+                PackageEntrypoint::new("extension-root.json")?,
             )?,
         })
     }
 
-    fn parse(&self, package: &dyn ArtifactPackageView) -> Result<ExtensionPackage, ArtifactError> {
-        ExtensionPackage::parse(package).map_err(|error| ArtifactError::AdapterPayload {
+    fn parse(&self, package: &dyn PackageView) -> Result<ExtensionPackage, PackageError> {
+        ExtensionPackage::parse(package).map_err(|error| PackageError::AdapterPayload {
             type_id: agl_package::EXTENSION_TYPE.to_owned(),
             reason: error.to_string(),
         })
     }
 
-    fn envelope(&self, package: &ExtensionPackage) -> Result<ArtifactEnvelope, ArtifactError> {
+    fn envelope(&self, package: &ExtensionPackage) -> Result<PackageEnvelope, PackageError> {
         let definition = package
             .definition()
-            .map_err(|error| ArtifactError::AdapterPayload {
+            .map_err(|error| PackageError::AdapterPayload {
                 type_id: agl_package::EXTENSION_TYPE.to_owned(),
                 reason: error.to_string(),
             })?;
-        let current = ArtifactVersion::new(env!("CARGO_PKG_VERSION"))?;
-        let compatibility = AglCompatibility::new(
-            ArtifactVersionReq::new(format!(">={}", env!("CARGO_PKG_VERSION")))?,
-            [current],
-        )?;
-        let requirements = definition
-            .descriptor()
-            .requirements
-            .iter()
-            .map(|requirement| {
-                ArtifactPackageRef::parse(&format!(
-                    "extension:{}@^{}.0",
-                    requirement.extension_id, requirement.api_major
-                ))
-                .map(ArtifactRequirement::new)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        ArtifactEnvelope::new(
-            ArtifactTypeId::extension(),
-            ArtifactPackageId::new(definition.id.as_str())?,
-            ArtifactVersion::new(&definition.version)?,
-            ArtifactSchemaId::new(EXTENSION_ROOT_SCHEMA)?,
-            compatibility,
-            requirements,
-        )
+        extension_envelope(definition)
     }
 }
 
@@ -260,28 +235,25 @@ impl Default for ExtensionPackageAdapter {
     }
 }
 
-impl ArtifactAdapter for ExtensionPackageAdapter {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+impl PackageAdapter for ExtensionPackageAdapter {
+    fn descriptor(&self) -> &PackageAdapterDescriptor {
         &self.descriptor
     }
 
-    fn extract_envelope(
-        &self,
-        package: &dyn ArtifactPackageView,
-    ) -> Result<ArtifactEnvelope, ArtifactError> {
+    fn extract_envelope(&self, package: &dyn PackageView) -> Result<PackageEnvelope, PackageError> {
         let package = self.parse(package)?;
         self.envelope(&package)
     }
 
     fn validate_payload(
         &self,
-        package: &dyn ArtifactPackageView,
-        envelope: &ArtifactEnvelope,
-    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        package: &dyn PackageView,
+        envelope: &PackageEnvelope,
+    ) -> Result<ErasedPackagePayload, PackageError> {
         let package = self.parse(package)?;
         let actual = self.envelope(&package)?;
         if &actual != envelope {
-            return Err(ArtifactError::AdapterPayload {
+            return Err(PackageError::AdapterPayload {
                 type_id: agl_package::EXTENSION_TYPE.to_owned(),
                 reason: "extension-root.json envelope changed during validation".to_owned(),
             });
@@ -290,10 +262,39 @@ impl ArtifactAdapter for ExtensionPackageAdapter {
     }
 }
 
+fn extension_envelope(definition: &ExtensionDefinition) -> Result<PackageEnvelope, PackageError> {
+    let current = PackageVersion::new(env!("CARGO_PKG_VERSION"))?;
+    let compatibility = AglCompatibility::new(
+        PackageVersionReq::new(format!(">={}", env!("CARGO_PKG_VERSION")))?,
+        [current],
+    )?;
+    let requirements = definition
+        .descriptor()
+        .requirements
+        .iter()
+        .map(|requirement| {
+            PackageRef::parse(&format!(
+                "extension:{}@^{}.0",
+                requirement.extension_id, requirement.api_major
+            ))
+            .map(PackageRequirement::new)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    PackageEnvelope::new(
+        PackageTypeId::extension(),
+        PackageId::new(definition.id.as_str())?,
+        PackageVersion::new(&definition.version)?,
+        PackageSchemaId::new(EXTENSION_ROOT_SCHEMA)?,
+        compatibility,
+        requirements,
+    )
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RootWire {
     schema: String,
+    package: PackageEnvelope,
     #[serde(default)]
     id: Option<ExtensionId>,
     #[serde(default)]
@@ -314,9 +315,11 @@ struct RootWire {
 }
 
 impl RootWire {
-    fn from_definition(definition: &ExtensionDefinition) -> Self {
-        Self {
+    fn from_definition(definition: &ExtensionDefinition) -> Result<Self, ExtensionPackageError> {
+        Ok(Self {
             schema: EXTENSION_ROOT_SCHEMA.to_owned(),
+            package: extension_envelope(definition)
+                .map_err(|error| ExtensionPackageError::Definition(error.to_string()))?,
             id: Some(definition.id.clone()),
             name: Some(definition.name.clone()),
             version: Some(definition.version.clone()),
@@ -326,7 +329,7 @@ impl RootWire {
             host_bindings: definition.descriptor().host_bindings.clone(),
             workflow: definition.descriptor().workflow.clone(),
             indexes: IndexPaths::default(),
-        }
+        })
     }
 
     fn into_definition(
@@ -417,13 +420,13 @@ impl<'a> IndexKind<'a> {
 }
 
 fn parse_index(
-    package: &dyn ArtifactPackageView,
+    package: &dyn PackageView,
     kind: &IndexKind<'_>,
-    listed_paths: &mut BTreeSet<ArtifactRelativePath>,
+    listed_paths: &mut BTreeSet<PackageRelativePath>,
 ) -> Result<Vec<Value>, ExtensionPackageError> {
     let index_path = kind
         .index_path
-        .parse::<ArtifactRelativePath>()
+        .parse::<PackageRelativePath>()
         .map_err(|error| ExtensionPackageError::Index {
             path: "extension-root.json"
                 .parse()
@@ -470,13 +473,12 @@ fn parse_index(
                 reason: format!("duplicate ID `{}`", entry.id),
             });
         }
-        let path = entry
-            .path
-            .parse::<ArtifactRelativePath>()
-            .map_err(|error| ExtensionPackageError::Index {
+        let path = entry.path.parse::<PackageRelativePath>().map_err(|error| {
+            ExtensionPackageError::Index {
                 path: index_path.clone(),
                 reason: error.to_string(),
-            })?;
+            }
+        })?;
         if !path.as_str().starts_with(&format!("{}/", kind.directory)) {
             return Err(ExtensionPackageError::Index {
                 path: index_path.clone(),
@@ -555,7 +557,7 @@ fn add_declarations(
 
 fn generated_files(
     definition: &ExtensionDefinition,
-) -> Result<BTreeMap<ArtifactRelativePath, Vec<u8>>, ExtensionPackageError> {
+) -> Result<BTreeMap<PackageRelativePath, Vec<u8>>, ExtensionPackageError> {
     let descriptor = definition.descriptor();
     let categories = [
         (
@@ -598,7 +600,7 @@ fn generated_files(
     let mut files = BTreeMap::new();
     files.insert(
         "extension-root.json".parse()?,
-        json_bytes(&RootWire::from_definition(definition))?,
+        json_bytes(&RootWire::from_definition(definition)?)?,
     );
     for (directory, schema, mut values) in categories {
         values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -626,7 +628,7 @@ fn generated_files(
 fn collect_source_files(
     root: &Path,
     directory: &Path,
-    files: &mut BTreeMap<ArtifactRelativePath, Vec<u8>>,
+    files: &mut BTreeMap<PackageRelativePath, Vec<u8>>,
 ) -> Result<(), ExtensionPackageError> {
     let mut entries = fs::read_dir(directory)
         .map_err(|error| ExtensionPackageError::Io {
@@ -659,7 +661,7 @@ fn collect_source_files(
                 .expect("walked source path is below root")
                 .to_string_lossy()
                 .replace('\\', "/")
-                .parse::<ArtifactRelativePath>()?;
+                .parse::<PackageRelativePath>()?;
             if files.contains_key(&relative) {
                 return Err(ExtensionPackageError::GeneratedPathCollision { path: relative });
             }
@@ -691,7 +693,7 @@ fn json_value_bytes(value: &Value) -> Result<Vec<u8>, ExtensionPackageError> {
 
 fn report(
     definition: &ExtensionDefinition,
-    package: &dyn ArtifactPackageView,
+    package: &dyn PackageView,
 ) -> Result<ExtensionPackageReport, ExtensionPackageError> {
     Ok(ExtensionPackageReport {
         extension_id: definition.id.clone(),
@@ -705,35 +707,35 @@ fn report(
 pub enum ExtensionPackageError {
     #[error("Extension package root `{path}` is invalid: {reason}")]
     Root {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         reason: String,
     },
     #[error("Extension index `{path}` is invalid: {reason}")]
     Index {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         reason: String,
     },
     #[error("Extension declaration `{path}` for `{id}` is missing")]
     MissingDeclaration {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         id: String,
     },
     #[error(
         "Extension declaration `{path}` ID mismatch: expected `{expected_id}`, got `{actual_id}`"
     )]
     DeclarationIdMismatch {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         expected_id: String,
         actual_id: String,
     },
     #[error("Extension declaration `{path}` for `{id}` is not listed")]
     UnlistedDeclaration {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         id: String,
     },
     #[error("Extension declaration `{path}` is invalid: {reason}")]
     Declaration {
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         reason: String,
     },
     #[error("Extension package root lacks authored identity fields")]
@@ -750,7 +752,7 @@ pub enum ExtensionPackageError {
     #[error("Extension output directory is not empty: `{path}`")]
     OutputNotEmpty { path: PathBuf },
     #[error("authored source collides with generated package path `{path}`")]
-    GeneratedPathCollision { path: ArtifactRelativePath },
+    GeneratedPathCollision { path: PackageRelativePath },
     #[error(transparent)]
-    Package(#[from] ArtifactError),
+    Package(#[from] PackageError),
 }

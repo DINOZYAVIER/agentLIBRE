@@ -22,9 +22,12 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "Basics:");
     assert_contains(
         &stdout,
-        ".agl/workspace.toml lists the repo's agentLIBRE folders",
+        ".agl/workspace.toml declares package sources and the default function",
     );
-    assert_contains(&stdout, "Workspace skills need .agl/artifact-lock.toml");
+    assert_contains(
+        &stdout,
+        "Workspace packages resolve through .agl/package-lock.toml",
+    );
     assert_contains(&stdout, "agl-terminal");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
@@ -32,9 +35,8 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "trace");
     assert_contains(&stdout, "runtime");
     assert_contains(&stdout, "serve");
-    assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
-    assert_contains(&stdout, "artifact");
+    assert_contains(&stdout, "package");
     assert_contains(&stdout, "model");
     assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
@@ -87,7 +89,7 @@ fn runtime_identity_query_is_machine_readable_and_explicitly_development() {
     assert_eq!(value["kind"], "development");
     assert_eq!(
         value["builtin_catalog_digest"],
-        agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST
+        agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST
     );
     assert!(
         value["generation_id"]
@@ -106,16 +108,19 @@ fn command_help_exits_successfully_for_public_commands() {
         &["config", "init", "--help"][..],
         &["runtime", "--help"][..],
         &["runtime", "identity", "--help"][..],
+        &["package", "--help"][..],
+        &["package", "list", "--help"][..],
+        &["package", "inspect", "--help"][..],
+        &["package", "resolve", "--help"][..],
+        &["package", "graph", "--help"][..],
+        &["package", "lock", "--help"][..],
+        &["package", "source", "--help"][..],
+        &["package", "source", "list", "--help"][..],
+        &["package", "source", "add", "--help"][..],
+        &["package", "source", "remove", "--help"][..],
         &["artifact", "--help"][..],
-        &["artifact", "list", "--help"][..],
-        &["artifact", "inspect", "--help"][..],
-        &["artifact", "resolve", "--help"][..],
-        &["artifact", "graph", "--help"][..],
-        &["artifact", "lock", "--help"][..],
-        &["artifact", "source", "--help"][..],
-        &["artifact", "source", "list", "--help"][..],
-        &["artifact", "source", "add", "--help"][..],
-        &["artifact", "source", "remove", "--help"][..],
+        &["artifact", "status", "--help"][..],
+        &["artifact", "verify", "--help"][..],
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
@@ -132,7 +137,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["trace", "export", "--help"][..],
         &["trace", "replay", "--help"][..],
         &["serve", "--help"][..],
-        &["status", "--help"][..],
         &["function", "--help"][..],
         &["function", "list", "--help"][..],
         &["function", "show", "--help"][..],
@@ -152,12 +156,10 @@ fn command_help_exits_successfully_for_public_commands() {
         &["inference", "run", "--help"][..],
         &["inference", "serve", "--help"][..],
         &["skill", "--help"][..],
-        &["skill", "init", "--help"][..],
         &["skill", "list", "--help"][..],
         &["skill", "inspect", "--help"][..],
         &["skill", "status", "--help"][..],
         &["skill", "verify", "--help"][..],
-        &["skill", "sync-folders", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
         &["cron", "--help"][..],
@@ -203,13 +205,13 @@ fn command_help_exits_successfully_for_public_commands() {
 }
 
 #[test]
-fn artifact_commands_project_graph_lock_and_workspace_sources() {
+fn package_commands_project_graph_lock_and_workspace_sources() {
     let repo = TempRepo::new("artifact-commands");
     let home = TempHome::new("artifact-commands");
     fs::create_dir_all(repo.path().join(".agl/local-source")).unwrap();
     fs::write(
         repo.path().join(".agl/workspace.toml"),
-        r#"version = 2
+        r#"version = 3
 default_function = "function:gemma4-e4b@^1.0"
 "#,
     )
@@ -218,14 +220,14 @@ default_function = "function:gemma4-e4b@^1.0"
 
     let list = run_agl_in(
         repo.path(),
-        &["--home", &home_arg, "artifact", "list", "--json"],
+        &["--home", &home_arg, "package", "list", "--json"],
     );
     assert_success_no_stderr(&list);
     let listed: serde_json::Value = serde_json::from_str(&stdout(&list)).unwrap();
     assert!(listed.as_array().unwrap().iter().any(|package| {
-        package["exact_reference"] == "function:gemma4-e4b@1.0.0"
+        package["exact_reference"] == "function:gemma4-e4b@1.1.0"
             && package["source_tier"] == "builtin"
-            && package["package_digest"]
+            && package["package_tree_digest"]
                 .as_str()
                 .unwrap()
                 .starts_with("sha256:")
@@ -236,7 +238,7 @@ default_function = "function:gemma4-e4b@^1.0"
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "inspect",
             "function:gemma4-e4b@^1.0",
             "--json",
@@ -253,7 +255,7 @@ default_function = "function:gemma4-e4b@^1.0"
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "resolve",
             "function:gemma4-e4b@^1.0",
             "--json",
@@ -261,7 +263,7 @@ default_function = "function:gemma4-e4b@^1.0"
     );
     assert_success_no_stderr(&resolve);
     let resolved: serde_json::Value = serde_json::from_str(&stdout(&resolve)).unwrap();
-    assert_eq!(resolved["root"], "function:gemma4-e4b@1.0.0");
+    assert_eq!(resolved["root"], "function:gemma4-e4b@1.1.0");
     assert!(resolved["nodes"].as_array().unwrap().len() >= 2);
 
     let lock = run_agl_in(
@@ -269,7 +271,7 @@ default_function = "function:gemma4-e4b@^1.0"
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "lock",
             "--refresh",
             "--json",
@@ -279,14 +281,14 @@ default_function = "function:gemma4-e4b@^1.0"
     let lock_projection: serde_json::Value = serde_json::from_str(&stdout(&lock)).unwrap();
     assert_eq!(lock_projection["refreshed"], true);
     assert_eq!(lock_projection["lock_present"], true);
-    assert!(repo.path().join(".agl/artifact-lock.toml").is_file());
+    assert!(repo.path().join(".agl/package-lock.toml").is_file());
 
     let graph = run_agl_in(
         repo.path(),
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "graph",
             "function:gemma4-e4b@^1.0",
             "--json",
@@ -307,7 +309,7 @@ default_function = "function:gemma4-e4b@^1.0"
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "source",
             "add",
             "local-fixture",
@@ -325,7 +327,7 @@ default_function = "function:gemma4-e4b@^1.0"
 
     let sources = run_agl_in(
         repo.path(),
-        &["--home", &home_arg, "artifact", "source", "list", "--json"],
+        &["--home", &home_arg, "package", "source", "list", "--json"],
     );
     assert_success_no_stderr(&sources);
     let sources: serde_json::Value = serde_json::from_str(&stdout(&sources)).unwrap();
@@ -342,7 +344,7 @@ default_function = "function:gemma4-e4b@^1.0"
         &[
             "--home",
             &home_arg,
-            "artifact",
+            "package",
             "source",
             "remove",
             "local-fixture",
@@ -358,20 +360,20 @@ default_function = "function:gemma4-e4b@^1.0"
 }
 
 #[test]
-fn artifact_list_reports_invalid_payload_in_complete_json_inventory() {
+fn package_list_reports_invalid_payload_in_complete_json_inventory() {
     let repo = TempRepo::new("artifact-list-invalid");
     let home = TempHome::new("artifact-list-invalid");
     fs::create_dir_all(repo.path().join(".agl/skills/invalid")).unwrap();
     fs::write(
         repo.path().join(".agl/workspace.toml"),
-        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+        "version = 3\ndefault_function = \"function:gemma4-e4b@^1.0\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n",
     )
     .unwrap();
     fs::write(
         repo.path().join(".agl/skills/invalid/SKILL.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: invalid
   version: 1.0.0
@@ -397,7 +399,7 @@ Body.
 
     let output = run_agl_in(
         repo.path(),
-        &["--home", &home.path_string(), "artifact", "list", "--json"],
+        &["--home", &home.path_string(), "package", "list", "--json"],
     );
 
     assert_failure(&output);
@@ -414,25 +416,25 @@ Body.
     assert_eq!(invalid["validation_status"], "invalid");
     assert_eq!(invalid["error"]["code"], "invalid_payload");
     let terminal: serde_json::Value = serde_json::from_str(&stderr(&output)).unwrap();
-    assert_eq!(terminal["error"]["code"], "artifact_error");
+    assert_eq!(terminal["error"]["code"], "package_error");
 }
 
 #[test]
-fn artifact_list_reports_invalid_envelope_in_complete_json_inventory() {
+fn package_list_reports_invalid_envelope_in_complete_json_inventory() {
     let repo = TempRepo::new("artifact-list-invalid-envelope");
     let home = TempHome::new("artifact-list-invalid-envelope");
     fs::create_dir_all(repo.path().join(".agl/skills/invalid-envelope")).unwrap();
     fs::create_dir_all(repo.path().join(".agl/functions/gemma4-e4b")).unwrap();
     fs::write(
         repo.path().join(".agl/workspace.toml"),
-        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+        "version = 3\ndefault_function = \"function:gemma4-e4b@^1.0\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n",
     )
     .unwrap();
     fs::write(
         repo.path().join(".agl/functions/gemma4-e4b/FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v999
+package:
+  schema: agentlibre.invalid/v999
   type: function
   id: gemma4-e4b
   version: 1.0.0
@@ -466,8 +468,8 @@ validation:
     fs::write(
         repo.path().join(".agl/skills/invalid-envelope/SKILL.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v999
+package:
+  schema: agentlibre.invalid/v999
   type: skill
   id: invalid-envelope
   version: 1.0.0
@@ -493,7 +495,7 @@ Body.
 
     let output = run_agl_in(
         repo.path(),
-        &["--home", &home.path_string(), "artifact", "list", "--json"],
+        &["--home", &home.path_string(), "package", "list", "--json"],
     );
 
     assert_failure(&output);
@@ -511,14 +513,14 @@ Body.
     assert_eq!(invalid["validation_status"], "invalid");
     assert_eq!(invalid["error"]["code"], "invalid_envelope");
     let terminal: serde_json::Value = serde_json::from_str(&stderr(&output)).unwrap();
-    assert_eq!(terminal["error"]["code"], "artifact_error");
+    assert_eq!(terminal["error"]["code"], "package_error");
 
     let home_path = home.path_string();
     for command in [
         vec![
             "--home",
             &home_path,
-            "artifact",
+            "package",
             "inspect",
             "skill:invalid-envelope@*",
             "--json",
@@ -526,7 +528,7 @@ Body.
         vec![
             "--home",
             &home_path,
-            "artifact",
+            "package",
             "resolve",
             "skill:invalid-envelope@*",
             "--json",
@@ -534,7 +536,7 @@ Body.
         vec![
             "--home",
             &home_path,
-            "artifact",
+            "package",
             "lock",
             "--refresh",
             "--json",
@@ -549,20 +551,20 @@ Body.
 }
 
 #[test]
-fn artifact_inspect_selects_the_root_when_a_dependency_sorts_first() {
+fn package_inspect_selects_the_root_when_a_dependency_sorts_first() {
     let repo = TempRepo::new("artifact-inspect-root");
     let home = TempHome::new("artifact-inspect-root");
     fs::create_dir_all(repo.path().join(".agl/skills/root-skill")).unwrap();
     fs::write(
         repo.path().join(".agl/workspace.toml"),
-        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+        "version = 3\ndefault_function = \"function:gemma4-e4b@^1.0\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n",
     )
     .unwrap();
     fs::write(
         repo.path().join(".agl/skills/root-skill/SKILL.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: root-skill
   version: 1.0.0
@@ -592,7 +594,7 @@ Body.
         &[
             "--home",
             &home.path_string(),
-            "artifact",
+            "package",
             "inspect",
             "skill:root-skill@*",
             "--json",
@@ -605,13 +607,13 @@ Body.
 }
 
 #[test]
-fn artifact_json_failures_distinguish_missing_and_incompatible_versions() {
+fn package_json_failures_distinguish_missing_and_incompatible_versions() {
     let repo = TempRepo::new("artifact-json-errors");
     let home = TempHome::new("artifact-json-errors");
     fs::create_dir_all(repo.path().join(".agl")).unwrap();
     fs::write(
         repo.path().join(".agl/workspace.toml"),
-        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+        "version = 3\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
     )
     .unwrap();
     let home = home.path_string();
@@ -622,7 +624,7 @@ fn artifact_json_failures_distinguish_missing_and_incompatible_versions() {
     ] {
         let output = run_agl_in(
             repo.path(),
-            &["--home", &home, "artifact", "inspect", reference, "--json"],
+            &["--home", &home, "package", "inspect", reference, "--json"],
         );
         assert_failure(&output);
         assert_empty_stdout(&output);
@@ -637,17 +639,8 @@ fn command_help_exits_successfully_for_advanced_commands() {
     for args in [
         &["repo", "--help"][..],
         &["repo", "init", "--help"][..],
-        &["repo", "init-component", "--help"][..],
-        &["repo", "import-profile", "--help"][..],
-        &["repo", "status", "--help"][..],
         &["repo", "verify-tasks", "--help"][..],
-        &["repo", "component", "--help"][..],
-        &["repo", "component", "status", "--help"][..],
-        &["repo", "component", "verify", "--help"][..],
-        &["repo", "component", "sync", "--help"][..],
-        &["repo", "component", "lock", "--help"][..],
         &["repo", "install-hooks", "--help"][..],
-        &["repo", "export-profile", "--help"][..],
         &["daemon", "--help"][..],
         &["daemon", "status", "--help"][..],
         &["cron", "tick", "--help"][..],
@@ -658,24 +651,6 @@ fn command_help_exits_successfully_for_advanced_commands() {
         let stdout = stdout(&output);
         assert_contains(&stdout, "Usage: agl");
         assert_no_noncanonical_product_spelling(&stdout);
-    }
-}
-
-#[test]
-fn workspace_git_help_does_not_describe_artifacts_as_submodules() {
-    for args in [
-        &["init", "--help"][..],
-        &["repo", "init", "--help"][..],
-        &["skill", "init", "--help"][..],
-    ] {
-        let output = run_agl(args);
-
-        assert_success_no_stderr(&output);
-        let stdout = stdout(&output);
-        assert!(
-            !stdout.to_ascii_lowercase().contains("submodule"),
-            "Git artifact help still describes an independent checkout as a submodule:\n{stdout}"
-        );
     }
 }
 
@@ -1184,14 +1159,11 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl repo");
-    assert_contains(&stdout, "Repo workspace:");
-    assert_contains(&stdout, "each opt-in root is declared once");
-    assert_contains(
-        &stdout,
-        "undeclared roots are not created, inspected, or reported as missing",
-    );
+    assert_contains(&stdout, "Repository layout:");
+    assert_contains(&stdout, "Runtime Artifacts are named Git submodules");
+    assert_contains(&stdout, "AGL only verifies bindings");
     assert_contains(&stdout, "init");
-    assert_contains(&stdout, "status");
+    assert_contains(&stdout, "verify-tasks");
     assert_contains(&stdout, "install-hooks");
     assert!(
         !stdout.contains("import-profile"),
@@ -1223,55 +1195,11 @@ fn skill_help_explains_workspace_skill_use() {
     assert_contains(&stdout, "SKILL.md embeds the common package identity");
     assert_contains(
         &stdout,
-        ".agl/artifact-lock.toml records the exact workspace package identity and digest",
+        ".agl/package-lock.toml records the exact workspace package identity and digest",
     );
     assert_contains(
         &stdout,
         "state/skill-trust.toml approves that exact identity and digest",
-    );
-}
-
-#[test]
-fn status_without_workspace_manifest_points_to_init() {
-    let repo = TempRepo::new("missing-workspace-manifest");
-    let output = run_agl_in(repo.path(), &["status"]);
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=invalid");
-    assert_contains(&stdout, "error=workspace_manifest_missing");
-    assert_contains(&stdout, "next_step=agl init");
-}
-
-#[test]
-fn batch_logging_init_failure_is_quiet_without_panicking() {
-    let repo = TempRepo::new("bad-log-directory");
-    let home = TempHome::new("bad-log-directory");
-    let state_dir = home.path().join("state");
-    fs::create_dir_all(&state_dir)
-        .unwrap_or_else(|err| panic!("failed to create state dir {}: {err}", state_dir.display()));
-    fs::write(state_dir.join("logs"), "not a directory").unwrap_or_else(|err| {
-        panic!(
-            "failed to create invalid logs path in {}: {err}",
-            state_dir.display()
-        )
-    });
-    let home_arg = home.path_string();
-
-    let output = run_agl_in(repo.path(), &["--home", &home_arg, "status"]);
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=invalid");
-    assert_contains(&stdout, "error=workspace_manifest_missing");
-    let stderr = stderr(&output);
-    assert!(
-        !stderr.contains("panicked at"),
-        "logging fallback should not panic:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("warning: failed to initialize logging"),
-        "batch commands should not print noisy logging warnings:\n{stderr}"
     );
 }
 
@@ -1405,432 +1333,36 @@ fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
 #[test]
 fn repo_init_remains_the_advanced_manifest_only_command() {
     let repo = TempRepo::new("repo-init-manifest");
+    init_git_repo(repo.path());
     let init = run_agl_in(repo.path(), &["repo", "init"]);
 
     assert_success_no_stderr(&init);
-    assert_contains(&stdout(&init), "state=initialized");
+    assert_contains(&stdout(&init), "workspace=");
+    assert_contains(&stdout(&init), "dry_run=false");
     assert!(repo.path().join(".agl/workspace.toml").is_file());
     let manifest = fs::read_to_string(repo.path().join(".agl/workspace.toml")).unwrap();
-    assert_contains(&manifest, "version = 2");
-    assert_contains(&manifest, "default_function = \"function:gemma4-e4b@^1.0\"");
+    assert_contains(&manifest, "version = 3");
+    assert_contains(&manifest, "default_function = \"function:gemma4-e4b@^1\"");
     assert!(
         !repo.path().join(".agl/functions").exists(),
         "manifest-only init must not invent an artifact root"
     );
 
     let second = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success_no_stderr(&second);
-    assert_contains(
-        &stdout(&second),
-        "change path=.agl/workspace.toml action=exists",
-    );
-}
-
-#[test]
-fn init_accepts_local_workspace_profile_file() {
-    let repo = TempRepo::new("init-profile-file");
-    let profile_path = repo.path().join("profile.toml");
-    fs::write(
-        &profile_path,
-        r#"
-version = 1
-name = "portable-repo-workflow"
-
-[components.skills]
-kind = "git"
-path = ".agl/skills"
-url = "ssh://git@example.invalid/agentlibre/agl-skill.git"
-rev = "v0.2.0"
-required = true
-access = "read"
-
-[components.tasks]
-kind = "git"
-path = ".agl/tasks"
-url = "ssh://git@example.invalid/agentlibre/tasks.git"
-rev = "main"
-required = true
-access = "read_write"
-validation = "agl.task_spec.v1"
-
-[components.state]
-kind = "ignored"
-path = ".agl/state"
-required = false
-access = "read_write"
-create = ["."]
-"#,
-    )
-    .unwrap_or_else(|err| panic!("failed to write profile {}: {err}", profile_path.display()));
-    let profile_arg = profile_path.display().to_string();
-
-    let output = run_agl_in(
-        repo.path(),
-        &["repo", "init", "--profile-file", &profile_arg, "--dry-run"],
-    );
-
-    assert_success(&output);
-    let stdout = stdout(&output);
-    assert_contains(
-        &stdout,
-        "change path=.agl/tasks action=declared_git_component",
-    );
-    assert_contains(
-        &stdout,
-        "change path=.agl/skills action=declared_git_component",
-    );
-}
-
-#[test]
-fn repo_export_profile_writes_portable_policy_manifest() {
-    let repo = TempRepo::new("export-profile");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    fs::write(
-        repo.path().join(".agl/skill-trust.toml"),
-        "SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT",
-    )
-    .unwrap();
-    let out = repo.path().join("repo-workflow.toml");
-    let out_arg = out.display().to_string();
-
-    let export = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
-
-    assert_success(&export);
-    let stdout = stdout(&export);
-    assert_contains(&stdout, "profile.exported=true");
-    assert_contains(&stdout, "profile.policy.trust.import_local_trust=false");
-
-    let content = fs::read_to_string(&out)
-        .unwrap_or_else(|err| panic!("failed to read profile export {}: {err}", out.display()));
-    assert_contains(&content, "[policy.hooks]");
-    assert!(!content.contains("[components."));
-    assert!(
-        !content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"),
-        "profile export must not include local trust:\n{content}"
-    );
-
-    let overwrite = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
-    assert_failure_stderr_contains(&overwrite, "failed to create profile export");
-}
-
-#[test]
-fn repo_import_profile_hidden_command_applies_explicit_profile() {
-    let repo = TempRepo::new("import-profile");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    let out = repo.path().join("repo-workflow.toml");
-    let out_arg = out.display().to_string();
-    let export = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
-    assert_success(&export);
-
-    let import = run_agl_in(
-        repo.path(),
-        &[
-            "repo",
-            "import-profile",
-            "--profile-file",
-            &out_arg,
-            "--dry-run",
-        ],
-    );
-
-    assert_success(&import);
-    let stdout = stdout(&import);
-    assert_contains(&stdout, "state=initialized");
-    assert_contains(&stdout, "dry_run=true");
-    assert_contains(&stdout, "change path=.agl/workspace.toml action=exists");
-}
-
-#[test]
-fn init_then_status_is_healthy_without_workspace_artifacts() {
-    let repo = TempRepo::new("status-after-init");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-
-    let output = run_agl_in(repo.path(), &["status"]);
-
-    assert_success_no_stderr(&output);
-    let status_stdout = stdout(&output);
-    assert_contains(&status_stdout, "state=ok");
-    assert!(!status_stdout.contains("component.skills"));
-
-    let artifact_status = run_agl_in(repo.path(), &["repo", "component", "status"]);
-    assert_success_no_stderr(&artifact_status);
-    let artifact_stdout = stdout(&artifact_status);
-    assert_contains(&artifact_stdout, "state=ok");
-    assert!(!artifact_stdout.contains("artifact_lock_missing"));
-    assert!(!artifact_stdout.contains("undeclared_artifact_root"));
-}
-
-#[test]
-fn status_strict_accepts_workspace_without_optional_artifacts() {
-    let repo = TempRepo::new("status-strict");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-
-    let output = run_agl_in(repo.path(), &["status", "--strict"]);
-
-    assert_success_no_stderr(&output);
-    assert_contains(&stdout(&output), "state=ok");
-}
-
-#[test]
-fn skill_list_reports_workspace_candidates_without_trusting_plain_dir() {
-    let repo = TempRepo::new("skill-list-plain-dir");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    write_workspace_skill(repo.path(), "repo-change");
-
-    let output = run_agl_in(repo.path(), &["skill", "list"]);
-
-    assert_success(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "skill name=repo-change");
-    assert_contains(&stdout, "valid=true");
-    assert_contains(&stdout, "usable=false");
-    assert_contains(&stdout, "component_not_usable");
-}
-
-#[test]
-fn skill_list_supports_source_trusted_only_and_limit_filters() {
-    let repo = TempRepo::new("skill-list-filters");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    write_workspace_skill(repo.path(), "repo-change");
-
-    let core_only = run_agl_in(
-        repo.path(),
-        &[
-            "skill",
-            "list",
-            "--source",
-            "core",
-            "--trusted-only",
-            "--limit",
-            "1",
-        ],
-    );
-
-    assert_success(&core_only);
-    let core_only_stdout = stdout(&core_only);
-    assert_contains(&core_only_stdout, "source=core");
-    assert!(
-        !core_only_stdout.contains("skill name=repo-change"),
-        "core-only list should not include local workspace skills:\n{core_only_stdout}"
-    );
-    assert!(
-        !core_only_stdout.contains("component_not_usable"),
-        "core-only list should not print workspace warnings:\n{core_only_stdout}"
-    );
-
-    let core = run_agl_in(
-        repo.path(),
-        &["skill", "list", "--source", "core", "--limit", "1"],
-    );
-    assert_success(&core);
-    let core_stdout = stdout(&core);
-    assert_contains(&core_stdout, "source=core");
-
-    let local = run_agl_in(repo.path(), &["skill", "list", "--source", "local"]);
-    assert_success(&local);
-    let local_stdout = stdout(&local);
-    assert_contains(&local_stdout, "skill name=repo-change");
-    assert!(
-        !local_stdout.contains("source=core"),
-        "local-only list should not include embedded core skills:\n{local_stdout}"
-    );
-}
-
-#[test]
-fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
-    let repo = TempRepo::new("skill-verify-missing");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-
-    let output = run_agl_in(repo.path(), &["skill", "verify"]);
-
-    assert_success_no_stderr(&output);
-    assert_contains(&stdout(&output), "state=ok");
-}
-
-#[test]
-fn skill_verify_reports_trusted_workspace_skill_as_usable() {
-    let (repo, _source, home) = submodule_workspace_with_skill(
-        "skill-verify-trust",
-        "repo-change",
-        r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: repo-change
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Review repository changes.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-guarantees:
-  - repository paths are checked
----
-Body.
-"#,
-    );
-    let home_arg = home.path_string();
-    let lock = run_agl_in(
-        repo.path(),
-        &["--home", &home_arg, "repo", "component", "lock"],
-    );
-    assert_success(&lock);
-    let trust = run_agl_in(
-        repo.path(),
-        &[
-            "--home",
-            &home_arg,
-            "skill",
-            "trust",
-            "repo-change",
-            "--yes",
-        ],
-    );
-    assert_success(&trust);
-
-    let verify = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "verify"]);
-
-    assert_success(&verify);
-    let stdout = stdout(&verify);
-    assert_contains(&stdout, "skill name=repo-change");
-    assert_contains(&stdout, "usable=true");
-    assert_contains(&stdout, "trust_state=TrustedLocal");
-}
-
-#[test]
-fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
-    let (repo, _source, home) = submodule_workspace_with_skill(
-        "skill-status-duplicate-create",
-        "bad-dupe",
-        r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: bad-dupe
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Bad duplicate folder create rule.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-requestable_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-artifacts:
-  - id: bad
-    kind: generated
-    path: .agl/tasks/bad
-    access: read_write
-    create:
-      - when: runtime_prepare
-      - when: runtime_prepare
-guarantees:
-  - duplicate create rule must fail
----
-Bad body.
-"#,
-    );
-    let home_arg = home.path_string();
-
-    let output = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "status"]);
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(
-        &stdout,
-        "diagnostic severity=error scope=skill_manifest code=duplicate_value",
-    );
-    assert_contains(&stdout, "skill_path=.agl/skills/agl/bad-dupe");
-    assert!(
-        !stdout.contains("not_component_git_worktree"),
-        "submodule-backed invalid manifest should not rely on component noise:\n{stdout}"
-    );
-}
-
-#[test]
-fn skill_status_json_groups_invalid_artifact_path_diagnostic() {
-    let (repo, _source, home) = submodule_workspace_with_skill(
-        "skill-status-invalid-path",
-        "bad-path",
-        r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: bad-path
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Bad folder path.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-requestable_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-artifacts:
-  - id: bad
-    kind: generated
-    path: ../outside
-    access: read_write
-    create:
-      - when: artifact_write
-guarantees:
-  - invalid path must fail
----
-Bad body.
-"#,
-    );
-    let home_arg = home.path_string();
-
-    let output = run_agl_in(
-        repo.path(),
-        &["--home", &home_arg, "skill", "status", "--json"],
-    );
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("invalid JSON: {err}\n{stdout}"));
-    let diagnostics = json["diagnostics"]
-        .as_array()
-        .unwrap_or_else(|| panic!("diagnostics missing:\n{stdout}"));
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic["severity"] == "error"
-            && diagnostic["scope"] == "skill_manifest"
-            && diagnostic["code"] == "invalid_artifact_path"
-            && diagnostic["skill"] == ".agl/skills/agl/bad-path"
-    }));
+    assert_failure_stderr_contains(&second, "workspace manifest already exists");
 }
 
 #[test]
 fn skill_inspect_runtime_succeeds_for_builtin_skill() {
-    let output = run_agl(&["skill", "inspect", "skill", "--runtime"]);
+    let home = TempHome::new("skill-inspect-builtin");
+    let output = run_agl(&[
+        "--home",
+        &home.path_string(),
+        "skill",
+        "inspect",
+        "skill",
+        "--runtime",
+    ]);
 
     assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "skill name=skill");
@@ -1839,42 +1371,18 @@ fn skill_inspect_runtime_succeeds_for_builtin_skill() {
 
 #[test]
 fn skill_inspect_runtime_rejects_non_core_private_skill_without_source() {
-    let output = run_agl(&["skill", "inspect", "repo-review", "--runtime"]);
+    let home = TempHome::new("skill-inspect-private");
+    let output = run_agl(&[
+        "--home",
+        &home.path_string(),
+        "skill",
+        "inspect",
+        "repo-review",
+        "--runtime",
+    ]);
 
     assert_failure(&output);
     assert_contains(&stderr(&output), "skill not found: repo-review");
-}
-
-#[test]
-fn skill_inspect_runtime_rejects_untrusted_workspace_skill() {
-    let repo = TempRepo::new("skill-inspect-runtime");
-    let home = TempHome::new("skill-inspect-runtime");
-    let home_arg = home.path_string();
-    let init = run_agl_in(repo.path(), &["--home", &home_arg, "repo", "init"]);
-    assert_success(&init);
-    write_workspace_skill(repo.path(), "repo-change");
-
-    let output = run_agl_in(
-        repo.path(),
-        &[
-            "--home",
-            &home_arg,
-            "skill",
-            "inspect",
-            "repo-change",
-            "--runtime",
-        ],
-    );
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "skill name=repo-change");
-    assert_contains(&stdout, "usable=false");
-    assert_contains(&stderr(&output), "skill is not runtime usable: repo-change");
-    assert!(
-        !stderr(&output).contains("local inference config"),
-        "skill preflight should not enter inference config resolution"
-    );
 }
 
 #[test]
@@ -2573,69 +2081,6 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
     output
 }
 
-fn submodule_workspace_with_skill(
-    label: &str,
-    skill_name: &str,
-    skill_md: &str,
-) -> (TempRepo, TempRepo, TempHome) {
-    let source = TempRepo::new(&format!("{label}-source"));
-    init_git_repo(source.path());
-    let skill_dir = source.path().join("agl").join(skill_name);
-    fs::create_dir_all(&skill_dir).unwrap_or_else(|err| {
-        panic!(
-            "failed to create source skill dir {}: {err}",
-            skill_dir.display()
-        )
-    });
-    fs::write(skill_dir.join("SKILL.md"), skill_md)
-        .unwrap_or_else(|err| panic!("failed to write source skill {skill_name}: {err}"));
-    git_run(source.path(), &["add", "."]);
-    git_run(
-        source.path(),
-        &[
-            "-c",
-            "user.name=agentLIBRE Test",
-            "-c",
-            "user.email=agentlibre-test@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "add workspace skill",
-        ],
-    );
-
-    let repo = TempRepo::new(&format!("{label}-repo"));
-    init_git_repo(repo.path());
-    let home = TempHome::new(label);
-    let home_arg = home.path_string();
-    let source_arg = source.path().display().to_string();
-    let init = run_agl_in(
-        repo.path(),
-        &[
-            "--home",
-            &home_arg,
-            "repo",
-            "init",
-            "--skills-url",
-            &source_arg,
-        ],
-    );
-    assert_success(&init);
-    git_run(
-        repo.path(),
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            &source_arg,
-            ".agl/skills",
-        ],
-    );
-
-    (repo, source, home)
-}
-
 fn init_git_repo(root: &std::path::Path) {
     let _ = fs::remove_dir_all(root.join(".git"));
     git_run(root, &["init", "-q", "."]);
@@ -2654,58 +2099,6 @@ fn git_run(root: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn write_workspace_skill(repo: &std::path::Path, name: &str) {
-    let manifest_path = repo.join(".agl/workspace.toml");
-    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
-    if !manifest.contains("[components.skills]") {
-        manifest.push_str(
-            r#"
-
-[components.skills]
-kind = "git"
-path = ".agl/skills"
-url = "ssh://git@example.invalid/agentlibre/skills.git"
-required = true
-access = "read"
-"#,
-        );
-        fs::write(&manifest_path, manifest).unwrap();
-    }
-    let skill_dir = repo.join(".agl/skills/agl").join(name);
-    fs::create_dir_all(&skill_dir)
-        .unwrap_or_else(|err| panic!("failed to create skill dir {}: {err}", skill_dir.display()));
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        format!(
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: {name}
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Review repository changes.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-guarantees:
-  - repository paths are checked
----
-Body.
-"#
-        ),
-    )
-    .unwrap_or_else(|err| panic!("failed to write workspace skill {name}: {err}"));
 }
 
 fn stdout(output: &Output) -> String {

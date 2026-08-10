@@ -15,6 +15,7 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Package(PackageCommand),
     Artifact(ArtifactCommand),
     Cron(CronCommand),
     Store(StoreCommand),
@@ -56,34 +57,34 @@ pub(crate) struct TraceReplayOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ArtifactCommand {
-    List(ArtifactListOptions),
-    Inspect(ArtifactReferenceOptions),
-    Resolve(ArtifactReferenceOptions),
-    Graph(ArtifactReferenceOptions),
-    Lock(ArtifactLockCommandOptions),
-    Source(ArtifactSourceCommand),
+pub(crate) enum PackageCommand {
+    List(PackageListOptions),
+    Inspect(PackageReferenceOptions),
+    Resolve(PackageReferenceOptions),
+    Graph(PackageReferenceOptions),
+    Lock(PackageLockCommandOptions),
+    Source(PackageSourceCommand),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArtifactListOptions {
+pub(crate) struct PackageListOptions {
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArtifactReferenceOptions {
+pub(crate) struct PackageReferenceOptions {
     pub(crate) reference: String,
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArtifactLockCommandOptions {
+pub(crate) struct PackageLockCommandOptions {
     pub(crate) refresh: bool,
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ArtifactSourceCommand {
+pub(crate) enum PackageSourceCommand {
     List {
         json: bool,
     },
@@ -98,6 +99,12 @@ pub(crate) enum ArtifactSourceCommand {
         name: String,
         json: bool,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ArtifactCommand {
+    Status(ArtifactStatusOptions),
+    Verify(ArtifactStatusOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,13 +229,8 @@ pub(crate) enum CronCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RepoCommand {
     Init(RepoInitOptions),
-    InitComponent(RepoComponentInitOptions),
-    ImportProfile(RepoImportProfileOptions),
-    Status(RepoStatusOptions),
     VerifyTasks(TaskSpecVerifyOptions),
-    Component(ComponentCommand),
     InstallHooks(RepoHooksOptions),
-    ExportProfile(RepoExportProfileOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -258,12 +260,10 @@ pub(crate) enum NotesCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SkillCommand {
-    Init(SkillInitOptions),
     List(SkillListOptions),
     Inspect(SkillInspectOptions),
     Status(SkillStatusOptions),
     Verify(SkillVerifyOptions),
-    SyncFolders(SkillFolderSyncOptions),
     Trust(SkillTrustOptions),
     Revoke(SkillRevokeOptions),
 }
@@ -316,51 +316,15 @@ pub(crate) struct SessionSubmitOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RepoComponentInitOptions {
-    pub(crate) component: String,
-    pub(crate) dry_run: bool,
-    pub(crate) json: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepoInitOptions {
-    pub(crate) profile: String,
-    pub(crate) profile_file: Option<PathBuf>,
-    pub(crate) artifacts: Vec<RepoArtifactOverride>,
-    pub(crate) skills_url: Option<String>,
-    pub(crate) skills_rev: Option<String>,
-    pub(crate) tasks_url: Option<String>,
-    pub(crate) tasks_rev: Option<String>,
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RepoArtifactOverride {
-    pub(crate) name: String,
-    pub(crate) url: String,
-    pub(crate) rev: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RepoStatusOptions {
-    pub(crate) json: bool,
-    pub(crate) component: Option<String>,
-    pub(crate) strict: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskSpecVerifyOptions {
     pub(crate) json: bool,
     pub(crate) strict: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ComponentCommand {
-    Status(ArtifactStatusOptions),
-    Verify(ArtifactStatusOptions),
-    Sync(ArtifactSyncOptions),
-    Lock(ArtifactLockOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -371,35 +335,7 @@ pub(crate) struct ArtifactStatusOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArtifactSyncOptions {
-    pub(crate) json: bool,
-    pub(crate) dry_run: bool,
-    pub(crate) strict: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ArtifactLockOptions {
-    pub(crate) json: bool,
-    pub(crate) dry_run: bool,
-    pub(crate) strict: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepoHooksOptions {
-    pub(crate) dry_run: bool,
-    pub(crate) force: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RepoExportProfileOptions {
-    pub(crate) out: PathBuf,
-    pub(crate) force: bool,
-    pub(crate) json: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RepoImportProfileOptions {
-    pub(crate) profile_file: PathBuf,
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
 }
@@ -419,12 +355,6 @@ pub(crate) enum SkillListSourceArg {
     Core,
     Community,
     Local,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SkillInitOptions {
-    pub(crate) dry_run: bool,
-    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -595,20 +525,6 @@ pub(crate) struct SkillStatusOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SkillVerifyOptions {
     pub(crate) json: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SkillFolderSyncOptions {
-    pub(crate) json: bool,
-    pub(crate) dry_run: bool,
-    pub(crate) when: SkillFolderSyncSituationArg,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum SkillFolderSyncSituationArg {
-    SkillSync,
-    RuntimePrepare,
-    ArtifactWrite,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

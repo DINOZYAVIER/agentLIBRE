@@ -1,16 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
-use agl_package::{
-    ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
-    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
-    StaticArtifactSource,
-};
+use agl_package::{DirectoryPackageView, PackageAdapter, compute_package_digest};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::{SkillArtifactAdapter, SkillHarness, SkillSource, skill_adapter_registry};
+use crate::{SkillHarness, SkillPackageAdapter, SkillSource};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,10 +48,7 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
 
     let mut seen = BTreeSet::new();
     let mut entries = Vec::with_capacity(manifest.skills.len());
-    let adapter = SkillArtifactAdapter::default();
-    let adapter_registry = skill_adapter_registry()?;
-    let source_id: ArtifactSourceId = "skill-pack".parse()?;
-    let skill_type: ArtifactTypeId = "skill".parse()?;
+    let adapter = SkillPackageAdapter::default();
     for entry in &manifest.skills {
         validate_relative_path(&entry.path)
             .with_context(|| format!("invalid skill path for {}", entry.name))?;
@@ -80,43 +72,14 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
         entries.push((entry, envelope, view));
     }
 
-    let candidates = entries
-        .iter()
-        .map(|(_, envelope, view)| {
-            ArtifactCandidate::new(
-                skill_type.clone(),
-                envelope.id.clone(),
-                envelope.version.clone(),
-                source_id.clone(),
-                ArtifactSourceTier::Explicit,
-                ArtifactSourceKind::Directory,
-                Arc::new(view.clone()),
-            )
-        })
-        .collect::<Vec<_>>();
-    let source = StaticArtifactSource::new(
-        source_id,
-        ArtifactSourceTier::Explicit,
-        ArtifactSourceKind::Directory,
-        candidates,
-    )?;
-    let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![Arc::new(source)]);
     let mut skills = Vec::with_capacity(entries.len());
-    for (entry, envelope, _) in entries {
-        let root_ref = ArtifactPackageRef::parse(&format!("skill:{}@*", envelope.id))?;
-        let graph = resolver.resolve_and_validate(&root_ref, None)?;
-        let node = graph
-            .nodes
-            .get(&graph.root)
-            .context("resolved pack skill root is missing")?;
-        let payload = adapter_registry
-            .lookup(&node.candidate.type_id)?
-            .validate_payload(node.candidate.view(), &node.envelope)?;
+    for (entry, envelope, view) in entries {
+        let payload = adapter.validate_payload(&view, &envelope)?;
         let mut harness = *payload
             .downcast::<SkillHarness>()
             .map_err(|_| anyhow::anyhow!("skill adapter returned an invalid payload"))?;
         harness.source = SkillSource::Local;
-        harness.tree_sha256 = node.package_digest.to_string();
+        harness.tree_sha256 = compute_package_digest(&view)?.to_string();
         harness.source_path = entry.path.join("SKILL.md").display().to_string();
         skills.push(harness);
     }

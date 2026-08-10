@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use agl_package::{
-    ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactCandidate, ArtifactEntrypoint,
-    ArtifactEnvelope, ArtifactError, ArtifactPackageRef, ArtifactPackageView, ArtifactResolver,
-    ArtifactSource, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId,
-    ErasedArtifactPayload, InMemoryPackageView, StaticArtifactSource,
+    ErasedPackagePayload, InMemoryPackageView, PackageAdapter, PackageAdapterDescriptor,
+    PackageCandidate, PackageEntrypoint, PackageEnvelope, PackageError, PackageRef, PackageSource,
+    PackageSourceId, PackageSourceKind, PackageSourceTier, PackageTypeId, PackageView,
+    StaticPackageSource,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -18,83 +18,80 @@ pub const MODEL_FILE_NAME: &str = "MODEL.toml";
 pub const MODEL_PAYLOAD_SCHEMA: &str = "agentlibre.model/v2";
 
 #[derive(Clone, Debug)]
-pub struct ModelArtifactAdapter {
-    descriptor: ArtifactAdapterDescriptor,
+pub struct ModelPackageAdapter {
+    descriptor: PackageAdapterDescriptor,
 }
 
-impl ModelArtifactAdapter {
-    pub fn new() -> Result<Self, ArtifactError> {
+impl ModelPackageAdapter {
+    pub fn new() -> Result<Self, PackageError> {
         Ok(Self {
-            descriptor: ArtifactAdapterDescriptor::new(
-                ArtifactTypeId::new("model")?,
+            descriptor: PackageAdapterDescriptor::new(
+                PackageTypeId::new("model")?,
                 "models",
-                ArtifactEntrypoint::new(MODEL_FILE_NAME)?,
+                PackageEntrypoint::new(MODEL_FILE_NAME)?,
             )?,
         })
     }
 }
 
-impl Default for ModelArtifactAdapter {
+impl Default for ModelPackageAdapter {
     fn default() -> Self {
         Self::new().expect("model adapter descriptor is valid")
     }
 }
 
-impl ArtifactAdapter for ModelArtifactAdapter {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+impl PackageAdapter for ModelPackageAdapter {
+    fn descriptor(&self) -> &PackageAdapterDescriptor {
         &self.descriptor
     }
 
-    fn extract_envelope(
-        &self,
-        package: &dyn ArtifactPackageView,
-    ) -> Result<ArtifactEnvelope, ArtifactError> {
+    fn extract_envelope(&self, package: &dyn PackageView) -> Result<PackageEnvelope, PackageError> {
         let path = MODEL_FILE_NAME.parse()?;
         let bytes = package.read_file(&path)?;
         let document: ModelDocument =
             toml::from_str(std::str::from_utf8(&bytes).map_err(|error| {
-                ArtifactError::AdapterEnvelope {
+                PackageError::AdapterEnvelope {
                     type_id: self.descriptor.type_id.to_string(),
                     reason: format!("MODEL.toml is not UTF-8: {error}"),
                 }
             })?)
-            .map_err(|error| ArtifactError::AdapterEnvelope {
+            .map_err(|error| PackageError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("failed to parse MODEL.toml: {error}"),
             })?;
-        if document.artifact.type_id != ArtifactTypeId::new("model")? {
-            return Err(ArtifactError::AdapterTypeMismatch {
+        if document.package.type_id != PackageTypeId::new("model")? {
+            return Err(PackageError::AdapterTypeMismatch {
                 type_id: self.descriptor.type_id.to_string(),
-                actual_type: document.artifact.type_id.to_string(),
+                actual_type: document.package.type_id.to_string(),
             });
         }
-        if document.artifact.payload_schema.as_str() != MODEL_PAYLOAD_SCHEMA {
-            return Err(ArtifactError::AdapterEnvelope {
+        if document.package.payload_schema.as_str() != MODEL_PAYLOAD_SCHEMA {
+            return Err(PackageError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!(
                     "unsupported model payload schema `{}`; expected {MODEL_PAYLOAD_SCHEMA}",
-                    document.artifact.payload_schema
+                    document.package.payload_schema
                 ),
             });
         }
-        document.artifact.validate()?;
-        Ok(document.artifact)
+        document.package.validate()?;
+        Ok(document.package)
     }
 
     fn validate_payload(
         &self,
-        package: &dyn ArtifactPackageView,
-        envelope: &ArtifactEnvelope,
-    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        package: &dyn PackageView,
+        envelope: &PackageEnvelope,
+    ) -> Result<ErasedPackagePayload, PackageError> {
         let extracted = self.extract_envelope(package)?;
         if &extracted != envelope {
-            return Err(ArtifactError::AdapterPayload {
+            return Err(PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: "MODEL.toml envelope changed during validation".to_owned(),
             });
         }
         let model = parse_model_package(package, envelope).map_err(|error| {
-            ArtifactError::AdapterPayload {
+            PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             }
@@ -106,7 +103,7 @@ impl ArtifactAdapter for ModelArtifactAdapter {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelDocument {
-    artifact: ArtifactEnvelope,
+    package: PackageEnvelope,
     display_name: String,
     capabilities: Vec<CatalogCapability>,
     license: String,
@@ -117,55 +114,48 @@ struct ModelDocument {
     profiles: Vec<CatalogRuntimeProfile>,
 }
 
-pub fn model_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterRegistry>, ArtifactError>
-{
-    Ok(Arc::new(agl_package::ArtifactAdapterRegistry::new([
-        ModelArtifactAdapter::default(),
-    ])?))
-}
-
-pub fn builtin_model_source() -> Result<Arc<dyn ArtifactSource>, ArtifactError> {
-    let source_id: ArtifactSourceId = "builtin".parse()?;
+pub fn builtin_model_source() -> Result<Arc<dyn PackageSource>, PackageError> {
+    let source_id: PackageSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
-    for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES
+    for package in agl_assets::BUILTIN_PACKAGES
         .iter()
         .filter(|package| package.type_id == "model")
     {
         let files = package
             .files
             .iter()
-            .map(|file| Ok::<_, ArtifactError>((file.path.parse()?, file.bytes.to_vec())))
+            .map(|file| Ok::<_, PackageError>((file.path.parse()?, file.bytes.to_vec())))
             .collect::<Result<Vec<_>, _>>()?;
         candidates.push(
-            ArtifactCandidate::new(
+            PackageCandidate::new(
                 package.type_id.parse()?,
                 package.id.parse()?,
                 package.version.parse()?,
                 source_id.clone(),
-                ArtifactSourceTier::Builtin,
-                ArtifactSourceKind::Embedded,
+                PackageSourceTier::Builtin,
+                PackageSourceKind::Embedded,
                 Arc::new(InMemoryPackageView::new(files)?),
             )
             .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
         );
     }
-    Ok(Arc::new(StaticArtifactSource::new(
+    Ok(Arc::new(StaticPackageSource::new(
         source_id,
-        ArtifactSourceTier::Builtin,
-        ArtifactSourceKind::Embedded,
+        PackageSourceTier::Builtin,
+        PackageSourceKind::Embedded,
         candidates,
     )?))
 }
 
 pub fn parse_model_package(
-    package: &dyn ArtifactPackageView,
-    envelope: &ArtifactEnvelope,
+    package: &dyn PackageView,
+    envelope: &PackageEnvelope,
 ) -> Result<ModelPackage> {
     let path = MODEL_FILE_NAME.parse()?;
     let bytes = package.read_file(&path)?;
     let text = std::str::from_utf8(&bytes).context("MODEL.toml is not UTF-8")?;
     let document: ModelDocument = toml::from_str(text).context("failed to parse MODEL.toml")?;
-    if document.artifact != *envelope {
+    if document.package != *envelope {
         bail!("MODEL.toml envelope does not match resolved envelope");
     }
     for profile in &document.profiles {
@@ -189,33 +179,26 @@ pub fn parse_model_package(
 }
 
 pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
-    let registry = model_adapter_registry()?;
+    let adapter = ModelPackageAdapter::default();
     let source = builtin_model_source()?;
-    let candidates = source.candidates(&ArtifactTypeId::new("model")?)?;
-    let resolver = ArtifactResolver::new(registry.clone(), vec![source]);
+    let candidates = source.candidates(&PackageTypeId::new("model")?)?;
     let mut packages = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let reference = ArtifactPackageRef::parse(&format!(
+        let reference = PackageRef::parse(&format!(
             "model:{}@={}",
             candidate.package_id, candidate.version
         ))?;
-        let graph = resolver.resolve_and_validate(&reference, None)?;
-        let node = graph
-            .nodes
-            .get(&graph.root)
-            .context("resolved model graph is missing its root")?;
-        let payload = registry
-            .lookup(&node.candidate.type_id)?
-            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let envelope = adapter.extract_envelope(candidate.view())?;
+        let payload = adapter.validate_payload(candidate.view(), &envelope)?;
         let mut package = *payload
             .downcast::<ModelPackage>()
             .map_err(|_| anyhow::anyhow!("model adapter returned an unexpected payload type"))?;
         package.provenance = Some(ModelPackageProvenance {
             reference: reference.clone(),
-            source_id: node.candidate.source_id.clone(),
-            source_tier: node.candidate.tier,
-            source_kind: node.candidate.kind,
-            package_digest: node.package_digest.clone(),
+            source_id: candidate.source_id.clone(),
+            source_tier: candidate.tier,
+            source_kind: candidate.kind,
+            package_tree_digest: agl_package::compute_package_digest(candidate.view())?,
         });
         packages.push(package);
     }
@@ -225,37 +208,31 @@ pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
 
 #[cfg(test)]
 mod tests {
-    use agl_package::{ArtifactPackageRef, ArtifactResolver};
-
     use super::*;
 
     #[test]
     fn every_builtin_model_resolves_through_the_common_adapter() {
-        let registry = model_adapter_registry().unwrap();
+        let adapter = ModelPackageAdapter::default();
         let source = builtin_model_source().unwrap();
         let candidates = source
-            .candidates(&ArtifactTypeId::new("model").unwrap())
+            .candidates(&PackageTypeId::new("model").unwrap())
             .unwrap();
-        let resolver = ArtifactResolver::new(registry.clone(), vec![source]);
 
         assert_eq!(candidates.len(), 5);
         for candidate in candidates {
-            let reference = ArtifactPackageRef::parse(&format!(
-                "model:{}@{}",
-                candidate.package_id, candidate.version
-            ))
-            .unwrap();
-            let graph = resolver.resolve_and_validate(&reference, None).unwrap();
-            let node = graph.nodes.get(&graph.root).unwrap();
-            let payload = registry
-                .lookup(&node.candidate.type_id)
-                .unwrap()
-                .validate_payload(node.candidate.view(), &node.envelope)
+            let envelope = adapter.extract_envelope(candidate.view()).unwrap();
+            let payload = adapter
+                .validate_payload(candidate.view(), &envelope)
                 .unwrap();
             let package = payload.downcast::<ModelPackage>().unwrap();
             assert_eq!(package.id.as_str(), candidate.package_id.as_str());
             assert!(!package.artifacts.is_empty());
-            assert!(node.package_digest.as_str().starts_with("sha256:"));
+            assert!(
+                agl_package::compute_package_digest(candidate.view())
+                    .unwrap()
+                    .as_str()
+                    .starts_with("sha256:")
+            );
         }
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use agl_package::{ArtifactAdapterRegistry, ArtifactCandidate, ResolvedArtifactGraph};
+use agl_package::{PackageAdapterRegistry, PackageCandidate, ResolvedPackageGraph};
 
 #[cfg(test)]
 use crate::loader::load_function;
@@ -119,7 +119,7 @@ pub(crate) fn resolve_runtime_function_with_profile_policy(
 }
 
 pub fn runtime_function_from_candidate(
-    candidate: &ArtifactCandidate,
+    candidate: &PackageCandidate,
     workspace_root: impl AsRef<Path>,
     config_dir: impl AsRef<Path>,
     require_profile: bool,
@@ -134,8 +134,8 @@ pub fn runtime_function_from_candidate(
 }
 
 pub fn runtime_function_from_resolved_graph(
-    graph: &ResolvedArtifactGraph,
-    registry: &ArtifactAdapterRegistry,
+    graph: &ResolvedPackageGraph,
+    registry: &PackageAdapterRegistry,
     workspace_root: impl AsRef<Path>,
     config_dir: impl AsRef<Path>,
     require_profile: bool,

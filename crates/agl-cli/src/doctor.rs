@@ -492,7 +492,7 @@ mod tests {
                 "source_id": "test",
                 "source_tier": "workspace",
                 "source_kind": "directory",
-                "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             },
             "weights": [{
                 "role": "main",
@@ -514,10 +514,15 @@ mod tests {
         let function_root = workspace.join(".agl/functions/setup-smoke");
         std::fs::create_dir_all(&function_root).unwrap();
         std::fs::write(
+            workspace.join(".agl/workspace.toml"),
+            "version = 3\ndefault_function = \"function:setup-smoke@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
+        )
+        .unwrap();
+        std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: setup-smoke
   version: 1.0.0

@@ -8,9 +8,10 @@ use agl_extension::package::{
     ExtensionPackageReport,
 };
 use agl_kernel::{ArtifactAccess, ArtifactDeclaration, ArtifactId, ArtifactKindId, ExtensionId};
-use agl_package::{ArtifactRelativePath, InMemoryPackageView, compute_package_digest};
+use agl_package::{InMemoryPackageView, PackageRelativePath, compute_package_digest};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MINIMAL_ROOT: &str = r#"{"schema":"agentlibre.extension-root/v1","package":{"schema":"agentlibre.package/v1","type":"extension","id":"example.package","version":"1.0.0","payload_schema":"agentlibre.extension-root/v1","agl":{"compatible":"^1","tested":["1.0.0"]},"requires":[]},"indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#;
 
 fn temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -98,10 +99,32 @@ fn generator_is_byte_deterministic_read_only_and_has_no_binary_identity() {
     fs::remove_dir_all(second).unwrap();
 }
 
+// AGL172-048. The Extension-specific root remains modular, while its
+// top-level package envelope uses the one common package key/schema.
+#[test]
+fn generated_extension_root_uses_the_common_package_envelope_only() {
+    let source = temp_dir("package-envelope-source");
+    let output = temp_dir("package-envelope-output");
+    let input = ExtensionPackageBuildInput::new(definition(), &source).unwrap();
+    ExtensionPackageBuilder::build(&input, &output).unwrap();
+    let root: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("extension-root.json")).unwrap()).unwrap();
+
+    assert_eq!(root["schema"], "agentlibre.extension-root/v1");
+    assert_eq!(root["package"]["schema"], "agentlibre.package/v1");
+    assert_eq!(root["package"]["type"], "extension");
+    assert!(root.get("artifact").is_none());
+    let old_schema = ["agentlibre.", "artifact", "/v1"].concat();
+    assert!(!serde_json::to_string(&root).unwrap().contains(&old_schema));
+
+    fs::remove_dir_all(source).unwrap();
+    fs::remove_dir_all(output).unwrap();
+}
+
 fn view(entries: &[(&str, &str)]) -> InMemoryPackageView {
     InMemoryPackageView::new(entries.iter().map(|(path, body)| {
         (
-            path.parse::<ArtifactRelativePath>().unwrap(),
+            path.parse::<PackageRelativePath>().unwrap(),
             body.as_bytes().to_vec(),
         )
     }))
@@ -112,10 +135,7 @@ fn view(entries: &[(&str, &str)]) -> InMemoryPackageView {
 #[test]
 fn parser_accepts_exact_sorted_id_path_indexes() {
     let package = view(&[
-        (
-            "extension-root.json",
-            r#"{"schema":"agentlibre.extension-root/v1","indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#,
-        ),
+        ("extension-root.json", MINIMAL_ROOT),
         (
             "indexes/tools.json",
             r#"{"schema":"agentlibre.extension-tool-index/v1","entries":[{"id":"example.package:a","path":"tools/a.json"},{"id":"example.package:z","path":"tools/z.json"}]}"#,
@@ -180,10 +200,7 @@ fn parser_returns_typed_exact_index_errors() {
     ];
     for (tools_index, label) in cases {
         let package = view(&[
-            (
-                "extension-root.json",
-                r#"{"schema":"agentlibre.extension-root/v1","indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#,
-            ),
+            ("extension-root.json", MINIMAL_ROOT),
             ("indexes/tools.json", tools_index),
             (
                 "indexes/hooks.json",
@@ -210,10 +227,7 @@ fn parser_returns_typed_exact_index_errors() {
 #[test]
 fn parser_rejects_missing_unlisted_and_id_file_mismatch() {
     let missing = view(&[
-        (
-            "extension-root.json",
-            r#"{"schema":"agentlibre.extension-root/v1","indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#,
-        ),
+        ("extension-root.json", MINIMAL_ROOT),
         (
             "indexes/tools.json",
             r#"{"schema":"agentlibre.extension-tool-index/v1","entries":[{"id":"example.package:a","path":"tools/a.json"}]}"#,
@@ -236,10 +250,7 @@ fn parser_rejects_missing_unlisted_and_id_file_mismatch() {
     );
 
     let mismatch = view(&[
-        (
-            "extension-root.json",
-            r#"{"schema":"agentlibre.extension-root/v1","indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#,
-        ),
+        ("extension-root.json", MINIMAL_ROOT),
         (
             "indexes/tools.json",
             r#"{"schema":"agentlibre.extension-tool-index/v1","entries":[{"id":"example.package:a","path":"tools/a.json"}]}"#,
@@ -270,10 +281,7 @@ fn parser_rejects_missing_unlisted_and_id_file_mismatch() {
     );
 
     let unlisted = view(&[
-        (
-            "extension-root.json",
-            r#"{"schema":"agentlibre.extension-root/v1","indexes":{"tools":"indexes/tools.json","hooks":"indexes/hooks.json","effects":"indexes/effects.json","artifacts":"indexes/artifacts.json"}}"#,
-        ),
+        ("extension-root.json", MINIMAL_ROOT),
         (
             "indexes/tools.json",
             r#"{"schema":"agentlibre.extension-tool-index/v1","entries":[]}"#,

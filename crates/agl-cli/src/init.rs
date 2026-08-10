@@ -15,10 +15,8 @@ use agl_model::{
     RuntimePlanSet, RuntimePlanner, SetupCheckpoint, SetupCheckpointStore, SetupPhase,
     setup_plan_hash, validate_gguf,
 };
-use agl_repo::{
-    RepoInitOptions, RepoInitReport, RepoStatusOptions, init_repo_workspace_with_default,
-    read_workspace_default_function, status_repo_workspace, write_workspace_default_function,
-};
+use agl_package::{PackageRef, WorkspaceConfigReferences, WorkspaceManifest, WorkspacePolicy};
+use agl_repo::read_workspace_default_function;
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
@@ -106,9 +104,16 @@ struct SetupReport {
     state: &'static str,
     plan: SetupPlanReport,
     completed_phases: Vec<SetupPhase>,
-    repository: Option<RepoInitReport>,
+    repository: Option<SetupWorkspaceReport>,
     smoke: Option<FunctionSmokeReport>,
     ready_command: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct SetupWorkspaceReport {
+    workspace_root: PathBuf,
+    manifest_path: PathBuf,
+    created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,14 +149,7 @@ fn run_init_inner(
     tracing::info!(target: "agentlibre::app", command = "init", "starting guided setup");
     options.offline |= agl_model::hugging_face_offline();
     let workspace_start = runtime.resolve_workspace_root(None)?;
-    let workspace_probe = status_repo_workspace(
-        &workspace_start,
-        &RepoStatusOptions {
-            component: None,
-            strict: false,
-        },
-    )?;
-    let workspace_root = workspace_probe.workspace_root;
+    let workspace_root = agl_repo::resolve_repo_root(&workspace_start)?;
     let checkpoint_store = SetupCheckpointStore::new(runtime.paths.setup_state_root());
     let previous_checkpoint = checkpoint_store.load(&workspace_root)?;
     let catalog = ModelCatalog::from_builtin_resolved()?;
@@ -368,23 +366,7 @@ fn run_init_inner(
     )?;
 
     let staged_default = current_default.as_deref().unwrap_or(SETUP_PENDING_FUNCTION);
-    let repo_report = init_repo_workspace_with_default(
-        &workspace_root,
-        &RepoInitOptions::default(),
-        staged_default,
-    )?;
-    let repo_status = status_repo_workspace(
-        &workspace_root,
-        &RepoStatusOptions {
-            component: None,
-            strict: false,
-        },
-    )?;
-    ensure!(
-        repo_status.errors.is_empty(),
-        "workspace initialization is incomplete: {}; repair with `agl repo init --force`",
-        repo_status.errors.join("; ")
-    );
+    let repo_report = ensure_workspace_manifest(&workspace_root, staged_default)?;
     advance_checkpoint(
         &checkpoint_store,
         &mut checkpoint,
@@ -731,7 +713,7 @@ fn commit_staged_setup(
     }
     let receipt =
         install_store.commit_with_bindings(records, &patch, published_bindings_path, true)?;
-    if let Err(error) = write_workspace_default_function(workspace_root, function_id) {
+    if let Err(error) = write_workspace_default(workspace_root, function_id) {
         if let Err(rollback) = receipt.rollback() {
             return Err(anyhow::anyhow!(
                 "failed to commit workspace default after staged smoke: {error:#}; model rollback also failed: {rollback:#}"
@@ -740,6 +722,36 @@ fn commit_staged_setup(
         return Err(error).context("failed to commit workspace default after staged smoke");
     }
     Ok(())
+}
+
+fn ensure_workspace_manifest(
+    workspace_root: &Path,
+    default_function: &str,
+) -> Result<SetupWorkspaceReport> {
+    let manifest_path = workspace_root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+    let created = !manifest_path.exists();
+    if created {
+        let manifest = WorkspaceManifest {
+            version: WorkspaceManifest::VERSION,
+            default_function: PackageRef::parse(default_function)?,
+            sources: Vec::new(),
+            policy: WorkspacePolicy::default(),
+            config: WorkspaceConfigReferences::default(),
+        };
+        agl_repo::write_workspace_manifest(&manifest_path, &manifest)?;
+    }
+    Ok(SetupWorkspaceReport {
+        workspace_root: workspace_root.to_path_buf(),
+        manifest_path,
+        created,
+    })
+}
+
+fn write_workspace_default(workspace_root: &Path, function_id: &str) -> Result<()> {
+    let path = workspace_root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+    let mut manifest = agl_repo::read_workspace_manifest(&path)?;
+    manifest.default_function = PackageRef::parse(function_id)?;
+    agl_repo::write_workspace_manifest(path, &manifest)
 }
 
 fn cleanup_staged_state(staged_bindings_path: &Path) {

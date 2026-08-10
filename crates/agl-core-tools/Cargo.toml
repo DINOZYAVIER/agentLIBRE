@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 agl-exec.workspace = true
 agl-extension.workspace = true
+agl-artifact.workspace = true
 agl-cron.workspace = true
 agl-memory.workspace = true
 agl-notes.workspace = true

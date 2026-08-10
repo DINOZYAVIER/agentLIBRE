@@ -277,14 +277,14 @@ fn compute_current_runtime_identity() -> Result<CurrentRuntimeIdentity> {
     hash_field(&mut digest, env!("CARGO_PKG_VERSION").as_bytes());
     hash_field(
         &mut digest,
-        agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST.as_bytes(),
+        agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST.as_bytes(),
     );
     hash_field(&mut digest, executable_digest.as_bytes());
     Ok(CurrentRuntimeIdentity {
         schema: RUNTIME_IDENTITY_SCHEMA.to_string(),
         kind: RuntimeIdentityKind::Development,
         generation_id: format!("sha256:{}", lowercase_hex(&digest.finalize())),
-        builtin_catalog_digest: agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST.to_string(),
+        builtin_catalog_digest: agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST.to_string(),
         executable_digest,
         manifest_path: None,
         manifest: None,
@@ -389,7 +389,7 @@ fn generation_id(content: &RuntimeManifestContent) -> Result<String> {
 }
 
 fn compiled_builtin_catalog() -> RuntimeBuiltinCatalog {
-    let mut packages = agl_assets::BUILTIN_ARTIFACT_PACKAGES
+    let mut packages = agl_assets::BUILTIN_PACKAGES
         .iter()
         .map(|package| {
             let mut requires = package
@@ -408,7 +408,7 @@ fn compiled_builtin_catalog() -> RuntimeBuiltinCatalog {
         .collect::<Vec<_>>();
     packages.sort_by(|left, right| left.exact_reference.cmp(&right.exact_reference));
     RuntimeBuiltinCatalog {
-        digest: agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST.to_string(),
+        digest: agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST.to_string(),
         packages,
     }
 }
@@ -729,7 +729,7 @@ mod tests {
         );
         assert_eq!(
             dirty_manifest.content.builtin_catalog.digest,
-            agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST
+            agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST
         );
         let _ = fs::remove_dir_all(unavailable);
         let _ = fs::remove_dir_all(dirty);

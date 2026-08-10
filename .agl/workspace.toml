@@ -1,0 +1,14 @@
+version = 3
+default_function = "function:gemma4-31b-32k@^1"
+
+[[sources]]
+id = "private-skills"
+tier = "workspace"
+kind = "git"
+path = ".agl/skills"
+url = "rpi:/home/dinozyavier/git/agl-private-skills.git"
+rev = "main"
+
+[policy]
+
+[config]

@@ -222,14 +222,7 @@ tool_extension!(
     repo_extension_factory,
     super::repo::EXTENSION_ID,
     super::repo::declaration,
-    [
-        super::REPO_STATUS_TOOL_ID,
-        super::REPO_EXPORT_PROFILE_TOOL_ID,
-        super::REPO_HOOKS_STATUS_TOOL_ID,
-        super::REPO_INIT_TOOL_ID,
-        super::REPO_IMPORT_PROFILE_TOOL_ID,
-        super::REPO_INSTALL_HOOKS_TOOL_ID,
-    ]
+    [super::ARTIFACT_COMMIT_TOOL_ID, super::TASKS_VERIFY_TOOL_ID,]
 );
 tool_extension!(
     SkillsExtension,

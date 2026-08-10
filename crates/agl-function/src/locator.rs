@@ -1,14 +1,10 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use agl_package::{ArtifactPackageRef, ArtifactResolver, ArtifactSourceTier};
 use anyhow::{Context, Result};
 #[cfg(test)]
 use anyhow::{bail, ensure};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use crate::adapter::{builtin_source, directory_function_source, function_adapter_registry};
 use crate::loader::load_function;
 use crate::manifest::FUNCTION_FILE_NAME;
 use crate::validation::validate_function_id;
@@ -138,47 +134,26 @@ pub fn resolve_function_package(
     }
 
     validate_function_id("function id", reference)?;
-    let registry = function_adapter_registry()?;
-    let sources = vec![
-        directory_function_source(
-            "workspace".parse()?,
-            ArtifactSourceTier::Workspace,
-            workspace_root.as_ref().join(".agl"),
-            registry.clone(),
-        ),
-        directory_function_source(
-            "global".parse()?,
-            ArtifactSourceTier::User,
-            config_dir.as_ref(),
-            registry.clone(),
-        ),
-        builtin_source()?,
-    ];
-    let resolver = ArtifactResolver::new(registry, sources);
-    let package_ref = ArtifactPackageRef::parse(&format!("function:{reference}@*"))?;
-    let graph = resolver.resolve_and_validate(&package_ref, None)?;
-    let node = graph
-        .nodes
-        .get(&graph.root)
-        .context("resolved function graph is missing its root")?;
-    let (source, path) = match node.candidate.tier {
-        ArtifactSourceTier::Workspace => (
-            FunctionPackageSource::Workspace,
-            workspace_functions_root(&workspace_root)
-                .join(reference)
-                .join(FUNCTION_FILE_NAME),
-        ),
-        ArtifactSourceTier::User => (
-            FunctionPackageSource::Global,
-            global_functions_root(&config_dir)
-                .join(reference)
-                .join(FUNCTION_FILE_NAME),
-        ),
-        ArtifactSourceTier::Builtin => (
+    let workspace = workspace_functions_root(&workspace_root)
+        .join(reference)
+        .join(FUNCTION_FILE_NAME);
+    let global = global_functions_root(&config_dir)
+        .join(reference)
+        .join(FUNCTION_FILE_NAME);
+    let (source, path) = if workspace.is_file() {
+        (FunctionPackageSource::Workspace, workspace)
+    } else if global.is_file() {
+        (FunctionPackageSource::Global, global)
+    } else if agl_assets::BUILTIN_PACKAGES
+        .iter()
+        .any(|package| package.type_id == "function" && package.id == reference)
+    {
+        (
             FunctionPackageSource::Builtin,
             builtin_package_path(reference),
-        ),
-        tier => bail!("unsupported Function source tier {tier:?}"),
+        )
+    } else {
+        bail!("function package not found: {reference}")
     };
     Ok(FunctionPackageLocation {
         reference: reference.to_string(),
@@ -274,7 +249,7 @@ pub(crate) fn collect_function_entries(
 }
 
 pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
-    for function in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
+    for function in agl_assets::BUILTIN_PACKAGES {
         if function.type_id != "function" {
             continue;
         }

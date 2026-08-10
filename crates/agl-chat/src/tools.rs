@@ -18,6 +18,7 @@ pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub store_root: &'a Path,
     pub trust_store_path: &'a Path,
     pub workspace_root: &'a Path,
+    pub runtime_paths: &'a agl_runtime::AgentLibrePaths,
     pub permission_status: agl_core_tools::PermissionRuntimeStatus,
     pub process_tools: Option<agl_core_tools::ProcessTools>,
     pub screen_admitted_run: Option<RunId>,
@@ -98,6 +99,9 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
 }
 
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
+    let mut core_tools = config.core_tools.clone();
+    let mut repo_tools =
+        agl_core_tools::RepoTools::new(config.workspace_root).with_store_root(config.store_root);
     let mut host = product_host_builder()
         .binding(
             host_binding_id(agl_core_tools::guards::EXTENSION_ID),
@@ -107,7 +111,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .shared_tool_handler(
             host_binding_id(agl_core_tools::fs::EXTENSION_ID),
             1,
-            Arc::new(config.core_tools.clone()),
+            Arc::new(core_tools.clone()),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::cron::EXTENSION_ID),
@@ -129,6 +133,27 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
             1,
             Arc::new(agl_core_tools::NotesTools::new(config.store_root)),
         );
+    let repo_descriptor = agl_core_tools::repo::declaration();
+    if let Some(declaration) = repo_descriptor
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id.as_str() == "core.repo:tasks")
+        && let Ok(repository) = agl_repo::ArtifactGitRepository::open(config.workspace_root)
+    {
+        let mut store = agl_store::AglStore::open_at(config.store_root)?;
+        repository.recover_incomplete(&mut store)?;
+        if let Ok(binding) = repository.verify_binding(declaration) {
+            let handle = agl_artifact::ArtifactHandle::bind(declaration.clone(), binding.clone())?;
+            core_tools =
+                core_tools.with_artifact_route(binding.submodule_path(), handle.clone())?;
+            repo_tools = repo_tools.with_artifact(binding, handle.clone())?;
+            host = host.artifact(handle).shared_tool_handler(
+                host_binding_id(agl_core_tools::fs::EXTENSION_ID),
+                1,
+                Arc::new(core_tools.clone()),
+            );
+        }
+    }
     let permission_tools = agl_core_tools::PermissionTools::new(config.store_root)
         .with_runtime_status(config.permission_status);
     let permission_tools = config
@@ -157,7 +182,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .shared_tool_handler(
             host_binding_id(agl_core_tools::repo::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::RepoTools::new(config.workspace_root)),
+            Arc::new(repo_tools),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::store::EXTENSION_ID),
@@ -171,6 +196,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
                 config.workspace_root,
                 config.trust_store_path,
                 env!("CARGO_PKG_VERSION"),
+                config.runtime_paths.clone(),
             )),
         )
         .shared_tool_handler(
@@ -196,18 +222,23 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
 
 fn compose_chat_product(host: ExtensionHost) -> Result<agl_runtime::RuntimeExtensionCatalog> {
     let mut registry = StaticExtensionRegistry::new();
-    let mut input = ExtensionCompositionInput::builder().host(host);
+    let mut input = ExtensionCompositionInput::builder();
     for factory in chat_product_factories() {
         let definition = factory.definition();
+        let selected = definition
+            .descriptor()
+            .artifacts
+            .iter()
+            .all(|artifact| host.artifact(&artifact.id).is_some());
         input = input
             .package(ExtensionPackageBuilder::build_to_memory(
                 definition.clone(),
             )?)
-            .selected(definition.id.clone(), true);
+            .selected(definition.id.clone(), selected);
         registry.register(factory)?;
     }
     Ok(compose_extension_catalog(
-        input.registry(registry).build()?,
+        input.host(host).registry(registry).build()?,
     )?)
 }
 
@@ -320,6 +351,7 @@ mod tests {
             store_root: &root.join("store"),
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: &root,
+            runtime_paths: &agl_runtime::AgentLibrePaths::from_agl_home(&root),
             permission_status: agl_core_tools::PermissionRuntimeStatus::default(),
             process_tools: None,
             screen_admitted_run: None,
@@ -442,6 +474,7 @@ mod tests {
             store_root: &root.join("store"),
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: root,
+            runtime_paths: &agl_runtime::AgentLibrePaths::from_agl_home(root),
             permission_status: agl_core_tools::PermissionRuntimeStatus::default(),
             process_tools: None,
             screen_admitted_run: None,

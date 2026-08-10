@@ -29,24 +29,14 @@ use agl_protocol::{
     RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionListRequest,
     SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
 };
-use agl_repo::{
-    ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
-    read_workspace_default_function,
-};
+use agl_repo::read_workspace_default_function;
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
-use agl_skill::{
-    SkillFolderCreateSituation, SkillFolderSyncActionKind,
-    SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport, SkillPermissions,
-    SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillDiagnostic,
-    WorkspaceSkillDiagnosticScope, WorkspaceSkillDiagnosticSeverity, WorkspaceSkillReport,
-    WorkspaceSkillStatus, builtin_registry, revoke_workspace_skill, sync_workspace_skill_folders,
-    trust_workspace_skill, workspace_skill_report_with_trust,
-};
+use agl_skill::{SkillPermissions, SkillSource, SkillTrustStore, builtin_registry};
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 mod args;
 mod artifact;
@@ -58,6 +48,7 @@ mod memory;
 mod model;
 mod notes;
 mod one_shot;
+mod package;
 mod repo;
 mod runtime;
 mod session;
@@ -68,10 +59,9 @@ use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, InferenceCommand,
-    RunOptions, ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillFolderSyncSituationArg,
-    SkillInitOptions, SkillInspectOptions, SkillListOptions, SkillListSourceArg,
-    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli,
-    print_completion,
+    RunOptions, ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions,
+    SkillListSourceArg, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
+    SkillVerifyOptions, parse_cli, print_completion,
 };
 use artifact::run_artifact;
 use config::run_config;
@@ -81,6 +71,7 @@ use memory::run_memory;
 use model::run_model;
 use notes::run_notes;
 use one_shot::OneShotSession;
+use package::run_package;
 use repo::run_repo;
 use session::run_session;
 use store::run_store;
@@ -139,8 +130,8 @@ pub fn run_cli() {
         _ => {}
     }
 
-    let artifact_json = match &command {
-        CliCommand::Artifact(command) => artifact::json_requested(command),
+    let package_json = match &command {
+        CliCommand::Package(command) => package::json_requested(command),
         _ => false,
     };
     let run_json = matches!(&command, CliCommand::Run(options) if options.json);
@@ -148,8 +139,8 @@ pub fn run_cli() {
         Ok(runtime) => runtime,
         Err(err) => {
             let err = err.context("failed to resolve agentLIBRE runtime");
-            if artifact_json {
-                artifact::print_error_json(&err);
+            if package_json {
+                package::print_error_json(&err);
             } else if run_json {
                 print_run_error_json(&err);
             } else {
@@ -180,8 +171,8 @@ pub fn run_cli() {
 
     if let Err(err) = run(command, &runtime) {
         tracing::error!(target: "agentlibre::app", error = %err, "agentLIBRE command failed");
-        if artifact_json {
-            artifact::print_error_json(&err);
+        if package_json {
+            package::print_error_json(&err);
         } else if run_json {
             print_run_error_json(&err);
         } else {
@@ -292,6 +283,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
             CliRuntimeProfile::Interactive
         }
         CliCommand::Config(_)
+        | CliCommand::Package(_)
         | CliCommand::Artifact(_)
         | CliCommand::Cron(_)
         | CliCommand::Function(_)
@@ -321,6 +313,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
             Ok(())
         }
         CliCommand::Config(command) => run_config(command, runtime),
+        CliCommand::Package(command) => run_package(command, runtime),
         CliCommand::Artifact(command) => run_artifact(command, runtime),
         CliCommand::Cron(command) => run_cron(command, runtime),
         CliCommand::Store(command) => run_store(command, runtime),
@@ -588,16 +581,17 @@ fn validate_stored_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig)
 }
 
 fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    let workspace = workspace_skill_report_with_trust(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-    )?;
-    let matches = workspace
-        .skills
+    let _ = runtime;
+    let registry = builtin_registry()?;
+    let matches = registry
+        .skills()
         .iter()
-        .filter(|skill| skill.name.as_deref() == Some(name))
+        .filter(|skill| skill.harness.name == name || skill.harness.id.as_str() == name)
         .collect::<Vec<_>>();
-    if matches.iter().any(|skill| skill.usable) {
+    if matches
+        .iter()
+        .any(|skill| skill.permits_context_injection())
+    {
         return Ok(());
     }
     if matches.is_empty() {
@@ -884,190 +878,58 @@ fn cron_target_kind(kind: CronTargetKindArg) -> CronTargetKind {
 
 fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
-        SkillCommand::Init(options) => run_skill_init(options),
         SkillCommand::List(options) => run_skill_list(options, runtime),
         SkillCommand::Inspect(options) => run_skill_inspect(options, runtime),
         SkillCommand::Status(options) => run_skill_status(options, runtime),
         SkillCommand::Verify(options) => run_skill_verify(options, runtime),
-        SkillCommand::SyncFolders(options) => run_skill_sync_folders(options),
         SkillCommand::Trust(options) => run_skill_trust(options, runtime),
         SkillCommand::Revoke(options) => run_skill_revoke(options, runtime),
     }
 }
 
-fn run_skill_init(options: SkillInitOptions) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill init", "starting command");
-    let report = init_repo_component(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        &AglRepoComponentInitOptions {
-            component: "skills".to_string(),
-            dry_run: options.dry_run,
-        },
-    )?;
-    crate::print_json_or(options.json, &report, || {
-        repo::print_repo_component_init_report(&report)
-    })?;
-    if report.has_errors() {
-        bail!("workspace skills initialization failed");
-    }
-    Ok(())
-}
-
 fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill list", "starting command");
-    const DEFAULT_SKILL_LIST_LIMIT: usize = 100;
-    const MAX_SKILL_LIST_LIMIT: usize = 100;
-
-    let registry = builtin_registry()?;
-    let workspace = workspace_skill_report_with_trust(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-    )?;
-    let limit = options
-        .limit
-        .unwrap_or(DEFAULT_SKILL_LIST_LIMIT)
-        .min(MAX_SKILL_LIST_LIMIT);
-    let workspace_overrides = workspace
-        .skills
+    let resolved = cli_workspace_skills(runtime)?;
+    let registry = &resolved.registry;
+    let limit = options.limit.unwrap_or(100).min(100);
+    let skills = registry
+        .skills()
         .iter()
-        .filter_map(|skill| {
-            skill
-                .overrides_builtin
-                .then(|| skill.name.clone())
-                .flatten()
+        .filter(|skill| match options.source {
+            SkillListSourceArg::All => true,
+            SkillListSourceArg::Core => skill.harness.source == SkillSource::Core,
+            SkillListSourceArg::Community => skill.harness.source == SkillSource::Community,
+            SkillListSourceArg::Local => skill.harness.source == SkillSource::Local,
         })
-        .collect::<std::collections::BTreeSet<_>>();
-    let include_builtin = matches!(
-        options.source,
-        SkillListSourceArg::All | SkillListSourceArg::Core
-    );
-    let include_workspace = true;
-    let mut emitted = 0usize;
-
+        .filter(|skill| !options.trusted_only || skill.permits_context_injection())
+        .take(limit)
+        .collect::<Vec<_>>();
     if options.json {
-        let mut builtins = Vec::new();
-        if include_builtin {
-            for skill in registry.skills() {
-                if emitted >= limit {
-                    break;
-                }
-                if options.trusted_only && !skill.permits_context_injection() {
-                    continue;
-                }
-                emitted += 1;
-                builtins.push(serde_json::json!({
-                    "name": skill.harness.name,
-                    "source": skill.harness.source.as_str(),
-                    "pack": skill.harness.pack,
-                    "description": skill.harness.description,
-                    "trust": format!("{:?}", skill.trust),
-                    "usable": skill.permits_context_injection(),
-                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
-                    "permissions": skill.harness.permissions,
-                }));
-            }
-        }
-        let mut workspace_skills = Vec::new();
-        if include_workspace {
-            for skill in &workspace.skills {
-                if emitted >= limit {
-                    break;
-                }
-                if !skill_list_matches_workspace_source(options.source, skill) {
-                    continue;
-                }
-                if options.trusted_only && !skill.usable {
-                    continue;
-                }
-                emitted += 1;
-                workspace_skills.push(skill);
-            }
-        }
-        crate::print_json(&serde_json::json!({
-            "source": skill_list_source_as_str(options.source),
-            "trusted_only": options.trusted_only,
-            "limit": limit,
-            "builtins": builtins,
-            "workspace": {
-                "state": workspace.state,
-                "workspace_root": workspace.workspace_root,
-                "component": workspace.component,
-                "lock_path": workspace.lock_path,
-                "skills": workspace_skills,
-                "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
-                "errors": if include_workspace { workspace.errors } else { Vec::new() },
-                "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
-            },
-        }))?;
+        crate::print_json(
+            &skills
+                .iter()
+                .map(|skill| {
+                    serde_json::json!({
+                        "id": skill.harness.id,
+                        "name": skill.harness.name,
+                        "package": skill.harness.package,
+                        "trust": format!("{:?}", skill.trust),
+                        "usable": skill.permits_context_injection(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
     } else {
-        if include_builtin {
-            for skill in registry.skills() {
-                if emitted >= limit {
-                    break;
-                }
-                if options.trusted_only && !skill.permits_context_injection() {
-                    continue;
-                }
-                emitted += 1;
-                println!(
-                    "skill name={} source={} pack={} trust={:?} usable={} overridden_by_workspace={}",
-                    skill.harness.name,
-                    skill.harness.source.as_str(),
-                    skill.harness.pack,
-                    skill.trust,
-                    skill.permits_context_injection(),
-                    workspace_overrides.contains(&skill.harness.name)
-                );
-                print_skill_permissions(
-                    &format!("skill.{}", skill.harness.name),
-                    &skill.harness.permissions,
-                );
-            }
+        for skill in skills {
+            println!(
+                "skill id={} name={} source={} trust={:?} usable={}",
+                skill.harness.id,
+                skill.harness.name,
+                skill.harness.source.as_str(),
+                skill.trust,
+                skill.permits_context_injection()
+            );
         }
-        if include_workspace {
-            for skill in &workspace.skills {
-                if emitted >= limit {
-                    break;
-                }
-                if !skill_list_matches_workspace_source(options.source, skill) {
-                    continue;
-                }
-                if options.trusted_only && !skill.usable {
-                    continue;
-                }
-                emitted += 1;
-                print_workspace_skill_status(skill);
-            }
-            for warning in &workspace.warnings {
-                println!("warning={warning}");
-            }
-            for error in &workspace.errors {
-                println!("error={error}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn skill_list_source_as_str(source: SkillListSourceArg) -> &'static str {
-    match source {
-        SkillListSourceArg::All => "all",
-        SkillListSourceArg::Core => "core",
-        SkillListSourceArg::Community => "community",
-        SkillListSourceArg::Local => "local",
-    }
-}
-
-fn skill_list_matches_workspace_source(
-    source: SkillListSourceArg,
-    skill: &WorkspaceSkillStatus,
-) -> bool {
-    match source {
-        SkillListSourceArg::All => true,
-        SkillListSourceArg::Core => skill.source.as_deref() == Some("core"),
-        SkillListSourceArg::Community => skill.source.as_deref() == Some("community"),
-        SkillListSourceArg::Local => skill.source.as_deref() == Some("local"),
+        Ok(())
     }
 }
 
@@ -1075,180 +937,129 @@ fn run_skill_inspect(
     options: SkillInspectOptions,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill inspect", "starting command");
-    let registry = builtin_registry()?;
-    let workspace = workspace_skill_report_with_trust(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-    )?;
-
-    let builtins = registry
+    let resolved = cli_workspace_skills(runtime)?;
+    let registry = &resolved.registry;
+    let skill = registry
         .skills()
         .iter()
-        .filter(|skill| skill.harness.name == options.name)
-        .collect::<Vec<_>>();
-    let workspace_skills = workspace
-        .skills
-        .iter()
-        .filter(|skill| skill.name.as_deref() == Some(options.name.as_str()))
-        .collect::<Vec<_>>();
-
-    if builtins.is_empty() && workspace_skills.is_empty() {
-        bail!("skill not found: {}", options.name);
+        .find(|skill| {
+            skill.harness.name == options.name || skill.harness.id.as_str() == options.name
+        })
+        .with_context(|| format!("skill not found: {}", options.name))?;
+    if options.runtime {
+        ensure!(
+            skill.permits_context_injection(),
+            "skill is not runtime usable"
+        );
     }
-    let runtime_usable = builtins
-        .iter()
-        .any(|skill| skill.permits_context_injection())
-        || workspace_skills.iter().any(|skill| skill.usable);
-    let workspace_overrides = workspace_skills
-        .iter()
-        .filter(|skill| skill.overrides_builtin)
-        .filter_map(|skill| skill.name.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-
     if options.json {
-        let builtins = builtins
-            .into_iter()
-            .map(|skill| {
-                serde_json::json!({
-                    "name": skill.harness.name,
-                    "source": skill.harness.source.as_str(),
-                    "pack": skill.harness.pack,
-                    "description": skill.harness.description,
-                    "version": skill.harness.version,
-                    "trust": format!("{:?}", skill.trust),
-                    "usable": skill.permits_context_injection(),
-                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
-                    "permissions": skill.harness.permissions,
-                })
-            })
-            .collect::<Vec<_>>();
         crate::print_json(&serde_json::json!({
-            "name": options.name,
-            "builtins": builtins,
-            "workspace": workspace_skills,
-        }))?;
+            "id": skill.harness.id,
+            "name": skill.harness.name,
+            "description": skill.harness.description,
+            "package": skill.harness.package,
+            "trust": format!("{:?}", skill.trust),
+            "usable": skill.permits_context_injection(),
+            "permissions": skill.harness.permissions,
+        }))
     } else {
-        for skill in builtins {
-            println!(
-                "skill name={} source={} pack={} version={} trust={:?} usable={} overridden_by_workspace={}",
-                skill.harness.name,
-                skill.harness.source.as_str(),
-                skill.harness.pack,
-                skill.harness.version,
-                skill.trust,
-                skill.permits_context_injection(),
-                workspace_overrides.contains(&skill.harness.name)
-            );
-            println!("description={}", skill.harness.description);
-            print_skill_permissions(
-                &format!("skill.{}", skill.harness.name),
-                &skill.harness.permissions,
-            );
-        }
-        for skill in workspace_skills {
-            print_workspace_skill_status(skill);
-        }
+        println!("skill id={} name={}", skill.harness.id, skill.harness.name);
+        println!("description={}", skill.harness.description);
+        println!("usable={}", skill.permits_context_injection());
+        print_skill_permissions("skill", &skill.harness.permissions);
+        Ok(())
     }
-
-    if options.runtime && !runtime_usable {
-        bail!("skill is not runtime usable: {}", options.name);
-    }
-
-    Ok(())
 }
 
 fn run_skill_status(options: SkillStatusOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill status", "starting command");
-    let report = workspace_skill_report_with_trust(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-    )?;
-
+    let resolved = cli_workspace_skills(runtime)?;
+    let registry = &resolved.registry;
+    let invalid = registry
+        .skills()
+        .iter()
+        .filter(|skill| !skill.permits_context_injection())
+        .count();
+    let lock_valid = resolved.external_package_count == 0 || resolved.package_lock_present;
+    let report = serde_json::json!({
+        "package_count": registry.skills().len(),
+        "external_package_count": resolved.external_package_count,
+        "package_lock_present": resolved.package_lock_present,
+        "invalid_or_untrusted": invalid,
+    });
     crate::print_json_or(options.json, &report, || {
-        print_workspace_skill_report(&report)
+        println!("package_count={}", registry.skills().len());
+        println!("package_lock_present={}", resolved.package_lock_present);
+        println!("invalid_or_untrusted={invalid}");
     })?;
-
-    if report.should_fail(options.strict) {
-        bail!("workspace skill status is not healthy");
+    if options.strict && (invalid != 0 || !lock_valid) {
+        bail!("Skill package status is not healthy");
     }
     Ok(())
 }
 
 fn run_skill_verify(options: SkillVerifyOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill verify", "starting command");
-    let report = workspace_skill_report_with_trust(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-    )?;
-
-    crate::print_json_or(options.json, &report, || {
-        print_workspace_skill_report(&report)
-    })?;
-
-    if report.should_fail(true) {
-        bail!("workspace skill verification failed");
-    }
-    Ok(())
-}
-
-fn run_skill_sync_folders(options: SkillFolderSyncOptions) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill sync-folders", "starting command");
-    let report = sync_workspace_skill_folders(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        &AglSkillFolderSyncOptions {
-            dry_run: options.dry_run,
-            situation: skill_folder_sync_situation(options.when),
+    run_skill_status(
+        SkillStatusOptions {
+            json: options.json,
+            strict: true,
         },
-    )?;
-
-    crate::print_json_or(options.json, &report, || {
-        print_skill_folder_sync_report(&report)
-    })?;
-
-    if report.has_errors() {
-        bail!("workspace skill folder sync failed");
-    }
-    Ok(())
+        runtime,
+    )
 }
 
 fn run_skill_trust(options: SkillTrustOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill trust", "starting command");
-    let report = trust_workspace_skill(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-        &options.name,
-        &AglSkillTrustOptions {
-            approve: options.yes,
-            agentlibre_version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-    )?;
-
-    crate::print_json_or(options.json, &report, || {
-        print_skill_trust_update_report(&report)
-    })?;
-
-    if report.has_errors() {
-        bail!("workspace skill trust failed");
-    }
-    Ok(())
+    ensure!(options.yes, "skill trust requires --yes");
+    update_cli_skill_trust(&options.name, runtime, true)
 }
 
 fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill revoke", "starting command");
-    let report = revoke_workspace_skill(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        skill_trust_store_path(runtime),
-        &options.name,
-    )?;
+    update_cli_skill_trust(&options.name, runtime, false)
+}
 
-    crate::print_json_or(options.json, &report, || {
-        print_skill_trust_update_report(&report)
-    })?;
+fn cli_workspace_skills(
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<agl_runtime::WorkspaceSkillRegistry> {
+    agl_runtime::resolve_workspace_skills(
+        &runtime.paths,
+        std::env::current_dir()?,
+        runtime.paths.state_dir.join("skill-trust.toml"),
+    )
+}
 
-    if report.has_errors() {
-        bail!("workspace skill revoke failed");
+fn update_cli_skill_trust(
+    name: &str,
+    runtime: &AgentLibreRuntimeConfig,
+    approve: bool,
+) -> Result<()> {
+    let resolved = cli_workspace_skills(runtime)?;
+    ensure!(
+        resolved.package_lock_present,
+        "workspace Skill trust requires .agl/package-lock.toml"
+    );
+    let skill = resolved
+        .registry
+        .skills()
+        .iter()
+        .find(|skill| skill.harness.id.as_str() == name || skill.harness.name == name)
+        .with_context(|| format!("skill not found: {name}"))?;
+    ensure!(
+        skill.harness.source != SkillSource::Core,
+        "core Skill trust is binary-owned"
+    );
+    let path = runtime.paths.state_dir.join("skill-trust.toml");
+    let mut store = SkillTrustStore::load(&path)?;
+    if approve {
+        store.trust(&skill.harness);
+    } else {
+        store.revoke(&skill.harness);
     }
+    store.write_atomic(&path)?;
+    println!(
+        "skill={} identity={} trust={}",
+        name,
+        agl_skill::skill_identity(&skill.harness),
+        if approve { "trusted" } else { "revoked" }
+    );
     Ok(())
 }
 
@@ -1311,10 +1122,6 @@ fn print_cli_error(err: &anyhow::Error) {
     } else {
         eprintln!("error: {message}");
     }
-}
-
-fn skill_trust_store_path(runtime: &AgentLibreRuntimeConfig) -> PathBuf {
-    runtime.paths.state_dir.join("skill-trust.toml")
 }
 
 fn inference_options_from_run_options(
@@ -2336,297 +2143,6 @@ fn optional_status_value<T: std::fmt::Display>(value: Option<T>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
-fn print_workspace_skill_report(report: &WorkspaceSkillReport) {
-    println!("state={}", skill_report_state(report.state));
-    println!("workspace_root={}", report.workspace_root.display());
-    println!("lock_path={}", report.lock_path.display());
-    if let Some(component) = &report.component {
-        print_component_status(component);
-    }
-    for skill in &report.skills {
-        print_workspace_skill_status(skill);
-    }
-    for diagnostic in &report.diagnostics {
-        print_workspace_skill_diagnostic(diagnostic);
-    }
-    for warning in &report.warnings {
-        println!("warning={warning}");
-    }
-    for error in &report.errors {
-        println!("error={error}");
-    }
-    for next_step in &report.next_steps {
-        println!("next_step={next_step}");
-    }
-}
-
-fn print_skill_folder_sync_report(report: &SkillFolderSyncReport) {
-    println!(
-        "state={}",
-        if report.errors.is_empty() {
-            "ok"
-        } else {
-            "error"
-        }
-    );
-    println!("workspace_root={}", report.workspace_root.display());
-    println!("dry_run={}", report.dry_run);
-    println!(
-        "situation={}",
-        skill_folder_create_situation(report.situation)
-    );
-    for action in &report.actions {
-        println!(
-            "skill.folder_action skill={} folder={} path={} action={}",
-            action.skill,
-            action.folder_id,
-            action.path.display(),
-            skill_folder_sync_action(action.action)
-        );
-    }
-    for warning in &report.warnings {
-        println!("warning={warning}");
-    }
-    for error in &report.errors {
-        println!("error={error}");
-    }
-}
-
-fn skill_folder_sync_action(action: SkillFolderSyncActionKind) -> &'static str {
-    match action {
-        SkillFolderSyncActionKind::Exists => "exists",
-        SkillFolderSyncActionKind::SkippedReadOnly => "skipped_read_only",
-        SkillFolderSyncActionKind::SkippedSource => "skipped_source",
-        SkillFolderSyncActionKind::SkippedNoCreateRule => "skipped_no_create_rule",
-        SkillFolderSyncActionKind::SkippedSituationMismatch => "skipped_situation_mismatch",
-        SkillFolderSyncActionKind::WouldCreateDir => "would_create_dir",
-        SkillFolderSyncActionKind::CreatedDir => "created_dir",
-    }
-}
-
-fn skill_folder_sync_situation(when: SkillFolderSyncSituationArg) -> SkillFolderCreateSituation {
-    match when {
-        SkillFolderSyncSituationArg::SkillSync => SkillFolderCreateSituation::SkillSync,
-        SkillFolderSyncSituationArg::RuntimePrepare => SkillFolderCreateSituation::RuntimePrepare,
-        SkillFolderSyncSituationArg::ArtifactWrite => SkillFolderCreateSituation::ArtifactWrite,
-    }
-}
-
-fn skill_folder_create_situation(when: SkillFolderCreateSituation) -> &'static str {
-    match when {
-        SkillFolderCreateSituation::SkillSync => "skill_sync",
-        SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
-        SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
-    }
-}
-
-fn skill_report_state(state: agl_skill::SkillReportState) -> &'static str {
-    match state {
-        agl_skill::SkillReportState::Ok => "ok",
-        agl_skill::SkillReportState::Warning => "warning",
-        agl_skill::SkillReportState::Invalid => "invalid",
-    }
-}
-
-fn print_component_status(component: &ComponentStatus) {
-    println!(
-        "component name={} path={} kind={:?} state={:?} exists={}",
-        component.name,
-        component.path.display(),
-        component.kind,
-        component.state,
-        component.exists
-    );
-    if let Some(expected_url) = &component.expected_url {
-        println!("component.{}.expected_url={expected_url}", component.name);
-    }
-    if let Some(actual_url) = &component.actual_url {
-        println!("component.{}.actual_url={actual_url}", component.name);
-    }
-    if let Some(expected_rev) = &component.expected_rev {
-        println!("component.{}.expected_rev={expected_rev}", component.name);
-    }
-    if let Some(expected_commit) = &component.expected_commit {
-        println!(
-            "component.{}.expected_commit={expected_commit}",
-            component.name
-        );
-    }
-    if let Some(actual_commit) = &component.actual_commit {
-        println!("component.{}.actual_commit={actual_commit}", component.name);
-    }
-    if let Some(expected_tree) = &component.expected_tree {
-        println!("component.{}.expected_tree={expected_tree}", component.name);
-    }
-    if let Some(actual_tree) = &component.actual_tree {
-        println!("component.{}.actual_tree={actual_tree}", component.name);
-    }
-    if let Some(registered) = component.submodule_registered {
-        println!(
-            "component.{}.submodule_registered={registered}",
-            component.name
-        );
-    }
-    if let Some(gitlink) = component.gitlink_present {
-        println!("component.{}.gitlink_present={gitlink}", component.name);
-    }
-    if let Some(top) = &component.nested_git_top {
-        println!(
-            "component.{}.nested_git_top={}",
-            component.name,
-            top.display()
-        );
-    }
-    if let Some(dirty) = component.tracked_dirty {
-        println!("component.{}.tracked_dirty={dirty}", component.name);
-    }
-    if let Some(untracked) = component.untracked_suspicious {
-        println!(
-            "component.{}.untracked_suspicious={untracked}",
-            component.name
-        );
-    }
-    for warning in &component.warnings {
-        println!("component.{}.warning={warning}", component.name);
-    }
-    for error in &component.errors {
-        println!("component.{}.error={error}", component.name);
-    }
-}
-
-fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
-    let name = workspace_skill_key(skill);
-    println!(
-        "skill name={} path={} valid={} usable={} shadowed_by_builtin={} overrides_builtin={} trust_state={:?}",
-        name,
-        skill.path.display(),
-        skill.valid,
-        skill.usable,
-        skill.shadowed_by_builtin,
-        skill.overrides_builtin,
-        skill.trust_state
-    );
-    if let Some(source_path) = &skill.source_path {
-        println!("skill.{name}.source_path={source_path}");
-    }
-    if let Some(source) = &skill.source {
-        println!("skill.{name}.source={source}");
-    }
-    if let Some(pack) = &skill.pack {
-        println!("skill.{name}.pack={pack}");
-    }
-    if let Some(version) = &skill.version {
-        println!("skill.{name}.version={version}");
-    }
-    if let Some(description) = &skill.description {
-        println!("skill.{name}.description={description}");
-    }
-    if !skill.memory_read_scopes.is_empty() {
-        println!(
-            "skill.{name}.permissions.memory.read={}",
-            skill.memory_read_scopes.join(",")
-        );
-    }
-    if skill.notes_read || skill.notes_write {
-        println!("skill.{name}.permissions.notes.read={}", skill.notes_read);
-        println!("skill.{name}.permissions.notes.write={}", skill.notes_write);
-    }
-    for folder in &skill.artifact_folders {
-        println!(
-            "skill.{name}.folder id={} path={} kind={:?} access={:?} exists={}",
-            folder.id,
-            folder.path.display(),
-            folder.kind,
-            folder.access,
-            folder.exists
-        );
-        for value in &folder.provides {
-            println!("skill.{name}.folder.{}.provides={value}", folder.id);
-        }
-        if let Some(schema) = &folder.schema {
-            println!("skill.{name}.folder.{}.schema={schema}", folder.id);
-        }
-        for rule in &folder.create {
-            println!(
-                "skill.{name}.folder.{}.create.when={}",
-                folder.id,
-                skill_folder_create_situation(rule.when)
-            );
-        }
-        for readiness in &folder.readiness {
-            println!(
-                "skill.{name}.folder.{}.ready.when={} action={}",
-                folder.id,
-                skill_folder_create_situation(readiness.situation),
-                skill_folder_sync_action(readiness.action)
-            );
-        }
-        for warning in &folder.warnings {
-            println!("skill.{name}.folder.{}.warning={warning}", folder.id);
-        }
-        for error in &folder.errors {
-            println!("skill.{name}.folder.{}.error={error}", folder.id);
-        }
-    }
-    for warning in &skill.warnings {
-        println!("skill.{name}.warning={warning}");
-    }
-    for error in &skill.errors {
-        println!("skill.{name}.error={error}");
-    }
-}
-
-fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {
-    skill
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("path:{}", skill.path.display()))
-}
-
-fn print_workspace_skill_diagnostic(diagnostic: &WorkspaceSkillDiagnostic) {
-    print!(
-        "diagnostic severity={} scope={} code={} message={}",
-        workspace_skill_diagnostic_severity(diagnostic.severity),
-        workspace_skill_diagnostic_scope(diagnostic.scope),
-        diagnostic.code,
-        diagnostic.message
-    );
-    if let Some(component) = &diagnostic.component {
-        print!(" component={component}");
-    }
-    if let Some(skill) = &diagnostic.skill {
-        print!(" skill={skill}");
-    }
-    if let Some(skill_path) = &diagnostic.skill_path {
-        print!(" skill_path={}", skill_path.display());
-    }
-    if let Some(folder_id) = &diagnostic.folder_id {
-        print!(" folder={folder_id}");
-    }
-    if let Some(path) = &diagnostic.path {
-        print!(" path={}", path.display());
-    }
-    println!();
-}
-
-fn workspace_skill_diagnostic_severity(severity: WorkspaceSkillDiagnosticSeverity) -> &'static str {
-    match severity {
-        WorkspaceSkillDiagnosticSeverity::Warning => "warning",
-        WorkspaceSkillDiagnosticSeverity::Error => "error",
-    }
-}
-
-fn workspace_skill_diagnostic_scope(scope: WorkspaceSkillDiagnosticScope) -> &'static str {
-    match scope {
-        WorkspaceSkillDiagnosticScope::Workspace => "workspace",
-        WorkspaceSkillDiagnosticScope::Component => "component",
-        WorkspaceSkillDiagnosticScope::Lock => "lock",
-        WorkspaceSkillDiagnosticScope::SkillManifest => "skill_manifest",
-        WorkspaceSkillDiagnosticScope::SkillArtifactFolder => "skill_artifact_folder",
-        WorkspaceSkillDiagnosticScope::SkillTrust => "skill_trust",
-    }
-}
-
 fn print_skill_permissions(prefix: &str, permissions: &SkillPermissions) {
     let memory_scopes = permissions
         .memory
@@ -2715,42 +2231,6 @@ fn print_cron_run(run: &CronRun) {
     }
     if let Some(supervisor_run_id) = &run.supervisor_run_id {
         println!("cron_run.{}.supervisor_run_id={supervisor_run_id}", run.id);
-    }
-}
-
-fn print_skill_trust_update_report(report: &SkillTrustUpdateReport) {
-    println!(
-        "state={}",
-        if report.has_errors() { "invalid" } else { "ok" }
-    );
-    println!("workspace_root={}", report.workspace_root.display());
-    println!("trust_store_path={}", report.trust_store_path.display());
-    println!("skill_name={}", report.skill_name);
-    println!("action={:?}", report.action);
-    println!("dry_run={}", report.dry_run);
-    println!("wrote={}", report.wrote);
-    if let Some(record) = &report.record {
-        println!("trust.skill_name={}", record.skill_name);
-        println!("trust.source={}", record.source);
-        println!("trust.workspace_root={}", record.workspace_root.display());
-        println!("trust.artifact_identity={}", record.artifact_identity);
-        println!("trust.package_digest={}", record.package_digest);
-        println!("trust.remote={}", record.remote);
-        println!("trust.ref={}", record.ref_name);
-        println!("trust.commit={}", record.commit);
-        println!("trust.tree={}", record.tree);
-        println!("trust.approved_at={}", record.approved_at);
-        println!("trust.agentlibre_version={}", record.agentlibre_version);
-        println!("trust.revoked={}", record.revoked);
-        if let Some(revoked_at) = &record.revoked_at {
-            println!("trust.revoked_at={revoked_at}");
-        }
-    }
-    for warning in &report.warnings {
-        println!("warning={warning}");
-    }
-    for error in &report.errors {
-        println!("error={error}");
     }
 }
 
@@ -3251,8 +2731,8 @@ tool_call_format = "gemma_function_call"
         std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: daemon-test
   version: 1.0.0
@@ -3374,7 +2854,7 @@ subagents:
         std::fs::create_dir_all(root.join(".agl")).unwrap();
         std::fs::write(
             root.join(".agl/workspace.toml"),
-            r#"version = 2
+            r#"version = 3
 default_function = "function:coding@^1.0"
 "#,
         )
@@ -3394,7 +2874,10 @@ default_function = "function:coding@^1.0"
 
         apply_workspace_default_function_to_run(&mut options, &runtime).unwrap();
 
-        assert_eq!(options.function_ref.as_deref(), Some("coding"));
+        assert_eq!(
+            options.function_ref.as_deref(),
+            Some("function:coding@^1.0")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3438,10 +2921,15 @@ default_function = "function:coding@^1.0"
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&function_root).unwrap();
         std::fs::write(
+            root.join(".agl/workspace.toml"),
+            "version = 3\ndefault_function = \"function:coding@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
+        )
+        .unwrap();
+        std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0

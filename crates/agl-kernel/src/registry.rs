@@ -469,6 +469,8 @@ impl ToolRuntime {
                 .append(journal, ToolEffectLifecycleState::Started, &[], None)
                 .map_err(ToolDispatchError::Journal)?;
         }
+        let effect_correlation =
+            (!admitted_effects.is_empty()).then(|| effect_journal.machine.correlation());
         if control.is_cancelled() || control.is_expired() {
             if !admitted_effects.is_empty() {
                 effect_journal
@@ -489,6 +491,7 @@ impl ToolRuntime {
                 control,
                 requested_effects,
                 effective_tool.grant_provenance().cloned(),
+                effect_correlation,
             )),
             &handler_control,
         );

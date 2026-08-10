@@ -111,7 +111,7 @@ pub fn declaration() -> ExtensionDescriptor {
     ))
     .with_tool(action::<SkillStatusArgs>(
         SKILL_STATUS_TOOL_ID,
-        "Report workspace skill component, lock, trust, and health status.",
+        "Report resolved Skill package, lock, trust, and health status.",
         OperationKind::Read,
         [],
     ))

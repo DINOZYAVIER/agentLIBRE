@@ -1101,7 +1101,7 @@ impl DaemonState {
         request_id: RequestId,
         request: agl_protocol::RunSubmitRequest,
     ) -> Result<DaemonEventKind, ProtocolError> {
-        if !request.content.has_artifacts()
+        if !request.content.has_attachments()
             && request
                 .content
                 .text_only()
@@ -2804,34 +2804,25 @@ impl DaemonState {
                     detail: None,
                 })
                 .collect(),
-            "skill_id" => {
-                let workspace = request
-                    .session_id
-                    .as_ref()
-                    .and_then(|session_id| self.sessions.get(session_id))
-                    .map(|session| session.execution_context.workspace_root.clone())
-                    .unwrap_or_else(|| self.runtime.paths.config_dir.clone());
-                let trust_store = self.runtime.paths.state_dir.join("skill-trust.toml");
-                agl_skill::trusted_workspace_registry(&workspace, &trust_store)
-                    .map_err(application_runtime_error)?
-                    .skills()
-                    .iter()
-                    .filter(|skill| {
-                        skill
-                            .harness
-                            .id
-                            .as_str()
-                            .to_ascii_lowercase()
-                            .contains(&query)
-                            || skill.harness.name.to_ascii_lowercase().contains(&query)
-                    })
-                    .map(|skill| agl_app::Suggestion {
-                        value: skill.harness.id.to_string(),
-                        label: skill.harness.name.clone(),
-                        detail: Some(skill.harness.description.clone()),
-                    })
-                    .collect()
-            }
+            "skill_id" => agl_skill::builtin_registry()
+                .map_err(application_runtime_error)?
+                .skills()
+                .iter()
+                .filter(|skill| {
+                    skill
+                        .harness
+                        .id
+                        .as_str()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                        || skill.harness.name.to_ascii_lowercase().contains(&query)
+                })
+                .map(|skill| agl_app::Suggestion {
+                    value: skill.harness.id.to_string(),
+                    label: skill.harness.name.clone(),
+                    detail: Some(skill.harness.description.clone()),
+                })
+                .collect(),
             "execution_id" => {
                 let Some(session_id) = request.session_id else {
                     return Ok(SuggestionPage {

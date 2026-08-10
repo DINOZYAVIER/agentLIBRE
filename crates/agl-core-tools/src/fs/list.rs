@@ -628,6 +628,13 @@ fn scan_entries_with_limits(
             };
             let relative = tools.display_path(&entry.path());
             if query.recursive && kind == EntryKind::Directory {
+                tools.enforce_artifact_access(
+                    entry
+                        .path()
+                        .strip_prefix(tools.root())
+                        .context("listed path escaped workspace")?,
+                    agl_kernel::ArtifactAccess::ReadTree,
+                )?;
                 child_directories.push(entry.path());
             }
             if kind_matches(query.kind, kind)

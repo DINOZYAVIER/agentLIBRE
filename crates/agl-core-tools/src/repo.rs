@@ -1,12 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agl_kernel::{
-    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
-    ToolDispatchContext, ToolHandler, ToolId, ToolResult,
+use agl_artifact::{
+    ArtifactBinding, ArtifactCommitEntry, ArtifactCommitEntryKind, ArtifactCommitRequest,
+    ArtifactHandle,
 };
-use agl_repo::{
-    RepoHooksOptions, RepoInitOptions, RepoStatusOptions, init_repo_workspace, install_repo_hooks,
-    render_repo_profile_toml, status_repo_workspace,
+use agl_kernel::{
+    ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactKindId,
+    ArtifactTargetSelector, AuthorityClass, EffectDeclaration, EffectId, ExtensionDescriptor,
+    ExtensionId, ObservedEffect, OperationKind, ToolDeclaration, ToolDispatchContext, ToolHandler,
+    ToolId, ToolResult,
 };
 use anyhow::Result;
 use schemars::JsonSchema;
@@ -16,399 +19,266 @@ use serde_json::{Value, json};
 use crate::parse_tool_args as parse_args;
 
 pub const EXTENSION_ID: &str = "core.repo";
-pub const REPO_STATUS_TOOL_ID: &str = "core.repo:status";
-pub const REPO_EXPORT_PROFILE_TOOL_ID: &str = "core.repo:export_profile";
-pub const REPO_HOOKS_STATUS_TOOL_ID: &str = "core.repo:hooks.status";
-pub const REPO_INIT_TOOL_ID: &str = "core.repo:init";
-pub const REPO_IMPORT_PROFILE_TOOL_ID: &str = "core.repo:import_profile";
-pub const REPO_INSTALL_HOOKS_TOOL_ID: &str = "core.repo:install_hooks";
+pub const ARTIFACT_COMMIT_TOOL_ID: &str = "core.repo:artifact.commit";
+pub const TASKS_VERIFY_TOOL_ID: &str = "core.repo:tasks.verify";
 
-const DEFAULT_PROFILE_MAX_BYTES: usize = 16 * 1024;
-const MAX_PROFILE_BYTES: usize = 128 * 1024;
+const ARTIFACT_REPOSITORY_EFFECT_ID: &str = "agl:artifact.repository";
+const REPO_GITLINK_EFFECT_ID: &str = "agl:repo.gitlink";
 
 #[derive(Clone, Debug)]
 pub struct RepoTools {
     workspace_root: PathBuf,
+    store_root: Option<PathBuf>,
+    artifacts: BTreeMap<ArtifactId, (ArtifactBinding, ArtifactHandle)>,
 }
 
 impl RepoTools {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
         Self {
             workspace_root: workspace_root.as_ref().to_path_buf(),
+            store_root: None,
+            artifacts: BTreeMap::new(),
         }
+    }
+
+    pub fn with_store_root(mut self, store_root: impl AsRef<Path>) -> Self {
+        self.store_root = Some(store_root.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_artifact(
+        mut self,
+        binding: ArtifactBinding,
+        handle: ArtifactHandle,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            binding.artifact_id() == handle.id(),
+            "Artifact binding and handle IDs differ"
+        );
+        anyhow::ensure!(
+            self.artifacts
+                .insert(handle.id().clone(), (binding, handle))
+                .is_none(),
+            "duplicate Artifact handler binding"
+        );
+        Ok(self)
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
-            REPO_STATUS_TOOL_ID => self.status(arguments),
-            REPO_EXPORT_PROFILE_TOOL_ID => self.export_profile(arguments),
-            REPO_HOOKS_STATUS_TOOL_ID => self.hooks_status(arguments),
-            REPO_INIT_TOOL_ID => self.init(arguments),
-            REPO_IMPORT_PROFILE_TOOL_ID => self.import_profile(arguments),
-            REPO_INSTALL_HOOKS_TOOL_ID => self.install_hooks(arguments),
+            ARTIFACT_COMMIT_TOOL_ID => {
+                parse_args::<ArtifactCommitArgs>(name, arguments)?;
+                anyhow::bail!("Artifact commit requires an admitted kernel Tool Effect call")
+            }
+            TASKS_VERIFY_TOOL_ID => {
+                parse_args::<TasksVerifyArgs>(name, arguments)?;
+                self.verify_tasks()
+            }
             _ => anyhow::bail!("unknown repo tool `{name}`"),
         }
     }
 
-    fn status(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<StatusArgs>(REPO_STATUS_TOOL_ID, arguments)?;
-        let report = status_repo_workspace(
-            &self.workspace_root,
-            &RepoStatusOptions {
-                component: args.component,
-                strict: args.strict.unwrap_or(false),
-            },
+    fn verify_tasks(&self) -> Result<Value> {
+        let id = ArtifactId::new("core.repo:tasks").expect("fixed Artifact ID is valid");
+        let (_, handle) = self
+            .artifacts
+            .get(&id)
+            .ok_or_else(|| anyhow::anyhow!("core.repo:tasks ArtifactHandle is not admitted"))?;
+        let report = agl_repo::verify_task_specs(
+            handle,
+            &agl_repo::TaskSpecVerifyOptions { strict: false },
         )?;
-        let state = serde_json::to_value(report.state)?;
         Ok(json!({
-            "tool": REPO_STATUS_TOOL_ID,
-            "status": state,
-            "workspace_root": report.workspace_root,
-            "manifest_path": report.manifest_path,
-            "component_count": report.components.len(),
-            "warning_count": report.warnings.len(),
-            "error_count": report.errors.len(),
-            "components": report.components,
-            "warnings": report.warnings,
+            "tool": TASKS_VERIFY_TOOL_ID,
+            "status": if report.errors.is_empty() { "ok" } else { "invalid" },
+            "artifact_id": id,
+            "files": report.files,
             "errors": report.errors,
-            "next_steps": report.next_steps,
         }))
-    }
-
-    fn export_profile(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<ExportProfileArgs>(REPO_EXPORT_PROFILE_TOOL_ID, arguments)?;
-        let max_bytes = args
-            .max_bytes
-            .unwrap_or(DEFAULT_PROFILE_MAX_BYTES)
-            .min(MAX_PROFILE_BYTES);
-        let mut profile = render_repo_profile_toml(&self.workspace_root)?;
-        let truncated = profile.len() > max_bytes;
-        if truncated {
-            profile.truncate(previous_char_boundary(&profile, max_bytes));
-        }
-        Ok(json!({
-            "tool": REPO_EXPORT_PROFILE_TOOL_ID,
-            "status": "ok",
-            "bytes": profile.len(),
-            "truncated": truncated,
-            "profile": profile,
-        }))
-    }
-
-    fn hooks_status(&self, arguments: Value) -> Result<Value> {
-        parse_args::<HooksStatusArgs>(REPO_HOOKS_STATUS_TOOL_ID, arguments)?;
-        let report = install_repo_hooks(
-            &self.workspace_root,
-            &RepoHooksOptions {
-                dry_run: true,
-                force: false,
-            },
-        )?;
-        Ok(render_hooks_report(REPO_HOOKS_STATUS_TOOL_ID, &report))
-    }
-
-    fn init(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<InitArgs>(REPO_INIT_TOOL_ID, arguments)?;
-        let report = init_repo_workspace(
-            &self.workspace_root,
-            &RepoInitOptions {
-                profile: args
-                    .profile
-                    .unwrap_or_else(|| agl_repo::DEFAULT_PROFILE.to_string()),
-                profile_file: args.profile_file.map(PathBuf::from),
-                artifacts: Vec::new(),
-                skills_url: None,
-                skills_rev: None,
-                tasks_url: None,
-                tasks_rev: None,
-                dry_run: args.dry_run.unwrap_or(false),
-                force: args.force.unwrap_or(false),
-            },
-        )?;
-        Ok(render_init_report(REPO_INIT_TOOL_ID, report))
-    }
-
-    fn import_profile(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<ImportProfileArgs>(REPO_IMPORT_PROFILE_TOOL_ID, arguments)?;
-        let report = init_repo_workspace(
-            &self.workspace_root,
-            &RepoInitOptions {
-                profile: agl_repo::DEFAULT_PROFILE.to_string(),
-                profile_file: Some(PathBuf::from(args.profile_file)),
-                artifacts: Vec::new(),
-                skills_url: None,
-                skills_rev: None,
-                tasks_url: None,
-                tasks_rev: None,
-                dry_run: args.dry_run.unwrap_or(false),
-                force: args.force.unwrap_or(false),
-            },
-        )?;
-        Ok(render_init_report(REPO_IMPORT_PROFILE_TOOL_ID, report))
-    }
-
-    fn install_hooks(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<InstallHooksArgs>(REPO_INSTALL_HOOKS_TOOL_ID, arguments)?;
-        let report = install_repo_hooks(
-            &self.workspace_root,
-            &RepoHooksOptions {
-                dry_run: args.dry_run.unwrap_or(false),
-                force: args.force.unwrap_or(false),
-            },
-        )?;
-        Ok(render_hooks_report(REPO_INSTALL_HOOKS_TOOL_ID, &report))
     }
 }
 
 impl ToolHandler for RepoTools {
     fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
+            let correlation = context.effect_correlation().cloned();
             let invocation = context.into_invocation();
-            self.dispatch(invocation.tool_id.as_str(), invocation.arguments)
-                .map(ToolResult::new)
-                .map_err(Into::into)
+            if invocation.tool_id.as_str() == TASKS_VERIFY_TOOL_ID {
+                parse_args::<TasksVerifyArgs>(TASKS_VERIFY_TOOL_ID, invocation.arguments)
+                    .map_err(agl_kernel::ToolHandlerError::from)?;
+                return self.verify_tasks().map(ToolResult::new).map_err(Into::into);
+            }
+            let operation_id = invocation
+                .run_step_idempotency_key()
+                .or_else(|| invocation.request_id.as_ref().map(ToString::to_string))
+                .ok_or_else(|| {
+                    agl_kernel::ToolHandlerError::from(anyhow::anyhow!(
+                        "Artifact commit requires a request or run-step idempotency identity"
+                    ))
+                })?;
+            let args =
+                parse_args::<ArtifactCommitArgs>(ARTIFACT_COMMIT_TOOL_ID, invocation.arguments)
+                    .map_err(agl_kernel::ToolHandlerError::from)?;
+            let correlation = correlation.ok_or_else(|| {
+                agl_kernel::ToolHandlerError::from(anyhow::anyhow!(
+                    "Artifact commit was dispatched without Tool Effect correlation"
+                ))
+            })?;
+            let id = ArtifactId::new(args.artifact_id)
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let (binding, handle) = self.artifacts.get(&id).ok_or_else(|| {
+                agl_kernel::ToolHandlerError::from(anyhow::anyhow!(
+                    "ArtifactHandle is not admitted for {id}"
+                ))
+            })?;
+            handle
+                .require_access(ArtifactAccess::MutateTree)
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let entries = args
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let kind = match entry.operation {
+                        ArtifactCommitEntryOperation::Create => ArtifactCommitEntryKind::Create,
+                        ArtifactCommitEntryOperation::Update => ArtifactCommitEntryKind::Update,
+                        ArtifactCommitEntryOperation::Delete => ArtifactCommitEntryKind::Delete,
+                    };
+                    ArtifactCommitEntry::new(entry.path, kind)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let request = ArtifactCommitRequest::new(
+                operation_id,
+                correlation,
+                id.clone(),
+                entries,
+                args.message,
+            )
+            .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let store_root = self.store_root.as_ref().ok_or_else(|| {
+                agl_kernel::ToolHandlerError::from(anyhow::anyhow!(
+                    "Artifact commit store is not configured"
+                ))
+            })?;
+            let mut store = agl_store::AglStore::open_at(store_root)
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let repository = agl_repo::ArtifactGitRepository::open(&self.workspace_root)
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let result = repository
+                .commit_artifact(binding, request, &mut store)
+                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
+            let data = json!({
+                "tool": ARTIFACT_COMMIT_TOOL_ID,
+                "status": if result.is_conflict() { "conflict" } else { "committed" },
+                "artifact_id": id,
+                "operation_id": result.operation_id(),
+                "child_commit": result.child_commit(),
+                "parent_commit": result.parent_commit(),
+            });
+            Ok(ToolResult::new(data).with_observed_effects([
+                ObservedEffect::new(
+                    EffectId::new(ARTIFACT_REPOSITORY_EFFECT_ID).expect("fixed Effect ID"),
+                    [
+                        ("artifact_id".to_owned(), id.to_string()),
+                        ("child_commit".to_owned(), result.child_commit().to_owned()),
+                    ],
+                ),
+                ObservedEffect::new(
+                    EffectId::new(REPO_GITLINK_EFFECT_ID).expect("fixed Effect ID"),
+                    [
+                        ("artifact_id".to_owned(), id.to_string()),
+                        (
+                            "parent_commit".to_owned(),
+                            result.parent_commit().to_owned(),
+                        ),
+                    ],
+                ),
+            ]))
         })
     }
 }
 
 pub fn declaration() -> ExtensionDescriptor {
+    let tasks_id = ArtifactId::new("core.repo:tasks").unwrap();
+    let repository_effect = EffectId::new(ARTIFACT_REPOSITORY_EFFECT_ID).unwrap();
+    let gitlink_effect = EffectId::new(REPO_GITLINK_EFFECT_ID).unwrap();
+    let commit = ToolDeclaration::from_schema::<ArtifactCommitArgs>(
+        ToolId::new(ARTIFACT_COMMIT_TOOL_ID).unwrap(),
+        "Commit exact changed entries in one verified Artifact and advance its parent gitlink.",
+        OperationKind::Write,
+    )
+    .unwrap()
+    .with_state_effects([repository_effect.clone(), gitlink_effect.clone()])
+    .with_artifact_link(ArtifactEffectLink::new(
+        repository_effect.clone(),
+        ArtifactTargetSelector::FromArgument {
+            pointer: "/artifact_id".to_owned(),
+            access: ArtifactAccess::MutateTree,
+        },
+        ArtifactAccess::MutateTree,
+    ));
+    let verify = ToolDeclaration::from_schema::<TasksVerifyArgs>(
+        ToolId::new(TASKS_VERIFY_TOOL_ID).unwrap(),
+        "Validate planned task specifications from core.repo:tasks.",
+        OperationKind::Read,
+    )
+    .unwrap()
+    .with_conditional_state_effects([EffectId::repo_files()])
+    .with_artifact_link(ArtifactEffectLink::new(
+        EffectId::repo_files(),
+        ArtifactTargetSelector::Fixed(tasks_id.clone()),
+        ArtifactAccess::ReadTree,
+    ));
+
     ExtensionDescriptor::builtin(
-        ExtensionId::new(EXTENSION_ID).expect("builtin repo extension id is valid"),
-        "Repo Tools",
+        ExtensionId::new(EXTENSION_ID).unwrap(),
+        "Repository Artifact Tools",
         env!("CARGO_PKG_VERSION"),
     )
-    .expect("builtin repo extension declaration is valid")
-    .with_tool(action::<StatusArgs>(
-        REPO_STATUS_TOOL_ID,
-        "Inspect agentLIBRE workspace manifest and component health.",
-        OperationKind::Read,
-    ))
-    .with_tool(action::<ExportProfileArgs>(
-        REPO_EXPORT_PROFILE_TOOL_ID,
-        "Render the current agentLIBRE workspace profile without writing a file.",
-        OperationKind::Read,
-    ))
-    .with_tool(action::<HooksStatusArgs>(
-        REPO_HOOKS_STATUS_TOOL_ID,
-        "Dry-run repository hook installation status.",
-        OperationKind::Read,
-    ))
-    .with_tool(
-        action::<InitArgs>(
-            REPO_INIT_TOOL_ID,
-            "Initialize agentLIBRE workspace files.",
-            OperationKind::Admin,
+    .unwrap()
+    .with_artifact(
+        ArtifactDeclaration::new(
+            tasks_id,
+            ArtifactKindId::new("agentlibre.task-specs").unwrap(),
+            [ArtifactAccess::ReadTree],
         )
-        .with_state_effects([EffectId::repo_workspace()]),
+        .unwrap(),
     )
-    .with_tool(
-        action::<ImportProfileArgs>(
-            REPO_IMPORT_PROFILE_TOOL_ID,
-            "Apply an explicit agentLIBRE workspace profile file.",
-            OperationKind::Admin,
-        )
-        .with_state_effects([EffectId::repo_workspace()]),
-    )
-    .with_tool(
-        action::<InstallHooksArgs>(
-            REPO_INSTALL_HOOKS_TOOL_ID,
-            "Install agentLIBRE managed git hooks.",
-            OperationKind::Admin,
-        )
-        .with_state_effects([EffectId::repo_hooks()]),
-    )
+    .with_tool(commit)
+    .with_tool(verify)
     .with_effects([
-        EffectDeclaration::for_standard(EffectId::repo_workspace()).unwrap(),
-        EffectDeclaration::for_standard(EffectId::repo_hooks()).unwrap(),
+        EffectDeclaration::new(
+            repository_effect,
+            AuthorityClass::RepositoryMutation.as_str(),
+        ),
+        EffectDeclaration::new(gitlink_effect, AuthorityClass::RepositoryMutation.as_str()),
+        EffectDeclaration::for_standard(EffectId::repo_files()).unwrap(),
     ])
 }
 
-fn action<T: JsonSchema>(
-    id: &str,
-    description: &str,
-    operation_kind: OperationKind,
-) -> ToolDeclaration {
-    ToolDeclaration::from_schema::<T>(
-        ToolId::new(id).expect("builtin repo action id is valid"),
-        description,
-        operation_kind,
-    )
-    .expect("builtin repo action schema is valid")
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ArtifactCommitArgs {
+    artifact_id: String,
+    entries: Vec<ArtifactCommitEntryArgs>,
+    message: String,
 }
 
-fn render_hooks_report(tool_id: &str, report: &agl_repo::HookInstallReport) -> Value {
-    json!({
-        "tool": tool_id,
-        "status": if report.errors.is_empty() { "ok" } else { "failed" },
-        "workspace_root": report.workspace_root,
-        "dry_run": report.dry_run,
-        "hook_count": report.hooks.len(),
-        "error_count": report.errors.len(),
-        "hooks": report.hooks,
-        "errors": report.errors,
-    })
+#[derive(Clone, Debug, Deserialize, JsonSchema, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactCommitEntryArgs {
+    path: String,
+    operation: ArtifactCommitEntryOperation,
 }
 
-fn render_init_report(tool_id: &str, report: agl_repo::RepoInitReport) -> Value {
-    json!({
-        "tool": tool_id,
-        "status": "ok",
-        "workspace_root": report.workspace_root,
-        "manifest_path": report.manifest_path,
-        "dry_run": report.dry_run,
-        "change_count": report.changes.len(),
-        "changes": report.changes,
-        "next_steps": report.next_steps,
-    })
-}
-
-fn previous_char_boundary(value: &str, mut index: usize) -> usize {
-    index = index.min(value.len());
-    while !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactCommitEntryOperation {
+    Create,
+    Update,
+    Delete,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct StatusArgs {
-    component: Option<String>,
-    strict: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ExportProfileArgs {
-    max_bytes: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct HooksStatusArgs {}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct InitArgs {
-    profile: Option<String>,
-    profile_file: Option<String>,
-    dry_run: Option<bool>,
-    force: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ImportProfileArgs {
-    profile_file: String,
-    dry_run: Option<bool>,
-    force: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct InstallHooksArgs {
-    dry_run: Option<bool>,
-    force: Option<bool>,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use crate::test_support::temp_root;
-
-    use super::*;
-
-    #[test]
-    fn repo_tools_initialize_status_export_and_check_hooks() {
-        let root = temp_root("workspace");
-        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
-        let tools = RepoTools::new(&root);
-
-        let init = tools.dispatch(REPO_INIT_TOOL_ID, json!({})).unwrap();
-        let status = tools.dispatch(REPO_STATUS_TOOL_ID, json!({})).unwrap();
-        let profile = tools
-            .dispatch(REPO_EXPORT_PROFILE_TOOL_ID, json!({"max_bytes": 4096}))
-            .unwrap();
-        let hooks = tools
-            .dispatch(REPO_HOOKS_STATUS_TOOL_ID, json!({}))
-            .unwrap();
-
-        assert_eq!(init["status"], "ok");
-        assert!(root.join(".agl/workspace.toml").is_file());
-        assert_eq!(status["tool"], REPO_STATUS_TOOL_ID);
-        assert!(status["components"].as_array().unwrap().is_empty());
-        assert_eq!(profile["tool"], REPO_EXPORT_PROFILE_TOOL_ID);
-        assert!(
-            profile["profile"]
-                .as_str()
-                .unwrap()
-                .contains("name = \"repo-workflow\"")
-        );
-        assert_eq!(hooks["tool"], REPO_HOOKS_STATUS_TOOL_ID);
-        assert_eq!(hooks["dry_run"], true);
-    }
-
-    #[test]
-    fn repo_tools_import_profile_requires_explicit_profile_file() {
-        let root = temp_root("import-profile");
-        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
-        let profile_path = root.join("profile.toml");
-        std::fs::write(
-            &profile_path,
-            r#"
-version = 1
-name = "team-profile"
-
-[components.skills]
-kind = "local"
-path = ".agl/skills"
-required = true
-access = "read"
-create = ["."]
-
-[components.tasks]
-kind = "local"
-path = ".agl/tasks"
-required = true
-access = "read_write"
-validation = "agl.task_spec.v1"
-create = ["."]
-"#,
-        )
-        .unwrap();
-        let tools = RepoTools::new(&root);
-
-        let imported = tools
-            .dispatch(
-                REPO_IMPORT_PROFILE_TOOL_ID,
-                json!({"profile_file": profile_path, "dry_run": false}),
-            )
-            .unwrap();
-
-        assert_eq!(imported["tool"], REPO_IMPORT_PROFILE_TOOL_ID);
-        assert_eq!(imported["status"], "ok");
-        assert!(root.join(".agl/workspace.toml").is_file());
-    }
-
-    #[test]
-    fn repo_declarations_expose_closed_schemas() {
-        let declaration = declaration();
-        for action in &declaration.tools {
-            assert_eq!(action.input_schema["additionalProperties"], false);
-        }
-        let import = declaration
-            .tools
-            .iter()
-            .find(|action| action.id.as_str() == REPO_IMPORT_PROFILE_TOOL_ID)
-            .unwrap();
-        assert_eq!(import.input_schema["required"], json!(["profile_file"]));
-        assert!(
-            import
-                .compile_schema()
-                .unwrap()
-                .validate(&json!({"profile_file": "profile.toml", "extra": true}))
-                .is_err()
-        );
-    }
-}
+struct TasksVerifyArgs {}

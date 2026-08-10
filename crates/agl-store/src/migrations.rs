@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 17;
+pub const CURRENT_SCHEMA_VERSION: u32 = 18;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -334,7 +334,7 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     },
     StoreMigration {
         version: 11,
-        name: "011_content_artifacts",
+        name: "011_content_attachments",
         sql: r#"
             CREATE TABLE content_blobs (
                 digest TEXT PRIMARY KEY,
@@ -342,7 +342,7 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 byte_length INTEGER NOT NULL CHECK (byte_length > 0),
                 created_at_ms INTEGER NOT NULL
             );
-            CREATE TABLE artifacts (
+            CREATE TABLE content_attachments (
                 id TEXT PRIMARY KEY,
                 blob_digest TEXT NOT NULL REFERENCES content_blobs(digest),
                 run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -358,9 +358,9 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 tombstoned_at_ms INTEGER,
                 CHECK ((width IS NULL) = (height IS NULL))
             );
-            CREATE INDEX artifacts_run_idx ON artifacts(run_id, state, created_at_ms);
-            CREATE INDEX artifacts_blob_idx ON artifacts(blob_digest, state);
-            CREATE INDEX artifacts_gc_idx ON artifacts(state, tombstoned_at_ms);
+            CREATE INDEX content_attachments_run_idx ON content_attachments(run_id, state, created_at_ms);
+            CREATE INDEX content_attachments_blob_idx ON content_attachments(blob_digest, state);
+            CREATE INDEX content_attachments_gc_idx ON content_attachments(state, tombstoned_at_ms);
         "#,
     },
     StoreMigration {
@@ -565,6 +565,24 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 SELECT RAISE(ABORT, 'invalid supervised subagent run shape');
             END;
             PRAGMA legacy_alter_table = OFF;
+        "#,
+    },
+    StoreMigration {
+        version: 18,
+        name: "018_artifact_commit_operations",
+        sql: r#"
+            CREATE TABLE artifact_commit_operations (
+                operation_id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                state TEXT NOT NULL CHECK (state IN (
+                    'prepared', 'child_committed', 'parent_committed',
+                    'committed', 'failed', 'conflict'
+                )),
+                correlation_json TEXT,
+                record_json TEXT NOT NULL
+            );
+            CREATE INDEX artifact_commit_operations_recovery_idx
+                ON artifact_commit_operations(state, operation_id);
         "#,
     },
 ];

@@ -44,12 +44,12 @@ pub enum StoreError {
         existing_fingerprint: String,
         requested_fingerprint: String,
     },
-    ArtifactAccessDenied,
-    ArtifactUnavailable {
-        artifact_id: String,
+    ContentAttachmentAccessDenied,
+    ContentAttachmentUnavailable {
+        content_attachment_id: String,
     },
-    ArtifactIntegrityFailed {
-        artifact_id: String,
+    ContentAttachmentIntegrityFailed {
+        content_attachment_id: String,
         reason: String,
     },
     Content(agl_content::ContentError),
@@ -95,16 +95,21 @@ impl fmt::Display for StoreError {
                 f,
                 "idempotency conflict for {namespace}/{key}: existing fingerprint {existing_fingerprint}, requested {requested_fingerprint}"
             ),
-            Self::ArtifactAccessDenied => f.write_str("artifact access denied"),
-            Self::ArtifactUnavailable { artifact_id } => {
-                write!(f, "artifact {artifact_id} is unavailable")
+            Self::ContentAttachmentAccessDenied => f.write_str("content attachment access denied"),
+            Self::ContentAttachmentUnavailable {
+                content_attachment_id,
+            } => {
+                write!(
+                    f,
+                    "content attachment {content_attachment_id} is unavailable"
+                )
             }
-            Self::ArtifactIntegrityFailed {
-                artifact_id,
+            Self::ContentAttachmentIntegrityFailed {
+                content_attachment_id,
                 reason,
             } => write!(
                 f,
-                "artifact {artifact_id} failed integrity validation: {reason}"
+                "content attachment {content_attachment_id} failed integrity validation: {reason}"
             ),
             Self::Content(error) => write!(f, "{error}"),
         }

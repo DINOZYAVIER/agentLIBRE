@@ -31,6 +31,26 @@ fn text(value: impl Into<String>) -> Content {
     Content::text(value).unwrap()
 }
 
+fn declare_workspace_source(workspace: &std::path::Path) {
+    std::fs::create_dir_all(workspace.join(".agl")).unwrap();
+    std::fs::write(
+        workspace.join(".agl/workspace.toml"),
+        r#"version = 3
+default_function = "function:gemma4-31b-32k@^1"
+
+[[sources]]
+id = "workspace"
+tier = "workspace"
+kind = "directory"
+path = ".agl"
+
+[policy]
+[config]
+"#,
+    )
+    .unwrap();
+}
+
 trait TestRenderedContent {
     fn as_str(&self) -> &str;
 
@@ -68,13 +88,14 @@ fn external_same_id_extension_cannot_bind_the_builtin_extension() {
     let function_root = workspace.join(".agl/functions/external-extension");
     let extension_root = workspace.join(".agl/extensions/core.workspace");
     let _ = std::fs::remove_dir_all(&root);
+    declare_workspace_source(&workspace);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::create_dir_all(&extension_root).unwrap();
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: external-extension
   version: 1.0.0
@@ -107,7 +128,7 @@ doctor:
             .unwrap();
     agl_extension::package::ExtensionPackageBuilder::build(&input, &extension_root).unwrap();
     let paths = AgentLibrePaths::from_agl_home(root.join("home"));
-    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
     let bundle = composition
         .resolve_runtime_bundle(
             &workspace,
@@ -121,7 +142,7 @@ doctor:
         bundle.graph.nodes[&bundle.extensions["core.workspace"].node_key]
             .candidate
             .tier,
-        ArtifactSourceTier::Workspace
+        PackageSourceTier::Workspace
     );
 
     let error = bind_runtime_extensions(&bundle).unwrap_err();
@@ -141,13 +162,14 @@ fn selected_skill_context_uses_the_admitted_bundle_bytes() {
     let function_root = workspace.join(".agl/functions/skill-snapshot");
     let skill_root = workspace.join(".agl/skills/snapshot-skill");
     let _ = std::fs::remove_dir_all(&root);
+    declare_workspace_source(&workspace);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::create_dir_all(&skill_root).unwrap();
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: skill-snapshot
   version: 1.0.0
@@ -175,8 +197,8 @@ doctor:
     let skill_document = |body: &str| {
         format!(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: snapshot-skill
   version: 1.0.0
@@ -202,7 +224,7 @@ guarantees:
     };
     std::fs::write(skill_root.join("SKILL.md"), skill_document("admitted body")).unwrap();
     let paths = AgentLibrePaths::from_agl_home(root.join("home"));
-    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
     let bundle = composition
         .resolve_runtime_bundle(&workspace, &paths.config_dir, "skill-snapshot", false, &[])
         .unwrap();
@@ -230,12 +252,13 @@ fn runtime_resolution_is_one_atomic_canonical_record() {
     let function_root = workspace.join(".agl/functions/evidence-function");
     let artifact_root = root.join("artifacts");
     let config_path = root.join("inference.toml");
+    declare_workspace_source(&workspace);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: evidence-function
   version: 1.0.0
@@ -850,74 +873,6 @@ fn selected_skill_ids_deduplicates_across_config_function_and_cli() {
 }
 
 #[test]
-fn artifact_write_preflight_normalizes_only_agl_paths() {
-    let normal = normalize_agl_artifact_write_path(&serde_json::json!({
-        "path": "README.md"
-    }))
-    .unwrap();
-    assert_eq!(normal, None);
-
-    let agl = normalize_agl_artifact_write_path(&serde_json::json!({
-        "path": ".agl/tasks/example.md"
-    }))
-    .unwrap();
-    assert_eq!(agl, Some(PathBuf::from(".agl/tasks/example.md")));
-}
-
-#[test]
-fn artifact_write_preflight_rejects_parent_traversal() {
-    let err = normalize_agl_artifact_write_path(&serde_json::json!({
-        "path": ".agl/tasks/../secret.md"
-    }))
-    .unwrap_err();
-
-    assert!(err.to_string().contains("parent traversal"));
-}
-
-#[test]
-fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths() {
-    let selected_skills = [SkillId::new("task-spec").unwrap()];
-    let agl_args = serde_json::json!({
-        "path": ".agl/tasks/example.md"
-    });
-
-    assert_eq!(
-        artifact_write_preflight_path_for_tool(
-            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
-            &selected_skills,
-            &agl_args
-        )
-        .unwrap(),
-        Some(PathBuf::from(".agl/tasks/example.md"))
-    );
-    assert_eq!(
-        artifact_write_preflight_path_for_tool("core.skill:status", &selected_skills, &agl_args)
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        artifact_write_preflight_path_for_tool(
-            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
-            &[],
-            &agl_args
-        )
-        .unwrap(),
-        None
-    );
-    assert_eq!(
-        artifact_write_preflight_path_for_tool(
-            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
-            &selected_skills,
-            &serde_json::json!({
-                "path": "README.md"
-            })
-        )
-        .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn selected_skill_hook_batches_use_declared_hook_events() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
@@ -1344,6 +1299,7 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
     let root = temp_store_root("function-policy-session");
     let workspace = root.join("workspace");
     let config_path = root.join("inference.toml");
+    declare_workspace_source(&workspace);
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(
         &config_path,
@@ -1389,7 +1345,7 @@ tool_call_format = "hermes_json"
         std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Function policy test\n{}---\n",
+                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Function policy test\n{}---\n",
                 case.id, case.tools_yaml
             ),
         )
@@ -1500,12 +1456,13 @@ fn inference_session_rejects_function_package_digest_drift() {
     let root = temp_store_root("function-lock-drift");
     let workspace = root.join("workspace");
     let function_root = workspace.join(".agl/functions/locked");
+    declare_workspace_source(&workspace);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: locked
   version: 1.0.0
@@ -1521,14 +1478,14 @@ title: Locked Function
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Original prompt.\n").unwrap();
     let paths = agl_runtime::AgentLibrePaths::from_agl_home(root.join("home"));
-    let reference: agl_package::ArtifactPackageRef = "function:locked@*".parse().unwrap();
-    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let reference: agl_package::PackageRef = "function:locked@*".parse().unwrap();
+    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
     let lock = composition
         .resolve_for_lock_refresh(&reference)
         .unwrap()
         .lock()
         .unwrap();
-    lock.write_atomic(workspace.join(".agl/artifact-lock.toml"))
+    lock.write_atomic(workspace.join(".agl/package-lock.toml"))
         .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Mutated prompt.\n").unwrap();
 
@@ -1557,7 +1514,7 @@ title: Locked Function
     };
     assert_eq!(
         error
-            .downcast_ref::<agl_package::ArtifactError>()
+            .downcast_ref::<agl_package::PackageError>()
             .unwrap()
             .code(),
         "digest_drift"
@@ -2517,11 +2474,11 @@ fn test_skill(
     permission_request_templates: Vec<agl_skill::SkillPermissionRequestTemplate>,
 ) -> agl_skill::SkillHarness {
     agl_skill::SkillHarness {
-        artifact: test_skill_artifact(id),
+        package: test_skill_package(id),
         id: SkillId::new(id).unwrap(),
         name: id.to_string(),
         description: format!("Test-only {id} skill."),
-        version: agl_package::ArtifactVersion::new("1.0.0").unwrap(),
+        version: agl_package::PackageVersion::new("1.0.0").unwrap(),
         source: agl_skill::SkillSource::Core,
         pack: "test".to_string(),
         required_hooks: hook_ids(required_hooks),
@@ -2535,7 +2492,6 @@ fn test_skill(
             include: Vec::new(),
         },
         references: Vec::new(),
-        artifacts: Vec::new(),
         guarantees: vec!["test fixture is trusted by construction".to_string()],
         body: format!("Use this test-only {id} skill."),
         source_path: format!("test/{id}/SKILL.md"),
@@ -2544,15 +2500,15 @@ fn test_skill(
     }
 }
 
-fn test_skill_artifact(id: &str) -> agl_package::ArtifactEnvelope {
-    agl_package::ArtifactEnvelope::new(
-        agl_package::ArtifactTypeId::skill(),
-        agl_package::ArtifactPackageId::new(id).unwrap(),
-        agl_package::ArtifactVersion::new("1.0.0").unwrap(),
-        agl_package::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+fn test_skill_package(id: &str) -> agl_package::PackageEnvelope {
+    agl_package::PackageEnvelope::new(
+        agl_package::PackageTypeId::skill(),
+        agl_package::PackageId::new(id).unwrap(),
+        agl_package::PackageVersion::new("1.0.0").unwrap(),
+        agl_package::PackageSchemaId::new("agentlibre.skill/v2").unwrap(),
         agl_package::AglCompatibility::new(
-            agl_package::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
-            [agl_package::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+            agl_package::PackageVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+            [agl_package::PackageVersion::new("1.0.0-alpha.12").unwrap()],
         )
         .unwrap(),
         Vec::new(),
@@ -2674,7 +2630,7 @@ fn embedded_function_profile_rejects_external_config_override() {
 
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("function:gemma4-31b-32k@1.1.0"),
+        rendered.contains("function:gemma4-31b-32k@1.2.0"),
         "{rendered}"
     );
     assert!(rendered.contains("owns an embedded inference profile"));

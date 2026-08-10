@@ -1,13 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
 use agl_kernel::{HookId, SkillId, ToolId};
 use agl_kernel::{ToolCatalog, ToolCatalogError};
-use agl_package::{
-    ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
-};
+use agl_package::{PackageAdapter, PackageSourceTier, PackageTypeId};
 
-use crate::adapter::{builtin_source, skill_adapter_registry};
+use crate::adapter::{SkillPackageAdapter, builtin_source};
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
 use serde::{Deserialize, Serialize};
@@ -83,52 +80,29 @@ impl SkillRegistry {
 
     pub fn from_builtin_assets() -> Result<Self, SkillRegistryError> {
         let source = builtin_source()
-            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
-        Self::from_sources(vec![source])
-    }
-
-    pub fn from_sources(sources: Vec<Arc<dyn ArtifactSource>>) -> Result<Self, SkillRegistryError> {
+            .map_err(|error| SkillRegistryError::PackageMessage(error.to_string()))?;
         let mut registry = Self::new();
-        let adapter_registry = skill_adapter_registry()
-            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
-        let skill_type: ArtifactTypeId = "skill".parse().map_err(SkillRegistryError::Artifact)?;
-        let mut candidates = Vec::new();
-        for source in &sources {
-            candidates.extend(
-                source
-                    .candidates(&skill_type)
-                    .map_err(SkillRegistryError::Artifact)?,
-            );
-        }
-        let resolver = ArtifactResolver::new(adapter_registry.clone(), sources);
-        let mut resolved = BTreeSet::new();
+        let adapter = SkillPackageAdapter::default();
+        let skill_type: PackageTypeId = "skill".parse().map_err(SkillRegistryError::Package)?;
+        let candidates = source
+            .candidates(&skill_type)
+            .map_err(SkillRegistryError::Package)?;
         for candidate in candidates {
-            let root = ArtifactPackageRef::parse(&format!("skill:{}@*", candidate.package_id))
-                .map_err(SkillRegistryError::Artifact)?;
-            let graph = resolver
-                .resolve_and_validate(&root, None)
-                .map_err(SkillRegistryError::Artifact)?;
-            let node = graph
-                .nodes
-                .get(&graph.root)
-                .expect("resolved builtin skill root must exist");
-            if !resolved.insert(graph.root.clone()) {
-                continue;
-            }
-            let payload = adapter_registry
-                .lookup(&node.candidate.type_id)
-                .map_err(SkillRegistryError::Artifact)?
-                .validate_payload(node.candidate.view(), &node.envelope)
-                .map_err(SkillRegistryError::Artifact)?;
+            let envelope = adapter
+                .extract_envelope(candidate.view())
+                .map_err(SkillRegistryError::Package)?;
+            let payload = adapter
+                .validate_payload(candidate.view(), &envelope)
+                .map_err(SkillRegistryError::Package)?;
             let mut harness = *payload.downcast::<SkillHarness>().map_err(|_| {
-                SkillRegistryError::ArtifactMessage(
+                SkillRegistryError::PackageMessage(
                     "skill adapter returned an invalid payload".to_owned(),
                 )
             })?;
-            harness.source = match node.candidate.tier {
-                ArtifactSourceTier::Builtin => SkillSource::Core,
-                ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
-                ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+            harness.source = match candidate.tier {
+                PackageSourceTier::Builtin => SkillSource::Core,
+                PackageSourceTier::User | PackageSourceTier::System => SkillSource::Community,
+                PackageSourceTier::Explicit | PackageSourceTier::Workspace => SkillSource::Local,
             };
             registry.register(RegisteredSkill::trusted_builtin(harness))?;
         }
@@ -309,8 +283,8 @@ pub enum SkillRegistryError {
         tools: Vec<ToolId>,
     },
     ToolCatalog(ToolCatalogError),
-    Artifact(agl_package::ArtifactError),
-    ArtifactMessage(String),
+    Package(agl_package::PackageError),
+    PackageMessage(String),
 }
 
 impl std::fmt::Display for SkillRegistryError {
@@ -340,8 +314,8 @@ impl std::fmt::Display for SkillRegistryError {
                 write!(f, "skill `{id}` is missing allowed tools: {tools}")
             }
             Self::ToolCatalog(err) => write!(f, "{err}"),
-            Self::Artifact(err) => write!(f, "artifact error: {err}"),
-            Self::ArtifactMessage(message) => write!(f, "artifact adapter error: {message}"),
+            Self::Package(err) => write!(f, "package error: {err}"),
+            Self::PackageMessage(message) => write!(f, "package adapter error: {message}"),
         }
     }
 }

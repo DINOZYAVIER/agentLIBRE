@@ -1,4 +1,4 @@
-artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "gemma4-26b", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+package = { schema = "agentlibre.package/v1", type = "model", id = "gemma4-26b", version = "1.1.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
 
 display_name = "Gemma 4 26B-A4B QAT Q4"
 capabilities = ["text", "tools"]

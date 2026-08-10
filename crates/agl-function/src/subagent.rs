@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agl_kernel::ToolId;
-use agl_package::{ArtifactPackageView, ArtifactRelativePath};
+use agl_package::{PackageRelativePath, PackageView};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -323,7 +323,7 @@ pub(crate) fn load_declared_subagents(
 }
 
 pub(crate) fn load_declared_subagents_from_view(
-    package: &dyn ArtifactPackageView,
+    package: &dyn PackageView,
     display_root: &Path,
     front_matter: &AgentFunctionFrontMatter,
 ) -> Result<Vec<LoadedSubagent>> {
@@ -342,7 +342,7 @@ pub(crate) fn load_declared_subagents_from_view(
 }
 
 fn load_subagent_graph_node_from_view(
-    package: &dyn ArtifactPackageView,
+    package: &dyn PackageView,
     display_root: &Path,
     subagent_id: &str,
     visiting: &mut Vec<String>,
@@ -361,7 +361,7 @@ fn load_subagent_graph_node_from_view(
         bail!("subagent graph contains a cycle: {}", cycle.join(" -> "));
     }
     visiting.push(subagent_id.to_owned());
-    let relative = ArtifactRelativePath::new(format!("subagents/{subagent_id}.md"))?;
+    let relative = PackageRelativePath::new(format!("subagents/{subagent_id}.md"))?;
     let content = String::from_utf8(package.read_file(&relative)?)
         .with_context(|| format!("declared subagent `{subagent_id}` is not UTF-8"))?;
     let source_digest = sha256_text(&content);

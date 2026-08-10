@@ -1,13 +1,11 @@
-Advanced repo workspace commands.
+Advanced repository commands.
 
-Repo workspace:
-- .agl/workspace.toml lists the .agl folders for this repo.
-- each opt-in root is declared once under `[components.<id>]`.
-- undeclared roots are not created, inspected, or reported as missing.
-- profiles can be exported, edited, checked with --dry-run, then applied.
+Repository layout:
+- .agl/workspace.toml contains only package sources, policy, config, and the default function.
+- Runtime Artifacts are named Git submodules; their section name is the exact ArtifactId.
+- Git adds and removes Artifact submodules. AGL only verifies bindings and performs admitted operations.
 
 Typical workflow:
-  agl repo status
-  agl repo export-profile --out profile.toml
-  agl repo init --profile-file profile.toml --dry-run
-  agl repo component verify
+  agl repo init
+  agl artifact verify
+  agl repo verify-tasks

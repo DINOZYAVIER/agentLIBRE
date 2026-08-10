@@ -57,7 +57,7 @@ fn tool(id: &str) -> ToolDeclaration {
     .with_state_effects([EffectId::repo_files()])
 }
 
-// AGL171-018 and AGL171-020.
+// AGL171-018, AGL171-020, AGL172-011 and AGL172-044.
 #[test]
 fn artifact_declaration_is_kernel_owned_and_contains_no_runtime_location() {
     let declaration = ArtifactDeclaration::new(
@@ -79,7 +79,7 @@ fn artifact_declaration_is_kernel_owned_and_contains_no_runtime_location() {
     assert!(ArtifactKindId::new("vendor.custom-tree").is_ok());
 }
 
-// AGL171-018 and AGL171-027.
+// AGL171-018, AGL171-027 and AGL172-012.
 #[test]
 fn artifact_selectors_validate_before_handler_and_affect_declaration_digest() {
     let artifact = ArtifactDeclaration::new(
@@ -128,7 +128,7 @@ fn artifact_selectors_validate_before_handler_and_affect_declaration_digest() {
     );
 }
 
-// AGL171-027. The dynamic target is resolved after schema validation and
+// AGL171-027 and AGL172-012. The dynamic target is resolved after schema validation and
 // before handler entry on the real ToolRuntime dispatch path.
 #[test]
 fn unknown_argument_selected_artifact_stops_before_handler() {
@@ -184,6 +184,32 @@ fn unknown_argument_selected_artifact_stops_before_handler() {
         ))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+// AGL172-044. Runtime Artifact identity is owner-qualified kernel vocabulary,
+// never a package ID or an unchecked Git submodule carrier string.
+#[test]
+fn artifact_identity_has_exact_owner_local_grammar_and_open_kind_namespace() {
+    for accepted in ["core.repo:tasks", "vendor.extension:data-1", "a.b:c_d"] {
+        assert!(ArtifactId::new(accepted).is_ok(), "rejected {accepted}");
+    }
+    for rejected in [
+        "tasks",
+        "core.repo/tasks",
+        "core.repo:tasks:extra",
+        "Core.repo:tasks",
+        "core.repo:Tasks",
+        "function:agentlibre/default@1",
+        "../core.repo:tasks",
+    ] {
+        assert!(ArtifactId::new(rejected).is_err(), "accepted {rejected}");
+    }
+    for accepted in ["agentlibre.task-specs", "vendor.custom-tree", "x.y.z"] {
+        assert!(ArtifactKindId::new(accepted).is_ok());
+    }
+    for rejected in ["file_tree", "File.Tree", "agentlibre:tasks", ".tree"] {
+        assert!(ArtifactKindId::new(rejected).is_err());
+    }
 }
 
 // AGL171-018, AGL171-023 and AGL171-027.

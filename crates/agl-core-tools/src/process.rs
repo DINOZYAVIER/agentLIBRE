@@ -1617,7 +1617,7 @@ pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
         ExtensionId::new(EXTENSION_ID).expect("process extension id is valid"),
         "Core Process",
-        "1.1.0",
+        "1.2.0",
     )
     .expect("process extension declaration is valid")
     .with_tool(action::<EmptyArgs, PwdOutput>(

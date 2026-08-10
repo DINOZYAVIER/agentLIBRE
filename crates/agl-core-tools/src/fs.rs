@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
@@ -10,11 +10,12 @@ mod list;
 use list::{ListArgs, ListQueryRegistry};
 
 use crate::parse_tool_args as parse_args;
+use agl_artifact::ArtifactHandle;
 use agl_kernel::{
-    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind,
-    ToolDeclaration, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolResult,
+    ArtifactAccess, ArtifactId, EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId,
+    ObservedEffect, OperationKind, ToolDeclaration, ToolDispatchContext, ToolHandler,
+    ToolHandlerError, ToolId, ToolResult,
 };
-use agl_repo::{ArtifactAccess, ComponentPathHandleRequest};
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,8 @@ pub struct CoreTools {
     list_queries: Arc<Mutex<ListQueryRegistry>>,
     mutation_lock: Arc<Mutex<()>>,
     commit_fail_after: Arc<Mutex<Option<usize>>>,
+    registered_artifact_paths: Arc<BTreeSet<PathBuf>>,
+    artifact_routes: Arc<BTreeMap<PathBuf, ArtifactHandle>>,
 }
 
 impl CoreTools {
@@ -58,12 +61,40 @@ impl CoreTools {
             root.display()
         );
         let mutation_lock = workspace_mutation_lock(&root);
+        let registered_artifact_paths = discover_registered_artifact_paths(&root)?;
         Ok(Self {
             root,
             list_queries: Arc::new(Mutex::new(ListQueryRegistry::default())),
             mutation_lock,
             commit_fail_after: Arc::new(Mutex::new(None)),
+            registered_artifact_paths: Arc::new(registered_artifact_paths),
+            artifact_routes: Arc::new(BTreeMap::new()),
         })
+    }
+
+    pub fn with_artifact_route(
+        mut self,
+        workspace_path: impl Into<PathBuf>,
+        handle: ArtifactHandle,
+    ) -> Result<Self> {
+        let path = workspace_path.into();
+        ensure!(
+            path.starts_with(".agl") && path.components().count() > 1,
+            "Artifact route must be a path below .agl"
+        );
+        ensure!(
+            self.registered_artifact_paths.contains(&path),
+            "Artifact route is not registered in .gitmodules: {}",
+            path.display()
+        );
+        let mut routes = (*self.artifact_routes).clone();
+        ensure!(
+            routes.insert(path.clone(), handle).is_none(),
+            "duplicate Artifact route: {}",
+            path.display()
+        );
+        self.artifact_routes = Arc::new(routes);
+        Ok(self)
     }
 
     pub fn root(&self) -> &Path {
@@ -592,6 +623,7 @@ impl CoreTools {
         allow_root: bool,
     ) -> Result<PathBuf> {
         let relative = normalize_repo_path(raw, allow_root)?;
+        self.enforce_artifact_access(&relative, ArtifactAccess::ReadTree)?;
         let joined = self.root.join(relative);
         self.reject_symlink_components(&joined, raw)?;
         let canonical = joined
@@ -654,7 +686,12 @@ impl CoreTools {
                 continue;
             }
             if file_type.is_dir() {
-                self.collect_matches(&entry.path(), needle, case_sensitive, max_matches, matches)?;
+                let entry_path = entry.path();
+                let relative = entry_path.strip_prefix(&self.root).with_context(|| {
+                    format!("search path escaped workspace: {}", entry_path.display())
+                })?;
+                self.enforce_artifact_access(relative, ArtifactAccess::ReadTree)?;
+                self.collect_matches(&entry_path, needle, case_sensitive, max_matches, matches)?;
                 continue;
             }
             if !file_type.is_file() {
@@ -699,21 +736,91 @@ impl CoreTools {
     }
 
     fn enforce_artifact_write_access(&self, relative: &Path) -> Result<()> {
-        if !is_agl_path(relative) {
-            return Ok(());
-        }
-
-        agl_repo::resolve_component_path_handle(
-            &self.root,
-            &ComponentPathHandleRequest {
-                path: relative.to_path_buf(),
-                access: ArtifactAccess::Write,
-            },
-        )
-        .context("failed to resolve artifact write handle")?;
-
-        Ok(())
+        self.enforce_artifact_access(relative, ArtifactAccess::MutateTree)
     }
+
+    pub(crate) fn enforce_artifact_access(
+        &self,
+        relative: &Path,
+        access: ArtifactAccess,
+    ) -> Result<()> {
+        let protected = self
+            .registered_artifact_paths
+            .iter()
+            .filter(|prefix| relative.starts_with(prefix))
+            .max_by_key(|prefix| prefix.components().count());
+        let Some(prefix) = protected else {
+            return Ok(());
+        };
+        let handle = self.artifact_routes.get(prefix).with_context(|| {
+            format!(
+                "path `{}` belongs to registered Artifact `{}` but no admitted ArtifactHandle is bound",
+                relative.display(),
+                prefix.display()
+            )
+        })?;
+        handle
+            .require_access(access)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+}
+
+fn discover_registered_artifact_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    if !root.join(".gitmodules").is_file() {
+        return Ok(BTreeSet::new());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "config",
+            "-f",
+            ".gitmodules",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
+        ])
+        .output()
+        .context("failed to inspect .gitmodules Artifact registrations")?;
+    ensure!(
+        output.status.success(),
+        "invalid .gitmodules Artifact registrations: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let stdout = String::from_utf8(output.stdout)
+        .context(".gitmodules Artifact registrations are not UTF-8")?;
+    let mut artifact_ids = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for line in stdout.lines() {
+        let (key, raw_path) = line
+            .split_once(char::is_whitespace)
+            .context("malformed .gitmodules Artifact registration")?;
+        let name = key
+            .strip_prefix("submodule.")
+            .and_then(|key| key.strip_suffix(".path"))
+            .context("malformed .gitmodules Artifact registration key")?;
+        let Ok(artifact_id) = ArtifactId::new(name) else {
+            // Ordinary Git submodules are not Artifacts. Only an exact
+            // owner-qualified ArtifactId opts a submodule into this boundary.
+            continue;
+        };
+        ensure!(
+            artifact_ids.insert(artifact_id),
+            "duplicate Artifact registration: {name}"
+        );
+        let raw_path = raw_path.trim();
+        let path = normalize_repo_path(raw_path, false)?;
+        ensure!(
+            path == Path::new(raw_path)
+                && path.starts_with(".agl")
+                && path.components().count() > 1,
+            "Artifact submodule path must be an explicit relative path below .agl: {raw_path}"
+        );
+        ensure!(
+            paths.insert(path),
+            "duplicate Artifact submodule path: {raw_path}"
+        );
+    }
+    Ok(paths)
 }
 
 fn workspace_mutation_lock(root: &Path) -> Arc<Mutex<()>> {
@@ -808,7 +915,7 @@ pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
         ExtensionId::new(EXTENSION_ID).expect("core tool extension id is valid"),
         "Core Tools",
-        "1.1.0",
+        "1.2.0",
     )
     .expect("core tool declaration is valid")
     .with_tool(read_only_action::<ReadArgs, ReadOutput>(
@@ -1098,13 +1205,6 @@ fn normalize_repo_path(raw: &str, allow_root: bool) -> Result<PathBuf> {
         "repository path must name a file or subdirectory"
     );
     Ok(normalized)
-}
-
-fn is_agl_path(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Normal(component)) if component == ".agl"
-    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1433,15 +1533,6 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    fn declare_artifact(root: &Path, id: &str, path: &str, access: &str) {
-        let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
-        let mut manifest = fs::read_to_string(&manifest_path).unwrap();
-        manifest.push_str(&format!(
-            "\n[components.{id}]\nkind = \"local\"\npath = {path:?}\nrequired = true\naccess = {access:?}\n"
-        ));
-        fs::write(manifest_path, manifest).unwrap();
     }
 
     #[test]
@@ -2432,121 +2523,6 @@ mod tests {
         assert_eq!(mode(&second), 0o640);
     }
 
-    #[test]
-    fn apply_patch_allows_writable_artifact_paths() {
-        let root = temp_root("apply-patch-artifact-writable");
-        fs::create_dir_all(root.join(".git")).unwrap();
-        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
-        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
-        fs::create_dir_all(root.join(".agl/tasks")).unwrap();
-        fs::write(
-            root.join(".agl/tasks/task.md"),
-            "# Problem\n\nold problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n",
-        )
-        .unwrap();
-        let tools = CoreTools::new(&root).unwrap();
-        let before = fs::read(root.join(".agl/tasks/task.md")).unwrap();
-
-        let output = tools
-            .dispatch(
-                FS_APPLY_PATCH_TOOL_ID,
-                json!({"operations": [{
-                    "op": "update",
-                    "path": ".agl/tasks/task.md",
-                    "expected_digest": content_digest(&before),
-                    "edits": [{"old_text": "old problem.", "new_text": "new problem."}]
-                }]}),
-            )
-            .unwrap();
-
-        assert_eq!(output["status"], "committed");
-        assert_eq!(
-            fs::read_to_string(root.join(".agl/tasks/task.md")).unwrap(),
-            "# Problem\n\nnew problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n"
-        );
-    }
-
-    #[test]
-    fn apply_patch_rejects_read_only_artifact_paths() {
-        let root = temp_root("apply-patch-artifact-read-only");
-        fs::create_dir_all(root.join(".git")).unwrap();
-        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
-        declare_artifact(&root, "skills", ".agl/skills", "read");
-        fs::create_dir_all(root.join(".agl/skills")).unwrap();
-        fs::write(root.join(".agl/skills/SKILL.md"), "hello old\n").unwrap();
-        let tools = CoreTools::new(&root).unwrap();
-
-        let err = tools
-            .dispatch(
-                FS_APPLY_PATCH_TOOL_ID,
-                json!({"operations": [{
-                    "op": "update",
-                    "path": ".agl/skills/SKILL.md",
-                    "expected_digest": content_digest(b"hello old\n"),
-                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
-                }]}),
-            )
-            .unwrap_err();
-
-        assert!(format!("{err:#}").contains("does not permit"));
-    }
-
-    #[test]
-    fn apply_patch_rejects_undeclared_artifact_paths() {
-        let root = temp_root("apply-patch-artifact-undeclared");
-        fs::create_dir_all(root.join(".git")).unwrap();
-        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
-        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
-        fs::create_dir_all(root.join(".agl/unknown")).unwrap();
-        fs::write(root.join(".agl/unknown/file.md"), "hello old\n").unwrap();
-        let tools = CoreTools::new(&root).unwrap();
-
-        let err = tools
-            .dispatch(
-                FS_APPLY_PATCH_TOOL_ID,
-                json!({"operations": [{
-                    "op": "update",
-                    "path": ".agl/unknown/file.md",
-                    "expected_digest": content_digest(b"hello old\n"),
-                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
-                }]}),
-            )
-            .unwrap_err();
-
-        assert!(format!("{err:#}").contains("not declared"));
-    }
-
-    #[test]
-    fn apply_patch_rejects_artifact_root_that_is_not_directory() {
-        let root = temp_root("apply-patch-artifact-not-directory");
-        fs::create_dir_all(root.join(".git")).unwrap();
-        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
-        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
-        let _ = fs::remove_dir_all(root.join(".agl/tasks"));
-        fs::create_dir_all(root.join(".agl")).unwrap();
-        fs::write(root.join(".agl/tasks"), "hello old\n").unwrap();
-        let tools = CoreTools::new(&root).unwrap();
-
-        let err = tools
-            .dispatch(
-                FS_APPLY_PATCH_TOOL_ID,
-                json!({"operations": [{
-                    "op": "update",
-                    "path": ".agl/tasks",
-                    "expected_digest": content_digest(b"hello old\n"),
-                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
-                }]}),
-            )
-            .unwrap_err();
-
-        let error = format!("{err:#}");
-        assert!(error.contains("not_directory"));
-        assert_eq!(
-            fs::read_to_string(root.join(".agl/tasks")).unwrap(),
-            "hello old\n"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn read_rejects_symlink_paths() {
@@ -2560,5 +2536,103 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("symlink"));
+    }
+
+    #[test]
+    fn malformed_artifact_registration_fails_closed() {
+        let root = temp_root("malformed-artifact-registration");
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"unterminated]\n\tpath = .agl/tasks\n\turl = test://tasks\n",
+        )
+        .unwrap();
+
+        let error = CoreTools::new(&root).unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid .gitmodules"));
+    }
+
+    #[test]
+    fn generic_filesystem_requires_an_exact_artifact_handle_route() {
+        let root = temp_root("artifact-handle-route");
+        fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+        fs::write(root.join(".agl/tasks/task.md"), "task\n").unwrap();
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"core.repo:tasks\"]\n\tpath = .agl/tasks\n\turl = test://tasks\n",
+        )
+        .unwrap();
+
+        let unbound = CoreTools::new(&root).unwrap();
+        let error = unbound
+            .dispatch(FS_READ_TOOL_ID, json!({"path": ".agl/tasks/task.md"}))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("no admitted ArtifactHandle is bound"));
+
+        let artifact_id = ArtifactId::new("core.repo:tasks").unwrap();
+        let binding = agl_artifact::ArtifactBinding::verified_checkout(
+            artifact_id.clone(),
+            ".agl/tasks",
+            "test://tasks",
+            "1111111111111111111111111111111111111111",
+            "1111111111111111111111111111111111111111",
+            root.join(".agl/tasks"),
+        )
+        .unwrap();
+        let read_declaration = agl_kernel::ArtifactDeclaration::new(
+            artifact_id.clone(),
+            agl_kernel::ArtifactKindId::new("agentlibre.file-tree").unwrap(),
+            [ArtifactAccess::ReadTree],
+        )
+        .unwrap();
+        let read_handle = ArtifactHandle::bind(read_declaration, binding.clone()).unwrap();
+        let read_only = CoreTools::new(&root)
+            .unwrap()
+            .with_artifact_route(".agl/tasks", read_handle)
+            .unwrap();
+        assert_eq!(
+            read_only
+                .dispatch(FS_READ_TOOL_ID, json!({"path": ".agl/tasks/task.md"}))
+                .unwrap()["status"],
+            "ok"
+        );
+        let error = read_only
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "create",
+                    "path": ".agl/tasks/new.md",
+                    "content": "new\n",
+                    "expected_absent": true
+                }]}),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("MutateTree"));
+
+        let mutate_declaration = agl_kernel::ArtifactDeclaration::new(
+            artifact_id,
+            agl_kernel::ArtifactKindId::new("agentlibre.file-tree").unwrap(),
+            [ArtifactAccess::ReadTree, ArtifactAccess::MutateTree],
+        )
+        .unwrap();
+        let mutate_handle = ArtifactHandle::bind(mutate_declaration, binding).unwrap();
+        let mutable = CoreTools::new(&root)
+            .unwrap()
+            .with_artifact_route(".agl/tasks", mutate_handle)
+            .unwrap();
+        assert_eq!(
+            mutable
+                .dispatch(
+                    FS_APPLY_PATCH_TOOL_ID,
+                    json!({"operations": [{
+                        "op": "create",
+                        "path": ".agl/tasks/new.md",
+                        "content": "new\n",
+                        "expected_absent": true
+                    }]}),
+                )
+                .unwrap()["status"],
+            "committed"
+        );
     }
 }

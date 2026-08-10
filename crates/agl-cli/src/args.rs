@@ -23,16 +23,19 @@ mod help {
     pub(super) const AGL: &str = cli_help!("agl");
     pub(super) const COMPLETION: &str = cli_help!("completion");
     pub(super) const CONFIG: &str = cli_help!("config");
+    pub(super) const PACKAGE: &str = cli_help!("package");
+    pub(super) const PACKAGE_LIST: &str = cli_help!("package/list");
+    pub(super) const PACKAGE_INSPECT: &str = cli_help!("package/inspect");
+    pub(super) const PACKAGE_RESOLVE: &str = cli_help!("package/resolve");
+    pub(super) const PACKAGE_GRAPH: &str = cli_help!("package/graph");
+    pub(super) const PACKAGE_LOCK: &str = cli_help!("package/lock");
+    pub(super) const PACKAGE_SOURCE: &str = cli_help!("package/source");
+    pub(super) const PACKAGE_SOURCE_LIST: &str = cli_help!("package/source/list");
+    pub(super) const PACKAGE_SOURCE_ADD: &str = cli_help!("package/source/add");
+    pub(super) const PACKAGE_SOURCE_REMOVE: &str = cli_help!("package/source/remove");
     pub(super) const ARTIFACT: &str = cli_help!("artifact");
-    pub(super) const ARTIFACT_LIST: &str = cli_help!("artifact/list");
-    pub(super) const ARTIFACT_INSPECT: &str = cli_help!("artifact/inspect");
-    pub(super) const ARTIFACT_RESOLVE: &str = cli_help!("artifact/resolve");
-    pub(super) const ARTIFACT_GRAPH: &str = cli_help!("artifact/graph");
-    pub(super) const ARTIFACT_LOCK: &str = cli_help!("artifact/lock");
-    pub(super) const ARTIFACT_SOURCE: &str = cli_help!("artifact/source");
-    pub(super) const ARTIFACT_SOURCE_LIST: &str = cli_help!("artifact/source/list");
-    pub(super) const ARTIFACT_SOURCE_ADD: &str = cli_help!("artifact/source/add");
-    pub(super) const ARTIFACT_SOURCE_REMOVE: &str = cli_help!("artifact/source/remove");
+    pub(super) const ARTIFACT_STATUS: &str = cli_help!("artifact/status");
+    pub(super) const ARTIFACT_VERIFY: &str = cli_help!("artifact/verify");
     pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
     pub(super) const CONFIG_PATHS: &str = cli_help!("config/paths");
     pub(super) const CONFIG_STATUS: &str = cli_help!("config/status");
@@ -89,17 +92,8 @@ mod help {
     pub(super) const NOTES_SHOW: &str = cli_help!("notes/show");
     pub(super) const NOTES_UPDATE: &str = cli_help!("notes/update");
     pub(super) const REPO: &str = cli_help!("repo");
-    pub(super) const REPO_COMPONENT: &str = cli_help!("repo/component");
-    pub(super) const REPO_COMPONENT_LOCK: &str = cli_help!("repo/component/lock");
-    pub(super) const REPO_COMPONENT_STATUS: &str = cli_help!("repo/component/status");
-    pub(super) const REPO_COMPONENT_SYNC: &str = cli_help!("repo/component/sync");
-    pub(super) const REPO_COMPONENT_VERIFY: &str = cli_help!("repo/component/verify");
-    pub(super) const REPO_EXPORT_PROFILE: &str = cli_help!("repo/export-profile");
-    pub(super) const REPO_IMPORT_PROFILE: &str = cli_help!("repo/import-profile");
     pub(super) const REPO_INIT: &str = cli_help!("repo/init");
-    pub(super) const REPO_INIT_COMPONENT: &str = cli_help!("repo/init-component");
     pub(super) const REPO_INSTALL_HOOKS: &str = cli_help!("repo/install-hooks");
-    pub(super) const REPO_STATUS: &str = cli_help!("repo/status");
     pub(super) const REPO_VERIFY_TASKS: &str = cli_help!("repo/verify-tasks");
     pub(super) const RUNTIME: &str = cli_help!("runtime");
     pub(super) const RUNTIME_IDENTITY: &str = cli_help!("runtime/identity");
@@ -115,15 +109,12 @@ mod help {
     pub(super) const SESSION_FINISH: &str = cli_help!("session/finish");
     pub(super) const SERVE: &str = cli_help!("serve");
     pub(super) const SKILL: &str = cli_help!("skill");
-    pub(super) const SKILL_INIT: &str = cli_help!("skill/init");
     pub(super) const SKILL_INSPECT: &str = cli_help!("skill/inspect");
     pub(super) const SKILL_LIST: &str = cli_help!("skill/list");
     pub(super) const SKILL_REVOKE: &str = cli_help!("skill/revoke");
     pub(super) const SKILL_STATUS: &str = cli_help!("skill/status");
-    pub(super) const SKILL_SYNC_FOLDERS: &str = cli_help!("skill/sync-folders");
     pub(super) const SKILL_TRUST: &str = cli_help!("skill/trust");
     pub(super) const SKILL_VERIFY: &str = cli_help!("skill/verify");
-    pub(super) const STATUS: &str = cli_help!("status");
     pub(super) const STORE: &str = cli_help!("store");
     pub(super) const STORE_EXPORT: &str = cli_help!("store/export");
     pub(super) const STORE_MIGRATE: &str = cli_help!("store/migrate");
@@ -169,7 +160,13 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Resolve and inspect generic artifact packages.
+    /// Resolve and inspect packages.
+    #[command(long_about = help::PACKAGE)]
+    Package {
+        #[command(subcommand)]
+        command: PackageCommands,
+    },
+    /// Inspect verified runtime Artifact bindings.
     #[command(long_about = help::ARTIFACT)]
     Artifact {
         #[command(subcommand)]
@@ -244,9 +241,6 @@ enum Commands {
     /// Run the local agent runtime daemon in the foreground.
     #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
-    /// Report repo-local agentLIBRE workspace status.
-    #[command(long_about = help::STATUS)]
-    Status(RepoStatusArgs),
     /// Inspect and verify agentLIBRE skills.
     #[command(long_about = help::SKILL)]
     Skill {
@@ -447,78 +441,70 @@ enum RepoCommands {
     /// Initialize the repo-local agentLIBRE workspace.
     #[command(long_about = help::REPO_INIT)]
     Init(RepoInitArgs),
-    /// Materialize a declared Git-backed artifact.
-    #[command(long_about = help::REPO_INIT_COMPONENT)]
-    InitComponent(RepoComponentInitArgs),
-    /// Apply an explicit workspace profile file.
-    #[command(hide = true, long_about = help::REPO_IMPORT_PROFILE)]
-    ImportProfile(RepoImportProfileArgs),
-    /// Report repo-local agentLIBRE workspace status.
-    #[command(long_about = help::REPO_STATUS)]
-    Status(RepoStatusArgs),
     /// Verify planned task overview files in the configured tasks artifact.
     #[command(long_about = help::REPO_VERIFY_TASKS)]
     VerifyTasks(TaskSpecVerifyArgs),
-    /// Inspect and create declared .agl artifacts.
-    #[command(long_about = help::REPO_COMPONENT)]
-    Component {
-        #[command(subcommand)]
-        command: ComponentCommands,
-    },
     /// Install agentLIBRE git hooks for this repository.
     #[command(long_about = help::REPO_INSTALL_HOOKS)]
     InstallHooks(RepoHooksArgs),
-    /// Export a portable workspace profile manifest.
-    #[command(long_about = help::REPO_EXPORT_PROFILE)]
-    ExportProfile(RepoExportProfileArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PackageCommands {
+    /// List candidates from the composed artifact sources.
+    #[command(long_about = help::PACKAGE_LIST)]
+    List(PackageListArgs),
+    /// Inspect one resolved artifact package.
+    #[command(long_about = help::PACKAGE_INSPECT)]
+    Inspect(PackageReferenceArgs),
+    /// Resolve one artifact package and its dependencies.
+    #[command(long_about = help::PACKAGE_RESOLVE)]
+    Resolve(PackageReferenceArgs),
+    /// Print one artifact dependency graph.
+    #[command(long_about = help::PACKAGE_GRAPH)]
+    Graph(PackageReferenceArgs),
+    /// Create or refresh the workspace artifact lock.
+    #[command(long_about = help::PACKAGE_LOCK)]
+    Lock(PackageLockCommandArgs),
+    /// Manage declared workspace artifact sources.
+    #[command(long_about = help::PACKAGE_SOURCE)]
+    Source {
+        #[command(subcommand)]
+        command: PackageSourceCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PackageSourceCommands {
+    /// List configured workspace sources.
+    #[command(long_about = help::PACKAGE_SOURCE_LIST)]
+    List(PackageSourceListArgs),
+    /// Add one Git or local workspace source.
+    #[command(long_about = help::PACKAGE_SOURCE_ADD)]
+    Add(PackageSourceAddArgs),
+    /// Remove one configured workspace source.
+    #[command(long_about = help::PACKAGE_SOURCE_REMOVE)]
+    Remove(PackageSourceRemoveArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ArtifactCommands {
-    /// List candidates from the composed artifact sources.
-    #[command(long_about = help::ARTIFACT_LIST)]
-    List(ArtifactListArgs),
-    /// Inspect one resolved artifact package.
-    #[command(long_about = help::ARTIFACT_INSPECT)]
-    Inspect(ArtifactReferenceArgs),
-    /// Resolve one artifact package and its dependencies.
-    #[command(long_about = help::ARTIFACT_RESOLVE)]
-    Resolve(ArtifactReferenceArgs),
-    /// Print one artifact dependency graph.
-    #[command(long_about = help::ARTIFACT_GRAPH)]
-    Graph(ArtifactReferenceArgs),
-    /// Create or refresh the workspace artifact lock.
-    #[command(long_about = help::ARTIFACT_LOCK)]
-    Lock(ArtifactLockCommandArgs),
-    /// Manage declared workspace artifact sources.
-    #[command(long_about = help::ARTIFACT_SOURCE)]
-    Source {
-        #[command(subcommand)]
-        command: ArtifactSourceCommands,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ArtifactSourceCommands {
-    /// List configured workspace sources.
-    #[command(long_about = help::ARTIFACT_SOURCE_LIST)]
-    List(ArtifactSourceListArgs),
-    /// Add one Git or local workspace source.
-    #[command(long_about = help::ARTIFACT_SOURCE_ADD)]
-    Add(ArtifactSourceAddArgs),
-    /// Remove one configured workspace source.
-    #[command(long_about = help::ARTIFACT_SOURCE_REMOVE)]
-    Remove(ArtifactSourceRemoveArgs),
+    /// Report runtime Artifact binding state without mutation.
+    #[command(long_about = help::ARTIFACT_STATUS)]
+    Status(ArtifactStatusArgs),
+    /// Verify runtime Artifact bindings and fail when invalid.
+    #[command(long_about = help::ARTIFACT_VERIFY)]
+    Verify(ArtifactStatusArgs),
 }
 
 #[derive(Debug, Args)]
-struct ArtifactListArgs {
+struct PackageListArgs {
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
-struct ArtifactReferenceArgs {
+struct PackageReferenceArgs {
     #[arg(value_name = "TYPE:ID@CONSTRAINT")]
     reference: String,
     #[arg(long)]
@@ -526,7 +512,7 @@ struct ArtifactReferenceArgs {
 }
 
 #[derive(Debug, Args)]
-struct ArtifactLockCommandArgs {
+struct PackageLockCommandArgs {
     #[arg(long)]
     refresh: bool,
     #[arg(long)]
@@ -534,13 +520,13 @@ struct ArtifactLockCommandArgs {
 }
 
 #[derive(Debug, Args)]
-struct ArtifactSourceListArgs {
+struct PackageSourceListArgs {
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Debug, Args)]
-struct ArtifactSourceAddArgs {
+struct PackageSourceAddArgs {
     #[arg(value_name = "NAME")]
     name: String,
     #[arg(long, conflicts_with_all = ["local", "rev"], requires = "rev", group = "source")]
@@ -554,27 +540,11 @@ struct ArtifactSourceAddArgs {
 }
 
 #[derive(Debug, Args)]
-struct ArtifactSourceRemoveArgs {
+struct PackageSourceRemoveArgs {
     #[arg(value_name = "NAME")]
     name: String,
     #[arg(long)]
     json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum ComponentCommands {
-    /// Report declared .agl artifact status.
-    #[command(long_about = help::REPO_COMPONENT_STATUS)]
-    Status(ArtifactStatusArgs),
-    /// Verify declared .agl artifacts.
-    #[command(long_about = help::REPO_COMPONENT_VERIFY)]
-    Verify(ArtifactStatusArgs),
-    /// Create missing declared artifact directories.
-    #[command(long_about = help::REPO_COMPONENT_SYNC)]
-    Sync(ArtifactSyncArgs),
-    /// Write the artifact lock file.
-    #[command(long_about = help::REPO_COMPONENT_LOCK)]
-    Lock(ArtifactLockArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -638,24 +608,18 @@ enum NotesCommands {
 
 #[derive(Debug, Subcommand)]
 enum SkillCommands {
-    /// Materialize the workspace skills Git artifact declared in .agl/workspace.toml.
-    #[command(long_about = help::SKILL_INIT)]
-    Init(SkillInitArgs),
     /// List core and workspace skills.
     #[command(long_about = help::SKILL_LIST)]
     List(SkillListArgs),
     /// Inspect one skill by name.
     #[command(long_about = help::SKILL_INSPECT)]
     Inspect(SkillInspectArgs),
-    /// Report workspace skill component and lock status.
+    /// Report resolved Skill package and lock status.
     #[command(long_about = help::SKILL_STATUS)]
     Status(SkillStatusArgs),
     /// Verify workspace skills and lock state.
     #[command(long_about = help::SKILL_VERIFY)]
     Verify(SkillVerifyArgs),
-    /// Create missing writable folders declared by workspace skills.
-    #[command(long_about = help::SKILL_SYNC_FOLDERS)]
-    SyncFolders(SkillFolderSyncArgs),
     /// Locally approve a locked workspace skill identity.
     #[command(long_about = help::SKILL_TRUST)]
     Trust(SkillTrustArgs),
@@ -738,34 +702,6 @@ struct SessionSubmitArgs {
 
 #[derive(Debug, Args)]
 struct RepoInitArgs {
-    /// Repo workflow profile to initialize.
-    #[arg(long, default_value = "repo-workflow")]
-    profile: String,
-
-    /// Local workspace profile manifest to apply.
-    #[arg(long, value_name = "PATH")]
-    profile_file: Option<PathBuf>,
-
-    /// Workspace artifact override as NAME=URL[@REV].
-    #[arg(long = "artifact", value_name = "NAME=URL[@REV]")]
-    artifacts: Vec<String>,
-
-    /// Skills repository URL for the .agl/skills Git artifact.
-    #[arg(long, value_name = "URL")]
-    skills_url: Option<String>,
-
-    /// Skills repository revision to pin in the workspace manifest.
-    #[arg(long, value_name = "REV")]
-    skills_rev: Option<String>,
-
-    /// Task/spec repository URL for the .agl/tasks Git artifact.
-    #[arg(long, value_name = "URL")]
-    tasks_url: Option<String>,
-
-    /// Task/spec repository revision to pin in the workspace manifest.
-    #[arg(long, value_name = "REV", requires = "tasks_url")]
-    tasks_rev: Option<String>,
-
     /// Print planned changes without writing files.
     #[arg(long)]
     dry_run: bool,
@@ -948,51 +884,6 @@ struct ConfigStatusArgs {
 }
 
 #[derive(Debug, Args)]
-struct RepoImportProfileArgs {
-    /// Local workspace profile manifest to apply.
-    #[arg(long, value_name = "PATH")]
-    profile_file: PathBuf,
-
-    /// Print planned changes without writing files.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Repair or replace agentLIBRE-managed files.
-    #[arg(long)]
-    force: bool,
-}
-
-#[derive(Debug, Args)]
-struct RepoComponentInitArgs {
-    /// Workspace component name to initialize.
-    #[arg(value_name = "NAME")]
-    component: String,
-
-    /// Print planned git operations without writing.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct RepoStatusArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-
-    /// Limit status to one component.
-    #[arg(long, value_name = "NAME")]
-    component: Option<String>,
-
-    /// Treat warnings as failures.
-    #[arg(long)]
-    strict: bool,
-}
-
-#[derive(Debug, Args)]
 struct TaskSpecVerifyArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1019,36 +910,6 @@ struct ArtifactStatusArgs {
 }
 
 #[derive(Debug, Args)]
-struct ArtifactSyncArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-
-    /// Print planned directory creation without writing.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Treat warnings as failures.
-    #[arg(long)]
-    strict: bool,
-}
-
-#[derive(Debug, Args)]
-struct ArtifactLockArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-
-    /// Print the lock payload without writing.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Treat warnings as failures.
-    #[arg(long)]
-    strict: bool,
-}
-
-#[derive(Debug, Args)]
 struct RepoHooksArgs {
     /// Print planned hook changes without writing files.
     #[arg(long)]
@@ -1057,21 +918,6 @@ struct RepoHooksArgs {
     /// Replace agentLIBRE-managed hooks or overwrite conflicts.
     #[arg(long)]
     force: bool,
-}
-
-#[derive(Debug, Args)]
-struct RepoExportProfileArgs {
-    /// Destination workspace profile TOML path.
-    #[arg(long, value_name = "PATH")]
-    out: PathBuf,
-
-    /// Overwrite an existing output file.
-    #[arg(long)]
-    force: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1334,17 +1180,6 @@ struct SkillListArgs {
     /// Maximum number of skills to print.
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct SkillInitArgs {
-    /// Print planned git operations without writing.
-    #[arg(long)]
-    dry_run: bool,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1693,21 +1528,6 @@ struct SkillVerifyArgs {
 }
 
 #[derive(Debug, Args)]
-struct SkillFolderSyncArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-
-    /// Print planned folder changes without writing files.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Folder creation reason to run.
-    #[arg(long, value_enum, default_value_t = SkillFolderSyncSituationArg::SkillSync)]
-    when: SkillFolderSyncSituationArg,
-}
-
-#[derive(Debug, Args)]
 struct SkillTrustArgs {
     /// Workspace skill name to trust.
     #[arg(value_name = "NAME")]
@@ -1905,7 +1725,15 @@ impl Cli {
                 }),
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
-            Some(Commands::Artifact { command }) => CliCommand::Artifact(artifact_command(command)),
+            Some(Commands::Package { command }) => CliCommand::Package(package_command(command)),
+            Some(Commands::Artifact { command }) => CliCommand::Artifact(match command {
+                ArtifactCommands::Status(args) => {
+                    ArtifactCommand::Status(artifact_status_options(args))
+                }
+                ArtifactCommands::Verify(args) => {
+                    ArtifactCommand::Verify(artifact_status_options(args))
+                }
+            }),
             Some(Commands::Store { command }) => CliCommand::Store(store_command(command)),
             Some(Commands::Function { command }) => {
                 CliCommand::Function(function_command(command)?)
@@ -1940,33 +1768,17 @@ impl Cli {
                 RuntimeCommands::Identity => CliCommand::RuntimeIdentity,
             },
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
-            Some(Commands::Status(args)) => {
-                CliCommand::Repo(RepoCommand::Status(repo_status_options(args)))
-            }
             Some(Commands::Skill { command }) => CliCommand::Skill(skill_command(command)),
             Some(Commands::InstallHooks(args)) => {
                 CliCommand::Repo(RepoCommand::InstallHooks(repo_hooks_options(args)))
             }
             Some(Commands::Repo { command }) => CliCommand::Repo(match command {
                 RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)?),
-                RepoCommands::InitComponent(args) => {
-                    RepoCommand::InitComponent(repo_component_init_options(args))
-                }
-                RepoCommands::ImportProfile(args) => {
-                    RepoCommand::ImportProfile(repo_import_profile_options(args))
-                }
-                RepoCommands::Status(args) => RepoCommand::Status(repo_status_options(args)),
                 RepoCommands::VerifyTasks(args) => {
                     RepoCommand::VerifyTasks(task_spec_verify_options(args))
                 }
-                RepoCommands::Component { command } => {
-                    RepoCommand::Component(component_command(command))
-                }
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
-                }
-                RepoCommands::ExportProfile(args) => {
-                    RepoCommand::ExportProfile(repo_export_profile_options(args))
                 }
             }),
             Some(Commands::Daemon { command }) => match command {
@@ -2119,82 +1931,9 @@ fn parse_model_digest(value: &str) -> std::result::Result<String, String> {
 
 fn repo_init_options(args: RepoInitArgs) -> Result<RepoInitOptions> {
     Ok(RepoInitOptions {
-        profile: args.profile,
-        profile_file: args.profile_file,
-        artifacts: args
-            .artifacts
-            .iter()
-            .map(|source| parse_repo_artifact(source))
-            .collect::<Result<Vec<_>>>()?,
-        skills_url: args.skills_url,
-        skills_rev: args.skills_rev,
-        tasks_url: args.tasks_url,
-        tasks_rev: args.tasks_rev,
         dry_run: args.dry_run,
         force: args.force,
     })
-}
-
-fn parse_repo_artifact(input: &str) -> Result<RepoArtifactOverride> {
-    let Some((name, source)) = input.split_once('=') else {
-        bail!("artifact must be NAME=URL[@REV]: {input}");
-    };
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("artifact name cannot be blank: {input}");
-    }
-    if !name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        bail!("artifact name contains invalid characters: {name}");
-    }
-
-    let source = source.trim();
-    if source.is_empty() {
-        bail!("artifact URL cannot be blank: {input}");
-    }
-
-    let split_index = source.rfind('@').filter(|index| {
-        let boundary = source.rfind(['/', ':']).unwrap_or(0);
-        *index > boundary
-    });
-    let (url, rev) = if let Some(index) = split_index {
-        let (url, rev) = source.split_at(index);
-        let rev = rev.trim_start_matches('@').trim();
-        if rev.is_empty() {
-            bail!("artifact revision cannot be blank: {input}");
-        }
-        (url.trim().to_string(), Some(rev.to_string()))
-    } else {
-        (source.to_string(), None)
-    };
-
-    if url.is_empty() {
-        bail!("artifact URL cannot be blank: {input}");
-    }
-
-    Ok(RepoArtifactOverride {
-        name: name.to_string(),
-        url,
-        rev,
-    })
-}
-
-fn repo_component_init_options(args: RepoComponentInitArgs) -> RepoComponentInitOptions {
-    RepoComponentInitOptions {
-        component: args.component,
-        dry_run: args.dry_run,
-        json: args.json,
-    }
-}
-
-fn repo_status_options(args: RepoStatusArgs) -> RepoStatusOptions {
-    RepoStatusOptions {
-        json: args.json,
-        component: args.component,
-        strict: args.strict,
-    }
 }
 
 fn task_spec_verify_options(args: TaskSpecVerifyArgs) -> TaskSpecVerifyOptions {
@@ -2204,54 +1943,35 @@ fn task_spec_verify_options(args: TaskSpecVerifyArgs) -> TaskSpecVerifyOptions {
     }
 }
 
-fn component_command(command: ComponentCommands) -> ComponentCommand {
+fn package_command(command: PackageCommands) -> PackageCommand {
     match command {
-        ComponentCommands::Status(args) => ComponentCommand::Status(artifact_status_options(args)),
-        ComponentCommands::Verify(args) => ComponentCommand::Verify(artifact_status_options(args)),
-        ComponentCommands::Sync(args) => ComponentCommand::Sync(ArtifactSyncOptions {
-            json: args.json,
-            dry_run: args.dry_run,
-            strict: args.strict,
-        }),
-        ComponentCommands::Lock(args) => ComponentCommand::Lock(ArtifactLockOptions {
-            json: args.json,
-            dry_run: args.dry_run,
-            strict: args.strict,
-        }),
-    }
-}
-
-fn artifact_command(command: ArtifactCommands) -> ArtifactCommand {
-    match command {
-        ArtifactCommands::List(args) => {
-            ArtifactCommand::List(ArtifactListOptions { json: args.json })
-        }
-        ArtifactCommands::Inspect(args) => ArtifactCommand::Inspect(ArtifactReferenceOptions {
+        PackageCommands::List(args) => PackageCommand::List(PackageListOptions { json: args.json }),
+        PackageCommands::Inspect(args) => PackageCommand::Inspect(PackageReferenceOptions {
             reference: args.reference,
             json: args.json,
         }),
-        ArtifactCommands::Resolve(args) => ArtifactCommand::Resolve(ArtifactReferenceOptions {
+        PackageCommands::Resolve(args) => PackageCommand::Resolve(PackageReferenceOptions {
             reference: args.reference,
             json: args.json,
         }),
-        ArtifactCommands::Graph(args) => ArtifactCommand::Graph(ArtifactReferenceOptions {
+        PackageCommands::Graph(args) => PackageCommand::Graph(PackageReferenceOptions {
             reference: args.reference,
             json: args.json,
         }),
-        ArtifactCommands::Lock(args) => ArtifactCommand::Lock(ArtifactLockCommandOptions {
+        PackageCommands::Lock(args) => PackageCommand::Lock(PackageLockCommandOptions {
             refresh: args.refresh,
             json: args.json,
         }),
-        ArtifactCommands::Source { command } => ArtifactCommand::Source(match command {
-            ArtifactSourceCommands::List(args) => ArtifactSourceCommand::List { json: args.json },
-            ArtifactSourceCommands::Add(args) => ArtifactSourceCommand::Add {
+        PackageCommands::Source { command } => PackageCommand::Source(match command {
+            PackageSourceCommands::List(args) => PackageSourceCommand::List { json: args.json },
+            PackageSourceCommands::Add(args) => PackageSourceCommand::Add {
                 name: args.name,
                 git: args.git,
                 local: args.local,
                 rev: args.rev,
                 json: args.json,
             },
-            ArtifactSourceCommands::Remove(args) => ArtifactSourceCommand::Remove {
+            PackageSourceCommands::Remove(args) => PackageSourceCommand::Remove {
                 name: args.name,
                 json: args.json,
             },
@@ -2269,22 +1989,6 @@ fn artifact_status_options(args: ArtifactStatusArgs) -> ArtifactStatusOptions {
 
 fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
     RepoHooksOptions {
-        dry_run: args.dry_run,
-        force: args.force,
-    }
-}
-
-fn repo_export_profile_options(args: RepoExportProfileArgs) -> RepoExportProfileOptions {
-    RepoExportProfileOptions {
-        out: args.out,
-        force: args.force,
-        json: args.json,
-    }
-}
-
-fn repo_import_profile_options(args: RepoImportProfileArgs) -> RepoImportProfileOptions {
-    RepoImportProfileOptions {
-        profile_file: args.profile_file,
         dry_run: args.dry_run,
         force: args.force,
     }
@@ -2626,10 +2330,6 @@ fn notes_command(command: NotesCommands) -> Result<NotesCommand> {
 
 fn skill_command(command: SkillCommands) -> SkillCommand {
     match command {
-        SkillCommands::Init(args) => SkillCommand::Init(SkillInitOptions {
-            dry_run: args.dry_run,
-            json: args.json,
-        }),
         SkillCommands::List(args) => SkillCommand::List(SkillListOptions {
             json: args.json,
             source: args.source,
@@ -2646,11 +2346,6 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
             strict: args.strict,
         }),
         SkillCommands::Verify(args) => SkillCommand::Verify(SkillVerifyOptions { json: args.json }),
-        SkillCommands::SyncFolders(args) => SkillCommand::SyncFolders(SkillFolderSyncOptions {
-            json: args.json,
-            dry_run: args.dry_run,
-            when: args.when,
-        }),
         SkillCommands::Trust(args) => SkillCommand::Trust(SkillTrustOptions {
             name: args.name,
             json: args.json,
@@ -2866,7 +2561,13 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Resolve and inspect generic artifact packages.
+    /// Resolve and inspect packages.
+    #[command(long_about = help::PACKAGE)]
+    Package {
+        #[command(subcommand)]
+        command: PackageCommands,
+    },
+    /// Inspect verified runtime Artifact bindings.
     #[command(long_about = help::ARTIFACT)]
     Artifact {
         #[command(subcommand)]
@@ -2928,8 +2629,6 @@ enum PublicCompletionCommands {
     },
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),
-    /// Report repo-local agentLIBRE workspace status.
-    Status(RepoStatusArgs),
     /// Inspect and verify agentLIBRE skills.
     Skill {
         #[command(subcommand)]

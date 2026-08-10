@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::str;
 
 use agl_kernel::{EffectId, HookId, OperationKind, SkillId, ToolId};
 use agl_package::{
-    ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
+    PackageEnvelope, PackageVersion, PackageView, SKILL_TYPE, compute_package_digest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,11 +44,11 @@ pub struct SkillReferencePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillHarness {
-    pub artifact: ArtifactEnvelope,
+    pub package: PackageEnvelope,
     pub id: SkillId,
     pub name: String,
     pub description: String,
-    pub version: ArtifactVersion,
+    pub version: PackageVersion,
     pub source: SkillSource,
     pub pack: String,
     pub required_hooks: Vec<HookId>,
@@ -62,7 +60,6 @@ pub struct SkillHarness {
     pub context_budget_tokens: u32,
     pub reference_policy: SkillReferencePolicy,
     pub references: Vec<SkillReference>,
-    pub artifacts: Vec<SkillArtifactDeclaration>,
     pub guarantees: Vec<String>,
     pub body: String,
     pub source_path: String,
@@ -75,62 +72,15 @@ struct SkillPackageFile<'a> {
     bytes: &'a [u8],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SkillArtifactDeclaration {
-    pub id: String,
-    pub kind: SkillArtifactKind,
-    pub path: PathBuf,
-    pub access: SkillArtifactAccess,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub create: Vec<SkillFolderCreateRule>,
-    #[serde(default)]
-    pub provides: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SkillFolderCreateRule {
-    pub when: SkillFolderCreateSituation,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillFolderCreateSituation {
-    #[default]
-    SkillSync,
-    RuntimePrepare,
-    ArtifactWrite,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillArtifactKind {
-    Source,
-    Generated,
-    State,
-    Cache,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillArtifactAccess {
-    Read,
-    Write,
-    ReadWrite,
-}
-
 impl SkillHarness {
     pub fn parse_package_view(
-        package: &dyn ArtifactPackageView,
+        package: &dyn PackageView,
         package_id: &str,
         source: SkillSource,
     ) -> Result<Self, SkillManifestError> {
         let entrypoint = "SKILL.md"
             .parse()
-            .expect("skill adapter entrypoint is a valid artifact path");
+            .expect("skill adapter entrypoint is a valid package path");
         let manifest_bytes =
             package
                 .read_file(&entrypoint)
@@ -175,47 +125,6 @@ impl SkillHarness {
             &manifest_bytes,
             &references,
             &digest,
-            source,
-            text,
-        )
-    }
-
-    pub fn parse_workspace_dir(
-        skill_dir: impl AsRef<Path>,
-        component_root: impl AsRef<Path>,
-        tree_sha256: &str,
-    ) -> Result<Self, SkillManifestError> {
-        Self::parse_workspace_dir_with_source(
-            skill_dir,
-            component_root,
-            tree_sha256,
-            SkillSource::Local,
-        )
-    }
-
-    pub fn parse_workspace_dir_with_source(
-        skill_dir: impl AsRef<Path>,
-        component_root: impl AsRef<Path>,
-        tree_sha256: &str,
-        source: SkillSource,
-    ) -> Result<Self, SkillManifestError> {
-        let skill_dir = skill_dir.as_ref();
-        let component_root = component_root.as_ref();
-        let manifest_path = skill_dir.join("SKILL.md");
-        let source_path = relative_source_path(&manifest_path, component_root);
-        let bytes = fs::read(&manifest_path).map_err(|err| SkillManifestError::ReadManifest {
-            source_path: source_path.clone(),
-            message: err.to_string(),
-        })?;
-        let text = str::from_utf8(&bytes).map_err(|_| SkillManifestError::InvalidUtf8 {
-            source_path: source_path.clone(),
-        })?;
-        parse_workspace_text(
-            skill_dir,
-            component_root,
-            &source_path,
-            &bytes,
-            tree_sha256,
             source,
             text,
         )
@@ -293,7 +202,7 @@ pub struct SkillNotesPermissions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSkillManifest {
-    artifact: ArtifactEnvelope,
+    package: PackageEnvelope,
     description: String,
     pack: String,
     required_hooks: Vec<HookId>,
@@ -308,8 +217,6 @@ struct RawSkillManifest {
     permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
-    #[serde(default)]
-    artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
 }
 
@@ -375,9 +282,6 @@ pub enum SkillManifestError {
     ContextBudgetZero,
     EmptyBody,
     ReferenceEscapesSkill {
-        path: String,
-    },
-    InvalidArtifactPath {
         path: String,
     },
 }
@@ -461,9 +365,6 @@ impl std::fmt::Display for SkillManifestError {
             Self::ReferenceEscapesSkill { path } => {
                 write!(f, "skill reference escapes the skill directory: {path}")
             }
-            Self::InvalidArtifactPath { path } => {
-                write!(f, "skill artifact path is invalid: {path}")
-            }
         }
     }
 }
@@ -480,14 +381,14 @@ fn parse_skill_text(
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
-    let actual_id = raw.artifact.id.as_str().to_owned();
+    let actual_id = raw.package.id.as_str().to_owned();
     if expected_id != actual_id {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
             expected: expected_id.to_string(),
             actual: actual_id,
         });
     }
-    validate_skill_artifact(&raw.artifact, source_path)?;
+    validate_skill_artifact(&raw.package, source_path)?;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(reference_assets, &reference_policy.include)?;
@@ -497,11 +398,11 @@ fn parse_skill_text(
         message: err.to_string(),
     })?;
     Ok(SkillHarness {
-        artifact: raw.artifact.clone(),
+        package: raw.package.clone(),
         id,
         name: actual_id,
         description: raw.description,
-        version: raw.artifact.version.clone(),
+        version: raw.package.version.clone(),
         source,
         pack: raw.pack,
         required_hooks: raw.required_hooks,
@@ -513,53 +414,6 @@ fn parse_skill_text(
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
-        artifacts: raw.artifacts,
-        guarantees: raw.guarantees,
-        body: body.to_string(),
-        source_path: source_path.to_string(),
-        manifest_sha256: sha256_hex(manifest_bytes),
-        tree_sha256: tree_sha256.to_string(),
-    })
-}
-
-fn parse_workspace_text(
-    skill_dir: &Path,
-    component_root: &Path,
-    source_path: &str,
-    manifest_bytes: &[u8],
-    tree_sha256: &str,
-    source: SkillSource,
-    text: &str,
-) -> Result<SkillHarness, SkillManifestError> {
-    let (mut raw, body) = parse_manifest_text(source_path, text)?;
-    validate_skill_artifact(&raw.artifact, source_path)?;
-
-    let reference_policy = normalize_references(&raw.references)?;
-    let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
-    normalize_raw_manifest(&mut raw, body)?;
-    let id =
-        SkillId::new(raw.artifact.id.as_str()).map_err(|err| SkillManifestError::InvalidYaml {
-            source_path: source_path.to_string(),
-            message: err.to_string(),
-        })?;
-    Ok(SkillHarness {
-        artifact: raw.artifact.clone(),
-        id,
-        name: raw.artifact.id.as_str().to_owned(),
-        description: raw.description,
-        version: raw.artifact.version.clone(),
-        source,
-        pack: raw.pack,
-        required_hooks: raw.required_hooks,
-        allowed_tools: raw.allowed_tools,
-        requestable_tools: raw.requestable_tools,
-        denied_tools: raw.denied_tools,
-        permission_request_templates: raw.permission_request_templates,
-        permissions: raw.permissions,
-        context_budget_tokens: raw.context_budget_tokens,
-        reference_policy,
-        references,
-        artifacts: raw.artifacts,
         guarantees: raw.guarantees,
         body: body.to_string(),
         source_path: source_path.to_string(),
@@ -608,7 +462,6 @@ fn normalize_raw_manifest(
     raw.required_hooks =
         sort_unique_ids(std::mem::take(&mut raw.required_hooks), "required_hooks")?;
     raw.permissions = normalize_permissions(std::mem::take(&mut raw.permissions))?;
-    normalize_artifacts(&raw.artifacts)?;
     raw.guarantees = sort_unique_strings(std::mem::take(&mut raw.guarantees), "guarantees")?;
     Ok(())
 }
@@ -660,28 +513,28 @@ fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestErro
 }
 
 fn validate_skill_artifact(
-    artifact: &ArtifactEnvelope,
+    package: &PackageEnvelope,
     source_path: &str,
 ) -> Result<(), SkillManifestError> {
-    if artifact.type_id.as_str() != SKILL_TYPE {
+    if package.type_id.as_str() != SKILL_TYPE {
         return Err(SkillManifestError::InvalidYaml {
             source_path: source_path.to_owned(),
             message: format!(
-                "skill artifact has type `{}`; expected `{SKILL_TYPE}`",
-                artifact.type_id
+                "skill package has type `{}`; expected `{SKILL_TYPE}`",
+                package.type_id
             ),
         });
     }
-    if artifact.payload_schema.as_str() != "agentlibre.skill/v2" {
+    if package.payload_schema.as_str() != "agentlibre.skill/v2" {
         return Err(SkillManifestError::InvalidYaml {
             source_path: source_path.to_owned(),
             message: format!(
                 "unsupported skill payload schema `{}`; expected `agentlibre.skill/v2`",
-                artifact.payload_schema
+                package.payload_schema
             ),
         });
     }
-    artifact
+    package
         .validate()
         .map_err(|error| SkillManifestError::InvalidYaml {
             source_path: source_path.to_owned(),
@@ -805,60 +658,6 @@ fn normalize_permissions(
     Ok(permissions)
 }
 
-fn normalize_artifacts(artifacts: &[SkillArtifactDeclaration]) -> Result<(), SkillManifestError> {
-    let mut ids = BTreeSet::new();
-    for artifact in artifacts {
-        ensure_non_blank("artifacts.id", &artifact.id)?;
-        if !ids.insert(artifact.id.clone()) {
-            return Err(SkillManifestError::DuplicateValue {
-                field: "artifacts.id",
-                value: artifact.id.clone(),
-            });
-        }
-        validate_artifact_path(&artifact.path)?;
-        if artifact
-            .provides
-            .iter()
-            .any(|value| value.trim().is_empty())
-        {
-            return Err(SkillManifestError::BlankField {
-                field: "artifacts.provides",
-            });
-        }
-        let mut create_situations = BTreeSet::new();
-        for rule in &artifact.create {
-            let value = format!("{:?}", rule.when);
-            if !create_situations.insert(rule.when) {
-                return Err(SkillManifestError::DuplicateValue {
-                    field: "artifacts.create.when",
-                    value,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_artifact_path(path: &Path) -> Result<(), SkillManifestError> {
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(SkillManifestError::InvalidArtifactPath {
-            path: path.display().to_string(),
-        });
-    }
-    let mut components = path.components();
-    match components.next() {
-        Some(std::path::Component::Normal(component)) if component == ".agl" => Ok(()),
-        _ => Err(SkillManifestError::InvalidArtifactPath {
-            path: path.display().to_string(),
-        }),
-    }
-}
-
 fn resolve_references(
     reference_assets: &[SkillPackageFile<'_>],
     includes: &[String],
@@ -882,47 +681,6 @@ fn resolve_references(
         resolved.push(SkillReference {
             path: include.clone(),
             sha256: sha256_hex(asset.bytes),
-            content,
-        });
-    }
-    Ok(resolved)
-}
-
-fn resolve_workspace_references(
-    skill_dir: &Path,
-    component_root: &Path,
-    policy: &SkillReferencePolicy,
-) -> Result<Vec<SkillReference>, SkillManifestError> {
-    let canonical_skill_dir =
-        skill_dir
-            .canonicalize()
-            .map_err(|err| SkillManifestError::ReadManifest {
-                source_path: relative_source_path(&skill_dir.join("SKILL.md"), component_root),
-                message: err.to_string(),
-            })?;
-    let mut resolved = Vec::with_capacity(policy.include.len());
-    for include in &policy.include {
-        let path = skill_dir.join(include);
-        let canonical_path =
-            fs::canonicalize(&path).map_err(|_| SkillManifestError::MissingReference {
-                path: include.clone(),
-            })?;
-        if !canonical_path.starts_with(&canonical_skill_dir) {
-            return Err(SkillManifestError::ReferenceEscapesSkill {
-                path: include.clone(),
-            });
-        }
-        let bytes = fs::read(&path).map_err(|_| SkillManifestError::MissingReference {
-            path: include.clone(),
-        })?;
-        let content = String::from_utf8(bytes.clone()).map_err(|_| {
-            SkillManifestError::InvalidReferenceUtf8 {
-                path: include.clone(),
-            }
-        })?;
-        resolved.push(SkillReference {
-            path: include.clone(),
-            sha256: sha256_hex(&bytes),
             content,
         });
     }
@@ -987,17 +745,6 @@ fn reject_duplicate_values(
     Ok(())
 }
 
-fn relative_source_path(path: &Path, component_root: &Path) -> String {
-    let relative = path.strip_prefix(component_root).unwrap_or(path);
-    slash_path(relative)
-}
-
-fn slash_path(path: &Path) -> String {
-    let mut result = PathBuf::new();
-    result.push(path);
-    result.to_string_lossy().replace('\\', "/")
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1011,8 +758,8 @@ mod tests {
     fn frontmatter_rejects_unknown_fields() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1047,8 +794,8 @@ Body.
     fn frontmatter_rejects_invalid_hook_ids() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1084,8 +831,8 @@ Body.
     fn frontmatter_rejects_duplicate_references() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1125,8 +872,8 @@ Body.
     fn frontmatter_parses_permissions() {
         let skill = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1168,8 +915,8 @@ Body.
     fn frontmatter_parses_permission_routing_fields() {
         let skill = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1252,8 +999,8 @@ Body.
     fn frontmatter_rejects_allowed_requestable_overlap() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1295,8 +1042,8 @@ Body.
     fn frontmatter_rejects_template_tool_outside_requestable_set() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1342,8 +1089,8 @@ Body.
     fn frontmatter_rejects_duplicate_permission_scopes() {
         let err = parse_fixture(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: task-spec
   version: 1.0.0
@@ -1382,104 +1129,6 @@ Body.
         );
     }
 
-    #[test]
-    fn frontmatter_parses_artifact_declarations() {
-        let skill = parse_fixture(
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: task-spec
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Write specs.
-pack: agl
-required_hooks:
-  - core:task_spec.validate
-allowed_tools: []
-context_budget_tokens: 128
-references:
-  include: []
-artifacts:
-  - id: task-specs
-    kind: generated
-    path: .agl/tasks/generated
-    access: read_write
-    create:
-      - when: skill_sync
-      - when: runtime_prepare
-    provides:
-      - tasks
-    schema: agl.task_spec.v1
-guarantees:
-  - specs are checked
----
-Body.
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(skill.artifacts.len(), 1);
-        assert_eq!(skill.artifacts[0].id, "task-specs");
-        assert_eq!(
-            skill.artifacts[0].path,
-            PathBuf::from(".agl/tasks/generated")
-        );
-        assert_eq!(skill.artifacts[0].access, SkillArtifactAccess::ReadWrite);
-        assert_eq!(skill.artifacts[0].create.len(), 2);
-        assert_eq!(
-            skill.artifacts[0].create[0].when,
-            SkillFolderCreateSituation::SkillSync
-        );
-    }
-
-    #[test]
-    fn frontmatter_rejects_artifact_paths_outside_agl() {
-        let err = parse_fixture(
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: task-spec
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Write specs.
-pack: agl
-required_hooks:
-  - core:task_spec.validate
-allowed_tools: []
-context_budget_tokens: 128
-references:
-  include: []
-artifacts:
-  - id: bad
-    kind: source
-    path: ../bad
-    access: read
-guarantees:
-  - specs are checked
----
-Body.
-"#,
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            err,
-            SkillManifestError::InvalidArtifactPath {
-                path: "../bad".to_string()
-            }
-        );
-    }
-
     fn parse_fixture(text: &str) -> Result<SkillHarness, SkillManifestError> {
         parse_skill_text(
             "task-spec",
@@ -1490,158 +1139,5 @@ Body.
             SkillSource::Local,
             text,
         )
-    }
-
-    #[test]
-    fn parses_local_skill_from_directory() {
-        let root = temp_root("local-skill");
-        let skill_dir = root.join("agl/repo-change");
-        fs::create_dir_all(skill_dir.join("references")).unwrap();
-        fs::write(skill_dir.join("references/policy.md"), "Policy").unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: repo-change
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Review repository changes.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-context_budget_tokens: 256
-references:
-  include:
-    - references/policy.md
-guarantees:
-  - repository paths are checked
----
-# Repo Change
-
-Review changes.
-"#,
-        )
-        .unwrap();
-
-        let skill = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap();
-
-        assert_eq!(skill.id.as_str(), "repo-change");
-        assert_eq!(skill.source, SkillSource::Local);
-        assert_eq!(skill.source_path, "agl/repo-change/SKILL.md");
-        assert_eq!(skill.references[0].path, "references/policy.md");
-        assert_eq!(skill.references[0].sha256.len(), 64);
-        assert_eq!(skill.tree_sha256, "tree-sha");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn parses_core_skill_from_external_directory() {
-        let root = temp_root("core-skill");
-        let skill_dir = root.join("agl/repo-review");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: repo-review
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Review repository changes.
-pack: agl
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-guarantees:
-  - repository paths are checked
----
-Body.
-"#,
-        )
-        .unwrap();
-
-        let skill = SkillHarness::parse_workspace_dir_with_source(
-            &skill_dir,
-            &root,
-            "tree-sha",
-            SkillSource::Core,
-        )
-        .unwrap();
-
-        assert_eq!(skill.id.as_str(), "repo-review");
-        assert_eq!(skill.source, SkillSource::Core);
-        assert_eq!(skill.tree_sha256, "tree-sha");
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn workspace_parser_rejects_unknown_source() {
-        let root = temp_root("workspace-source");
-        let skill_dir = root.join("agl/repo-change");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            r#"---
-artifact:
-  schema: agentlibre.artifact/v1
-  type: skill
-  id: repo-change
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Review repository changes.
-pack: agl
-source: workspace
-required_hooks:
-  - core:repo_path.validate
-allowed_tools: []
-context_budget_tokens: 256
-references:
-  include: []
-guarantees:
-  - repository paths are checked
----
-Body.
-"#,
-        )
-        .unwrap();
-
-        let err = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap_err();
-
-        match err {
-            SkillManifestError::InvalidYaml { message, .. } => {
-                assert!(message.contains("unknown field `source`"), "{message}");
-            }
-            other => panic!("expected invalid YAML source error, got {other:?}"),
-        }
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("agl-skill-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
     }
 }

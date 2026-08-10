@@ -243,6 +243,7 @@ pub struct ToolDispatchContext {
     control: ToolDispatchControl,
     authorized_conditional_effects: std::collections::BTreeSet<EffectId>,
     grant_provenance: Option<ToolGrantProvenance>,
+    effect_correlation: Option<crate::ToolEffectCorrelation>,
 }
 
 impl ToolDispatchContext {
@@ -251,12 +252,14 @@ impl ToolDispatchContext {
         control: ToolDispatchControl,
         authorized_conditional_effects: impl IntoIterator<Item = EffectId>,
         grant_provenance: Option<ToolGrantProvenance>,
+        effect_correlation: Option<crate::ToolEffectCorrelation>,
     ) -> Self {
         Self {
             invocation,
             control,
             authorized_conditional_effects: authorized_conditional_effects.into_iter().collect(),
             grant_provenance,
+            effect_correlation,
         }
     }
 
@@ -274,6 +277,10 @@ impl ToolDispatchContext {
 
     pub fn grant_provenance(&self) -> Option<&ToolGrantProvenance> {
         self.grant_provenance.as_ref()
+    }
+
+    pub fn effect_correlation(&self) -> Option<&crate::ToolEffectCorrelation> {
+        self.effect_correlation.as_ref()
     }
 
     pub fn into_invocation(self) -> ToolInvocation {

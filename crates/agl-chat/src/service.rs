@@ -1683,7 +1683,7 @@ fn log_message_metadata(
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Artifact { .. } => None,
+            ContentPart::Attachment { .. } => None,
         })
         .collect::<String>();
     let fields = logged_message_fields(role, &text, runtime.logging.include_message_text);
@@ -1918,8 +1918,13 @@ tool_call_format = "hermes_json"
         let function_root = workspace_root.join(".agl/functions/service-test");
         std::fs::create_dir_all(&function_root).unwrap();
         std::fs::write(
+            workspace_root.join(".agl/workspace.toml"),
+            "version = 3\ndefault_function = \"function:service-test@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
+        )
+        .unwrap();
+        std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
-            "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: service-test\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Service test\nruntime:\n  tool_mode: read-only\n  max_output_tokens: 1\nskills:\n  use: []\nsubagents:\n  use: []\n---\n",
+            "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: service-test\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Service test\nruntime:\n  tool_mode: read-only\n  max_output_tokens: 1\nskills:\n  use: []\nsubagents:\n  use: []\n---\n",
         )
         .unwrap();
         std::fs::write(

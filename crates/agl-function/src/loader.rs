@@ -1,14 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use agl_package::{
-    ArtifactCandidate, ArtifactPackageView, ArtifactRelativePath, ArtifactSourceKind,
-    ArtifactSourceTier,
+    PackageCandidate, PackageRelativePath, PackageSourceKind, PackageSourceTier, PackageView,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-#[cfg(test)]
-use crate::adapter::validate_function_model_contract;
 use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{
     AgentFunctionFrontMatter, FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME,
@@ -87,8 +84,6 @@ pub(crate) fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFu
     let system_prompt_sections = markdown_sections(&system_prompt);
     let (inference_config_path, inference_config_toml) =
         load_function_inference_config(&locator.root_dir, &front_matter, builtin)?;
-    #[cfg(test)]
-    validate_function_model_contract(&front_matter, inference_config_toml.as_deref(), &locator)?;
     Ok(LoadedFunction {
         locator,
         front_matter,
@@ -101,7 +96,7 @@ pub(crate) fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFu
     })
 }
 
-pub fn load_function_candidate(candidate: &ArtifactCandidate) -> Result<LoadedFunction> {
+pub fn load_function_candidate(candidate: &PackageCandidate) -> Result<LoadedFunction> {
     let content = read_package_text(candidate.view(), FUNCTION_FILE_NAME)?;
     let (front_matter, body) =
         parse_function_document(&content).context("failed to parse resolved Function payload")?;
@@ -117,14 +112,14 @@ pub fn load_function_candidate(candidate: &ArtifactCandidate) -> Result<LoadedFu
         candidate.package_id
     );
     let source = match (candidate.tier, candidate.kind) {
-        (ArtifactSourceTier::Explicit, _) => FunctionPackageSource::Explicit,
-        (ArtifactSourceTier::Workspace, _) => FunctionPackageSource::Workspace,
-        (_, ArtifactSourceKind::Embedded) => FunctionPackageSource::Builtin,
+        (PackageSourceTier::Explicit, _) => FunctionPackageSource::Explicit,
+        (PackageSourceTier::Workspace, _) => FunctionPackageSource::Workspace,
+        (_, PackageSourceKind::Embedded) => FunctionPackageSource::Builtin,
         _ => FunctionPackageSource::Global,
     };
     let root_dir = candidate.package_root.clone().unwrap_or_else(|| {
         PathBuf::from(format!(
-            "artifact/function/{}@{}",
+            "package/function/{}@{}",
             candidate.package_id, candidate.version
         ))
     });
@@ -160,15 +155,15 @@ pub fn load_function_candidate(candidate: &ArtifactCandidate) -> Result<LoadedFu
     })
 }
 
-fn read_package_text(package: &dyn ArtifactPackageView, path: &str) -> Result<String> {
-    let relative = ArtifactRelativePath::new(path.to_owned())?;
+fn read_package_text(package: &dyn PackageView, path: &str) -> Result<String> {
+    let relative = PackageRelativePath::new(path.to_owned())?;
     let bytes = package.read_file(&relative)?;
     String::from_utf8(bytes).with_context(|| format!("{path} is not UTF-8"))
 }
 
 pub(crate) fn load_function_system_prompt(
     function_root: &Path,
-    builtin: Option<&'static agl_assets::BuiltinArtifactPackage>,
+    builtin: Option<&'static agl_assets::BuiltinPackage>,
 ) -> Result<(PathBuf, String)> {
     if let Some(function) = builtin {
         let file = function_file(function, FUNCTION_SYSTEM_PROMPT_FILE_NAME)?;
@@ -208,7 +203,7 @@ pub(crate) fn load_function_system_prompt(
 pub(crate) fn load_function_inference_config(
     function_root: &Path,
     front_matter: &AgentFunctionFrontMatter,
-    builtin: Option<&'static agl_assets::BuiltinArtifactPackage>,
+    builtin: Option<&'static agl_assets::BuiltinPackage>,
 ) -> Result<(Option<PathBuf>, Option<String>)> {
     let Some(relative) = front_matter.model_config_path() else {
         return Ok((None, None));
@@ -262,13 +257,13 @@ pub(crate) fn load_function_inference_config(
 
 pub(crate) fn resolve_builtin_package(
     reference: &str,
-) -> Result<&'static agl_assets::BuiltinArtifactPackage> {
-    agl_assets::builtin_artifact_package(reference)
+) -> Result<&'static agl_assets::BuiltinPackage> {
+    agl_assets::builtin_package(reference)
         .with_context(|| format!("builtin function `{reference}` is not embedded"))
 }
 
 fn function_file<'a>(
-    function: &'a agl_assets::BuiltinArtifactPackage,
+    function: &'a agl_assets::BuiltinPackage,
     path: &str,
 ) -> Result<&'a agl_assets::BuiltinArtifactFile> {
     function

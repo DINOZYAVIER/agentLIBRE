@@ -1,4 +1,4 @@
 Initialize the repo-local agentLIBRE workspace.
 
-This writes .agl/workspace.toml and creates or declares the folders selected by
-the profile. Start with --dry-run.
+This writes the canonical .agl/workspace.toml in an existing Git repository.
+It does not create or register Artifact submodules. Start with --dry-run.

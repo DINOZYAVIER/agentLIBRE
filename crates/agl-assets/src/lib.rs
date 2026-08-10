@@ -34,7 +34,7 @@ pub struct BuiltinArtifactFile {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BuiltinArtifactPackage {
+pub struct BuiltinPackage {
     pub type_id: &'static str,
     pub id: &'static str,
     pub version: &'static str,
@@ -50,8 +50,8 @@ pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
     BUILTIN_ASSETS.iter().copied().find(|asset| asset.id == id)
 }
 
-pub fn builtin_artifact_package(id: &str) -> Option<&'static BuiltinArtifactPackage> {
-    BUILTIN_ARTIFACT_PACKAGES
+pub fn builtin_package(id: &str) -> Option<&'static BuiltinPackage> {
+    BUILTIN_PACKAGES
         .iter()
         .find(|package| package.type_id == "function" && package.id == id)
 }
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn skill_package_digests_are_present() {
-        for skill in BUILTIN_ARTIFACT_PACKAGES
+        for skill in BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "skill")
         {
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn builtin_functions_are_embedded_from_assets() {
-        let functions = BUILTIN_ARTIFACT_PACKAGES
+        let functions = BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "function")
             .map(|function| function.id)
@@ -129,14 +129,14 @@ mod tests {
                 "gemma4-e4b"
             ]
         );
-        for function in BUILTIN_ARTIFACT_PACKAGES
+        for function in BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "function")
         {
             assert_eq!(function.type_id, "function");
             let expected_version = match function.id {
-                "gemma4-31b-32k" | "gemma4-31b-64k" => "1.1.0",
-                _ => "1.0.0",
+                "gemma4-31b-32k" | "gemma4-31b-64k" => "1.2.0",
+                _ => "1.1.0",
             };
             assert_eq!(function.version, expected_version);
             assert_eq!(function.entrypoint, "FUNCTION.md");
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn builtin_function_presets_use_model_ids_only() {
-        for function in BUILTIN_ARTIFACT_PACKAGES
+        for function in BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "function")
         {
@@ -190,7 +190,7 @@ tool_call_format = "gemma_function_call"
 
     #[test]
     fn gemma4_agent_presets_match_builtin_policy() {
-        let e2b = builtin_artifact_package("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
+        let e2b = builtin_package("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
         let e2b_text = std::str::from_utf8(
             e2b.files
                 .iter()
@@ -213,8 +213,7 @@ tool_call_format = "gemma_function_call"
         assert_eq!(e2b_runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
         assert!(!e2b_preset.runtime.mtp_enabled());
 
-        let twelve_b =
-            builtin_artifact_package("gemma4-12b").expect("Gemma 4 12B must be embedded");
+        let twelve_b = builtin_package("gemma4-12b").expect("Gemma 4 12B must be embedded");
         let twelve_b_preset = agl_config::load_inference_preset_from_str(
             "gemma4-12b",
             std::str::from_utf8(
@@ -238,7 +237,7 @@ tool_call_format = "gemma_function_call"
         for (function_id, expected_context) in
             [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)]
         {
-            let thirty_one_b = builtin_artifact_package(function_id)
+            let thirty_one_b = builtin_package(function_id)
                 .unwrap_or_else(|| panic!("{function_id} must be embedded"));
             let preset = agl_config::load_inference_preset_from_str(
                 function_id,
@@ -270,12 +269,12 @@ tool_call_format = "gemma_function_call"
             assert_eq!(runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
             assert!(!preset.runtime.mtp_enabled());
         }
-        assert!(builtin_artifact_package("gemma4-31b").is_none());
+        assert!(builtin_package("gemma4-31b").is_none());
     }
 
     #[test]
     fn generated_package_digests_match_the_canonical_runtime_algorithm() {
-        for package in BUILTIN_ARTIFACT_PACKAGES {
+        for package in BUILTIN_PACKAGES {
             let view = agl_package::InMemoryPackageView::new(package.files.iter().map(|file| {
                 (
                     file.path.parse().expect("generated package path is valid"),
@@ -299,21 +298,21 @@ tool_call_format = "gemma_function_call"
     #[test]
     fn builtin_catalog_identity_is_canonical_sha256() {
         assert_eq!(
-            BUILTIN_ARTIFACT_CATALOG_DIGEST,
-            "sha256:5f00142d15976e9d92e3a2118f772fd60c7cba10844798a824919c68a9378950"
+            BUILTIN_PACKAGE_CATALOG_DIGEST,
+            "sha256:b86860a33c5f7a03d97ea0f43a57ac727f8aa38161d502e7a83c7aceb0b22b65"
         );
     }
 
     #[test]
     fn builtin_skills_are_embedded_from_core_repo_checkout() {
-        let skills = BUILTIN_ARTIFACT_PACKAGES
+        let skills = BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "skill")
             .map(|skill| skill.id)
             .collect::<Vec<_>>();
 
         assert_eq!(skills, vec!["process", "repo-status", "skill"]);
-        for skill in BUILTIN_ARTIFACT_PACKAGES
+        for skill in BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "skill")
         {
@@ -328,9 +327,9 @@ tool_call_format = "gemma_function_call"
     #[test]
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
-        assert!(builtin_artifact_package("missing").is_none());
+        assert!(builtin_package("missing").is_none());
         assert_eq!(
-            BUILTIN_ARTIFACT_PACKAGES
+            BUILTIN_PACKAGES
                 .iter()
                 .filter(|package| package.type_id == "skill" && package.id == "missing")
                 .count(),
