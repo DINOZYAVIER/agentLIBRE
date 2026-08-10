@@ -19,7 +19,7 @@ enum AssetKind {
     FunctionManifest,
     FunctionSystemPrompt,
     FunctionInferenceConfig,
-    ExtensionManifest,
+    ExtensionPackageFile,
 }
 
 impl AssetKind {
@@ -34,7 +34,7 @@ impl AssetKind {
             Self::FunctionManifest => "BuiltinAssetKind::FunctionManifest",
             Self::FunctionSystemPrompt => "BuiltinAssetKind::FunctionSystemPrompt",
             Self::FunctionInferenceConfig => "BuiltinAssetKind::FunctionInferenceConfig",
-            Self::ExtensionManifest => "BuiltinAssetKind::ExtensionManifest",
+            Self::ExtensionPackageFile => "BuiltinAssetKind::ExtensionPackageFile",
         }
     }
 }
@@ -126,30 +126,68 @@ fn add_extensions(
             .and_then(|name| name.to_str())
             .expect("extension directory must have a UTF-8 name");
         validate_extension_name(id);
-        let manifest_path = extension_dir.join("EXTENSION.json");
-        if !manifest_path.is_file() {
-            panic!("builtin extension {id} is missing EXTENSION.json");
+        let root_path = extension_dir.join("extension-root.json");
+        if !root_path.is_file() {
+            panic!("builtin extension {id} is missing extension-root.json");
         }
-        let manifest_bytes = fs::read(&manifest_path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", manifest_path.display()));
-        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", manifest_path.display()));
-        let envelope = extension_envelope(&manifest, &manifest_path);
-        validate_envelope(&envelope, "extension", id, &manifest_path);
-        let asset_index = assets.len();
-        assets.push(asset(
-            &format!("extension:{id}/EXTENSION.json"),
-            AssetKind::ExtensionManifest,
-            repo_root,
-            &manifest_path,
-        ));
-        let files = vec![("EXTENSION.json".to_string(), asset_index)];
+        let root_bytes = fs::read(&root_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", root_path.display()));
+        let root: serde_json::Value = serde_json::from_slice(&root_bytes)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", root_path.display()));
+        let root_id = root
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{} has no Extension id", root_path.display()));
+        if root_id != id {
+            panic!(
+                "builtin extension directory {id} does not match Extension id {root_id} in {}",
+                root_path.display()
+            );
+        }
+        let version = root
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{} has no Extension version", root_path.display()));
+        let requires = root
+            .get("requirements")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|requirement| {
+                let extension_id = requirement
+                    .get("extension_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("invalid requirement in {}", root_path.display()));
+                let api_major = requirement
+                    .get("api_major")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| panic!("invalid requirement in {}", root_path.display()));
+                format!("extension:{extension_id}@^{api_major}.0")
+            })
+            .collect::<Vec<_>>();
+        let mut files = Vec::new();
+        for path in files_recursive_sorted(&extension_dir) {
+            reject_symlink(&path);
+            let relative = path
+                .strip_prefix(&extension_dir)
+                .expect("Extension package file is under its package root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let asset_index = assets.len();
+            assets.push(asset(
+                &format!("extension:{id}/{relative}"),
+                AssetKind::ExtensionPackageFile,
+                repo_root,
+                &path,
+            ));
+            files.push((relative, asset_index));
+        }
         packages.push(ArtifactPackage {
-            type_id: envelope.type_id.to_string(),
-            id: envelope.id.to_string(),
-            version: envelope.version.to_string(),
-            entrypoint: "EXTENSION.json".to_string(),
-            requires: envelope.requires.iter().map(ToString::to_string).collect(),
+            type_id: "extension".to_owned(),
+            id: id.to_owned(),
+            version: version.to_owned(),
+            entrypoint: "extension-root.json".to_owned(),
+            requires,
             digest: package_tree_digest(assets, &files),
             files,
         });
@@ -555,38 +593,6 @@ fn split_frontmatter(text: &str) -> Option<&str> {
     text.strip_prefix("---\r\n")?
         .split_once("\r\n---\r\n")
         .map(|(frontmatter, _)| frontmatter)
-}
-
-fn extension_envelope(document: &serde_json::Value, path: &Path) -> ArtifactEnvelope {
-    let object = document
-        .as_object()
-        .unwrap_or_else(|| panic!("{} must contain a JSON object", path.display()));
-    let mut envelope = serde_json::Map::new();
-    for field in [
-        "schema",
-        "type",
-        "id",
-        "version",
-        "payload_schema",
-        "agl",
-        "requires",
-    ] {
-        envelope.insert(
-            field.to_string(),
-            object
-                .get(field)
-                .unwrap_or_else(|| panic!("{} has no {field} field", path.display()))
-                .clone(),
-        );
-    }
-    serde_json::from_value::<ArtifactEnvelope>(serde_json::Value::Object(envelope)).unwrap_or_else(
-        |error| {
-            panic!(
-                "failed to parse artifact envelope from {}: {error}",
-                path.display()
-            )
-        },
-    )
 }
 
 fn validate_envelope(envelope: &ArtifactEnvelope, type_id: &str, id: &str, path: &Path) {

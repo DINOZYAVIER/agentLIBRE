@@ -19,19 +19,18 @@
 | agl-events | Communication |
 | agl-extension | Extensibility |
 | agl-function | Execution |
-| agl-hooks | Extensibility |
 | agl-host-tools | Tooling |
 | agl-ids | Identity |
 | agl-inference | AI/ML |
 | agl-inference-worker | AI/ML |
 | agl-kernel | Runtime |
 | agl-llama-cpp-sys | AI/ML |
-| agl-loop | Runtime |
 | agl-matrix-bridge | Communication |
 | agl-memory | Storage |
 | agl-model | AI/ML |
 | agl-notes | Storage |
 | agl-oven | Tooling |
+| agl-package | Extensibility |
 | agl-process | Runtime (agent-side typed terminal client adapter) |
 | agl-protocol | Communication |
 | agl-repo | Storage |
@@ -40,7 +39,6 @@
 | agl-skill | Extensibility |
 | agl-store | Storage |
 | agl-supervisor | Runtime |
-| agl-turn | Runtime |
 
 ## Extracted Packages (Owner: agl-terminal)
 

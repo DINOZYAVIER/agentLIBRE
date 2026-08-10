@@ -1,0 +1,106 @@
+{
+  "api_major": 1,
+  "declaration_digest": "sha256:1050bab5ac2fbcf831fd817027b299824a260fd18ce21d4de1667c1495a3f171",
+  "host_bindings": [
+    {
+      "api_major": 1,
+      "id": "core.process"
+    }
+  ],
+  "id": "core.process",
+  "indexes": {
+    "artifacts": "indexes/artifacts.json",
+    "effects": "indexes/effects.json",
+    "hooks": "indexes/hooks.json",
+    "tools": "indexes/tools.json"
+  },
+  "name": "Core Process",
+  "requirements": [],
+  "schema": "agentlibre.extension-root/v1",
+  "version": "1.1.0",
+  "workflow": {
+    "mappings": [
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.pwd"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.cd"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.process:process.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.start"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.process:process.start"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.status"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.read"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.write"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.resize"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:process.kill"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.process:shell.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "invalid_effect_envelope",
+        "tool_id": "core.process:shell.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "invalid_patch",
+        "tool_id": "core.process:shell.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.process:shell.exec"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "conflict",
+        "tool_id": "core.process:shell.exec"
+      }
+    ],
+    "schema": "agentlibre.extension-workflow.v1alpha"
+  }
+}

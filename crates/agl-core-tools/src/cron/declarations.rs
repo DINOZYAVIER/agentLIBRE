@@ -4,18 +4,16 @@ use agl_kernel::{
 };
 use schemars::JsonSchema;
 
-use crate::{ToolCatalog, ToolCatalogError};
-
 use super::{
     CRON_ADD_TOOL_ID, CRON_DELETE_TOOL_ID, CRON_DISABLE_TOOL_ID, CRON_ENABLE_TOOL_ID,
     CRON_HISTORY_TOOL_ID, CRON_LIST_TOOL_ID, CRON_PREFLIGHT_TOOL_ID, CRON_RUN_TOOL_ID,
-    CRON_SHOW_TOOL_ID, CRON_TICK_TOOL_ID, CRON_UPDATE_TOOL_ID, HistoryArgs, IdArgs, JobDraftArgs,
-    ListArgs, PROVIDER_ID, RunArgs, TickArgs, UpdateArgs,
+    CRON_SHOW_TOOL_ID, CRON_TICK_TOOL_ID, CRON_UPDATE_TOOL_ID, EXTENSION_ID, HistoryArgs, IdArgs,
+    JobDraftArgs, ListArgs, RunArgs, TickArgs, UpdateArgs,
 };
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin cron extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin cron extension id is valid"),
         "Cron Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -105,10 +103,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::store_idempotency()).unwrap(),
         EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap(),
     ])
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(

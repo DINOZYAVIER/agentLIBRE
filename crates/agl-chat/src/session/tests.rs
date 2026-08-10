@@ -99,25 +99,13 @@ doctor:
     )
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Do not execute tools.\n").unwrap();
-    std::fs::write(
-        extension_root.join("EXTENSION.json"),
-        r#"{
-  "schema": "agentlibre.artifact/v1",
-  "type": "extension",
-  "id": "core.workspace",
-  "version": "1.1.0",
-  "payload_schema": "agentlibre.extension/v1",
-  "agl": {
-    "compatible": ">=1.0.0-alpha.12",
-    "tested": ["1.0.0-alpha.12"]
-  },
-  "requires": [],
-  "api_major": 1,
-  "implementation": { "kind": "rust-static" }
-}
-"#,
-    )
-    .unwrap();
+    let extension_source = root.join("extension-source");
+    std::fs::create_dir(&extension_source).unwrap();
+    let definition = agl_core_tools::fs_extension_factory().definition();
+    let input =
+        agl_extension::package::ExtensionPackageBuildInput::new(definition, extension_source)
+            .unwrap();
+    agl_extension::package::ExtensionPackageBuilder::build(&input, &extension_root).unwrap();
     let paths = AgentLibrePaths::from_agl_home(root.join("home"));
     let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
     let bundle = composition
@@ -340,13 +328,18 @@ tool_call_format = "hermes_json"
     assert_eq!(record["session_id"], session_id.as_str());
     assert_eq!(record["turn_id"], turn_id.as_str());
     assert_eq!(record["attempt_id"], attempt_id.as_str());
+    assert!(
+        record["extension_catalog_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
     assert_eq!(
         record["artifacts"]["root"],
         "function:evidence-function@1.0.0"
     );
     assert_eq!(
-        record["extension_bindings"]["core.workspace"]["implementation"],
-        serde_json::json!({"kind": "rust-static"})
+        record["extension_bindings"]["core.workspace"]["api_major"],
+        1
     );
     assert_eq!(record["function_policy"]["max_tool_calls"], 3);
     assert_eq!(record["admission"]["fallback_allowed"], false);
@@ -928,10 +921,18 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
 fn selected_skill_hook_batches_use_declared_hook_events() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let batches = selected_skill_hook_batches(
         &skill_registry,
@@ -957,10 +958,18 @@ fn selected_skill_hook_batches_use_declared_hook_events() {
 fn selected_skill_visible_tools_use_declared_tool_metadata() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -994,10 +1003,18 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
 fn no_skill_route_exposes_only_read_only_filesystem_tools() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -1024,10 +1041,18 @@ fn no_skill_route_exposes_only_read_only_filesystem_tools() {
 fn no_skill_route_adds_only_filesystem_edit_in_write_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -1130,7 +1155,7 @@ fn foreground_process_and_shell_are_baseline_and_skill_routes_the_lifecycle_surf
 fn omitted_function_extension_does_not_activate_its_core_tools() {
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let selected_extensions = [ExtensionId::new(agl_core_tools::fs::PROVIDER_ID).unwrap()]
+    let selected_extensions = [ExtensionId::new(agl_core_tools::fs::EXTENSION_ID).unwrap()]
         .into_iter()
         .collect();
     let effective = resolve_effective_capabilities(
@@ -1583,10 +1608,18 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
 fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -1614,10 +1647,18 @@ fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
 fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -2207,21 +2248,39 @@ fn untrusted_extension_tools_are_unavailable_and_skill_instructions_remain() {
     catalog
         .register(crate::delegation_contract::delegation_extension())
         .unwrap();
-    agl_core_tools::guards::register(&mut catalog).unwrap();
+    catalog
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
     catalog
         .register(
             agl_core_tools::cron::declaration().with_trust(agl_kernel::ExtensionTrust::Revoked),
         )
         .unwrap();
-    agl_core_tools::fs::register(&mut catalog).unwrap();
-    agl_core_tools::matrix::register(&mut catalog).unwrap();
-    agl_core_tools::memory::register(&mut catalog).unwrap();
-    agl_core_tools::notes::register(&mut catalog).unwrap();
-    agl_core_tools::permissions::register(&mut catalog).unwrap();
-    agl_core_tools::process::register(&mut catalog).unwrap();
-    agl_core_tools::repo::register(&mut catalog).unwrap();
-    agl_core_tools::skills::register(&mut catalog).unwrap();
-    agl_core_tools::store::register(&mut catalog).unwrap();
+    catalog.register(agl_core_tools::fs::declaration()).unwrap();
+    catalog
+        .register(agl_core_tools::matrix::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::memory::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::notes::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::process::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::repo::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::store::declaration())
+        .unwrap();
     let selected = [SkillId::new("cron-planner").unwrap()];
     let effective = resolve_effective_capabilities(
         &skill_registry,
@@ -2277,7 +2336,9 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
         )))
         .unwrap();
     let mut catalog = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut catalog).unwrap();
+    catalog
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
     let selected = [skill_id.clone()];
     let effective = resolve_effective_capabilities(
         &registry,
@@ -2352,17 +2413,37 @@ fn full_tool_catalog() -> ToolCatalog {
     catalog
         .register(crate::delegation_contract::delegation_extension())
         .unwrap();
-    agl_core_tools::guards::register(&mut catalog).unwrap();
-    agl_core_tools::cron::register(&mut catalog).unwrap();
-    agl_core_tools::fs::register(&mut catalog).unwrap();
-    agl_core_tools::matrix::register(&mut catalog).unwrap();
-    agl_core_tools::memory::register(&mut catalog).unwrap();
-    agl_core_tools::notes::register(&mut catalog).unwrap();
-    agl_core_tools::permissions::register(&mut catalog).unwrap();
-    agl_core_tools::process::register(&mut catalog).unwrap();
-    agl_core_tools::repo::register(&mut catalog).unwrap();
-    agl_core_tools::skills::register(&mut catalog).unwrap();
-    agl_core_tools::store::register(&mut catalog).unwrap();
+    catalog
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::cron::declaration())
+        .unwrap();
+    catalog.register(agl_core_tools::fs::declaration()).unwrap();
+    catalog
+        .register(agl_core_tools::matrix::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::memory::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::notes::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::process::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::repo::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
+    catalog
+        .register(agl_core_tools::store::declaration())
+        .unwrap();
     catalog
 }
 
@@ -2505,10 +2586,18 @@ fn temp_store_root(label: &str) -> PathBuf {
 fn selected_tool_smoke_skill_exposes_only_declared_tool() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_core_tools::guards::register(&mut extension_registry).unwrap();
-    agl_core_tools::fs::register(&mut extension_registry).unwrap();
-    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_core_tools::skills::register(&mut extension_registry).unwrap();
+    extension_registry
+        .register(agl_core_tools::guards::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::fs::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::permissions::declaration())
+        .unwrap();
+    extension_registry
+        .register(agl_core_tools::skills::declaration())
+        .unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,

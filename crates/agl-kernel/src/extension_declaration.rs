@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AuthorityClass, DeclarationDigest, EffectId, ExtensionId, HookEvent, HookId,
-    SchemaValidationError, ToolId, ToolSchema, WorkflowEventId, draft202012_schema_for,
+    ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactTargetSelector,
+    AuthorityClass, DeclarationDigest, EffectId, ExtensionId, ExtensionRequirement, HookEvent,
+    HookId, HostBindingId, ResolvedArtifactTarget, SchemaValidationError, ToolId, ToolSchema,
+    WorkflowEventId, draft202012_schema_for,
 };
 
 pub const EXTENSION_WORKFLOW_SCHEMA: &str = "agentlibre.extension-workflow.v1alpha";
@@ -153,6 +155,8 @@ pub struct ToolDeclaration {
     pub state_effects: BTreeSet<EffectId>,
     pub conditional_state_effects: BTreeSet<EffectId>,
     pub sensitive_inputs: BTreeSet<SensitiveInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_links: Vec<ArtifactEffectLink>,
 }
 
 impl ToolDeclaration {
@@ -174,6 +178,7 @@ impl ToolDeclaration {
             state_effects: BTreeSet::new(),
             conditional_state_effects: BTreeSet::new(),
             sensitive_inputs: BTreeSet::new(),
+            artifact_links: Vec::new(),
         };
         declaration.validate_shape()?;
         Ok(declaration)
@@ -237,6 +242,11 @@ impl ToolDeclaration {
         self
     }
 
+    pub fn with_artifact_link(mut self, link: ArtifactEffectLink) -> Self {
+        self.artifact_links.push(link);
+        self
+    }
+
     pub fn with_run_step_idempotency(mut self) -> Self {
         self.delivery = ToolDelivery::IdempotentRunStep;
         self
@@ -253,6 +263,32 @@ impl ToolDeclaration {
                 id: self.id.clone(),
                 message: "mandatory and conditional state effects must be disjoint",
             });
+        }
+        reject_duplicates(
+            self.artifact_links
+                .iter()
+                .map(|link| link.effect_id.as_str()),
+            "tool Artifact effect link",
+        )?;
+        for link in &self.artifact_links {
+            if !self
+                .state_effects
+                .iter()
+                .chain(&self.conditional_state_effects)
+                .any(|effect| effect == &link.effect_id)
+            {
+                return Err(DeclarationError::UndeclaredArtifactEffect {
+                    tool_id: self.id.clone(),
+                    effect_id: link.effect_id.clone(),
+                });
+            }
+            if let ArtifactTargetSelector::FromArgument { pointer, access } = &link.selector
+                && (!pointer.starts_with('/') || access != &link.access)
+            {
+                return Err(DeclarationError::InvalidArtifactSelector {
+                    pointer: pointer.clone(),
+                });
+            }
         }
         if self.operation_kind.is_state_mutating()
             && self.operation_kind != OperationKind::Request
@@ -673,6 +709,19 @@ impl ExtensionWorkflowFragment {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HostBindingRequirement {
+    pub id: HostBindingId,
+    pub api_major: u32,
+}
+
+impl HostBindingRequirement {
+    pub fn new(id: HostBindingId, api_major: u32) -> Self {
+        Self { id, api_major }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionDescriptor {
     pub id: ExtensionId,
     pub name: String,
@@ -682,6 +731,12 @@ pub struct ExtensionDescriptor {
     pub hooks: Vec<HookDeclaration>,
     pub effects: Vec<EffectDeclaration>,
     pub tools: Vec<ToolDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<ExtensionRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_bindings: Vec<HostBindingRequirement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<ExtensionWorkflowFragment>,
 }
@@ -717,6 +772,9 @@ impl ExtensionDescriptor {
             hooks: Vec::new(),
             effects: Vec::new(),
             tools: Vec::new(),
+            requirements: Vec::new(),
+            artifacts: Vec::new(),
+            host_bindings: Vec::new(),
             workflow: None,
         };
         declaration.validate()?;
@@ -743,12 +801,33 @@ impl ExtensionDescriptor {
         self
     }
 
+    pub fn with_requirement(mut self, requirement: ExtensionRequirement) -> Self {
+        self.requirements.push(requirement);
+        self
+    }
+
+    pub fn with_artifact(mut self, artifact: ArtifactDeclaration) -> Self {
+        self.artifacts.push(artifact);
+        self
+    }
+
+    pub fn with_host_binding(mut self, requirement: HostBindingRequirement) -> Self {
+        self.host_bindings.push(requirement);
+        self
+    }
+
     pub fn with_workflow(mut self, workflow: ExtensionWorkflowFragment) -> Self {
         self.workflow = Some(workflow);
         self
     }
 
     pub fn with_trust(mut self, trust: ExtensionTrust) -> Self {
+        self.trust = trust;
+        self
+    }
+
+    pub fn with_runtime_identity(mut self, source: ExtensionSource, trust: ExtensionTrust) -> Self {
+        self.source = source;
         self.trust = trust;
         self
     }
@@ -763,11 +842,13 @@ impl ExtensionDescriptor {
             id: &'a ExtensionId,
             name: &'a str,
             version: &'a str,
-            source: ExtensionSource,
-            trust: ExtensionTrust,
             hooks: std::collections::BTreeMap<&'a HookId, &'a HookDeclaration>,
             effects: std::collections::BTreeMap<&'a EffectId, &'a EffectDeclaration>,
             tools: std::collections::BTreeMap<&'a ToolId, &'a ToolDeclaration>,
+            requirements: std::collections::BTreeMap<&'a ExtensionId, &'a ExtensionRequirement>,
+            artifacts: std::collections::BTreeMap<&'a ArtifactId, &'a ArtifactDeclaration>,
+            host_bindings:
+                std::collections::BTreeMap<&'a HostBindingId, &'a HostBindingRequirement>,
             workflow: &'a Option<ExtensionWorkflowFragment>,
         }
 
@@ -775,8 +856,6 @@ impl ExtensionDescriptor {
             id: &self.id,
             name: &self.name,
             version: &self.version,
-            source: self.source,
-            trust: self.trust,
             hooks: self.hooks.iter().map(|hook| (&hook.id, hook)).collect(),
             effects: self
                 .effects
@@ -784,6 +863,21 @@ impl ExtensionDescriptor {
                 .map(|effect| (&effect.id, effect))
                 .collect(),
             tools: self.tools.iter().map(|tool| (&tool.id, tool)).collect(),
+            requirements: self
+                .requirements
+                .iter()
+                .map(|requirement| (&requirement.extension_id, requirement))
+                .collect(),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|artifact| (&artifact.id, artifact))
+                .collect(),
+            host_bindings: self
+                .host_bindings
+                .iter()
+                .map(|requirement| (&requirement.id, requirement))
+                .collect(),
             workflow: &self.workflow,
         })
         .expect("extension descriptors are serializable");
@@ -792,6 +886,55 @@ impl ExtensionDescriptor {
 
     pub fn tool(&self, id: &ToolId) -> Option<&ToolDeclaration> {
         self.tools.iter().find(|tool| &tool.id == id)
+    }
+
+    pub fn artifact(&self, id: &ArtifactId) -> Option<&ArtifactDeclaration> {
+        self.artifacts.iter().find(|artifact| &artifact.id == id)
+    }
+
+    pub fn resolve_artifact_targets(
+        &self,
+        arguments: &Value,
+    ) -> Result<Vec<ResolvedArtifactTarget>, DeclarationError> {
+        let mut resolved = Vec::new();
+        for tool in &self.tools {
+            for link in &tool.artifact_links {
+                let artifact_id = link.resolve(arguments)?;
+                let owner = artifact_id.owner();
+                if owner != self.id
+                    && !self
+                        .requirements
+                        .iter()
+                        .any(|requirement| requirement.extension_id == owner)
+                {
+                    return Err(DeclarationError::ForeignArtifactOwner {
+                        artifact_id,
+                        extension_id: self.id.clone(),
+                    });
+                }
+                if owner == self.id {
+                    let declaration = self.artifact(&artifact_id).ok_or_else(|| {
+                        DeclarationError::UnknownArtifact {
+                            tool_id: tool.id.clone(),
+                            artifact_id: artifact_id.clone(),
+                        }
+                    })?;
+                    if !declaration.permits(link.access) {
+                        return Err(DeclarationError::ArtifactAccessMismatch {
+                            tool_id: tool.id.clone(),
+                            artifact_id,
+                            requested: link.access,
+                        });
+                    }
+                }
+                resolved.push(ResolvedArtifactTarget {
+                    effect_id: link.effect_id.clone(),
+                    artifact_id,
+                    access: link.access,
+                });
+            }
+        }
+        Ok(resolved)
     }
 
     pub fn validate(&self) -> Result<(), DeclarationError> {
@@ -816,6 +959,39 @@ impl ExtensionDescriptor {
             "effect",
         )?;
         reject_duplicates(self.tools.iter().map(|tool| tool.id.as_str()), "tool")?;
+        reject_duplicates(
+            self.requirements
+                .iter()
+                .map(|requirement| requirement.extension_id.as_str()),
+            "Extension requirement",
+        )?;
+        reject_duplicates(
+            self.artifacts.iter().map(|artifact| artifact.id.as_str()),
+            "Artifact",
+        )?;
+        reject_duplicates(
+            self.host_bindings
+                .iter()
+                .map(|requirement| requirement.id.as_str()),
+            "host binding requirement",
+        )?;
+        if let Some(requirement) = self
+            .host_bindings
+            .iter()
+            .find(|requirement| requirement.api_major == 0)
+        {
+            return Err(DeclarationError::InvalidHostBindingApiMajor {
+                binding_id: requirement.id.clone(),
+            });
+        }
+        for artifact in &self.artifacts {
+            if artifact.id.owner() != self.id {
+                return Err(DeclarationError::ArtifactOwnerMismatch {
+                    artifact_id: artifact.id.clone(),
+                    extension_id: self.id.clone(),
+                });
+            }
+        }
         for hook in &self.hooks {
             hook.validate()?;
             if hook.id.extension_namespace() != self.id.as_str() {
@@ -855,6 +1031,42 @@ impl ExtensionDescriptor {
                     tool_id: tool.id.clone(),
                     effect_id: effect_id.clone(),
                 });
+            }
+            for link in &tool.artifact_links {
+                let fixed = match &link.selector {
+                    ArtifactTargetSelector::Fixed(artifact_id) => Some(artifact_id),
+                    ArtifactTargetSelector::FromArgument { .. } => None,
+                };
+                let Some(artifact_id) = fixed else {
+                    continue;
+                };
+                let owner = artifact_id.owner();
+                if owner != self.id {
+                    if !self
+                        .requirements
+                        .iter()
+                        .any(|requirement| requirement.extension_id == owner)
+                    {
+                        return Err(DeclarationError::ForeignArtifactOwner {
+                            artifact_id: artifact_id.clone(),
+                            extension_id: self.id.clone(),
+                        });
+                    }
+                    continue;
+                }
+                let declaration = self.artifact(artifact_id).ok_or_else(|| {
+                    DeclarationError::UnknownArtifact {
+                        tool_id: tool.id.clone(),
+                        artifact_id: artifact_id.clone(),
+                    }
+                })?;
+                if !declaration.permits(link.access) {
+                    return Err(DeclarationError::ArtifactAccessMismatch {
+                        tool_id: tool.id.clone(),
+                        artifact_id: artifact_id.clone(),
+                        requested: link.access,
+                    });
+                }
             }
         }
         if let Some(workflow) = &self.workflow {
@@ -954,6 +1166,42 @@ pub enum DeclarationError {
     ReservedExtensionNamespace {
         extension_id: ExtensionId,
     },
+    ArtifactAccessEmpty {
+        artifact_id: ArtifactId,
+    },
+    ArtifactOwnerMismatch {
+        artifact_id: ArtifactId,
+        extension_id: ExtensionId,
+    },
+    UnknownArtifact {
+        tool_id: ToolId,
+        artifact_id: ArtifactId,
+    },
+    ArtifactAccessMismatch {
+        tool_id: ToolId,
+        artifact_id: ArtifactId,
+        requested: ArtifactAccess,
+    },
+    ForeignArtifactOwner {
+        artifact_id: ArtifactId,
+        extension_id: ExtensionId,
+    },
+    UndeclaredArtifactEffect {
+        tool_id: ToolId,
+        effect_id: EffectId,
+    },
+    InvalidArtifactSelector {
+        pointer: String,
+    },
+    InvalidArtifactTarget {
+        value: String,
+    },
+    InvalidHostBindingApiMajor {
+        binding_id: HostBindingId,
+    },
+    InvalidExtensionApiMajor {
+        extension_id: ExtensionId,
+    },
 }
 
 impl Display for DeclarationError {
@@ -1021,6 +1269,56 @@ impl Display for DeclarationError {
             Self::ReservedExtensionNamespace { extension_id } => write!(
                 formatter,
                 "extension namespace `{extension_id}` is reserved for builtin AgentLIBRE hooks"
+            ),
+            Self::ArtifactAccessEmpty { artifact_id } => {
+                write!(formatter, "Artifact `{artifact_id}` declares no access")
+            }
+            Self::ArtifactOwnerMismatch {
+                artifact_id,
+                extension_id,
+            } => write!(
+                formatter,
+                "Artifact `{artifact_id}` owner must match Extension `{extension_id}`"
+            ),
+            Self::UnknownArtifact {
+                tool_id,
+                artifact_id,
+            } => write!(
+                formatter,
+                "Tool `{tool_id}` references unknown Artifact `{artifact_id}`"
+            ),
+            Self::ArtifactAccessMismatch {
+                tool_id,
+                artifact_id,
+                requested,
+            } => write!(
+                formatter,
+                "Tool `{tool_id}` requests {requested:?} for Artifact `{artifact_id}` outside its declaration"
+            ),
+            Self::ForeignArtifactOwner {
+                artifact_id,
+                extension_id,
+            } => write!(
+                formatter,
+                "Extension `{extension_id}` has no explicit requirement for foreign Artifact `{artifact_id}`"
+            ),
+            Self::UndeclaredArtifactEffect { tool_id, effect_id } => write!(
+                formatter,
+                "Tool `{tool_id}` links Artifact through undeclared Effect `{effect_id}`"
+            ),
+            Self::InvalidArtifactSelector { pointer } => {
+                write!(formatter, "invalid Artifact argument selector `{pointer}`")
+            }
+            Self::InvalidArtifactTarget { value } => {
+                write!(formatter, "invalid selected Artifact ID `{value}`")
+            }
+            Self::InvalidHostBindingApiMajor { binding_id } => write!(
+                formatter,
+                "host binding `{binding_id}` must require a non-zero API major"
+            ),
+            Self::InvalidExtensionApiMajor { extension_id } => write!(
+                formatter,
+                "Extension `{extension_id}` must declare a non-zero API major"
             ),
         }
     }

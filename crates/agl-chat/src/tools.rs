@@ -1,11 +1,17 @@
+use std::fmt::{self, Display, Formatter};
 use std::path::Path;
+use std::sync::Arc;
 
-use agl_ids::RunId;
-use agl_kernel::{
-    ExtensionDescriptor, ExtensionRegistration, HookBinding, ToolBinding, ToolHandler, ToolId,
+use agl_extension::package::ExtensionPackageBuilder;
+use agl_extension::{
+    Extension, ExtensionBindings, ExtensionDefinition, ExtensionHost, ExtensionHostBuilder,
+    StaticExtensionFactory,
 };
-use agl_kernel::{ToolCatalog, ToolCatalogError, ToolRuntime};
-use anyhow::{Context, Result};
+use agl_ids::RunId;
+use agl_kernel::{HostBindingId, HostBindingRequirement, ToolBinding, ToolHandler, ToolId};
+use agl_kernel::{ToolCatalog, ToolRuntime};
+use agl_runtime::{ExtensionCompositionInput, StaticExtensionRegistry, compose_extension_catalog};
+use anyhow::Result;
 
 pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub core_tools: &'a agl_core_tools::CoreTools,
@@ -19,66 +25,110 @@ pub(crate) struct ChatToolRuntimeConfig<'a> {
 }
 
 pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
-    let mut catalog = ToolCatalog::new();
-    catalog
-        .register(agl_core_tools::guards::declaration())
-        .context("failed to register builtin core guard extension")?;
-    register_chat_tool_extensions(&mut catalog)?;
-    Ok(catalog)
+    let shared: Arc<dyn ToolHandler> = Arc::new(UnavailableToolHandler);
+    let host = product_host_builder()
+        .binding(
+            host_binding_id(agl_core_tools::guards::EXTENSION_ID),
+            1,
+            agl_core_tools::guards::CoreGuards::new(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::cron::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::fs::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::matrix::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::memory::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::notes::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::permissions::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::process::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::repo::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::skills::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::store::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_host_tools::screen::EXTENSION_ID),
+            1,
+            shared.clone(),
+        )
+        .shared_tool_handler(
+            host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+            1,
+            shared,
+        )
+        .build();
+    let composed = compose_chat_product(host)?;
+    Ok(composed.runtime().catalog().clone())
 }
 
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
-    let mut runtime = ToolRuntime::new();
-    let guards = agl_core_tools::guards::CoreGuards::new();
-    let hook_bindings = guards
-        .declaration()
-        .hooks
-        .iter()
-        .map(|hook| HookBinding::new(hook.id.clone(), guards.clone()))
-        .collect::<Vec<_>>();
-    runtime
-        .register_extension(
-            ExtensionRegistration::new(guards.declaration().clone(), [])
-                .with_hook_bindings(hook_bindings),
+    let mut host = product_host_builder()
+        .binding(
+            host_binding_id(agl_core_tools::guards::EXTENSION_ID),
+            1,
+            agl_core_tools::guards::CoreGuards::new(),
         )
-        .context("failed to register builtin core guard extension")?;
-
-    register_extension(
-        &mut runtime,
-        agl_core_tools::fs::declaration(),
-        FS_TOOL_IDS,
-        config.core_tools.clone(),
-        "core filesystem",
-    )?;
-
-    register_extension(
-        &mut runtime,
-        agl_core_tools::cron::declaration(),
-        CRON_TOOL_IDS,
-        agl_core_tools::CronTools::new(config.store_root),
-        "builtin cron",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_core_tools::matrix::declaration(),
-        MATRIX_TOOL_IDS,
-        agl_core_tools::MatrixTools::new(config.store_root),
-        "builtin Matrix",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_core_tools::memory::declaration(),
-        MEMORY_TOOL_IDS,
-        agl_core_tools::MemoryTools::new(config.store_root),
-        "builtin memory",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_core_tools::notes::declaration(),
-        NOTES_TOOL_IDS,
-        agl_core_tools::NotesTools::new(config.store_root),
-        "builtin notes",
-    )?;
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::fs::EXTENSION_ID),
+            1,
+            Arc::new(config.core_tools.clone()),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::cron::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::CronTools::new(config.store_root)),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::matrix::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::MatrixTools::new(config.store_root)),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::memory::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::MemoryTools::new(config.store_root)),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::notes::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::NotesTools::new(config.store_root)),
+        );
     let permission_tools = agl_core_tools::PermissionTools::new(config.store_root)
         .with_runtime_status(config.permission_status);
     let permission_tools = config
@@ -90,103 +140,107 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
                 .with_terminal_endpoint(process.terminal_endpoint())
         })
         .unwrap_or(permission_tools);
-    register_extension(
-        &mut runtime,
-        agl_core_tools::permissions::declaration(),
-        PERMISSION_TOOL_IDS,
-        permission_tools,
-        "builtin permission",
-    )?;
-    if let Some(process_tools) = config.process_tools {
-        register_extension(
-            &mut runtime,
-            agl_core_tools::process::declaration(),
-            agl_core_tools::PROCESS_TOOL_IDS,
-            process_tools,
-            "builtin process",
-        )?;
-    } else {
-        register_extension(
-            &mut runtime,
-            agl_core_tools::process::declaration(),
-            agl_core_tools::PROCESS_TOOL_IDS,
-            UnavailableProcessHandler,
-            "unavailable builtin process",
-        )?;
-    }
-    register_extension(
-        &mut runtime,
-        agl_core_tools::repo::declaration(),
-        REPO_TOOL_IDS,
-        agl_core_tools::RepoTools::new(config.workspace_root),
-        "builtin repo",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_core_tools::store::declaration(),
-        STORE_TOOL_IDS,
-        agl_core_tools::StoreTools::new(config.store_root),
-        "builtin store",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_core_tools::skills::declaration(),
-        SKILL_TOOL_IDS,
-        agl_host_tools::SkillTools::new(
-            config.workspace_root,
-            config.trust_store_path,
-            env!("CARGO_PKG_VERSION"),
-        ),
-        "builtin skill",
-    )?;
-    register_extension(
-        &mut runtime,
-        agl_host_tools::screen::declaration(),
-        SCREEN_TOOL_IDS,
-        agl_host_tools::ScreenTools::new(config.store_root, config.screen_admitted_run),
-        "builtin screen",
-    )?;
-    register_extension(
-        &mut runtime,
-        crate::delegation_contract::delegation_extension(),
-        &[crate::delegation_contract::AGENT_DELEGATE_TOOL_ID],
-        config
-            .delegation_handler
-            .unwrap_or_else(crate::delegation::DelegationHandler::disabled),
-        "builtin delegation",
-    )?;
+    host = host
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::permissions::EXTENSION_ID),
+            1,
+            Arc::new(permission_tools),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::process::EXTENSION_ID),
+            1,
+            config.process_tools.map_or_else(
+                || Arc::new(UnavailableToolHandler) as Arc<dyn ToolHandler>,
+                |tools| Arc::new(tools) as Arc<dyn ToolHandler>,
+            ),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::repo::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::RepoTools::new(config.workspace_root)),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::store::EXTENSION_ID),
+            1,
+            Arc::new(agl_core_tools::StoreTools::new(config.store_root)),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_core_tools::skills::EXTENSION_ID),
+            1,
+            Arc::new(agl_host_tools::SkillTools::new(
+                config.workspace_root,
+                config.trust_store_path,
+                env!("CARGO_PKG_VERSION"),
+            )),
+        )
+        .shared_tool_handler(
+            host_binding_id(agl_host_tools::screen::EXTENSION_ID),
+            1,
+            Arc::new(agl_host_tools::ScreenTools::new(
+                config.store_root,
+                config.screen_admitted_run,
+            )),
+        )
+        .shared_tool_handler(
+            host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+            1,
+            Arc::new(
+                config
+                    .delegation_handler
+                    .unwrap_or_else(crate::delegation::DelegationHandler::disabled),
+            ),
+        );
 
-    Ok(runtime)
+    Ok(compose_chat_product(host.build())?.into_runtime())
 }
 
-fn register_chat_tool_extensions(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    for declaration in chat_tool_extension_declarations() {
-        catalog.register(declaration)?;
+fn compose_chat_product(host: ExtensionHost) -> Result<agl_runtime::RuntimeExtensionCatalog> {
+    let mut registry = StaticExtensionRegistry::new();
+    let mut input = ExtensionCompositionInput::builder().host(host);
+    for factory in chat_product_factories() {
+        let definition = factory.definition();
+        input = input
+            .package(ExtensionPackageBuilder::build_to_memory(
+                definition.clone(),
+            )?)
+            .selected(definition.id.clone(), true);
+        registry.register(factory)?;
     }
-    Ok(())
+    Ok(compose_extension_catalog(
+        input.registry(registry).build()?,
+    )?)
 }
 
-pub(crate) fn chat_tool_extension_declarations() -> Vec<ExtensionDescriptor> {
+pub(crate) fn chat_product_factories() -> Vec<StaticExtensionFactory> {
     vec![
-        agl_core_tools::cron::declaration(),
-        agl_core_tools::fs::declaration(),
-        agl_core_tools::matrix::declaration(),
-        agl_core_tools::memory::declaration(),
-        agl_core_tools::notes::declaration(),
-        agl_core_tools::permissions::declaration(),
-        agl_core_tools::process::declaration(),
-        agl_core_tools::repo::declaration(),
-        agl_core_tools::skills::declaration(),
-        agl_core_tools::store::declaration(),
-        agl_host_tools::screen::declaration(),
-        crate::delegation_contract::delegation_extension(),
+        agl_core_tools::guards_extension_factory(),
+        agl_core_tools::cron_extension_factory(),
+        agl_core_tools::fs_extension_factory(),
+        agl_core_tools::matrix_extension_factory(),
+        agl_core_tools::memory_extension_factory(),
+        agl_core_tools::notes_extension_factory(),
+        agl_core_tools::permissions_extension_factory(),
+        agl_core_tools::process_extension_factory(),
+        agl_core_tools::repo_extension_factory(),
+        agl_core_tools::skills_extension_factory(),
+        agl_core_tools::store_extension_factory(),
+        agl_host_tools::screen_extension_factory(),
+        StaticExtensionFactory::for_extension::<DelegationExtension>(),
     ]
 }
 
-#[derive(Clone, Copy)]
-struct UnavailableProcessHandler;
+fn product_host_builder() -> ExtensionHostBuilder {
+    ExtensionHost::builder()
+}
 
-impl ToolHandler for UnavailableProcessHandler {
+fn host_binding_id(extension_id: &str) -> HostBindingId {
+    HostBindingId::new(extension_id).expect("Extension ID is a valid host binding ID")
+}
+
+#[derive(Clone, Copy)]
+struct UnavailableToolHandler;
+
+impl ToolHandler for UnavailableToolHandler {
     fn dispatch(
         &self,
         _context: agl_kernel::ToolDispatchContext,
@@ -198,104 +252,51 @@ impl ToolHandler for UnavailableProcessHandler {
     }
 }
 
-fn register_extension<H>(
-    runtime: &mut ToolRuntime,
-    descriptor: ExtensionDescriptor,
-    tool_ids: &[&str],
-    handler: H,
-    label: &str,
-) -> Result<()>
-where
-    H: ToolHandler + Clone + 'static,
-{
-    let bindings = tool_ids
-        .iter()
-        .map(|tool_id| {
-            ToolId::new(*tool_id).map(|tool_id| ToolBinding::new(tool_id, handler.clone()))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    runtime
-        .register_extension(ExtensionRegistration::new(descriptor, bindings))
-        .with_context(|| format!("failed to register {label} extension"))
+struct DelegationExtension;
+
+#[derive(Debug)]
+struct DelegationBindError;
+
+impl Display for DelegationBindError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("delegation host binding is absent or has the wrong type")
+    }
 }
 
-const FS_TOOL_IDS: &[&str] = &[
-    agl_core_tools::FS_READ_TOOL_ID,
-    agl_core_tools::FS_LIST_TOOL_ID,
-    agl_core_tools::FS_SEARCH_TOOL_ID,
-    agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
-];
+impl std::error::Error for DelegationBindError {}
 
-const CRON_TOOL_IDS: &[&str] = &[
-    agl_core_tools::CRON_LIST_TOOL_ID,
-    agl_core_tools::CRON_SHOW_TOOL_ID,
-    agl_core_tools::CRON_HISTORY_TOOL_ID,
-    agl_core_tools::CRON_PREFLIGHT_TOOL_ID,
-    agl_core_tools::CRON_ADD_TOOL_ID,
-    agl_core_tools::CRON_UPDATE_TOOL_ID,
-    agl_core_tools::CRON_DELETE_TOOL_ID,
-    agl_core_tools::CRON_ENABLE_TOOL_ID,
-    agl_core_tools::CRON_DISABLE_TOOL_ID,
-    agl_core_tools::CRON_RUN_TOOL_ID,
-    agl_core_tools::CRON_TICK_TOOL_ID,
-];
+impl Extension for DelegationExtension {
+    type BindError = DelegationBindError;
 
-const MATRIX_TOOL_IDS: &[&str] = &[
-    agl_core_tools::MATRIX_OUTBOX_STATUS_TOOL_ID,
-    agl_core_tools::MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
-];
+    fn definition() -> ExtensionDefinition {
+        ExtensionDefinition::from_descriptor(
+            1,
+            crate::delegation_contract::delegation_extension().with_host_binding(
+                HostBindingRequirement::new(
+                    host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+                    1,
+                ),
+            ),
+        )
+        .expect("delegation Extension definition is valid")
+    }
 
-const MEMORY_TOOL_IDS: &[&str] = &[
-    agl_core_tools::MEMORY_SEARCH_TOOL_ID,
-    agl_core_tools::MEMORY_LIST_TOOL_ID,
-    agl_core_tools::MEMORY_SUGGEST_TOOL_ID,
-    agl_core_tools::MEMORY_ADD_TOOL_ID,
-    agl_core_tools::MEMORY_APPROVE_TOOL_ID,
-    agl_core_tools::MEMORY_REJECT_TOOL_ID,
-];
-
-const NOTES_TOOL_IDS: &[&str] = &[
-    agl_core_tools::NOTES_ADD_TOOL_ID,
-    agl_core_tools::NOTES_SEARCH_TOOL_ID,
-    agl_core_tools::NOTES_SHOW_TOOL_ID,
-    agl_core_tools::NOTES_UPDATE_TOOL_ID,
-    agl_core_tools::NOTES_LINK_TOOL_ID,
-    agl_core_tools::NOTES_DELETE_TOOL_ID,
-    agl_core_tools::NOTES_REMEMBER_TOOL_ID,
-];
-
-const PERMISSION_TOOL_IDS: &[&str] = &[
-    agl_core_tools::PERMISSIONS_STATUS_TOOL_ID,
-    agl_core_tools::PERMISSIONS_REQUEST_TOOL_ID,
-    agl_core_tools::PERMISSIONS_GRANT_TOOL_ID,
-    agl_core_tools::PERMISSIONS_REVOKE_TOOL_ID,
-];
-
-const REPO_TOOL_IDS: &[&str] = &[
-    agl_core_tools::REPO_STATUS_TOOL_ID,
-    agl_core_tools::REPO_EXPORT_PROFILE_TOOL_ID,
-    agl_core_tools::REPO_HOOKS_STATUS_TOOL_ID,
-    agl_core_tools::REPO_INIT_TOOL_ID,
-    agl_core_tools::REPO_IMPORT_PROFILE_TOOL_ID,
-    agl_core_tools::REPO_INSTALL_HOOKS_TOOL_ID,
-];
-
-const STORE_TOOL_IDS: &[&str] = &[
-    agl_core_tools::STORE_STATUS_TOOL_ID,
-    agl_core_tools::STORE_EXPORT_TOOL_ID,
-    agl_core_tools::STORE_MIGRATE_TOOL_ID,
-];
-
-const SKILL_TOOL_IDS: &[&str] = &[
-    agl_core_tools::SKILL_LIST_TOOL_ID,
-    agl_core_tools::SKILL_INSPECT_TOOL_ID,
-    agl_core_tools::SKILL_STATUS_TOOL_ID,
-    agl_core_tools::SKILL_VERIFY_TOOL_ID,
-    agl_core_tools::SKILL_TRUST_TOOL_ID,
-    agl_core_tools::SKILL_REVOKE_TOOL_ID,
-];
-
-const SCREEN_TOOL_IDS: &[&str] = &[agl_host_tools::SCREEN_CAPTURE_TOOL_ID];
+    fn bind(host: &ExtensionHost) -> Result<ExtensionBindings, Self::BindError> {
+        let handler = host
+            .shared_tool_handler(&host_binding_id(
+                crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID,
+            ))
+            .ok_or(DelegationBindError)?;
+        Ok(ExtensionBindings::new(
+            [ToolBinding::from_shared(
+                ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID)
+                    .expect("delegation Tool ID is valid"),
+                handler.clone(),
+            )],
+            [],
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

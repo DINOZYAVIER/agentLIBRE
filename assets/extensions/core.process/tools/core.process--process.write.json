@@ -1,0 +1,106 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "at_most_once",
+  "description": "Write bounded bytes or EOF to an owned live execution.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.write",
+  "input_schema": {
+    "$defs": {
+      "BytesArg": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "maxLength": 87384,
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      },
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "bytes": {
+        "$ref": "#/$defs/BytesArg"
+      },
+      "eof": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "execution_id": {
+        "maxLength": 41,
+        "minLength": 41,
+        "type": "string"
+      }
+    },
+    "required": [
+      "execution_id",
+      "bytes"
+    ],
+    "title": "WriteArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "eof": {
+        "type": "boolean"
+      },
+      "execution_id": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "execution_id",
+      "eof"
+    ],
+    "title": "WriteOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.control"
+  ]
+}

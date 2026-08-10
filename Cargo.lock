@@ -77,6 +77,7 @@ dependencies = [
 name = "agl-artifact"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-kernel",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -103,6 +104,7 @@ dependencies = [
  "agl-core-tools",
  "agl-events",
  "agl-exec",
+ "agl-extension",
  "agl-function",
  "agl-host-tools",
  "agl-ids",
@@ -141,6 +143,7 @@ dependencies = [
  "agl-daemon",
  "agl-events",
  "agl-exec",
+ "agl-extension",
  "agl-function",
  "agl-ids",
  "agl-inference",
@@ -210,6 +213,7 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-cron",
  "agl-exec",
+ "agl-extension",
  "agl-ids",
  "agl-kernel",
  "agl-memory",
@@ -305,11 +309,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-extension"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-artifact",
+ "agl-kernel",
+ "agl-package",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "agl-function"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-assets",
  "agl-config",
+ "agl-extension",
  "agl-kernel",
  "agl-model",
  "agl-package",
@@ -320,23 +337,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-hooks"
-version = "1.0.0-alpha.12"
-dependencies = [
- "agl-kernel",
- "anyhow",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
 name = "agl-host-tools"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-content",
  "agl-core-tools",
  "agl-exec",
+ "agl-extension",
  "agl-ids",
  "agl-kernel",
  "agl-process",
@@ -570,9 +577,11 @@ dependencies = [
 name = "agl-runtime"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-config",
  "agl-exec",
+ "agl-extension",
  "agl-function",
  "agl-ids",
  "agl-kernel",
@@ -587,6 +596,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
  "toml",
  "tracing-appender",
  "tracing-subscriber",

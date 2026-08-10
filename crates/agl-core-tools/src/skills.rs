@@ -5,9 +5,7 @@ use agl_kernel::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{ToolCatalog, ToolCatalogError};
-
-pub const PROVIDER_ID: &str = "core.skill";
+pub const EXTENSION_ID: &str = "core.skill";
 pub const SKILL_LIST_TOOL_ID: &str = "core.skill:list";
 pub const SKILL_INSPECT_TOOL_ID: &str = "core.skill:inspect";
 pub const SKILL_STATUS_TOOL_ID: &str = "core.skill:status";
@@ -94,7 +92,7 @@ fn default_true() -> bool {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin skill extension ID is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin skill extension ID is valid"),
         "Skill Host Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -136,10 +134,6 @@ pub fn declaration() -> ExtensionDescriptor {
         [EffectId::skill_trust()],
     ))
     .with_effect(EffectDeclaration::for_standard(EffectId::skill_trust()).unwrap())
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(

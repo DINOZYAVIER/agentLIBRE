@@ -151,7 +151,7 @@ struct RuntimeExtensionExtensionBinding {
     package_digest: String,
     source_tier: ArtifactSourceTier,
     source_id: String,
-    implementation: agl_package::ExtensionImplementation,
+    api_major: u32,
     declaration_digest: String,
     extension_version: String,
     runtime_generation_id: String,
@@ -233,6 +233,7 @@ struct RuntimeResolutionRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     model_plan: Option<&'a RuntimePlanSet>,
     effective_inference_config: &'a ResolvedInferenceConfig,
+    extension_catalog_digest: agl_kernel::CatalogDigest,
     extension_bindings: &'a BTreeMap<String, RuntimeExtensionExtensionBinding>,
     skills: Vec<RuntimeResolutionSkillIdentity>,
     admission: RuntimeResolutionAdmissionPhase,
@@ -1256,6 +1257,14 @@ impl InferenceSession {
             },
             model_plan: self.automatic_runtime_plan.as_ref(),
             effective_inference_config: &self.inference_config,
+            extension_catalog_digest: agl_kernel::CatalogDigest::from_admitted(
+                crate::tools::chat_product_factories()
+                    .iter()
+                    .map(|factory| factory.definition())
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(agl_extension::ExtensionDefinition::descriptor),
+            ),
             extension_bindings: &self.extension_bindings,
             skills,
             admission: RuntimeResolutionAdmissionPhase {
@@ -2247,23 +2256,23 @@ impl Default for RuntimeToolBoundary<'_> {
             authority_ceiling: None,
             delegation_enabled: false,
             selected_extensions: [
-                ExtensionId::new(agl_core_tools::fs::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::fs::EXTENSION_ID)
                     .expect("core.workspace Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::process::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::process::EXTENSION_ID)
                     .expect("core.process Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::cron::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::cron::EXTENSION_ID)
                     .expect("core.cron Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::memory::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::memory::EXTENSION_ID)
                     .expect("core.memory Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::notes::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::notes::EXTENSION_ID)
                     .expect("core.note Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::permissions::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::permissions::EXTENSION_ID)
                     .expect("core.permission Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::repo::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::repo::EXTENSION_ID)
                     .expect("core.repo Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::store::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::store::EXTENSION_ID)
                     .expect("core.store Extension ID is valid"),
-                ExtensionId::new(agl_core_tools::skills::PROVIDER_ID)
+                ExtensionId::new(agl_core_tools::skills::EXTENSION_ID)
                     .expect("core.skill Extension ID is valid"),
             ]
             .into_iter()
@@ -2687,7 +2696,7 @@ fn core_tool_ids(selected_extensions: &BTreeSet<ExtensionId>) -> Result<BTreeSet
     let mut ids = Vec::new();
     if selected_extensions
         .iter()
-        .any(|id| id.as_str() == agl_core_tools::fs::PROVIDER_ID)
+        .any(|id| id.as_str() == agl_core_tools::fs::EXTENSION_ID)
     {
         ids.extend([
             agl_core_tools::FS_READ_TOOL_ID,
@@ -2698,7 +2707,7 @@ fn core_tool_ids(selected_extensions: &BTreeSet<ExtensionId>) -> Result<BTreeSet
     }
     if selected_extensions
         .iter()
-        .any(|id| id.as_str() == agl_core_tools::process::PROVIDER_ID)
+        .any(|id| id.as_str() == agl_core_tools::process::EXTENSION_ID)
     {
         ids.extend([
             agl_core_tools::PROCESS_EXEC_TOOL_ID,
@@ -2735,9 +2744,9 @@ fn runtime_function_extensions(function: &RuntimeFunction) -> Result<Vec<Extensi
 fn bind_runtime_extensions(
     bundle: &ResolvedRuntimeBundle,
 ) -> Result<BTreeMap<String, RuntimeExtensionExtensionBinding>> {
-    let extensions = crate::tools::chat_tool_extension_declarations()
+    let factories = crate::tools::chat_product_factories()
         .into_iter()
-        .map(|extension| (extension.id.as_str().to_owned(), extension))
+        .map(|factory| (factory.key().extension_id.as_str().to_owned(), factory))
         .collect::<BTreeMap<_, _>>();
     let mut bindings = BTreeMap::new();
     for (extension_id, extension) in &bundle.extensions {
@@ -2753,49 +2762,44 @@ fn bind_runtime_extensions(
             node.candidate.source_id,
             node.candidate.tier
         );
-        match extension_id.as_str() {
-            "core.workspace" | "core.process" => {}
-            _ => {
-                bail!(
-                    "Extension `{extension_id}` has no exact executable extension in this runtime; no Tool effect occurred"
-                )
-            }
-        };
-        ensure!(
-            extension.manifest.implementation == agl_package::ExtensionImplementation::RustStatic,
-            "Extension `{extension_id}` must use the rust-static implementation; no Tool effect occurred"
-        );
-        let artifact_version = extension.manifest.artifact.version.to_string();
-        let implementation = extension.manifest.implementation.clone();
-        let extension = extensions.get(extension_id).with_context(|| {
+        let package_definition = extension.package.definition()?;
+        let factory = factories.get(extension_id).with_context(|| {
             format!(
-                "Extension `{extension_id}` has no registered executable extension; no Tool effect occurred"
+                "Extension `{extension_id}` has no compiled product factory; no Tool effect occurred"
             )
         })?;
         ensure!(
-            extension.source == ExtensionSource::Builtin
-                && extension.trust == ExtensionTrust::TrustedByBinary,
+            package_definition.id.as_str() == extension_id
+                && package_definition.api_major == factory.key().api_major
+                && package_definition.digest() == factory.key().declaration_digest,
+            "Extension `{extension_id}` package has no exact compiled factory key; no Tool effect occurred"
+        );
+        let authored = factory.definition();
+        ensure!(
+            authored.descriptor().source == ExtensionSource::Builtin
+                && authored.descriptor().trust == ExtensionTrust::TrustedByBinary,
             "Extension `{extension_id}` extension is not trusted by the active binary; no Tool effect occurred"
         );
-        let mut tools = extension
+        let mut tools = authored
+            .descriptor()
             .tools
             .iter()
             .map(|tool| tool.id.as_str().to_owned())
             .collect::<Vec<_>>();
         tools.sort();
-        let mut effects = extension.effects.clone();
+        let mut effects = authored.descriptor().effects.clone();
         effects.sort_by(|left, right| left.id.cmp(&right.id));
         bindings.insert(
             extension_id.clone(),
             RuntimeExtensionExtensionBinding {
                 artifact_reference: node.key(),
-                artifact_version,
+                artifact_version: node.envelope.version.to_string(),
                 package_digest: node.package_digest.to_string(),
                 source_tier: node.candidate.tier,
                 source_id: node.candidate.source_id.to_string(),
-                implementation,
-                declaration_digest: extension.digest().to_string(),
-                extension_version: extension.version.clone(),
+                api_major: authored.api_major,
+                declaration_digest: authored.digest().to_string(),
+                extension_version: authored.version.clone(),
                 runtime_generation_id: bundle.runtime.generation_id.clone(),
                 runtime_executable_digest: bundle.runtime.executable_digest.clone(),
                 tools,

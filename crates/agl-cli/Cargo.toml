@@ -10,6 +10,10 @@ autobins = false
 name = "agl"
 path = "src/main.rs"
 
+[[bin]]
+name = "cargo-agl"
+path = "src/cargo_agl.rs"
+
 [dependencies]
 agl-app.workspace = true
 agl-package.workspace = true
@@ -17,6 +21,7 @@ agl-assets.workspace = true
 agl-chat.workspace = true
 agl-kernel.workspace = true
 agl-events.workspace = true
+agl-extension.workspace = true
 agl-client.workspace = true
 agl-config.workspace = true
 agl-content.workspace = true

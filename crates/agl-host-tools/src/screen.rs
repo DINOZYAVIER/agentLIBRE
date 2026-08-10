@@ -23,7 +23,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-pub const PROVIDER_ID: &str = "host.screen";
+pub const EXTENSION_ID: &str = "host.screen";
 pub const SCREEN_CAPTURE_TOOL_ID: &str = "host.screen:capture";
 
 const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
@@ -197,7 +197,7 @@ pub fn extension_available() -> bool {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin screen extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin screen extension id is valid"),
         "Screen Tools",
         env!("CARGO_PKG_VERSION"),
     )

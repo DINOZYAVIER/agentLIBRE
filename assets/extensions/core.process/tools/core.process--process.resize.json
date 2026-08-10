@@ -1,0 +1,108 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "at_most_once",
+  "description": "Resize an owned live PTY.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.resize",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "columns": {
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "execution_id": {
+        "maxLength": 41,
+        "minLength": 41,
+        "type": "string"
+      },
+      "rows": {
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "execution_id",
+      "columns",
+      "rows"
+    ],
+    "title": "ResizeArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "TerminalSizeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "execution_id": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "terminal_size": {
+        "$ref": "#/$defs/TerminalSizeArgs"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "execution_id",
+      "terminal_size"
+    ],
+    "title": "ResizeOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.control"
+  ]
+}

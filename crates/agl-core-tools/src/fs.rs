@@ -9,7 +9,7 @@ mod list;
 
 use list::{ListArgs, ListQueryRegistry};
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 use agl_kernel::{
     EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind,
     ToolDeclaration, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolResult,
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub const PROVIDER_ID: &str = "core.workspace";
+pub const EXTENSION_ID: &str = "core.workspace";
 pub const FS_READ_TOOL_ID: &str = "core.workspace:fs.read";
 pub const FS_LIST_TOOL_ID: &str = "core.workspace:fs.list";
 pub const FS_SEARCH_TOOL_ID: &str = "core.workspace:fs.search";
@@ -806,9 +806,9 @@ fn requested_read_only_path<'a>(tool_id: &str, arguments: &'a Value) -> Option<&
 
 pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("core tool extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("core tool extension id is valid"),
         "Core Tools",
-        env!("CARGO_PKG_VERSION"),
+        "1.1.0",
     )
     .expect("core tool declaration is valid")
     .with_tool(read_only_action::<ReadArgs, ReadOutput>(
@@ -847,10 +847,6 @@ pub fn declaration() -> ExtensionDescriptor {
     crate::with_observation_workflow(
         descriptor.with_effect(EffectDeclaration::for_standard(EffectId::repo_files()).unwrap()),
     )
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<I: JsonSchema, O: JsonSchema>(

@@ -1,0 +1,21 @@
+{
+  "entries": [
+    {
+      "id": "core.workspace:fs.apply_patch",
+      "path": "tools/core.workspace--fs.apply_patch.json"
+    },
+    {
+      "id": "core.workspace:fs.list",
+      "path": "tools/core.workspace--fs.list.json"
+    },
+    {
+      "id": "core.workspace:fs.read",
+      "path": "tools/core.workspace--fs.read.json"
+    },
+    {
+      "id": "core.workspace:fs.search",
+      "path": "tools/core.workspace--fs.search.json"
+    }
+  ],
+  "schema": "agentlibre.extension-tool-index/v1"
+}

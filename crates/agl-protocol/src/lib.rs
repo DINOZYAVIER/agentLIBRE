@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
+mod extension;
 mod surface;
+pub use extension::*;
 pub use surface::*;
 
 use agl_content::Content;

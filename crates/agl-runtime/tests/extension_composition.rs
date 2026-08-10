@@ -34,6 +34,28 @@ impl Extension for ClockExtension {
     }
 
     fn bind(_host: &ExtensionHost) -> Result<ExtensionBindings, Self::BindError> {
+        Ok(ExtensionBindings::empty())
+    }
+}
+
+struct CountedExtension;
+
+impl Extension for CountedExtension {
+    type BindError = Infallible;
+
+    fn definition() -> ExtensionDefinition {
+        ExtensionDefinition::builder(
+            ExtensionId::new("example.counted").unwrap(),
+            "Counted",
+            "1.0.0",
+            1,
+        )
+        .require_host_binding(HostBindingId::new("host.clock").unwrap(), 1)
+        .build()
+        .unwrap()
+    }
+
+    fn bind(_host: &ExtensionHost) -> Result<ExtensionBindings, Self::BindError> {
         BINDS.fetch_add(1, Ordering::SeqCst);
         Ok(ExtensionBindings::empty())
     }
@@ -55,7 +77,11 @@ impl Extension for MissingToolExtension {
             ToolDeclaration::new(
                 ToolId::new("example.missing-tool:run").unwrap(),
                 "Run",
-                json!({"type": "object", "additionalProperties": false}),
+                json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false
+                }),
                 OperationKind::Read,
             )
             .unwrap(),
@@ -76,7 +102,7 @@ impl Extension for WrongMajorClockExtension {
 
     fn definition() -> ExtensionDefinition {
         ExtensionDefinition::builder(
-            ExtensionId::new("example.clock").unwrap(),
+            ExtensionId::new("example.counted").unwrap(),
             "Clock",
             "1.0.0",
             2,
@@ -115,29 +141,29 @@ fn production_composer_matches_exact_factory_key_and_binds_once_per_generation()
     let host = ExtensionHost::builder()
         .binding(HostBindingId::new("host.clock").unwrap(), 1, ())
         .build();
-    let composed = compose_extension_catalog(input::<ClockExtension>(true, host)).unwrap();
+    let composed = compose_extension_catalog(input::<CountedExtension>(true, host)).unwrap();
 
     assert_eq!(BINDS.load(Ordering::SeqCst), 1);
     assert_eq!(composed.admitted().len(), 1);
-    assert_eq!(composed.admitted()[0].id.as_str(), "example.clock");
+    assert_eq!(composed.admitted()[0].id.as_str(), "example.counted");
 
     let error = compose_extension_catalog(
         ExtensionCompositionInput::builder()
             .registry(
                 StaticExtensionRegistry::from_factories([StaticExtensionFactory::for_extension::<
-                    ClockExtension,
+                    CountedExtension,
                 >()])
                 .unwrap(),
             )
             .package(package::<WrongMajorClockExtension>())
-            .selected(ExtensionId::new("example.clock").unwrap(), true)
+            .selected(ExtensionId::new("example.counted").unwrap(), true)
             .host(ExtensionHost::empty())
             .build()
             .unwrap(),
     )
     .unwrap_err();
     assert!(
-        matches!(error, ExtensionLoadError::FactoryKeyMismatch { extension_id, .. } if extension_id == ExtensionId::new("example.clock").unwrap())
+        matches!(error, ExtensionLoadError::FactoryKeyMismatch { extension_id, .. } if extension_id == ExtensionId::new("example.counted").unwrap())
     );
 }
 
@@ -193,8 +219,5 @@ fn turn_snapshot_is_frozen_and_catalog_digest_includes_runtime_identity() {
         [ExtensionId::new("example.clock").unwrap()]
     );
     assert_ne!(turn.catalog_digest(), second.catalog_digest());
-    assert_eq!(
-        turn.extensions()[0].declaration_digest,
-        second.admitted()[0].declaration_digest
-    );
+    assert_eq!(turn.extensions()[0].digest(), second.admitted()[0].digest());
 }

@@ -1,0 +1,98 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "at_most_once",
+  "description": "Request graceful or immediate termination of an owned process tree.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.kill",
+  "input_schema": {
+    "$defs": {
+      "KillModeArg": {
+        "enum": [
+          "graceful",
+          "immediate"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "execution_id": {
+        "maxLength": 41,
+        "minLength": 41,
+        "type": "string"
+      },
+      "mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/KillModeArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "execution_id"
+    ],
+    "title": "KillArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "KillModeArg": {
+        "enum": [
+          "graceful",
+          "immediate"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "execution_id": {
+        "type": "string"
+      },
+      "mode": {
+        "$ref": "#/$defs/KillModeArg"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "execution_id",
+      "mode"
+    ],
+    "title": "KillOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.control"
+  ]
+}

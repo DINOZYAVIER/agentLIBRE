@@ -14,9 +14,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "core.memory";
+pub const EXTENSION_ID: &str = "core.memory";
 pub const MEMORY_SEARCH_TOOL_ID: &str = "core.memory:search";
 pub const MEMORY_LIST_TOOL_ID: &str = "core.memory:list";
 pub const MEMORY_SUGGEST_TOOL_ID: &str = "core.memory:suggest";
@@ -177,7 +177,7 @@ impl ToolHandler for MemoryTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin memory extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin memory extension id is valid"),
         "Memory Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -231,10 +231,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::store_memory_entries()).unwrap(),
         EffectDeclaration::for_standard(EffectId::store_memory_suggestions()).unwrap(),
     ])
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(

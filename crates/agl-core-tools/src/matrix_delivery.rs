@@ -5,9 +5,7 @@ use agl_kernel::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{ToolCatalog, ToolCatalogError};
-
-pub const PROVIDER_ID: &str = "matrix.bridge";
+pub const EXTENSION_ID: &str = "matrix.bridge";
 pub const MATRIX_OUTBOX_DELIVER_TOOL_ID: &str = "matrix.bridge:outbox.deliver";
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -22,7 +20,7 @@ pub struct MatrixOutboxDeliverArgs {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix delivery extension ID is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin Matrix delivery extension ID is valid"),
         "Matrix Delivery Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -38,10 +36,6 @@ pub fn declaration() -> ExtensionDescriptor {
         .with_state_effects([EffectId::matrix_outbox()]),
     )
     .with_effect(EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap())
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 #[cfg(test)]

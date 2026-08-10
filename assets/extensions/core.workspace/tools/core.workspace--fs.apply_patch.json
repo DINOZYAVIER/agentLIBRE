@@ -1,0 +1,349 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "at_most_once",
+  "description": "Atomically mutate repository files. Operation objects use `op` as the discriminator; create requires `expected_absent=true`, update applies exact `old_text`/`new_text` edits, and update/delete/move require the complete digest returned by `fs.read`, including its `sha256:` prefix. Use at most one operation per path and group all updates to that path in one `edits` array.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "invalid_patch",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "edit_index": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "InvalidPatchErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "recoverable",
+      "code": "conflict",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "actual_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_absent": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expected_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PatchConflictErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "outcome_unknown",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.workspace:fs.apply_patch",
+  "input_schema": {
+    "$defs": {
+      "PatchEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "new_text": {
+            "description": "UTF-8 replacement text. Use an empty string to delete the selected span.",
+            "type": "string"
+          },
+          "old_text": {
+            "description": "Exact original text. It must identify one unique source span.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "old_text",
+          "new_text"
+        ],
+        "type": "object"
+      },
+      "PatchOperation": {
+        "description": "One filesystem mutation with an explicit concurrency precondition.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "expected_absent": {
+                "description": "Must be explicitly true so create conflicts with an existing path.",
+                "type": "boolean"
+              },
+              "op": {
+                "const": "create",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "path",
+              "content",
+              "expected_absent"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "edits": {
+                "description": "Exact UTF-8 spans resolved against the digest-pinned original file.",
+                "items": {
+                  "$ref": "#/$defs/PatchEdit"
+                },
+                "maxItems": 64,
+                "minItems": 1,
+                "type": "array"
+              },
+              "expected_digest": {
+                "description": "Complete opaque digest returned by `fs.read`. Copy the `sha256:`\nprefix and hexadecimal value without normalization.",
+                "type": "string"
+              },
+              "op": {
+                "const": "update",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "path",
+              "expected_digest",
+              "edits"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "expected_digest": {
+                "description": "Complete opaque digest returned by `fs.read`. Copy the `sha256:`\nprefix and hexadecimal value without normalization.",
+                "type": "string"
+              },
+              "op": {
+                "const": "delete",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "path",
+              "expected_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "expected_destination_absent": {
+                "description": "Must be explicitly true so move conflicts with an existing target.",
+                "type": "boolean"
+              },
+              "expected_digest": {
+                "description": "Complete opaque source digest returned by `fs.read`. Copy the\n`sha256:` prefix and hexadecimal value without normalization.",
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "op": {
+                "const": "move",
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "from",
+              "to",
+              "expected_digest",
+              "expected_destination_absent"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "operations": {
+        "description": "Atomic create, update, delete, and move operations. Each object uses\n`op` as its discriminator and includes its required precondition. Use\nat most one operation per path and group same-file replacements in one\nupdate `edits` array.",
+        "items": {
+          "$ref": "#/$defs/PatchOperation"
+        },
+        "maxItems": 64,
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "operations"
+    ],
+    "title": "ApplyPatchArgs",
+    "type": "object"
+  },
+  "operation_kind": "write",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "PatchReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "after_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "before_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "change_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "changes": {
+        "items": {
+          "$ref": "#/$defs/PatchReceipt"
+        },
+        "type": "array"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "change_count",
+      "changes"
+    ],
+    "title": "ApplyPatchOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:repo.files"
+  ]
+}

@@ -10,9 +10,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "matrix.outbox";
+pub const EXTENSION_ID: &str = "matrix.outbox";
 pub const MATRIX_OUTBOX_STATUS_TOOL_ID: &str = "matrix.outbox:status";
 pub const MATRIX_OUTBOX_ENQUEUE_TOOL_ID: &str = "matrix.outbox:enqueue";
 
@@ -119,7 +119,7 @@ impl ToolHandler for MatrixTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin Matrix extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin Matrix extension id is valid"),
         "Matrix Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -142,10 +142,6 @@ pub fn declaration() -> ExtensionDescriptor {
         .with_state_effects([EffectId::matrix_outbox()]),
     )
     .with_effect(EffectDeclaration::for_standard(EffectId::matrix_outbox()).unwrap())
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 #[derive(Deserialize, JsonSchema)]

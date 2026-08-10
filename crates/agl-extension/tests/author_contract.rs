@@ -75,15 +75,17 @@ fn factory_cannot_publish_or_mutate_the_admitted_catalog() {
 // resource mutation handles are not an invocation parameter.
 #[test]
 fn hook_binding_has_no_resource_mutation_context() {
-    fn selected_api<'a>(
-        binding: &'a agl_extension::HookBinding,
-        invocation: agl_kernel::HookInvocation,
-    ) -> agl_kernel::HookHandlerFuture<'a> {
-        binding.invoke(invocation)
+    fn selected_api(
+        binding: &agl_kernel::HookBinding,
+        declaration: &agl_kernel::HookDeclaration,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, agl_kernel::HookInvocationError> {
+        binding.invoke(declaration, payload)
     }
 
-    let _: for<'a> fn(
-        &'a agl_extension::HookBinding,
-        agl_kernel::HookInvocation,
-    ) -> agl_kernel::HookHandlerFuture<'a> = selected_api;
+    let _: fn(
+        &agl_kernel::HookBinding,
+        &agl_kernel::HookDeclaration,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, agl_kernel::HookInvocationError> = selected_api;
 }

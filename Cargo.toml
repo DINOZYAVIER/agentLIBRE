@@ -10,7 +10,6 @@ members = [
     "crates/agl-daemon",
     "crates/agl-function",
     "crates/agl-core-tools",
-    "crates/agl-hooks",
     "crates/agl-host-tools",
     "crates/agl-ids",
     "crates/agl-inference",
@@ -29,6 +28,7 @@ members = [
     "crates/agl-config",
     "crates/agl-content",
     "crates/agl-events",
+    "crates/agl-extension",
     "crates/agl-actions",
     "crates/agl-app",
     "crates/agl-runtime",
@@ -48,6 +48,7 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 agl-artifact = { path = "crates/agl-artifact" }
 agl-package = { path = "crates/agl-package" }
 agl-events = { path = "crates/agl-events" }
+agl-extension = { path = "crates/agl-extension" }
 agl-actions = { path = "crates/agl-actions" }
 agl-app = { path = "crates/agl-app" }
 agl-assets = { path = "crates/agl-assets" }
@@ -60,7 +61,6 @@ agl-function = { path = "crates/agl-function" }
 agl-config = { path = "crates/agl-config" }
 agl-content = { path = "crates/agl-content" }
 agl-core-tools = { path = "crates/agl-core-tools" }
-agl-hooks = { path = "crates/agl-hooks" }
 agl-host-tools = { path = "crates/agl-host-tools" }
 agl-ids = { path = "crates/agl-ids" }
 agl-inference = { path = "crates/agl-inference" }

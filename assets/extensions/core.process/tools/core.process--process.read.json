@@ -1,0 +1,182 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "Read bounded ordered output chunks from an owned execution.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.read",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "after_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "execution_id": {
+        "maxLength": 41,
+        "minLength": 41,
+        "type": "string"
+      },
+      "max_bytes": {
+        "format": "uint",
+        "maximum": 65536,
+        "minimum": 1,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "execution_id",
+      "max_bytes"
+    ],
+    "title": "ReadOutputArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "ExecutionChannelOutput": {
+        "enum": [
+          "stdout",
+          "stderr",
+          "terminal",
+          "lifecycle"
+        ],
+        "type": "string"
+      },
+      "ExecutionReadOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/$defs/OutputChunk"
+            },
+            "type": "array"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "next_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_expired": {
+            "type": "boolean"
+          },
+          "output_truncated": {
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/$defs/ExecutionStateOutput"
+          }
+        },
+        "required": [
+          "execution_id",
+          "chunks",
+          "next_sequence",
+          "state",
+          "output_truncated",
+          "output_expired"
+        ],
+        "type": "object"
+      },
+      "ExecutionStateOutput": {
+        "enum": [
+          "admitting",
+          "starting",
+          "running",
+          "exited",
+          "signalled",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "OutputChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "$ref": "#/$defs/ProcessBytesOutput"
+          },
+          "channel": {
+            "$ref": "#/$defs/ExecutionChannelOutput"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "ProcessBytesOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "output": {
+        "$ref": "#/$defs/ExecutionReadOutput"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "output"
+    ],
+    "title": "ReadOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

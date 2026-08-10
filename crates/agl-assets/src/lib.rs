@@ -9,7 +9,7 @@ pub enum BuiltinAssetKind {
     FunctionManifest,
     FunctionSystemPrompt,
     FunctionInferenceConfig,
-    ExtensionManifest,
+    ExtensionPackageFile,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,7 +300,7 @@ tool_call_format = "gemma_function_call"
     fn builtin_catalog_identity_is_canonical_sha256() {
         assert_eq!(
             BUILTIN_ARTIFACT_CATALOG_DIGEST,
-            "sha256:ca020837f6c2d90cb568cd5bf0d32fc8e17696b73a094af9377982b91f05e9da"
+            "sha256:5f00142d15976e9d92e3a2118f772fd60c7cba10844798a824919c68a9378950"
         );
     }
 

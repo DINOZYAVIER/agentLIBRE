@@ -1,0 +1,329 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "Return safe lifecycle and retention status for an owned execution.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.status",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "execution_id": {
+        "maxLength": 41,
+        "minLength": 41,
+        "type": "string"
+      }
+    },
+    "required": [
+      "execution_id"
+    ],
+    "title": "ExecutionIdArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "ExecutionExitOutput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "kind": {
+                "const": "code",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "signal",
+                "type": "string"
+              },
+              "signal": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "signal"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExecutionOwnerOutput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "session": {
+                "additionalProperties": false,
+                "properties": {
+                  "root_run_id": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "session_id",
+                  "root_run_id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "session"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "run": {
+                "additionalProperties": false,
+                "properties": {
+                  "root_run_id": {
+                    "type": "string"
+                  },
+                  "run_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "root_run_id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "run"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExecutionStateOutput": {
+        "enum": [
+          "admitting",
+          "starting",
+          "running",
+          "exited",
+          "signalled",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "FullExecutionStatusOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "discarded_output_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "exit": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExecutionExitOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at_unix_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "first_retained_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "io": {
+            "$ref": "#/$defs/IoArg"
+          },
+          "last_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_expired": {
+            "type": "boolean"
+          },
+          "output_truncated": {
+            "type": "boolean"
+          },
+          "owner": {
+            "$ref": "#/$defs/ExecutionOwnerOutput"
+          },
+          "profile": {
+            "$ref": "#/$defs/ProfileArg"
+          },
+          "retained_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started_at_unix_ms": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/ExecutionStateOutput"
+          },
+          "terminal_size": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TerminalSizeArgs"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "execution_id",
+          "owner",
+          "state",
+          "profile",
+          "io",
+          "cwd",
+          "last_sequence",
+          "retained_bytes",
+          "discarded_output_bytes",
+          "output_truncated",
+          "output_expired"
+        ],
+        "type": "object"
+      },
+      "IoArg": {
+        "enum": [
+          "pipes",
+          "pty"
+        ],
+        "type": "string"
+      },
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      },
+      "TerminalSizeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "status": {
+        "$ref": "#/$defs/FullExecutionStatusOutput"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status"
+    ],
+    "title": "StatusOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

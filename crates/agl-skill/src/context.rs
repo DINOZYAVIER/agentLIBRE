@@ -491,9 +491,15 @@ mod tests {
     fn verified_context_bundle_records_hashes_for_minimal_builtin_skill() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut tool_catalog = ToolCatalog::new();
-        agl_core_tools::guards::register(&mut tool_catalog).unwrap();
-        agl_core_tools::fs::register(&mut tool_catalog).unwrap();
-        agl_core_tools::repo::register(&mut tool_catalog).unwrap();
+        tool_catalog
+            .register(agl_core_tools::guards::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::fs::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::repo::declaration())
+            .unwrap();
 
         let skill_id = SkillId::new("repo-status").unwrap();
         let routing = SkillToolRoutingView::new([(
@@ -553,11 +559,21 @@ mod tests {
     fn context_distinguishes_callable_from_requestable_tools() {
         let registry = registry_with_requestable_fixture();
         let mut tool_catalog = ToolCatalog::new();
-        agl_core_tools::guards::register(&mut tool_catalog).unwrap();
-        agl_core_tools::cron::register(&mut tool_catalog).unwrap();
-        agl_core_tools::fs::register(&mut tool_catalog).unwrap();
-        agl_core_tools::matrix::register(&mut tool_catalog).unwrap();
-        agl_core_tools::permissions::register(&mut tool_catalog).unwrap();
+        tool_catalog
+            .register(agl_core_tools::guards::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::cron::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::fs::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::matrix::declaration())
+            .unwrap();
+        tool_catalog
+            .register(agl_core_tools::permissions::declaration())
+            .unwrap();
 
         let skill_id = SkillId::new("requestable-test").unwrap();
         let routing = SkillToolRoutingView::new([(

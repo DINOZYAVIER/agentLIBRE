@@ -85,4 +85,35 @@ impl Display for DigestParseError {
 impl std::error::Error for DigestParseError {}
 
 digest_type!(DeclarationDigest);
+digest_type!(CatalogDigest);
 digest_type!(PolicyHash);
+
+impl CatalogDigest {
+    pub fn empty() -> Self {
+        Self::from_json(&serde_json::json!([]))
+    }
+
+    pub fn from_admitted<'a>(
+        extensions: impl IntoIterator<Item = &'a crate::ExtensionDescriptor>,
+    ) -> Self {
+        #[derive(Serialize)]
+        struct CatalogEntry<'a> {
+            id: &'a crate::ExtensionId,
+            declaration_digest: DeclarationDigest,
+            source: crate::ExtensionSource,
+            trust: crate::ExtensionTrust,
+        }
+
+        let mut entries = extensions
+            .into_iter()
+            .map(|extension| CatalogEntry {
+                id: &extension.id,
+                declaration_digest: extension.digest(),
+                source: extension.source,
+                trust: extension.trust,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.id.cmp(right.id));
+        Self::from_json(&serde_json::to_value(entries).expect("catalog entries are serializable"))
+    }
+}

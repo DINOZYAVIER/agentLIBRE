@@ -2,11 +2,11 @@ schema = "agentlibre.builtin-catalog-baseline/v1"
 
 [[packages]]
 reference = "extension:core.process@1.1.0"
-digest = "sha256:6baa3792d26a0350f341806159ecbcf34fa1d2076b4042da7051981557e56f50"
+digest = "sha256:c9a8e1835a33ea601a491aa4570b2aa9ba270141a29260a65cc717a1f8ab6486"
 
 [[packages]]
 reference = "extension:core.workspace@1.1.0"
-digest = "sha256:bdec8a27e32727ad5e48928575d8df9650cca8c8a619aa232f5b3d4a0c9a50a6"
+digest = "sha256:be6718582b07fdf8cf03c87615dd5ecd02f4f9bc29e50d810f7d138bb1af3dca"
 
 [[packages]]
 reference = "function:gemma4-12b@1.0.0"

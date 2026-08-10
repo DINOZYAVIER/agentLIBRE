@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 
 use crate::{
+    ArtifactAccess, ArtifactDeclaration, ArtifactId, ArtifactTargetSelector, DeclarationError,
+    EffectId, ExtensionDescriptor, ExtensionId, ExtensionRegistration, ExtensionTrust,
+    HookDeclaration, HookHandler, HookId, ResolvedArtifactTarget, ToolDeclaration,
+    ToolDispatchContext, ToolDispatchControl, ToolHandler, ToolHandlerError, ToolId,
+    ToolInvocation,
+};
+use crate::{
     AuthorityClass, DispatchDenial, DispatchDenialCode, EffectiveToolSet, KernelWorkflowEvent,
     MemoryToolEffectJournal, ToolEffectJournal, ToolEffectJournalError, ToolEffectLifecycleState,
     ToolEffectMachine, ToolOutcome,
-};
-use crate::{
-    DeclarationError, EffectId, ExtensionDescriptor, ExtensionId, ExtensionRegistration,
-    ExtensionTrust, HookDeclaration, HookHandler, HookId, ToolDeclaration, ToolDispatchContext,
-    ToolDispatchControl, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -18,6 +20,7 @@ pub struct ToolCatalog {
     extension_index: BTreeMap<ExtensionId, usize>,
     hook_index: BTreeMap<HookId, usize>,
     tool_index: BTreeMap<ToolId, usize>,
+    artifact_index: BTreeMap<ArtifactId, usize>,
     effect_authorities: BTreeMap<EffectId, AuthorityClass>,
     workflow_mappings: BTreeMap<(ToolId, String), KernelWorkflowEvent>,
 }
@@ -25,6 +28,16 @@ pub struct ToolCatalog {
 impl ToolCatalog {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn from_extensions(
+        declarations: impl IntoIterator<Item = ExtensionDescriptor>,
+    ) -> Result<Self, ToolCatalogError> {
+        let mut catalog = Self::new();
+        for declaration in declarations {
+            catalog.register(declaration)?;
+        }
+        Ok(catalog)
     }
 
     pub fn register(&mut self, declaration: ExtensionDescriptor) -> Result<(), ToolCatalogError> {
@@ -48,6 +61,13 @@ impl ToolCatalog {
             if self.tool_index.contains_key(&action.id) {
                 return Err(ToolCatalogError::DuplicateTool {
                     id: action.id.clone(),
+                });
+            }
+        }
+        for artifact in &declaration.artifacts {
+            if self.artifact_index.contains_key(&artifact.id) {
+                return Err(ToolCatalogError::DuplicateArtifact {
+                    id: artifact.id.clone(),
                 });
             }
         }
@@ -93,6 +113,10 @@ impl ToolCatalog {
         for action in &declaration.tools {
             self.tool_index.insert(action.id.clone(), extension_index);
         }
+        for artifact in &declaration.artifacts {
+            self.artifact_index
+                .insert(artifact.id.clone(), extension_index);
+        }
         self.effect_authorities.extend(resolved_effects);
         self.workflow_mappings.extend(resolved_workflow);
         self.extensions.push(declaration);
@@ -130,6 +154,85 @@ impl ToolCatalog {
 
     pub fn extension_for_tool(&self, id: &ToolId) -> Option<&ExtensionDescriptor> {
         self.extensions.get(*self.tool_index.get(id)?)
+    }
+
+    pub fn artifact(&self, id: &ArtifactId) -> Option<&ArtifactDeclaration> {
+        let extension = self.extensions.get(*self.artifact_index.get(id)?)?;
+        extension.artifact(id)
+    }
+
+    pub fn validate_artifact_links(&self) -> Result<(), ToolCatalogError> {
+        for extension in &self.extensions {
+            for tool in &extension.tools {
+                for link in &tool.artifact_links {
+                    let ArtifactTargetSelector::Fixed(artifact_id) = &link.selector else {
+                        continue;
+                    };
+                    let declaration = self.artifact(artifact_id).ok_or_else(|| {
+                        ToolCatalogError::UnknownArtifact {
+                            tool_id: tool.id.clone(),
+                            artifact_id: artifact_id.clone(),
+                        }
+                    })?;
+                    if !declaration.permits(link.access) {
+                        return Err(ToolCatalogError::ArtifactAccessMismatch {
+                            tool_id: tool.id.clone(),
+                            artifact_id: artifact_id.clone(),
+                            requested: link.access,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve_artifact_targets(
+        &self,
+        tool_id: &ToolId,
+        arguments: &serde_json::Value,
+    ) -> Result<Vec<ResolvedArtifactTarget>, DeclarationError> {
+        let extension = self
+            .extension_for_tool(tool_id)
+            .expect("registered Tool has an owning Extension");
+        let tool = extension
+            .tool(tool_id)
+            .expect("registered Tool index points to its declaration");
+        let mut targets = Vec::new();
+        for link in &tool.artifact_links {
+            let artifact_id = link.resolve(arguments)?;
+            let owner = artifact_id.owner();
+            if owner != extension.id
+                && !extension
+                    .requirements
+                    .iter()
+                    .any(|requirement| requirement.extension_id == owner)
+            {
+                return Err(DeclarationError::ForeignArtifactOwner {
+                    artifact_id,
+                    extension_id: extension.id.clone(),
+                });
+            }
+            let declaration =
+                self.artifact(&artifact_id)
+                    .ok_or_else(|| DeclarationError::UnknownArtifact {
+                        tool_id: tool.id.clone(),
+                        artifact_id: artifact_id.clone(),
+                    })?;
+            if !declaration.permits(link.access) {
+                return Err(DeclarationError::ArtifactAccessMismatch {
+                    tool_id: tool.id.clone(),
+                    artifact_id,
+                    requested: link.access,
+                });
+            }
+            targets.push(ResolvedArtifactTarget {
+                effect_id: link.effect_id.clone(),
+                artifact_id,
+                access: link.access,
+            });
+        }
+        Ok(targets)
     }
 
     pub fn executable_tool(&self, id: &ToolId) -> Result<&ToolDeclaration, ToolDispatchError> {
@@ -312,6 +415,9 @@ impl ToolRuntime {
         let declaration = effective
             .authorize(&invocation, self.catalog.extensions())
             .map_err(ToolDispatchError::Denied)?;
+        self.catalog
+            .resolve_artifact_targets(&invocation.tool_id, &invocation.arguments)
+            .map_err(ToolDispatchError::ArtifactTarget)?;
         let handler = self.handlers.get(&invocation.tool_id).ok_or_else(|| {
             ToolDispatchError::MissingHandler {
                 id: invocation.tool_id.clone(),
@@ -663,6 +769,18 @@ pub enum ToolCatalogError {
     DuplicateTool {
         id: ToolId,
     },
+    DuplicateArtifact {
+        id: ArtifactId,
+    },
+    UnknownArtifact {
+        tool_id: ToolId,
+        artifact_id: ArtifactId,
+    },
+    ArtifactAccessMismatch {
+        tool_id: ToolId,
+        artifact_id: ArtifactId,
+        requested: ArtifactAccess,
+    },
     DuplicateHandler {
         id: ToolId,
     },
@@ -704,6 +822,22 @@ impl Display for ToolCatalogError {
             Self::DuplicateTool { id } => {
                 write!(formatter, "duplicate tool ID `{id}`")
             }
+            Self::DuplicateArtifact { id } => write!(formatter, "duplicate Artifact ID `{id}`"),
+            Self::UnknownArtifact {
+                tool_id,
+                artifact_id,
+            } => write!(
+                formatter,
+                "Tool `{tool_id}` references unknown Artifact `{artifact_id}`"
+            ),
+            Self::ArtifactAccessMismatch {
+                tool_id,
+                artifact_id,
+                requested,
+            } => write!(
+                formatter,
+                "Tool `{tool_id}` requests {requested:?} for Artifact `{artifact_id}` outside its declaration"
+            ),
             Self::DuplicateHandler { id } => {
                 write!(formatter, "duplicate tool handler for `{id}`")
             }
@@ -762,6 +896,7 @@ pub enum ToolDispatchError {
         trust: ExtensionTrust,
     },
     Denied(DispatchDenial),
+    ArtifactTarget(DeclarationError),
     Handler(ToolHandlerError),
     InvalidResult {
         id: ToolId,
@@ -814,6 +949,7 @@ impl Display for ToolDispatchError {
                 trust.as_str()
             ),
             Self::Denied(denial) => Display::fmt(denial, formatter),
+            Self::ArtifactTarget(error) => Display::fmt(error, formatter),
             Self::Handler(error) => Display::fmt(error, formatter),
             Self::InvalidResult { id, message } => {
                 write!(
@@ -851,6 +987,7 @@ impl std::error::Error for ToolDispatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Denied(error) => Some(error),
+            Self::ArtifactTarget(error) => Some(error),
             Self::Handler(error) => Some(error),
             Self::Journal(error) => Some(error),
             _ => None,

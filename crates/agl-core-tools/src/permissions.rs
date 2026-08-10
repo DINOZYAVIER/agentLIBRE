@@ -14,9 +14,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "core.permission";
+pub const EXTENSION_ID: &str = "core.permission";
 pub const PERMISSIONS_STATUS_TOOL_ID: &str = "core.permission:status";
 pub const PERMISSIONS_REQUEST_TOOL_ID: &str = "core.permission:request";
 pub const PERMISSIONS_GRANT_TOOL_ID: &str = "core.permission:grant";
@@ -288,7 +288,7 @@ impl ToolHandler for PermissionTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin permission extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin permission extension id is valid"),
         "Permission Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -324,10 +324,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::store_permission_requests()).unwrap(),
         EffectDeclaration::for_standard(EffectId::store_permission_grants()).unwrap(),
     ])
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(
