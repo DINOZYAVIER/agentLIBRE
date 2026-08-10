@@ -37,6 +37,7 @@ struct DelegationContext {
     children: BTreeSet<String>,
     authority_ceiling: BTreeSet<ToolId>,
     execution_context_state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
+    runtime_bundle: Option<agl_runtime::ResolvedRuntimeBundle>,
 }
 
 impl DelegationHandler {
@@ -70,6 +71,7 @@ impl DelegationHandler {
                 children,
                 authority_ceiling,
                 execution_context_state,
+                runtime_bundle: session.runtime_bundle().cloned(),
             }),
         })
     }
@@ -121,6 +123,7 @@ impl DelegationHandler {
             &context.runtime_paths,
             &context.workspace_root,
             &context.trust_store_path,
+            context.runtime_bundle.as_ref(),
         )?;
         let execution_session_id = SessionId::generate();
         let execution_turn_id = TurnId::generate();
@@ -264,7 +267,7 @@ fn validate_existing_child(
         bail!("durable child has a non-subagent input");
     };
     ensure!(
-        !task.has_artifacts() && task.text_only().as_deref() == Some(args.task.as_str()),
+        !task.has_attachments() && task.text_only().as_deref() == Some(args.task.as_str()),
         "durable child task does not match the delegation invocation"
     );
     ensure!(

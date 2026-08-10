@@ -86,9 +86,9 @@ pub use artifact_contract::{
     ResolvedArtifactTarget,
 };
 pub use effect::{
-    AuthorityClass, MemoryToolEffectJournal, ToolEffectJournal, ToolEffectJournalError,
-    ToolEffectJournalRecord, ToolEffectLifecycleState, ToolEffectMachine,
-    ToolEffectTransitionError,
+    AuthorityClass, MemoryToolEffectJournal, ToolEffectCorrelation, ToolEffectJournal,
+    ToolEffectJournalError, ToolEffectJournalRecord, ToolEffectLifecycleState, ToolEffectMachine,
+    ToolEffectRecoveryJournal, ToolEffectTransitionError,
 };
 pub use outcome::{ToolOutcome, ToolOutcomeError, ToolOutcomeStatus};
 pub use workflow::{KernelWorkflowEvent, TOOL_OBSERVATION_APPEND_EVENT_ID};

@@ -717,7 +717,7 @@ fn incomplete_response_has_incomplete_evidence_and_status_accounting() {
 }
 
 #[test]
-fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
+fn manager_resolves_vision_attachments_only_for_the_worker_runtime() {
     let root = temp_root("vision-resolution");
     let store = agl_store::AglStore::open_at(&root).unwrap();
     let run_id = RunId::parse(RUN_ID).unwrap();
@@ -739,7 +739,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
         .unwrap();
     let private_bytes = b"private fake image bytes";
     let stored = store
-        .write_artifact(
+        .write_content_attachment(
             &run_id,
             MediaType::ImagePng,
             private_bytes,
@@ -771,7 +771,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
                 content: Some(
                     Content::new([
                         ContentPart::text("what is shown?").unwrap(),
-                        ContentPart::artifact(stored.reference),
+                        ContentPart::attachment(stored.reference),
                     ])
                     .unwrap(),
                 ),
@@ -824,7 +824,7 @@ fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
 }
 
 #[test]
-fn text_only_profile_rejects_artifact_content_before_queue_admission() {
+fn text_only_profile_rejects_attachment_content_before_queue_admission() {
     let mut request = job(
         &temp_root("unsupported-content"),
         &config("text.gguf"),
@@ -833,8 +833,8 @@ fn text_only_profile_rejects_artifact_content_before_queue_admission() {
     )
     .request()
     .clone();
-    let artifact = agl_content::ArtifactRef::new(
-        agl_content::ArtifactId::generate(),
+    let attachment = agl_content::ContentAttachmentRef::new(
+        agl_content::ContentAttachmentId::generate(),
         agl_content::BlobDigest::from_bytes(b"image"),
         MediaType::ImagePng,
         5,
@@ -847,7 +847,7 @@ fn text_only_profile_rejects_artifact_content_before_queue_admission() {
     )
     .unwrap();
     request.rendered.messages[0].content =
-        Some(Content::new([ContentPart::artifact(artifact)]).unwrap());
+        Some(Content::new([ContentPart::attachment(attachment)]).unwrap());
     let config = config("text.gguf");
     let error = InferenceJob::new(
         config.clone(),

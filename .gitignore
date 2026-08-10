@@ -1,1 +1,14 @@
 /target/
+/.agl/decision-docs/
+/.agl/extracted/
+/.agl/functions/
+/.agl/handoffs/
+/.agl/research/
+/.agl/reviews/
+/.agl/skills/
+/.agl/smoke/
+/.agl/state/
+/.agl/cache/
+/.agl/run/
+/.agl/sockets/
+/.agl/tmp/

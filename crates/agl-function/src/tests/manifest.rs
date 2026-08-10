@@ -5,8 +5,8 @@ use crate::*;
 #[test]
 fn parses_function_document() {
     let content = r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0
@@ -62,8 +62,8 @@ fn validates_function_tool_call_boundaries() {
     fn document(max_tool_calls: u32) -> String {
         format!(
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0
@@ -154,7 +154,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
         std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - extension:core.process@^1.0\ntitle: Policy {index}\n{}---\n",
+                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - extension:core.process@^1.0\ntitle: Policy {index}\n{}---\n",
                 case.tools_yaml
             ),
         )
@@ -188,8 +188,8 @@ fn runtime_function_preserves_function_tool_policy_states() {
 #[test]
 fn rejects_model_profile_and_config_together() {
     let content = r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0
@@ -217,8 +217,8 @@ model:
 #[test]
 fn rejects_unknown_fields_without_extension_prefix() {
     let content = r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0

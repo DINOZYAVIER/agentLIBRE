@@ -674,9 +674,9 @@ mod tests {
             provenance: Some(ModelPackageProvenance {
                 reference: "model:gemma4-e4b@=1.0.0".parse().unwrap(),
                 source_id: "test".parse().unwrap(),
-                source_tier: agl_package::ArtifactSourceTier::Workspace,
-                source_kind: agl_package::ArtifactSourceKind::Directory,
-                package_digest:
+                source_tier: agl_package::PackageSourceTier::Workspace,
+                source_kind: agl_package::PackageSourceKind::Directory,
+                package_tree_digest:
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .parse()
                         .unwrap(),

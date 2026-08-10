@@ -1,9 +1,9 @@
 ---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: gemma4-31b-32k
-  version: 1.1.0
+  version: 1.2.0
   payload_schema: agentlibre.function/v2
   agl:
     compatible: ">=1.0.0-alpha.12"

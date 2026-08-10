@@ -39,12 +39,19 @@ config="$(smoke_abs_path "$config")"
 cd "$repo_root"
 cargo build \
   -p agl-cli \
-  --bin agl
+  -p agl-inference-worker \
+  --bin agl \
+  --bin agl-inference-worker
 agl_bin="$(smoke_abs_path "$agl_bin")"
+worker_bin="$(dirname "$agl_bin")/agl-inference-worker"
+[[ -x "$worker_bin" ]] || fail "missing inference worker beside AGL binary: $worker_bin"
 
-linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
-[[ "$linked_libraries" == *"libllama"* ]] || fail "$agl_bin is not linked to libllama"
-[[ "$linked_libraries" == *"libggml"* ]] || fail "$agl_bin is not linked to libggml"
+agl_linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
+worker_linked_libraries="$(readelf -d "$worker_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
+[[ "$agl_linked_libraries" != *"libllama"* ]] || fail "$agl_bin must not own libllama"
+[[ "$agl_linked_libraries" != *"libggml"* ]] || fail "$agl_bin must not own libggml"
+[[ "$worker_linked_libraries" == *"libllama"* ]] || fail "$worker_bin is not linked to libllama"
+[[ "$worker_linked_libraries" == *"libggml"* ]] || fail "$worker_bin is not linked to libggml"
 
 infer_root="$AGL_HOME/data"
 inference_log="$AGL_HOME/state/logs/inference.log"
@@ -75,7 +82,7 @@ echo "config path: $config"
 echo "infer artifact root: $infer_root"
 echo "inference log: $inference_log"
 echo "infer runtime log: $infer_runtime_log"
-echo "linked llama.cpp libraries:"
-echo "$linked_libraries"
+echo "inference worker linked llama.cpp libraries:"
+echo "$worker_linked_libraries"
 echo "selected device: $device"
 echo "AGL-016 llama.cpp smoke passed"

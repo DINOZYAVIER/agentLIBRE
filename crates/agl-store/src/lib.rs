@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
-mod artifacts;
+mod artifact_commits;
 mod connection;
+mod content_attachments;
 mod error;
 mod export;
 mod idempotency;
@@ -17,7 +18,9 @@ mod status;
 mod types;
 mod util;
 
-pub use artifacts::{ArtifactGcReport, ResolvedArtifact, StoredArtifact};
+pub use content_attachments::{
+    ContentAttachmentGcReport, ResolvedContentAttachment, StoredContentAttachment,
+};
 pub use error::{Result, StoreError};
 pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
 #[cfg(test)]
@@ -31,6 +34,12 @@ pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
 pub struct AglStore {
     conn: Connection,
     database_path: PathBuf,
+}
+
+impl AglStore {
+    pub fn artifact_commit_repository(&self) -> &dyn agl_artifact::ArtifactCommitRepository {
+        self
+    }
 }
 
 #[cfg(test)]

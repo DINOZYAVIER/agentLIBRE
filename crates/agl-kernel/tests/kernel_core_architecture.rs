@@ -439,12 +439,226 @@ fn extension_cutover_has_one_owner_and_no_registration_or_hook_bypass() {
         artifact_source,
         &[
             "pub struct PackageTreeDigest",
-            "pub struct ArtifactPackageView",
+            "pub struct PackageView",
             "pub use agl_package",
         ],
     );
     assert!(
         duplicate_package_owner.is_empty(),
         "agl-artifact duplicates/re-exports agl-package: {duplicate_package_owner:#?}"
+    );
+}
+
+// AGL172-004, AGL172-008, AGL172-014, AGL172-015, AGL172-031,
+// AGL172-037 and AGL172-056. The metadata graph is the executable ownership
+// contract; source scans below cover vocabulary, not dependency direction.
+#[test]
+fn package_artifact_workspace_and_git_owners_have_exact_dependencies() {
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().unwrap();
+    let by_name = |name: &str| {
+        packages
+            .iter()
+            .find(|package| package["name"] == name)
+            .unwrap_or_else(|| panic!("missing package {name}"))
+    };
+    let normal_dependencies = |name: &str| {
+        by_name(name)["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal")
+            .filter_map(|dependency| dependency["name"].as_str())
+            .collect::<BTreeSet<_>>()
+    };
+
+    let names = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(!names.contains("agl-workspace"));
+
+    assert_eq!(
+        normal_dependencies("agl-artifact")
+            .intersection(&["agl-kernel"].into_iter().collect())
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        ["agl-kernel"].into_iter().collect()
+    );
+    assert!(!normal_dependencies("agl-artifact").contains("agl-repo"));
+    assert!(normal_dependencies("agl-repo").contains("agl-artifact"));
+    assert!(normal_dependencies("agl-runtime").contains("agl-artifact"));
+    assert!(normal_dependencies("agl-runtime").contains("agl-package"));
+    assert!(!normal_dependencies("agl-runtime").contains("agl-repo"));
+    assert!(!normal_dependencies("agl-kernel").contains("agl-artifact"));
+    assert!(!normal_dependencies("agl-package").contains("agl-kernel"));
+}
+
+// AGL172-005, AGL172-010, AGL172-032, AGL172-047, AGL172-051,
+// AGL172-058, AGL172-059 and AGL172-063.
+#[test]
+fn breaking_cutover_leaves_no_old_package_component_profile_or_blob_names() {
+    let found = matches_in(
+        production_rs_files(&workspace_root().join("crates")),
+        &[
+            "RepoManifest",
+            "WorkspaceFunctions",
+            "from_v2_manifest",
+            "to_v2_manifest",
+            "WorkspaceProfile",
+            "ArtifactPackageId",
+            "ArtifactPackageRef",
+            "ArtifactPackageView",
+            "ArtifactAdapterRegistry",
+            "ArtifactResolver",
+            "ArtifactLock",
+            "ResolvedArtifactGraph",
+            "WorkspaceComponentKind",
+            "WorkspaceComponent",
+            "LockedWorkspaceComponent",
+            "ArtifactDataClass",
+            "ComponentPathHandleRequest",
+            "ComponentHandle",
+            "SkillArtifactDeclaration",
+            "SkillArtifactKind",
+            "SkillArtifactAccess",
+            "SkillArtifactFolder",
+            "StoredArtifact",
+            "write_artifact",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "obsolete AGL-172 vocabulary remains: {found:#?}"
+    );
+}
+
+#[test]
+fn content_attachment_cutover_has_no_blob_artifact_api() {
+    let crates = workspace_root().join("crates");
+    let found = matches_in(
+        [
+            "agl-content",
+            "agl-store",
+            "agl-host-tools",
+            "agl-inference",
+        ]
+        .into_iter()
+        .flat_map(|name| production_rs_files(&crates.join(name).join("src"))),
+        &[
+            "StoredArtifact",
+            "ResolvedArtifact",
+            "write_artifact",
+            "resolve_artifact",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "obsolete content attachment vocabulary remains: {found:#?}"
+    );
+}
+
+// AGL172-048 and AGL172-059. This includes authored/generated fixtures and
+// scripts, because a breaking wire cutover cannot leave a second accepted
+// package schema outside Rust production source.
+#[test]
+fn package_wire_format_has_one_key_schema_and_lock_path() {
+    fn visit(path: &Path, files: &mut Vec<PathBuf>) {
+        let mut entries = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                let is_task_history = entry.file_name().and_then(|name| name.to_str())
+                    == Some("tasks")
+                    && entry
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        == Some(".agl");
+                if matches!(
+                    entry.file_name().and_then(|name| name.to_str()),
+                    Some(".git" | "target" | "vendor")
+                ) || is_task_history
+                {
+                    continue;
+                }
+                visit(&entry, files);
+            } else {
+                files.push(entry);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(&workspace_root(), &mut files);
+    let old_schema = ["agentlibre.", "artifact", "/v1"].concat();
+    let old_lock = ["artifact", "-lock.toml"].concat();
+    let old_lock_path = [".agl/", old_lock.as_str()].concat();
+    let old_frontmatter = ["artifact", ": agentlibre"].concat();
+    let old_table = ["[", "artifact", "]"].concat();
+    let found = matches_in(
+        files,
+        &[
+            old_schema.as_str(),
+            old_lock_path.as_str(),
+            old_lock.as_str(),
+            old_frontmatter.as_str(),
+            old_table.as_str(),
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "obsolete package wire material remains: {found:#?}"
+    );
+}
+
+// AGL172-052, AGL172-054 and AGL172-063. Parser/help behavior is also tested
+// through the real agl binary; this guard prevents hidden production aliases.
+#[test]
+fn removed_repo_component_profile_and_skill_folder_commands_have_no_owner() {
+    let found = matches_in(
+        production_rs_files(&workspace_root().join("crates")),
+        &[
+            "RepoImportProfile",
+            "RepoExportProfile",
+            "RepoInitComponent",
+            "RepoComponent",
+            "RepoStatus",
+            "SyncFolders",
+            "init_repo_component",
+            "status_repo_workspace",
+            "REPO_IMPORT_PROFILE_TOOL_ID",
+            "REPO_EXPORT_PROFILE_TOOL_ID",
+            "REPO_STATUS_TOOL_ID",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "removed command/tool owner remains: {found:#?}"
+    );
+}
+
+// AGL172-002 and AGL172-004. Domain packages may decode their own payload,
+// but runtime package selection has one production resolver/composition.
+#[test]
+fn runtime_package_selection_has_no_domain_local_resolver_or_registry() {
+    let crates = workspace_root().join("crates");
+    let found = matches_in(
+        ["agl-function", "agl-model", "agl-skill"]
+            .into_iter()
+            .flat_map(|name| production_rs_files(&crates.join(name).join("src"))),
+        &[
+            "ArtifactResolver::new",
+            "PackageResolver::new",
+            "ArtifactAdapterRegistry::new",
+            "PackageAdapterRegistry::new",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "domain-local runtime selection remains: {found:#?}"
     );
 }

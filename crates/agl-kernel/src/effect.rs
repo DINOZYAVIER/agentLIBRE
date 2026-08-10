@@ -99,6 +99,33 @@ pub struct ToolEffectJournalRecord {
     outcome_code: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolEffectCorrelation {
+    call_id: String,
+    tool_id: ToolId,
+    extension_id: ExtensionId,
+    schema_digest: DeclarationDigest,
+}
+
+impl ToolEffectCorrelation {
+    pub fn from_record(record: &ToolEffectJournalRecord) -> Self {
+        Self {
+            call_id: record.call_id.clone(),
+            tool_id: record.tool_id.clone(),
+            extension_id: record.extension_id.clone(),
+            schema_digest: record.schema_digest.clone(),
+        }
+    }
+
+    pub fn matches(&self, record: &ToolEffectJournalRecord) -> bool {
+        self.call_id == record.call_id
+            && self.tool_id == record.tool_id
+            && self.extension_id == record.extension_id
+            && self.schema_digest == record.schema_digest
+    }
+}
+
 impl ToolEffectJournalRecord {
     pub fn call_id(&self) -> &str {
         &self.call_id
@@ -141,6 +168,14 @@ pub struct ToolEffectMachine {
 }
 
 impl ToolEffectMachine {
+    pub fn correlation(&self) -> ToolEffectCorrelation {
+        ToolEffectCorrelation {
+            call_id: self.call_id.clone(),
+            tool_id: self.tool_id.clone(),
+            extension_id: self.extension_id.clone(),
+            schema_digest: self.schema_digest.clone(),
+        }
+    }
     pub fn new(
         call_id: impl Into<String>,
         tool_id: ToolId,
@@ -276,6 +311,85 @@ pub struct MemoryToolEffectJournal {
 impl MemoryToolEffectJournal {
     pub fn records(&self) -> &[ToolEffectJournalRecord] {
         &self.records
+    }
+}
+
+pub trait ToolEffectRecoveryJournal {
+    fn correlated_records(
+        &self,
+        correlation: &ToolEffectCorrelation,
+    ) -> Vec<ToolEffectJournalRecord>;
+
+    fn append_recovery_terminal(
+        &mut self,
+        correlation: &ToolEffectCorrelation,
+        state: ToolEffectLifecycleState,
+    ) -> Result<(), ToolEffectJournalError>;
+}
+
+impl ToolEffectRecoveryJournal for MemoryToolEffectJournal {
+    fn correlated_records(
+        &self,
+        correlation: &ToolEffectCorrelation,
+    ) -> Vec<ToolEffectJournalRecord> {
+        self.records
+            .iter()
+            .filter(|record| correlation.matches(record))
+            .cloned()
+            .collect()
+    }
+
+    fn append_recovery_terminal(
+        &mut self,
+        correlation: &ToolEffectCorrelation,
+        state: ToolEffectLifecycleState,
+    ) -> Result<(), ToolEffectJournalError> {
+        if !matches!(
+            state,
+            ToolEffectLifecycleState::Committed
+                | ToolEffectLifecycleState::Failed
+                | ToolEffectLifecycleState::Cancelled
+                | ToolEffectLifecycleState::OutcomeUnknown
+        ) {
+            return Err(ToolEffectJournalError::new(
+                "recovery may append only a terminal Tool Effect state",
+            ));
+        }
+        let records = self.correlated_records(correlation);
+        let Some(started) = records
+            .iter()
+            .rev()
+            .find(|record| record.state == ToolEffectLifecycleState::Started)
+        else {
+            return Err(ToolEffectJournalError::new(
+                "correlated Tool Effect has no Started record",
+            ));
+        };
+        if records.iter().any(|record| {
+            matches!(
+                record.state,
+                ToolEffectLifecycleState::Committed
+                    | ToolEffectLifecycleState::Failed
+                    | ToolEffectLifecycleState::Cancelled
+                    | ToolEffectLifecycleState::OutcomeUnknown
+            )
+        }) {
+            return Err(ToolEffectJournalError::new(
+                "correlated Tool Effect already has a terminal record",
+            ));
+        }
+        let terminal = ToolEffectJournalRecord {
+            call_id: started.call_id.clone(),
+            tool_id: started.tool_id.clone(),
+            extension_id: started.extension_id.clone(),
+            schema_digest: started.schema_digest.clone(),
+            delivery: started.delivery,
+            state,
+            admitted_effects: started.admitted_effects.clone(),
+            observed_effects: Vec::new(),
+            outcome_code: None,
+        };
+        self.append(&terminal).map(|_| ())
     }
 }
 

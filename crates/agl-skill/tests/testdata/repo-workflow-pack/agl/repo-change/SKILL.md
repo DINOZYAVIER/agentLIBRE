@@ -1,6 +1,6 @@
 ---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: skill
   id: repo-change
   version: 1.0.0

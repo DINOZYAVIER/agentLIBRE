@@ -8,22 +8,22 @@ pub const MAX_TEXT_PART_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct ArtifactId(String);
+pub struct ContentAttachmentId(String);
 
-impl ArtifactId {
+impl ContentAttachmentId {
     pub fn generate() -> Self {
-        Self(format!("art_{}", uuid::Uuid::now_v7()))
+        Self(format!("att_{}", uuid::Uuid::now_v7()))
     }
 
     pub fn parse(value: impl Into<String>) -> Result<Self, ContentError> {
         let value = value.into();
         let uuid = value
-            .strip_prefix("art_")
-            .ok_or_else(|| ContentError::InvalidArtifactId(value.clone()))?;
+            .strip_prefix("att_")
+            .ok_or_else(|| ContentError::InvalidContentAttachmentId(value.clone()))?;
         let parsed = uuid::Uuid::parse_str(uuid)
-            .map_err(|_| ContentError::InvalidArtifactId(value.clone()))?;
-        if parsed.get_version_num() != 7 || format!("art_{parsed}") != value {
-            return Err(ContentError::InvalidArtifactId(value));
+            .map_err(|_| ContentError::InvalidContentAttachmentId(value.clone()))?;
+        if parsed.get_version_num() != 7 || format!("att_{parsed}") != value {
+            return Err(ContentError::InvalidContentAttachmentId(value));
         }
         Ok(Self(value))
     }
@@ -33,13 +33,13 @@ impl ArtifactId {
     }
 }
 
-impl Display for ArtifactId {
+impl Display for ContentAttachmentId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactId {
+impl<'de> Deserialize<'de> for ContentAttachmentId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -180,8 +180,8 @@ impl ImageDimensions {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactRef {
-    pub artifact_id: ArtifactId,
+pub struct ContentAttachmentRef {
+    pub content_attachment_id: ContentAttachmentId,
     pub digest: BlobDigest,
     pub media_type: MediaType,
     pub byte_length: u64,
@@ -191,10 +191,10 @@ pub struct ArtifactRef {
     pub source: ArtifactSource,
 }
 
-impl ArtifactRef {
+impl ContentAttachmentRef {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        artifact_id: ArtifactId,
+        content_attachment_id: ContentAttachmentId,
         digest: BlobDigest,
         media_type: MediaType,
         byte_length: u64,
@@ -203,7 +203,7 @@ impl ArtifactRef {
         source: ArtifactSource,
     ) -> Result<Self, ContentError> {
         let reference = Self {
-            artifact_id,
+            content_attachment_id,
             digest,
             media_type,
             byte_length,
@@ -217,7 +217,7 @@ impl ArtifactRef {
 
     pub fn validate(&self) -> Result<(), ContentError> {
         if self.byte_length == 0 {
-            return Err(ContentError::EmptyArtifact);
+            return Err(ContentError::EmptyContentAttachment);
         }
         if matches!(self.media_type, MediaType::ImagePng | MediaType::ImageJpeg)
             && self.image.is_none()
@@ -236,7 +236,7 @@ impl ArtifactRef {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactRef {
+impl<'de> Deserialize<'de> for ContentAttachmentRef {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -244,7 +244,7 @@ impl<'de> Deserialize<'de> for ArtifactRef {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            artifact_id: ArtifactId,
+            content_attachment_id: ContentAttachmentId,
             digest: BlobDigest,
             media_type: MediaType,
             byte_length: u64,
@@ -254,7 +254,7 @@ impl<'de> Deserialize<'de> for ArtifactRef {
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(
-            wire.artifact_id,
+            wire.content_attachment_id,
             wire.digest,
             wire.media_type,
             wire.byte_length,
@@ -270,7 +270,7 @@ impl<'de> Deserialize<'de> for ArtifactRef {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentPart {
     Text { text: String },
-    Artifact { artifact: ArtifactRef },
+    Attachment { attachment: ContentAttachmentRef },
 }
 
 impl ContentPart {
@@ -280,14 +280,14 @@ impl ContentPart {
         Ok(Self::Text { text })
     }
 
-    pub fn artifact(artifact: ArtifactRef) -> Self {
-        Self::Artifact { artifact }
+    pub fn attachment(attachment: ContentAttachmentRef) -> Self {
+        Self::Attachment { attachment }
     }
 
     fn validate(&self) -> Result<(), ContentError> {
         match self {
             Self::Text { text } => validate_text(text),
-            Self::Artifact { artifact } => artifact.validate(),
+            Self::Attachment { attachment } => attachment.validate(),
         }
     }
 }
@@ -324,15 +324,15 @@ impl Content {
         Ok(())
     }
 
-    pub fn artifacts(&self) -> impl Iterator<Item = &ArtifactRef> {
+    pub fn attachments(&self) -> impl Iterator<Item = &ContentAttachmentRef> {
         self.parts.iter().filter_map(|part| match part {
-            ContentPart::Artifact { artifact } => Some(artifact),
+            ContentPart::Attachment { attachment } => Some(attachment),
             ContentPart::Text { .. } => None,
         })
     }
 
-    pub fn has_artifacts(&self) -> bool {
-        self.artifacts().next().is_some()
+    pub fn has_attachments(&self) -> bool {
+        self.attachments().next().is_some()
     }
 
     pub fn text_byte_len(&self) -> usize {
@@ -340,13 +340,13 @@ impl Content {
             .iter()
             .map(|part| match part {
                 ContentPart::Text { text } => text.len(),
-                ContentPart::Artifact { .. } => 0,
+                ContentPart::Attachment { .. } => 0,
             })
             .sum()
     }
 
-    pub fn artifact_count(&self) -> usize {
-        self.artifacts().count()
+    pub fn attachment_count(&self) -> usize {
+        self.attachments().count()
     }
 
     pub fn text_only(&self) -> Option<String> {
@@ -354,7 +354,7 @@ impl Content {
         for part in &self.parts {
             match part {
                 ContentPart::Text { text } => output.push_str(text),
-                ContentPart::Artifact { .. } => return None,
+                ContentPart::Attachment { .. } => return None,
             }
         }
         Some(output)
@@ -387,12 +387,12 @@ fn validate_text(text: &str) -> Result<(), ContentError> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContentError {
-    InvalidArtifactId(String),
+    InvalidContentAttachmentId(String),
     InvalidBlobDigest(String),
     UnsupportedMediaType(String),
     InvalidImageDimensions { width: u32, height: u32 },
     MissingImageDimensions,
-    EmptyArtifact,
+    EmptyContentAttachment,
     InvalidSourceExtension,
     EmptyContent,
     EmptyText,
@@ -403,7 +403,9 @@ pub enum ContentError {
 impl Display for ContentError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidArtifactId(value) => write!(formatter, "invalid artifact ID {value:?}"),
+            Self::InvalidContentAttachmentId(value) => {
+                write!(formatter, "invalid content attachment ID {value:?}")
+            }
             Self::InvalidBlobDigest(value) => write!(formatter, "invalid blob digest {value:?}"),
             Self::UnsupportedMediaType(value) => {
                 write!(formatter, "unsupported media type {value:?}")
@@ -412,9 +414,11 @@ impl Display for ContentError {
                 write!(formatter, "invalid image dimensions {width}x{height}")
             }
             Self::MissingImageDimensions => formatter.write_str("image dimensions are required"),
-            Self::EmptyArtifact => formatter.write_str("artifact byte length must be positive"),
+            Self::EmptyContentAttachment => {
+                formatter.write_str("content attachment byte length must be positive")
+            }
             Self::InvalidSourceExtension => {
-                formatter.write_str("invalid artifact source extension")
+                formatter.write_str("invalid content attachment source extension")
             }
             Self::EmptyContent => formatter.write_str("content must contain at least one part"),
             Self::EmptyText => formatter.write_str("text content part cannot be empty"),
@@ -435,8 +439,8 @@ mod tests {
     #[test]
     fn text_and_artifact_content_round_trip_without_bytes_or_paths() {
         let bytes = b"private image";
-        let reference = ArtifactRef::new(
-            ArtifactId::generate(),
+        let reference = ContentAttachmentRef::new(
+            ContentAttachmentId::generate(),
             BlobDigest::from_bytes(bytes),
             MediaType::ImagePng,
             u64::try_from(bytes.len()).unwrap(),
@@ -450,7 +454,7 @@ mod tests {
         .unwrap();
         let content = Content::new([
             ContentPart::text("Inspect this image: ").unwrap(),
-            ContentPart::artifact(reference),
+            ContentPart::attachment(reference),
         ])
         .unwrap();
         let json = serde_json::to_string(&content).unwrap();
@@ -465,7 +469,7 @@ mod tests {
         assert!(Content::new([]).is_err());
         assert!(ContentPart::text("").is_err());
         assert!(BlobDigest::parse("sha256:ABC").is_err());
-        assert!(ArtifactId::parse("artifact-1").is_err());
+        assert!(ContentAttachmentId::parse("artifact-1").is_err());
         assert!(
             serde_json::from_value::<Content>(serde_json::json!({
                 "parts": [{"kind": "text", "text": "ok", "bytes": "forbidden"}]

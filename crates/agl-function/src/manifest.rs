@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 pub use agl_kernel::FunctionToolPolicy;
 use agl_kernel::{ExtensionId, ToolId};
 use agl_package::{
-    ArtifactEnvelope, EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
+    EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, PackageEnvelope, SKILL_TYPE,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ impl FunctionToolMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentFunctionFrontMatter {
-    pub artifact: ArtifactEnvelope,
+    pub package: PackageEnvelope,
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -71,21 +71,21 @@ pub struct AgentFunctionFrontMatter {
 
 impl AgentFunctionFrontMatter {
     pub fn id(&self) -> &str {
-        self.artifact.id.as_str()
+        self.package.id.as_str()
     }
 
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.artifact.type_id.as_str() == FUNCTION_TYPE,
-            "function artifact has type `{}`; expected `{FUNCTION_TYPE}`",
-            self.artifact.type_id
+            self.package.type_id.as_str() == FUNCTION_TYPE,
+            "function package has type `{}`; expected `{FUNCTION_TYPE}`",
+            self.package.type_id
         );
         ensure!(
-            self.artifact.payload_schema.as_str() == FUNCTION_PAYLOAD_SCHEMA,
+            self.package.payload_schema.as_str() == FUNCTION_PAYLOAD_SCHEMA,
             "unsupported function payload schema `{}`; expected `{FUNCTION_PAYLOAD_SCHEMA}`",
-            self.artifact.payload_schema
+            self.package.payload_schema
         );
-        self.artifact.validate().map_err(|error| anyhow!(error))?;
+        self.package.validate().map_err(|error| anyhow!(error))?;
         validate_function_id("function id", self.id())?;
         ensure!(
             !self.title.trim().is_empty(),
@@ -99,7 +99,7 @@ impl AgentFunctionFrontMatter {
             runtime.validate()?;
         }
         for requirement in self
-            .artifact
+            .package
             .requires
             .iter()
             .filter(|requirement| requirement.type_id().as_str() == EXTENSION_TYPE)
@@ -112,11 +112,11 @@ impl AgentFunctionFrontMatter {
             skills.validate("skills.use")?;
             for skill in &skills.use_ {
                 ensure!(
-                    self.artifact.requires.iter().any(|requirement| {
+                    self.package.requires.iter().any(|requirement| {
                         requirement.type_id().as_str() == SKILL_TYPE
                             && requirement.package_id().as_str() == skill
                     }),
-                    "function skill `{skill}` must be declared in artifact.requires"
+                    "function skill `{skill}` must be declared in package.requires"
                 );
             }
         }
@@ -135,7 +135,7 @@ impl AgentFunctionFrontMatter {
                 })?;
                 ensure!(
                     selected_extensions.contains(&extension_id),
-                    "function Tool `{tool_id}` requires explicit artifact requirement `extension:{extension_id}@<version>`"
+                    "function Tool `{tool_id}` requires explicit package requirement `extension:{extension_id}@<version>`"
                 );
             }
         }
@@ -144,11 +144,11 @@ impl AgentFunctionFrontMatter {
             for subagent in &subagents.use_ {
                 validate_function_id("subagent id", subagent)?;
                 ensure!(
-                    self.artifact.requires.iter().any(|requirement| {
+                    self.package.requires.iter().any(|requirement| {
                         requirement.type_id().as_str() == SUBFUNCTION_TYPE
                             && requirement.package_id().as_str() == subagent
                     }),
-                    "function subagent `{subagent}` must be declared in artifact.requires"
+                    "function subagent `{subagent}` must be declared in package.requires"
                 );
             }
         }
@@ -214,13 +214,13 @@ impl AgentFunctionFrontMatter {
     }
 
     pub fn required_extensions(&self) -> Vec<ExtensionId> {
-        self.artifact
+        self.package
             .requires
             .iter()
             .filter(|requirement| requirement.type_id().as_str() == EXTENSION_TYPE)
             .map(|requirement| {
                 ExtensionId::new(requirement.package_id().as_str())
-                    .expect("validated Extension artifact package ID must be a valid Extension ID")
+                    .expect("validated Extension package package ID must be a valid Extension ID")
             })
             .collect()
     }

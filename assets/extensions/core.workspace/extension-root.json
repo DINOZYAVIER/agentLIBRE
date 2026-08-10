@@ -1,6 +1,6 @@
 {
   "api_major": 1,
-  "declaration_digest": "sha256:ccc0fe17671f4f8d16491017e1daf1bff731e5b2d2626ca33deaa58c99255041",
+  "declaration_digest": "sha256:21bae679aaca6c4660a3351533cc5de2e30f2e394d9b8d0f32e852463507b319",
   "host_bindings": [
     {
       "api_major": 1,
@@ -15,9 +15,23 @@
     "tools": "indexes/tools.json"
   },
   "name": "Core Tools",
+  "package": {
+    "agl": {
+      "compatible": ">=1.0.0-alpha.12",
+      "tested": [
+        "1.0.0-alpha.12"
+      ]
+    },
+    "id": "core.workspace",
+    "payload_schema": "agentlibre.extension-root/v1",
+    "requires": [],
+    "schema": "agentlibre.package/v1",
+    "type": "extension",
+    "version": "1.2.0"
+  },
   "requirements": [],
   "schema": "agentlibre.extension-root/v1",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "workflow": {
     "mappings": [
       {

@@ -1,1 +1,2 @@
-Manage generic artifact packages and their workspace sources.
+Inspect verified runtime Artifact bindings. These commands are read-only and
+never clone, fetch, check out, commit, or modify repository state.

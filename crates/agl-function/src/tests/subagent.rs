@@ -22,7 +22,7 @@ fn graph_fixture(
     std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: graph\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n{requires}title: Graph\nsubagents:\n  use:\n{selected}delegation:\n  max_depth: 4\n  max_children_per_run: 4\n  max_descendants: 8\n  max_total_output_tokens: 4096\n  timeout_seconds: 600\n---\n"
+                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: graph\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n{requires}title: Graph\nsubagents:\n  use:\n{selected}delegation:\n  max_depth: 4\n  max_children_per_run: 4\n  max_descendants: 8\n  max_total_output_tokens: 4096\n  timeout_seconds: 600\n---\n"
             ),
         )
         .unwrap();
@@ -66,8 +66,8 @@ fn renders_subagent_context() {
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0

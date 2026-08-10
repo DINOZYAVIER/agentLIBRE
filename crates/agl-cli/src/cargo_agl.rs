@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
-use agl_package::{ArtifactPackageView, DirectoryPackageView};
+use agl_package::{DirectoryPackageView, PackageView};
 use anyhow::{Context, Result, bail};
 
 fn main() -> ExitCode {

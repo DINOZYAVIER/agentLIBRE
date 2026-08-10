@@ -414,10 +414,15 @@ mod tests {
         let function_root = root.join(".agl/functions/coordinator");
         std::fs::create_dir_all(function_root.join("subagents")).unwrap();
         std::fs::write(
+            root.join(".agl/workspace.toml"),
+            "version = 3\ndefault_function = \"function:coordinator@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
+        )
+        .unwrap();
+        std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coordinator
   version: 1.0.0
@@ -447,8 +452,8 @@ delegation:
         std::fs::write(
             reviewer_function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: reviewer
   version: 1.0.0

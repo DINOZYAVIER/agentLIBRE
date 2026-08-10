@@ -3,29 +3,162 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agl_artifact::{ArtifactBinding, ArtifactHandle};
 use agl_extension::package::{ExtensionPackage, ExtensionPackageAdapter};
-use agl_function::FunctionArtifactAdapter;
-use agl_model::{ModelArtifactAdapter, ModelPackage, ModelPackageProvenance};
+use agl_function::FunctionPackageAdapter;
+use agl_model::{ModelPackage, ModelPackageAdapter, ModelPackageProvenance};
 use agl_package::{
-    ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactLock, ArtifactPackageRef,
-    ArtifactPathRouter, ArtifactResolver, ArtifactSource, ArtifactSourceId, ArtifactSourceKind,
-    ArtifactSourceTier, ArtifactTypeId, DirectoryArtifactSource, DirectoryPackageView,
-    InMemoryPackageView, PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph,
-    StaticArtifactSource, WorkspaceManifest,
+    DirectoryPackageSource, DirectoryPackageView, InMemoryPackageView, PackageAdapter,
+    PackageAdapterRegistry, PackageCandidate, PackageLock, PackagePathRouter, PackageRef,
+    PackageResolver, PackageSource, PackageSourceId, PackageSourceKind, PackageSourceTier,
+    PackageTreeDigest, PackageTypeId, ResolvedPackage, ResolvedPackageGraph, StaticPackageSource,
+    WorkspaceManifest,
 };
-use agl_skill::{SkillArtifactAdapter, SkillHarness, SkillSource};
+use agl_skill::{
+    RegisteredSkill, SkillHarness, SkillPackageAdapter, SkillRegistry, SkillSource, SkillTrustStore,
+};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::AgentLibrePaths;
 
+#[derive(Clone, Debug)]
+pub struct ArtifactBindingInput {
+    declarations: Vec<agl_kernel::ArtifactDeclaration>,
+    bindings: Vec<ArtifactBinding>,
+}
+
+impl ArtifactBindingInput {
+    pub fn new(
+        declarations: impl IntoIterator<Item = agl_kernel::ArtifactDeclaration>,
+        bindings: impl IntoIterator<Item = ArtifactBinding>,
+    ) -> Self {
+        Self {
+            declarations: declarations.into_iter().collect(),
+            bindings: bindings.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ArtifactCompositionError {
+    #[error("Artifact `{artifact_id}` has no binding")]
+    MissingBinding { artifact_id: agl_kernel::ArtifactId },
+    #[error("Artifact binding `{artifact_id}` is not verified")]
+    UnverifiedBinding { artifact_id: agl_kernel::ArtifactId },
+    #[error("duplicate Artifact binding path `{path}`")]
+    DuplicateBindingPath { path: PathBuf },
+    #[error("Artifact binding `{artifact_id}` has no matching declaration")]
+    UndeclaredBinding { artifact_id: agl_kernel::ArtifactId },
+    #[error("Artifact handle binding failed: {0}")]
+    Handle(String),
+}
+
+pub fn bind_artifact_handles(
+    input: ArtifactBindingInput,
+) -> Result<Vec<ArtifactHandle>, ArtifactCompositionError> {
+    let mut by_id = input
+        .bindings
+        .into_iter()
+        .map(|binding| (binding.artifact_id().clone(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut paths = BTreeSet::new();
+    for binding in by_id.values() {
+        if !paths.insert(binding.submodule_path().to_path_buf()) {
+            return Err(ArtifactCompositionError::DuplicateBindingPath {
+                path: binding.submodule_path().to_path_buf(),
+            });
+        }
+    }
+    let mut handles = Vec::new();
+    for declaration in input.declarations {
+        let binding = by_id.remove(&declaration.id).ok_or_else(|| {
+            ArtifactCompositionError::MissingBinding {
+                artifact_id: declaration.id.clone(),
+            }
+        })?;
+        if !binding.is_verified() {
+            return Err(ArtifactCompositionError::UnverifiedBinding {
+                artifact_id: declaration.id,
+            });
+        }
+        handles.push(
+            ArtifactHandle::bind(declaration, binding)
+                .map_err(|error| ArtifactCompositionError::Handle(error.to_string()))?,
+        );
+    }
+    if let Some((artifact_id, _)) = by_id.into_iter().next() {
+        return Err(ArtifactCompositionError::UndeclaredBinding { artifact_id });
+    }
+    Ok(handles)
+}
+
 #[derive(Clone)]
-pub struct ArtifactComposition {
-    pub registry: Arc<ArtifactAdapterRegistry>,
-    pub sources: Vec<Arc<dyn ArtifactSource>>,
-    pub router: ArtifactPathRouter,
-    pub lock: Option<ArtifactLock>,
+pub struct PackageComposition {
+    pub registry: Arc<PackageAdapterRegistry>,
+    pub sources: Vec<Arc<dyn PackageSource>>,
+    pub router: PackagePathRouter,
+    pub lock: Option<PackageLock>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceSkillRegistry {
+    pub registry: SkillRegistry,
+    pub package_lock_present: bool,
+    pub external_package_count: usize,
+}
+
+pub fn resolve_workspace_skills(
+    paths: &AgentLibrePaths,
+    workspace_root: impl Into<PathBuf>,
+    trust_store_path: impl AsRef<Path>,
+) -> Result<WorkspaceSkillRegistry> {
+    let workspace_root = workspace_root.into();
+    let composition = compose_packages(paths, workspace_root)?;
+    let trust = SkillTrustStore::load(trust_store_path)?;
+    let skill_type = PackageTypeId::new("skill")?;
+    let mut ids = BTreeSet::new();
+    for source in &composition.sources {
+        for candidate in source.inventory_candidates(&skill_type)? {
+            ids.insert(candidate.package_id.to_string());
+        }
+    }
+    let mut registry = SkillRegistry::new();
+    let mut external_package_count = 0;
+    for id in ids {
+        let reference = PackageRef::parse(&format!("skill:{id}@*"))?;
+        let graph = composition.resolve(&reference)?;
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved Skill graph has no root node")?;
+        let payload = composition
+            .registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let mut harness = *payload
+            .downcast::<SkillHarness>()
+            .map_err(|_| anyhow::anyhow!("Skill package adapter returned an unexpected payload"))?;
+        harness.source = match node.candidate.tier {
+            PackageSourceTier::Builtin => SkillSource::Core,
+            PackageSourceTier::User | PackageSourceTier::System => SkillSource::Community,
+            PackageSourceTier::Explicit | PackageSourceTier::Workspace => SkillSource::Local,
+        };
+        if node.candidate.tier != PackageSourceTier::Builtin {
+            external_package_count += 1;
+        }
+        let trust_state = trust.state(&harness);
+        registry.register(RegisteredSkill {
+            harness,
+            trust: trust_state,
+        })?;
+    }
+    Ok(WorkspaceSkillRegistry {
+        registry,
+        package_lock_present: composition.lock.is_some(),
+        external_package_count,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -51,7 +184,7 @@ pub struct ResolvedRuntimeSkill {
 /// than paths that can be rediscovered later.
 #[derive(Clone, Debug)]
 pub struct ResolvedRuntimeBundle {
-    pub graph: ResolvedArtifactGraph,
+    pub graph: ResolvedPackageGraph,
     pub function: agl_function::RuntimeFunction,
     pub model: Option<ResolvedRuntimeModel>,
     pub extensions: BTreeMap<String, ResolvedRuntimeExtension>,
@@ -89,9 +222,9 @@ pub struct RuntimeBundleNodeIdentity {
     pub type_id: String,
     pub package_id: String,
     pub version: String,
-    pub package_digest: PackageTreeDigest,
-    pub source_tier: ArtifactSourceTier,
-    pub source_kind: ArtifactSourceKind,
+    pub package_tree_digest: PackageTreeDigest,
+    pub source_tier: PackageSourceTier,
+    pub source_kind: PackageSourceKind,
     pub source_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
@@ -121,30 +254,55 @@ pub struct RuntimeBundleIdentity {
     pub runtime: crate::CurrentRuntimeIdentity,
 }
 
-impl ArtifactComposition {
-    pub fn resolve(&self, root: &ArtifactPackageRef) -> Result<ResolvedArtifactGraph> {
+impl PackageComposition {
+    pub fn resolve(&self, root: &PackageRef) -> Result<ResolvedPackageGraph> {
         self.resolve_with_lock(root, self.lock.as_ref())
     }
 
-    pub fn resolve_for_lock_refresh(
-        &self,
-        root: &ArtifactPackageRef,
-    ) -> Result<ResolvedArtifactGraph> {
+    pub fn resolve_for_lock_refresh(&self, root: &PackageRef) -> Result<ResolvedPackageGraph> {
         self.resolve_with_lock(root, None)
+    }
+
+    pub fn workspace_lock(&self, root: &PackageRef) -> Result<PackageLock> {
+        let mut entries = self
+            .resolve_for_lock_refresh(root)?
+            .package_lock_entries()?;
+        let skill_type = PackageTypeId::skill();
+        let mut skill_ids = BTreeSet::new();
+        for source in &self.sources {
+            for candidate in source.inventory_candidates(&skill_type)? {
+                skill_ids.insert(candidate.package_id);
+            }
+        }
+        for skill_id in skill_ids {
+            let reference = PackageRef::parse(&format!("skill:{skill_id}@*"))?;
+            for (key, package) in self
+                .resolve_for_lock_refresh(&reference)?
+                .package_lock_entries()?
+            {
+                if let Some(existing) = entries.insert(key.clone(), package.clone()) {
+                    ensure!(
+                        existing == package,
+                        "package lock contains conflicting entries for `{key}`"
+                    );
+                }
+            }
+        }
+        Ok(PackageLock::new(entries.into_values())?)
     }
 
     pub fn resolve_function_reference(
         &self,
         workspace_root: &Path,
         reference: &str,
-    ) -> Result<ResolvedArtifactGraph> {
+    ) -> Result<ResolvedPackageGraph> {
         if !looks_like_function_path(reference) {
             let reference = if reference.contains(':') {
                 reference.to_owned()
             } else {
                 format!("function:{reference}@*")
             };
-            return self.resolve(&ArtifactPackageRef::parse(&reference)?);
+            return self.resolve(&PackageRef::parse(&reference)?);
         }
 
         let requested_path = PathBuf::from(reference);
@@ -162,43 +320,43 @@ impl ArtifactComposition {
                 .to_path_buf()
         };
         let view = Arc::new(DirectoryPackageView::new(&package_root)?);
-        let type_id = ArtifactTypeId::function();
+        let type_id = PackageTypeId::function();
         let adapter = self.registry.lookup(&type_id)?;
         let envelope = adapter.extract_envelope(view.as_ref())?;
         envelope.validate()?;
         if envelope.type_id != type_id {
-            return Err(agl_package::ArtifactError::AdapterTypeMismatch {
+            return Err(agl_package::PackageError::AdapterTypeMismatch {
                 type_id: type_id.to_string(),
                 actual_type: envelope.type_id.to_string(),
             }
             .into());
         }
-        let source_id: ArtifactSourceId = "explicit-function".parse()?;
-        let root = ArtifactPackageRef::new(
+        let source_id: PackageSourceId = "explicit-function".parse()?;
+        let root = PackageRef::new(
             type_id.clone(),
             envelope.id.clone(),
             envelope.version.to_string().parse()?,
         );
-        let candidate = ArtifactCandidate::new(
+        let candidate = PackageCandidate::new(
             type_id,
             envelope.id.clone(),
             envelope.version.clone(),
             source_id.clone(),
-            ArtifactSourceTier::Explicit,
-            ArtifactSourceKind::Directory,
+            PackageSourceTier::Explicit,
+            PackageSourceKind::Directory,
             view,
         )
         .with_package_root(package_root);
-        let explicit_source = Arc::new(StaticArtifactSource::new(
+        let explicit_source = Arc::new(StaticPackageSource::new(
             source_id.clone(),
-            ArtifactSourceTier::Explicit,
-            ArtifactSourceKind::Directory,
+            PackageSourceTier::Explicit,
+            PackageSourceKind::Directory,
             vec![candidate],
-        )?) as Arc<dyn ArtifactSource>;
+        )?) as Arc<dyn PackageSource>;
         let mut sources = Vec::with_capacity(self.sources.len() + 1);
         sources.push(explicit_source);
         sources.extend(self.sources.iter().cloned());
-        ArtifactResolver::new(self.registry.clone(), sources)
+        PackageResolver::new(self.registry.clone(), sources)
             .resolve_and_validate_with_explicit_root(&root, &source_id, self.lock.as_ref())
             .map_err(Into::into)
     }
@@ -230,10 +388,10 @@ impl ArtifactComposition {
 
     fn resolve_with_lock(
         &self,
-        root: &ArtifactPackageRef,
-        lock: Option<&ArtifactLock>,
-    ) -> Result<ResolvedArtifactGraph> {
-        ArtifactResolver::new(self.registry.clone(), self.sources.clone())
+        root: &PackageRef,
+        lock: Option<&PackageLock>,
+    ) -> Result<ResolvedPackageGraph> {
+        PackageResolver::new(self.registry.clone(), self.sources.clone())
             .resolve_and_validate(root, lock)
             .map_err(Into::into)
     }
@@ -241,8 +399,8 @@ impl ArtifactComposition {
 
 impl ResolvedRuntimeBundle {
     fn from_function_graph(
-        composition: &ArtifactComposition,
-        graph: ResolvedArtifactGraph,
+        composition: &PackageComposition,
+        graph: ResolvedPackageGraph,
         function: agl_function::RuntimeFunction,
         workspace_root: &Path,
         additional_skills: &[String],
@@ -272,7 +430,7 @@ impl ResolvedRuntimeBundle {
 
     pub fn with_selected_skills(
         mut self,
-        composition: &ArtifactComposition,
+        composition: &PackageComposition,
         workspace_root: &Path,
         selected_skills: &[String],
     ) -> Result<Self> {
@@ -290,8 +448,8 @@ impl ResolvedRuntimeBundle {
             .nodes
             .iter()
             .map(|(key, node)| {
-                let embedded_runtime = (node.candidate.tier == ArtifactSourceTier::Builtin
-                    && node.candidate.kind == ArtifactSourceKind::Embedded)
+                let embedded_runtime = (node.candidate.tier == PackageSourceTier::Builtin
+                    && node.candidate.kind == PackageSourceKind::Embedded)
                     .then(|| embedded.clone());
                 (
                     key.clone(),
@@ -300,7 +458,7 @@ impl ResolvedRuntimeBundle {
                         type_id: node.candidate.type_id.to_string(),
                         package_id: node.candidate.package_id.to_string(),
                         version: node.candidate.version.to_string(),
-                        package_digest: node.package_digest.clone(),
+                        package_tree_digest: node.package_tree_digest.clone(),
                         source_tier: node.candidate.tier,
                         source_kind: node.candidate.kind,
                         source_id: node.candidate.source_id.to_string(),
@@ -338,7 +496,7 @@ impl ResolvedRuntimeBundle {
 
     fn add_selected_skills(
         &mut self,
-        composition: &ArtifactComposition,
+        composition: &PackageComposition,
         _workspace_root: &Path,
         selected_skills: &[String],
     ) -> Result<()> {
@@ -351,7 +509,7 @@ impl ResolvedRuntimeBundle {
             if self.skills.contains_key(&skill_id) {
                 continue;
             }
-            let reference = ArtifactPackageRef::parse(&format!("skill:{skill_id}@*"))?;
+            let reference = PackageRef::parse(&format!("skill:{skill_id}@*"))?;
             let skill_graph = composition.resolve(&reference)?;
             let root = skill_graph
                 .nodes
@@ -381,14 +539,14 @@ impl ResolvedRuntimeBundle {
 }
 
 fn resolved_runtime_model(
-    graph: &ResolvedArtifactGraph,
-    registry: &ArtifactAdapterRegistry,
+    graph: &ResolvedPackageGraph,
+    registry: &PackageAdapterRegistry,
     function: &agl_function::RuntimeFunction,
 ) -> Result<Option<ResolvedRuntimeModel>> {
     let models = graph
         .nodes
         .iter()
-        .filter(|(_, node)| node.candidate.type_id == ArtifactTypeId::model())
+        .filter(|(_, node)| node.candidate.type_id == PackageTypeId::model())
         .collect::<Vec<_>>();
     if function.inference_config_toml.is_none() {
         ensure!(
@@ -410,14 +568,14 @@ fn resolved_runtime_model(
         .downcast::<ModelPackage>()
         .map_err(|_| anyhow::anyhow!("Model adapter returned an unexpected payload"))?;
     package.provenance = Some(ModelPackageProvenance {
-        reference: ArtifactPackageRef::parse(&format!(
+        reference: PackageRef::parse(&format!(
             "{}:{}@={}",
             node.candidate.type_id, node.candidate.package_id, node.candidate.version
         ))?,
         source_id: node.candidate.source_id.clone(),
         source_tier: node.candidate.tier,
         source_kind: node.candidate.kind,
-        package_digest: node.package_digest.clone(),
+        package_tree_digest: node.package_tree_digest.clone(),
     });
     Ok(Some(ResolvedRuntimeModel {
         node_key: node_key.clone(),
@@ -426,8 +584,8 @@ fn resolved_runtime_model(
 }
 
 fn resolved_runtime_extensions(
-    graph: &ResolvedArtifactGraph,
-    registry: &ArtifactAdapterRegistry,
+    graph: &ResolvedPackageGraph,
+    registry: &PackageAdapterRegistry,
     function: &agl_function::RuntimeFunction,
 ) -> Result<BTreeMap<String, ResolvedRuntimeExtension>> {
     let mut extensions = BTreeMap::new();
@@ -436,7 +594,7 @@ fn resolved_runtime_extensions(
             .nodes
             .iter()
             .filter(|(_, node)| {
-                node.candidate.type_id == ArtifactTypeId::extension()
+                node.candidate.type_id == PackageTypeId::extension()
                     && node.candidate.package_id.as_str() == extension_id
             })
             .collect::<Vec<_>>();
@@ -464,8 +622,8 @@ fn resolved_runtime_extensions(
 }
 
 fn merge_runtime_graph(
-    target: &mut ResolvedArtifactGraph,
-    incoming: ResolvedArtifactGraph,
+    target: &mut ResolvedPackageGraph,
+    incoming: ResolvedPackageGraph,
 ) -> Result<()> {
     for node in incoming.nodes.values() {
         if let Some(existing) = target.nodes.values().find(|existing| {
@@ -474,7 +632,7 @@ fn merge_runtime_graph(
         }) {
             ensure!(
                 existing.key() == node.key()
-                    && existing.package_digest == node.package_digest
+                    && existing.package_tree_digest == node.package_tree_digest
                     && existing.candidate.source_id == node.candidate.source_id,
                 "runtime artifact snapshot conflict for {}:{}: admitted `{}` from `{}` but later selected `{}` from `{}`",
                 node.candidate.type_id,
@@ -499,9 +657,9 @@ fn merge_runtime_graph(
     Ok(())
 }
 
-fn same_resolved_node(left: &ResolvedArtifact, right: &ResolvedArtifact) -> bool {
+fn same_resolved_node(left: &ResolvedPackage, right: &ResolvedPackage) -> bool {
     left.envelope == right.envelope
-        && left.package_digest == right.package_digest
+        && left.package_tree_digest == right.package_tree_digest
         && left.dependencies == right.dependencies
         && left.candidate.source_id == right.candidate.source_id
         && left.candidate.tier == right.candidate.tier
@@ -510,15 +668,15 @@ fn same_resolved_node(left: &ResolvedArtifact, right: &ResolvedArtifact) -> bool
         && left.candidate.source_tree == right.candidate.source_tree
 }
 
-fn skill_source(tier: ArtifactSourceTier) -> SkillSource {
+fn skill_source(tier: PackageSourceTier) -> SkillSource {
     match tier {
-        ArtifactSourceTier::Builtin => SkillSource::Core,
-        ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
-        ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+        PackageSourceTier::Builtin => SkillSource::Core,
+        PackageSourceTier::User | PackageSourceTier::System => SkillSource::Community,
+        PackageSourceTier::Explicit | PackageSourceTier::Workspace => SkillSource::Local,
     }
 }
 
-fn lock_identity(lock: Option<&ArtifactLock>) -> Result<RuntimeBundleLockIdentity> {
+fn lock_identity(lock: Option<&PackageLock>) -> Result<RuntimeBundleLockIdentity> {
     let Some(lock) = lock else {
         return Ok(RuntimeBundleLockIdentity {
             state: RuntimeBundleLockState::Unlocked,
@@ -543,12 +701,12 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     output
 }
 
-pub fn resolve_composed_artifacts(
+pub fn resolve_composed_packages(
     paths: &AgentLibrePaths,
     workspace_root: impl Into<PathBuf>,
-    root: &ArtifactPackageRef,
-) -> Result<ResolvedArtifactGraph> {
-    compose_artifacts(paths, workspace_root)?.resolve(root)
+    root: &PackageRef,
+) -> Result<ResolvedPackageGraph> {
+    compose_packages(paths, workspace_root)?.resolve(root)
 }
 
 pub fn resolve_composed_runtime_function(
@@ -558,7 +716,7 @@ pub fn resolve_composed_runtime_function(
     require_profile: bool,
 ) -> Result<agl_function::RuntimeFunction> {
     let workspace_root = workspace_root.as_ref();
-    let composition = compose_artifacts(paths, workspace_root)?;
+    let composition = compose_packages(paths, workspace_root)?;
     let graph = composition.resolve_function_reference(workspace_root, reference)?;
     agl_function::runtime_function_from_resolved_graph(
         &graph,
@@ -578,20 +736,24 @@ fn looks_like_function_path(reference: &str) -> bool {
         || path.extension().is_some()
 }
 
-pub fn compose_artifacts(
+pub fn compose_packages(
     paths: &AgentLibrePaths,
     workspace_root: impl Into<PathBuf>,
-) -> Result<ArtifactComposition> {
-    let registry = Arc::new(ArtifactAdapterRegistry::from_dyn([
-        Arc::new(FunctionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(SkillArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(ModelArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(ExtensionPackageAdapter::default()) as Arc<dyn ArtifactAdapter>,
+) -> Result<PackageComposition> {
+    let registry = Arc::new(PackageAdapterRegistry::from_dyn([
+        Arc::new(FunctionPackageAdapter::default()) as Arc<dyn PackageAdapter>,
+        Arc::new(SkillPackageAdapter::default()) as Arc<dyn PackageAdapter>,
+        Arc::new(ModelPackageAdapter::default()) as Arc<dyn PackageAdapter>,
+        Arc::new(ExtensionPackageAdapter::default()) as Arc<dyn PackageAdapter>,
     ])?);
     let workspace_root = workspace_root.into();
-    let lock =
-        agl_repo::read_optional_artifact_lock_v2(workspace_root.join(".agl/artifact-lock.toml"))?;
-    let router = ArtifactPathRouter::new(
+    let lock_path = workspace_root.join(".agl/package-lock.toml");
+    let lock = match fs::read_to_string(&lock_path) {
+        Ok(value) => Some(PackageLock::from_toml(&value)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let router = PackagePathRouter::new(
         workspace_root.clone(),
         paths.data_dir.clone(),
         paths.config_dir.clone(),
@@ -599,35 +761,26 @@ pub fn compose_artifacts(
         paths.cache_dir.clone(),
         registry.clone(),
     );
-    let mut sources: Vec<Arc<dyn ArtifactSource>> = vec![
-        Arc::new(DirectoryArtifactSource::new(
-            "workspace".parse()?,
-            ArtifactSourceTier::Workspace,
-            ArtifactSourceKind::Directory,
-            workspace_root.join(".agl"),
-            registry.clone(),
-        )),
-        Arc::new(DirectoryArtifactSource::new(
-            "user".parse()?,
-            ArtifactSourceTier::User,
-            ArtifactSourceKind::Directory,
-            paths.data_dir.clone(),
-            registry.clone(),
-        )),
-    ];
+    let mut sources: Vec<Arc<dyn PackageSource>> = vec![Arc::new(DirectoryPackageSource::new(
+        "user".parse()?,
+        PackageSourceTier::User,
+        PackageSourceKind::Directory,
+        paths.data_dir.clone(),
+        registry.clone(),
+    ))];
     for (index, root) in system_data_roots().into_iter().enumerate() {
-        sources.push(Arc::new(DirectoryArtifactSource::new(
-            ArtifactSourceId::new(format!("system-{index}"))?,
-            ArtifactSourceTier::System,
-            ArtifactSourceKind::Directory,
+        sources.push(Arc::new(DirectoryPackageSource::new(
+            PackageSourceId::new(format!("system-{index}"))?,
+            PackageSourceTier::System,
+            PackageSourceKind::Directory,
             root,
             registry.clone(),
         )));
     }
     add_declared_sources(&mut sources, &workspace_root, &registry)?;
     sources.push(builtin_source()?);
-    let sources = freeze_artifact_sources(&registry, sources)?;
-    Ok(ArtifactComposition {
+    let sources = freeze_package_sources(&registry, sources)?;
+    Ok(PackageComposition {
         registry,
         sources,
         router,
@@ -635,10 +788,10 @@ pub fn compose_artifacts(
     })
 }
 
-fn freeze_artifact_sources(
-    registry: &ArtifactAdapterRegistry,
-    sources: Vec<Arc<dyn ArtifactSource>>,
-) -> Result<Vec<Arc<dyn ArtifactSource>>> {
+fn freeze_package_sources(
+    registry: &PackageAdapterRegistry,
+    sources: Vec<Arc<dyn PackageSource>>,
+) -> Result<Vec<Arc<dyn PackageSource>>> {
     let type_ids = registry
         .iter()
         .map(|adapter| adapter.descriptor().type_id.clone())
@@ -652,47 +805,66 @@ fn freeze_artifact_sources(
                     candidates.push(candidate.snapshot()?);
                 }
             }
-            Ok(Arc::new(StaticArtifactSource::new(
+            Ok(Arc::new(StaticPackageSource::new(
                 source.id().clone(),
                 source.tier(),
                 source.kind(),
                 candidates,
-            )?) as Arc<dyn ArtifactSource>)
+            )?) as Arc<dyn PackageSource>)
         })
         .collect()
 }
 
 fn add_declared_sources(
-    sources: &mut Vec<Arc<dyn ArtifactSource>>,
+    sources: &mut Vec<Arc<dyn PackageSource>>,
     workspace_root: &Path,
-    registry: &Arc<ArtifactAdapterRegistry>,
+    registry: &Arc<PackageAdapterRegistry>,
 ) -> Result<()> {
     let manifest_path = workspace_root.join(".agl/workspace.toml");
     if !manifest_path.is_file() {
         return Ok(());
     }
     let manifest = WorkspaceManifest::from_toml(&fs::read_to_string(&manifest_path)?)?;
-    for (name, declaration) in manifest.sources {
+    for declaration in manifest.sources {
         let kind = declaration.kind;
+        let source_id = declaration.id.clone();
         let root = match kind {
-            ArtifactSourceKind::Directory | ArtifactSourceKind::Git => {
-                agl_repo::resolve_artifact_source_root(workspace_root, &name, &declaration)?
+            PackageSourceKind::Directory => {
+                let relative = declaration
+                    .path
+                    .as_ref()
+                    .context("declared package source path is missing")?;
+                let root = workspace_root.join(relative).canonicalize()?;
+                let workspace = workspace_root.canonicalize()?;
+                ensure!(
+                    root.starts_with(&workspace),
+                    "package source escapes workspace"
+                );
+                root
             }
-            ArtifactSourceKind::Embedded => continue,
+            PackageSourceKind::Git => {
+                let relative = declaration
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(".agl/sources").join(declaration.id.as_str()));
+                let root = workspace_root.join(relative).canonicalize()?;
+                let workspace = workspace_root.canonicalize()?;
+                ensure!(
+                    root.starts_with(&workspace),
+                    "package source escapes workspace"
+                );
+                root
+            }
+            PackageSourceKind::Embedded => continue,
         };
-        let provenance = if kind == ArtifactSourceKind::Git {
-            Some(agl_repo::git_source_provenance(&root)?)
-        } else {
-            None
-        };
-        let mut source = DirectoryArtifactSource::new(
-            ArtifactSourceId::new(name)?,
-            ArtifactSourceTier::Workspace,
-            kind,
-            root,
-            registry.clone(),
-        );
-        if let Some(provenance) = provenance {
+        let mut source =
+            DirectoryPackageSource::new(source_id, declaration.tier, kind, &root, registry.clone());
+        if kind == PackageSourceKind::Git {
+            let revision = declaration
+                .rev
+                .as_deref()
+                .context("declared Git package source revision is missing")?;
+            let provenance = agl_repo::verified_git_source_provenance(&root, revision)?;
             source = source.with_source_provenance(provenance.revision, provenance.tree);
         }
         sources.push(Arc::new(source));
@@ -715,34 +887,34 @@ fn system_data_roots() -> Vec<PathBuf> {
         })
 }
 
-fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id: ArtifactSourceId = "builtin".parse()?;
+fn builtin_source() -> Result<Arc<dyn PackageSource>> {
+    let source_id: PackageSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
-    for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
+    for package in agl_assets::BUILTIN_PACKAGES {
         let files = package
             .files
             .iter()
             .map(|file| {
-                Ok::<_, agl_package::ArtifactError>((file.path.parse()?, file.bytes.to_vec()))
+                Ok::<_, agl_package::PackageError>((file.path.parse()?, file.bytes.to_vec()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         candidates.push(
-            ArtifactCandidate::new(
+            PackageCandidate::new(
                 package.type_id.parse()?,
                 package.id.parse()?,
                 package.version.parse()?,
                 source_id.clone(),
-                ArtifactSourceTier::Builtin,
-                ArtifactSourceKind::Embedded,
+                PackageSourceTier::Builtin,
+                PackageSourceKind::Embedded,
                 Arc::new(InMemoryPackageView::new(files)?),
             )
             .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
         );
     }
-    Ok(Arc::new(StaticArtifactSource::new(
+    Ok(Arc::new(StaticPackageSource::new(
         source_id,
-        ArtifactSourceTier::Builtin,
-        ArtifactSourceKind::Embedded,
+        PackageSourceTier::Builtin,
+        PackageSourceKind::Embedded,
         candidates,
     )?))
 }
@@ -750,7 +922,23 @@ fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agl_package::ArtifactTypeId;
+    use agl_package::PackageTypeId;
+    use std::process::Command;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
 
     fn write_test_function(root: &Path, id: &str) {
         let package = root.join("functions").join(id);
@@ -759,8 +947,8 @@ mod tests {
             package.join("FUNCTION.md"),
             format!(
                 r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: {id}
   version: 1.0.0
@@ -778,37 +966,58 @@ title: Test Function
         fs::write(package.join("SYSTEM.md"), "Test.\n").unwrap();
     }
 
+    fn declare_workspace_source(workspace: &Path) {
+        fs::create_dir_all(workspace.join(".agl")).unwrap();
+        fs::write(
+            workspace.join(".agl/workspace.toml"),
+            r#"version = 3
+default_function = "function:gemma4-31b-32k@^1"
+
+[[sources]]
+id = "workspace"
+tier = "workspace"
+kind = "directory"
+path = ".agl"
+
+[policy]
+[config]
+"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn composition_registers_all_core_adapters_and_source_tiers() {
         let paths = AgentLibrePaths::from_agl_home(std::env::temp_dir().join("agl-app-test-home"));
         let workspace =
             std::env::temp_dir().join(format!("agl-app-composition-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        declare_workspace_source(&workspace);
+        let composition = compose_packages(&paths, &workspace).unwrap();
         assert_eq!(composition.registry.iter().count(), 4);
         assert!(
             composition
                 .registry
-                .lookup(&ArtifactTypeId::extension())
+                .lookup(&PackageTypeId::extension())
                 .is_ok()
         );
         assert!(
             composition
                 .sources
                 .iter()
-                .any(|source| source.tier() == ArtifactSourceTier::Builtin)
+                .any(|source| source.tier() == PackageSourceTier::Builtin)
         );
         assert!(
             composition
                 .sources
                 .iter()
-                .any(|source| source.tier() == ArtifactSourceTier::Workspace)
+                .any(|source| source.tier() == PackageSourceTier::Workspace)
         );
         assert!(
             composition
                 .sources
                 .iter()
-                .any(|source| source.tier() == ArtifactSourceTier::User)
+                .any(|source| source.tier() == PackageSourceTier::User)
         );
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -821,22 +1030,23 @@ title: Test Function
         let workspace =
             std::env::temp_dir().join(format!("agl-app-locked-resolution-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
-        let root: ArtifactPackageRef = "function:gemma4-e4b@^1.0".parse().unwrap();
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        let root: PackageRef = "function:gemma4-e4b@^1.0".parse().unwrap();
+        let composition = compose_packages(&paths, &workspace).unwrap();
         let graph = composition.resolve_for_lock_refresh(&root).unwrap();
         let mut lock = graph.lock().unwrap();
-        let package = lock.packages.values_mut().next().unwrap();
-        package.package_digest =
+        let package = lock.packages.first_mut().unwrap();
+        package.package_tree_digest =
             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                 .parse()
                 .unwrap();
 
         fs::create_dir_all(workspace.join(".agl")).unwrap();
-        agl_repo::write_artifact_lock_v2(workspace.join(".agl/artifact-lock.toml"), &lock).unwrap();
-        let error = resolve_composed_artifacts(&paths, &workspace, &root).unwrap_err();
+        lock.write_atomic(workspace.join(".agl/package-lock.toml"))
+            .unwrap();
+        let error = resolve_composed_packages(&paths, &workspace, &root).unwrap_err();
         assert_eq!(
             error
-                .downcast_ref::<agl_package::ArtifactError>()
+                .downcast_ref::<agl_package::PackageError>()
                 .unwrap()
                 .code(),
             "digest_drift"
@@ -854,20 +1064,117 @@ title: Test Function
         write_test_function(&paths.data_dir, "from-data");
         write_test_function(&paths.config_dir, "from-config");
 
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, &workspace).unwrap();
         let user = composition
             .sources
             .iter()
-            .find(|source| source.tier() == ArtifactSourceTier::User)
+            .find(|source| source.tier() == PackageSourceTier::User)
             .unwrap();
         let ids = user
-            .candidates(&ArtifactTypeId::function())
+            .candidates(&PackageTypeId::function())
             .unwrap()
             .into_iter()
             .map(|candidate| candidate.package_id.to_string())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["from-data"]);
 
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn git_workspace_source_is_locked_by_clean_declared_revision_and_tree() {
+        let home = std::env::temp_dir().join(format!(
+            "agl-runtime-git-workspace-source-{}",
+            std::process::id()
+        ));
+        let workspace = home.join("workspace");
+        let source = workspace.join(".agl/private-skills");
+        let skill = source.join("skills/private-notes");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            r#"---
+package:
+  schema: agentlibre.package/v1
+  type: skill
+  id: private-notes
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+description: Fixture private skill.
+pack: agl
+required_hooks: []
+allowed_tools: []
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - fixture guarantee
+---
+
+Fixture.
+"#,
+        )
+        .unwrap();
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "user.name", "Fixture"]);
+        git(
+            &source,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "fixture"]);
+        fs::write(
+            workspace.join(".agl/workspace.toml"),
+            r#"version = 3
+default_function = "function:gemma4-e4b@^1"
+
+[[sources]]
+id = "private-skills"
+tier = "workspace"
+kind = "git"
+path = ".agl/private-skills"
+url = "fixture"
+rev = "main"
+
+[policy]
+[config]
+"#,
+        )
+        .unwrap();
+        let paths = AgentLibrePaths::from_agl_home(&home);
+        let composition = compose_packages(&paths, &workspace).unwrap();
+        let graph = composition
+            .resolve_for_lock_refresh(&"skill:private-notes@*".parse().unwrap())
+            .unwrap();
+        let node = graph.nodes.get(&graph.root).unwrap();
+        assert_eq!(
+            node.candidate.source_revision.as_deref(),
+            Some(git(&source, &["rev-parse", "HEAD"]).as_str())
+        );
+        assert_eq!(
+            node.candidate.source_tree.as_deref(),
+            Some(git(&source, &["rev-parse", "HEAD^{tree}"]).as_str())
+        );
+        let lock = composition
+            .workspace_lock(&"function:gemma4-e4b@^1".parse().unwrap())
+            .unwrap();
+        assert!(
+            lock.packages
+                .iter()
+                .any(|package| package.key() == "skill:private-notes@1.0.0")
+        );
+
+        fs::write(skill.join("untracked.txt"), "dirty").unwrap();
+        let error = match compose_packages(&paths, &workspace) {
+            Ok(_) => panic!("dirty Git source unexpectedly produced a composition"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("uncommitted or ignored files"));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -881,10 +1188,11 @@ title: Test Function
         let package = workspace.join(".agl/functions/broken");
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&package).unwrap();
+        declare_workspace_source(&workspace);
         fs::write(
             package.join("FUNCTION.md"),
             r#"---
-artifact:
+package:
   schema: agentlibre.artifact/v999
   type: function
   id: broken
@@ -901,14 +1209,14 @@ title: Broken
         .unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
 
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, &workspace).unwrap();
         let workspace_source = composition
             .sources
             .iter()
             .find(|source| source.id().as_str() == "workspace")
             .unwrap();
         let candidates = workspace_source
-            .inventory_candidates(&ArtifactTypeId::function())
+            .inventory_candidates(&PackageTypeId::function())
             .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].package_id.as_str(), "broken");
@@ -918,11 +1226,11 @@ title: Broken
             "invalid_envelope"
         );
 
-        let reference: ArtifactPackageRef = "function:broken@*".parse().unwrap();
+        let reference: PackageRef = "function:broken@*".parse().unwrap();
         let error = composition.resolve(&reference).unwrap_err();
         assert_eq!(
             error
-                .downcast_ref::<agl_package::ArtifactError>()
+                .downcast_ref::<agl_package::PackageError>()
                 .unwrap()
                 .code(),
             "invalid_envelope"
@@ -973,18 +1281,18 @@ title: Broken
             .join("../../assets/functions/gemma4-31b-32k/FUNCTION.md")
             .canonicalize()
             .unwrap();
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, &workspace).unwrap();
 
         let graph = composition
             .resolve_function_reference(&workspace, function_path.to_str().unwrap())
             .unwrap();
 
         let root = &graph.nodes[&graph.root];
-        assert_eq!(root.candidate.tier, ArtifactSourceTier::Explicit);
+        assert_eq!(root.candidate.tier, PackageSourceTier::Explicit);
         assert_eq!(root.candidate.package_id.as_str(), "gemma4-31b-32k");
         assert_eq!(graph.nodes.len(), 4);
         for dependency in graph.nodes.values().filter(|node| node.key() != graph.root) {
-            assert_eq!(dependency.candidate.tier, ArtifactSourceTier::Builtin);
+            assert_eq!(dependency.candidate.tier, PackageSourceTier::Builtin);
             assert_eq!(dependency.candidate.source_id.as_str(), "builtin");
         }
         let function = agl_function::runtime_function_from_resolved_graph(
@@ -1015,7 +1323,7 @@ title: Broken
             .unwrap();
         let model = bundle.model.as_ref().unwrap();
         let provenance = model.package.provenance.as_ref().unwrap();
-        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.1.0");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.2.0");
         assert_eq!(provenance.source_id.as_str(), "builtin");
         assert_eq!(bundle.extensions.len(), 2);
         let identity = bundle.identity();
@@ -1024,7 +1332,7 @@ title: Broken
         for node in identity
             .nodes
             .values()
-            .filter(|node| node.source_tier == ArtifactSourceTier::Builtin)
+            .filter(|node| node.source_tier == PackageSourceTier::Builtin)
         {
             assert!(node.source_revision.is_none());
             assert!(node.source_tree.is_none());
@@ -1050,11 +1358,12 @@ title: Broken
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&function_root).unwrap();
         fs::create_dir_all(model_root.join("evidence")).unwrap();
+        declare_workspace_source(&workspace);
         fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: workspace-model
   version: 1.0.0
@@ -1107,7 +1416,7 @@ tool_call_format = "gemma_function_call"
 "#,
         )
         .unwrap();
-        let model_document = r#"artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "gemma4-31b", version = "1.2.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+        let model_document = r#"package = { schema = "agentlibre.package/v1", type = "model", id = "gemma4-31b", version = "1.2.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
 
 display_name = "Workspace Gemma fixture"
 capabilities = ["text", "tools"]
@@ -1148,17 +1457,17 @@ expected_speed = "fixture"
         )
         .unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
-        let root: ArtifactPackageRef = "function:workspace-model@=1.0.0".parse().unwrap();
-        let unlocked = compose_artifacts(&paths, &workspace).unwrap();
+        let root: PackageRef = "function:workspace-model@=1.0.0".parse().unwrap();
+        let unlocked = compose_packages(&paths, &workspace).unwrap();
         let graph = unlocked.resolve_for_lock_refresh(&root).unwrap();
         fs::create_dir_all(workspace.join(".agl")).unwrap();
-        agl_repo::write_artifact_lock_v2(
-            workspace.join(".agl/artifact-lock.toml"),
-            &graph.lock().unwrap(),
-        )
-        .unwrap();
+        graph
+            .lock()
+            .unwrap()
+            .write_atomic(workspace.join(".agl/package-lock.toml"))
+            .unwrap();
 
-        let composition = compose_artifacts(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, &workspace).unwrap();
         fs::write(model_root.join("MODEL.toml"), "mutated after admission").unwrap();
         let bundle = composition
             .resolve_runtime_bundle(&workspace, &paths.config_dir, "workspace-model", true, &[])
@@ -1167,7 +1476,7 @@ expected_speed = "fixture"
         let model = &bundle.model.as_ref().unwrap().package;
         let provenance = model.provenance.as_ref().unwrap();
         assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.2.0");
-        assert_eq!(provenance.source_tier, ArtifactSourceTier::Workspace);
+        assert_eq!(provenance.source_tier, PackageSourceTier::Workspace);
         assert_eq!(model.profiles[0].id, "workspace-vulkan-32768");
 
         let preset = agl_config::load_inference_preset_from_str(
@@ -1225,20 +1534,16 @@ expected_speed = "fixture"
         let workspace = home.join("workspace");
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(workspace.join(".agl")).unwrap();
-        fs::write(
-            workspace.join(".agl/artifact-lock.toml"),
-            "invalid lock = [",
-        )
-        .unwrap();
+        fs::write(workspace.join(".agl/package-lock.toml"), "invalid lock = [").unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
 
-        let error = match compose_artifacts(&paths, &workspace) {
+        let error = match compose_packages(&paths, &workspace) {
             Ok(_) => panic!("invalid lock unexpectedly produced a composition"),
             Err(error) => error,
         };
         assert_eq!(
             error
-                .downcast_ref::<agl_package::ArtifactError>()
+                .downcast_ref::<agl_package::PackageError>()
                 .unwrap()
                 .code(),
             "lock_stale"

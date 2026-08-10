@@ -9,8 +9,8 @@ mod status;
 mod worker;
 
 pub use adapter::{
-    MODEL_FILE_NAME, MODEL_PAYLOAD_SCHEMA, ModelArtifactAdapter, builtin_model_source,
-    model_adapter_registry, parse_model_package,
+    MODEL_FILE_NAME, MODEL_PAYLOAD_SCHEMA, ModelPackageAdapter, builtin_model_source,
+    parse_model_package,
 };
 pub use catalog::{
     CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactRole, ModelCatalog,

@@ -10,7 +10,10 @@ use agl_function::{
     load_function_candidate, workspace_functions_root,
 };
 use agl_model::{CatalogRuntimeProfile, ProfileDevice};
-use agl_package::{ArtifactSourceTier, ArtifactTypeId};
+use agl_package::{
+    PackageRef, PackageSourceDeclaration, PackageSourceId, PackageSourceKind, PackageSourceTier,
+    PackageTypeId, WorkspaceConfigReferences, WorkspaceManifest, WorkspacePolicy,
+};
 use agl_protocol::RuntimeGenerationIdentity;
 use agl_runtime::{AgentLibreRuntimeConfig, RuntimeBundleIdentity};
 use anyhow::{Context, Result, bail, ensure};
@@ -106,10 +109,10 @@ fn run_function_list(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let composition = agl_runtime::compose_artifacts(&runtime.paths, &workspace_root)?;
+    let composition = agl_runtime::compose_packages(&runtime.paths, &workspace_root)?;
     let mut functions = Vec::new();
     for source in &composition.sources {
-        for candidate in source.candidates(&ArtifactTypeId::function())? {
+        for candidate in source.candidates(&PackageTypeId::function())? {
             let loaded = load_function_candidate(&candidate);
             functions.push(match loaded {
                 Ok(function) => FunctionListEntry {
@@ -225,7 +228,7 @@ fn resolve_function_diagnostics(
     workspace_root: &std::path::Path,
     reference: &str,
 ) -> Result<(LoadedFunction, FunctionResolutionDiagnostics)> {
-    let composition = agl_runtime::compose_artifacts(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
     let bundle = composition.resolve_runtime_bundle(
         workspace_root,
         &runtime.paths.config_dir,
@@ -285,7 +288,7 @@ fn function_inference_diagnostics(
             .graph
             .nodes
             .get(&model.node_key)
-            .map(|node| node.package_digest.to_string())
+            .map(|node| node.package_tree_digest.to_string())
     });
     let bindings_path = agl_config::model_bindings_path(&runtime.paths.config_dir);
     let (binding, binding_error) = match bind_inference_preset(preset.clone(), &bindings_path) {
@@ -367,7 +370,7 @@ pub(crate) fn resolve_loaded_function(
     workspace_root: &std::path::Path,
     reference: &str,
 ) -> Result<LoadedFunction> {
-    let composition = agl_runtime::compose_artifacts(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
     let graph = composition.resolve_function_reference(workspace_root, reference)?;
     let root = graph
         .nodes
@@ -380,16 +383,18 @@ fn run_function_init(
     options: FunctionInitOptions,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
-    let (source, root) = if options.workspace {
+    let (source, root, workspace_root) = if options.workspace {
         let workspace_root = runtime.resolve_workspace_root(None)?;
         (
             FunctionPackageSource::Workspace,
             workspace_functions_root(&workspace_root),
+            Some(workspace_root),
         )
     } else {
         (
             FunctionPackageSource::Global,
             runtime.paths.data_dir.join("functions"),
+            None,
         )
     };
     let function_dir = root.join(&options.id);
@@ -428,6 +433,9 @@ fn run_function_init(
                 system_prompt_path.display()
             )
         })?;
+    if let Some(workspace_root) = workspace_root {
+        ensure_workspace_package_source(&workspace_root)?;
+    }
 
     let report = FunctionInitReport {
         id: options.id,
@@ -458,12 +466,50 @@ fn run_function_init(
     })
 }
 
-fn function_source(tier: ArtifactSourceTier) -> FunctionPackageSource {
+fn ensure_workspace_package_source(workspace_root: &std::path::Path) -> Result<()> {
+    let path = workspace_root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+    let mut manifest = if path.is_file() {
+        agl_repo::read_workspace_manifest(&path)?
+    } else {
+        WorkspaceManifest {
+            version: WorkspaceManifest::VERSION,
+            default_function: PackageRef::parse(agl_repo::DEFAULT_FUNCTION)?,
+            sources: Vec::new(),
+            policy: WorkspacePolicy::default(),
+            config: WorkspaceConfigReferences::default(),
+        }
+    };
+    if manifest.sources.iter().any(|source| {
+        source.tier == PackageSourceTier::Workspace
+            && source.kind == PackageSourceKind::Directory
+            && source.path.as_deref() == Some(std::path::Path::new(".agl"))
+    }) {
+        return Ok(());
+    }
+    ensure!(
+        manifest
+            .sources
+            .iter()
+            .all(|source| source.id.as_str() != "workspace"),
+        "WorkspaceManifest source id `workspace` already names a different package source"
+    );
+    manifest.sources.push(PackageSourceDeclaration {
+        id: PackageSourceId::new("workspace")?,
+        tier: PackageSourceTier::Workspace,
+        kind: PackageSourceKind::Directory,
+        path: Some(PathBuf::from(".agl")),
+        url: None,
+        rev: None,
+    });
+    agl_repo::write_workspace_manifest(path, &manifest)
+}
+
+fn function_source(tier: PackageSourceTier) -> FunctionPackageSource {
     match tier {
-        ArtifactSourceTier::Explicit => FunctionPackageSource::Explicit,
-        ArtifactSourceTier::Workspace => FunctionPackageSource::Workspace,
-        ArtifactSourceTier::Builtin => FunctionPackageSource::Builtin,
-        ArtifactSourceTier::User | ArtifactSourceTier::System => FunctionPackageSource::Global,
+        PackageSourceTier::Explicit => FunctionPackageSource::Explicit,
+        PackageSourceTier::Workspace => FunctionPackageSource::Workspace,
+        PackageSourceTier::Builtin => FunctionPackageSource::Builtin,
+        PackageSourceTier::User | PackageSourceTier::System => FunctionPackageSource::Global,
     }
 }
 
@@ -505,7 +551,7 @@ fn doctor_timeout(
     workspace_root: &std::path::Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<Duration> {
-    let composition = agl_runtime::compose_artifacts(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
     let bundle = composition.resolve_runtime_bundle(
         workspace_root,
         &runtime.paths.config_dir,
@@ -601,7 +647,7 @@ fn print_function_resolution(report: &FunctionResolutionDiagnostics) {
             "artifact.node key={} reference={} digest={} tier={:?} kind={:?} source={}",
             key,
             node.reference,
-            node.package_digest,
+            node.package_tree_digest,
             node.source_tier,
             node.source_kind,
             node.source_id
@@ -825,8 +871,8 @@ fn function_template(id: &str, model_profile: Option<&str>) -> String {
     let model_profile = model_profile.unwrap_or("local");
     format!(
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: {id}
   version: 1.0.0
@@ -907,7 +953,7 @@ mod tests {
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
-        let composition = agl_runtime::compose_artifacts(&runtime.paths, &workspace).unwrap();
+        let composition = agl_runtime::compose_packages(&runtime.paths, &workspace).unwrap();
 
         for (reference, context_tokens, profile_id, required_vram_bytes) in [
             (
@@ -937,8 +983,8 @@ mod tests {
             assert_eq!(profile.pci_device_id.as_deref(), Some("1002:744c"));
             assert_eq!(profile.pci_subsystem_id.as_deref(), Some("1da2:471e"));
             let identity = bundle.identity();
-            assert_eq!(identity.root, format!("function:{reference}@1.1.0"));
-            assert_eq!(identity.model.as_deref(), Some("model:gemma4-31b@1.1.0"));
+            assert_eq!(identity.root, format!("function:{reference}@1.2.0"));
+            assert_eq!(identity.model.as_deref(), Some("model:gemma4-31b@1.2.0"));
             assert_eq!(identity.nodes.len(), 4);
         }
         std::fs::remove_dir_all(root).unwrap();

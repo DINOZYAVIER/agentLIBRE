@@ -13,8 +13,8 @@ fn runtime_function_can_allow_missing_profile_when_config_overrides() {
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-artifact:
-  schema: agentlibre.artifact/v1
+package:
+  schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0

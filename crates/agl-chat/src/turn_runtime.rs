@@ -1319,6 +1319,7 @@ fn build_chat_tool_runtime(
         store_root: session.store_root(),
         trust_store_path: session.trust_store_path(),
         workspace_root,
+        runtime_paths: session.runtime_paths(),
         permission_status: permission_runtime_status(session),
         process_tools: Some(process_tools.clone()),
         screen_admitted_run: session

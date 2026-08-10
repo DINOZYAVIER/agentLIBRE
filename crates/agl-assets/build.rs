@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agl_package::{ArtifactEnvelope, InMemoryPackageView, compute_package_digest};
+use agl_package::{InMemoryPackageView, PackageEnvelope, compute_package_digest};
 use sha2::{Digest, Sha256};
 
 const BUILTIN_SKILL_PACKS: &[&str] = &["agl"];
@@ -47,7 +47,7 @@ struct Asset {
     sha256: String,
 }
 
-struct ArtifactPackage {
+struct Package {
     type_id: String,
     id: String,
     version: String,
@@ -105,7 +105,7 @@ fn main() {
 
 fn add_extensions(
     assets: &mut Vec<Asset>,
-    packages: &mut Vec<ArtifactPackage>,
+    packages: &mut Vec<Package>,
     repo_root: &Path,
     extensions_root: &Path,
 ) {
@@ -182,7 +182,7 @@ fn add_extensions(
             ));
             files.push((relative, asset_index));
         }
-        packages.push(ArtifactPackage {
+        packages.push(Package {
             type_id: "extension".to_owned(),
             id: id.to_owned(),
             version: version.to_owned(),
@@ -196,7 +196,7 @@ fn add_extensions(
 
 fn add_models(
     assets: &mut Vec<Asset>,
-    packages: &mut Vec<ArtifactPackage>,
+    packages: &mut Vec<Package>,
     repo_root: &Path,
     models_root: &Path,
 ) {
@@ -219,14 +219,14 @@ fn add_models(
         let document: toml::Value = toml::from_str(&descriptor_text)
             .unwrap_or_else(|err| panic!("failed to parse {}: {err}", descriptor.display()));
         let artifact = document
-            .get("artifact")
+            .get("package")
             .cloned()
             .unwrap_or_else(|| panic!("model {id} has no artifact table"));
         let envelope = artifact
-            .try_into::<ArtifactEnvelope>()
+            .try_into::<PackageEnvelope>()
             .unwrap_or_else(|error| {
                 panic!(
-                    "failed to parse artifact envelope from {}: {error}",
+                    "failed to parse package envelope from {}: {error}",
                     descriptor.display()
                 )
             });
@@ -256,7 +256,7 @@ fn add_models(
             ));
         }
         let digest = package_tree_digest(assets, &files);
-        packages.push(ArtifactPackage {
+        packages.push(Package {
             type_id: envelope.type_id.to_string(),
             id: envelope.id.to_string(),
             version: envelope.version.to_string(),
@@ -283,7 +283,7 @@ fn add_system_prompt(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Pa
 
 fn add_skills(
     assets: &mut Vec<Asset>,
-    packages: &mut Vec<ArtifactPackage>,
+    packages: &mut Vec<Package>,
     repo_root: &Path,
     skills_root: &Path,
 ) {
@@ -366,7 +366,7 @@ fn add_skills(
             ));
             files.extend(package_resource_files(assets, &skill_dir, &asset_indices));
             let digest = package_tree_digest(assets, &files);
-            packages.push(ArtifactPackage {
+            packages.push(Package {
                 type_id: envelope.type_id.to_string(),
                 id,
                 version: envelope.version.to_string(),
@@ -387,7 +387,7 @@ fn add_skills(
 
 fn add_functions(
     assets: &mut Vec<Asset>,
-    packages: &mut Vec<ArtifactPackage>,
+    packages: &mut Vec<Package>,
     repo_root: &Path,
     functions_root: &Path,
 ) {
@@ -467,7 +467,7 @@ fn add_functions(
             ("inference.toml".to_string(), inference_config_asset_index),
         ];
         let digest = package_tree_digest(assets, &files);
-        packages.push(ArtifactPackage {
+        packages.push(Package {
             type_id: envelope.type_id.to_string(),
             id: envelope.id.to_string(),
             version: envelope.version.to_string(),
@@ -561,7 +561,7 @@ fn package_tree_digest(assets: &[Asset], files: &[(String, usize)]) -> String {
         .to_string()
 }
 
-fn markdown_envelope(path: &Path) -> ArtifactEnvelope {
+fn markdown_envelope(path: &Path) -> PackageEnvelope {
     let text = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let frontmatter = split_frontmatter(&text).unwrap_or_else(|| {
@@ -573,12 +573,12 @@ fn markdown_envelope(path: &Path) -> ArtifactEnvelope {
     let document = serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
         .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
     let artifact = document
-        .get("artifact")
+        .get("package")
         .cloned()
-        .unwrap_or_else(|| panic!("{} has no artifact envelope", path.display()));
-    serde_yaml::from_value::<ArtifactEnvelope>(artifact).unwrap_or_else(|error| {
+        .unwrap_or_else(|| panic!("{} has no package envelope", path.display()));
+    serde_yaml::from_value::<PackageEnvelope>(artifact).unwrap_or_else(|error| {
         panic!(
-            "failed to parse artifact envelope from {}: {error}",
+            "failed to parse package envelope from {}: {error}",
             path.display()
         )
     })
@@ -595,10 +595,10 @@ fn split_frontmatter(text: &str) -> Option<&str> {
         .map(|(frontmatter, _)| frontmatter)
 }
 
-fn validate_envelope(envelope: &ArtifactEnvelope, type_id: &str, id: &str, path: &Path) {
+fn validate_envelope(envelope: &PackageEnvelope, type_id: &str, id: &str, path: &Path) {
     envelope
         .validate()
-        .unwrap_or_else(|error| panic!("invalid artifact envelope in {}: {error}", path.display()));
+        .unwrap_or_else(|error| panic!("invalid package envelope in {}: {error}", path.display()));
     if envelope.type_id.as_str() != type_id {
         panic!(
             "builtin package {} has artifact type {}; expected {type_id}",
@@ -615,11 +615,11 @@ fn validate_envelope(envelope: &ArtifactEnvelope, type_id: &str, id: &str, path:
     }
 }
 
-fn exact_reference(package: &ArtifactPackage) -> String {
+fn exact_reference(package: &Package) -> String {
     format!("{}:{}@{}", package.type_id, package.id, package.version)
 }
 
-fn builtin_catalog_digest(packages: &[ArtifactPackage]) -> String {
+fn builtin_catalog_digest(packages: &[Package]) -> String {
     let mut packages = packages.iter().collect::<Vec<_>>();
     packages.sort_by_key(|package| exact_reference(package));
     let mut hasher = Sha256::new();
@@ -643,7 +643,7 @@ fn hash_catalog_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-fn validate_builtin_catalog_baseline(packages: &[ArtifactPackage], path: &Path) {
+fn validate_builtin_catalog_baseline(packages: &[Package], path: &Path) {
     println!("cargo:rerun-if-changed={}", path.display());
     let text = fs::read_to_string(path).unwrap_or_else(|error| {
         panic!(
@@ -803,7 +803,7 @@ fn validate_unique_asset_ids(assets: &[Asset]) {
     }
 }
 
-fn validate_unique_package_ids(packages: &[ArtifactPackage]) {
+fn validate_unique_package_ids(packages: &[Package]) {
     let mut ids = std::collections::BTreeSet::new();
     for package in packages {
         if !ids.insert((package.type_id.as_str(), package.id.as_str())) {
@@ -815,7 +815,7 @@ fn validate_unique_package_ids(packages: &[ArtifactPackage]) {
     }
 }
 
-fn write_registry(assets: &[Asset], packages: &[ArtifactPackage]) {
+fn write_registry(assets: &[Asset], packages: &[Package]) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set by Cargo"));
     let destination = out_dir.join("builtin_assets.rs");
     let mut output = String::new();
@@ -857,10 +857,10 @@ fn write_registry(assets: &[Asset], packages: &[ArtifactPackage]) {
         output.push_str("];\n");
     }
 
-    output.push_str("pub static BUILTIN_ARTIFACT_PACKAGES: &[BuiltinArtifactPackage] = &[\n");
+    output.push_str("pub static BUILTIN_PACKAGES: &[BuiltinPackage] = &[\n");
     for (index, package) in packages.iter().enumerate() {
         output.push_str(&format!(
-            "    BuiltinArtifactPackage {{ type_id: {}, id: {}, version: {}, entrypoint: {}, requires: PACKAGE_{index}_REQUIRES, files: PACKAGE_{index}_FILES, digest: {} }},\n",
+            "    BuiltinPackage {{ type_id: {}, id: {}, version: {}, entrypoint: {}, requires: PACKAGE_{index}_REQUIRES, files: PACKAGE_{index}_FILES, digest: {} }},\n",
             rust_string(&package.type_id),
             rust_string(&package.id),
             rust_string(&package.version),
@@ -870,7 +870,7 @@ fn write_registry(assets: &[Asset], packages: &[ArtifactPackage]) {
     }
     output.push_str("];\n");
     output.push_str(&format!(
-        "pub const BUILTIN_ARTIFACT_CATALOG_DIGEST: &str = {};\n",
+        "pub const BUILTIN_PACKAGE_CATALOG_DIGEST: &str = {};\n",
         rust_string(&builtin_catalog_digest(packages))
     ));
 

@@ -46,7 +46,7 @@ mkdir -p "$workspace/.agl/functions/session-smoke"
 printf '%s\n' \
   '---' \
   'artifact:' \
-  '  schema: agentlibre.artifact/v1' \
+  '  schema: agentlibre.package/v1' \
   '  type: function' \
   '  id: session-smoke' \
   '  version: 1.0.0' \

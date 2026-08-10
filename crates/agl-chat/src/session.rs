@@ -37,17 +37,14 @@ use agl_model::{
     hugging_face_cache_dir,
 };
 use agl_oven::render_model_request;
-use agl_package::ArtifactSourceTier;
+use agl_package::PackageSourceTier;
 use agl_runtime::{
-    AgentLibrePaths, AgentLibreRuntimeConfig, ArtifactComposition, RenderedRuntimeFeatureContext,
+    AgentLibrePaths, AgentLibreRuntimeConfig, PackageComposition, RenderedRuntimeFeatureContext,
     ResolvedRuntimeBundle, RuntimeFeatureRenderOptions, render_runtime_feature_context,
 };
 use agl_skill::{
-    RegisteredSkill, SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
-    SkillFolderPrepareReport, SkillHarness, SkillRegistry, SkillSource, SkillToolRouting,
-    SkillToolRoutingView, SkillTrustState, build_verified_context_bundle,
-    prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
-    trusted_workspace_registry,
+    RegisteredSkill, SkillContextEvidence, SkillRegistry, SkillToolRouting, SkillToolRoutingView,
+    SkillTrustState, build_verified_context_bundle,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
 use anyhow::{Context, Result, bail, ensure};
@@ -148,8 +145,8 @@ struct RuntimeIdentityFunction {
 struct RuntimeExtensionExtensionBinding {
     artifact_reference: String,
     artifact_version: String,
-    package_digest: String,
-    source_tier: ArtifactSourceTier,
+    package_tree_digest: String,
+    source_tier: PackageSourceTier,
     source_id: String,
     api_major: u32,
     declaration_digest: String,
@@ -187,8 +184,8 @@ struct RuntimeResolutionFunctionPolicy {
 struct RuntimeResolutionSkillIdentity {
     id: String,
     node_key: String,
-    package_digest: String,
-    source_tier: ArtifactSourceTier,
+    package_tree_digest: String,
+    source_tier: PackageSourceTier,
     source_id: String,
     trust: SkillTrustState,
 }
@@ -269,14 +266,20 @@ impl InferenceSession {
             function_profile_required,
             &options.skills,
         )?;
-        let runtime_function = runtime_bundle
-            .as_ref()
-            .map(|bundle| bundle.function.clone());
-        let extension_bindings = runtime_bundle
-            .as_ref()
-            .map(bind_runtime_extensions)
-            .transpose()?
-            .unwrap_or_default();
+        let runtime_function = options.function_ref.as_ref().and_then(|_| {
+            runtime_bundle
+                .as_ref()
+                .map(|bundle| bundle.function.clone())
+        });
+        let extension_bindings = if options.function_ref.is_some() {
+            runtime_bundle
+                .as_ref()
+                .map(bind_runtime_extensions)
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
         let function_config_path = runtime_function
             .as_ref()
             .and_then(|function| function.inference_config_path.as_deref());
@@ -756,6 +759,10 @@ impl InferenceSession {
         &self.inference_config
     }
 
+    pub(crate) fn runtime_bundle(&self) -> Option<&ResolvedRuntimeBundle> {
+        self.runtime_bundle.as_ref()
+    }
+
     pub(crate) fn install_root_delegation_plan(&mut self, plan: Option<RuntimeDelegationPlan>) {
         self.delegation_children = plan
             .as_ref()
@@ -836,40 +843,10 @@ impl InferenceSession {
 
     pub(crate) fn prepare_artifact_write_for_tool(
         &self,
-        run_id: &RunId,
-        tool_name: &str,
-        arguments: &serde_json::Value,
+        _run_id: &RunId,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
     ) -> Result<()> {
-        let Some(relative) =
-            artifact_write_preflight_path_for_tool(tool_name, &self.selected_skills, arguments)?
-        else {
-            return Ok(());
-        };
-        let report = prepare_workspace_skill_artifact_write(
-            &self.workspace_root,
-            &self.trust_store_path,
-            &self.selected_skills,
-            &relative,
-            &SkillFolderPrepareOptions {
-                dry_run: false,
-                situation: SkillFolderCreateSituation::ArtifactWrite,
-                strict: true,
-            },
-        )
-        .context("failed to prepare selected skill artifact-write folders")?;
-        if !report.actions.is_empty() || report.has_errors() {
-            write_skill_folder_prepare_evidence(
-                &self.artifact_root,
-                run_id,
-                "artifact-write",
-                &report,
-            )?;
-        }
-        ensure!(
-            !report.has_errors(),
-            "selected skill artifact-write preparation failed: {}",
-            report.errors.join(", ")
-        );
         Ok(())
     }
 
@@ -1088,6 +1065,18 @@ impl InferenceSession {
             self.extension_bindings = bind_runtime_extensions(&bundle)?;
             self.runtime_function = Some(function);
             self.runtime_bundle = Some(bundle);
+        } else {
+            let mut selected_skills = self.config_skills.clone();
+            selected_skills.extend(self.option_skills.iter().cloned());
+            let (_, bundle) = resolve_session_bundle(
+                None,
+                &self.runtime_paths,
+                &self.workspace_root,
+                self.function_profile_required,
+                &selected_skills,
+            )?;
+            self.runtime_bundle = bundle;
+            self.extension_bindings.clear();
         }
         let delegation_enabled = self.delegation_available(run_id)?;
         let skill_context = resolve_skill_context(SkillContextRequest {
@@ -1209,7 +1198,7 @@ impl InferenceSession {
                 Ok(RuntimeResolutionSkillIdentity {
                     id: skill_id.as_str().to_owned(),
                     node_key: admitted.node_key.clone(),
-                    package_digest: node.package_digest.to_string(),
+                    package_tree_digest: node.package_tree_digest.to_string(),
                     source_tier: node.candidate.tier,
                     source_id: node.candidate.source_id.to_string(),
                     trust,
@@ -1399,11 +1388,13 @@ fn resolve_session_bundle(
     workspace_root: &Path,
     require_profile: bool,
     additional_skills: &[String],
-) -> Result<(Option<ArtifactComposition>, Option<ResolvedRuntimeBundle>)> {
-    let Some(reference) = reference else {
-        return Ok((None, None));
+) -> Result<(Option<PackageComposition>, Option<ResolvedRuntimeBundle>)> {
+    let reference = match reference {
+        Some(reference) => reference,
+        None if additional_skills.is_empty() => return Ok((None, None)),
+        None => agl_repo::DEFAULT_FUNCTION,
     };
-    let composition = agl_runtime::compose_artifacts(paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(paths, workspace_root)?;
     let bundle = composition
         .resolve_runtime_bundle(
             workspace_root,
@@ -1418,7 +1409,7 @@ fn resolve_session_bundle(
 
 fn extend_runtime_bundle_skills(
     bundle: &mut Option<ResolvedRuntimeBundle>,
-    composition: Option<&ArtifactComposition>,
+    composition: Option<&PackageComposition>,
     workspace_root: &Path,
     selected_skills: &[String],
 ) -> Result<()> {
@@ -1858,57 +1849,27 @@ fn ensure_memory_context_allowed_for_skills(
 }
 
 fn composed_skill_registry(
-    runtime_paths: &AgentLibrePaths,
-    workspace_root: &Path,
-    trust_store_path: &Path,
+    _runtime_paths: &AgentLibrePaths,
+    _workspace_root: &Path,
+    _trust_store_path: &Path,
     selected_skills: &[SkillId],
     runtime_bundle: Option<&ResolvedRuntimeBundle>,
 ) -> Result<SkillRegistry> {
-    let trusted_workspace = trusted_workspace_registry(workspace_root, trust_store_path)
-        .context("failed to load workspace Skill trust")?;
     let mut registry = SkillRegistry::new();
     for skill_id in selected_skills {
-        let (harness, tier) = if let Some(bundle) = runtime_bundle {
-            let skill = bundle.skills.get(skill_id.as_str()).with_context(|| {
-                format!("selected Skill `{skill_id}` is absent from the admitted runtime bundle")
-            })?;
-            let node = bundle
-                .graph
-                .nodes
-                .get(&skill.node_key)
-                .context("admitted Skill node is absent from the runtime graph")?;
-            (skill.harness.clone(), node.candidate.tier)
-        } else {
-            let composition = agl_runtime::compose_artifacts(runtime_paths, workspace_root)?;
-            let reference =
-                agl_package::ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
-            let graph = composition.resolve(&reference)?;
-            let node = graph
-                .nodes
-                .get(&graph.root)
-                .context("resolved Skill graph has no root candidate")?;
-            let payload = composition
-                .registry
-                .lookup(&node.candidate.type_id)?
-                .validate_payload(node.candidate.view(), &node.envelope)?;
-            let mut harness = *payload
-                .downcast::<SkillHarness>()
-                .map_err(|_| anyhow::anyhow!("Skill adapter returned an unexpected payload"))?;
-            harness.source = match node.candidate.tier {
-                ArtifactSourceTier::Builtin => SkillSource::Core,
-                ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
-                ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
-            };
-            (harness, node.candidate.tier)
-        };
-        let trust = if tier == ArtifactSourceTier::Builtin {
+        let bundle = runtime_bundle
+            .context("selected Skills require the session's admitted runtime package bundle")?;
+        let skill = bundle.skills.get(skill_id.as_str()).with_context(|| {
+            format!("selected Skill `{skill_id}` is absent from the admitted runtime bundle")
+        })?;
+        let node = bundle
+            .graph
+            .nodes
+            .get(&skill.node_key)
+            .context("admitted Skill node is absent from the runtime graph")?;
+        let (harness, tier) = (skill.harness.clone(), node.candidate.tier);
+        let trust = if tier == PackageSourceTier::Builtin {
             SkillTrustState::TrustedByBinary
-        } else if trusted_workspace.get(&harness.id).is_some_and(|trusted| {
-            trusted.harness.artifact == harness.artifact
-                && trusted.harness.tree_sha256 == harness.tree_sha256
-                && trusted.trust == SkillTrustState::TrustedLocal
-        }) {
-            SkillTrustState::TrustedLocal
         } else {
             SkillTrustState::Unknown
         };
@@ -1956,30 +1917,6 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     let hook_batches = if selected_skills.is_empty() {
         Vec::new()
     } else {
-        let folder_prepare = prepare_workspace_skill_folders(
-            request.workspace_root,
-            request.trust_store_path,
-            &selected_skills,
-            &SkillFolderPrepareOptions {
-                dry_run: false,
-                situation: SkillFolderCreateSituation::RuntimePrepare,
-                strict: true,
-            },
-        )
-        .context("failed to prepare selected skill runtime folders")?;
-        if let Some(run_id) = request.run_id {
-            write_skill_folder_prepare_evidence(
-                request.artifact_root,
-                run_id,
-                "runtime-prepare",
-                &folder_prepare,
-            )?;
-        }
-        ensure!(
-            !folder_prepare.has_errors(),
-            "selected skill runtime folder preparation failed: {}",
-            folder_prepare.errors.join(", ")
-        );
         selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?
     };
     let mut permission_grants = if request.allow_dynamic_grants
@@ -2134,6 +2071,7 @@ pub(crate) fn resolve_subagent_effective_capabilities(
     runtime_paths: &AgentLibrePaths,
     workspace_root: &Path,
     trust_store_path: &Path,
+    runtime_bundle: Option<&ResolvedRuntimeBundle>,
 ) -> Result<EffectiveToolSet> {
     let selected_skills = selected_skill_ids(&[], &spec.skills, &[])?;
     let skill_registry = composed_skill_registry(
@@ -2141,7 +2079,7 @@ pub(crate) fn resolve_subagent_effective_capabilities(
         workspace_root,
         trust_store_path,
         &selected_skills,
-        None,
+        runtime_bundle,
     )
     .context("failed to load subagent skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
@@ -2756,8 +2694,8 @@ fn bind_runtime_extensions(
             .get(&extension.node_key)
             .context("selected Extension node is absent from the runtime graph")?;
         ensure!(
-            node.candidate.tier == ArtifactSourceTier::Builtin
-                && node.candidate.kind == agl_package::ArtifactSourceKind::Embedded,
+            node.candidate.tier == PackageSourceTier::Builtin
+                && node.candidate.kind == agl_package::PackageSourceKind::Embedded,
             "Extension `{extension_id}` from source `{}` ({:?}) cannot bind to a builtin extension; no Tool effect occurred",
             node.candidate.source_id,
             node.candidate.tier
@@ -2794,7 +2732,7 @@ fn bind_runtime_extensions(
             RuntimeExtensionExtensionBinding {
                 artifact_reference: node.key(),
                 artifact_version: node.envelope.version.to_string(),
-                package_digest: node.package_digest.to_string(),
+                package_tree_digest: node.package_tree_digest.to_string(),
                 source_tier: node.candidate.tier,
                 source_id: node.candidate.source_id.to_string(),
                 api_major: authored.api_major,
@@ -2824,90 +2762,6 @@ fn extensions_for_tools(tools: &BTreeSet<ToolId>) -> Result<Vec<ExtensionId>> {
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map(|extensions| extensions.into_iter().collect())
         .map_err(Into::into)
-}
-
-fn normalize_agl_artifact_write_path(arguments: &serde_json::Value) -> Result<Option<PathBuf>> {
-    let Some(raw) = arguments.get("path").and_then(|value| value.as_str()) else {
-        return Ok(None);
-    };
-    if !raw.starts_with(".agl/") && raw != ".agl" {
-        return Ok(None);
-    }
-    ensure!(!raw.trim().is_empty(), "repository path cannot be blank");
-    ensure!(!raw.contains('\0'), "repository path contains NUL");
-    ensure!(
-        !raw.contains('\\'),
-        "repository path must use forward slashes"
-    );
-
-    let path = std::path::Path::new(raw);
-    ensure!(!path.is_absolute(), "repository path cannot be absolute");
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(segment) => {
-                ensure!(segment != ".git", "repository path cannot enter .git");
-                normalized.push(segment);
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                bail!("repository path cannot contain parent traversal")
-            }
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                bail!("repository path cannot be absolute")
-            }
-        }
-    }
-    Ok(Some(normalized))
-}
-
-fn artifact_write_preflight_path_for_tool(
-    tool_name: &str,
-    selected_skills: &[SkillId],
-    arguments: &serde_json::Value,
-) -> Result<Option<PathBuf>> {
-    if tool_name != agl_core_tools::FS_APPLY_PATCH_TOOL_ID || selected_skills.is_empty() {
-        return Ok(None);
-    }
-
-    normalize_agl_artifact_write_path(arguments)
-}
-
-fn write_skill_folder_prepare_evidence(
-    artifact_root: &std::path::Path,
-    run_id: &RunId,
-    label: &str,
-    report: &SkillFolderPrepareReport,
-) -> Result<()> {
-    let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
-        .run_dir(run_id)
-        .join(format!("skill-folder-{label}.json"));
-    let parent = path.parent().with_context(|| {
-        format!(
-            "skill folder prepare evidence path has no parent: {}",
-            path.display()
-        )
-    })?;
-    std::fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create skill folder prepare evidence directory {}",
-            parent.display()
-        )
-    })?;
-    let mut bytes = serde_json::to_vec_pretty(report).with_context(|| {
-        format!(
-            "failed to serialize skill folder prepare evidence {}",
-            path.display()
-        )
-    })?;
-    bytes.push(b'\n');
-    std::fs::write(&path, bytes).with_context(|| {
-        format!(
-            "failed to write skill folder prepare evidence {}",
-            path.display()
-        )
-    })
 }
 
 fn write_skill_context_evidence(

@@ -4,13 +4,9 @@ use agl_core_tools::skills::{
     SkillInspectArgs, SkillListArgs, SkillListSource, SkillRevokeArgs, SkillStatusArgs,
     SkillTrustArgs, SkillVerifyArgs,
 };
-use agl_kernel::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
-use agl_skill::{
-    SkillHarness, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
-    revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
-    workspace_skill_report_with_trust,
-};
-use anyhow::{Context, Result, ensure};
+use agl_kernel::{EffectId, ObservedEffect, ToolDispatchContext, ToolHandler, ToolId, ToolResult};
+use agl_skill::{SkillHarness, SkillSource, SkillTrustStore};
+use anyhow::{Context, Result, bail, ensure};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -21,19 +17,20 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 pub struct SkillTools {
     workspace_root: PathBuf,
     trust_store_path: PathBuf,
-    agentlibre_version: String,
+    runtime_paths: agl_runtime::AgentLibrePaths,
 }
 
 impl SkillTools {
     pub fn new(
         workspace_root: impl AsRef<Path>,
-        trust_store_path: impl AsRef<Path>,
-        agentlibre_version: impl Into<String>,
+        _trust_store_path: impl AsRef<Path>,
+        _agentlibre_version: impl Into<String>,
+        runtime_paths: agl_runtime::AgentLibrePaths,
     ) -> Self {
         Self {
             workspace_root: workspace_root.as_ref().to_path_buf(),
-            trust_store_path: trust_store_path.as_ref().to_path_buf(),
-            agentlibre_version: agentlibre_version.into(),
+            trust_store_path: _trust_store_path.as_ref().to_path_buf(),
+            runtime_paths,
         }
     }
 
@@ -43,17 +40,39 @@ impl SkillTools {
             agl_core_tools::SKILL_INSPECT_TOOL_ID => {
                 self.inspect(parse_args(id.as_str(), arguments)?)?
             }
-            agl_core_tools::SKILL_STATUS_TOOL_ID => {
-                self.status(parse_args(id.as_str(), arguments)?)?
-            }
+            agl_core_tools::SKILL_STATUS_TOOL_ID => self.status(
+                parse_args::<SkillStatusArgs>(id.as_str(), arguments)?,
+                false,
+            )?,
             agl_core_tools::SKILL_VERIFY_TOOL_ID => {
-                self.verify(parse_args(id.as_str(), arguments)?)?
+                self.status(parse_args::<SkillVerifyArgs>(id.as_str(), arguments)?, true)?
             }
             agl_core_tools::SKILL_TRUST_TOOL_ID => {
-                self.trust(parse_args(id.as_str(), arguments)?)?
+                let args = parse_args::<SkillTrustArgs>(id.as_str(), arguments)?;
+                ensure!(args.approve, "Skill trust requires approve=true");
+                let identity = self.update_trust(&args.name, true)?;
+                return Ok(ToolResult::new(json!({
+                    "tool_id": id,
+                    "status": "trusted",
+                    "identity": identity,
+                }))
+                .with_observed_effects([ObservedEffect::new(
+                    EffectId::skill_trust(),
+                    [("identity".to_owned(), identity)],
+                )]));
             }
             agl_core_tools::SKILL_REVOKE_TOOL_ID => {
-                self.revoke(parse_args(id.as_str(), arguments)?)?
+                let args = parse_args::<SkillRevokeArgs>(id.as_str(), arguments)?;
+                let identity = self.update_trust(&args.name, false)?;
+                return Ok(ToolResult::new(json!({
+                    "tool_id": id,
+                    "status": "revoked",
+                    "identity": identity,
+                }))
+                .with_observed_effects([ObservedEffect::new(
+                    EffectId::skill_trust(),
+                    [("identity".to_owned(), identity)],
+                )]));
             }
             _ => anyhow::bail!("unknown skill tool `{id}`"),
         };
@@ -62,19 +81,16 @@ impl SkillTools {
 
     fn list(&self, args: SkillListArgs) -> Result<Value> {
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).min(DEFAULT_LIMIT);
-        let registry = builtin_registry()?;
-        let workspace =
-            workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
-        let workspace_overrides = workspace
-            .skills
-            .iter()
-            .filter(|skill| skill.overrides_builtin)
-            .filter_map(|skill| skill.name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
+        let resolved = self.resolved()?;
+        let registry = &resolved.registry;
         let mut skills = Vec::new();
 
-        if matches!(args.source, SkillListSource::All | SkillListSource::Core) {
-            for skill in registry.skills() {
+        {
+            for skill in registry
+                .skills()
+                .iter()
+                .filter(|skill| source_matches(args.source, skill.harness.source))
+            {
                 if args.trusted_only && !skill.permits_context_injection() {
                     continue;
                 }
@@ -85,19 +101,9 @@ impl SkillTools {
                     "version": skill.harness.version,
                     "usable": skill.permits_context_injection(),
                     "trust": skill.trust,
-                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
                     "routing": routing_summary(&skill.harness),
                 }));
             }
-        }
-        for skill in &workspace.skills {
-            if !workspace_skill_source_matches(args.source, skill) {
-                continue;
-            }
-            if args.trusted_only && !skill.usable {
-                continue;
-            }
-            skills.push(workspace_skill_summary(skill));
         }
 
         let total = skills.len();
@@ -107,7 +113,6 @@ impl SkillTools {
             "source": args.source.as_str(),
             "trusted_only": args.trusted_only,
             "limit": limit,
-            "workspace_state": workspace.state,
             "skills": skills,
             "total": total,
             "truncated": total > limit,
@@ -116,9 +121,8 @@ impl SkillTools {
 
     fn inspect(&self, args: SkillInspectArgs) -> Result<Value> {
         let max_bytes = args.max_bytes.unwrap_or(MAX_BODY_BYTES).min(MAX_BODY_BYTES);
-        let registry = builtin_registry()?;
-        let workspace =
-            workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
+        let resolved = self.resolved()?;
+        let registry = &resolved.registry;
         let mut matches = Vec::new();
 
         for skill in registry
@@ -138,22 +142,6 @@ impl SkillTools {
                 ),
             }));
         }
-        for skill in workspace
-            .skills
-            .iter()
-            .filter(|skill| skill.name.as_deref() == Some(args.id.as_str()))
-        {
-            matches.push(json!({
-                "kind": "workspace",
-                "status": skill,
-                "harness": skill.harness.as_ref().map(|harness| harness_details(
-                    harness,
-                    args.include_body,
-                    args.include_references,
-                    max_bytes,
-                )),
-            }));
-        }
         ensure!(!matches.is_empty(), "skill not found: {}", args.id);
 
         Ok(json!({
@@ -166,40 +154,73 @@ impl SkillTools {
         }))
     }
 
-    fn status(&self, _args: SkillStatusArgs) -> Result<Value> {
-        let report =
-            workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
-        report_value(agl_core_tools::SKILL_STATUS_TOOL_ID, &report)
-    }
-
-    fn verify(&self, _args: SkillVerifyArgs) -> Result<Value> {
-        let report = workspace_skill_report(&self.workspace_root)?;
-        report_value(agl_core_tools::SKILL_VERIFY_TOOL_ID, &report)
-    }
-
-    fn trust(&self, args: SkillTrustArgs) -> Result<Value> {
-        let report = trust_workspace_skill(
+    fn resolved(&self) -> Result<agl_runtime::WorkspaceSkillRegistry> {
+        agl_runtime::resolve_workspace_skills(
+            &self.runtime_paths,
             &self.workspace_root,
             &self.trust_store_path,
-            &args.name,
-            &SkillTrustOptions {
-                approve: args.approve,
-                agentlibre_version: self.agentlibre_version.clone(),
-            },
-        )?;
+        )
+    }
+
+    fn status<T>(&self, _args: T, verify: bool) -> Result<Value> {
+        let resolved = self.resolved()?;
+        let unusable = resolved
+            .registry
+            .skills()
+            .iter()
+            .filter(|skill| !skill.permits_context_injection())
+            .count();
+        let lock_valid = resolved.external_package_count == 0 || resolved.package_lock_present;
+        let valid = lock_valid && unusable == 0;
+        if verify && !valid {
+            bail!(
+                "Skill package verification failed: lock_valid={lock_valid}, unusable={unusable}"
+            );
+        }
         Ok(json!({
-            "tool_id": agl_core_tools::SKILL_TRUST_TOOL_ID,
-            "report": report,
+            "tool_id": if verify { agl_core_tools::SKILL_VERIFY_TOOL_ID } else { agl_core_tools::SKILL_STATUS_TOOL_ID },
+            "status": if valid { "ok" } else { "invalid" },
+            "package_count": resolved.registry.skills().len(),
+            "external_package_count": resolved.external_package_count,
+            "package_lock_present": resolved.package_lock_present,
+            "unusable": unusable,
         }))
     }
 
-    fn revoke(&self, args: SkillRevokeArgs) -> Result<Value> {
-        let report =
-            revoke_workspace_skill(&self.workspace_root, &self.trust_store_path, &args.name)?;
-        Ok(json!({
-            "tool_id": agl_core_tools::SKILL_REVOKE_TOOL_ID,
-            "report": report,
-        }))
+    fn update_trust(&self, name: &str, approve: bool) -> Result<String> {
+        let resolved = self.resolved()?;
+        let skill = resolved
+            .registry
+            .skills()
+            .iter()
+            .find(|skill| skill.harness.id.as_str() == name || skill.harness.name == name)
+            .with_context(|| format!("skill not found: {name}"))?;
+        ensure!(
+            skill.harness.source != SkillSource::Core,
+            "core Skill trust is binary-owned"
+        );
+        ensure!(
+            resolved.package_lock_present,
+            "workspace Skill trust requires .agl/package-lock.toml"
+        );
+        let identity = agl_skill::skill_identity(&skill.harness);
+        let mut store = SkillTrustStore::load(&self.trust_store_path)?;
+        if approve {
+            store.trust(&skill.harness);
+        } else {
+            store.revoke(&skill.harness);
+        }
+        store.write_atomic(&self.trust_store_path)?;
+        Ok(identity)
+    }
+}
+
+fn source_matches(filter: SkillListSource, source: SkillSource) -> bool {
+    match filter {
+        SkillListSource::All => true,
+        SkillListSource::Core => source == SkillSource::Core,
+        SkillListSource::Community => source == SkillSource::Community,
+        SkillListSource::Workspace | SkillListSource::Local => source == SkillSource::Local,
     }
 }
 
@@ -215,13 +236,6 @@ impl ToolHandler for SkillTools {
 
 fn parse_args<T: DeserializeOwned>(tool_id: &str, arguments: Value) -> Result<T> {
     serde_json::from_value(arguments).with_context(|| format!("{tool_id} arguments are invalid"))
-}
-
-fn report_value(tool_id: &str, report: &agl_skill::WorkspaceSkillReport) -> Result<Value> {
-    Ok(json!({
-        "tool_id": tool_id,
-        "report": report,
-    }))
 }
 
 fn routing_summary(harness: &SkillHarness) -> Value {
@@ -270,44 +284,10 @@ fn harness_details(
         "routing": routing_summary(harness),
         "permission_request_templates": harness.permission_request_templates,
         "permissions": harness.permissions,
-        "artifacts": harness.artifacts,
         "guarantees": harness.guarantees,
         "body": body,
         "references": references,
     })
-}
-
-fn workspace_skill_summary(skill: &WorkspaceSkillStatus) -> Value {
-    json!({
-        "id": workspace_skill_key(skill),
-        "source": skill.source.as_deref().unwrap_or("unknown"),
-        "usable": skill.usable,
-        "trust": skill.trust_state,
-        "valid": skill.valid,
-        "broadens_builtin_routing": skill.broadens_builtin_routing,
-        "artifact_folder_count": skill.artifact_folders.len(),
-        "routing": {
-            "allowed": skill.allowed_tools,
-            "requestable": skill.requestable_tools,
-            "denied": skill.denied_tools,
-        },
-    })
-}
-
-fn workspace_skill_source_matches(source: SkillListSource, skill: &WorkspaceSkillStatus) -> bool {
-    match source {
-        SkillListSource::All | SkillListSource::Workspace => true,
-        SkillListSource::Core => skill.source.as_deref() == Some("core"),
-        SkillListSource::Community => skill.source.as_deref() == Some("community"),
-        SkillListSource::Local => skill.source.as_deref() == Some("local"),
-    }
-}
-
-fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {
-    skill
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("path:{}", skill.path.display()))
 }
 
 fn id_strings<T: ToString>(ids: &[T]) -> Vec<String> {
@@ -337,7 +317,12 @@ mod tests {
     fn skill_tools_list_and_inspect_return_structured_core_skills() {
         let root = temp_root("list-inspect");
         std::fs::create_dir_all(&root).unwrap();
-        let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
+        let tools = SkillTools::new(
+            &root,
+            root.join("skill-trust.toml"),
+            "test",
+            agl_runtime::AgentLibrePaths::from_agl_home(&root),
+        );
 
         let list = tools
             .dispatch_action(
@@ -374,7 +359,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join(".agl/skills")).unwrap();
-        let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
+        let tools = SkillTools::new(
+            &root,
+            root.join("skill-trust.toml"),
+            "test",
+            agl_runtime::AgentLibrePaths::from_agl_home(&root),
+        );
 
         let status = tools
             .dispatch_action(
@@ -382,8 +372,10 @@ mod tests {
                 json!({}),
             )
             .unwrap();
-        assert!(status.data["report"]["diagnostics"].is_array());
-        assert!(status.data["report"]["errors"].is_array());
+        assert!(status.data["package_count"].is_number());
+        assert!(status.data["external_package_count"].is_number());
+        assert!(status.data["package_lock_present"].is_boolean());
+        assert!(status.data["unusable"].is_number());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -392,7 +384,12 @@ mod tests {
     fn shared_argument_dtos_reject_unknown_fields_in_handler_too() {
         let root = temp_root("unknown");
         std::fs::create_dir_all(&root).unwrap();
-        let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
+        let tools = SkillTools::new(
+            &root,
+            root.join("skill-trust.toml"),
+            "test",
+            agl_runtime::AgentLibrePaths::from_agl_home(&root),
+        );
         let error = tools
             .dispatch_action(
                 &ToolId::new(agl_core_tools::SKILL_LIST_TOOL_ID).unwrap(),

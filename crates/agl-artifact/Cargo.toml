@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 agl-kernel.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

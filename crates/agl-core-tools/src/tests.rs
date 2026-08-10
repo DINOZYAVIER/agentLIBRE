@@ -56,7 +56,7 @@ fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
         .flat_map(|extension| extension.tools.iter())
         .collect::<Vec<_>>();
 
-    assert_eq!(actions.len(), 60);
+    assert_eq!(actions.len(), 56);
     for extension in catalog.extensions() {
         extension.validate().unwrap();
         for action in &extension.tools {
@@ -200,24 +200,15 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
             OperationKind::Admin,
             &[EffectId::store_schema()],
         ),
-        (REPO_STATUS_TOOL_ID, OperationKind::Read, &[]),
-        (REPO_EXPORT_PROFILE_TOOL_ID, OperationKind::Read, &[]),
-        (REPO_HOOKS_STATUS_TOOL_ID, OperationKind::Read, &[]),
         (
-            REPO_INIT_TOOL_ID,
-            OperationKind::Admin,
-            &[EffectId::repo_workspace()],
+            ARTIFACT_COMMIT_TOOL_ID,
+            OperationKind::Write,
+            &[
+                EffectId::new("agl:artifact.repository").unwrap(),
+                EffectId::new("agl:repo.gitlink").unwrap(),
+            ],
         ),
-        (
-            REPO_IMPORT_PROFILE_TOOL_ID,
-            OperationKind::Admin,
-            &[EffectId::repo_workspace()],
-        ),
-        (
-            REPO_INSTALL_HOOKS_TOOL_ID,
-            OperationKind::Admin,
-            &[EffectId::repo_hooks()],
-        ),
+        (TASKS_VERIFY_TOOL_ID, OperationKind::Read, &[]),
         (SKILL_LIST_TOOL_ID, OperationKind::Read, &[]),
         (SKILL_INSPECT_TOOL_ID, OperationKind::Read, &[]),
         (SKILL_STATUS_TOOL_ID, OperationKind::Read, &[]),
@@ -291,7 +282,7 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
         ),
     ];
 
-    assert_eq!(expected.len(), 60);
+    assert_eq!(expected.len(), 56);
     for (id, operation_kind, effects) in expected {
         assert_action_metadata(&catalog, id, operation_kind, effects);
     }

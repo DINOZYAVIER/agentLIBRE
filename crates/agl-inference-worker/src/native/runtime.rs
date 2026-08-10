@@ -945,8 +945,8 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use agl_content::{
-        ArtifactId, ArtifactRef, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind,
-        BlobDigest, ImageDimensions, MediaType,
+        ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, BlobDigest, ContentAttachmentId,
+        ContentAttachmentRef, ImageDimensions, MediaType,
     };
 
     use super::*;
@@ -960,8 +960,8 @@ mod tests {
     }
 
     fn image_part(bytes: Vec<u8>) -> ResolvedContentPart {
-        let artifact = ArtifactRef::new(
-            ArtifactId::generate(),
+        let attachment = ContentAttachmentRef::new(
+            ContentAttachmentId::generate(),
             BlobDigest::from_bytes(&bytes),
             MediaType::ImagePng,
             u64::try_from(bytes.len()).unwrap(),
@@ -973,7 +973,7 @@ mod tests {
             },
         )
         .unwrap();
-        ResolvedContentPart::Image { artifact, bytes }
+        ResolvedContentPart::Image { attachment, bytes }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::artifacts::ArtifactWriteFailpoint;
+use crate::content_attachments::ContentAttachmentWriteFailpoint;
 
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, ImageDimensions,
@@ -95,8 +95,8 @@ fn migration_seventeen_rebuilds_live_run_table_without_losing_foreign_keys() {
 
     let report = AglStore::migrate_at(&root).unwrap();
     assert_eq!(report.before_schema_version, 16);
-    assert_eq!(report.after_schema_version, 17);
-    assert_eq!(report.applied_migrations.len(), 1);
+    assert_eq!(report.after_schema_version, 18);
+    assert_eq!(report.applied_migrations.len(), 2);
 
     let store = AglStore::open_current_at(&root).unwrap();
     let foreign_key_errors: u64 = store
@@ -903,7 +903,7 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
 
 #[test]
 fn artifacts_are_private_deduplicated_and_run_scoped() {
-    let (root, store) = open_temp_store("artifacts");
+    let (root, store) = open_temp_store("content_attachments");
     let first_run = run_draft(None);
     let second_run = run_draft(None);
     store.admit_run(&first_run).unwrap();
@@ -914,7 +914,7 @@ fn artifacts_are_private_deduplicated_and_run_scoped() {
         extension: Some("fake-portal".to_string()),
     };
     let first = store
-        .write_artifact(
+        .write_content_attachment(
             &first_run.run_id,
             MediaType::ImagePng,
             bytes,
@@ -925,7 +925,7 @@ fn artifacts_are_private_deduplicated_and_run_scoped() {
         )
         .unwrap();
     let second = store
-        .write_artifact(
+        .write_content_attachment(
             &second_run.run_id,
             MediaType::ImagePng,
             bytes,
@@ -936,7 +936,10 @@ fn artifacts_are_private_deduplicated_and_run_scoped() {
         )
         .unwrap();
 
-    assert_ne!(first.reference.artifact_id, second.reference.artifact_id);
+    assert_ne!(
+        first.reference.content_attachment_id,
+        second.reference.content_attachment_id
+    );
     assert_eq!(first.reference.digest, second.reference.digest);
     let blob_count: u64 = store
         .connection()
@@ -945,30 +948,34 @@ fn artifacts_are_private_deduplicated_and_run_scoped() {
     assert_eq!(blob_count, 1);
     assert_eq!(
         store
-            .resolve_artifact(&first_run.run_id, &first.reference)
+            .resolve_content_attachment(&first_run.run_id, &first.reference)
             .unwrap()
             .bytes,
         bytes
     );
     assert!(matches!(
-        store.resolve_artifact(&second_run.run_id, &first.reference),
-        Err(StoreError::ArtifactAccessDenied)
+        store.resolve_content_attachment(&second_run.run_id, &first.reference),
+        Err(StoreError::ContentAttachmentAccessDenied)
     ));
     let encoded = serde_json::to_string(&first.reference).unwrap();
     assert!(!encoded.contains(root.to_string_lossy().as_ref()));
     assert!(!encoded.contains("validated-png-bytes"));
 
-    store.tombstone_run_artifacts(&first_run.run_id).unwrap();
-    let first_gc = store.garbage_collect_artifacts().unwrap();
-    assert_eq!(first_gc.artifact_records_deleted, 1);
+    store
+        .tombstone_run_content_attachments(&first_run.run_id)
+        .unwrap();
+    let first_gc = store.garbage_collect_content_attachments().unwrap();
+    assert_eq!(first_gc.content_attachment_records_deleted, 1);
     assert_eq!(first_gc.blob_records_deleted, 0);
     assert!(
         store
-            .resolve_artifact(&second_run.run_id, &second.reference)
+            .resolve_content_attachment(&second_run.run_id, &second.reference)
             .is_ok()
     );
-    store.tombstone_run_artifacts(&second_run.run_id).unwrap();
-    let second_gc = store.garbage_collect_artifacts().unwrap();
+    store
+        .tombstone_run_content_attachments(&second_run.run_id)
+        .unwrap();
+    let second_gc = store.garbage_collect_content_attachments().unwrap();
     assert_eq!(second_gc.blob_records_deleted, 1);
     assert_eq!(second_gc.blob_files_deleted, 1);
 }
@@ -989,7 +996,7 @@ fn concurrent_identical_artifact_writes_share_one_complete_blob() {
             let store = AglStore::open_current_at(root).unwrap();
             barrier.wait();
             store
-                .write_artifact(
+                .write_content_attachment(
                     &run_id,
                     MediaType::ImagePng,
                     b"same-private-image",
@@ -1004,8 +1011,11 @@ fn concurrent_identical_artifact_writes_share_one_complete_blob() {
                 .unwrap()
         })
     });
-    let artifacts = handles.map(|handle| handle.join().unwrap());
-    assert_eq!(artifacts[0].reference.digest, artifacts[1].reference.digest);
+    let content_attachments = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(
+        content_attachments[0].reference.digest,
+        content_attachments[1].reference.digest
+    );
     let store = AglStore::open_current_at(&root).unwrap();
     let blob_count: u64 = store
         .connection()
@@ -1020,7 +1030,7 @@ fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
     let run = run_draft(None);
     store.admit_run(&run).unwrap();
     let write_at = |bytes: &[u8], failpoint| {
-        store.write_artifact_injected(
+        store.write_content_attachment_injected(
             &run.run_id,
             MediaType::ImagePng,
             bytes,
@@ -1035,10 +1045,16 @@ fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
         )
     };
 
-    assert!(write_at(b"before-blob", ArtifactWriteFailpoint::BeforeBlobWrite).is_err());
+    assert!(
+        write_at(
+            b"before-blob",
+            ContentAttachmentWriteFailpoint::BeforeBlobWrite
+        )
+        .is_err()
+    );
     assert_eq!(
         store
-            .garbage_collect_artifacts()
+            .garbage_collect_content_attachments()
             .unwrap()
             .orphan_files_deleted,
         0
@@ -1047,43 +1063,45 @@ fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
     for (bytes, failpoint) in [
         (
             b"after-blob".as_slice(),
-            ArtifactWriteFailpoint::AfterBlobWrite,
+            ContentAttachmentWriteFailpoint::AfterBlobWrite,
         ),
         (
             b"before-metadata".as_slice(),
-            ArtifactWriteFailpoint::BeforeMetadataCommit,
+            ContentAttachmentWriteFailpoint::BeforeMetadataCommit,
         ),
     ] {
         assert!(write_at(bytes, failpoint).is_err());
-        let report = store.garbage_collect_artifacts().unwrap();
+        let report = store.garbage_collect_content_attachments().unwrap();
         assert_eq!(report.orphan_files_deleted, 1);
     }
 
     assert!(
         write_at(
             b"after-metadata",
-            ArtifactWriteFailpoint::AfterMetadataCommit,
+            ContentAttachmentWriteFailpoint::AfterMetadataCommit,
         )
         .is_err()
     );
-    let artifact_id: String = store
+    let content_attachment_id: String = store
         .connection()
-        .query_row("SELECT id FROM artifacts", [], |row| row.get(0))
+        .query_row("SELECT id FROM content_attachments", [], |row| row.get(0))
         .unwrap();
     let stored = store
-        .artifact(&agl_content::ArtifactId::parse(artifact_id).unwrap())
+        .content_attachment(
+            &agl_content::ContentAttachmentId::parse(content_attachment_id).unwrap(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
         store
-            .resolve_artifact(&run.run_id, &stored.reference)
+            .resolve_content_attachment(&run.run_id, &stored.reference)
             .unwrap()
             .bytes,
         b"after-metadata"
     );
     assert_eq!(
         store
-            .garbage_collect_artifacts()
+            .garbage_collect_content_attachments()
             .unwrap()
             .orphan_files_deleted,
         0
@@ -1094,7 +1112,7 @@ fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
     std::fs::write(temp_root.join("stale-private-temp"), b"partial").unwrap();
     assert_eq!(
         store
-            .garbage_collect_artifacts()
+            .garbage_collect_content_attachments()
             .unwrap()
             .orphan_files_deleted,
         1

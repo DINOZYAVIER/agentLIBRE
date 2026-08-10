@@ -1,0 +1,99 @@
+version = 1
+
+[[packages]]
+type_id = "extension"
+id = "core.process"
+version = "1.2.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:09bce1ebedd4d4234a70b5b088c9bd836baaaf18a8badd9e60ebae842cc7b51a"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.extension-root/v1"
+dependencies = []
+
+[[packages]]
+type_id = "extension"
+id = "core.workspace"
+version = "1.2.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:4e55d910224592407e2c0ed183bd33f93fcd981911c56ae4d25262206f46824d"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.extension-root/v1"
+dependencies = []
+
+[[packages]]
+type_id = "function"
+id = "gemma4-31b-32k"
+version = "1.2.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:396bf33edd5504fe20eec5cb76986d2d72d9ad18fce8cec49f7aa551e746240b"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.function/v2"
+dependencies = ["extension:core.process@1.2.0", "extension:core.workspace@1.2.0", "model:gemma4-31b@1.2.0"]
+
+[[packages]]
+type_id = "model"
+id = "gemma4-31b"
+version = "1.2.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:fd8fc2798a1b2c1a6a6075889e1fcb31e9ea7081e9a15a7100376d8cc5ed35ee"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.model/v2"
+dependencies = []
+
+[[packages]]
+type_id = "skill"
+id = "private-notes"
+version = "1.0.0"
+source_tier = "workspace"
+source_kind = "git"
+source_id = "private-skills"
+package_tree_digest = "sha256:509b544793b0b670acee026489a33346af01fa820c9a1c050e77eb13ea3b800f"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.skill/v2"
+source_revision = "277dcfde989fed8de1aa30c43a695b7d8922125e"
+source_tree = "458eb23da6e7e0599f5420f055d19d3427020045"
+dependencies = []
+
+[[packages]]
+type_id = "skill"
+id = "process"
+version = "1.1.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:f2f78c96067953fb1ba089815864ced3d302d02a8375aa2292324b241f20b92b"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.skill/v2"
+dependencies = []
+
+[[packages]]
+type_id = "skill"
+id = "repo-status"
+version = "1.3.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:fec3a64d95f8f62ee38a9bbec806f815596b8b519ebe521e9984d3db887148e9"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.skill/v2"
+dependencies = []
+
+[[packages]]
+type_id = "skill"
+id = "skill"
+version = "1.1.0"
+source_tier = "builtin"
+source_kind = "embedded"
+source_id = "builtin"
+package_tree_digest = "sha256:8914e5aa111b7bcf022c04a0b72472ccca3f5e7e09a0b3777b6e6e04009a118c"
+envelope_schema = "agentlibre.package/v1"
+payload_schema = "agentlibre.skill/v2"
+dependencies = []

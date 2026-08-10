@@ -1,6 +1,6 @@
 {
   "api_major": 1,
-  "declaration_digest": "sha256:1050bab5ac2fbcf831fd817027b299824a260fd18ce21d4de1667c1495a3f171",
+  "declaration_digest": "sha256:877a01c59689d35eb84b0b929c4229439221515c83e8b6bcab32f0f2cc1c35d3",
   "host_bindings": [
     {
       "api_major": 1,
@@ -15,9 +15,23 @@
     "tools": "indexes/tools.json"
   },
   "name": "Core Process",
+  "package": {
+    "agl": {
+      "compatible": ">=1.0.0-alpha.12",
+      "tested": [
+        "1.0.0-alpha.12"
+      ]
+    },
+    "id": "core.process",
+    "payload_schema": "agentlibre.extension-root/v1",
+    "requires": [],
+    "schema": "agentlibre.package/v1",
+    "type": "extension",
+    "version": "1.2.0"
+  },
   "requirements": [],
   "schema": "agentlibre.extension-root/v1",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "workflow": {
     "mappings": [
       {

@@ -1,7 +1,7 @@
-//! Format-neutral contracts shared by typed agentLIBRE artifacts.
+//! Format-neutral contracts shared by versioned agentLIBRE packages.
 //!
 //! This crate intentionally contains no package discovery or payload-specific
-//! code.  It is the dependency leaf for the artifact layer.
+//! code. It is the dependency leaf for package composition.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as ShaDigest, Sha256};
 use thiserror::Error;
 
-pub const ARTIFACT_SCHEMA: &str = "agentlibre.artifact/v1";
+pub const PACKAGE_SCHEMA: &str = "agentlibre.package/v1";
 pub const FUNCTION_TYPE: &str = "function";
 pub const EXTENSION_TYPE: &str = "extension";
 pub const SKILL_TYPE: &str = "skill";
@@ -33,38 +33,38 @@ const CORE_TYPES: [&str; 4] = [FUNCTION_TYPE, EXTENSION_TYPE, SKILL_TYPE, MODEL_
 
 const RESERVED_ROOTS: [&str; 4] = [FUNCTION_ROOT, EXTENSION_ROOT, SKILL_ROOT, MODEL_ROOT];
 
-/// Errors returned by the public artifact contract.
+/// Errors returned by the public package contract.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum ArtifactError {
-    #[error("invalid artifact type ID `{value}`")]
+pub enum PackageError {
+    #[error("invalid package type ID `{value}`")]
     InvalidTypeId { value: String },
-    #[error("invalid artifact package ID `{value}`")]
+    #[error("invalid package ID `{value}`")]
     InvalidPackageId { value: String },
-    #[error("invalid artifact schema ID `{value}`")]
+    #[error("invalid package schema ID `{value}`")]
     InvalidSchemaId { value: String },
-    #[error("invalid artifact version `{value}`: {reason}")]
+    #[error("invalid package version `{value}`: {reason}")]
     InvalidVersion { value: String, reason: String },
-    #[error("invalid artifact version requirement `{value}`: {reason}")]
+    #[error("invalid package version requirement `{value}`: {reason}")]
     InvalidVersionReq { value: String, reason: String },
-    #[error("invalid artifact package reference `{value}`: {reason}")]
+    #[error("invalid package reference `{value}`: {reason}")]
     InvalidReference { value: String, reason: String },
-    #[error("artifact envelope must contain at least one tested AGL version")]
+    #[error("package envelope must contain at least one tested AGL version")]
     EmptyTestedVersions,
     #[error("tested AGL version `{version}` is outside compatible range `{compatible}`")]
     TestedVersionIncompatible { version: String, compatible: String },
-    #[error("artifact envelope uses unsupported schema `{value}`")]
+    #[error("package envelope uses unsupported schema `{value}`")]
     InvalidEnvelopeSchema { value: String },
-    #[error("artifact payload schema must differ from `{common}`")]
+    #[error("package payload schema must differ from `{common}`")]
     PayloadSchemaConflicts { common: String },
-    #[error("duplicate artifact requirement target `{type_id}:{package_id}`")]
+    #[error("duplicate package requirement target `{type_id}:{package_id}`")]
     DuplicateRequirement { type_id: String, package_id: String },
     #[error("invalid adapter root `{value}`")]
     InvalidAdapterRoot { value: String },
     #[error("invalid adapter entrypoint `{value}`")]
     InvalidAdapterEntrypoint { value: String },
-    #[error("duplicate artifact adapter type `{type_id}`")]
+    #[error("duplicate package adapter type `{type_id}`")]
     DuplicateAdapterType { type_id: String },
-    #[error("duplicate artifact adapter root `{root}`")]
+    #[error("duplicate package adapter root `{root}`")]
     DuplicateAdapterRoot { root: String },
     #[error("adapter root `{root}` is reserved")]
     ReservedRootCollision { root: String },
@@ -74,29 +74,27 @@ pub enum ArtifactError {
         expected: String,
         actual: String,
     },
-    #[error("no adapter is registered for artifact type `{type_id}`")]
+    #[error("no adapter is registered for package type `{type_id}`")]
     UnsupportedType { type_id: String },
-    #[error("invalid artifact relative path `{value}`")]
+    #[error("invalid package relative path `{value}`")]
     InvalidRelativePath { value: String },
-    #[error("invalid artifact entrypoint `{value}`")]
+    #[error("invalid package entrypoint `{value}`")]
     InvalidEntrypoint { value: String },
-    #[error("invalid artifact source ID `{value}`")]
+    #[error("invalid package source ID `{value}`")]
     InvalidSourceId { value: String },
-    #[error("artifact package file `{path}` is duplicated")]
+    #[error("package file `{path}` is duplicated")]
     DuplicatePackageFile { path: String },
-    #[error("artifact package file `{path}` was not found")]
+    #[error("package file `{path}` was not found")]
     PackageFileNotFound { path: String },
-    #[error("artifact package path `{path}` is not a regular file")]
+    #[error("package path `{path}` is not a regular file")]
     PackagePathNotRegular { path: String },
-    #[error("artifact package path `{path}` is a symlink")]
+    #[error("package path `{path}` is a symlink")]
     PackageSymlinkRejected { path: String },
-    #[error("artifact source path escapes its workspace boundary: `{path}`")]
+    #[error("package source path escapes its workspace boundary: `{path}`")]
     PathEscape { path: String },
-    #[error("failed to inspect artifact package path `{path}`: {reason}")]
+    #[error("failed to inspect package path `{path}`: {reason}")]
     PackageIo { path: String, reason: String },
-    #[error(
-        "artifact candidate version `{candidate}` disagrees with envelope version `{envelope}`"
-    )]
+    #[error("package candidate version `{candidate}` disagrees with envelope version `{envelope}`")]
     CandidateVersionMismatch { candidate: String, envelope: String },
     #[error("adapter `{type_id}` returned an envelope for `{actual_type}`")]
     AdapterTypeMismatch {
@@ -116,10 +114,10 @@ pub enum ArtifactError {
         version: String,
         sources: Vec<String>,
     },
-    #[error("artifact package `{type_id}:{package_id}` was not found")]
+    #[error("package `{type_id}:{package_id}` was not found")]
     PackageNotFound { type_id: String, package_id: String },
     #[error(
-        "artifact package `{type_id}:{package_id}` has no version compatible with {requirements:?}; available versions: {available:?}"
+        "package `{type_id}:{package_id}` has no version compatible with {requirements:?}; available versions: {available:?}"
     )]
     IncompatibleVersion {
         type_id: String,
@@ -127,22 +125,22 @@ pub enum ArtifactError {
         requirements: Vec<String>,
         available: Vec<String>,
     },
-    #[error("missing artifact dependency `{reference}` from `{parent}`")]
+    #[error("missing package dependency `{reference}` from `{parent}`")]
     MissingDependency { parent: String, reference: String },
-    #[error("artifact dependency cycle: {path:?}")]
+    #[error("package dependency cycle: {path:?}")]
     DependencyCycle { path: Vec<String> },
-    #[error("artifact constraints conflict for `{key}`: `{requirement}`")]
+    #[error("package constraints conflict for `{key}`: `{requirement}`")]
     ConstraintConflict { key: String, requirement: String },
     #[error("invalid package tree digest `{value}`")]
     InvalidPackageDigest { value: String },
     #[error("reserved mutable/control-plane file `{path}` is inside the package")]
     ReservedPackageFile { path: String },
-    #[error("artifact lock has unsupported version `{version}`")]
+    #[error("package lock has unsupported version `{version}`")]
     UnsupportedLockVersion { version: u32 },
-    #[error("artifact lock is missing package `{key}`")]
+    #[error("package lock is missing package `{key}`")]
     LockMissingPackage { key: String },
     #[error(
-        "artifact lock package `{key}` has drifted {field}: expected `{expected}`, got `{actual}`"
+        "package lock entry `{key}` has drifted {field}: expected `{expected}`, got `{actual}`"
     )]
     LockDrift {
         key: String,
@@ -150,13 +148,13 @@ pub enum ArtifactError {
         expected: String,
         actual: String,
     },
-    #[error("artifact lock package key `{key}` is invalid")]
+    #[error("package lock key `{key}` is invalid")]
     InvalidLockPackageKey { key: String },
-    #[error("failed to write artifact lock `{path}`: {reason}")]
+    #[error("failed to write package lock `{path}`: {reason}")]
     LockIo { path: String, reason: String },
 }
 
-impl ArtifactError {
+impl PackageError {
     /// Stable machine-readable code for diagnostics and CLI projections.
     pub fn code(&self) -> &'static str {
         match self {
@@ -200,7 +198,7 @@ impl ArtifactError {
             Self::ReservedPackageFile { .. } => "reserved_package_file",
             Self::UnsupportedLockVersion { .. } => "lock_stale",
             Self::LockMissingPackage { .. } => "lock_missing",
-            Self::LockDrift { field, .. } if field == "package_digest" => "digest_drift",
+            Self::LockDrift { field, .. } if field == "package_tree_digest" => "digest_drift",
             Self::LockDrift { field, .. }
                 if field == "source_revision" || field == "source_tree" =>
             {
@@ -213,16 +211,16 @@ impl ArtifactError {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactTypeId(String);
+pub struct PackageTypeId(String);
 
-impl ArtifactTypeId {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageTypeId {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         if CORE_TYPES.contains(&value.as_str()) {
             return Ok(Self(value));
         }
         if value.starts_with("agentlibre.") || !valid_dotted_id(&value, 2) {
-            return Err(ArtifactError::InvalidTypeId { value });
+            return Err(PackageError::InvalidTypeId { value });
         }
         Ok(Self(value))
     }
@@ -252,21 +250,21 @@ impl ArtifactTypeId {
     }
 }
 
-impl Display for ArtifactTypeId {
+impl Display for PackageTypeId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactTypeId {
-    type Err = ArtifactError;
+impl FromStr for PackageTypeId {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactTypeId {
+impl Serialize for PackageTypeId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -275,7 +273,7 @@ impl Serialize for ArtifactTypeId {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactTypeId {
+impl<'de> Deserialize<'de> for PackageTypeId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -285,10 +283,10 @@ impl<'de> Deserialize<'de> for ArtifactTypeId {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactPackageId(String);
+pub struct PackageId(String);
 
-impl ArtifactPackageId {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageId {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         let valid = !value.is_empty()
             && !value.starts_with('/')
@@ -302,7 +300,7 @@ impl ArtifactPackageId {
             })
             && value.split('/').all(valid_package_segment);
         if !valid {
-            return Err(ArtifactError::InvalidPackageId { value });
+            return Err(PackageError::InvalidPackageId { value });
         }
         Ok(Self(value))
     }
@@ -320,21 +318,21 @@ fn valid_package_segment(segment: &str) -> bool {
         })
 }
 
-impl Display for ArtifactPackageId {
+impl Display for PackageId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactPackageId {
-    type Err = ArtifactError;
+impl FromStr for PackageId {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactPackageId {
+impl Serialize for PackageId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -343,7 +341,7 @@ impl Serialize for ArtifactPackageId {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactPackageId {
+impl<'de> Deserialize<'de> for PackageId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -353,23 +351,23 @@ impl<'de> Deserialize<'de> for ArtifactPackageId {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactSchemaId(String);
+pub struct PackageSchemaId(String);
 
-impl ArtifactSchemaId {
+impl PackageSchemaId {
     pub fn common() -> Self {
-        Self(ARTIFACT_SCHEMA.to_owned())
+        Self(PACKAGE_SCHEMA.to_owned())
     }
 
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         let Some((namespace, revision)) = value.split_once('/') else {
-            return Err(ArtifactError::InvalidSchemaId { value });
+            return Err(PackageError::InvalidSchemaId { value });
         };
         let valid_revision = revision.starts_with('v')
             && revision.len() > 1
             && revision[1..].bytes().all(|byte| byte.is_ascii_digit());
         if !valid_dotted_id(namespace, 1) || !valid_revision {
-            return Err(ArtifactError::InvalidSchemaId { value });
+            return Err(PackageError::InvalidSchemaId { value });
         }
         Ok(Self(value))
     }
@@ -379,21 +377,21 @@ impl ArtifactSchemaId {
     }
 }
 
-impl Display for ArtifactSchemaId {
+impl Display for PackageSchemaId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactSchemaId {
-    type Err = ArtifactError;
+impl FromStr for PackageSchemaId {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactSchemaId {
+impl Serialize for PackageSchemaId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -402,7 +400,7 @@ impl Serialize for ArtifactSchemaId {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactSchemaId {
+impl<'de> Deserialize<'de> for PackageSchemaId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -412,14 +410,14 @@ impl<'de> Deserialize<'de> for ArtifactSchemaId {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactVersion(Version);
+pub struct PackageVersion(Version);
 
-impl ArtifactVersion {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageVersion {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         Version::parse(&value)
             .map(Self)
-            .map_err(|error| ArtifactError::InvalidVersion {
+            .map_err(|error| PackageError::InvalidVersion {
                 value,
                 reason: error.to_string(),
             })
@@ -430,21 +428,21 @@ impl ArtifactVersion {
     }
 }
 
-impl Display for ArtifactVersion {
+impl Display for PackageVersion {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
-impl FromStr for ArtifactVersion {
-    type Err = ArtifactError;
+impl FromStr for PackageVersion {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactVersion {
+impl Serialize for PackageVersion {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -453,7 +451,7 @@ impl Serialize for ArtifactVersion {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactVersion {
+impl<'de> Deserialize<'de> for PackageVersion {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -463,20 +461,20 @@ impl<'de> Deserialize<'de> for ArtifactVersion {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ArtifactVersionReq(VersionReq);
+pub struct PackageVersionReq(VersionReq);
 
-impl ArtifactVersionReq {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageVersionReq {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         VersionReq::parse(&value)
             .map(Self)
-            .map_err(|error| ArtifactError::InvalidVersionReq {
+            .map_err(|error| PackageError::InvalidVersionReq {
                 value,
                 reason: error.to_string(),
             })
     }
 
-    pub fn matches(&self, version: &ArtifactVersion) -> bool {
+    pub fn matches(&self, version: &PackageVersion) -> bool {
         self.0.matches(version.as_semver())
     }
 
@@ -485,21 +483,21 @@ impl ArtifactVersionReq {
     }
 }
 
-impl Display for ArtifactVersionReq {
+impl Display for PackageVersionReq {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
-impl FromStr for ArtifactVersionReq {
-    type Err = ArtifactError;
+impl FromStr for PackageVersionReq {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactVersionReq {
+impl Serialize for PackageVersionReq {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -508,7 +506,7 @@ impl Serialize for ArtifactVersionReq {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactVersionReq {
+impl<'de> Deserialize<'de> for PackageVersionReq {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -518,17 +516,17 @@ impl<'de> Deserialize<'de> for ArtifactVersionReq {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ArtifactPackageRef {
-    pub type_id: ArtifactTypeId,
-    pub package_id: ArtifactPackageId,
-    pub version_req: ArtifactVersionReq,
+pub struct PackageRef {
+    pub type_id: PackageTypeId,
+    pub package_id: PackageId,
+    pub version_req: PackageVersionReq,
 }
 
-impl ArtifactPackageRef {
+impl PackageRef {
     pub fn new(
-        type_id: ArtifactTypeId,
-        package_id: ArtifactPackageId,
-        version_req: ArtifactVersionReq,
+        type_id: PackageTypeId,
+        package_id: PackageId,
+        version_req: PackageVersionReq,
     ) -> Self {
         Self {
             type_id,
@@ -537,33 +535,32 @@ impl ArtifactPackageRef {
         }
     }
 
-    pub fn parse(value: &str) -> Result<Self, ArtifactError> {
+    pub fn parse(value: &str) -> Result<Self, PackageError> {
         let original = value.to_owned();
         let Some((type_text, remainder)) = value.split_once(':') else {
-            return Err(ArtifactError::InvalidReference {
+            return Err(PackageError::InvalidReference {
                 value: original,
                 reason: "missing `:` delimiter".to_owned(),
             });
         };
         let Some((package_text, requirement_text)) = remainder.rsplit_once('@') else {
-            return Err(ArtifactError::InvalidReference {
+            return Err(PackageError::InvalidReference {
                 value: original,
                 reason: "missing `@` delimiter".to_owned(),
             });
         };
         let type_id =
-            ArtifactTypeId::new(type_text).map_err(|error| ArtifactError::InvalidReference {
+            PackageTypeId::new(type_text).map_err(|error| PackageError::InvalidReference {
                 value: value.to_owned(),
                 reason: error.to_string(),
             })?;
-        let package_id = ArtifactPackageId::new(package_text).map_err(|error| {
-            ArtifactError::InvalidReference {
+        let package_id =
+            PackageId::new(package_text).map_err(|error| PackageError::InvalidReference {
                 value: value.to_owned(),
                 reason: error.to_string(),
-            }
-        })?;
-        let version_req = ArtifactVersionReq::new(requirement_text).map_err(|error| {
-            ArtifactError::InvalidReference {
+            })?;
+        let version_req = PackageVersionReq::new(requirement_text).map_err(|error| {
+            PackageError::InvalidReference {
                 value: value.to_owned(),
                 reason: error.to_string(),
             }
@@ -572,7 +569,7 @@ impl ArtifactPackageRef {
     }
 }
 
-impl Display for ArtifactPackageRef {
+impl Display for PackageRef {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
@@ -582,15 +579,15 @@ impl Display for ArtifactPackageRef {
     }
 }
 
-impl FromStr for ArtifactPackageRef {
-    type Err = ArtifactError;
+impl FromStr for PackageRef {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
     }
 }
 
-impl Serialize for ArtifactPackageRef {
+impl Serialize for PackageRef {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -599,7 +596,7 @@ impl Serialize for ArtifactPackageRef {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactPackageRef {
+impl<'de> Deserialize<'de> for PackageRef {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -609,45 +606,45 @@ impl<'de> Deserialize<'de> for ArtifactPackageRef {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ArtifactRequirement(ArtifactPackageRef);
+pub struct PackageRequirement(PackageRef);
 
-impl ArtifactRequirement {
-    pub fn new(reference: ArtifactPackageRef) -> Self {
+impl PackageRequirement {
+    pub fn new(reference: PackageRef) -> Self {
         Self(reference)
     }
 
-    pub fn parse(value: &str) -> Result<Self, ArtifactError> {
-        ArtifactPackageRef::parse(value).map(Self)
+    pub fn parse(value: &str) -> Result<Self, PackageError> {
+        PackageRef::parse(value).map(Self)
     }
 
-    pub fn reference(&self) -> &ArtifactPackageRef {
+    pub fn reference(&self) -> &PackageRef {
         &self.0
     }
 
-    pub fn type_id(&self) -> &ArtifactTypeId {
+    pub fn type_id(&self) -> &PackageTypeId {
         &self.0.type_id
     }
 
-    pub fn package_id(&self) -> &ArtifactPackageId {
+    pub fn package_id(&self) -> &PackageId {
         &self.0.package_id
     }
 }
 
-impl Display for ArtifactRequirement {
+impl Display for PackageRequirement {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
 }
 
-impl FromStr for ArtifactRequirement {
-    type Err = ArtifactError;
+impl FromStr for PackageRequirement {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
     }
 }
 
-impl Serialize for ArtifactRequirement {
+impl Serialize for PackageRequirement {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -656,27 +653,27 @@ impl Serialize for ArtifactRequirement {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactRequirement {
+impl<'de> Deserialize<'de> for PackageRequirement {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        ArtifactPackageRef::deserialize(deserializer).map(Self)
+        PackageRef::deserialize(deserializer).map(Self)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AglCompatibility {
-    pub compatible: ArtifactVersionReq,
-    pub tested: BTreeSet<ArtifactVersion>,
+    pub compatible: PackageVersionReq,
+    pub tested: BTreeSet<PackageVersion>,
 }
 
 impl AglCompatibility {
     pub fn new(
-        compatible: ArtifactVersionReq,
-        tested: impl IntoIterator<Item = ArtifactVersion>,
-    ) -> Result<Self, ArtifactError> {
+        compatible: PackageVersionReq,
+        tested: impl IntoIterator<Item = PackageVersion>,
+    ) -> Result<Self, PackageError> {
         let compatibility = Self {
             compatible,
             tested: tested.into_iter().collect(),
@@ -685,16 +682,16 @@ impl AglCompatibility {
         Ok(compatibility)
     }
 
-    pub fn validate(&self) -> Result<(), ArtifactError> {
+    pub fn validate(&self) -> Result<(), PackageError> {
         if self.tested.is_empty() {
-            return Err(ArtifactError::EmptyTestedVersions);
+            return Err(PackageError::EmptyTestedVersions);
         }
         if let Some(version) = self
             .tested
             .iter()
             .find(|version| !self.compatible.matches(version))
         {
-            return Err(ArtifactError::TestedVersionIncompatible {
+            return Err(PackageError::TestedVersionIncompatible {
                 version: version.to_string(),
                 compatible: self.compatible.to_string(),
             });
@@ -711,8 +708,8 @@ impl<'de> Deserialize<'de> for AglCompatibility {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            compatible: ArtifactVersionReq,
-            tested: BTreeSet<ArtifactVersion>,
+            compatible: PackageVersionReq,
+            tested: BTreeSet<PackageVersion>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -722,28 +719,28 @@ impl<'de> Deserialize<'de> for AglCompatibility {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactEnvelope {
-    pub schema: ArtifactSchemaId,
+pub struct PackageEnvelope {
+    pub schema: PackageSchemaId,
     #[serde(rename = "type")]
-    pub type_id: ArtifactTypeId,
-    pub id: ArtifactPackageId,
-    pub version: ArtifactVersion,
-    pub payload_schema: ArtifactSchemaId,
+    pub type_id: PackageTypeId,
+    pub id: PackageId,
+    pub version: PackageVersion,
+    pub payload_schema: PackageSchemaId,
     pub agl: AglCompatibility,
-    pub requires: Vec<ArtifactRequirement>,
+    pub requires: Vec<PackageRequirement>,
 }
 
-impl ArtifactEnvelope {
+impl PackageEnvelope {
     pub fn new(
-        type_id: ArtifactTypeId,
-        id: ArtifactPackageId,
-        version: ArtifactVersion,
-        payload_schema: ArtifactSchemaId,
+        type_id: PackageTypeId,
+        id: PackageId,
+        version: PackageVersion,
+        payload_schema: PackageSchemaId,
         agl: AglCompatibility,
-        requires: Vec<ArtifactRequirement>,
-    ) -> Result<Self, ArtifactError> {
+        requires: Vec<PackageRequirement>,
+    ) -> Result<Self, PackageError> {
         let envelope = Self {
-            schema: ArtifactSchemaId::common(),
+            schema: PackageSchemaId::common(),
             type_id,
             id,
             version,
@@ -755,15 +752,15 @@ impl ArtifactEnvelope {
         Ok(envelope)
     }
 
-    pub fn validate(&self) -> Result<(), ArtifactError> {
-        if self.schema.as_str() != ARTIFACT_SCHEMA {
-            return Err(ArtifactError::InvalidEnvelopeSchema {
+    pub fn validate(&self) -> Result<(), PackageError> {
+        if self.schema.as_str() != PACKAGE_SCHEMA {
+            return Err(PackageError::InvalidEnvelopeSchema {
                 value: self.schema.to_string(),
             });
         }
-        if self.payload_schema.as_str() == ARTIFACT_SCHEMA {
-            return Err(ArtifactError::PayloadSchemaConflicts {
-                common: ARTIFACT_SCHEMA.to_owned(),
+        if self.payload_schema.as_str() == PACKAGE_SCHEMA {
+            return Err(PackageError::PayloadSchemaConflicts {
+                common: PACKAGE_SCHEMA.to_owned(),
             });
         }
         self.agl.validate()?;
@@ -774,7 +771,7 @@ impl ArtifactEnvelope {
                 requirement.package_id().clone(),
             );
             if !targets.insert(target) {
-                return Err(ArtifactError::DuplicateRequirement {
+                return Err(PackageError::DuplicateRequirement {
                     type_id: requirement.type_id().to_string(),
                     package_id: requirement.package_id().to_string(),
                 });
@@ -784,7 +781,7 @@ impl ArtifactEnvelope {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactEnvelope {
+impl<'de> Deserialize<'de> for PackageEnvelope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -792,14 +789,14 @@ impl<'de> Deserialize<'de> for ArtifactEnvelope {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            schema: ArtifactSchemaId,
+            schema: PackageSchemaId,
             #[serde(rename = "type")]
-            type_id: ArtifactTypeId,
-            id: ArtifactPackageId,
-            version: ArtifactVersion,
-            payload_schema: ArtifactSchemaId,
+            type_id: PackageTypeId,
+            id: PackageId,
+            version: PackageVersion,
+            payload_schema: PackageSchemaId,
             agl: AglCompatibility,
-            requires: Vec<ArtifactRequirement>,
+            requires: Vec<PackageRequirement>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -818,13 +815,13 @@ impl<'de> Deserialize<'de> for ArtifactEnvelope {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactRelativePath(String);
+pub struct PackageRelativePath(String);
 
-impl ArtifactRelativePath {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageRelativePath {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         if !valid_relative_path(&value) {
-            return Err(ArtifactError::InvalidRelativePath { value });
+            return Err(PackageError::InvalidRelativePath { value });
         }
         Ok(Self(value))
     }
@@ -838,21 +835,21 @@ impl ArtifactRelativePath {
     }
 }
 
-impl Display for ArtifactRelativePath {
+impl Display for PackageRelativePath {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactRelativePath {
-    type Err = ArtifactError;
+impl FromStr for PackageRelativePath {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactRelativePath {
+impl Serialize for PackageRelativePath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -861,7 +858,7 @@ impl Serialize for ArtifactRelativePath {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactRelativePath {
+impl<'de> Deserialize<'de> for PackageRelativePath {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -871,19 +868,19 @@ impl<'de> Deserialize<'de> for ArtifactRelativePath {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactEntrypoint(ArtifactRelativePath);
+pub struct PackageEntrypoint(PackageRelativePath);
 
-impl ArtifactEntrypoint {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageEntrypoint {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         if value.is_empty() || value == "." || value == ".." {
-            return Err(ArtifactError::InvalidAdapterEntrypoint { value });
+            return Err(PackageError::InvalidAdapterEntrypoint { value });
         }
-        ArtifactRelativePath::new(value)
+        PackageRelativePath::new(value)
             .map(Self)
             .map_err(|error| match error {
-                ArtifactError::InvalidRelativePath { value } => {
-                    ArtifactError::InvalidAdapterEntrypoint { value }
+                PackageError::InvalidRelativePath { value } => {
+                    PackageError::InvalidAdapterEntrypoint { value }
                 }
                 other => other,
             })
@@ -893,26 +890,26 @@ impl ArtifactEntrypoint {
         self.0.as_str()
     }
 
-    pub fn path(&self) -> &ArtifactRelativePath {
+    pub fn path(&self) -> &PackageRelativePath {
         &self.0
     }
 }
 
-impl Display for ArtifactEntrypoint {
+impl Display for PackageEntrypoint {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactEntrypoint {
-    type Err = ArtifactError;
+impl FromStr for PackageEntrypoint {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactEntrypoint {
+impl Serialize for PackageEntrypoint {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -921,7 +918,7 @@ impl Serialize for ArtifactEntrypoint {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactEntrypoint {
+impl<'de> Deserialize<'de> for PackageEntrypoint {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -943,21 +940,21 @@ fn valid_relative_path(value: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArtifactAdapterDescriptor {
-    pub type_id: ArtifactTypeId,
+pub struct PackageAdapterDescriptor {
+    pub type_id: PackageTypeId,
     pub root: String,
-    pub entrypoint: ArtifactEntrypoint,
+    pub entrypoint: PackageEntrypoint,
 }
 
-impl ArtifactAdapterDescriptor {
+impl PackageAdapterDescriptor {
     pub fn new(
-        type_id: ArtifactTypeId,
+        type_id: PackageTypeId,
         root: impl Into<String>,
-        entrypoint: ArtifactEntrypoint,
-    ) -> Result<Self, ArtifactError> {
+        entrypoint: PackageEntrypoint,
+    ) -> Result<Self, PackageError> {
         let root = root.into();
         if !valid_root(&root) {
-            return Err(ArtifactError::InvalidAdapterRoot { value: root });
+            return Err(PackageError::InvalidAdapterRoot { value: root });
         }
         Ok(Self {
             type_id,
@@ -967,21 +964,21 @@ impl ArtifactAdapterDescriptor {
     }
 }
 
-pub trait ArtifactPackageView: Send + Sync {
-    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError>;
+pub trait PackageView: Send + Sync {
+    fn files(&self) -> Result<Vec<PackageRelativePath>, PackageError>;
 
-    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError>;
+    fn read_file(&self, path: &PackageRelativePath) -> Result<Vec<u8>, PackageError>;
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryPackageView {
-    files: BTreeMap<ArtifactRelativePath, Vec<u8>>,
+    files: BTreeMap<PackageRelativePath, Vec<u8>>,
 }
 
 impl InMemoryPackageView {
     pub fn new(
-        files: impl IntoIterator<Item = (ArtifactRelativePath, Vec<u8>)>,
-    ) -> Result<Self, ArtifactError> {
+        files: impl IntoIterator<Item = (PackageRelativePath, Vec<u8>)>,
+    ) -> Result<Self, PackageError> {
         let mut view = Self::default();
         for (path, content) in files {
             view.insert(path, content)?;
@@ -991,11 +988,11 @@ impl InMemoryPackageView {
 
     pub fn insert(
         &mut self,
-        path: ArtifactRelativePath,
+        path: PackageRelativePath,
         content: Vec<u8>,
-    ) -> Result<(), ArtifactError> {
+    ) -> Result<(), PackageError> {
         if self.files.insert(path.clone(), content).is_some() {
-            return Err(ArtifactError::DuplicatePackageFile {
+            return Err(PackageError::DuplicatePackageFile {
                 path: path.to_string(),
             });
         }
@@ -1003,16 +1000,16 @@ impl InMemoryPackageView {
     }
 }
 
-impl ArtifactPackageView for InMemoryPackageView {
-    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError> {
+impl PackageView for InMemoryPackageView {
+    fn files(&self) -> Result<Vec<PackageRelativePath>, PackageError> {
         Ok(self.files.keys().cloned().collect())
     }
 
-    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError> {
+    fn read_file(&self, path: &PackageRelativePath) -> Result<Vec<u8>, PackageError> {
         self.files
             .get(path)
             .cloned()
-            .ok_or_else(|| ArtifactError::PackageFileNotFound {
+            .ok_or_else(|| PackageError::PackageFileNotFound {
                 path: path.to_string(),
             })
     }
@@ -1024,16 +1021,16 @@ pub struct DirectoryPackageView {
 }
 
 impl DirectoryPackageView {
-    pub fn new(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, PackageError> {
         let root = root.into();
         let metadata = fs::symlink_metadata(&root).map_err(|error| package_io(&root, error))?;
         if metadata.file_type().is_symlink() {
-            return Err(ArtifactError::PackageSymlinkRejected {
+            return Err(PackageError::PackageSymlinkRejected {
                 path: root.display().to_string(),
             });
         }
         if !metadata.is_dir() {
-            return Err(ArtifactError::PackagePathNotRegular {
+            return Err(PackageError::PackagePathNotRegular {
                 path: root.display().to_string(),
             });
         }
@@ -1044,11 +1041,11 @@ impl DirectoryPackageView {
         &self.root
     }
 
-    fn checked_path(&self, relative: &ArtifactRelativePath) -> Result<PathBuf, ArtifactError> {
+    fn checked_path(&self, relative: &PackageRelativePath) -> Result<PathBuf, PackageError> {
         let mut current = self.root.clone();
         for component in relative.as_path().components() {
             let Component::Normal(segment) = component else {
-                return Err(ArtifactError::InvalidRelativePath {
+                return Err(PackageError::InvalidRelativePath {
                     value: relative.to_string(),
                 });
             };
@@ -1056,7 +1053,7 @@ impl DirectoryPackageView {
             let metadata =
                 fs::symlink_metadata(&current).map_err(|error| package_io(&current, error))?;
             if metadata.file_type().is_symlink() {
-                return Err(ArtifactError::PackageSymlinkRejected {
+                return Err(PackageError::PackageSymlinkRejected {
                     path: relative.to_string(),
                 });
             }
@@ -1065,20 +1062,20 @@ impl DirectoryPackageView {
     }
 }
 
-impl ArtifactPackageView for DirectoryPackageView {
-    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError> {
+impl PackageView for DirectoryPackageView {
+    fn files(&self) -> Result<Vec<PackageRelativePath>, PackageError> {
         let mut paths = Vec::new();
         collect_directory_files(&self.root, "", &mut paths)?;
         paths.sort();
         Ok(paths)
     }
 
-    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError> {
+    fn read_file(&self, path: &PackageRelativePath) -> Result<Vec<u8>, PackageError> {
         let absolute = self.checked_path(path)?;
         let metadata =
             fs::symlink_metadata(&absolute).map_err(|error| package_io(&absolute, error))?;
         if !metadata.is_file() {
-            return Err(ArtifactError::PackagePathNotRegular {
+            return Err(PackageError::PackagePathNotRegular {
                 path: path.to_string(),
             });
         }
@@ -1089,8 +1086,8 @@ impl ArtifactPackageView for DirectoryPackageView {
 fn collect_directory_files(
     directory: &Path,
     prefix: &str,
-    paths: &mut Vec<ArtifactRelativePath>,
-) -> Result<(), ArtifactError> {
+    paths: &mut Vec<PackageRelativePath>,
+) -> Result<(), PackageError> {
     let mut entries = fs::read_dir(directory)
         .map_err(|error| package_io(directory, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -1100,7 +1097,7 @@ fn collect_directory_files(
         let name = entry
             .file_name()
             .into_string()
-            .map_err(|_| ArtifactError::PackageIo {
+            .map_err(|_| PackageError::PackageIo {
                 path: entry.path().display().to_string(),
                 reason: "package file name is not valid UTF-8".to_owned(),
             })?;
@@ -1112,31 +1109,31 @@ fn collect_directory_files(
         let metadata =
             fs::symlink_metadata(entry.path()).map_err(|error| package_io(&entry.path(), error))?;
         if metadata.file_type().is_symlink() {
-            return Err(ArtifactError::PackageSymlinkRejected { path: relative });
+            return Err(PackageError::PackageSymlinkRejected { path: relative });
         }
         if metadata.is_dir() {
             collect_directory_files(&entry.path(), &relative, paths)?;
         } else if metadata.is_file() {
-            paths.push(ArtifactRelativePath::new(relative)?);
+            paths.push(PackageRelativePath::new(relative)?);
         } else {
-            return Err(ArtifactError::PackagePathNotRegular { path: relative });
+            return Err(PackageError::PackagePathNotRegular { path: relative });
         }
     }
     Ok(())
 }
 
-fn package_io(path: &Path, error: std::io::Error) -> ArtifactError {
-    ArtifactError::PackageIo {
+fn package_io(path: &Path, error: std::io::Error) -> PackageError {
+    PackageError::PackageIo {
         path: path.display().to_string(),
         reason: error.to_string(),
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ArtifactSourceId(String);
+pub struct PackageSourceId(String);
 
-impl ArtifactSourceId {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+impl PackageSourceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         if value.is_empty()
             || !value.bytes().all(|byte| {
@@ -1146,7 +1143,7 @@ impl ArtifactSourceId {
             })
             || !value.as_bytes()[0].is_ascii_lowercase()
         {
-            return Err(ArtifactError::InvalidSourceId { value });
+            return Err(PackageError::InvalidSourceId { value });
         }
         Ok(Self(value))
     }
@@ -1156,21 +1153,21 @@ impl ArtifactSourceId {
     }
 }
 
-impl Display for ArtifactSourceId {
+impl Display for PackageSourceId {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for ArtifactSourceId {
-    type Err = ArtifactError;
+impl FromStr for PackageSourceId {
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
     }
 }
 
-impl Serialize for ArtifactSourceId {
+impl Serialize for PackageSourceId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -1179,7 +1176,7 @@ impl Serialize for ArtifactSourceId {
     }
 }
 
-impl<'de> Deserialize<'de> for ArtifactSourceId {
+impl<'de> Deserialize<'de> for PackageSourceId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -1190,7 +1187,7 @@ impl<'de> Deserialize<'de> for ArtifactSourceId {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ArtifactSourceTier {
+pub enum PackageSourceTier {
     Explicit,
     Workspace,
     User,
@@ -1200,34 +1197,18 @@ pub enum ArtifactSourceTier {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ArtifactSourceKind {
+pub enum PackageSourceKind {
     Directory,
     Git,
     Embedded,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceComponentKind {
-    Git,
-    Submodule,
-    Local,
-    Generated,
-    Ignored,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactAccess {
-    Read,
-    Write,
-    ReadWrite,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactSourceDeclaration {
-    pub kind: ArtifactSourceKind,
+pub struct PackageSourceDeclaration {
+    pub id: PackageSourceId,
+    pub tier: PackageSourceTier,
+    pub kind: PackageSourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1236,35 +1217,13 @@ pub struct ArtifactSourceDeclaration {
     pub rev: Option<String>,
 }
 
-impl ArtifactSourceDeclaration {
-    pub fn validate(&self) -> Result<(), ArtifactError> {
+impl PackageSourceDeclaration {
+    pub fn validate(&self) -> Result<(), PackageError> {
         if let Some(path) = &self.path {
             validate_workspace_relative_path(path)?;
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceComponent {
-    pub kind: WorkspaceComponentKind,
-    pub path: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-    pub access: ArtifactAccess,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub create: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1285,11 +1244,9 @@ pub struct WorkspaceConfigReferences {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceManifest {
     pub version: u32,
-    pub default_function: ArtifactPackageRef,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sources: BTreeMap<String, ArtifactSourceDeclaration>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub components: BTreeMap<String, WorkspaceComponent>,
+    pub default_function: PackageRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<PackageSourceDeclaration>,
     #[serde(default)]
     pub policy: WorkspacePolicy,
     #[serde(default)]
@@ -1297,43 +1254,42 @@ pub struct WorkspaceManifest {
 }
 
 impl WorkspaceManifest {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 
-    pub fn validate(&self) -> Result<(), ArtifactError> {
+    pub fn validate(&self) -> Result<(), PackageError> {
         if self.version != Self::VERSION {
-            return Err(ArtifactError::UnsupportedLockVersion {
+            return Err(PackageError::UnsupportedLockVersion {
                 version: self.version,
             });
         }
         if self.default_function.type_id.as_str() != FUNCTION_TYPE {
-            return Err(ArtifactError::InvalidReference {
+            return Err(PackageError::InvalidReference {
                 value: self.default_function.to_string(),
                 reason: "default_function must reference a function".to_owned(),
             });
         }
-        for (name, source) in &self.sources {
-            ArtifactSourceId::new(name.clone())?;
-            source.validate()?;
-        }
-        for component in self.components.values() {
-            validate_workspace_relative_path(&component.path)?;
-            for create in &component.create {
-                validate_workspace_create_path(create)?;
+        let mut source_ids = BTreeSet::new();
+        for source in &self.sources {
+            if !source_ids.insert(source.id.clone()) {
+                return Err(PackageError::InvalidSourceId {
+                    value: source.id.to_string(),
+                });
             }
+            source.validate()?;
         }
         Ok(())
     }
 
-    pub fn to_toml(&self) -> Result<String, ArtifactError> {
+    pub fn to_toml(&self) -> Result<String, PackageError> {
         self.validate()?;
-        toml::to_string(self).map_err(|error| ArtifactError::LockIo {
+        toml::to_string(self).map_err(|error| PackageError::LockIo {
             path: "<memory>".to_owned(),
             reason: error.to_string(),
         })
     }
 
-    pub fn from_toml(value: &str) -> Result<Self, ArtifactError> {
-        let manifest: Self = toml::from_str(value).map_err(|error| ArtifactError::LockIo {
+    pub fn from_toml(value: &str) -> Result<Self, PackageError> {
+        let manifest: Self = toml::from_str(value).map_err(|error| PackageError::LockIo {
             path: "<memory>".to_owned(),
             reason: error.to_string(),
         })?;
@@ -1342,41 +1298,34 @@ impl WorkspaceManifest {
     }
 }
 
-fn validate_workspace_relative_path(path: &Path) -> Result<(), ArtifactError> {
+fn validate_workspace_relative_path(path: &Path) -> Result<(), PackageError> {
     let value = path
         .to_str()
-        .ok_or_else(|| ArtifactError::InvalidRelativePath {
+        .ok_or_else(|| PackageError::InvalidRelativePath {
             value: path.display().to_string(),
         })?;
-    ArtifactRelativePath::new(value.to_owned()).map(|_| ())
-}
-
-fn validate_workspace_create_path(path: &Path) -> Result<(), ArtifactError> {
-    if path == Path::new(".") {
-        return Ok(());
-    }
-    validate_workspace_relative_path(path)
+    PackageRelativePath::new(value.to_owned()).map(|_| ())
 }
 
 #[derive(Clone)]
-pub struct ArtifactCandidate {
-    pub type_id: ArtifactTypeId,
-    pub package_id: ArtifactPackageId,
-    pub version: ArtifactVersion,
-    pub source_id: ArtifactSourceId,
-    pub tier: ArtifactSourceTier,
-    pub kind: ArtifactSourceKind,
+pub struct PackageCandidate {
+    pub type_id: PackageTypeId,
+    pub package_id: PackageId,
+    pub version: PackageVersion,
+    pub source_id: PackageSourceId,
+    pub tier: PackageSourceTier,
+    pub kind: PackageSourceKind,
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
     pub package_root: Option<PathBuf>,
-    discovery_error: Option<ArtifactError>,
-    view: Arc<dyn ArtifactPackageView>,
+    discovery_error: Option<PackageError>,
+    view: Arc<dyn PackageView>,
 }
 
-impl fmt::Debug for ArtifactCandidate {
+impl fmt::Debug for PackageCandidate {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ArtifactCandidate")
+            .debug_struct("PackageCandidate")
             .field("type_id", &self.type_id)
             .field("package_id", &self.package_id)
             .field("version", &self.version)
@@ -1388,15 +1337,15 @@ impl fmt::Debug for ArtifactCandidate {
     }
 }
 
-impl ArtifactCandidate {
+impl PackageCandidate {
     pub fn new(
-        type_id: ArtifactTypeId,
-        package_id: ArtifactPackageId,
-        version: ArtifactVersion,
-        source_id: ArtifactSourceId,
-        tier: ArtifactSourceTier,
-        kind: ArtifactSourceKind,
-        view: Arc<dyn ArtifactPackageView>,
+        type_id: PackageTypeId,
+        package_id: PackageId,
+        version: PackageVersion,
+        source_id: PackageSourceId,
+        tier: PackageSourceTier,
+        kind: PackageSourceKind,
+        view: Arc<dyn PackageView>,
     ) -> Self {
         Self {
             type_id,
@@ -1428,22 +1377,22 @@ impl ArtifactCandidate {
         self
     }
 
-    fn with_discovery_error(mut self, error: ArtifactError) -> Self {
+    fn with_discovery_error(mut self, error: PackageError) -> Self {
         self.discovery_error = Some(error);
         self
     }
 
-    pub fn discovery_error(&self) -> Option<&ArtifactError> {
+    pub fn discovery_error(&self) -> Option<&PackageError> {
         self.discovery_error.as_ref()
     }
 
-    pub fn view(&self) -> &dyn ArtifactPackageView {
+    pub fn view(&self) -> &dyn PackageView {
         self.view.as_ref()
     }
 
     /// Captures one immutable package-byte view for resolution and every later
     /// typed projection derived from the selected candidate.
-    pub fn snapshot(&self) -> Result<Self, ArtifactError> {
+    pub fn snapshot(&self) -> Result<Self, PackageError> {
         let files = self
             .view
             .files()?
@@ -1452,88 +1401,81 @@ impl ArtifactCandidate {
                 let bytes = self.view.read_file(&path)?;
                 Ok((path, bytes))
             })
-            .collect::<Result<Vec<_>, ArtifactError>>()?;
+            .collect::<Result<Vec<_>, PackageError>>()?;
         let mut candidate = self.clone();
         candidate.view = Arc::new(InMemoryPackageView::new(files)?);
         Ok(candidate)
     }
 }
 
-pub trait ArtifactSource: Send + Sync {
-    fn id(&self) -> &ArtifactSourceId;
-    fn tier(&self) -> ArtifactSourceTier;
-    fn kind(&self) -> ArtifactSourceKind;
-    fn candidates(&self, type_id: &ArtifactTypeId)
-    -> Result<Vec<ArtifactCandidate>, ArtifactError>;
+pub trait PackageSource: Send + Sync {
+    fn id(&self) -> &PackageSourceId;
+    fn tier(&self) -> PackageSourceTier;
+    fn kind(&self) -> PackageSourceKind;
+    fn candidates(&self, type_id: &PackageTypeId) -> Result<Vec<PackageCandidate>, PackageError>;
 
     fn inventory_candidates(
         &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        type_id: &PackageTypeId,
+    ) -> Result<Vec<PackageCandidate>, PackageError> {
         self.candidates(type_id)
     }
 }
 
-pub type ErasedArtifactPayload = Box<dyn Any + Send + Sync>;
+pub type ErasedPackagePayload = Box<dyn Any + Send + Sync>;
 
 /// Adapter lifecycle completed in H02; payload implementations remain in domain crates.
-pub trait ArtifactAdapter: Send + Sync {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor;
+pub trait PackageAdapter: Send + Sync {
+    fn descriptor(&self) -> &PackageAdapterDescriptor;
 
-    fn extract_envelope(
-        &self,
-        package: &dyn ArtifactPackageView,
-    ) -> Result<ArtifactEnvelope, ArtifactError>;
+    fn extract_envelope(&self, package: &dyn PackageView) -> Result<PackageEnvelope, PackageError>;
 
     fn validate_payload(
         &self,
-        package: &dyn ArtifactPackageView,
-        envelope: &ArtifactEnvelope,
-    ) -> Result<ErasedArtifactPayload, ArtifactError>;
+        package: &dyn PackageView,
+        envelope: &PackageEnvelope,
+    ) -> Result<ErasedPackagePayload, PackageError>;
 }
 
-impl<T> ArtifactAdapter for Arc<T>
+impl<T> PackageAdapter for Arc<T>
 where
-    T: ArtifactAdapter + ?Sized,
+    T: PackageAdapter + ?Sized,
 {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+    fn descriptor(&self) -> &PackageAdapterDescriptor {
         self.as_ref().descriptor()
     }
 
-    fn extract_envelope(
-        &self,
-        package: &dyn ArtifactPackageView,
-    ) -> Result<ArtifactEnvelope, ArtifactError> {
+    fn extract_envelope(&self, package: &dyn PackageView) -> Result<PackageEnvelope, PackageError> {
         self.as_ref().extract_envelope(package)
     }
 
     fn validate_payload(
         &self,
-        package: &dyn ArtifactPackageView,
-        envelope: &ArtifactEnvelope,
-    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        package: &dyn PackageView,
+        envelope: &PackageEnvelope,
+    ) -> Result<ErasedPackagePayload, PackageError> {
         self.as_ref().validate_payload(package, envelope)
     }
 }
 
 #[derive(Clone, Default)]
-pub struct ArtifactAdapterRegistry {
-    adapters: BTreeMap<ArtifactTypeId, Arc<dyn ArtifactAdapter>>,
+pub struct PackageAdapterRegistry {
+    adapters: BTreeMap<PackageTypeId, Arc<dyn PackageAdapter>>,
 }
 
-impl fmt::Debug for ArtifactAdapterRegistry {
+impl fmt::Debug for PackageAdapterRegistry {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ArtifactAdapterRegistry")
+            .debug_struct("PackageAdapterRegistry")
             .field("types", &self.adapters.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl ArtifactAdapterRegistry {
-    pub fn new<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, ArtifactError>
+impl PackageAdapterRegistry {
+    pub fn new<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, PackageError>
     where
-        A: ArtifactAdapter + 'static,
+        A: PackageAdapter + 'static,
     {
         let mut registry = Self::default();
         for adapter in adapters {
@@ -1542,16 +1484,16 @@ impl ArtifactAdapterRegistry {
         Ok(registry)
     }
 
-    pub fn from_adapters<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, ArtifactError>
+    pub fn from_adapters<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, PackageError>
     where
-        A: ArtifactAdapter + 'static,
+        A: PackageAdapter + 'static,
     {
         Self::new(adapters)
     }
 
     pub fn from_dyn(
-        adapters: impl IntoIterator<Item = Arc<dyn ArtifactAdapter>>,
-    ) -> Result<Self, ArtifactError> {
+        adapters: impl IntoIterator<Item = Arc<dyn PackageAdapter>>,
+    ) -> Result<Self, PackageError> {
         let mut registry = Self::default();
         for adapter in adapters {
             registry.insert(adapter)?;
@@ -1559,27 +1501,27 @@ impl ArtifactAdapterRegistry {
         Ok(registry)
     }
 
-    pub fn lookup(&self, type_id: &ArtifactTypeId) -> Result<&dyn ArtifactAdapter, ArtifactError> {
+    pub fn lookup(&self, type_id: &PackageTypeId) -> Result<&dyn PackageAdapter, PackageError> {
         self.adapters
             .get(type_id)
             .map(AsRef::as_ref)
-            .ok_or_else(|| ArtifactError::UnsupportedType {
+            .ok_or_else(|| PackageError::UnsupportedType {
                 type_id: type_id.to_string(),
             })
     }
 
-    pub fn get(&self, type_id: &ArtifactTypeId) -> Option<&dyn ArtifactAdapter> {
+    pub fn get(&self, type_id: &PackageTypeId) -> Option<&dyn PackageAdapter> {
         self.adapters.get(type_id).map(AsRef::as_ref)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &dyn ArtifactAdapter> {
+    pub fn iter(&self) -> impl Iterator<Item = &dyn PackageAdapter> {
         self.adapters.values().map(AsRef::as_ref)
     }
 
-    fn insert(&mut self, adapter: Arc<dyn ArtifactAdapter>) -> Result<(), ArtifactError> {
+    fn insert(&mut self, adapter: Arc<dyn PackageAdapter>) -> Result<(), PackageError> {
         let descriptor = adapter.descriptor();
         if self.adapters.contains_key(&descriptor.type_id) {
-            return Err(ArtifactError::DuplicateAdapterType {
+            return Err(PackageError::DuplicateAdapterType {
                 type_id: descriptor.type_id.to_string(),
             });
         }
@@ -1588,19 +1530,19 @@ impl ArtifactAdapterRegistry {
             .values()
             .any(|existing| existing.descriptor().root == descriptor.root)
         {
-            return Err(ArtifactError::DuplicateAdapterRoot {
+            return Err(PackageError::DuplicateAdapterRoot {
                 root: descriptor.root.clone(),
             });
         }
         if !descriptor.type_id.is_core() && RESERVED_ROOTS.contains(&descriptor.root.as_str()) {
-            return Err(ArtifactError::ReservedRootCollision {
+            return Err(PackageError::ReservedRootCollision {
                 root: descriptor.root.clone(),
             });
         }
         if let Some(expected) = core_root(descriptor.type_id.as_str())
             && expected != descriptor.root
         {
-            return Err(ArtifactError::CoreRootMismatch {
+            return Err(PackageError::CoreRootMismatch {
                 type_id: descriptor.type_id.to_string(),
                 expected: expected.to_owned(),
                 actual: descriptor.root.clone(),
@@ -1612,24 +1554,25 @@ impl ArtifactAdapterRegistry {
 }
 
 #[derive(Clone, Debug)]
-pub struct StaticArtifactSource {
-    source_id: ArtifactSourceId,
-    tier: ArtifactSourceTier,
-    kind: ArtifactSourceKind,
-    candidates: Vec<ArtifactCandidate>,
+pub struct StaticPackageSource {
+    source_id: PackageSourceId,
+    tier: PackageSourceTier,
+    kind: PackageSourceKind,
+    candidates: Vec<PackageCandidate>,
 }
 
-impl StaticArtifactSource {
+impl StaticPackageSource {
     pub fn new(
-        source_id: ArtifactSourceId,
-        tier: ArtifactSourceTier,
-        kind: ArtifactSourceKind,
-        candidates: Vec<ArtifactCandidate>,
-    ) -> Result<Self, ArtifactError> {
+        source_id: PackageSourceId,
+        tier: PackageSourceTier,
+        kind: PackageSourceKind,
+        candidates: impl IntoIterator<Item = PackageCandidate>,
+    ) -> Result<Self, PackageError> {
+        let candidates = candidates.into_iter().collect::<Vec<_>>();
         for candidate in &candidates {
             if candidate.source_id != source_id || candidate.tier != tier || candidate.kind != kind
             {
-                return Err(ArtifactError::PackageIo {
+                return Err(PackageError::PackageIo {
                     path: candidate.package_id.to_string(),
                     reason: "candidate provenance does not match source".to_owned(),
                 });
@@ -1643,7 +1586,7 @@ impl StaticArtifactSource {
         })
     }
 
-    fn matching_candidates(&self, type_id: &ArtifactTypeId) -> Vec<ArtifactCandidate> {
+    fn matching_candidates(&self, type_id: &PackageTypeId) -> Vec<PackageCandidate> {
         let mut candidates = self
             .candidates
             .iter()
@@ -1662,27 +1605,24 @@ impl StaticArtifactSource {
     }
 }
 
-impl ArtifactSource for StaticArtifactSource {
-    fn id(&self) -> &ArtifactSourceId {
+impl PackageSource for StaticPackageSource {
+    fn id(&self) -> &PackageSourceId {
         &self.source_id
     }
 
-    fn tier(&self) -> ArtifactSourceTier {
+    fn tier(&self) -> PackageSourceTier {
         self.tier
     }
 
-    fn kind(&self) -> ArtifactSourceKind {
+    fn kind(&self) -> PackageSourceKind {
         self.kind
     }
 
-    fn candidates(
-        &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+    fn candidates(&self, type_id: &PackageTypeId) -> Result<Vec<PackageCandidate>, PackageError> {
         let candidates = self.matching_candidates(type_id);
         if let Some(error) = candidates
             .iter()
-            .find_map(ArtifactCandidate::discovery_error)
+            .find_map(PackageCandidate::discovery_error)
         {
             return Err(error.clone());
         }
@@ -1691,26 +1631,26 @@ impl ArtifactSource for StaticArtifactSource {
 
     fn inventory_candidates(
         &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        type_id: &PackageTypeId,
+    ) -> Result<Vec<PackageCandidate>, PackageError> {
         Ok(self.matching_candidates(type_id))
     }
 }
 
-pub struct DirectoryArtifactSource {
-    source_id: ArtifactSourceId,
-    tier: ArtifactSourceTier,
-    kind: ArtifactSourceKind,
+pub struct DirectoryPackageSource {
+    source_id: PackageSourceId,
+    tier: PackageSourceTier,
+    kind: PackageSourceKind,
     root: PathBuf,
-    registry: Arc<ArtifactAdapterRegistry>,
+    registry: Arc<PackageAdapterRegistry>,
     source_revision: Option<String>,
     source_tree: Option<String>,
 }
 
-impl fmt::Debug for DirectoryArtifactSource {
+impl fmt::Debug for DirectoryPackageSource {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("DirectoryArtifactSource")
+            .debug_struct("DirectoryPackageSource")
             .field("source_id", &self.source_id)
             .field("tier", &self.tier)
             .field("kind", &self.kind)
@@ -1719,13 +1659,13 @@ impl fmt::Debug for DirectoryArtifactSource {
     }
 }
 
-impl DirectoryArtifactSource {
+impl DirectoryPackageSource {
     pub fn new(
-        source_id: ArtifactSourceId,
-        tier: ArtifactSourceTier,
-        kind: ArtifactSourceKind,
+        source_id: PackageSourceId,
+        tier: PackageSourceTier,
+        kind: PackageSourceKind,
         root: impl Into<PathBuf>,
-        registry: Arc<ArtifactAdapterRegistry>,
+        registry: Arc<PackageAdapterRegistry>,
     ) -> Self {
         Self {
             source_id,
@@ -1750,19 +1690,19 @@ impl DirectoryArtifactSource {
 
     fn scan_candidates(
         &self,
-        type_id: &ArtifactTypeId,
+        type_id: &PackageTypeId,
         preserve_invalid_envelopes: bool,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+    ) -> Result<Vec<PackageCandidate>, PackageError> {
         let adapter = self.registry.lookup(type_id)?;
         let typed_root = self.root.join(&adapter.descriptor().root);
         match fs::symlink_metadata(&typed_root) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(ArtifactError::PackageSymlinkRejected {
+                return Err(PackageError::PackageSymlinkRejected {
                     path: typed_root.display().to_string(),
                 });
             }
             Ok(metadata) if !metadata.is_dir() => {
-                return Err(ArtifactError::PackagePathNotRegular {
+                return Err(PackageError::PackagePathNotRegular {
                     path: typed_root.display().to_string(),
                 });
             }
@@ -1789,7 +1729,7 @@ impl DirectoryArtifactSource {
             let parts = prefix.split('/').collect::<Vec<_>>();
             let (package_text, declared_version, package_dir_text) =
                 if let Some(version_text) = parts.last().copied() {
-                    if let Ok(version) = ArtifactVersion::new(version_text) {
+                    if let Ok(version) = PackageVersion::new(version_text) {
                         if parts.len() < 2 {
                             continue;
                         }
@@ -1801,27 +1741,27 @@ impl DirectoryArtifactSource {
                 } else {
                     continue;
                 };
-            let package_id = ArtifactPackageId::new(package_text)?;
+            let package_id = PackageId::new(package_text)?;
             let package_root = typed_root.join(package_dir_text);
             let view = DirectoryPackageView::new(&package_root)?;
             let validated_version = (|| {
                 let envelope = adapter.extract_envelope(&view)?;
                 envelope.validate()?;
                 if envelope.type_id != *type_id {
-                    return Err(ArtifactError::AdapterTypeMismatch {
+                    return Err(PackageError::AdapterTypeMismatch {
                         type_id: type_id.to_string(),
                         actual_type: envelope.type_id.to_string(),
                     });
                 }
                 if envelope.id != package_id {
-                    return Err(ArtifactError::AdapterPackageMismatch {
+                    return Err(PackageError::AdapterPackageMismatch {
                         type_id: type_id.to_string(),
                         actual_id: envelope.id.to_string(),
                     });
                 }
                 if let Some(declared_version) = &declared_version {
                     if declared_version != &envelope.version {
-                        return Err(ArtifactError::CandidateVersionMismatch {
+                        return Err(PackageError::CandidateVersionMismatch {
                             candidate: declared_version.to_string(),
                             envelope: envelope.version.to_string(),
                         });
@@ -1835,14 +1775,14 @@ impl DirectoryArtifactSource {
                 Ok(version) => (version, None),
                 Err(error) if preserve_invalid_envelopes => (
                     declared_version.clone().unwrap_or_else(|| {
-                        ArtifactVersion::new("0.0.0-invalid")
+                        PackageVersion::new("0.0.0-invalid")
                             .expect("invalid-envelope inventory version is valid SemVer")
                     }),
                     Some(error),
                 ),
                 Err(error) => return Err(error),
             };
-            let mut candidate = ArtifactCandidate::new(
+            let mut candidate = PackageCandidate::new(
                 type_id.clone(),
                 package_id,
                 version,
@@ -1867,37 +1807,34 @@ impl DirectoryArtifactSource {
     }
 }
 
-impl ArtifactSource for DirectoryArtifactSource {
-    fn id(&self) -> &ArtifactSourceId {
+impl PackageSource for DirectoryPackageSource {
+    fn id(&self) -> &PackageSourceId {
         &self.source_id
     }
 
-    fn tier(&self) -> ArtifactSourceTier {
+    fn tier(&self) -> PackageSourceTier {
         self.tier
     }
 
-    fn kind(&self) -> ArtifactSourceKind {
+    fn kind(&self) -> PackageSourceKind {
         self.kind
     }
 
-    fn candidates(
-        &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+    fn candidates(&self, type_id: &PackageTypeId) -> Result<Vec<PackageCandidate>, PackageError> {
         self.scan_candidates(type_id, false)
     }
 
     fn inventory_candidates(
         &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        type_id: &PackageTypeId,
+    ) -> Result<Vec<PackageCandidate>, PackageError> {
         self.scan_candidates(type_id, true)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ArtifactDataClass {
+pub enum PackageDataClass {
     Package,
     Config,
     State,
@@ -1905,23 +1842,23 @@ pub enum ArtifactDataClass {
 }
 
 #[derive(Clone, Debug)]
-pub struct ArtifactPathRouter {
+pub struct PackagePathRouter {
     workspace_root: PathBuf,
     data_root: PathBuf,
     config_root: PathBuf,
     state_root: PathBuf,
     cache_root: PathBuf,
-    registry: Arc<ArtifactAdapterRegistry>,
+    registry: Arc<PackageAdapterRegistry>,
 }
 
-impl ArtifactPathRouter {
+impl PackagePathRouter {
     pub fn new(
         workspace_root: impl Into<PathBuf>,
         data_root: impl Into<PathBuf>,
         config_root: impl Into<PathBuf>,
         state_root: impl Into<PathBuf>,
         cache_root: impl Into<PathBuf>,
-        registry: Arc<ArtifactAdapterRegistry>,
+        registry: Arc<PackageAdapterRegistry>,
     ) -> Self {
         Self {
             workspace_root: workspace_root.into(),
@@ -1935,68 +1872,62 @@ impl ArtifactPathRouter {
 
     pub fn root(
         &self,
-        scope: ArtifactPathScope,
-        data_class: ArtifactDataClass,
-        type_id: &ArtifactTypeId,
-    ) -> Result<PathBuf, ArtifactError> {
+        scope: PackagePathScope,
+        data_class: PackageDataClass,
+        type_id: &PackageTypeId,
+    ) -> Result<PathBuf, PackageError> {
         let type_root = self.registry.lookup(type_id)?.descriptor().root.clone();
         let root = match (scope, data_class) {
-            (ArtifactPathScope::Workspace, ArtifactDataClass::Package) => {
+            (PackagePathScope::Workspace, PackageDataClass::Package) => {
                 self.workspace_root.join(".agl")
             }
-            (ArtifactPathScope::Workspace, ArtifactDataClass::Config) => {
+            (PackagePathScope::Workspace, PackageDataClass::Config) => {
                 self.workspace_root.join(".agl/config")
             }
-            (ArtifactPathScope::Workspace, ArtifactDataClass::State) => {
+            (PackagePathScope::Workspace, PackageDataClass::State) => {
                 self.workspace_root.join(".agl/state")
             }
-            (ArtifactPathScope::Workspace, ArtifactDataClass::Cache) => {
+            (PackagePathScope::Workspace, PackageDataClass::Cache) => {
                 self.workspace_root.join(".agl/cache")
             }
-            (ArtifactPathScope::Xdg, ArtifactDataClass::Package) => self.data_root.clone(),
-            (ArtifactPathScope::Xdg, ArtifactDataClass::Config) => self.config_root.clone(),
-            (ArtifactPathScope::Xdg, ArtifactDataClass::State) => self.state_root.clone(),
-            (ArtifactPathScope::Xdg, ArtifactDataClass::Cache) => self.cache_root.clone(),
+            (PackagePathScope::Xdg, PackageDataClass::Package) => self.data_root.clone(),
+            (PackagePathScope::Xdg, PackageDataClass::Config) => self.config_root.clone(),
+            (PackagePathScope::Xdg, PackageDataClass::State) => self.state_root.clone(),
+            (PackagePathScope::Xdg, PackageDataClass::Cache) => self.cache_root.clone(),
         };
         Ok(root.join(type_root))
     }
 
-    pub fn workspace_package_root(
-        &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<PathBuf, ArtifactError> {
+    pub fn workspace_package_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
         self.root(
-            ArtifactPathScope::Workspace,
-            ArtifactDataClass::Package,
+            PackagePathScope::Workspace,
+            PackageDataClass::Package,
             type_id,
         )
     }
 
-    pub fn xdg_package_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
-        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Package, type_id)
+    pub fn xdg_package_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
+        self.root(PackagePathScope::Xdg, PackageDataClass::Package, type_id)
     }
 
-    pub fn workspace_config_root(
-        &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<PathBuf, ArtifactError> {
+    pub fn workspace_config_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
         self.root(
-            ArtifactPathScope::Workspace,
-            ArtifactDataClass::Config,
+            PackagePathScope::Workspace,
+            PackageDataClass::Config,
             type_id,
         )
     }
 
-    pub fn xdg_config_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
-        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Config, type_id)
+    pub fn xdg_config_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
+        self.root(PackagePathScope::Xdg, PackageDataClass::Config, type_id)
     }
 
     pub fn workspace_package_path(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-        version: &ArtifactVersion,
-    ) -> Result<PathBuf, ArtifactError> {
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+        version: &PackageVersion,
+    ) -> Result<PathBuf, PackageError> {
         Ok(append_package_version(
             self.workspace_package_root(type_id)?,
             package_id,
@@ -2006,10 +1937,10 @@ impl ArtifactPathRouter {
 
     pub fn xdg_package_path(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-        version: &ArtifactVersion,
-    ) -> Result<PathBuf, ArtifactError> {
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+        version: &PackageVersion,
+    ) -> Result<PathBuf, PackageError> {
         Ok(append_package_version(
             self.xdg_package_root(type_id)?,
             package_id,
@@ -2019,9 +1950,9 @@ impl ArtifactPathRouter {
 
     pub fn workspace_config_path(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-    ) -> Result<PathBuf, ArtifactError> {
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+    ) -> Result<PathBuf, PackageError> {
         Ok(append_package_id(
             self.workspace_config_root(type_id)?,
             package_id,
@@ -2030,9 +1961,9 @@ impl ArtifactPathRouter {
 
     pub fn xdg_config_path(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-    ) -> Result<PathBuf, ArtifactError> {
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+    ) -> Result<PathBuf, PackageError> {
         Ok(append_package_id(
             self.xdg_config_root(type_id)?,
             package_id,
@@ -2041,48 +1972,48 @@ impl ArtifactPathRouter {
 
     pub fn config_layers(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-    ) -> Result<Vec<ArtifactConfigEvidence>, ArtifactError> {
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+    ) -> Result<Vec<PackageConfigEvidence>, PackageError> {
         let user = self.xdg_config_path(type_id, package_id)?;
         let workspace = self.workspace_config_path(type_id, package_id)?;
         Ok(vec![
-            ArtifactConfigEvidence {
-                layer: ArtifactConfigLayer::PackageDefaults,
+            PackageConfigEvidence {
+                layer: PackageConfigLayer::PackageDefaults,
                 path: None,
                 present: true,
             },
-            ArtifactConfigEvidence {
-                layer: ArtifactConfigLayer::User,
+            PackageConfigEvidence {
+                layer: PackageConfigLayer::User,
                 path: Some(user.clone()),
                 present: user.exists(),
             },
-            ArtifactConfigEvidence {
-                layer: ArtifactConfigLayer::Workspace,
+            PackageConfigEvidence {
+                layer: PackageConfigLayer::Workspace,
                 path: Some(workspace.clone()),
                 present: workspace.exists(),
             },
         ])
     }
 
-    pub fn state_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
-        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::State, type_id)
+    pub fn state_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
+        self.root(PackagePathScope::Xdg, PackageDataClass::State, type_id)
     }
 
-    pub fn cache_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
-        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Cache, type_id)
+    pub fn cache_root(&self, type_id: &PackageTypeId) -> Result<PathBuf, PackageError> {
+        self.root(PackagePathScope::Xdg, PackageDataClass::Cache, type_id)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ArtifactPathScope {
+pub enum PackagePathScope {
     Workspace,
     Xdg,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ArtifactConfigLayer {
+pub enum PackageConfigLayer {
     PackageDefaults,
     User,
     Workspace,
@@ -2090,13 +2021,13 @@ pub enum ArtifactConfigLayer {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactConfigEvidence {
-    pub layer: ArtifactConfigLayer,
+pub struct PackageConfigEvidence {
+    pub layer: PackageConfigLayer,
     pub path: Option<PathBuf>,
     pub present: bool,
 }
 
-fn append_package_id(mut root: PathBuf, package_id: &ArtifactPackageId) -> PathBuf {
+fn append_package_id(mut root: PathBuf, package_id: &PackageId) -> PathBuf {
     for segment in package_id.as_str().split('/') {
         root.push(segment);
     }
@@ -2105,8 +2036,8 @@ fn append_package_id(mut root: PathBuf, package_id: &ArtifactPackageId) -> PathB
 
 fn append_package_version(
     root: PathBuf,
-    package_id: &ArtifactPackageId,
-    version: &ArtifactVersion,
+    package_id: &PackageId,
+    version: &PackageVersion,
 ) -> PathBuf {
     let mut path = append_package_id(root, package_id);
     path.push(version.to_string());
@@ -2117,7 +2048,7 @@ fn append_package_version(
 pub struct PackageTreeDigest(String);
 
 impl PackageTreeDigest {
-    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackageError> {
         let value = value.into();
         let valid = value.len() == 71
             && value.starts_with("sha256:")
@@ -2125,7 +2056,7 @@ impl PackageTreeDigest {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
         if !valid {
-            return Err(ArtifactError::InvalidPackageDigest { value });
+            return Err(PackageError::InvalidPackageDigest { value });
         }
         Ok(Self(value))
     }
@@ -2142,7 +2073,7 @@ impl Display for PackageTreeDigest {
 }
 
 impl FromStr for PackageTreeDigest {
-    type Err = ArtifactError;
+    type Err = PackageError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
@@ -2167,9 +2098,7 @@ impl<'de> Deserialize<'de> for PackageTreeDigest {
     }
 }
 
-pub fn compute_package_digest(
-    view: &dyn ArtifactPackageView,
-) -> Result<PackageTreeDigest, ArtifactError> {
+pub fn compute_package_digest(view: &dyn PackageView) -> Result<PackageTreeDigest, PackageError> {
     let mut files = view.files()?;
     files.sort();
     let mut hasher = Sha256::new();
@@ -2177,12 +2106,12 @@ pub fn compute_package_digest(
     let mut previous = None;
     for path in files {
         if previous.as_ref() == Some(&path) {
-            return Err(ArtifactError::DuplicatePackageFile {
+            return Err(PackageError::DuplicatePackageFile {
                 path: path.to_string(),
             });
         }
         if reserved_package_file(&path) {
-            return Err(ArtifactError::ReservedPackageFile {
+            return Err(PackageError::ReservedPackageFile {
                 path: path.to_string(),
             });
         }
@@ -2201,52 +2130,29 @@ pub fn compute_package_digest(
     PackageTreeDigest::new(format!("sha256:{hex}"))
 }
 
-fn reserved_package_file(path: &ArtifactRelativePath) -> bool {
+fn reserved_package_file(path: &PackageRelativePath) -> bool {
     let value = path.as_str();
     value.starts_with(".agl/")
         || value == "workspace.toml"
-        || value == "artifact-lock.toml"
+        || value == "package-lock.toml"
         || value.starts_with("config/")
         || value.starts_with("state/")
         || value.starts_with("cache/")
         || value.contains("/source-index")
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedWorkspaceComponent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<WorkspaceComponentKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_digest: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<ArtifactSourceId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_kind: Option<ArtifactSourceKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LockedArtifactPackage {
-    pub type_id: ArtifactTypeId,
-    pub id: ArtifactPackageId,
-    pub version: ArtifactVersion,
-    pub source_tier: ArtifactSourceTier,
-    pub source_kind: ArtifactSourceKind,
-    pub source_id: ArtifactSourceId,
-    pub package_digest: PackageTreeDigest,
-    pub envelope_schema: ArtifactSchemaId,
-    pub payload_schema: ArtifactSchemaId,
+pub struct LockedPackage {
+    pub type_id: PackageTypeId,
+    pub id: PackageId,
+    pub version: PackageVersion,
+    pub source_tier: PackageSourceTier,
+    pub source_kind: PackageSourceKind,
+    pub source_id: PackageSourceId,
+    pub package_tree_digest: PackageTreeDigest,
+    pub envelope_schema: PackageSchemaId,
+    pub payload_schema: PackageSchemaId,
     #[serde(default)]
     pub source_revision: Option<String>,
     #[serde(default)]
@@ -2254,14 +2160,14 @@ pub struct LockedArtifactPackage {
     pub dependencies: Vec<String>,
 }
 
-impl LockedArtifactPackage {
+impl LockedPackage {
     pub fn key(&self) -> String {
         format!("{}:{}@{}", self.type_id, self.id, self.version)
     }
 
-    fn validate(&self, key: &str) -> Result<(), ArtifactError> {
+    fn validate(&self, key: &str) -> Result<(), PackageError> {
         if self.key() != key {
-            return Err(ArtifactError::InvalidLockPackageKey {
+            return Err(PackageError::InvalidLockPackageKey {
                 key: key.to_owned(),
             });
         }
@@ -2269,20 +2175,20 @@ impl LockedArtifactPackage {
         sorted.sort();
         sorted.dedup();
         if sorted != self.dependencies {
-            return Err(ArtifactError::LockDrift {
+            return Err(PackageError::LockDrift {
                 key: key.to_owned(),
                 field: "dependencies".to_owned(),
                 expected: sorted.join(","),
                 actual: self.dependencies.join(","),
             });
         }
-        if self.source_kind == ArtifactSourceKind::Git {
+        if self.source_kind == PackageSourceKind::Git {
             for (field, value) in [
                 ("source_revision", self.source_revision.as_deref()),
                 ("source_tree", self.source_tree.as_deref()),
             ] {
                 if value.is_none_or(str::is_empty) {
-                    return Err(ArtifactError::LockDrift {
+                    return Err(PackageError::LockDrift {
                         key: key.to_owned(),
                         field: field.to_owned(),
                         expected: "present".to_owned(),
@@ -2293,72 +2199,81 @@ impl LockedArtifactPackage {
         }
         Ok(())
     }
+
+    pub fn fixture(
+        type_id: PackageTypeId,
+        id: PackageId,
+        version: PackageVersion,
+        source_id: PackageSourceId,
+        package_tree_digest: PackageTreeDigest,
+    ) -> Self {
+        Self {
+            type_id,
+            id,
+            version,
+            source_tier: PackageSourceTier::Explicit,
+            source_kind: PackageSourceKind::Embedded,
+            source_id,
+            package_tree_digest,
+            envelope_schema: PackageSchemaId::common(),
+            payload_schema: PackageSchemaId::new("agentlibre.fixture/v1").unwrap(),
+            source_revision: None,
+            source_tree: None,
+            dependencies: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ArtifactLock {
+pub struct PackageLock {
     pub version: u32,
     #[serde(default)]
-    pub components: BTreeMap<String, LockedWorkspaceComponent>,
-    #[serde(default)]
-    pub packages: BTreeMap<String, LockedArtifactPackage>,
+    pub packages: Vec<LockedPackage>,
 }
 
-impl ArtifactLock {
-    pub const VERSION: u32 = 2;
+impl PackageLock {
+    pub const VERSION: u32 = 1;
 
-    pub fn new(
-        components: BTreeMap<String, LockedWorkspaceComponent>,
-        packages: BTreeMap<String, LockedArtifactPackage>,
-    ) -> Result<Self, ArtifactError> {
+    pub fn new(packages: impl IntoIterator<Item = LockedPackage>) -> Result<Self, PackageError> {
+        let mut packages = packages.into_iter().collect::<Vec<_>>();
+        packages.sort_by_key(LockedPackage::key);
         let lock = Self {
             version: Self::VERSION,
-            components,
             packages,
         };
         lock.validate()?;
         Ok(lock)
     }
 
-    pub fn validate(&self) -> Result<(), ArtifactError> {
+    pub fn validate(&self) -> Result<(), PackageError> {
         if self.version != Self::VERSION {
-            return Err(ArtifactError::UnsupportedLockVersion {
+            return Err(PackageError::UnsupportedLockVersion {
                 version: self.version,
             });
         }
-        for (key, component) in &self.components {
-            for (field, present) in [
-                ("kind", component.kind.is_some()),
-                ("path", component.path.is_some()),
-                ("definition_digest", component.definition_digest.is_some()),
-            ] {
-                if !present {
-                    return Err(ArtifactError::LockDrift {
-                        key: key.clone(),
-                        field: field.to_owned(),
-                        expected: "present".to_owned(),
-                        actual: "missing".to_owned(),
-                    });
-                }
+        let mut previous = None;
+        for package in &self.packages {
+            let key = package.key();
+            package.validate(&key)?;
+            if previous.as_ref().is_some_and(|previous| previous >= &key) {
+                return Err(PackageError::InvalidLockPackageKey { key });
             }
-        }
-        for (key, package) in &self.packages {
-            package.validate(key)?;
+            previous = Some(key);
         }
         Ok(())
     }
 
-    pub fn to_toml(&self) -> Result<String, ArtifactError> {
+    pub fn to_toml(&self) -> Result<String, PackageError> {
         self.validate()?;
-        toml::to_string(self).map_err(|error| ArtifactError::LockIo {
+        toml::to_string(self).map_err(|error| PackageError::LockIo {
             path: "<memory>".to_owned(),
             reason: error.to_string(),
         })
     }
 
-    pub fn from_toml(value: &str) -> Result<Self, ArtifactError> {
-        let lock: Self = toml::from_str(value).map_err(|error| ArtifactError::LockIo {
+    pub fn from_toml(value: &str) -> Result<Self, PackageError> {
+        let lock: Self = toml::from_str(value).map_err(|error| PackageError::LockIo {
             path: "<memory>".to_owned(),
             reason: error.to_string(),
         })?;
@@ -2366,7 +2281,7 @@ impl ArtifactLock {
         Ok(lock)
     }
 
-    pub fn write_atomic(&self, path: impl AsRef<Path>) -> Result<(), ArtifactError> {
+    pub fn write_atomic(&self, path: impl AsRef<Path>) -> Result<(), PackageError> {
         let path = path.as_ref();
         let content = self.to_toml()?;
         let temporary = path.with_extension("toml.tmp");
@@ -2379,7 +2294,7 @@ impl ArtifactLock {
         })();
         if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
-            return Err(ArtifactError::LockIo {
+            return Err(PackageError::LockIo {
                 path: path.display().to_string(),
                 reason: error.to_string(),
             });
@@ -2389,14 +2304,14 @@ impl ArtifactLock {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedArtifact {
-    pub candidate: ArtifactCandidate,
-    pub envelope: ArtifactEnvelope,
-    pub package_digest: PackageTreeDigest,
+pub struct ResolvedPackage {
+    pub candidate: PackageCandidate,
+    pub envelope: PackageEnvelope,
+    pub package_tree_digest: PackageTreeDigest,
     pub dependencies: Vec<String>,
 }
 
-impl ResolvedArtifact {
+impl ResolvedPackage {
     pub fn key(&self) -> String {
         format!(
             "{}:{}@{}",
@@ -2406,25 +2321,23 @@ impl ResolvedArtifact {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedArtifactGraph {
+pub struct ResolvedPackageGraph {
     pub root: String,
-    pub nodes: BTreeMap<String, ResolvedArtifact>,
+    pub nodes: BTreeMap<String, ResolvedPackage>,
 }
 
-impl ResolvedArtifactGraph {
-    pub fn package_lock_entries(
-        &self,
-    ) -> Result<BTreeMap<String, LockedArtifactPackage>, ArtifactError> {
+impl ResolvedPackageGraph {
+    pub fn package_lock_entries(&self) -> Result<BTreeMap<String, LockedPackage>, PackageError> {
         let mut packages = BTreeMap::new();
         for node in self.nodes.values() {
-            let locked = LockedArtifactPackage {
+            let locked = LockedPackage {
                 type_id: node.candidate.type_id.clone(),
                 id: node.candidate.package_id.clone(),
                 version: node.candidate.version.clone(),
                 source_tier: node.candidate.tier,
                 source_kind: node.candidate.kind,
                 source_id: node.candidate.source_id.clone(),
-                package_digest: node.package_digest.clone(),
+                package_tree_digest: node.package_tree_digest.clone(),
                 envelope_schema: node.envelope.schema.clone(),
                 payload_schema: node.envelope.payload_schema.clone(),
                 source_revision: node.candidate.source_revision.clone(),
@@ -2439,22 +2352,22 @@ impl ResolvedArtifactGraph {
         Ok(packages)
     }
 
-    pub fn lock(&self) -> Result<ArtifactLock, ArtifactError> {
-        ArtifactLock::new(BTreeMap::new(), self.package_lock_entries()?)
+    pub fn lock(&self) -> Result<PackageLock, PackageError> {
+        PackageLock::new(self.package_lock_entries()?.into_values())
     }
 
-    pub fn verify_lock(&self, lock: &ArtifactLock) -> Result<(), ArtifactError> {
+    pub fn verify_lock(&self, lock: &PackageLock) -> Result<(), PackageError> {
         lock.validate()?;
         for node in self.nodes.values() {
             let key = node.key();
-            let Some(locked) = lock.packages.get(&key) else {
-                return Err(ArtifactError::LockMissingPackage { key });
+            let Some(locked) = lock.packages.iter().find(|package| package.key() == key) else {
+                return Err(PackageError::LockMissingPackage { key });
             };
             compare_lock_field(
                 &key,
-                "package_digest",
-                locked.package_digest.to_string(),
-                node.package_digest.to_string(),
+                "package_tree_digest",
+                locked.package_tree_digest.to_string(),
+                node.package_tree_digest.to_string(),
             )?;
             compare_lock_field(
                 &key,
@@ -2508,10 +2421,7 @@ impl ResolvedArtifactGraph {
         Ok(())
     }
 
-    pub fn validate_payloads(
-        &self,
-        registry: &ArtifactAdapterRegistry,
-    ) -> Result<(), ArtifactError> {
+    pub fn validate_payloads(&self, registry: &PackageAdapterRegistry) -> Result<(), PackageError> {
         for node in self.nodes.values() {
             let adapter = registry.lookup(&node.candidate.type_id)?;
             adapter.validate_payload(node.candidate.view(), &node.envelope)?;
@@ -2525,11 +2435,11 @@ fn compare_lock_field(
     field: &str,
     expected: String,
     actual: String,
-) -> Result<(), ArtifactError> {
+) -> Result<(), PackageError> {
     if expected == actual {
         Ok(())
     } else {
-        Err(ArtifactError::LockDrift {
+        Err(PackageError::LockDrift {
             key: key.to_owned(),
             field: field.to_owned(),
             expected,
@@ -2538,67 +2448,64 @@ fn compare_lock_field(
     }
 }
 
-fn source_tier_name(value: ArtifactSourceTier) -> &'static str {
+fn source_tier_name(value: PackageSourceTier) -> &'static str {
     match value {
-        ArtifactSourceTier::Explicit => "explicit",
-        ArtifactSourceTier::Workspace => "workspace",
-        ArtifactSourceTier::User => "user",
-        ArtifactSourceTier::System => "system",
-        ArtifactSourceTier::Builtin => "builtin",
+        PackageSourceTier::Explicit => "explicit",
+        PackageSourceTier::Workspace => "workspace",
+        PackageSourceTier::User => "user",
+        PackageSourceTier::System => "system",
+        PackageSourceTier::Builtin => "builtin",
     }
 }
 
-fn source_kind_name(value: ArtifactSourceKind) -> &'static str {
+fn source_kind_name(value: PackageSourceKind) -> &'static str {
     match value {
-        ArtifactSourceKind::Directory => "directory",
-        ArtifactSourceKind::Git => "git",
-        ArtifactSourceKind::Embedded => "embedded",
+        PackageSourceKind::Directory => "directory",
+        PackageSourceKind::Git => "git",
+        PackageSourceKind::Embedded => "embedded",
     }
 }
 
 #[derive(Clone)]
-pub struct ArtifactResolver {
-    registry: Arc<ArtifactAdapterRegistry>,
-    sources: Vec<Arc<dyn ArtifactSource>>,
+pub struct PackageResolver {
+    registry: Arc<PackageAdapterRegistry>,
+    sources: Vec<Arc<dyn PackageSource>>,
 }
 
-impl fmt::Debug for ArtifactResolver {
+impl fmt::Debug for PackageResolver {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ArtifactResolver")
+            .debug_struct("PackageResolver")
             .field("source_count", &self.sources.len())
             .finish()
     }
 }
 
-impl ArtifactResolver {
+impl PackageResolver {
     pub fn new(
-        registry: Arc<ArtifactAdapterRegistry>,
-        sources: Vec<Arc<dyn ArtifactSource>>,
+        registry: Arc<PackageAdapterRegistry>,
+        sources: Vec<Arc<dyn PackageSource>>,
     ) -> Self {
         Self { registry, sources }
     }
 
-    pub fn resolve(
-        &self,
-        root: &ArtifactPackageRef,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+    pub fn resolve(&self, root: &PackageRef) -> Result<ResolvedPackageGraph, PackageError> {
         self.resolve_with_selection(root, CandidateSelection::Global)
     }
 
     pub fn resolve_with_explicit_root(
         &self,
-        root: &ArtifactPackageRef,
-        source_id: &ArtifactSourceId,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        root: &PackageRef,
+        source_id: &PackageSourceId,
+    ) -> Result<ResolvedPackageGraph, PackageError> {
         self.resolve_with_selection(root, CandidateSelection::ExplicitRoot(source_id))
     }
 
     fn resolve_with_selection(
         &self,
-        root: &ArtifactPackageRef,
+        root: &PackageRef,
         selection: CandidateSelection<'_>,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+    ) -> Result<ResolvedPackageGraph, PackageError> {
         let mut nodes = BTreeMap::new();
         let mut stack = Vec::new();
         let root_key = self.visit(
@@ -2609,17 +2516,17 @@ impl ArtifactResolver {
             &mut stack,
             &mut nodes,
         )?;
-        Ok(ResolvedArtifactGraph {
+        Ok(ResolvedPackageGraph {
             root: root_key,
             nodes,
         })
     }
 
-    pub fn resolve_with_lock(
+    pub fn resolve_locked(
         &self,
-        root: &ArtifactPackageRef,
-        lock: &ArtifactLock,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        root: &PackageRef,
+        lock: &PackageLock,
+    ) -> Result<ResolvedPackageGraph, PackageError> {
         let graph = self.resolve(root)?;
         graph.verify_lock(lock)?;
         Ok(graph)
@@ -2627,9 +2534,9 @@ impl ArtifactResolver {
 
     pub fn resolve_and_validate(
         &self,
-        root: &ArtifactPackageRef,
-        lock: Option<&ArtifactLock>,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        root: &PackageRef,
+        lock: Option<&PackageLock>,
+    ) -> Result<ResolvedPackageGraph, PackageError> {
         let graph = self.resolve(root)?;
         if let Some(lock) = lock {
             graph.verify_lock(lock)?;
@@ -2640,10 +2547,10 @@ impl ArtifactResolver {
 
     pub fn resolve_and_validate_with_explicit_root(
         &self,
-        root: &ArtifactPackageRef,
-        source_id: &ArtifactSourceId,
-        lock: Option<&ArtifactLock>,
-    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        root: &PackageRef,
+        source_id: &PackageSourceId,
+        lock: Option<&PackageLock>,
+    ) -> Result<ResolvedPackageGraph, PackageError> {
         let graph = self.resolve_with_explicit_root(root, source_id)?;
         if let Some(lock) = lock {
             graph.verify_lock(lock)?;
@@ -2654,25 +2561,25 @@ impl ArtifactResolver {
 
     fn visit(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-        constraints: &[ArtifactVersionReq],
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+        constraints: &[PackageVersionReq],
         selection: CandidateSelection<'_>,
         stack: &mut Vec<String>,
-        nodes: &mut BTreeMap<String, ResolvedArtifact>,
-    ) -> Result<String, ArtifactError> {
+        nodes: &mut BTreeMap<String, ResolvedPackage>,
+    ) -> Result<String, PackageError> {
         let identity = format!("{}:{}", type_id, package_id);
         if let Some(position) = stack.iter().position(|entry| entry == &identity) {
             let mut cycle = stack[position..].to_vec();
             cycle.push(identity);
-            return Err(ArtifactError::DependencyCycle { path: cycle });
+            return Err(PackageError::DependencyCycle { path: cycle });
         }
         if let Some(existing) = nodes.values().find(|node| {
             node.candidate.type_id == *type_id && node.candidate.package_id == *package_id
         }) {
             for constraint in constraints {
                 if !constraint.matches(&existing.candidate.version) {
-                    return Err(ArtifactError::ConstraintConflict {
+                    return Err(PackageError::ConstraintConflict {
                         key: existing.key(),
                         requirement: constraint.to_string(),
                     });
@@ -2688,24 +2595,24 @@ impl ArtifactResolver {
         let envelope = adapter.extract_envelope(candidate.view())?;
         envelope.validate()?;
         if envelope.type_id != *type_id {
-            return Err(ArtifactError::AdapterTypeMismatch {
+            return Err(PackageError::AdapterTypeMismatch {
                 type_id: type_id.to_string(),
                 actual_type: envelope.type_id.to_string(),
             });
         }
         if envelope.id != *package_id {
-            return Err(ArtifactError::AdapterPackageMismatch {
+            return Err(PackageError::AdapterPackageMismatch {
                 type_id: type_id.to_string(),
                 actual_id: envelope.id.to_string(),
             });
         }
         if envelope.version != candidate.version {
-            return Err(ArtifactError::CandidateVersionMismatch {
+            return Err(PackageError::CandidateVersionMismatch {
                 candidate: candidate.version.to_string(),
                 envelope: envelope.version.to_string(),
             });
         }
-        let package_digest = compute_package_digest(candidate.view())?;
+        let package_tree_digest = compute_package_digest(candidate.view())?;
         let key = format!("{}:{}@{}", type_id, package_id, candidate.version);
         stack.push(identity);
         let mut dependencies = Vec::new();
@@ -2720,7 +2627,7 @@ impl ArtifactResolver {
                     nodes,
                 )
                 .map_err(|error| match error {
-                    ArtifactError::PackageNotFound { .. } => ArtifactError::MissingDependency {
+                    PackageError::PackageNotFound { .. } => PackageError::MissingDependency {
                         parent: key.clone(),
                         reference: requirement.to_string(),
                     },
@@ -2730,10 +2637,10 @@ impl ArtifactResolver {
         }
         stack.pop();
         dependencies.sort();
-        let node = ResolvedArtifact {
+        let node = ResolvedPackage {
             candidate,
             envelope,
-            package_digest,
+            package_tree_digest,
             dependencies,
         };
         nodes.insert(key.clone(), node);
@@ -2742,19 +2649,19 @@ impl ArtifactResolver {
 
     fn select_candidate(
         &self,
-        type_id: &ArtifactTypeId,
-        package_id: &ArtifactPackageId,
-        constraints: &[ArtifactVersionReq],
+        type_id: &PackageTypeId,
+        package_id: &PackageId,
+        constraints: &[PackageVersionReq],
         selection: CandidateSelection<'_>,
-    ) -> Result<ArtifactCandidate, ArtifactError> {
+    ) -> Result<PackageCandidate, PackageError> {
         let mut sources = self.sources.clone();
         sources.sort_by_key(|source| (source.tier(), source.id().clone()));
         let tiers = [
-            ArtifactSourceTier::Explicit,
-            ArtifactSourceTier::Workspace,
-            ArtifactSourceTier::User,
-            ArtifactSourceTier::System,
-            ArtifactSourceTier::Builtin,
+            PackageSourceTier::Explicit,
+            PackageSourceTier::Workspace,
+            PackageSourceTier::User,
+            PackageSourceTier::System,
+            PackageSourceTier::Builtin,
         ];
         let mut available = BTreeSet::new();
         for tier in tiers {
@@ -2762,15 +2669,15 @@ impl ArtifactResolver {
                 CandidateSelection::Global
                     if sources
                         .iter()
-                        .any(|source| source.tier() == ArtifactSourceTier::Explicit)
-                        && tier != ArtifactSourceTier::Explicit =>
+                        .any(|source| source.tier() == PackageSourceTier::Explicit)
+                        && tier != PackageSourceTier::Explicit =>
                 {
                     break;
                 }
-                CandidateSelection::ExplicitRoot(_) if tier != ArtifactSourceTier::Explicit => {
+                CandidateSelection::ExplicitRoot(_) if tier != PackageSourceTier::Explicit => {
                     break;
                 }
-                CandidateSelection::Ordinary if tier == ArtifactSourceTier::Explicit => continue,
+                CandidateSelection::Ordinary if tier == PackageSourceTier::Explicit => continue,
                 CandidateSelection::Global
                 | CandidateSelection::ExplicitRoot(_)
                 | CandidateSelection::Ordinary => {}
@@ -2809,7 +2716,7 @@ impl ArtifactResolver {
                 .filter(|candidate| candidate.version == version)
                 .collect::<Vec<_>>();
             if matching.len() > 1 {
-                return Err(ArtifactError::AmbiguousCandidate {
+                return Err(PackageError::AmbiguousCandidate {
                     type_id: type_id.to_string(),
                     package_id: package_id.to_string(),
                     version: version.to_string(),
@@ -2822,12 +2729,12 @@ impl ArtifactResolver {
             return Ok(matching.into_iter().next().expect("one candidate"));
         }
         if available.is_empty() {
-            Err(ArtifactError::PackageNotFound {
+            Err(PackageError::PackageNotFound {
                 type_id: type_id.to_string(),
                 package_id: package_id.to_string(),
             })
         } else {
-            Err(ArtifactError::IncompatibleVersion {
+            Err(PackageError::IncompatibleVersion {
                 type_id: type_id.to_string(),
                 package_id: package_id.to_string(),
                 requirements: constraints.iter().map(ToString::to_string).collect(),
@@ -2840,7 +2747,7 @@ impl ArtifactResolver {
 #[derive(Clone, Copy)]
 enum CandidateSelection<'a> {
     Global,
-    ExplicitRoot(&'a ArtifactSourceId),
+    ExplicitRoot(&'a PackageSourceId),
     Ordinary,
 }
 
@@ -2888,19 +2795,19 @@ mod tests {
     use super::*;
 
     struct TestAdapter {
-        descriptor: ArtifactAdapterDescriptor,
+        descriptor: PackageAdapterDescriptor,
     }
 
-    impl ArtifactAdapter for TestAdapter {
-        fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+    impl PackageAdapter for TestAdapter {
+        fn descriptor(&self) -> &PackageAdapterDescriptor {
             &self.descriptor
         }
 
         fn extract_envelope(
             &self,
-            _package: &dyn ArtifactPackageView,
-        ) -> Result<ArtifactEnvelope, ArtifactError> {
-            Err(ArtifactError::AdapterPayload {
+            _package: &dyn PackageView,
+        ) -> Result<PackageEnvelope, PackageError> {
+            Err(PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: "test adapter".to_owned(),
             })
@@ -2908,75 +2815,75 @@ mod tests {
 
         fn validate_payload(
             &self,
-            _package: &dyn ArtifactPackageView,
-            _envelope: &ArtifactEnvelope,
-        ) -> Result<ErasedArtifactPayload, ArtifactError> {
-            Err(ArtifactError::AdapterPayload {
+            _package: &dyn PackageView,
+            _envelope: &PackageEnvelope,
+        ) -> Result<ErasedPackagePayload, PackageError> {
+            Err(PackageError::AdapterPayload {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: "test adapter".to_owned(),
             })
         }
     }
 
-    fn version(value: &str) -> ArtifactVersion {
+    fn version(value: &str) -> PackageVersion {
         value.parse().unwrap()
     }
 
-    fn requirement(value: &str) -> ArtifactRequirement {
+    fn requirement(value: &str) -> PackageRequirement {
         value.parse().unwrap()
     }
 
     #[test]
     fn type_ids_enforce_core_and_custom_grammar() {
-        assert!("function".parse::<ArtifactTypeId>().is_ok());
-        assert!("vendor.workflow".parse::<ArtifactTypeId>().is_ok());
+        assert!("function".parse::<PackageTypeId>().is_ok());
+        assert!("vendor.workflow".parse::<PackageTypeId>().is_ok());
         for invalid in ["", "Vendor.workflow", "vendor", "agentlibre.custom", "a..b"] {
-            assert!(invalid.parse::<ArtifactTypeId>().is_err(), "{invalid}");
+            assert!(invalid.parse::<PackageTypeId>().is_err(), "{invalid}");
         }
     }
 
     #[test]
     fn package_ids_reject_paths_and_delimiters() {
         for valid in ["example", "vendor/workflow.v2", "a-1/b_c"] {
-            assert!(valid.parse::<ArtifactPackageId>().is_ok(), "{valid}");
+            assert!(valid.parse::<PackageId>().is_ok(), "{valid}");
         }
         for invalid in ["", "/absolute", "a/", "a//b", "a/../b", "a:b", "a@b", "A"] {
-            assert!(invalid.parse::<ArtifactPackageId>().is_err(), "{invalid}");
+            assert!(invalid.parse::<PackageId>().is_err(), "{invalid}");
         }
     }
 
     #[test]
     fn references_are_canonical() {
-        let reference: ArtifactPackageRef = "skill:vendor/workflow@^1.0".parse().unwrap();
+        let reference: PackageRef = "skill:vendor/workflow@^1.0".parse().unwrap();
         assert_eq!(reference.to_string(), "skill:vendor/workflow@^1.0");
         for invalid in [
             "skill/vendor/workflow@^1",
             "skill:vendor/workflow",
             "skill:vendor@^1@x",
         ] {
-            assert!(invalid.parse::<ArtifactPackageRef>().is_err(), "{invalid}");
+            assert!(invalid.parse::<PackageRef>().is_err(), "{invalid}");
         }
     }
 
     #[test]
     fn compatibility_requires_tested_versions_inside_range() {
-        let compatible: ArtifactVersionReq = ">=1.0.0, <2.0.0".parse().unwrap();
+        let compatible: PackageVersionReq = ">=1.0.0, <2.0.0".parse().unwrap();
         assert!(AglCompatibility::new(compatible.clone(), [version("1.2.0")]).is_ok());
         assert_eq!(
             AglCompatibility::new(compatible, []).unwrap_err(),
-            ArtifactError::EmptyTestedVersions
+            PackageError::EmptyTestedVersions
         );
         assert!(matches!(
             AglCompatibility::new(">=2.0.0".parse().unwrap(), [version("1.2.0")]),
-            Err(ArtifactError::TestedVersionIncompatible { .. })
+            Err(PackageError::TestedVersionIncompatible { .. })
         ));
     }
 
     #[test]
     fn envelope_rejects_duplicate_requirement_targets() {
         let agl = AglCompatibility::new(">=1.0.0".parse().unwrap(), [version("1.0.0")]).unwrap();
-        let result = ArtifactEnvelope::new(
-            ArtifactTypeId::function(),
+        let result = PackageEnvelope::new(
+            PackageTypeId::function(),
             "example".parse().unwrap(),
             version("1.0.0"),
             "agentlibre.function/v2".parse().unwrap(),
@@ -2988,43 +2895,43 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ArtifactError::DuplicateRequirement { .. })
+            Err(PackageError::DuplicateRequirement { .. })
         ));
     }
 
     #[test]
     fn registry_checks_roots_and_unknown_types() {
-        let function = ArtifactAdapterDescriptor::new(
-            ArtifactTypeId::function(),
+        let function = PackageAdapterDescriptor::new(
+            PackageTypeId::function(),
             FUNCTION_ROOT,
             "FUNCTION.md".parse().unwrap(),
         )
         .unwrap();
-        let registry = ArtifactAdapterRegistry::new([TestAdapter {
+        let registry = PackageAdapterRegistry::new([TestAdapter {
             descriptor: function,
         }])
         .unwrap();
         assert_eq!(
             registry
-                .lookup(&ArtifactTypeId::function())
+                .lookup(&PackageTypeId::function())
                 .unwrap()
                 .descriptor()
                 .root,
             FUNCTION_ROOT
         );
         assert!(matches!(
-            registry.lookup(&ArtifactTypeId::skill()),
-            Err(ArtifactError::UnsupportedType { .. })
+            registry.lookup(&PackageTypeId::skill()),
+            Err(PackageError::UnsupportedType { .. })
         ));
-        let wrong = ArtifactAdapterDescriptor::new(
-            ArtifactTypeId::skill(),
+        let wrong = PackageAdapterDescriptor::new(
+            PackageTypeId::skill(),
             FUNCTION_ROOT,
             "SKILL.md".parse().unwrap(),
         )
         .unwrap();
         assert!(matches!(
-            ArtifactAdapterRegistry::new([TestAdapter { descriptor: wrong }]),
-            Err(ArtifactError::CoreRootMismatch { .. })
+            PackageAdapterRegistry::new([TestAdapter { descriptor: wrong }]),
+            Err(PackageError::CoreRootMismatch { .. })
         ));
     }
 }

@@ -386,33 +386,19 @@ fn parse_init_command() {
 }
 
 #[test]
-fn parse_repo_init_hidden_alias() {
+fn parse_repo_init_command() {
     assert_command(
-        [
-            "agl",
-            "repo",
-            "init",
-            "--force",
-            "--profile-file",
-            "profiles/custom.toml",
-        ],
+        ["agl", "repo", "init", "--force", "--dry-run"],
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
-            profile: "repo-workflow".to_string(),
-            profile_file: Some(PathBuf::from("profiles/custom.toml")),
-            artifacts: Vec::new(),
-            skills_url: None,
-            skills_rev: None,
-            tasks_url: None,
-            tasks_rev: None,
-            dry_run: false,
+            dry_run: true,
             force: true,
         })),
     );
 }
 
 #[test]
-fn parse_repo_init_command_with_external_artifacts() {
-    assert_command(
+fn repo_init_rejects_removed_external_artifact_options() {
+    assert_parse_error_contains(
         [
             "agl",
             "repo",
@@ -426,23 +412,13 @@ fn parse_repo_init_command_with_external_artifacts() {
             "--tasks-rev",
             "main",
         ],
-        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
-            profile: "repo-workflow".to_string(),
-            profile_file: None,
-            artifacts: Vec::new(),
-            skills_url: Some("ssh://git@example.invalid/agentlibre/skills.git".to_string()),
-            skills_rev: Some("v1".to_string()),
-            tasks_url: Some("ssh://git@example.invalid/agentlibre/specs.git".to_string()),
-            tasks_rev: Some("main".to_string()),
-            dry_run: false,
-            force: false,
-        })),
+        "unexpected argument",
     );
 }
 
 #[test]
-fn parse_repo_init_command_with_generic_artifacts() {
-    assert_command(
+fn repo_init_rejects_removed_generic_artifact_options() {
+    assert_parse_error_contains(
         [
             "agl",
             "repo",
@@ -452,28 +428,7 @@ fn parse_repo_init_command_with_generic_artifacts() {
             "--artifact",
             "reviews=ssh://git@example.invalid/agentlibre/reviews.git",
         ],
-        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
-            profile: "repo-workflow".to_string(),
-            profile_file: None,
-            artifacts: vec![
-                RepoArtifactOverride {
-                    name: "tasks".to_string(),
-                    url: "ssh://git@example.invalid/agentlibre/agl-specs.git".to_string(),
-                    rev: Some("main".to_string()),
-                },
-                RepoArtifactOverride {
-                    name: "reviews".to_string(),
-                    url: "ssh://git@example.invalid/agentlibre/reviews.git".to_string(),
-                    rev: None,
-                },
-            ],
-            skills_url: None,
-            skills_rev: None,
-            tasks_url: None,
-            tasks_rev: None,
-            dry_run: false,
-            force: false,
-        })),
+        "unexpected argument",
     );
 }
 
@@ -556,8 +511,8 @@ fn parse_model_pull_and_lifecycle_commands() {
 }
 
 #[test]
-fn parse_status_command_with_repo_options() {
-    assert_command(
+fn removed_repo_status_commands_are_rejected() {
+    assert_parse_error_contains(
         [
             "agl",
             "status",
@@ -566,23 +521,11 @@ fn parse_status_command_with_repo_options() {
             "skills",
             "--strict",
         ],
-        CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
-            json: true,
-            component: Some("skills".to_string()),
-            strict: true,
-        })),
+        "unrecognized subcommand",
     );
-}
-
-#[test]
-fn parse_repo_status_hidden_alias() {
-    assert_command(
+    assert_parse_error_contains(
         ["agl", "repo", "status", "--json"],
-        CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
-            json: true,
-            component: None,
-            strict: false,
-        })),
+        "unrecognized subcommand",
     );
 }
 
@@ -598,33 +541,16 @@ fn parse_repo_verify_tasks_hidden_command() {
 }
 
 #[test]
-fn parse_repo_artifact_commands() {
-    assert_command(
+fn removed_repo_component_and_profile_commands_are_rejected() {
+    assert_parse_error_contains(
         ["agl", "repo", "component", "sync", "--dry-run", "--json"],
-        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Sync(
-            ArtifactSyncOptions {
-                json: true,
-                dry_run: true,
-                strict: false,
-            },
-        ))),
+        "unrecognized subcommand",
     );
-
-    assert_command(
+    assert_parse_error_contains(
         ["agl", "repo", "component", "lock", "--dry-run"],
-        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Lock(
-            ArtifactLockOptions {
-                json: false,
-                dry_run: true,
-                strict: false,
-            },
-        ))),
+        "unrecognized subcommand",
     );
-}
-
-#[test]
-fn parse_repo_init_component_hidden_command() {
-    assert_command(
+    assert_parse_error_contains(
         [
             "agl",
             "repo",
@@ -633,17 +559,9 @@ fn parse_repo_init_component_hidden_command() {
             "--dry-run",
             "--json",
         ],
-        CliCommand::Repo(RepoCommand::InitComponent(RepoComponentInitOptions {
-            component: "tasks".to_string(),
-            dry_run: true,
-            json: true,
-        })),
+        "unrecognized subcommand",
     );
-}
-
-#[test]
-fn parse_repo_export_profile_hidden_command() {
-    assert_command(
+    assert_parse_error_contains(
         [
             "agl",
             "repo",
@@ -653,17 +571,9 @@ fn parse_repo_export_profile_hidden_command() {
             "--force",
             "--json",
         ],
-        CliCommand::Repo(RepoCommand::ExportProfile(RepoExportProfileOptions {
-            out: PathBuf::from("repo-workflow.toml"),
-            force: true,
-            json: true,
-        })),
+        "unrecognized subcommand",
     );
-}
-
-#[test]
-fn parse_repo_import_profile_hidden_command() {
-    assert_command(
+    assert_parse_error_contains(
         [
             "agl",
             "repo",
@@ -673,11 +583,7 @@ fn parse_repo_import_profile_hidden_command() {
             "--dry-run",
             "--force",
         ],
-        CliCommand::Repo(RepoCommand::ImportProfile(RepoImportProfileOptions {
-            profile_file: PathBuf::from("repo-workflow.toml"),
-            dry_run: true,
-            force: true,
-        })),
+        "unrecognized subcommand",
     );
 }
 
@@ -694,12 +600,9 @@ fn parse_install_hooks_command() {
 
 #[test]
 fn parse_skill_commands() {
-    assert_command(
+    assert_parse_error_contains(
         ["agl", "skill", "init", "--dry-run", "--json"],
-        CliCommand::Skill(SkillCommand::Init(SkillInitOptions {
-            dry_run: true,
-            json: true,
-        })),
+        "unrecognized subcommand",
     );
     assert_command(
         [
@@ -756,13 +659,9 @@ fn parse_skill_commands() {
         ["agl", "skill", "verify", "--json"],
         CliCommand::Skill(SkillCommand::Verify(SkillVerifyOptions { json: true })),
     );
-    assert_command(
+    assert_parse_error_contains(
         ["agl", "skill", "sync-folders", "--dry-run", "--json"],
-        CliCommand::Skill(SkillCommand::SyncFolders(SkillFolderSyncOptions {
-            json: true,
-            dry_run: true,
-            when: SkillFolderSyncSituationArg::SkillSync,
-        })),
+        "unrecognized subcommand",
     );
     assert_command(
         ["agl", "skill", "trust", "repo-change", "--yes"],
