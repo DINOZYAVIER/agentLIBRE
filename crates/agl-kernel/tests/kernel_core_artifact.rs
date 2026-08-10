@@ -1,10 +1,25 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use agl_ids::{ExecutionScope, RunId};
 use agl_kernel::{
     ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactKindId,
-    ArtifactTargetSelector, CatalogDigest, DeclarationError, EffectId, ExtensionDescriptor,
-    ExtensionId, ExtensionRequirement, ExtensionSource, ExtensionTrust, OperationKind,
-    ToolDeclaration, ToolId,
+    ArtifactTargetSelector, CatalogDigest, DeclarationError, EffectDeclaration, EffectId,
+    ExtensionDescriptor, ExtensionId, ExtensionRequirement, ExtensionSource, ExtensionTrust,
+    OperationKind, ToolAccessMode, ToolBinding, ToolDeclaration, ToolDispatchContext,
+    ToolDispatchControl, ToolDispatchError, ToolHandler, ToolHandlerFuture, ToolId, ToolInvocation,
+    ToolPolicyInput, ToolResult, ToolRuntime,
 };
 use serde_json::json;
+
+struct CountingHandler(Arc<AtomicUsize>);
+
+impl ToolHandler for CountingHandler {
+    fn dispatch(&self, _context: ToolDispatchContext) -> ToolHandlerFuture<'_> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(ToolResult::new(json!({})))))
+    }
+}
 
 fn artifact_id(value: &str) -> ArtifactId {
     ArtifactId::new(value).unwrap()
@@ -23,6 +38,7 @@ fn descriptor(id: &str) -> ExtensionDescriptor {
         ExtensionTrust::TrustedRegistered,
     )
     .unwrap()
+    .with_effect(EffectDeclaration::for_standard(EffectId::repo_files()).unwrap())
 }
 
 fn tool(id: &str) -> ToolDeclaration {
@@ -38,6 +54,7 @@ fn tool(id: &str) -> ToolDeclaration {
         OperationKind::Write,
     )
     .unwrap()
+    .with_state_effects([EffectId::repo_files()])
 }
 
 // AGL171-018 and AGL171-020.
@@ -109,6 +126,64 @@ fn artifact_selectors_validate_before_handler_and_affect_declaration_digest() {
             .resolve_artifact_targets(&json!({"artifact": "unknown:data"}))
             .is_err()
     );
+}
+
+// AGL171-027. The dynamic target is resolved after schema validation and
+// before handler entry on the real ToolRuntime dispatch path.
+#[test]
+fn unknown_argument_selected_artifact_stops_before_handler() {
+    let artifact = ArtifactDeclaration::new(
+        artifact_id("example.workspace:data"),
+        ArtifactKindId::new("agl.file-tree").unwrap(),
+        [ArtifactAccess::ReadTree],
+    )
+    .unwrap();
+    let declaration = descriptor("example.workspace")
+        .with_artifact(artifact)
+        .with_tool(
+            tool("example.workspace:argument").with_artifact_link(ArtifactEffectLink::new(
+                EffectId::repo_files(),
+                ArtifactTargetSelector::FromArgument {
+                    pointer: "/artifact".to_owned(),
+                    access: ArtifactAccess::ReadTree,
+                },
+                ArtifactAccess::ReadTree,
+            )),
+        );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = ToolRuntime::new();
+    runtime
+        .register_extension(agl_kernel::ExtensionRegistration::new(
+            declaration.clone(),
+            [ToolBinding::new(
+                ToolId::new("example.workspace:argument").unwrap(),
+                CountingHandler(calls.clone()),
+            )],
+        ))
+        .unwrap();
+    let effective = ToolPolicyInput::new(
+        [declaration.clone()],
+        [ToolId::new("example.workspace:argument").unwrap()],
+        ToolAccessMode::Write,
+    )
+    .resolve()
+    .unwrap();
+    let invocation = ToolInvocation::new(
+        ExecutionScope::builder(RunId::generate()).build().unwrap(),
+        ToolId::new("example.workspace:argument").unwrap(),
+        declaration.id.clone(),
+        declaration.tools[0].digest(),
+        effective.policy_hash().clone(),
+        json!({"artifact": "example.workspace:unknown"}),
+    );
+
+    assert!(matches!(
+        runtime.dispatch(invocation, &effective, ToolDispatchControl::uncancellable()),
+        Err(ToolDispatchError::ArtifactTarget(
+            DeclarationError::UnknownArtifact { .. }
+        ))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 // AGL171-018, AGL171-023 and AGL171-027.

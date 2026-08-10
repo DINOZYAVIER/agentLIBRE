@@ -1,0 +1,4 @@
+{
+  "authority_class": "shell_startup",
+  "id": "agl:process.shell_login_startup"
+}

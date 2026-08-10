@@ -1,0 +1,288 @@
+{
+  "conditional_state_effects": [
+    "agl:process.host_execution"
+  ],
+  "delivery": "at_most_once",
+  "description": "Start an exact argv with pipes or a PTY and return its execution handle.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "program": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "title": "ProgramNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.start",
+  "input_schema": {
+    "$defs": {
+      "BytesArg": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "maxLength": 87384,
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      },
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "IoArg": {
+        "enum": [
+          "pipes",
+          "pty"
+        ],
+        "type": "string"
+      },
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      },
+      "TerminalSizeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "args": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 1024,
+        "type": "array"
+      },
+      "cwd": {
+        "maxLength": 4096,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "env": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "io": {
+        "$ref": "#/$defs/IoArg"
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ProfileArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "program": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "stdin": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BytesArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "terminal_size": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TerminalSizeArgs"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout_ms": {
+        "format": "uint64",
+        "minimum": 1,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "program",
+      "io"
+    ],
+    "title": "StartArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "ExecutionStateOutput": {
+        "enum": [
+          "admitting",
+          "starting",
+          "running",
+          "exited",
+          "signalled",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "IoArg": {
+        "enum": [
+          "pipes",
+          "pty"
+        ],
+        "type": "string"
+      },
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      },
+      "TerminalSizeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "cwd": {
+        "type": "string"
+      },
+      "execution_id": {
+        "type": "string"
+      },
+      "io": {
+        "$ref": "#/$defs/IoArg"
+      },
+      "profile": {
+        "$ref": "#/$defs/ProfileArg"
+      },
+      "state": {
+        "$ref": "#/$defs/ExecutionStateOutput"
+      },
+      "terminal_size": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TerminalSizeArgs"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "execution_id",
+      "state",
+      "cwd",
+      "io",
+      "profile"
+    ],
+    "title": "BackgroundOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.spawn"
+  ]
+}

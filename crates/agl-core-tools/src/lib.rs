@@ -1,4 +1,5 @@
 pub mod cron;
+mod extensions;
 pub mod fs;
 pub mod guards;
 pub mod matrix;
@@ -26,6 +27,12 @@ pub use cron::{
     CRON_ADD_TOOL_ID, CRON_DELETE_TOOL_ID, CRON_DISABLE_TOOL_ID, CRON_ENABLE_TOOL_ID,
     CRON_HISTORY_TOOL_ID, CRON_LIST_TOOL_ID, CRON_PREFLIGHT_TOOL_ID, CRON_RUN_TOOL_ID,
     CRON_SHOW_TOOL_ID, CRON_TICK_TOOL_ID, CRON_UPDATE_TOOL_ID, CronTools,
+};
+pub use extensions::{
+    cron_extension_factory, fs_extension_factory, guards_extension_factory,
+    matrix_delivery_extension_factory, matrix_extension_factory, memory_extension_factory,
+    notes_extension_factory, permissions_extension_factory, process_extension_factory,
+    repo_extension_factory, skills_extension_factory, store_extension_factory,
 };
 pub use fs::{
     CoreTools, FS_APPLY_PATCH_TOOL_ID, FS_LIST_TOOL_ID, FS_READ_TOOL_ID, FS_SEARCH_TOOL_ID,
@@ -67,20 +74,20 @@ where
 }
 
 pub fn builtin_tool_catalog() -> Result<ToolCatalog, ToolCatalogError> {
-    let mut catalog = ToolCatalog::new();
-    guards::register(&mut catalog)?;
-    cron::register(&mut catalog)?;
-    fs::register(&mut catalog)?;
-    matrix::register(&mut catalog)?;
-    matrix_delivery::register(&mut catalog)?;
-    memory::register(&mut catalog)?;
-    notes::register(&mut catalog)?;
-    permissions::register(&mut catalog)?;
-    process::register(&mut catalog)?;
-    repo::register(&mut catalog)?;
-    skills::register(&mut catalog)?;
-    store::register(&mut catalog)?;
-    Ok(catalog)
+    ToolCatalog::from_extensions([
+        guards::declaration(),
+        cron::declaration(),
+        fs::declaration(),
+        matrix::declaration(),
+        matrix_delivery::declaration(),
+        memory::declaration(),
+        notes::declaration(),
+        permissions::declaration(),
+        process::declaration(),
+        repo::declaration(),
+        skills::declaration(),
+        store::declaration(),
+    ])
 }
 
 fn with_observation_workflow(descriptor: ExtensionDescriptor) -> ExtensionDescriptor {

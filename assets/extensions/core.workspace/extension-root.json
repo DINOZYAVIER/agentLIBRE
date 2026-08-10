@@ -1,0 +1,76 @@
+{
+  "api_major": 1,
+  "declaration_digest": "sha256:ccc0fe17671f4f8d16491017e1daf1bff731e5b2d2626ca33deaa58c99255041",
+  "host_bindings": [
+    {
+      "api_major": 1,
+      "id": "core.workspace"
+    }
+  ],
+  "id": "core.workspace",
+  "indexes": {
+    "artifacts": "indexes/artifacts.json",
+    "effects": "indexes/effects.json",
+    "hooks": "indexes/hooks.json",
+    "tools": "indexes/tools.json"
+  },
+  "name": "Core Tools",
+  "requirements": [],
+  "schema": "agentlibre.extension-root/v1",
+  "version": "1.1.0",
+  "workflow": {
+    "mappings": [
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.workspace:fs.read"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.workspace:fs.read"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.workspace:fs.list"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.workspace:fs.list"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.workspace:fs.search"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.workspace:fs.search"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "success",
+        "tool_id": "core.workspace:fs.apply_patch"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "invalid_patch",
+        "tool_id": "core.workspace:fs.apply_patch"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "not_found",
+        "tool_id": "core.workspace:fs.apply_patch"
+      },
+      {
+        "event_id": "agl:tool_observation.append",
+        "outcome_code": "conflict",
+        "tool_id": "core.workspace:fs.apply_patch"
+      }
+    ],
+    "schema": "agentlibre.extension-workflow.v1alpha"
+  }
+}

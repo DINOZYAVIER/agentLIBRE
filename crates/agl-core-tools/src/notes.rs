@@ -12,7 +12,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    ToolCatalog, ToolCatalogError,
     memory::{
         MemoryKindArg, MemoryScopeArg, parse_kind as parse_memory_kind,
         parse_scope_kind as parse_memory_scope_kind,
@@ -20,7 +19,7 @@ use crate::{
     parse_tool_args as parse_args,
 };
 
-pub const PROVIDER_ID: &str = "core.note";
+pub const EXTENSION_ID: &str = "core.note";
 pub const NOTES_ADD_TOOL_ID: &str = "core.note:add";
 pub const NOTES_SEARCH_TOOL_ID: &str = "core.note:search";
 pub const NOTES_SHOW_TOOL_ID: &str = "core.note:show";
@@ -225,7 +224,7 @@ impl ToolHandler for NotesTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin notes extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin notes extension id is valid"),
         "Notes Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -276,10 +275,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::store_note_links()).unwrap(),
         EffectDeclaration::for_standard(EffectId::store_memory_entries()).unwrap(),
     ])
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(

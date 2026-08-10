@@ -1,3 +1,4 @@
+mod artifact_contract;
 mod effect;
 mod extension_declaration;
 mod extension_digest;
@@ -25,13 +26,13 @@ mod workflow;
 
 pub use extension_declaration::{
     DeclarationError, EXTENSION_WORKFLOW_SCHEMA, EffectDeclaration, ExtensionDescriptor,
-    ExtensionSource, ExtensionTrust, ExtensionWorkflowFragment, HookDeclaration, OperationKind,
-    SensitiveInput, ToolDeclaration, ToolDelivery, ToolErrorClass, ToolErrorDeclaration,
-    ToolOutcomeDeclaration, ToolWorkflowMapping,
+    ExtensionSource, ExtensionTrust, ExtensionWorkflowFragment, HookDeclaration,
+    HostBindingRequirement, OperationKind, SensitiveInput, ToolDeclaration, ToolDelivery,
+    ToolErrorClass, ToolErrorDeclaration, ToolOutcomeDeclaration, ToolWorkflowMapping,
 };
-pub use extension_digest::{DeclarationDigest, DigestParseError, PolicyHash};
+pub use extension_digest::{CatalogDigest, DeclarationDigest, DigestParseError, PolicyHash};
 pub use extension_ids::{
-    EffectId, ExtensionId, HookId, IdentifierError, IdentifierKind, SkillId, ToolId,
+    EffectId, ExtensionId, HookId, HostBindingId, IdentifierError, IdentifierKind, SkillId, ToolId,
     WorkflowEventId,
 };
 pub use extension_registration::{ExtensionRegistration, HookBinding, ToolBinding};
@@ -79,6 +80,11 @@ pub use turn_state::TurnState;
 pub use turn_tool::{ToolDispatchRequest, ToolDispatchResponse};
 pub use turn_transcript::{ModelRequest, ModelResponse, ModelResponseOutcome, TurnMessage};
 
+pub use artifact_contract::{
+    ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactIdError,
+    ArtifactKindId, ArtifactKindIdError, ArtifactTargetSelector, ExtensionRequirement,
+    ResolvedArtifactTarget,
+};
 pub use effect::{
     AuthorityClass, MemoryToolEffectJournal, ToolEffectJournal, ToolEffectJournalError,
     ToolEffectJournalRecord, ToolEffectLifecycleState, ToolEffectMachine,

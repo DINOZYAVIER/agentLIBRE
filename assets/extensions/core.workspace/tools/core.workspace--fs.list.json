@@ -1,0 +1,195 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "List repository directory entries.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.workspace:fs.list",
+  "input_schema": {
+    "$defs": {
+      "EntryKindFilter": {
+        "enum": [
+          "any",
+          "file",
+          "directory"
+        ],
+        "type": "string"
+      },
+      "GlobCase": {
+        "enum": [
+          "sensitive",
+          "ascii_insensitive"
+        ],
+        "type": "string"
+      },
+      "GlobTarget": {
+        "enum": [
+          "basename",
+          "relative_path"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "case": {
+        "$ref": "#/$defs/GlobCase"
+      },
+      "cursor": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "kind": {
+        "$ref": "#/$defs/EntryKindFilter"
+      },
+      "match_on": {
+        "$ref": "#/$defs/GlobTarget"
+      },
+      "name_glob": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "page_size": {
+        "default": 100,
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "path": {
+        "type": "string"
+      },
+      "recursive": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ListArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "ListEntryOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ListOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "entries": {
+        "items": {
+          "$ref": "#/$defs/ListEntryOutput"
+        },
+        "type": "array"
+      },
+      "entry_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "outcome": {
+        "$ref": "#/$defs/ListOutcome"
+      },
+      "path": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "path",
+      "entry_count",
+      "entries",
+      "outcome"
+    ],
+    "title": "ListOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

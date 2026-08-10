@@ -3,11 +3,9 @@ use agl_kernel::{
     HookId, HookInput, HookResult,
 };
 
-use crate::{ToolCatalog, ToolCatalogError};
-
 mod validators;
 
-pub const PROVIDER_ID: &str = "core";
+pub const EXTENSION_ID: &str = "core";
 pub const JSON_VALIDATE_HOOK_ID: &str = "core:json.validate";
 pub const REPO_PATH_VALIDATE_HOOK_ID: &str = "core:repo_path.validate";
 pub const TASK_SPEC_VALIDATE_HOOK_ID: &str = "core:task_spec.validate";
@@ -76,7 +74,7 @@ impl CoreGuards {
 
 pub fn declaration() -> ExtensionDescriptor {
     let mut declaration = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("core guard extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("core guard extension id is valid"),
         "Core Guards",
         env!("CARGO_PKG_VERSION"),
     )
@@ -97,10 +95,6 @@ pub fn declaration() -> ExtensionDescriptor {
         declaration = declaration.with_hook(hook(id, HookEvent::ArtifactWrite));
     }
     declaration
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn hook(id: &str, event: HookEvent) -> HookDeclaration {

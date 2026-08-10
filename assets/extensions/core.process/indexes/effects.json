@@ -1,0 +1,29 @@
+{
+  "entries": [
+    {
+      "id": "agl:process.control",
+      "path": "effects/agl--process.control.json"
+    },
+    {
+      "id": "agl:process.host_execution",
+      "path": "effects/agl--process.host_execution.json"
+    },
+    {
+      "id": "agl:process.shell_login_startup",
+      "path": "effects/agl--process.shell_login_startup.json"
+    },
+    {
+      "id": "agl:process.spawn",
+      "path": "effects/agl--process.spawn.json"
+    },
+    {
+      "id": "agl:repo.workspace",
+      "path": "effects/agl--repo.workspace.json"
+    },
+    {
+      "id": "agl:session.working_directory",
+      "path": "effects/agl--session.working_directory.json"
+    }
+  ],
+  "schema": "agentlibre.extension-effect-index/v1"
+}

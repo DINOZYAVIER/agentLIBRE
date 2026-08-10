@@ -1,0 +1,149 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "Read a UTF-8 file from the repository with line bounds.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.workspace:fs.read",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "limit_lines": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "offset_line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "ReadArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "ReadLine": {
+        "additionalProperties": false,
+        "properties": {
+          "line": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "digest": {
+        "type": "string"
+      },
+      "end_line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "lines": {
+        "items": {
+          "$ref": "#/$defs/ReadLine"
+        },
+        "type": "array"
+      },
+      "path": {
+        "type": "string"
+      },
+      "start_line": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      },
+      "total_lines": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "path",
+      "start_line",
+      "end_line",
+      "total_lines",
+      "truncated",
+      "digest",
+      "lines"
+    ],
+    "title": "ReadOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

@@ -10,9 +10,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "core.store";
+pub const EXTENSION_ID: &str = "core.store";
 pub const STORE_STATUS_TOOL_ID: &str = "core.store:status";
 pub const STORE_EXPORT_TOOL_ID: &str = "core.store:export";
 pub const STORE_MIGRATE_TOOL_ID: &str = "core.store:migrate";
@@ -171,7 +171,7 @@ impl ToolHandler for StoreTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin store extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin store extension id is valid"),
         "Store Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -202,10 +202,6 @@ pub fn declaration() -> ExtensionDescriptor {
         .with_state_effects([EffectId::store_schema()]),
     )
     .with_effect(EffectDeclaration::for_standard(EffectId::store_schema()).unwrap())
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 #[derive(Deserialize, JsonSchema)]

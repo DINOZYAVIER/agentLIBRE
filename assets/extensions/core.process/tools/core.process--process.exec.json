@@ -1,0 +1,329 @@
+{
+  "conditional_state_effects": [
+    "agl:process.host_execution"
+  ],
+  "delivery": "at_most_once",
+  "description": "Run an exact argv with pipes and wait for its bounded result.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "program": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "program"
+        ],
+        "title": "ProgramNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.exec",
+  "input_schema": {
+    "$defs": {
+      "BytesArg": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "maxLength": 87384,
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      },
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "args": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 1024,
+        "type": "array"
+      },
+      "cwd": {
+        "maxLength": 4096,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "env": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ProfileArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "program": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "stdin": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BytesArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout_ms": {
+        "format": "uint64",
+        "minimum": 1,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "program"
+    ],
+    "title": "ArgvArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "ExecutionChannelOutput": {
+        "enum": [
+          "stdout",
+          "stderr",
+          "terminal",
+          "lifecycle"
+        ],
+        "type": "string"
+      },
+      "ExecutionExitOutput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "kind": {
+                "const": "code",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "signal",
+                "type": "string"
+              },
+              "signal": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "signal"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExecutionStateOutput": {
+        "enum": [
+          "admitting",
+          "starting",
+          "running",
+          "exited",
+          "signalled",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "OutputChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "$ref": "#/$defs/ProcessBytesOutput"
+          },
+          "channel": {
+            "$ref": "#/$defs/ExecutionChannelOutput"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "ProcessBytesOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "chunks": {
+        "items": {
+          "$ref": "#/$defs/OutputChunk"
+        },
+        "type": "array"
+      },
+      "execution_id": {
+        "type": "string"
+      },
+      "exit": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ExecutionExitOutput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "next_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "output_expired": {
+        "type": "boolean"
+      },
+      "output_truncated": {
+        "type": "boolean"
+      },
+      "state": {
+        "$ref": "#/$defs/ExecutionStateOutput"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "execution_id",
+      "state",
+      "chunks",
+      "next_sequence",
+      "output_truncated",
+      "output_expired"
+    ],
+    "title": "ForegroundOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.spawn"
+  ]
+}

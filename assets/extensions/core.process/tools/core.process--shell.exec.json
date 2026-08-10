@@ -1,0 +1,742 @@
+{
+  "conditional_state_effects": [
+    "agl:process.host_execution",
+    "agl:process.shell_login_startup",
+    "agl:repo.workspace"
+  ],
+  "delivery": "at_most_once",
+  "description": "Run one explicitly degraded shell fallback inside the admitted effect envelope.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "invalid_effect_envelope",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "recoverable",
+      "code": "invalid_patch",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "recoverable",
+      "code": "conflict",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "actual_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_absent": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expected_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PatchConflictErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "outcome_unknown",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:shell.exec",
+  "input_schema": {
+    "$defs": {
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      },
+      "ShellExpectedEffects": {
+        "additionalProperties": false,
+        "properties": {
+          "external": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "process": {
+            "type": "boolean"
+          },
+          "workspace_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          }
+        },
+        "required": [
+          "process"
+        ],
+        "type": "object"
+      },
+      "TerminalSizeArgs": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "rows": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "type": "object"
+      },
+      "WorkspaceAccessArg": {
+        "enum": [
+          "read_only",
+          "write"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "background": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "command": {
+        "maxLength": 65536,
+        "type": "string"
+      },
+      "cwd": {
+        "maxLength": 4096,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "env": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "expected_effects": {
+        "$ref": "#/$defs/ShellExpectedEffects"
+      },
+      "fallback_reason": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "login": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ProfileArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "semantic_intent": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "terminal_size": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TerminalSizeArgs"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "timeout_ms": {
+        "format": "uint64",
+        "minimum": 1,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "workspace_access": {
+        "$ref": "#/$defs/WorkspaceAccessArg"
+      }
+    },
+    "required": [
+      "command",
+      "semantic_intent",
+      "workspace_access",
+      "expected_effects",
+      "fallback_reason"
+    ],
+    "title": "ShellArgs",
+    "type": "object"
+  },
+  "operation_kind": "execute",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "BytesEncodingArg": {
+        "enum": [
+          "utf8",
+          "base64"
+        ],
+        "type": "string"
+      },
+      "ExecutionChannelOutput": {
+        "enum": [
+          "stdout",
+          "stderr",
+          "terminal",
+          "lifecycle"
+        ],
+        "type": "string"
+      },
+      "ExecutionExitOutput": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "kind": {
+                "const": "code",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "signal",
+                "type": "string"
+              },
+              "signal": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "signal"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "code"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ExecutionStateOutput": {
+        "enum": [
+          "admitting",
+          "starting",
+          "running",
+          "exited",
+          "signalled",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "ManagedShellOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "after_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chunks": {
+            "items": {
+              "$ref": "#/$defs/OutputChunk"
+            },
+            "type": "array"
+          },
+          "command_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "exit": {
+            "$ref": "#/$defs/ExecutionExitOutput"
+          },
+          "expected_effects": {
+            "$ref": "#/$defs/ShellExpectedEffects"
+          },
+          "fallback_reason": {
+            "type": "string"
+          },
+          "guarantee_class": {
+            "type": "string"
+          },
+          "next_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "observed_effects": {
+            "$ref": "#/$defs/ObservedEffectsOutput"
+          },
+          "output_expired": {
+            "type": "boolean"
+          },
+          "output_truncated": {
+            "type": "boolean"
+          },
+          "requested_workspace_access": {
+            "$ref": "#/$defs/WorkspaceAccessArg"
+          },
+          "semantic_intent": {
+            "type": "string"
+          },
+          "terminal_id": {
+            "type": "string"
+          },
+          "through_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "guarantee_class",
+          "semantic_intent",
+          "fallback_reason",
+          "requested_workspace_access",
+          "expected_effects",
+          "observed_effects",
+          "terminal_id",
+          "execution_id",
+          "command_sequence",
+          "cwd",
+          "exit",
+          "after_sequence",
+          "through_sequence",
+          "chunks",
+          "next_sequence",
+          "output_truncated",
+          "output_expired"
+        ],
+        "type": "object"
+      },
+      "ObservedEffectsOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "external": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "process": {
+            "type": "boolean"
+          },
+          "workspace_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "process",
+          "workspace_paths",
+          "external"
+        ],
+        "type": "object"
+      },
+      "OneShotShellOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/$defs/OutputChunk"
+            },
+            "type": "array"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "exit": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExecutionExitOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_effects": {
+            "$ref": "#/$defs/ShellExpectedEffects"
+          },
+          "fallback_reason": {
+            "type": "string"
+          },
+          "guarantee_class": {
+            "type": "string"
+          },
+          "next_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "observed_effects": {
+            "$ref": "#/$defs/ObservedEffectsOutput"
+          },
+          "output_expired": {
+            "type": "boolean"
+          },
+          "output_truncated": {
+            "type": "boolean"
+          },
+          "requested_workspace_access": {
+            "$ref": "#/$defs/WorkspaceAccessArg"
+          },
+          "semantic_intent": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/ExecutionStateOutput"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "workspace_transaction": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkspaceTransactionOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "tool",
+          "execution_id",
+          "state",
+          "chunks",
+          "next_sequence",
+          "output_truncated",
+          "output_expired",
+          "guarantee_class",
+          "semantic_intent",
+          "fallback_reason",
+          "requested_workspace_access",
+          "expected_effects",
+          "observed_effects"
+        ],
+        "type": "object"
+      },
+      "OutputChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "$ref": "#/$defs/ProcessBytesOutput"
+          },
+          "channel": {
+            "$ref": "#/$defs/ExecutionChannelOutput"
+          },
+          "sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "channel",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "PatchOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "change_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/$defs/PatchReceiptOutput"
+            },
+            "type": "array"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "status",
+          "change_count",
+          "changes"
+        ],
+        "type": "object"
+      },
+      "PatchReceiptOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "after_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "before_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "ProcessBytesOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "encoding": {
+            "$ref": "#/$defs/BytesEncodingArg"
+          }
+        },
+        "required": [
+          "encoding",
+          "data"
+        ],
+        "type": "object"
+      },
+      "ShellExpectedEffects": {
+        "additionalProperties": false,
+        "properties": {
+          "external": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "process": {
+            "type": "boolean"
+          },
+          "workspace_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          }
+        },
+        "required": [
+          "process"
+        ],
+        "type": "object"
+      },
+      "WorkspaceAccessArg": {
+        "enum": [
+          "read_only",
+          "write"
+        ],
+        "type": "string"
+      },
+      "WorkspaceTransactionOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "patch_receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PatchOutput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "anyOf": [
+      {
+        "$ref": "#/$defs/ManagedShellOutput"
+      },
+      {
+        "$ref": "#/$defs/OneShotShellOutput"
+      }
+    ],
+    "title": "ShellOutput"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:process.spawn"
+  ]
+}

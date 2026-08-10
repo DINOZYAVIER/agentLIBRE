@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "id": "agl:repo.files",
+      "path": "effects/agl--repo.files.json"
+    }
+  ],
+  "schema": "agentlibre.extension-effect-index/v1"
+}

@@ -8,7 +8,7 @@ use agl_extension::package::{
     ExtensionPackageReport,
 };
 use agl_kernel::{ArtifactAccess, ArtifactDeclaration, ArtifactId, ArtifactKindId, ExtensionId};
-use agl_package::{InMemoryPackageView, PackageRelativePath, PackageTreeDigest};
+use agl_package::{ArtifactRelativePath, InMemoryPackageView, compute_package_digest};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -92,12 +92,16 @@ fn generator_is_byte_deterministic_read_only_and_has_no_binary_identity() {
     let encoded = serde_json::to_string(&root).unwrap();
     assert!(!encoded.contains(&source.display().to_string()));
     assert!(!encoded.contains("timestamp"));
+
+    fs::remove_dir_all(source).unwrap();
+    fs::remove_dir_all(first).unwrap();
+    fs::remove_dir_all(second).unwrap();
 }
 
 fn view(entries: &[(&str, &str)]) -> InMemoryPackageView {
     InMemoryPackageView::new(entries.iter().map(|(path, body)| {
         (
-            path.parse::<PackageRelativePath>().unwrap(),
+            path.parse::<ArtifactRelativePath>().unwrap(),
             body.as_bytes().to_vec(),
         )
     }))
@@ -148,7 +152,7 @@ fn parser_accepts_exact_sorted_id_path_indexes() {
     );
     assert_eq!(
         parsed.package_tree_digest(),
-        &PackageTreeDigest::from_view(&package).unwrap()
+        &compute_package_digest(&package).unwrap()
     );
 }
 
@@ -196,7 +200,7 @@ fn parser_returns_typed_exact_index_errors() {
         ]);
         let error = ExtensionPackage::parse(&package).unwrap_err();
         assert!(
-            matches!(error, ExtensionPackageError::Index { path, .. } if path == "indexes/tools.json".parse().unwrap()),
+            matches!(error, ExtensionPackageError::Index { ref path, .. } if path == &"indexes/tools.json".parse().unwrap()),
             "wrong error for {label}: {error:?}"
         );
     }

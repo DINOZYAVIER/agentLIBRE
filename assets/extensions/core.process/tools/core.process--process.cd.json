@@ -1,0 +1,106 @@
+{
+  "conditional_state_effects": [
+    "agl:process.host_execution"
+  ],
+  "delivery": "at_most_once",
+  "description": "Change the caller's durable logical working directory.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.cd",
+  "input_schema": {
+    "$defs": {
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "type": "string"
+      },
+      "profile": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ProfileArg"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "title": "CdArgs",
+    "type": "object"
+  },
+  "operation_kind": "write",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "ProfileArg": {
+        "enum": [
+          "workspace",
+          "host"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "profile": {
+        "$ref": "#/$defs/ProfileArg"
+      },
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      },
+      "working_directory": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "working_directory",
+      "profile",
+      "revision"
+    ],
+    "title": "CdOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": [
+    "agl:session.working_directory"
+  ]
+}

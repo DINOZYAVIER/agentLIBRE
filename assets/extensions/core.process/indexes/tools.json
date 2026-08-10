@@ -1,0 +1,45 @@
+{
+  "entries": [
+    {
+      "id": "core.process:process.cd",
+      "path": "tools/core.process--process.cd.json"
+    },
+    {
+      "id": "core.process:process.exec",
+      "path": "tools/core.process--process.exec.json"
+    },
+    {
+      "id": "core.process:process.kill",
+      "path": "tools/core.process--process.kill.json"
+    },
+    {
+      "id": "core.process:process.pwd",
+      "path": "tools/core.process--process.pwd.json"
+    },
+    {
+      "id": "core.process:process.read",
+      "path": "tools/core.process--process.read.json"
+    },
+    {
+      "id": "core.process:process.resize",
+      "path": "tools/core.process--process.resize.json"
+    },
+    {
+      "id": "core.process:process.start",
+      "path": "tools/core.process--process.start.json"
+    },
+    {
+      "id": "core.process:process.status",
+      "path": "tools/core.process--process.status.json"
+    },
+    {
+      "id": "core.process:process.write",
+      "path": "tools/core.process--process.write.json"
+    },
+    {
+      "id": "core.process:shell.exec",
+      "path": "tools/core.process--shell.exec.json"
+    }
+  ],
+  "schema": "agentlibre.extension-tool-index/v1"
+}

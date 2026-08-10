@@ -37,9 +37,9 @@ use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "core.process";
+pub const EXTENSION_ID: &str = "core.process";
 pub const PROCESS_PWD_TOOL_ID: &str = "core.process:process.pwd";
 pub const PROCESS_CD_TOOL_ID: &str = "core.process:process.cd";
 pub const PROCESS_EXEC_TOOL_ID: &str = "core.process:process.exec";
@@ -1615,9 +1615,9 @@ fn observed_process_effects(
 
 pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("process extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("process extension id is valid"),
         "Core Process",
-        env!("CARGO_PKG_VERSION"),
+        "1.1.0",
     )
     .expect("process extension declaration is valid")
     .with_tool(action::<EmptyArgs, PwdOutput>(
@@ -1727,10 +1727,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::shell_login_startup()).unwrap(),
         EffectDeclaration::for_standard(EffectId::repo_workspace()).unwrap(),
     ]))
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<I: JsonSchema, O: JsonSchema>(
@@ -2683,7 +2679,7 @@ mod tests {
     #[test]
     fn declaration_has_exact_extension_actions_and_effect_classes() {
         let declaration = declaration();
-        assert_eq!(declaration.id.as_str(), PROVIDER_ID);
+        assert_eq!(declaration.id.as_str(), EXTENSION_ID);
         assert_eq!(
             declaration
                 .tools

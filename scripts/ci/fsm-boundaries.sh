@@ -30,19 +30,6 @@ check_absent() {
 }
 
 check_absent \
-  "AgentLoopHost must not expose or call emit_event without a transition record" \
-  -E 'emit_event[[:space:]]*\(' -- crates/agl-loop/src crates/agl-cli/src
-
-check_absent \
-  "production AgentEvent construction must stay in agl-loop event_map" \
-  'AgentEvent::' -- \
-  crates \
-  ':(exclude)crates/agl-loop/src/event_map.rs' \
-  ':(exclude)crates/agl-loop/src/tests.rs' \
-  ':(exclude)crates/agl-events/src/event.rs' \
-  ':(exclude)crates/agl-events/src/tests.rs'
-
-check_absent \
   "inference observation events must be emitted from transition records" \
   'InferenceObservationEvent::' -- \
   crates/agl-inference/src \

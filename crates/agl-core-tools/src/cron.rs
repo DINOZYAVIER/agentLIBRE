@@ -16,9 +16,9 @@ use crate::parse_tool_args as parse_args;
 
 mod declarations;
 
-pub use declarations::{declaration, register};
+pub use declarations::declaration;
 
-pub const PROVIDER_ID: &str = "core.cron";
+pub const EXTENSION_ID: &str = "core.cron";
 pub const CRON_LIST_TOOL_ID: &str = "core.cron:list";
 pub const CRON_SHOW_TOOL_ID: &str = "core.cron:show";
 pub const CRON_HISTORY_TOOL_ID: &str = "core.cron:history";

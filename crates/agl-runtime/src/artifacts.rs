@@ -3,14 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agl_extension::package::{ExtensionPackage, ExtensionPackageAdapter};
 use agl_function::FunctionArtifactAdapter;
 use agl_model::{ModelArtifactAdapter, ModelPackage, ModelPackageProvenance};
 use agl_package::{
     ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactLock, ArtifactPackageRef,
     ArtifactPathRouter, ArtifactResolver, ArtifactSource, ArtifactSourceId, ArtifactSourceKind,
     ArtifactSourceTier, ArtifactTypeId, DirectoryArtifactSource, DirectoryPackageView,
-    ExtensionArtifactAdapter, ExtensionArtifactManifest, InMemoryPackageView, PackageTreeDigest,
-    ResolvedArtifact, ResolvedArtifactGraph, StaticArtifactSource, WorkspaceManifest,
+    InMemoryPackageView, PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph,
+    StaticArtifactSource, WorkspaceManifest,
 };
 use agl_skill::{SkillArtifactAdapter, SkillHarness, SkillSource};
 use anyhow::{Context, Result, ensure};
@@ -36,7 +37,7 @@ pub struct ResolvedRuntimeModel {
 #[derive(Clone, Debug)]
 pub struct ResolvedRuntimeExtension {
     pub node_key: String,
-    pub manifest: ExtensionArtifactManifest,
+    pub package: ExtensionPackage,
 }
 
 #[derive(Clone, Debug)]
@@ -448,14 +449,14 @@ fn resolved_runtime_extensions(
         let payload = registry
             .lookup(&node.candidate.type_id)?
             .validate_payload(node.candidate.view(), &node.envelope)?;
-        let manifest = *payload
-            .downcast::<ExtensionArtifactManifest>()
+        let package = *payload
+            .downcast::<ExtensionPackage>()
             .map_err(|_| anyhow::anyhow!("Extension adapter returned an unexpected payload"))?;
         extensions.insert(
             extension_id.clone(),
             ResolvedRuntimeExtension {
                 node_key: node_key.clone(),
-                manifest,
+                package,
             },
         );
     }
@@ -585,7 +586,7 @@ pub fn compose_artifacts(
         Arc::new(FunctionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
         Arc::new(SkillArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
         Arc::new(ModelArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(ExtensionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
+        Arc::new(ExtensionPackageAdapter::default()) as Arc<dyn ArtifactAdapter>,
     ])?);
     let workspace_root = workspace_root.into();
     let lock =

@@ -11,6 +11,7 @@ pub enum IdentifierKind {
     WorkflowEvent,
     Hook,
     Skill,
+    HostBinding,
 }
 
 impl IdentifierKind {
@@ -22,6 +23,7 @@ impl IdentifierKind {
             Self::WorkflowEvent => "workflow event",
             Self::Hook => "hook",
             Self::Skill => "skill",
+            Self::HostBinding => "host binding",
         }
     }
 }
@@ -173,6 +175,11 @@ identifier_type!(
 );
 identifier_type!(HookId, IdentifierKind::Hook, validate_hook_identifier);
 identifier_type!(SkillId, IdentifierKind::Skill, validate_identifier);
+identifier_type!(
+    HostBindingId,
+    IdentifierKind::HostBinding,
+    validate_extension_identifier
+);
 
 impl HookId {
     pub fn extension_namespace(&self) -> &str {

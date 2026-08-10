@@ -13,9 +13,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use crate::parse_tool_args as parse_args;
 
-pub const PROVIDER_ID: &str = "core.repo";
+pub const EXTENSION_ID: &str = "core.repo";
 pub const REPO_STATUS_TOOL_ID: &str = "core.repo:status";
 pub const REPO_EXPORT_PROFILE_TOOL_ID: &str = "core.repo:export_profile";
 pub const REPO_HOOKS_STATUS_TOOL_ID: &str = "core.repo:hooks.status";
@@ -173,7 +173,7 @@ impl ToolHandler for RepoTools {
 
 pub fn declaration() -> ExtensionDescriptor {
     ExtensionDescriptor::builtin(
-        ExtensionId::new(PROVIDER_ID).expect("builtin repo extension id is valid"),
+        ExtensionId::new(EXTENSION_ID).expect("builtin repo extension id is valid"),
         "Repo Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -221,10 +221,6 @@ pub fn declaration() -> ExtensionDescriptor {
         EffectDeclaration::for_standard(EffectId::repo_workspace()).unwrap(),
         EffectDeclaration::for_standard(EffectId::repo_hooks()).unwrap(),
     ])
-}
-
-pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
-    catalog.register(declaration())
 }
 
 fn action<T: JsonSchema>(

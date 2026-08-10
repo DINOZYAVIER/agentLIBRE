@@ -1,0 +1,145 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "Search repository text files for a literal pattern.",
+  "errors": [
+    {
+      "class": "recoverable",
+      "code": "not_found",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathNotFoundErrorData",
+        "type": "object"
+      }
+    },
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.workspace:fs.search",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "case_sensitive": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "max_matches": {
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "path": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pattern": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "title": "SearchArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$defs": {
+      "SearchMatchOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "line": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "match_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "matches": {
+        "items": {
+          "$ref": "#/$defs/SearchMatchOutput"
+        },
+        "type": "array"
+      },
+      "path": {
+        "type": "string"
+      },
+      "pattern": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "path",
+      "pattern",
+      "match_count",
+      "truncated",
+      "matches"
+    ],
+    "title": "SearchOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

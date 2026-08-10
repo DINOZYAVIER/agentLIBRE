@@ -1,0 +1,64 @@
+{
+  "conditional_state_effects": [],
+  "delivery": "replay_safe",
+  "description": "Return the caller's durable logical working directory.",
+  "errors": [
+    {
+      "class": "terminal",
+      "code": "execution_failed",
+      "data_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "EmptyToolErrorData",
+        "type": "object"
+      }
+    }
+  ],
+  "id": "core.process:process.pwd",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "title": "EmptyArgs",
+    "type": "object"
+  },
+  "operation_kind": "read",
+  "outcomes": [
+    {
+      "code": "success"
+    }
+  ],
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "revision": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "status": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      },
+      "working_directory": {
+        "type": "string"
+      },
+      "workspace_root": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "status",
+      "working_directory",
+      "workspace_root",
+      "revision"
+    ],
+    "title": "PwdOutput",
+    "type": "object"
+  },
+  "sensitive_inputs": [],
+  "state_effects": []
+}

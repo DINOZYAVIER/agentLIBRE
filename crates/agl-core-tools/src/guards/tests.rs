@@ -3,6 +3,7 @@ use serde_json::json;
 use agl_kernel::HookStatus;
 
 use super::*;
+use agl_kernel::ToolCatalog;
 
 #[test]
 fn declaration_exposes_core_guard_hooks() {
@@ -35,7 +36,7 @@ fn declaration_exposes_core_guard_hooks() {
 fn extension_registers_with_tool_catalog() {
     let mut catalog = ToolCatalog::new();
 
-    register(&mut catalog).unwrap();
+    catalog.register(declaration()).unwrap();
 
     assert!(catalog.has_hook(&HookId::new(TASK_SPEC_VALIDATE_HOOK_ID).unwrap()));
 }

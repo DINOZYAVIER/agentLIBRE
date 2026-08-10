@@ -115,7 +115,7 @@ pub fn function_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterReg
     let adapters: [Arc<dyn ArtifactAdapter>; 3] = [
         Arc::new(FunctionArtifactAdapter::default()),
         Arc::new(agl_model::ModelArtifactAdapter::default()),
-        Arc::new(agl_package::ExtensionArtifactAdapter::default()),
+        Arc::new(agl_extension::package::ExtensionPackageAdapter::default()),
     ];
     Ok(Arc::new(agl_package::ArtifactAdapterRegistry::from_dyn(
         adapters,
