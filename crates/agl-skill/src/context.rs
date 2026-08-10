@@ -632,7 +632,7 @@ mod tests {
                 id: SkillId::new("requestable-test").unwrap(),
                 name: "requestable-test".to_string(),
                 description: "Test-only requestable tool routing skill.".to_string(),
-                version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+                version: agl_package::ArtifactVersion::new("1.0.0").unwrap(),
                 source: SkillSource::Core,
                 pack: "test".to_string(),
                 required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
@@ -670,15 +670,15 @@ mod tests {
         registry
     }
 
-    fn test_artifact(id: &str) -> agl_artifact::ArtifactEnvelope {
-        agl_artifact::ArtifactEnvelope::new(
-            agl_artifact::ArtifactTypeId::skill(),
-            agl_artifact::ArtifactPackageId::new(id).unwrap(),
-            agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
-            agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
-            agl_artifact::AglCompatibility::new(
-                agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
-                [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+    fn test_artifact(id: &str) -> agl_package::ArtifactEnvelope {
+        agl_package::ArtifactEnvelope::new(
+            agl_package::ArtifactTypeId::skill(),
+            agl_package::ArtifactPackageId::new(id).unwrap(),
+            agl_package::ArtifactVersion::new("1.0.0").unwrap(),
+            agl_package::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+            agl_package::AglCompatibility::new(
+                agl_package::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+                [agl_package::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
             )
             .unwrap(),
             Vec::new(),

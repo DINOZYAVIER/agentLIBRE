@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agl_artifact::{ArtifactPackageView, ArtifactRelativePath};
 use agl_kernel::ToolId;
+use agl_package::{ArtifactPackageView, ArtifactRelativePath};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactAdapter, ArtifactCandidate, ArtifactConfigEvidence, ArtifactEnvelope, ArtifactError,
     ArtifactPackageRef, ArtifactPathRouter, ArtifactSourceDeclaration, ArtifactSourceId,
     ArtifactSourceKind, ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact,
@@ -431,7 +431,7 @@ fn run_source(command: ArtifactSourceCommand, runtime: &AgentLibreRuntimeConfig)
 
 fn graph_projection(
     graph: &ResolvedArtifactGraph,
-    lock: Option<&agl_artifact::ArtifactLock>,
+    lock: Option<&agl_package::ArtifactLock>,
     router: &ArtifactPathRouter,
 ) -> ArtifactGraphProjection {
     let nodes = graph
@@ -447,7 +447,7 @@ fn graph_projection(
 
 fn projection(
     node: &ResolvedArtifact,
-    lock: Option<&agl_artifact::ArtifactLock>,
+    lock: Option<&agl_package::ArtifactLock>,
     router: &ArtifactPathRouter,
 ) -> ArtifactProjection {
     let key = node.key();
@@ -495,7 +495,7 @@ fn print_projection(value: &ArtifactProjection) {
     }
 }
 
-fn envelope_reference(envelope: &agl_artifact::ArtifactEnvelope) -> String {
+fn envelope_reference(envelope: &agl_package::ArtifactEnvelope) -> String {
     format!("{}:{}@{}", envelope.type_id, envelope.id, envelope.version)
 }
 

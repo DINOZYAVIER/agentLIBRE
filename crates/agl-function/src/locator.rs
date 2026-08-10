@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use agl_artifact::{ArtifactPackageRef, ArtifactResolver, ArtifactSourceTier};
+use agl_package::{ArtifactPackageRef, ArtifactResolver, ArtifactSourceTier};
 use anyhow::{Context, Result};
 #[cfg(test)]
 use anyhow::{bail, ensure};

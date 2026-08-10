@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use agl_artifact as artifact_contract;
+use agl_package as artifact_contract;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 

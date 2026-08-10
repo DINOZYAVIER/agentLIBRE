@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agl_artifact::{ArtifactSourceTier, ArtifactTypeId};
 use agl_client::ClientError;
 use agl_config::{InferencePreset, bind_inference_preset, load_inference_preset_from_str};
 use agl_function::{
@@ -11,6 +10,7 @@ use agl_function::{
     load_function_candidate, workspace_functions_root,
 };
 use agl_model::{CatalogRuntimeProfile, ProfileDevice};
+use agl_package::{ArtifactSourceTier, ArtifactTypeId};
 use agl_protocol::RuntimeGenerationIdentity;
 use agl_runtime::{AgentLibreRuntimeConfig, RuntimeBundleIdentity};
 use anyhow::{Context, Result, bail, ensure};

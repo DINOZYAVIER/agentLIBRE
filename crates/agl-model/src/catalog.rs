@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-use agl_artifact::{
+use agl_config::ModelId;
+use agl_package::{
     ArtifactPackageId, ArtifactPackageRef, ArtifactSourceId, ArtifactSourceKind,
     ArtifactSourceTier, PackageTreeDigest,
 };
-use agl_config::ModelId;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 

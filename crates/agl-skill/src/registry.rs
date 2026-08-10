@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use agl_artifact::{
-    ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
-};
 use agl_kernel::{HookId, SkillId, ToolId};
 use agl_kernel::{ToolCatalog, ToolCatalogError};
+use agl_package::{
+    ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
+};
 
 use crate::adapter::{builtin_source, skill_adapter_registry};
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
@@ -309,7 +309,7 @@ pub enum SkillRegistryError {
         tools: Vec<ToolId>,
     },
     ToolCatalog(ToolCatalogError),
-    Artifact(agl_artifact::ArtifactError),
+    Artifact(agl_package::ArtifactError),
     ArtifactMessage(String),
 }
 

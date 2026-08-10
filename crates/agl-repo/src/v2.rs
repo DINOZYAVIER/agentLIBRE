@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactLock, LockedArtifactPackage, LockedWorkspaceComponent, WorkspaceManifest,
 };
 use anyhow::{Context, Result};
@@ -112,7 +112,7 @@ pub fn replace_artifact_lock_components_v2(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agl_artifact::{ArtifactSourceKind, ArtifactSourceTier, WorkspaceComponentKind};
+    use agl_package::{ArtifactSourceKind, ArtifactSourceTier, WorkspaceComponentKind};
 
     fn lock_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

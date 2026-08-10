@@ -53,7 +53,6 @@ dependencies = [
 name = "agl-app"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-chat",
  "agl-content",
@@ -62,6 +61,7 @@ dependencies = [
  "agl-ids",
  "agl-kernel",
  "agl-model",
+ "agl-package",
  "agl-process",
  "agl-runtime",
  "agl-skill",
@@ -77,20 +77,16 @@ dependencies = [
 name = "agl-artifact"
 version = "1.0.0-alpha.12"
 dependencies = [
- "semver",
- "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.18",
- "toml",
 ]
 
 [[package]]
 name = "agl-assets"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-config",
+ "agl-package",
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
@@ -101,7 +97,6 @@ dependencies = [
 name = "agl-chat"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-config",
  "agl-content",
@@ -116,6 +111,7 @@ dependencies = [
  "agl-memory",
  "agl-model",
  "agl-oven",
+ "agl-package",
  "agl-process",
  "agl-repo",
  "agl-runtime",
@@ -136,7 +132,6 @@ name = "agl-cli"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-app",
- "agl-artifact",
  "agl-assets",
  "agl-chat",
  "agl-client",
@@ -153,6 +148,7 @@ dependencies = [
  "agl-memory",
  "agl-model",
  "agl-notes",
+ "agl-package",
  "agl-process",
  "agl-protocol",
  "agl-repo",
@@ -312,11 +308,11 @@ dependencies = [
 name = "agl-function"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-config",
  "agl-kernel",
  "agl-model",
+ "agl-package",
  "anyhow",
  "serde",
  "serde_yaml",
@@ -464,9 +460,9 @@ dependencies = [
 name = "agl-model"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-config",
+ "agl-package",
  "anyhow",
  "futures-util",
  "hf-hub",
@@ -502,6 +498,18 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agl-package"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]
@@ -549,7 +557,7 @@ dependencies = [
 name = "agl-repo"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
+ "agl-package",
  "anyhow",
  "serde",
  "serde_json",
@@ -562,7 +570,6 @@ dependencies = [
 name = "agl-runtime"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-config",
  "agl-exec",
@@ -570,6 +577,7 @@ dependencies = [
  "agl-ids",
  "agl-kernel",
  "agl-model",
+ "agl-package",
  "agl-process",
  "agl-repo",
  "agl-skill",
@@ -603,10 +611,10 @@ dependencies = [
 name = "agl-skill"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-artifact",
  "agl-assets",
  "agl-core-tools",
  "agl-kernel",
+ "agl-package",
  "agl-repo",
  "anyhow",
  "serde",

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use agl_artifact::{ArtifactAdapterRegistry, ArtifactCandidate, ResolvedArtifactGraph};
+use agl_package::{ArtifactAdapterRegistry, ArtifactCandidate, ResolvedArtifactGraph};
 
 #[cfg(test)]
 use crate::loader::load_function;

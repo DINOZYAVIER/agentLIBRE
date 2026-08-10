@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agl_artifact::{ArtifactEnvelope, InMemoryPackageView, compute_package_digest};
+use agl_package::{ArtifactEnvelope, InMemoryPackageView, compute_package_digest};
 use sha2::{Digest, Sha256};
 
 const BUILTIN_SKILL_PACKS: &[&str] = &["agl"];

@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use agl_artifact::ArtifactSourceTier;
 use agl_config::{
     ModelConfig, ResolvedInferenceConfig, bind_inference_preset,
     bind_inference_preset_with_bindings, load_inference_preset_from_str,
@@ -38,6 +37,7 @@ use agl_model::{
     hugging_face_cache_dir,
 };
 use agl_oven::render_model_request;
+use agl_package::ArtifactSourceTier;
 use agl_runtime::{
     AgentLibrePaths, AgentLibreRuntimeConfig, ArtifactComposition, RenderedRuntimeFeatureContext,
     ResolvedRuntimeBundle, RuntimeFeatureRenderOptions, render_runtime_feature_context,
@@ -151,7 +151,7 @@ struct RuntimeExtensionExtensionBinding {
     package_digest: String,
     source_tier: ArtifactSourceTier,
     source_id: String,
-    implementation: agl_artifact::ExtensionImplementation,
+    implementation: agl_package::ExtensionImplementation,
     declaration_digest: String,
     extension_version: String,
     runtime_generation_id: String,
@@ -1872,7 +1872,7 @@ fn composed_skill_registry(
         } else {
             let composition = agl_runtime::compose_artifacts(runtime_paths, workspace_root)?;
             let reference =
-                agl_artifact::ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
+                agl_package::ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
             let graph = composition.resolve(&reference)?;
             let node = graph
                 .nodes
@@ -2748,7 +2748,7 @@ fn bind_runtime_extensions(
             .context("selected Extension node is absent from the runtime graph")?;
         ensure!(
             node.candidate.tier == ArtifactSourceTier::Builtin
-                && node.candidate.kind == agl_artifact::ArtifactSourceKind::Embedded,
+                && node.candidate.kind == agl_package::ArtifactSourceKind::Embedded,
             "Extension `{extension_id}` from source `{}` ({:?}) cannot bind to a builtin extension; no Tool effect occurred",
             node.candidate.source_id,
             node.candidate.tier
@@ -2762,7 +2762,7 @@ fn bind_runtime_extensions(
             }
         };
         ensure!(
-            extension.manifest.implementation == agl_artifact::ExtensionImplementation::RustStatic,
+            extension.manifest.implementation == agl_package::ExtensionImplementation::RustStatic,
             "Extension `{extension_id}` must use the rust-static implementation; no Tool effect occurred"
         );
         let artifact_version = extension.manifest.artifact.version.to_string();

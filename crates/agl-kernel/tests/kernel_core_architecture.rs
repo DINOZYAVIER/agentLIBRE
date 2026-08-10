@@ -70,18 +70,18 @@ fn matches_in(files: impl IntoIterator<Item = PathBuf>, needles: &[&str]) -> Vec
     matches
 }
 
-// KCT-ARCH-001. Mutation: restore one removed package or source directory.
+// KCT-ARCH-001 / AGL171-024. Mutation: restore one removed kernel owner, or
+// let the author SDK own/re-export generic kernel contracts.
 #[test]
 fn obsolete_kernel_boundary_packages_are_absent() {
     let metadata = metadata();
-    let names = metadata["packages"]
-        .as_array()
-        .unwrap()
+    let packages = metadata["packages"].as_array().unwrap();
+    let names = packages
         .iter()
         .filter_map(|package| package["name"].as_str())
         .collect::<BTreeSet<_>>();
 
-    for removed in ["agl-extension", "agl-turn", "agl-loop"] {
+    for removed in ["agl-turn", "agl-loop"] {
         assert!(
             !names.contains(removed),
             "removed package still exists: {removed}"
@@ -92,6 +92,35 @@ fn obsolete_kernel_boundary_packages_are_absent() {
         );
     }
     assert!(names.contains("agl-kernel"));
+
+    let extension = packages
+        .iter()
+        .find(|package| package["name"] == "agl-extension")
+        .expect("agl-extension author/package SDK exists");
+    let extension_dependencies = extension["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(extension_dependencies.contains("agl-kernel"));
+
+    let extension_source = workspace_root().join("crates/agl-extension/src");
+    let forbidden = matches_in(
+        production_rs_files(&extension_source),
+        &[
+            "pub struct ExtensionDescriptor",
+            "pub struct ToolDeclaration",
+            "pub struct HookDeclaration",
+            "pub struct EffectDeclaration",
+            "pub use agl_kernel::{",
+            "pub use agl_kernel::",
+        ],
+    );
+    assert!(
+        forbidden.is_empty(),
+        "agl-extension owns or re-exports kernel contracts: {forbidden:#?}"
+    );
 }
 
 // KCT-ARCH-002. Mutation: add one outward or platform dependency to agl-kernel.
@@ -307,5 +336,115 @@ fn runtime_has_no_global_static_extension_inventory() {
     assert!(
         found.is_empty(),
         "global factory discovery exists: {found:#?}"
+    );
+}
+
+// AGL171-008, AGL171-010, AGL171-015 and AGL171-021. These source guards are
+// deletion/boundary contracts; behavioral contracts live with their owners.
+#[test]
+fn extension_cutover_has_one_owner_and_no_registration_or_hook_bypass() {
+    let root = workspace_root();
+    let crates = root.join("crates");
+    let metadata = metadata();
+    let packages = metadata["packages"].as_array().unwrap();
+    let names = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect::<BTreeSet<_>>();
+
+    for required in ["agl-package", "agl-artifact", "agl-extension"] {
+        assert!(
+            names.contains(required),
+            "required package is absent: {required}"
+        );
+    }
+    for forbidden in ["agl-hooks", "agl-workspace"] {
+        assert!(
+            !names.contains(forbidden),
+            "forbidden package exists: {forbidden}"
+        );
+        assert!(
+            !crates.join(forbidden).exists(),
+            "forbidden source directory exists: crates/{forbidden}"
+        );
+    }
+
+    let production = production_rs_files(&crates);
+    let forbidden_source = matches_in(
+        production.clone(),
+        &[
+            "PROVIDER_ID",
+            "register(&mut ToolCatalog)",
+            "ScriptHookRuntime",
+            "ScriptHookTrust",
+            "ExtensionAdminPort",
+            "VerifiedExtensionBinary",
+            "verify_extension_binary",
+        ],
+    );
+    assert!(
+        forbidden_source.is_empty(),
+        "obsolete Extension/Hook bypass remains: {forbidden_source:#?}"
+    );
+
+    let kernel_source = production_rs_files(&crates.join("agl-kernel/src"));
+    let kernel_handle_leak = matches_in(kernel_source, &["ArtifactHandle"]);
+    assert!(
+        kernel_handle_leak.is_empty(),
+        "kernel public/runtime contracts import ArtifactHandle: {kernel_handle_leak:#?}"
+    );
+
+    let runtime_extension_source = production_rs_files(&crates.join("agl-runtime/src"));
+    let live_admin = matches_in(
+        runtime_extension_source,
+        &[
+            "fn install_extension",
+            "fn remove_extension",
+            "fn reload_extension",
+            "fn trust_extension",
+        ],
+    );
+    assert!(
+        live_admin.is_empty(),
+        "live Extension administration exists: {live_admin:#?}"
+    );
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "agl-package")
+        .unwrap();
+    let artifact = packages
+        .iter()
+        .find(|package| package["name"] == "agl-artifact")
+        .unwrap();
+    let kernel = packages
+        .iter()
+        .find(|package| package["name"] == "agl-kernel")
+        .unwrap();
+    let normal_dependencies = |package: &Value| {
+        package["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal")
+            .filter_map(|dependency| dependency["name"].as_str().map(str::to_owned))
+            .collect::<BTreeSet<_>>()
+    };
+    assert!(normal_dependencies(artifact).contains("agl-kernel"));
+    assert!(!normal_dependencies(kernel).contains("agl-artifact"));
+    assert!(!normal_dependencies(package).contains("agl-artifact"));
+
+    let artifact_source = production_rs_files(&crates.join("agl-artifact/src"));
+    let duplicate_package_owner = matches_in(
+        artifact_source,
+        &[
+            "pub struct PackageTreeDigest",
+            "pub struct ArtifactPackageView",
+            "pub use agl_package",
+        ],
+    );
+    assert!(
+        duplicate_package_owner.is_empty(),
+        "agl-artifact duplicates/re-exports agl-package: {duplicate_package_owner:#?}"
     );
 }
