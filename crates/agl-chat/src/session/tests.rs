@@ -1496,7 +1496,7 @@ title: Locked Function
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Original prompt.\n").unwrap();
     let paths = agl_runtime::AgentLibrePaths::from_agl_home(root.join("home"));
-    let reference: agl_artifact::ArtifactPackageRef = "function:locked@*".parse().unwrap();
+    let reference: agl_package::ArtifactPackageRef = "function:locked@*".parse().unwrap();
     let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
     let lock = composition
         .resolve_for_lock_refresh(&reference)
@@ -1532,7 +1532,7 @@ title: Locked Function
     };
     assert_eq!(
         error
-            .downcast_ref::<agl_artifact::ArtifactError>()
+            .downcast_ref::<agl_package::ArtifactError>()
             .unwrap()
             .code(),
         "digest_drift"
@@ -2440,7 +2440,7 @@ fn test_skill(
         id: SkillId::new(id).unwrap(),
         name: id.to_string(),
         description: format!("Test-only {id} skill."),
-        version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+        version: agl_package::ArtifactVersion::new("1.0.0").unwrap(),
         source: agl_skill::SkillSource::Core,
         pack: "test".to_string(),
         required_hooks: hook_ids(required_hooks),
@@ -2463,15 +2463,15 @@ fn test_skill(
     }
 }
 
-fn test_skill_artifact(id: &str) -> agl_artifact::ArtifactEnvelope {
-    agl_artifact::ArtifactEnvelope::new(
-        agl_artifact::ArtifactTypeId::skill(),
-        agl_artifact::ArtifactPackageId::new(id).unwrap(),
-        agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
-        agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
-        agl_artifact::AglCompatibility::new(
-            agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
-            [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+fn test_skill_artifact(id: &str) -> agl_package::ArtifactEnvelope {
+    agl_package::ArtifactEnvelope::new(
+        agl_package::ArtifactTypeId::skill(),
+        agl_package::ArtifactPackageId::new(id).unwrap(),
+        agl_package::ArtifactVersion::new("1.0.0").unwrap(),
+        agl_package::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+        agl_package::AglCompatibility::new(
+            agl_package::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+            [agl_package::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
         )
         .unwrap(),
         Vec::new(),

@@ -1,7 +1,7 @@
 #[path = "core/support.rs"]
 mod support;
 
-use agl_artifact::ExtensionArtifactManifest;
+use agl_package::ExtensionArtifactManifest;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::{ExecutionProbe, FactoryKey, ProductionRuntimeHarness, RegistrationFixture};

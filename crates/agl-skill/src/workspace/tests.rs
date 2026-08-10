@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use agl_artifact::{ArtifactLock, LockedWorkspaceComponent};
 use agl_kernel::{HookId, SkillId, ToolId};
+use agl_package::{ArtifactLock, LockedWorkspaceComponent};
 
 use super::*;
 use crate::SkillReferencePolicy;
@@ -91,14 +91,14 @@ fn component() -> ComponentStatus {
 
 fn harness() -> SkillHarness {
     SkillHarness {
-        artifact: agl_artifact::ArtifactEnvelope::new(
-            agl_artifact::ArtifactTypeId::skill(),
-            agl_artifact::ArtifactPackageId::new("repo-change").unwrap(),
-            agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
-            agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
-            agl_artifact::AglCompatibility::new(
-                agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
-                [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+        artifact: agl_package::ArtifactEnvelope::new(
+            agl_package::ArtifactTypeId::skill(),
+            agl_package::ArtifactPackageId::new("repo-change").unwrap(),
+            agl_package::ArtifactVersion::new("1.0.0").unwrap(),
+            agl_package::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+            agl_package::AglCompatibility::new(
+                agl_package::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+                [agl_package::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
             )
             .unwrap(),
             Vec::new(),
@@ -107,7 +107,7 @@ fn harness() -> SkillHarness {
         id: SkillId::new("repo-change").unwrap(),
         name: "repo-change".to_string(),
         description: "test skill".to_string(),
-        version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+        version: agl_package::ArtifactVersion::new("1.0.0").unwrap(),
         source: SkillSource::Local,
         pack: "agl".to_string(),
         required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],

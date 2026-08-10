@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str;
 
-use agl_artifact::{
+use agl_kernel::{EffectId, HookId, OperationKind, SkillId, ToolId};
+use agl_package::{
     ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
 };
-use agl_kernel::{EffectId, HookId, OperationKind, SkillId, ToolId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

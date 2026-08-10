@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactCandidate, ArtifactEntrypoint,
     ArtifactEnvelope, ArtifactError, ArtifactPackageRef, ArtifactPackageView, ArtifactResolver,
     ArtifactSource, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId,
@@ -117,9 +117,9 @@ struct ModelDocument {
     profiles: Vec<CatalogRuntimeProfile>,
 }
 
-pub fn model_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRegistry>, ArtifactError>
+pub fn model_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterRegistry>, ArtifactError>
 {
-    Ok(Arc::new(agl_artifact::ArtifactAdapterRegistry::new([
+    Ok(Arc::new(agl_package::ArtifactAdapterRegistry::new([
         ModelArtifactAdapter::default(),
     ])?))
 }
@@ -225,7 +225,7 @@ pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
 
 #[cfg(test)]
 mod tests {
-    use agl_artifact::{ArtifactPackageRef, ArtifactResolver};
+    use agl_package::{ArtifactPackageRef, ArtifactResolver};
 
     use super::*;
 

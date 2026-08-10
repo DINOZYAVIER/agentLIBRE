@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
     ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
     StaticArtifactSource,

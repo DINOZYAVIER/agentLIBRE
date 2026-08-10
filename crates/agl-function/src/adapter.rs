@@ -1,12 +1,12 @@
 #[cfg(test)]
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactEntrypoint, ArtifactEnvelope,
     ArtifactError, ArtifactPackageView, ArtifactTypeId, ErasedArtifactPayload,
 };
 #[cfg(test)]
-use agl_artifact::{
+use agl_package::{
     ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceKind,
     ArtifactSourceTier, DirectoryArtifactSource, InMemoryPackageView, StaticArtifactSource,
 };
@@ -49,7 +49,7 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
         &self,
         package: &dyn ArtifactPackageView,
     ) -> Result<ArtifactEnvelope, ArtifactError> {
-        let entrypoint: agl_artifact::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
+        let entrypoint: agl_package::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
             std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterEnvelope {
@@ -88,7 +88,7 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
                 reason: "FUNCTION.md envelope changed during validation".to_owned(),
             });
         }
-        let entrypoint: agl_artifact::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
+        let entrypoint: agl_package::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
             std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterPayload {
@@ -111,20 +111,20 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
 }
 
 #[cfg(test)]
-pub fn function_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRegistry>> {
+pub fn function_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterRegistry>> {
     let adapters: [Arc<dyn ArtifactAdapter>; 3] = [
         Arc::new(FunctionArtifactAdapter::default()),
         Arc::new(agl_model::ModelArtifactAdapter::default()),
-        Arc::new(agl_artifact::ExtensionArtifactAdapter::default()),
+        Arc::new(agl_package::ExtensionArtifactAdapter::default()),
     ];
-    Ok(Arc::new(agl_artifact::ArtifactAdapterRegistry::from_dyn(
+    Ok(Arc::new(agl_package::ArtifactAdapterRegistry::from_dyn(
         adapters,
     )?))
 }
 
 #[cfg(test)]
 pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id: agl_artifact::ArtifactSourceId = "builtin".parse()?;
+    let source_id: agl_package::ArtifactSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
     for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
         let files = package
@@ -155,10 +155,10 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
 
 #[cfg(test)]
 pub fn directory_function_source(
-    source_id: agl_artifact::ArtifactSourceId,
+    source_id: agl_package::ArtifactSourceId,
     tier: ArtifactSourceTier,
     root: impl Into<std::path::PathBuf>,
-    registry: Arc<agl_artifact::ArtifactAdapterRegistry>,
+    registry: Arc<agl_package::ArtifactAdapterRegistry>,
 ) -> Arc<dyn ArtifactSource> {
     Arc::new(DirectoryArtifactSource::new(
         source_id,
@@ -261,8 +261,8 @@ pub fn validate_function_model_contract(
 pub fn validate_resolved_function_model_contract(
     front_matter: &AgentFunctionFrontMatter,
     inference_config: Option<&str>,
-    graph: &agl_artifact::ResolvedArtifactGraph,
-    registry: &agl_artifact::ArtifactAdapterRegistry,
+    graph: &agl_package::ResolvedArtifactGraph,
+    registry: &agl_package::ArtifactAdapterRegistry,
 ) -> Result<()> {
     let model_requirements = front_matter
         .artifact

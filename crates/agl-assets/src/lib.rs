@@ -276,7 +276,7 @@ tool_call_format = "gemma_function_call"
     #[test]
     fn generated_package_digests_match_the_canonical_runtime_algorithm() {
         for package in BUILTIN_ARTIFACT_PACKAGES {
-            let view = agl_artifact::InMemoryPackageView::new(package.files.iter().map(|file| {
+            let view = agl_package::InMemoryPackageView::new(package.files.iter().map(|file| {
                 (
                     file.path.parse().expect("generated package path is valid"),
                     file.bytes.to_vec(),
@@ -285,7 +285,7 @@ tool_call_format = "gemma_function_call"
             .expect("generated package paths are unique");
             assert_eq!(
                 package.digest,
-                agl_artifact::compute_package_digest(&view)
+                agl_package::compute_package_digest(&view)
                     .expect("generated package is canonical")
                     .as_str(),
                 "{}:{}@{}",

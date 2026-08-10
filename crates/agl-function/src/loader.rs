@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use agl_artifact::{
+use agl_package::{
     ArtifactCandidate, ArtifactPackageView, ArtifactRelativePath, ArtifactSourceKind,
     ArtifactSourceTier,
 };

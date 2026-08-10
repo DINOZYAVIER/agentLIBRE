@@ -154,7 +154,7 @@ fn builtin_function_rejects_missing_model_dependency() {
     let (mut front_matter, _) =
         parse_function_document(std::str::from_utf8(manifest.bytes).unwrap()).unwrap();
     front_matter.artifact.requires =
-        vec![agl_artifact::ArtifactRequirement::parse("model:missing@^1.0").unwrap()];
+        vec![agl_package::ArtifactRequirement::parse("model:missing@^1.0").unwrap()];
     let inference = function
         .files
         .iter()

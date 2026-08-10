@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_package::{
     ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactCandidate, ArtifactEntrypoint,
     ArtifactEnvelope, ArtifactError, ArtifactPackageView, ArtifactSource, ArtifactSourceKind,
     ArtifactSourceTier, ArtifactTypeId, DirectoryArtifactSource, ErasedArtifactPayload,
@@ -112,14 +112,14 @@ pub fn parse_skill_envelope(content: &str) -> Result<ArtifactEnvelope> {
     Ok(document.artifact)
 }
 
-pub fn skill_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRegistry>> {
-    Ok(Arc::new(agl_artifact::ArtifactAdapterRegistry::new([
+pub fn skill_adapter_registry() -> Result<Arc<agl_package::ArtifactAdapterRegistry>> {
+    Ok(Arc::new(agl_package::ArtifactAdapterRegistry::new([
         SkillArtifactAdapter::default(),
     ])?))
 }
 
 pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id: agl_artifact::ArtifactSourceId = "builtin".parse()?;
+    let source_id: agl_package::ArtifactSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
     for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES
         .iter()
@@ -152,10 +152,10 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
 }
 
 pub fn directory_skill_source(
-    source_id: agl_artifact::ArtifactSourceId,
+    source_id: agl_package::ArtifactSourceId,
     tier: ArtifactSourceTier,
     root: impl Into<std::path::PathBuf>,
-    registry: Arc<agl_artifact::ArtifactAdapterRegistry>,
+    registry: Arc<agl_package::ArtifactAdapterRegistry>,
 ) -> Arc<dyn ArtifactSource> {
     Arc::new(DirectoryArtifactSource::new(
         source_id,

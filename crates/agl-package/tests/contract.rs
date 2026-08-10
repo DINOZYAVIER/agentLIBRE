@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_package::{
     AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactAdapterRegistry,
     ArtifactCandidate, ArtifactConfigLayer, ArtifactDataClass, ArtifactEnvelope, ArtifactError,
     ArtifactLock, ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
@@ -210,7 +210,7 @@ fn adapter_descriptor_rejects_path_like_values() {
         Err(ArtifactError::InvalidAdapterRoot { .. })
     ));
     assert!(matches!(
-        "/nested/FUNCTION.md".parse::<agl_artifact::ArtifactEntrypoint>(),
+        "/nested/FUNCTION.md".parse::<agl_package::ArtifactEntrypoint>(),
         Err(ArtifactError::InvalidAdapterEntrypoint { .. })
     ));
 }
@@ -590,8 +590,8 @@ fn package_digest_matches_golden_vector_and_is_order_independent() {
         ("b.txt".parse().unwrap(), b"B".to_vec()),
     ])
     .unwrap();
-    let left = agl_artifact::compute_package_digest(&first).unwrap();
-    let right = agl_artifact::compute_package_digest(&second).unwrap();
+    let left = agl_package::compute_package_digest(&first).unwrap();
+    let right = agl_package::compute_package_digest(&second).unwrap();
     assert_eq!(left, right);
     assert_eq!(
         left.to_string(),
@@ -603,7 +603,7 @@ fn package_digest_matches_golden_vector_and_is_order_independent() {
     )])
     .unwrap();
     assert!(matches!(
-        agl_artifact::compute_package_digest(&forbidden),
+        agl_package::compute_package_digest(&forbidden),
         Err(ArtifactError::ReservedPackageFile { .. })
     ));
 }
@@ -1052,7 +1052,7 @@ fn workspace_v2_round_trips_and_rejects_v1_or_package_metadata() {
                 commit: None,
                 tree: None,
                 required: true,
-                access: agl_artifact::ArtifactAccess::ReadWrite,
+                access: agl_package::ArtifactAccess::ReadWrite,
                 validation: Some("agl.task_spec.v1".to_owned()),
                 create: Vec::new(),
             },
@@ -1152,7 +1152,7 @@ fn envelope_for(type_name: &str, id: &str, version: &str, requires: &[&str]) -> 
 }
 
 fn temp_dir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("agl-artifact-{label}-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("agl-package-{label}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     path

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use agl_artifact::{
-    ArtifactEnvelope, EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
-};
 pub use agl_kernel::FunctionToolPolicy;
 use agl_kernel::{ExtensionId, ToolId};
+use agl_package::{
+    ArtifactEnvelope, EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 

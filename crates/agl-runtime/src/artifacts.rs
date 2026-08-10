@@ -3,15 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agl_artifact::{
+use agl_function::FunctionArtifactAdapter;
+use agl_model::{ModelArtifactAdapter, ModelPackage, ModelPackageProvenance};
+use agl_package::{
     ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactLock, ArtifactPackageRef,
     ArtifactPathRouter, ArtifactResolver, ArtifactSource, ArtifactSourceId, ArtifactSourceKind,
     ArtifactSourceTier, ArtifactTypeId, DirectoryArtifactSource, DirectoryPackageView,
     ExtensionArtifactAdapter, ExtensionArtifactManifest, InMemoryPackageView, PackageTreeDigest,
     ResolvedArtifact, ResolvedArtifactGraph, StaticArtifactSource, WorkspaceManifest,
 };
-use agl_function::FunctionArtifactAdapter;
-use agl_model::{ModelArtifactAdapter, ModelPackage, ModelPackageProvenance};
 use agl_skill::{SkillArtifactAdapter, SkillHarness, SkillSource};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -166,7 +166,7 @@ impl ArtifactComposition {
         let envelope = adapter.extract_envelope(view.as_ref())?;
         envelope.validate()?;
         if envelope.type_id != type_id {
-            return Err(agl_artifact::ArtifactError::AdapterTypeMismatch {
+            return Err(agl_package::ArtifactError::AdapterTypeMismatch {
                 type_id: type_id.to_string(),
                 actual_type: envelope.type_id.to_string(),
             }
@@ -722,7 +722,7 @@ fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
             .files
             .iter()
             .map(|file| {
-                Ok::<_, agl_artifact::ArtifactError>((file.path.parse()?, file.bytes.to_vec()))
+                Ok::<_, agl_package::ArtifactError>((file.path.parse()?, file.bytes.to_vec()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         candidates.push(
@@ -749,7 +749,7 @@ fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agl_artifact::ArtifactTypeId;
+    use agl_package::ArtifactTypeId;
 
     fn write_test_function(root: &Path, id: &str) {
         let package = root.join("functions").join(id);
@@ -835,7 +835,7 @@ title: Test Function
         let error = resolve_composed_artifacts(&paths, &workspace, &root).unwrap_err();
         assert_eq!(
             error
-                .downcast_ref::<agl_artifact::ArtifactError>()
+                .downcast_ref::<agl_package::ArtifactError>()
                 .unwrap()
                 .code(),
             "digest_drift"
@@ -921,7 +921,7 @@ title: Broken
         let error = composition.resolve(&reference).unwrap_err();
         assert_eq!(
             error
-                .downcast_ref::<agl_artifact::ArtifactError>()
+                .downcast_ref::<agl_package::ArtifactError>()
                 .unwrap()
                 .code(),
             "invalid_envelope"
@@ -1237,7 +1237,7 @@ expected_speed = "fixture"
         };
         assert_eq!(
             error
-                .downcast_ref::<agl_artifact::ArtifactError>()
+                .downcast_ref::<agl_package::ArtifactError>()
                 .unwrap()
                 .code(),
             "lock_stale"

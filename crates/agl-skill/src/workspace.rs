@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_artifact::{
+use agl_kernel::{SkillId, ToolId};
+use agl_package::{
     ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
     ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
     StaticArtifactSource,
 };
-use agl_kernel::{SkillId, ToolId};
 use agl_repo::{
     ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceComponentKind,
     status_repo_workspace,

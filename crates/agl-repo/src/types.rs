@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use agl_artifact::{
+pub use agl_package::{
     ArtifactAccess, ArtifactDataClass, ArtifactLock, LockedWorkspaceComponent, WorkspaceComponent,
     WorkspaceComponentKind,
 };
@@ -454,7 +454,7 @@ pub struct RepoManifest {
     pub profile: String,
     pub functions: WorkspaceFunctions,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sources: BTreeMap<String, agl_artifact::ArtifactSourceDeclaration>,
+    pub sources: BTreeMap<String, agl_package::ArtifactSourceDeclaration>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifacts: BTreeMap<String, WorkspaceComponent>,
 }

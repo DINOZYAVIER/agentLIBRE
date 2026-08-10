@@ -7,10 +7,10 @@ repository.workspace = true
 build = "build.rs"
 
 [dependencies]
-agl-artifact.workspace = true
+agl-package.workspace = true
 
 [build-dependencies]
-agl-artifact.workspace = true
+agl-package.workspace = true
 agl-config.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
