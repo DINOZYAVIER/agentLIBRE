@@ -13,7 +13,6 @@ use crate::manifest::{
 use crate::subagent::{
     SubagentFrontMatter, load_declared_subagents, load_declared_subagents_from_view,
 };
-use crate::validation::validate_relative_function_file_path;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MarkdownSection {
     pub title: String,
@@ -27,8 +26,6 @@ pub struct LoadedFunction {
     pub system_prompt_path: PathBuf,
     pub system_prompt: String,
     pub system_prompt_sections: Vec<MarkdownSection>,
-    pub inference_config_path: Option<PathBuf>,
-    pub inference_config_toml: Option<String>,
     pub subagents: Vec<LoadedSubagent>,
 }
 
@@ -82,16 +79,12 @@ pub(crate) fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFu
     let (system_prompt_path, system_prompt) =
         load_function_system_prompt(&locator.root_dir, builtin)?;
     let system_prompt_sections = markdown_sections(&system_prompt);
-    let (inference_config_path, inference_config_toml) =
-        load_function_inference_config(&locator.root_dir, &front_matter, builtin)?;
     Ok(LoadedFunction {
         locator,
         front_matter,
         system_prompt_path,
         system_prompt,
         system_prompt_sections,
-        inference_config_path,
-        inference_config_toml,
         subagents,
     })
 }
@@ -135,13 +128,6 @@ pub fn load_function_candidate(candidate: &PackageCandidate) -> Result<LoadedFun
         "function system prompt cannot be empty"
     );
     let system_prompt_path = root_dir.join(FUNCTION_SYSTEM_PROMPT_FILE_NAME);
-    let inference_config_toml = front_matter
-        .model_config_path()
-        .map(|path| read_package_text(candidate.view(), path))
-        .transpose()?;
-    let inference_config_path = front_matter
-        .model_config_path()
-        .map(|path| root_dir.join(path));
     let subagents = load_declared_subagents_from_view(candidate.view(), &root_dir, &front_matter)?;
     Ok(LoadedFunction {
         locator,
@@ -149,8 +135,6 @@ pub fn load_function_candidate(candidate: &PackageCandidate) -> Result<LoadedFun
         system_prompt_sections: markdown_sections(&system_prompt),
         system_prompt,
         system_prompt_path,
-        inference_config_path,
-        inference_config_toml,
         subagents,
     })
 }
@@ -200,61 +184,6 @@ pub(crate) fn load_function_system_prompt(
     Ok((path, content))
 }
 
-pub(crate) fn load_function_inference_config(
-    function_root: &Path,
-    front_matter: &AgentFunctionFrontMatter,
-    builtin: Option<&'static agl_assets::BuiltinPackage>,
-) -> Result<(Option<PathBuf>, Option<String>)> {
-    let Some(relative) = front_matter.model_config_path() else {
-        return Ok((None, None));
-    };
-    if let Some(function) = builtin {
-        ensure!(
-            relative == "inference.toml",
-            "builtin function `{}` can only load model.config: inference.toml",
-            function.id
-        );
-        let file = function_file(function, relative)?;
-        let content = std::str::from_utf8(file.bytes).with_context(|| {
-            format!(
-                "builtin function `{}` inference config is not UTF-8",
-                function.id
-            )
-        })?;
-        ensure!(
-            !content.trim().is_empty(),
-            "function inference config cannot be empty: {}",
-            file.path
-        );
-        return Ok((
-            Some(PathBuf::from(format!(
-                "builtin:function/{}/{}",
-                function.id, file.path
-            ))),
-            Some(content.to_string()),
-        ));
-    }
-
-    let path = resolve_function_relative_path(function_root, relative)?;
-    ensure!(
-        path.is_file(),
-        "function inference config file not found: {}",
-        path.display()
-    );
-    let content = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "failed to read function inference config {}",
-            path.display()
-        )
-    })?;
-    ensure!(
-        !content.trim().is_empty(),
-        "function inference config cannot be empty: {}",
-        path.display()
-    );
-    Ok((Some(path), Some(content)))
-}
-
 pub(crate) fn resolve_builtin_package(
     reference: &str,
 ) -> Result<&'static agl_assets::BuiltinPackage> {
@@ -277,7 +206,7 @@ pub(crate) fn resolve_function_relative_path(
     function_root: &Path,
     relative: &str,
 ) -> Result<PathBuf> {
-    validate_relative_function_file_path("function file path", relative)?;
+    crate::validation::validate_relative_function_file_path("function file path", relative)?;
     let path = function_root.join(relative);
     ensure!(
         path.starts_with(function_root),

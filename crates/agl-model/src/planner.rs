@@ -265,7 +265,7 @@ impl RuntimePlanner {
             .find(|profile| profile.id == cpu_plan.profile_id)
             .context("CPU fallback profile disappeared from catalog")?;
         let measured_fit = host.detected_total_memory_bytes >= cpu_profile.required_total_ram_bytes
-            && host.available_memory_bytes >= cpu_profile.required_available_ram_bytes;
+            && host.available_memory_bytes >= cpu_profile.host_private_bytes;
         Ok(CpuFallbackOffer {
             gpu_failure: gpu_failure.into(),
             memory_fit: if measured_fit {
@@ -325,7 +325,7 @@ impl RuntimePlanner {
                 kind: ModelFitKind::Fits,
                 reason: if allow_low_memory
                     && (host.detected_total_memory_bytes < profile.required_total_ram_bytes
-                        || host.available_memory_bytes < profile.required_available_ram_bytes)
+                        || host.available_memory_bytes < profile.host_private_bytes)
                 {
                     format!(
                         "best-effort low-memory override selects benchmarked GPU profile for {}",
@@ -350,7 +350,7 @@ impl RuntimePlanner {
                 kind,
                 reason: if allow_low_memory
                     && (host.detected_total_memory_bytes < profile.required_total_ram_bytes
-                        || host.available_memory_bytes < profile.required_available_ram_bytes)
+                        || host.available_memory_bytes < profile.host_private_bytes)
                 {
                     "best-effort low-memory override selects a benchmarked CPU profile despite RAM gates"
                         .to_string()
@@ -575,15 +575,15 @@ fn select_gpu_profile<'a>(
                     LlamaDeviceKind::DiscreteGpu | LlamaDeviceKind::IntegratedGpu
                 )
         }) {
-            let vram_fits = device.free_memory_bytes >= profile.required_vram_bytes;
+            let vram_fits = device.free_memory_bytes >= profile.device_private_bytes;
             let ram_fits = host.detected_total_memory_bytes >= profile.required_total_ram_bytes
-                && host.available_memory_bytes >= profile.required_available_ram_bytes;
+                && host.available_memory_bytes >= profile.host_private_bytes;
             let unified_safe = device.kind != LlamaDeviceKind::IntegratedGpu
                 || host.available_memory_bytes
                     >= profile
-                        .required_available_ram_bytes
-                        .saturating_add(profile.required_vram_bytes);
-            let physical_capacity_fits = device.total_memory_bytes >= profile.required_vram_bytes;
+                        .host_private_bytes
+                        .saturating_add(profile.device_private_bytes);
+            let physical_capacity_fits = device.total_memory_bytes >= profile.device_private_bytes;
             if physical_capacity_fits
                 && (!enforce_dynamic_fit
                     || (vram_fits && (allow_low_memory || ram_fits) && unified_safe))
@@ -617,7 +617,7 @@ fn select_cpu_profile<'a>(
         .find(|profile| {
             allow_low_memory
                 || (host.detected_total_memory_bytes >= profile.required_total_ram_bytes
-                    && host.available_memory_bytes >= profile.required_available_ram_bytes)
+                    && host.available_memory_bytes >= profile.host_private_bytes)
         })
 }
 
@@ -665,7 +665,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        CatalogCapability, ModelArtifact, ModelArtifactRole, ModelPackageId, ModelPackageProvenance,
+        CatalogCapability, ModelArtifact, ModelArtifactFile, ModelArtifactRole, ModelPackageId,
+        ModelPackageProvenance,
     };
 
     fn package() -> ModelPackage {
@@ -690,9 +691,11 @@ mod tests {
             artifacts: vec![ModelArtifact {
                 role: ModelArtifactRole::Main,
                 model_id: agl_config::ModelId::new("gemma4-e4b").unwrap(),
-                filename: "model.gguf".to_string(),
-                byte_size: 4_000_000_000,
-                sha256: "b".repeat(64),
+                files: vec![ModelArtifactFile {
+                    filename: "model.gguf".to_string(),
+                    byte_size: 4_000_000_000,
+                    sha256: "b".repeat(64),
+                }],
                 required: true,
             }],
             profiles: vec![CatalogRuntimeProfile {
@@ -702,13 +705,21 @@ mod tests {
                 pci_subsystem_id: None,
                 benchmark_evidence: "fixture".to_string(),
                 required_total_ram_bytes: 7_000_000_000,
-                required_available_ram_bytes: 4_000_000_000,
-                required_vram_bytes: 0,
+                host_private_bytes: 4_000_000_000,
+                device_private_bytes: 0,
+                shared_bytes: 0,
+                decoder_scratch_bytes: 0,
                 gpu_layers: 0,
                 context_tokens: 32768,
                 batch_size: 256,
                 ubatch_size: 128,
                 threads: 4,
+                flash_attention: true,
+                cache_type_k: KvCacheType::Q8_0,
+                cache_type_v: KvCacheType::Q8_0,
+                mmap: true,
+                unified_kv: false,
+                slot_count: 1,
                 smoke_timeout_seconds: 300,
                 expected_speed: "slow".to_string(),
             }],
@@ -726,13 +737,21 @@ mod tests {
                 pci_subsystem_id: Some("1da2:471e".to_string()),
                 benchmark_evidence: "fixture".to_string(),
                 required_total_ram_bytes: 8_000_000_000,
-                required_available_ram_bytes: 5_000_000_000,
-                required_vram_bytes: 4_000_000_000,
+                host_private_bytes: 5_000_000_000,
+                device_private_bytes: 4_000_000_000,
+                shared_bytes: 0,
+                decoder_scratch_bytes: 0,
                 gpu_layers: 43,
                 context_tokens: 32768,
                 batch_size: 256,
                 ubatch_size: 128,
                 threads: 4,
+                flash_attention: true,
+                cache_type_k: KvCacheType::Q8_0,
+                cache_type_v: KvCacheType::Q8_0,
+                mmap: true,
+                unified_kv: false,
+                slot_count: 1,
                 smoke_timeout_seconds: 120,
                 expected_speed: "fast".to_string(),
             },

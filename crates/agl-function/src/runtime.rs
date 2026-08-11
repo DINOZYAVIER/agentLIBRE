@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::Serialize;
 
 use agl_package::{PackageAdapterRegistry, PackageCandidate, ResolvedPackageGraph};
@@ -9,9 +9,9 @@ use agl_package::{PackageAdapterRegistry, PackageCandidate, ResolvedPackageGraph
 #[cfg(test)]
 use crate::loader::load_function;
 use crate::loader::{LoadedFunction, load_function_candidate};
+use crate::locator::FunctionPackageSource;
 #[cfg(test)]
 use crate::locator::resolve_function_package;
-use crate::locator::{FunctionPackageSource, resolve_profile};
 use crate::manifest::{
     FunctionDelegationBudget, FunctionToolMode, FunctionToolPolicy, RuntimeIdentityValidation,
 };
@@ -19,7 +19,6 @@ use crate::render::render_function_context;
 use crate::subagent::{
     RuntimeDelegationPlan, RuntimeSubagent, RuntimeSubagentSpec, resolve_runtime_subagent_specs,
 };
-use crate::validation::join_paths;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RuntimeFunction {
     pub reference: String,
@@ -29,9 +28,7 @@ pub struct RuntimeFunction {
     pub title: String,
     pub description: Option<String>,
     pub model_profile: Option<String>,
-    pub profile_path: Option<PathBuf>,
-    pub inference_config_path: Option<PathBuf>,
-    pub inference_config_toml: Option<String>,
+    pub generation_policy: Option<agl_model::GenerationPolicy>,
     pub tool_mode: Option<FunctionToolMode>,
     pub tool_policy: Option<FunctionToolPolicy>,
     pub max_output_tokens: Option<u32>,
@@ -90,32 +87,13 @@ pub(crate) fn resolve_runtime_function_with_profile_policy(
 ) -> Result<RuntimeFunction> {
     let locator = resolve_function_package(reference, &workspace_root, &config_dir)?;
     let loaded = load_function(locator)?;
-    let profile_path = if let Some(profile) = loaded.front_matter.model_profile() {
-        let resolution = resolve_profile(profile, &workspace_root, &config_dir)?;
-        match resolution.selected_path {
-            Some(path) => Some(path),
-            None if require_profile => {
-                bail!(
-                    "inference profile `{profile}` not found; checked {}",
-                    join_paths(&resolution.candidates)
-                );
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
     let subagent_specs = resolve_runtime_subagent_specs(
         &loaded,
         workspace_root.as_ref(),
         config_dir.as_ref(),
         require_profile,
     )?;
-    Ok(runtime_function_from_loaded(
-        loaded,
-        profile_path,
-        subagent_specs,
-    ))
+    Ok(runtime_function_from_loaded(loaded, subagent_specs))
 }
 
 pub fn runtime_function_from_candidate(
@@ -145,12 +123,7 @@ pub fn runtime_function_from_resolved_graph(
         .get(&graph.root)
         .ok_or_else(|| anyhow::anyhow!("resolved Function graph has no root candidate"))?;
     let loaded = load_function_candidate(&root.candidate)?;
-    crate::validate_resolved_function_model_contract(
-        &loaded.front_matter,
-        loaded.inference_config_toml.as_deref(),
-        graph,
-        registry,
-    )?;
+    crate::validate_resolved_function_model_contract(&loaded.front_matter, None, graph, registry)?;
     runtime_function_from_loaded_with_profile_policy(
         loaded,
         workspace_root,
@@ -165,37 +138,17 @@ fn runtime_function_from_loaded_with_profile_policy(
     config_dir: impl AsRef<Path>,
     require_profile: bool,
 ) -> Result<RuntimeFunction> {
-    let profile_path = if let Some(profile) = loaded.front_matter.model_profile() {
-        let resolution = resolve_profile(profile, &workspace_root, &config_dir)?;
-        match resolution.selected_path {
-            Some(path) => Some(path),
-            None if require_profile => {
-                bail!(
-                    "inference profile `{profile}` not found; checked {}",
-                    join_paths(&resolution.candidates)
-                );
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
     let subagent_specs = resolve_runtime_subagent_specs(
         &loaded,
         workspace_root.as_ref(),
         config_dir.as_ref(),
         require_profile,
     )?;
-    Ok(runtime_function_from_loaded(
-        loaded,
-        profile_path,
-        subagent_specs,
-    ))
+    Ok(runtime_function_from_loaded(loaded, subagent_specs))
 }
 
 pub(crate) fn runtime_function_from_loaded(
     loaded: LoadedFunction,
-    profile_path: Option<PathBuf>,
     subagent_specs: BTreeMap<String, RuntimeSubagentSpec>,
 ) -> RuntimeFunction {
     let selected_subagents = loaded.front_matter.selected_subagents().to_vec();
@@ -207,12 +160,15 @@ pub(crate) fn runtime_function_from_loaded(
         title: loaded.front_matter.title.clone(),
         description: loaded.front_matter.description.clone(),
         model_profile: loaded.front_matter.model_profile().map(str::to_string),
-        profile_path: profile_path.clone(),
-        inference_config_path: loaded
-            .inference_config_path
-            .clone()
-            .or_else(|| profile_path.clone()),
-        inference_config_toml: loaded.inference_config_toml.clone(),
+        generation_policy: loaded.front_matter.runtime.as_ref().map(|runtime| {
+            agl_model::GenerationPolicy::greedy(
+                runtime.max_output_tokens.unwrap_or(256),
+                runtime.stop_rules.clone(),
+                runtime.structured_generation,
+                runtime.repair_malformed_tool_calls,
+            )
+            .expect("validated Function runtime must produce a generation policy")
+        }),
         tool_mode: loaded.front_matter.runtime_tool_mode(),
         tool_policy: loaded.front_matter.tool_policy(),
         max_output_tokens: loaded.front_matter.runtime_max_output_tokens(),

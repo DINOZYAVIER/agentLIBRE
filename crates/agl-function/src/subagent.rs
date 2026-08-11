@@ -7,14 +7,13 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::loader::{LoadedFunction, LoadedSubagent, markdown_sections, parse_subagent_document};
-use crate::locator::{FunctionPackageSource, resolve_profile};
+use crate::locator::FunctionPackageSource;
 use crate::manifest::{
     AgentFunctionFrontMatter, FunctionDelegationBudget, FunctionMemory, FunctionToolMode,
     FunctionToolPolicy, SUBAGENT_SCHEMA, SelectionBlock,
 };
 use crate::validation::{
-    join_paths, sha256_bytes, sha256_text, validate_extensions, validate_function_id,
-    validate_unique_non_empty,
+    sha256_text, validate_extensions, validate_function_id, validate_unique_non_empty,
 };
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentFrontMatter {
@@ -180,8 +179,6 @@ pub struct RuntimeSubagent {
 pub struct RuntimeSubagentModel {
     pub inherit: bool,
     pub profile: Option<String>,
-    pub profile_path: Option<PathBuf>,
-    pub profile_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -221,51 +218,26 @@ pub struct RuntimeDelegationPlan {
 
 pub(crate) fn resolve_runtime_subagent_specs(
     loaded: &LoadedFunction,
-    workspace_root: &Path,
-    config_dir: &Path,
-    require_profile: bool,
+    _workspace_root: &Path,
+    _config_dir: &Path,
+    _require_profile: bool,
 ) -> Result<BTreeMap<String, RuntimeSubagentSpec>> {
     loaded
         .subagents
         .iter()
         .map(|subagent| {
-            let (profile_path, profile_digest) =
-                if let Some(profile) = &subagent.front_matter.model.profile {
-                    let resolution = resolve_profile(profile, workspace_root, config_dir)?;
-                    let selected = match resolution.selected_path {
-                        Some(path) => Some(path),
-                        None if require_profile => {
-                            bail!(
-                                "subagent `{}` inference profile `{profile}` not found; checked {}",
-                                subagent.front_matter.id,
-                                join_paths(&resolution.candidates)
-                            );
-                        }
-                        None => None,
-                    };
-                    let digest = selected
-                        .as_ref()
-                        .filter(|path| path.is_file())
-                        .map(std::fs::read)
-                        .transpose()
-                        .with_context(|| {
-                            format!(
-                                "failed to read subagent profile for `{}`",
-                                subagent.front_matter.id
-                            )
-                        })?
-                        .map(|bytes| sha256_bytes(&bytes));
-                    (selected, digest)
-                } else {
-                    (None, None)
-                };
             let normalized = serde_yaml::to_string(&subagent.front_matter)
                 .context("failed to normalize subagent specification")?;
             let spec_digest = sha256_text(&format!(
                 "{}\0{}\0{}",
                 subagent.source_digest,
                 normalized,
-                profile_digest.as_deref().unwrap_or("inherit")
+                subagent
+                    .front_matter
+                    .model
+                    .profile
+                    .as_deref()
+                    .unwrap_or("inherit")
             ));
             let memory =
                 subagent
@@ -285,8 +257,6 @@ pub(crate) fn resolve_runtime_subagent_specs(
                     model: RuntimeSubagentModel {
                         inherit: subagent.front_matter.model.inherit,
                         profile: subagent.front_matter.model.profile.clone(),
-                        profile_path,
-                        profile_digest,
                     },
                     tool_mode: subagent.front_matter.tools.mode,
                     tool_policy: subagent.front_matter.tools.to_runtime_policy(),

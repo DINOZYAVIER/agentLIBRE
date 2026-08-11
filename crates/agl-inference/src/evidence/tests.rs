@@ -5,7 +5,11 @@ use agl_events::{SafeRuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use serde_json::json;
 
-use crate::{InferenceAttemptMachine, InferenceAttemptTransition};
+use crate::{
+    InferenceAdmissionEvidence, InferenceAttemptMachine, InferenceAttemptOutcome,
+    InferenceAttemptTransition, InferenceContentEvidence, InferenceDispatchEvidence,
+    InferencePlanEvidence, InferenceRuntimeEvidence,
+};
 
 use super::*;
 
@@ -136,11 +140,9 @@ fn observation_events_preserve_full_request_correlation() {
             path: paths.request_json().to_path_buf(),
         },
     );
-    append_transition(
-        &writer,
-        &mut machine,
-        InferenceAttemptTransition::StartRuntime,
-    );
+    for transition in test_live_start_transitions() {
+        append_transition(&writer, &mut machine, transition);
+    }
     append_transition(
         &writer,
         &mut machine,
@@ -159,7 +161,7 @@ fn observation_events_preserve_full_request_correlation() {
         &writer,
         &mut machine,
         InferenceAttemptTransition::FinishAttempt {
-            status: InferenceFinishStatus::Succeeded,
+            outcome: InferenceAttemptOutcome::Succeeded,
         },
     );
 
@@ -195,6 +197,41 @@ fn observation_events_preserve_full_request_correlation() {
     ));
 
     std::fs::remove_dir_all(root_path).unwrap();
+}
+
+fn test_live_start_transitions() -> [InferenceAttemptTransition; 5] {
+    [
+        InferenceAttemptTransition::RecordPlan {
+            plan: InferencePlanEvidence {
+                plan_digest: "plan".to_owned(),
+                package_refs: vec!["function@1".to_owned(), "model@1".to_owned()],
+                profile_id: "cpu".to_owned(),
+            },
+        },
+        InferenceAttemptTransition::RecordContentReady {
+            content: InferenceContentEvidence {
+                content_digest: "content".to_owned(),
+                resolved_bytes: 0,
+            },
+        },
+        InferenceAttemptTransition::RecordAdmissionGrant {
+            admission: InferenceAdmissionEvidence {
+                reservation_id: "reservation".to_owned(),
+                resource_components: Vec::new(),
+            },
+        },
+        InferenceAttemptTransition::RecordDispatch {
+            dispatch: InferenceDispatchEvidence {
+                descriptor_set_id: "descriptors".to_owned(),
+                engine_generation: "generation".to_owned(),
+            },
+        },
+        InferenceAttemptTransition::RecordRuntimeStarted {
+            runtime: InferenceRuntimeEvidence {
+                allocation_receipt_id: "receipt".to_owned(),
+            },
+        },
+    ]
 }
 
 #[test]

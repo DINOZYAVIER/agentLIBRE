@@ -1,9 +1,7 @@
-use std::path::Path;
-
 use crate::loader::parse_function_document;
 use crate::*;
 #[test]
-fn resolves_builtin_gemma4_function_with_embedded_config() {
+fn resolves_builtin_gemma4_function_with_typed_policy() {
     let root = std::env::temp_dir().join(format!(
         "agl-function-builtin-gemma4-{}",
         std::process::id()
@@ -19,23 +17,18 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     let loaded = load_function(locator).unwrap();
     assert_eq!(loaded.front_matter.id(), "gemma4-12b");
     assert_eq!(
-        loaded.inference_config_path.as_deref(),
-        Some(Path::new("builtin:function/gemma4-12b/inference.toml"))
-    );
-    assert!(
-        loaded
-            .inference_config_toml
-            .as_deref()
-            .unwrap()
-            .contains("tool_call_format = \"gemma_function_call\"")
+        loaded.front_matter.model_profile(),
+        Some("gpu-rx7900xtx-65536")
     );
 
     let runtime = resolve_runtime_function("gemma4-12b", &workspace, &config).unwrap();
     assert_eq!(runtime.source, FunctionPackageSource::Builtin);
-    assert_eq!(runtime.model_profile, None);
-    assert_eq!(runtime.profile_path, None);
+    assert_eq!(
+        runtime.model_profile.as_deref(),
+        Some("gpu-rx7900xtx-65536")
+    );
     assert_eq!(runtime.max_output_tokens, Some(512));
-    assert!(runtime.inference_config_toml.is_some());
+    assert_eq!(runtime.generation_policy.unwrap().max_output_tokens(), 512);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -69,16 +62,18 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
             .use_
             .is_empty()
     );
-    let inference = loaded.inference_config_toml.as_deref().unwrap();
-    assert!(inference.contains("model_id = \"gemma4-e2b\""));
-    assert!(!inference.contains("multimodal_projector_id"));
-    assert!(!inference.contains("[runtime.mtp]"));
+    assert_eq!(
+        loaded.front_matter.model_profile(),
+        Some("gpu-rx7900xtx-32768")
+    );
 
     let runtime = resolve_runtime_function("gemma4-e2b", &workspace, &config).unwrap();
     assert_eq!(runtime.source, FunctionPackageSource::Builtin);
-    assert_eq!(runtime.model_profile, None);
-    assert_eq!(runtime.profile_path, None);
-    assert!(runtime.inference_config_toml.is_some());
+    assert_eq!(
+        runtime.model_profile.as_deref(),
+        Some("gpu-rx7900xtx-32768")
+    );
+    assert!(runtime.generation_policy.is_some());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -103,9 +98,14 @@ fn builtin_gemma4_31b_profiles_are_explicit_and_keep_extended_turn_limits() {
                 .context
                 .contains("its receipt status is `committed`")
         );
-        let inference = runtime.inference_config_toml.as_deref().unwrap();
-        assert!(inference.contains(&format!("max_context_tokens = {context_tokens}")));
-        assert!(inference.contains("device = \"vulkan0\""));
+        assert_eq!(
+            runtime.model_profile.as_deref(),
+            Some(if context_tokens == 32_768 {
+                "gpu-rx7900xtx-32768"
+            } else {
+                "gpu-rx7900xtx-65536"
+            })
+        );
     }
     assert!(resolve_runtime_function("gemma4-31b", &workspace, &config).is_err());
 
@@ -162,7 +162,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -200,7 +200,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -234,7 +234,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]

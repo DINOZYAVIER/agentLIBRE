@@ -89,7 +89,7 @@ fn resolver_source_and_lock_are_owned_by_agl_package() {
     let package = view(&[
         (
             "artifact.json",
-            br#"{"schema":"agentlibre.package/v1","type":"function","id":"example/echo","version":"1.0.0","payload_schema":"agentlibre.function/v2","agl":{"compatible":"^1","tested":["1.0.0"]},"requires":[]}"#,
+            br#"{"schema":"agentlibre.package/v1","type":"function","id":"example/echo","version":"1.0.0","payload_schema":"agentlibre.function/v3","agl":{"compatible":"^1","tested":["1.0.0"]},"requires":[]}"#,
         ),
         ("FUNCTION.md", b"fixture"),
     ]);

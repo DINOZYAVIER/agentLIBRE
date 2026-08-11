@@ -2886,7 +2886,7 @@ mod tests {
             PackageTypeId::function(),
             "example".parse().unwrap(),
             version("1.0.0"),
-            "agentlibre.function/v2".parse().unwrap(),
+            "agentlibre.function/v3".parse().unwrap(),
             agl,
             vec![
                 requirement("skill:workflow@^1"),

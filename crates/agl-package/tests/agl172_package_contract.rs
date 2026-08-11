@@ -53,7 +53,7 @@ fn envelope(id: &str, version: &str) -> Vec<u8> {
         "type": "function",
         "id": id,
         "version": version,
-        "payload_schema": "agentlibre.function/v2",
+        "payload_schema": "agentlibre.function/v3",
         "agl": {"compatible": "^1", "tested": ["1.0.0"]},
         "requires": []
     }))

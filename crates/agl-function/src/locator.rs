@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::loader::load_function;
 use crate::manifest::FUNCTION_FILE_NAME;
+#[cfg(test)]
 use crate::validation::validate_function_id;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,67 +47,12 @@ pub struct FunctionListEntry {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ProfileResolution {
-    pub profile: String,
-    pub selected_path: Option<PathBuf>,
-    pub candidates: Vec<PathBuf>,
-}
-
 pub fn workspace_functions_root(workspace_root: impl AsRef<Path>) -> PathBuf {
     workspace_root.as_ref().join(".agl").join("functions")
 }
 
 pub fn global_functions_root(config_dir: impl AsRef<Path>) -> PathBuf {
     config_dir.as_ref().join("functions")
-}
-
-pub fn workspace_profile_path(workspace_root: impl AsRef<Path>, profile: &str) -> PathBuf {
-    workspace_root
-        .as_ref()
-        .join(".agl")
-        .join("inference")
-        .join("profiles")
-        .join(format!("{profile}.toml"))
-}
-
-pub fn global_profile_path(config_dir: impl AsRef<Path>, profile: &str) -> PathBuf {
-    config_dir
-        .as_ref()
-        .join("inference")
-        .join("profiles")
-        .join(format!("{profile}.toml"))
-}
-
-pub fn default_local_profile_path(config_dir: impl AsRef<Path>) -> PathBuf {
-    config_dir.as_ref().join("inference").join("local.toml")
-}
-
-pub fn resolve_profile(
-    profile: &str,
-    workspace_root: impl AsRef<Path>,
-    config_dir: impl AsRef<Path>,
-) -> Result<ProfileResolution> {
-    validate_function_id("model.profile", profile)?;
-    if profile == "local" {
-        let path = default_local_profile_path(config_dir);
-        return Ok(ProfileResolution {
-            profile: profile.to_string(),
-            selected_path: Some(path.clone()),
-            candidates: vec![path],
-        });
-    }
-
-    let candidates = vec![
-        workspace_profile_path(&workspace_root, profile),
-        global_profile_path(&config_dir, profile),
-    ];
-    let selected_path = candidates.iter().find(|path| path.is_file()).cloned();
-    Ok(ProfileResolution {
-        profile: profile.to_string(),
-        selected_path,
-        candidates,
-    })
 }
 
 #[cfg(test)]

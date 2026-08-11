@@ -1,5 +1,6 @@
 pub mod admission;
 mod attempt_fsm;
+mod attempt_journal;
 mod backend;
 mod device;
 #[cfg(target_os = "linux")]
@@ -22,9 +23,13 @@ mod worker_runtime;
 pub mod worker_supervisor;
 
 pub use attempt_fsm::{
-    InferenceAttemptMachine, InferenceAttemptPhase, InferenceAttemptTransition,
-    InferenceAttemptTransitionError, InferenceAttemptTransitionRecord,
+    InferenceAdmissionEvidence, InferenceAttemptCancellation, InferenceAttemptFailure,
+    InferenceAttemptMachine, InferenceAttemptOutcome, InferenceAttemptPhase,
+    InferenceAttemptTransition, InferenceAttemptTransitionError, InferenceAttemptTransitionRecord,
+    InferenceContentEvidence, InferenceDispatchEvidence, InferencePlanEvidence,
+    InferenceRejectionStage, InferenceRuntimeEvidence,
 };
+pub use attempt_journal::{AttemptJournal, AttemptJournalError, AttemptJournalReplay};
 pub use backend::{
     InferenceFinishReason, InferenceRequest, InferenceResponse, InferenceResponseMetadata,
 };

@@ -3,8 +3,8 @@ package:
   schema: agentlibre.package/v1
   type: function
   id: gemma4-26b
-  version: 1.1.0
-  payload_schema: agentlibre.function/v2
+  version: 1.2.0
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -15,10 +15,13 @@ package:
 title: Gemma4 26B-A4B
 description: Local Gemma4 26B-A4B QAT agent function with native Gemma tool-call formatting.
 model:
-  config: inference.toml
+  profile: gpu-rx7900xtx-32768
 runtime:
   tool_mode: read-only
   max_output_tokens: 512
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 skills:
   use: []
 subagents:

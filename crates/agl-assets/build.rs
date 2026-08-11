@@ -18,7 +18,6 @@ enum AssetKind {
     SkillAsset,
     FunctionManifest,
     FunctionSystemPrompt,
-    FunctionInferenceConfig,
     ExtensionPackageFile,
 }
 
@@ -33,7 +32,6 @@ impl AssetKind {
             Self::SkillAsset => "BuiltinAssetKind::SkillAsset",
             Self::FunctionManifest => "BuiltinAssetKind::FunctionManifest",
             Self::FunctionSystemPrompt => "BuiltinAssetKind::FunctionSystemPrompt",
-            Self::FunctionInferenceConfig => "BuiltinAssetKind::FunctionInferenceConfig",
             Self::ExtensionPackageFile => "BuiltinAssetKind::ExtensionPackageFile",
         }
     }
@@ -414,31 +412,13 @@ fn add_functions(
 
         let function_md = function_dir.join("FUNCTION.md");
         let system_prompt = function_dir.join("SYSTEM.md");
-        let inference_config = function_dir.join("inference.toml");
-        for required in [&function_md, &system_prompt, &inference_config] {
+        for required in [&function_md, &system_prompt] {
             if !required.is_file() {
                 panic!("builtin function {} is missing {}", id, required.display());
             }
         }
         let envelope = markdown_envelope(&function_md);
         validate_envelope(&envelope, "function", id, &function_md);
-        let inference_text = fs::read_to_string(&inference_config).unwrap_or_else(|error| {
-            panic!(
-                "failed to read builtin function inference preset {}: {error}",
-                inference_config.display()
-            )
-        });
-        agl_config::load_inference_preset_from_str(
-            &inference_config.display().to_string(),
-            &inference_text,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "builtin function inference preset {} must use portable model ids: {error:#}",
-                inference_config.display()
-            )
-        });
-
         let function_asset_index = assets.len();
         assets.push(asset(
             &format!("function:{id}/FUNCTION.md"),
@@ -453,18 +433,9 @@ fn add_functions(
             repo_root,
             &system_prompt,
         ));
-        let inference_config_asset_index = assets.len();
-        assets.push(asset(
-            &format!("function:{id}/inference.toml"),
-            AssetKind::FunctionInferenceConfig,
-            repo_root,
-            &inference_config,
-        ));
-
         let files = vec![
             ("FUNCTION.md".to_string(), function_asset_index),
             ("SYSTEM.md".to_string(), system_prompt_asset_index),
-            ("inference.toml".to_string(), inference_config_asset_index),
         ];
         let digest = package_tree_digest(assets, &files);
         packages.push(Package {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub type ModelPackageId = PackageId;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelArtifactRole {
     Main,
@@ -35,13 +35,29 @@ pub enum ProfileDevice {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelArtifact {
-    pub role: ModelArtifactRole,
-    pub model_id: ModelId,
+pub struct ModelArtifactFile {
     pub filename: String,
     pub byte_size: u64,
     pub sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArtifact {
+    pub role: ModelArtifactRole,
+    pub model_id: ModelId,
+    pub files: Vec<ModelArtifactFile>,
     pub required: bool,
+}
+
+impl ModelArtifact {
+    pub fn primary_file(&self) -> &ModelArtifactFile {
+        &self.files[0]
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.files.iter().map(|file| file.byte_size).sum()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -53,13 +69,21 @@ pub struct CatalogRuntimeProfile {
     pub pci_subsystem_id: Option<String>,
     pub benchmark_evidence: String,
     pub required_total_ram_bytes: u64,
-    pub required_available_ram_bytes: u64,
-    pub required_vram_bytes: u64,
+    pub host_private_bytes: u64,
+    pub device_private_bytes: u64,
+    pub shared_bytes: u64,
+    pub decoder_scratch_bytes: u64,
     pub gpu_layers: u32,
     pub context_tokens: u32,
     pub batch_size: u32,
     pub ubatch_size: u32,
     pub threads: u32,
+    pub flash_attention: bool,
+    pub cache_type_k: agl_config::KvCacheType,
+    pub cache_type_v: agl_config::KvCacheType,
+    pub mmap: bool,
+    pub unified_kv: bool,
+    pub slot_count: u32,
     pub smoke_timeout_seconds: u64,
     pub expected_speed: String,
 }
@@ -104,7 +128,7 @@ impl ModelPackage {
 
     pub fn total_required_bytes(&self) -> u64 {
         self.required_artifacts()
-            .map(|artifact| artifact.byte_size)
+            .map(ModelArtifact::total_bytes)
             .sum()
     }
 }
@@ -245,37 +269,46 @@ fn validate_package(package: &ModelPackage) -> Result<()> {
     let mut filenames = BTreeSet::new();
     for artifact in &package.artifacts {
         ensure!(
-            filenames.insert(artifact.filename.as_str()),
-            "package `{}` contains duplicate artifact filename `{}`",
+            !artifact.files.is_empty(),
+            "package `{}` artifact role `{:?}` has no files",
             package.id,
-            artifact.filename
+            artifact.role
         );
-        ensure!(
-            !artifact.filename.is_empty()
-                && Path::new(&artifact.filename)
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
-                && artifact.filename.to_ascii_lowercase().ends_with(".gguf"),
-            "package `{}` artifact filename `{}` is not a safe GGUF path",
-            package.id,
-            artifact.filename
-        );
-        ensure!(
-            artifact.byte_size > 4,
-            "package `{}` artifact `{}` has invalid byte size",
-            package.id,
-            artifact.filename
-        );
-        ensure!(
-            artifact.sha256.len() == 64
-                && artifact
-                    .sha256
-                    .bytes()
-                    .all(|byte| { byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase() }),
-            "package `{}` artifact `{}` has invalid SHA-256",
-            package.id,
-            artifact.filename
-        );
+        for file in &artifact.files {
+            ensure!(
+                filenames.insert(file.filename.as_str()),
+                "package `{}` contains duplicate artifact filename `{}`",
+                package.id,
+                file.filename
+            );
+            ensure!(
+                !file.filename.is_empty()
+                    && Path::new(&file.filename).components().count() == 1
+                    && Path::new(&file.filename)
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+                    && file.filename.to_ascii_lowercase().ends_with(".gguf"),
+                "package `{}` artifact filename `{}` is not a safe GGUF basename",
+                package.id,
+                file.filename
+            );
+            ensure!(
+                file.byte_size > 4,
+                "package `{}` artifact `{}` has invalid byte size",
+                package.id,
+                file.filename
+            );
+            ensure!(
+                file.sha256.len() == 64
+                    && file
+                        .sha256
+                        .bytes()
+                        .all(|byte| { byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase() }),
+                "package `{}` artifact `{}` has invalid SHA-256",
+                package.id,
+                file.filename
+            );
+        }
     }
     validate_profiles(package)
 }
@@ -310,10 +343,11 @@ fn validate_profiles(package: &ModelPackage) -> Result<()> {
         );
         ensure!(
             profile.required_total_ram_bytes > 0
-                && profile.required_available_ram_bytes > 0
+                && profile.host_private_bytes > 0
                 && profile.batch_size > 0
                 && profile.ubatch_size > 0
                 && profile.threads > 0
+                && profile.slot_count == 1
                 && profile.smoke_timeout_seconds > 0,
             "package `{}` profile `{}` contains zero limits",
             package.id,
@@ -336,7 +370,7 @@ fn validate_profiles(package: &ModelPackage) -> Result<()> {
         match profile.device {
             ProfileDevice::Cpu => {
                 ensure!(
-                    profile.gpu_layers == 0 && profile.required_vram_bytes == 0,
+                    profile.gpu_layers == 0 && profile.device_private_bytes == 0,
                     "CPU profile `{}` must not request GPU resources",
                     profile.id
                 );
@@ -348,7 +382,7 @@ fn validate_profiles(package: &ModelPackage) -> Result<()> {
             }
             ProfileDevice::Gpu => {
                 ensure!(
-                    profile.gpu_layers > 0 && profile.required_vram_bytes > 0,
+                    profile.gpu_layers > 0 && profile.device_private_bytes > 0,
                     "GPU profile `{}` must request GPU resources",
                     profile.id
                 );
@@ -397,7 +431,7 @@ mod tests {
             .provenance
             .as_ref()
             .expect("resolved catalog package carries common provenance");
-        assert_eq!(provenance.reference.to_string(), "model:gemma4-e4b@=1.1.0");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-e4b@=1.2.0");
         assert_eq!(provenance.source_id.as_str(), "builtin");
         assert!(
             provenance
@@ -521,11 +555,12 @@ mod tests {
             assert_eq!(package.revision, revision);
             assert_eq!(package.artifacts.len(), 1);
             let main = &package.artifacts[0];
+            let main_file = main.primary_file();
             assert_eq!(main.role, ModelArtifactRole::Main);
             assert_eq!(main.model_id.as_str(), package_id);
-            assert_eq!(main.filename, filename);
-            assert_eq!(main.byte_size, byte_size);
-            assert_eq!(main.sha256, sha256);
+            assert_eq!(main_file.filename, filename);
+            assert_eq!(main_file.byte_size, byte_size);
+            assert_eq!(main_file.sha256, sha256);
             assert!(main.required);
             assert_eq!(
                 package.capabilities,
@@ -617,7 +652,7 @@ mod tests {
                 .unwrap();
             assert_eq!(cpu.id, cpu_profile_id);
             assert_eq!(cpu.context_tokens, cpu_context);
-            assert_eq!(cpu.required_vram_bytes, 0);
+            assert_eq!(cpu.device_private_bytes, 0);
             assert_eq!(cpu.gpu_layers, 0);
 
             let gpu = package
@@ -627,7 +662,7 @@ mod tests {
                 .unwrap();
             assert_eq!(gpu.id, gpu_profile_id);
             assert_eq!(gpu.context_tokens, gpu_context);
-            assert_eq!(gpu.required_vram_bytes, required_vram);
+            assert_eq!(gpu.device_private_bytes, required_vram);
             assert_eq!(gpu.gpu_layers, 999);
             assert_eq!(gpu.pci_device_id.as_deref(), Some("1002:744c"));
             assert_eq!(gpu.pci_subsystem_id.as_deref(), Some("1da2:471e"));
@@ -669,7 +704,7 @@ mod tests {
         ] {
             assert_eq!(profile.id, id);
             assert_eq!(profile.context_tokens, context);
-            assert_eq!(profile.required_vram_bytes, required_vram);
+            assert_eq!(profile.device_private_bytes, required_vram);
             assert_eq!(profile.gpu_layers, 999);
             assert_eq!(profile.pci_device_id.as_deref(), Some("1002:744c"));
             assert_eq!(profile.pci_subsystem_id.as_deref(), Some("1da2:471e"));
