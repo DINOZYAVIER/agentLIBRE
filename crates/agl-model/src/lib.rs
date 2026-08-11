@@ -1,29 +1,49 @@
 mod adapter;
 mod catalog;
 mod checkpoint;
+mod downloader;
+mod execution_plan;
 mod install;
+mod install_transaction;
 mod lifecycle;
 mod planner;
 mod source;
 mod status;
-mod worker;
 
 pub use adapter::{
     MODEL_FILE_NAME, MODEL_PAYLOAD_SCHEMA, ModelPackageAdapter, builtin_model_source,
     parse_model_package,
 };
 pub use catalog::{
-    CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactRole, ModelCatalog,
-    ModelPackage, ModelPackageId, ModelPackageProvenance, ProfileDevice,
+    CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactFile, ModelArtifactRole,
+    ModelCatalog, ModelPackage, ModelPackageId, ModelPackageProvenance, ProfileDevice,
 };
 pub use checkpoint::{
     PlannedArtifactRole, SetupCheckpoint, SetupCheckpointStore, SetupPhase,
     canonical_workspace_digest, setup_plan_hash,
 };
+pub use downloader::{
+    ArtifactDownloadSpec, ArtifactFileDownloadSpec, DownloadedArtifact, DownloadedArtifactFile,
+    HubFileCandidate, HubInspection, ModelCacheStatus, ModelDownloadError, ModelDownloadHandle,
+    ModelDownloadJob, ModelDownloadRequest, ModelDownloadResult, ModelDownloader,
+    ModelProgressEvent,
+};
+pub use execution_plan::{
+    GenerationPolicy, HostCapabilities, HostCapabilityDevice, HostCapabilityDeviceKind,
+    MODEL_EXECUTION_PLAN_IDENTITY_VERSION, ModelArtifactPlan, ModelContextKey, ModelExecutionPlan,
+    ModelExecutionPlanDigest, ModelLoadKey, ModelPlanRejection, ModelResourceEnvelope,
+    ModelRuntimeShape, PackagePlanIdentity, PlannedArtifactFile, ProfileMismatchPredicate,
+    ResolvedFunctionPlanInput, ResolvedModelPlanInput, StructuredGenerationMode,
+    resolve_execution_plan,
+};
 pub use install::{
     ImportedModel, InstallRecordState, InstallSource, InstalledArtifactFile, ModelBindingPatch,
-    ModelInstallCommitReceipt, ModelInstallRecord, ModelInstallStore, derive_hf_model_id,
-    derive_model_id_from_path, import_local_model, validate_gguf,
+    ModelInstallRecord, ModelInstallStore, derive_hf_model_id, derive_model_id_from_path,
+    import_local_model, validate_gguf,
+};
+pub use install_transaction::{
+    ModelInstallRecovery, ModelInstallTransaction, ModelInstallTransactionError,
+    ModelInstallTransactionInput, ModelInstallTransactionPhase, ModelInstallTransactionReceipt,
 };
 pub use lifecycle::{
     ModelLifecycleOperation, ModelLifecyclePlan, ModelLifecycleService, ModelLifecycleTarget,
@@ -36,12 +56,6 @@ pub use planner::{
 pub use source::{HfSource, HfSourceKind};
 pub use status::{
     ModelFileObservation, ModelInspector, ModelStatusReport, ModelVerificationReport,
-};
-pub use worker::{
-    ArtifactDownloadSpec, ArtifactFileDownloadSpec, DownloadedArtifact, DownloadedArtifactFile,
-    HubFileCandidate, HubInspection, ModelCacheStatus, ModelDownloadError, ModelDownloadHandle,
-    ModelDownloadJob, ModelDownloadRequest, ModelDownloadResult, ModelDownloadWorker,
-    ModelProgressEvent,
 };
 
 pub fn hugging_face_cache_dir() -> std::path::PathBuf {

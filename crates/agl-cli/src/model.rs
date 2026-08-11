@@ -9,10 +9,10 @@ use agl_config::{
 use agl_daemon::default_socket_path;
 use agl_model::{
     ArtifactDownloadSpec, ArtifactFileDownloadSpec, HfSource, HfSourceKind, HubFileCandidate,
-    InstallSource, ModelArtifactRole, ModelBindingPatch, ModelDownloadRequest, ModelDownloadWorker,
-    ModelInspector, ModelInstallRecord, ModelInstallStore, ModelLifecyclePlan,
-    ModelLifecycleService, ModelProgressEvent, SetupCheckpointStore, derive_hf_model_id,
-    import_local_model,
+    InstallSource, ModelArtifactRole, ModelBindingPatch, ModelDownloadRequest, ModelDownloader,
+    ModelInspector, ModelInstallRecord, ModelInstallStore, ModelInstallTransaction,
+    ModelInstallTransactionInput, ModelLifecyclePlan, ModelLifecycleService, ModelProgressEvent,
+    SetupCheckpointStore, derive_hf_model_id, import_local_model,
 };
 use agl_protocol::{ModelUnloadOutcome, ModelUnloadRequest};
 use agl_runtime::AgentLibreRuntimeConfig;
@@ -140,7 +140,7 @@ fn run_unload(options: ModelUnloadOptions, runtime: &AgentLibreRuntimeConfig) ->
 
 fn run_pull(mut options: ModelPullOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     options.offline |= agl_model::hugging_face_offline();
-    let worker = ModelDownloadWorker::spawn().context("failed to start model download worker")?;
+    let worker = ModelDownloader::spawn().context("failed to start model download worker")?;
     let handle = worker.handle();
     let main_source = HfSource::parse(&options.source).context("invalid Hugging Face model URL")?;
     let main_files = choose_candidate(
@@ -249,13 +249,12 @@ fn run_pull(mut options: ModelPullOptions, runtime: &AgentLibreRuntimeConfig) ->
         .iter()
         .map(ModelInstallRecord::from_downloaded)
         .collect::<Result<Vec<_>>>()?;
-    let _commit = store
-        .commit_with_bindings(
-            &records,
-            &result.binding_patch,
-            &bindings_path,
+    ModelInstallTransaction::new(store, &bindings_path)?
+        .commit(ModelInstallTransactionInput::new(
+            records.clone(),
+            result.binding_patch,
             options.replace,
-        )
+        ))
         .context("failed to commit model bindings")?;
     print_pull_report(
         options.json,
@@ -293,7 +292,9 @@ fn run_import(options: ModelImportOptions, runtime: &AgentLibreRuntimeConfig) ->
         .iter()
         .map(|item| item.record.clone())
         .collect::<Vec<_>>();
-    let _commit = store.commit_with_bindings(&records, &patch, &bindings_path, options.replace)?;
+    ModelInstallTransaction::new(store, &bindings_path)?.commit(
+        ModelInstallTransactionInput::new(records, patch, options.replace),
+    )?;
     let report = ModelImportReport {
         version: 1,
         state: "ready",

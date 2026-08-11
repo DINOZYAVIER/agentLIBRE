@@ -1,6 +1,9 @@
-use crate::evidence::{InferenceEventWriter, InferenceFinishStatus};
+use crate::evidence::InferenceEventWriter;
 use crate::{
-    InferenceAttemptMachine, InferenceAttemptTransition, InferenceFinishReason, InferenceResponse,
+    InferenceAdmissionEvidence, InferenceAttemptFailure, InferenceAttemptMachine,
+    InferenceAttemptOutcome, InferenceAttemptTransition, InferenceContentEvidence,
+    InferenceDispatchEvidence, InferenceFinishReason, InferencePlanEvidence,
+    InferenceRejectionStage, InferenceResponse, InferenceRuntimeEvidence,
 };
 
 use super::{InferenceJob, ModelManagerError};
@@ -44,10 +47,56 @@ impl AttemptEvidence {
                 path: paths.request_json().to_path_buf(),
             },
         )?;
+        let model_key = job.model_key().digest().to_owned();
         apply(
             &writer,
             &mut machine,
-            InferenceAttemptTransition::StartRuntime,
+            InferenceAttemptTransition::RecordPlan {
+                plan: InferencePlanEvidence {
+                    plan_digest: model_key.clone(),
+                    package_refs: Vec::new(),
+                    profile_id: "pre-agl173-manager".to_owned(),
+                },
+            },
+        )?;
+        apply(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordContentReady {
+                content: InferenceContentEvidence {
+                    content_digest: job.context_key().digest().to_owned(),
+                    resolved_bytes: 0,
+                },
+            },
+        )?;
+        apply(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordAdmissionGrant {
+                admission: InferenceAdmissionEvidence {
+                    reservation_id: model_key.clone(),
+                    resource_components: Vec::new(),
+                },
+            },
+        )?;
+        apply(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordDispatch {
+                dispatch: InferenceDispatchEvidence {
+                    descriptor_set_id: model_key.clone(),
+                    engine_generation: model_key.clone(),
+                },
+            },
+        )?;
+        apply(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordRuntimeStarted {
+                runtime: InferenceRuntimeEvidence {
+                    allocation_receipt_id: model_key,
+                },
+            },
         )?;
         Ok(Self {
             paths,
@@ -76,10 +125,10 @@ impl AttemptEvidence {
             &self.writer,
             &mut self.machine,
             InferenceAttemptTransition::FinishAttempt {
-                status: match response.finish_reason {
-                    InferenceFinishReason::Stop => InferenceFinishStatus::Succeeded,
+                outcome: match response.finish_reason {
+                    InferenceFinishReason::Stop => InferenceAttemptOutcome::Succeeded,
                     InferenceFinishReason::Length | InferenceFinishReason::ContentByteLimit => {
-                        InferenceFinishStatus::IncompleteOutput
+                        InferenceAttemptOutcome::IncompleteOutput
                     }
                 },
             },
@@ -102,15 +151,19 @@ impl AttemptEvidence {
         apply(
             &self.writer,
             &mut self.machine,
-            InferenceAttemptTransition::FailAttempt {
-                message: error.code().to_string(),
+            InferenceAttemptTransition::RecordFailure {
+                failure: InferenceAttemptFailure {
+                    code: error.code().to_string(),
+                    stage: InferenceRejectionStage::Engine,
+                    message: error.to_string(),
+                },
             },
         )?;
         apply(
             &self.writer,
             &mut self.machine,
             InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Failed,
+                outcome: InferenceAttemptOutcome::Failed,
             },
         )?;
         Ok(())

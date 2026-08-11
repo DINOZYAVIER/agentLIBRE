@@ -398,6 +398,55 @@ impl PackageComposition {
 }
 
 impl ResolvedRuntimeBundle {
+    pub fn model_execution_inputs(
+        &self,
+        visible_tools_digest: impl Into<String>,
+    ) -> Result<
+        Option<(
+            agl_model::ResolvedFunctionPlanInput,
+            agl_model::ResolvedModelPlanInput,
+        )>,
+    > {
+        let Some(model) = &self.model else {
+            return Ok(None);
+        };
+        let function_node = self
+            .graph
+            .nodes
+            .get(&self.graph.root)
+            .context("resolved Function graph has no root node")?;
+        let model_node = self
+            .graph
+            .nodes
+            .get(&model.node_key)
+            .context("resolved Model graph node is missing")?;
+        let profile_id = self
+            .function
+            .model_profile
+            .clone()
+            .context("Function with a Model dependency has no model.profile")?;
+        let generation_policy = self
+            .function
+            .generation_policy
+            .clone()
+            .context("Function with a Model dependency has no generation policy")?;
+        let prompt_template_digest = sha256_text(&self.function.context);
+        Ok(Some((
+            agl_model::ResolvedFunctionPlanInput {
+                package: plan_identity(function_node)?,
+                selected_profile_id: profile_id,
+                generation_policy,
+                prompt_template_digest,
+                visible_tools_digest: visible_tools_digest.into(),
+            },
+            agl_model::ResolvedModelPlanInput {
+                package: plan_identity(model_node)?,
+                payload_schema: model_node.envelope.payload_schema.to_string(),
+                model: model.package.clone(),
+            },
+        )))
+    }
+
     fn from_function_graph(
         composition: &PackageComposition,
         graph: ResolvedPackageGraph,
@@ -538,6 +587,29 @@ impl ResolvedRuntimeBundle {
     }
 }
 
+fn plan_identity(node: &agl_package::ResolvedPackage) -> Result<agl_model::PackagePlanIdentity> {
+    Ok(agl_model::PackagePlanIdentity {
+        reference: PackageRef::parse(&format!(
+            "{}:{}@={}",
+            node.candidate.type_id, node.candidate.package_id, node.candidate.version
+        ))?,
+        source_id: node.candidate.source_id.clone(),
+        package_tree_digest: node.package_tree_digest.clone(),
+    })
+}
+
+fn sha256_text(value: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
 fn resolved_runtime_model(
     graph: &ResolvedPackageGraph,
     registry: &PackageAdapterRegistry,
@@ -548,10 +620,10 @@ fn resolved_runtime_model(
         .iter()
         .filter(|(_, node)| node.candidate.type_id == PackageTypeId::model())
         .collect::<Vec<_>>();
-    if function.inference_config_toml.is_none() {
+    if function.model_profile.is_none() {
         ensure!(
             models.is_empty(),
-            "Function without an inference config selected a Model artifact"
+            "Function without model.profile selected a Model artifact"
         );
         return Ok(None);
     }
@@ -952,7 +1024,7 @@ package:
   type: function
   id: {id}
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1197,7 +1269,7 @@ package:
   type: function
   id: broken
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1304,12 +1376,9 @@ title: Broken
         )
         .unwrap();
         assert_eq!(function.id, "gemma4-31b-32k");
-        assert!(
-            function
-                .inference_config_toml
-                .as_deref()
-                .unwrap()
-                .contains("max_context_tokens = 32768")
+        assert_eq!(
+            function.model_profile.as_deref(),
+            Some("gpu-rx7900xtx-32768")
         );
 
         let bundle = composition
@@ -1323,7 +1392,7 @@ title: Broken
             .unwrap();
         let model = bundle.model.as_ref().unwrap();
         let provenance = model.package.provenance.as_ref().unwrap();
-        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.2.0");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.3.0");
         assert_eq!(provenance.source_id.as_str(), "builtin");
         assert_eq!(bundle.extensions.len(), 2);
         let identity = bundle.identity();
@@ -1367,7 +1436,7 @@ package:
   type: function
   id: workspace-model
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1375,10 +1444,13 @@ package:
     - model:gemma4-31b@^1.0
 title: Workspace model
 model:
-  config: inference.toml
+  profile: workspace-vulkan-32768
 runtime:
   tool_mode: read-only
   max_output_tokens: 32
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 skills:
   use: []
 subagents:
@@ -1394,29 +1466,7 @@ doctor:
             "Use the workspace model.\n",
         )
         .unwrap();
-        fs::write(
-            function_root.join("inference.toml"),
-            r#"[backend]
-kind = "llama_cpp"
-model_id = "gemma4-31b"
-
-[runtime]
-mode = "auto"
-max_context_tokens = 32768
-max_batch_size = 64
-max_ubatch_size = 32
-device = "vulkan0"
-flash_attention = "on"
-cache_type_k = "q8_0"
-cache_type_v = "q8_0"
-
-[model]
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#,
-        )
-        .unwrap();
-        let model_document = r#"package = { schema = "agentlibre.package/v1", type = "model", id = "gemma4-31b", version = "1.2.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+        let model_document = r#"package = { schema = "agentlibre.package/v1", type = "model", id = "gemma4-31b", version = "1.3.0", payload_schema = "agentlibre.model/v3", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
 
 display_name = "Workspace Gemma fixture"
 capabilities = ["text", "tools"]
@@ -1428,9 +1478,7 @@ upstream_revision = "1111111111111111111111111111111111111111"
 [[weights]]
 role = "main"
 model_id = "gemma4-31b"
-filename = "workspace-gemma.gguf"
-byte_size = 123456789
-sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+files = [{ filename = "workspace-gemma.gguf", byte_size = 123456789, sha256 = "2222222222222222222222222222222222222222222222222222222222222222" }]
 required = true
 
 [[profiles]]
@@ -1440,13 +1488,21 @@ pci_device_id = "1002:744c"
 pci_subsystem_id = "1da2:471e"
 benchmark_evidence = "evidence/workspace.md"
 required_total_ram_bytes = 1024
-required_available_ram_bytes = 512
-required_vram_bytes = 1024
+host_private_bytes = 512
+device_private_bytes = 1024
+shared_bytes = 0
+decoder_scratch_bytes = 0
 gpu_layers = 999
 context_tokens = 32768
 batch_size = 64
 ubatch_size = 32
 threads = 2
+flash_attention = true
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+mmap = true
+unified_kv = false
+slot_count = 1
 smoke_timeout_seconds = 30
 expected_speed = "fixture"
 "#;
@@ -1475,53 +1531,37 @@ expected_speed = "fixture"
         assert_eq!(bundle.lock.state, RuntimeBundleLockState::Verified);
         let model = &bundle.model.as_ref().unwrap().package;
         let provenance = model.provenance.as_ref().unwrap();
-        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.2.0");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-31b@=1.3.0");
         assert_eq!(provenance.source_tier, PackageSourceTier::Workspace);
         assert_eq!(model.profiles[0].id, "workspace-vulkan-32768");
 
-        let preset = agl_config::load_inference_preset_from_str(
-            "workspace fixture",
-            bundle.function.inference_config_toml.as_deref().unwrap(),
-        )
-        .unwrap();
-        let host = agl_model::HostResources {
-            detected_total_memory_bytes: 16_000_000_000,
-            nominal_memory_class_bytes: 16_000_000_000,
-            available_memory_bytes: 15_000_000_000,
-            cpu: agl_model::CpuResources {
-                physical_cores: 4,
-                logical_cores: 8,
-            },
-            disk: agl_model::DiskResources {
-                path: home.clone(),
-                mount_point: home.clone(),
-                total_bytes: 10_000_000_000,
-                available_bytes: 9_000_000_000,
-            },
-            devices: vec![agl_model::LlamaDeviceInfo {
-                name: "Vulkan0".to_owned(),
-                description: "fixture GPU".to_owned(),
-                kind: agl_model::LlamaDeviceKind::DiscreteGpu,
+        let (function_input, model_input) = bundle
+            .model_execution_inputs("sha256:visible-tools")
+            .unwrap()
+            .unwrap();
+        let host = agl_model::HostCapabilities {
+            physical_host_bytes: 16_000_000_000,
+            physical_cpu_cores: 4,
+            logical_cpu_cores: 8,
+            devices: vec![agl_model::HostCapabilityDevice {
+                identity: "Vulkan0".to_owned(),
+                kind: agl_model::HostCapabilityDeviceKind::DiscreteGpu,
                 pci_device_id: Some("1002:744c".to_owned()),
                 pci_subsystem_id: Some("1da2:471e".to_owned()),
-                free_memory_bytes: 20_000_000_000,
-                total_memory_bytes: 24_000_000_000,
+                physical_pool_bytes: 24_000_000_000,
                 usable: true,
                 supports_gpu_offload: true,
             }],
         };
-        let plan = agl_model::RuntimePlanner
-            .plan(model, &host, preset.runtime.auto_policy().unwrap(), false)
-            .unwrap();
-        assert_eq!(plan.profile_id, "workspace-vulkan-32768");
-        assert_eq!(plan.model.provenance, provenance.clone());
-        assert_eq!(plan.model.weights[0].filename, "workspace-gemma.gguf");
+        let plan = agl_model::resolve_execution_plan(&function_input, &model_input, &host).unwrap();
+        assert_eq!(plan.profile_id(), "workspace-vulkan-32768");
+        assert_eq!(plan.model_package().reference, provenance.reference);
         assert_eq!(
-            plan.selected_device_identity
-                .as_ref()
-                .unwrap()
-                .pci_device_id
-                .as_deref(),
+            plan.artifact_roles()[0].files()[0].basename(),
+            "workspace-gemma.gguf"
+        );
+        assert_eq!(
+            plan.selected_device().unwrap().pci_device_id.as_deref(),
             Some("1002:744c")
         );
         fs::remove_dir_all(home).unwrap();

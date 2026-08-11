@@ -681,8 +681,8 @@ fn print_function_resolution(report: &FunctionResolutionDiagnostics) {
             println!("inference.ubatch_size={}", profile.ubatch_size);
             println!("inference.gpu_layers={}", profile.gpu_layers);
             println!(
-                "inference.required_vram_bytes={}",
-                profile.required_vram_bytes
+                "inference.device_private_bytes={}",
+                profile.device_private_bytes
             );
             if let Some(id) = &profile.pci_device_id {
                 println!("inference.pci_device_id={id}");

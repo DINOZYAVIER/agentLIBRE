@@ -101,7 +101,7 @@ fn envelope_json() -> serde_json::Value {
         "type": "function",
         "id": "example",
         "version": "1.0.0",
-        "payload_schema": "agentlibre.function/v2",
+        "payload_schema": "agentlibre.function/v3",
         "agl": {
             "compatible": ">=1.0.0, <2.0.0",
             "tested": ["1.0.0"]
@@ -450,7 +450,7 @@ fn fixture_extension_resolves_from_a_function_requirement() {
         "type": "function",
         "id": "fixture",
         "version": "1.0.0",
-        "payload_schema": "agentlibre.function/v2",
+        "payload_schema": "agentlibre.function/v3",
         "agl": {
             "compatible": ">=1.0.0",
             "tested": ["1.0.0"]

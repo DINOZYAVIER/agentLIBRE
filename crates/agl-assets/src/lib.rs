@@ -8,7 +8,6 @@ pub enum BuiltinAssetKind {
     SkillAsset,
     FunctionManifest,
     FunctionSystemPrompt,
-    FunctionInferenceConfig,
     ExtensionPackageFile,
 }
 
@@ -135,15 +134,15 @@ mod tests {
         {
             assert_eq!(function.type_id, "function");
             let expected_version = match function.id {
-                "gemma4-31b-32k" | "gemma4-31b-64k" => "1.2.0",
-                _ => "1.1.0",
+                "gemma4-31b-32k" | "gemma4-31b-64k" => "1.3.0",
+                _ => "1.2.0",
             };
             assert_eq!(function.version, expected_version);
             assert_eq!(function.entrypoint, "FUNCTION.md");
             assert_eq!(function.digest.len(), "sha256:".len() + 64);
             assert!(function.files.iter().any(|file| file.path == "SYSTEM.md"));
             assert!(
-                function
+                !function
                     .files
                     .iter()
                     .any(|file| file.path == "inference.toml")
@@ -152,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_function_presets_use_model_ids_only() {
+    fn builtin_functions_bind_a_package_model_profile() {
         for function in BUILTIN_PACKAGES
             .iter()
             .filter(|package| package.type_id == "function")
@@ -160,114 +159,42 @@ mod tests {
             let text = function
                 .files
                 .iter()
-                .find(|file| file.path == "inference.toml")
+                .find(|file| file.path == "FUNCTION.md")
                 .unwrap()
                 .bytes;
             let text = std::str::from_utf8(text).unwrap();
-            let preset = agl_config::load_inference_preset_from_str(function.id, text).unwrap();
-            assert!(!preset.backend.model_id.as_str().is_empty());
+            assert!(text.contains("payload_schema: agentlibre.function/v3"));
+            assert!(text.contains("  profile: "));
+            assert!(!text.contains("  config: "));
+            assert!(!text.contains("inference.toml"));
             assert!(!text.contains("/home/"));
             assert!(!text.contains(".dyno/models"));
             assert!(!text.contains(".lmstudio/models"));
         }
-
-        let direct_path = r#"
-[backend]
-kind = "llama_cpp"
-model = "/home/user/model.gguf"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 4096
-threads = 2
-
-[model]
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#;
-        assert!(agl_config::load_inference_preset_from_str("direct path", direct_path).is_err());
     }
 
     #[test]
-    fn gemma4_agent_presets_match_builtin_policy() {
-        let e2b = builtin_package("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
-        let e2b_text = std::str::from_utf8(
-            e2b.files
-                .iter()
-                .find(|file| file.path == "inference.toml")
-                .unwrap()
-                .bytes,
-        )
-        .unwrap();
-        let e2b_preset =
-            agl_config::load_inference_preset_from_str("gemma4-e2b", e2b_text).unwrap();
-        let e2b_runtime = e2b_preset.runtime.auto_policy().unwrap();
-
-        assert_eq!(e2b_preset.backend.model_id.as_str(), "gemma4-e2b");
-        assert_eq!(e2b_preset.backend.multimodal_projector_id, None);
-        assert_eq!(e2b_runtime.max_context_tokens, 32_768);
-        assert_eq!(e2b_runtime.max_batch_size, 512);
-        assert_eq!(e2b_runtime.max_ubatch_size, 256);
-        assert_eq!(e2b_runtime.flash_attention, agl_config::RuntimeSwitch::On);
-        assert_eq!(e2b_runtime.cache_type_k, agl_config::KvCacheType::Q8_0);
-        assert_eq!(e2b_runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
-        assert!(!e2b_preset.runtime.mtp_enabled());
-
-        let twelve_b = builtin_package("gemma4-12b").expect("Gemma 4 12B must be embedded");
-        let twelve_b_preset = agl_config::load_inference_preset_from_str(
-            "gemma4-12b",
-            std::str::from_utf8(
-                twelve_b
+    fn gemma4_functions_select_the_exact_builtin_profile() {
+        for (function_id, expected_profile) in [
+            ("gemma4-12b", "gpu-rx7900xtx-65536"),
+            ("gemma4-26b", "gpu-rx7900xtx-32768"),
+            ("gemma4-31b-32k", "gpu-rx7900xtx-32768"),
+            ("gemma4-31b-64k", "gpu-rx7900xtx-65536"),
+            ("gemma4-e2b", "gpu-rx7900xtx-32768"),
+            ("gemma4-e4b", "gpu-rx7900xtx-32768"),
+        ] {
+            let package = builtin_package(function_id)
+                .unwrap_or_else(|| panic!("{function_id} must be embedded"));
+            let manifest = std::str::from_utf8(
+                package
                     .files
                     .iter()
-                    .find(|file| file.path == "inference.toml")
+                    .find(|file| file.path == "FUNCTION.md")
                     .unwrap()
                     .bytes,
             )
-            .unwrap(),
-        )
-        .unwrap();
-        let twelve_b_runtime = twelve_b_preset.runtime.auto_policy().unwrap();
-
-        assert_eq!(twelve_b_runtime.max_context_tokens, 65_536);
-        assert_eq!(twelve_b_runtime.max_batch_size, 512);
-        assert_eq!(twelve_b_runtime.max_ubatch_size, 256);
-        assert!(!twelve_b_preset.runtime.mtp_enabled());
-
-        for (function_id, expected_context) in
-            [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)]
-        {
-            let thirty_one_b = builtin_package(function_id)
-                .unwrap_or_else(|| panic!("{function_id} must be embedded"));
-            let preset = agl_config::load_inference_preset_from_str(
-                function_id,
-                std::str::from_utf8(
-                    thirty_one_b
-                        .files
-                        .iter()
-                        .find(|file| file.path == "inference.toml")
-                        .unwrap()
-                        .bytes,
-                )
-                .unwrap(),
-            )
             .unwrap();
-            let runtime = preset.runtime.auto_policy().unwrap();
-
-            assert_eq!(preset.backend.model_id.as_str(), "gemma4-31b");
-            assert_eq!(runtime.max_context_tokens, expected_context);
-            assert_eq!(runtime.max_batch_size, 512);
-            assert_eq!(runtime.max_ubatch_size, 256);
-            assert_eq!(
-                runtime
-                    .device
-                    .map(agl_config::AutoRuntimeDevice::runtime_name),
-                Some("Vulkan0")
-            );
-            assert_eq!(runtime.flash_attention, agl_config::RuntimeSwitch::On);
-            assert_eq!(runtime.cache_type_k, agl_config::KvCacheType::Q8_0);
-            assert_eq!(runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
-            assert!(!preset.runtime.mtp_enabled());
+            assert!(manifest.contains(&format!("  profile: {expected_profile}")));
         }
         assert!(builtin_package("gemma4-31b").is_none());
     }
@@ -299,7 +226,7 @@ tool_call_format = "gemma_function_call"
     fn builtin_catalog_identity_is_canonical_sha256() {
         assert_eq!(
             BUILTIN_PACKAGE_CATALOG_DIGEST,
-            "sha256:b86860a33c5f7a03d97ea0f43a57ac727f8aa38161d502e7a83c7aceb0b22b65"
+            "sha256:bcd78ff80570da84c27d70c3c1e6f49b152fd188f7752db114510f50dc2724a2"
         );
     }
 

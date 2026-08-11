@@ -4,14 +4,12 @@ use serde::Serialize;
 
 #[cfg(test)]
 use crate::loader::load_function;
-use crate::locator::{FunctionPackageSource, resolve_profile};
 #[cfg(test)]
 use crate::locator::{looks_like_path, resolve_function_package};
 use crate::manifest::FunctionToolPolicy;
 use crate::subagent::RuntimeSubagent;
 #[cfg(test)]
 use crate::validation::is_valid_function_id;
-use crate::validation::join_paths;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FunctionStatusReport {
     pub reference: String,
@@ -22,16 +20,6 @@ pub struct FunctionStatusReport {
     pub id: Option<String>,
     pub title: Option<String>,
     pub profile: Option<String>,
-    pub profile_path: Option<PathBuf>,
-    pub inference_config_path: Option<PathBuf>,
-    pub inference_config_embedded: bool,
-    pub inference_model_id: Option<String>,
-    pub inference_multimodal_projector_id: Option<String>,
-    pub inference_draft_model_id: Option<String>,
-    pub inference_model_path: Option<PathBuf>,
-    pub inference_multimodal_projector_path: Option<PathBuf>,
-    pub inference_draft_model_path: Option<PathBuf>,
-    pub inference_model_exists: Option<bool>,
     pub tool_policy: Option<FunctionToolPolicy>,
     pub skills: Vec<String>,
     pub subagents: Vec<RuntimeSubagent>,
@@ -114,16 +102,6 @@ fn empty_function_status(reference: &str) -> FunctionStatusReport {
         id: None,
         title: None,
         profile: None,
-        profile_path: None,
-        inference_config_path: None,
-        inference_config_embedded: false,
-        inference_model_id: None,
-        inference_multimodal_projector_id: None,
-        inference_draft_model_id: None,
-        inference_model_path: None,
-        inference_multimodal_projector_path: None,
-        inference_draft_model_path: None,
-        inference_model_exists: None,
         tool_policy: None,
         skills: Vec::new(),
         subagents: Vec::new(),
@@ -136,57 +114,13 @@ fn empty_function_status(reference: &str) -> FunctionStatusReport {
 fn populate_function_status(
     mut report: FunctionStatusReport,
     loaded: crate::LoadedFunction,
-    workspace_root: &Path,
-    config_dir: &Path,
-    model_bindings: Option<&Path>,
+    _workspace_root: &Path,
+    _config_dir: &Path,
+    _model_bindings: Option<&Path>,
 ) -> FunctionStatusReport {
     report.id = Some(loaded.front_matter.id().to_owned());
     report.title = Some(loaded.front_matter.title.clone());
     report.system_prompt_path = Some(loaded.system_prompt_path.clone());
-    report.inference_config_path = loaded.inference_config_path.clone();
-    report.inference_config_embedded = loaded.locator.source == FunctionPackageSource::Builtin
-        && loaded.inference_config_toml.is_some();
-    if let Some(config_toml) = loaded.inference_config_toml.as_deref() {
-        let source_name = loaded
-            .inference_config_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<function inference config>".to_string());
-        match agl_config::load_inference_preset_from_str(&source_name, config_toml) {
-            Ok(preset) => {
-                report.inference_model_id = Some(preset.backend.model_id.to_string());
-                report.inference_multimodal_projector_id = preset
-                    .backend
-                    .multimodal_projector_id
-                    .as_ref()
-                    .map(ToString::to_string);
-                report.inference_draft_model_id = preset
-                    .runtime
-                    .fixed()
-                    .and_then(|runtime| runtime.mtp.draft_model_id.as_ref())
-                    .map(ToString::to_string);
-                let bindings_path = model_bindings
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| agl_config::model_bindings_path(config_dir));
-                match agl_config::bind_inference_preset(preset, &bindings_path) {
-                    Ok(bound) => {
-                        report.inference_model_path = Some(bound.backend.model);
-                        report.inference_multimodal_projector_path =
-                            bound.backend.multimodal_projector;
-                        report.inference_model_exists = Some(true);
-                    }
-                    Err(error) => {
-                        report.warnings.push(format!("{error:#}"));
-                        report.next_steps.push(format!(
-                            "configure model ids in {}",
-                            bindings_path.display()
-                        ));
-                    }
-                }
-            }
-            Err(err) => report.errors.push(format!("{err:#}")),
-        }
-    }
     report.skills = loaded.front_matter.selected_skills().to_vec();
     report.tool_policy = loaded.front_matter.tool_policy();
     report.subagents = loaded
@@ -208,23 +142,6 @@ fn populate_function_status(
 
     if let Some(profile) = loaded.front_matter.model_profile() {
         report.profile = Some(profile.to_string());
-        match resolve_profile(profile, workspace_root, config_dir) {
-            Ok(resolution) => {
-                report.profile_path = resolution.selected_path.clone();
-                match resolution.selected_path {
-                    Some(path) if path.is_file() => {}
-                    Some(path) => report.errors.push(format!(
-                        "inference profile `{profile}` not found: {}",
-                        path.display()
-                    )),
-                    None => report.errors.push(format!(
-                        "inference profile `{profile}` not found; checked {}",
-                        join_paths(&resolution.candidates)
-                    )),
-                }
-            }
-            Err(err) => report.errors.push(format!("{err:#}")),
-        }
     }
 
     if report.errors.is_empty() {
@@ -287,11 +204,7 @@ mod tests {
             function_status_with_model_bindings("gemma4-e4b", &workspace, &config, Some(&staged));
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-        assert_eq!(report.inference_model_path.as_deref(), Some(main.as_path()));
-        assert_eq!(
-            report.inference_multimodal_projector_path.as_deref(),
-            Some(projector.as_path())
-        );
+        assert_eq!(report.profile.as_deref(), Some("gpu-rx7900xtx-32768"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

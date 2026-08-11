@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::validation::{
     default_identity_fields, is_valid_identity_field, validate_extensions, validate_function_id,
-    validate_relative_function_file_path, validate_unique_non_empty,
+    validate_unique_non_empty,
 };
-pub const FUNCTION_PAYLOAD_SCHEMA: &str = "agentlibre.function/v2";
+pub const FUNCTION_PAYLOAD_SCHEMA: &str = "agentlibre.function/v3";
 pub const SUBAGENT_SCHEMA: &str = "agentlibre/subagent/v1";
 pub const FUNCTION_FILE_NAME: &str = "FUNCTION.md";
 pub const FUNCTION_SYSTEM_PROMPT_FILE_NAME: &str = "SYSTEM.md";
@@ -175,15 +175,7 @@ impl AgentFunctionFrontMatter {
     }
 
     pub fn model_profile(&self) -> Option<&str> {
-        self.model
-            .as_ref()
-            .and_then(|model| model.profile.as_deref())
-    }
-
-    pub fn model_config_path(&self) -> Option<&str> {
-        self.model
-            .as_ref()
-            .and_then(|model| model.config.as_deref())
+        self.model.as_ref().map(|model| model.profile.as_str())
     }
 
     pub fn runtime_tool_mode(&self) -> Option<FunctionToolMode> {
@@ -294,10 +286,7 @@ impl FunctionDelegationBudget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FunctionModel {
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub config: Option<String>,
+    pub profile: String,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
@@ -305,16 +294,7 @@ pub struct FunctionModel {
 impl FunctionModel {
     fn validate(&self) -> Result<()> {
         validate_extensions("model", &self.extensions)?;
-        ensure!(
-            !(self.profile.is_some() && self.config.is_some()),
-            "model.profile and model.config cannot both be set"
-        );
-        if let Some(profile) = &self.profile {
-            validate_function_id("model.profile", profile)?;
-        }
-        if let Some(config) = &self.config {
-            validate_relative_function_file_path("model.config", config)?;
-        }
+        validate_function_id("model.profile", &self.profile)?;
         Ok(())
     }
 }
@@ -325,9 +305,19 @@ pub struct FunctionRuntime {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
+    pub stop_rules: Vec<String>,
+    #[serde(default)]
+    pub structured_generation: agl_model::StructuredGenerationMode,
+    #[serde(default = "default_repair_malformed_tool_calls")]
+    pub repair_malformed_tool_calls: bool,
+    #[serde(default)]
     pub max_tool_calls: Option<u32>,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
+}
+
+const fn default_repair_malformed_tool_calls() -> bool {
+    true
 }
 
 impl FunctionRuntime {
@@ -339,6 +329,10 @@ impl FunctionRuntime {
                 "runtime.max_output_tokens must be greater than zero"
             );
         }
+        ensure!(
+            self.stop_rules.iter().all(|rule| !rule.is_empty()),
+            "runtime.stop_rules cannot contain an empty rule"
+        );
         if let Some(max_tool_calls) = self.max_tool_calls {
             ensure!(
                 (1..=MAX_FUNCTION_CAPABILITY_CALLS).contains(&max_tool_calls),

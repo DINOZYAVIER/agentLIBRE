@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -94,12 +94,4 @@ pub(crate) fn validate_unique_non_empty(field: &str, values: &[String]) -> Resul
         );
     }
     Ok(())
-}
-
-pub(crate) fn join_paths(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }

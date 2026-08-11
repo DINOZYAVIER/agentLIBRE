@@ -3,8 +3,8 @@ package:
   schema: agentlibre.package/v1
   type: function
   id: gemma4-31b-64k
-  version: 1.2.0
-  payload_schema: agentlibre.function/v2
+  version: 1.3.0
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -15,11 +15,14 @@ package:
 title: Gemma4 31B 64K
 description: Local Gemma4 31B QAT 64K GPU agent function with native Gemma tool-call formatting.
 model:
-  config: inference.toml
+  profile: gpu-rx7900xtx-65536
 runtime:
   tool_mode: read-only
   max_output_tokens: 4096
   max_tool_calls: 32
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 skills:
   use: []
 subagents:

@@ -17,9 +17,8 @@ pub use loader::{LoadedFunction, LoadedSubagent, MarkdownSection, load_function_
 #[cfg(test)]
 pub(crate) use locator::resolve_function_package;
 pub use locator::{
-    FunctionListEntry, FunctionPackageLocation, FunctionPackageSource, ProfileResolution,
-    default_local_profile_path, global_functions_root, global_profile_path, list_functions,
-    resolve_profile, workspace_functions_root, workspace_profile_path,
+    FunctionListEntry, FunctionPackageLocation, FunctionPackageSource, global_functions_root,
+    list_functions, workspace_functions_root,
 };
 pub use manifest::*;
 pub use render::render_function_context;

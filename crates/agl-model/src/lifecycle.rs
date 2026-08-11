@@ -4,13 +4,14 @@ use std::io::ErrorKind;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
-use agl_config::{
-    ModelId, load_model_bindings_or_empty, model_bindings_path, write_model_bindings,
-};
+use agl_config::{ModelId, load_model_bindings_or_empty, model_bindings_path};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::{InstallRecordState, InstallSource, ModelInstallStore};
+use crate::{
+    InstallRecordState, InstallSource, ModelInstallStore, ModelInstallTransaction,
+    ModelInstallTransactionInput,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,7 +125,7 @@ impl ModelLifecycleService {
         );
         let target = &plan.targets[0];
         self.ensure_not_protected(&target.model_id)?;
-        let mut bindings = load_model_bindings_or_empty(&self.bindings_path)?;
+        let bindings = load_model_bindings_or_empty(&self.bindings_path)?;
         let current = bindings
             .models
             .get(&target.model_id)
@@ -133,8 +134,10 @@ impl ModelLifecycleService {
             Some(&current.path) == target.binding_path.as_ref(),
             "model binding changed after the unbind plan was created"
         );
-        bindings.models.remove(&target.model_id);
-        write_model_bindings(&self.bindings_path, &bindings)
+        ModelInstallTransaction::new(self.store.clone(), self.bindings_path.clone())?.commit(
+            ModelInstallTransactionInput::unbind(vec![target.model_id.clone()]),
+        )?;
+        Ok(())
     }
 
     pub fn plan_remove(&self, id: &ModelId) -> Result<ModelLifecyclePlan> {
@@ -191,7 +194,7 @@ impl ModelLifecycleService {
             "model `{}` became bound after the remove plan was created",
             target.model_id
         );
-        let record = self
+        let mut record = self
             .store
             .get(&target.model_id)?
             .context("install record disappeared after remove planning")?;
@@ -200,7 +203,9 @@ impl ModelLifecycleService {
                 && Some(&record.path) == target.cache_path.as_ref(),
             "install record changed after the remove plan was created"
         );
-        self.store.mark_removed(&target.model_id)?;
+        record.state = InstallRecordState::Removed;
+        ModelInstallTransaction::new(self.store.clone(), self.bindings_path.clone())?
+            .commit(ModelInstallTransactionInput::update_records(vec![record]))?;
         Ok(())
     }
 
@@ -431,8 +436,15 @@ impl ModelLifecycleService {
                 std::fs::remove_file(path)
                     .with_context(|| format!("failed to prune cache path {}", path.display()))?;
             }
-            self.store.delete_record(&target.model_id)?;
         }
+        ModelInstallTransaction::new(self.store.clone(), self.bindings_path.clone())?.commit(
+            ModelInstallTransactionInput::delete_records(
+                plan.targets
+                    .iter()
+                    .map(|target| target.model_id.clone())
+                    .collect(),
+            ),
+        )?;
         Ok(())
     }
 
@@ -785,7 +797,7 @@ fn active_model_lease_paths(root: Option<&Path>) -> Result<BTreeSet<PathBuf>> {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use agl_config::{ModelBinding, ModelBindings};
+    use agl_config::{ModelBinding, ModelBindings, write_model_bindings};
 
     use super::*;
     use crate::{InstallRecordState, ModelArtifactRole, ModelInstallRecord};

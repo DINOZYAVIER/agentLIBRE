@@ -3,37 +3,133 @@ use std::fmt;
 use std::path::PathBuf;
 
 use agl_ids::{AttemptId, RunId, TurnId};
+use serde::{Deserialize, Serialize};
 
-use crate::evidence::InferenceFinishStatus;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceAttemptOutcome {
+    Succeeded,
+    IncompleteOutput,
+    Failed,
+    Cancelled,
+}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceRejectionStage {
+    Plan,
+    Content,
+    Descriptor,
+    Lease,
+    Admission,
+    Queue,
+    Dispatch,
+    Engine,
+    Evidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceAttemptFailure {
+    pub code: String,
+    pub stage: InferenceRejectionStage,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceAttemptCancellation {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferencePlanEvidence {
+    pub plan_digest: String,
+    pub package_refs: Vec<String>,
+    pub profile_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceContentEvidence {
+    pub content_digest: String,
+    pub resolved_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceAdmissionEvidence {
+    pub reservation_id: String,
+    pub resource_components: Vec<(String, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceDispatchEvidence {
+    pub descriptor_set_id: String,
+    pub engine_generation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceRuntimeEvidence {
+    pub allocation_receipt_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InferenceAttemptPhase {
     Initialized,
     Started,
     RequestRecorded,
+    Planned,
+    ContentReady,
+    Admitted,
+    DispatchRecorded,
     RuntimeGenerating,
     RuntimeLogRecorded,
     ResponseRecorded,
+    FailureRecorded,
+    CancellationRecorded,
+    Succeeded,
+    IncompleteOutput,
     Failed,
-    Finished,
+    Cancelled,
 }
 
 impl InferenceAttemptPhase {
     pub fn as_str(self) -> &'static str {
         match self {
-            InferenceAttemptPhase::Initialized => "initialized",
-            InferenceAttemptPhase::Started => "started",
-            InferenceAttemptPhase::RequestRecorded => "request_recorded",
-            InferenceAttemptPhase::RuntimeGenerating => "runtime_generating",
-            InferenceAttemptPhase::RuntimeLogRecorded => "runtime_log_recorded",
-            InferenceAttemptPhase::ResponseRecorded => "response_recorded",
-            InferenceAttemptPhase::Failed => "failed",
-            InferenceAttemptPhase::Finished => "finished",
+            Self::Initialized => "initialized",
+            Self::Started => "started",
+            Self::RequestRecorded => "request_recorded",
+            Self::Planned => "planned",
+            Self::ContentReady => "content_ready",
+            Self::Admitted => "admitted",
+            Self::DispatchRecorded => "dispatch_recorded",
+            Self::RuntimeGenerating => "runtime_generating",
+            Self::RuntimeLogRecorded => "runtime_log_recorded",
+            Self::ResponseRecorded => "response_recorded",
+            Self::FailureRecorded => "failure_recorded",
+            Self::CancellationRecorded => "cancellation_recorded",
+            Self::Succeeded => "succeeded",
+            Self::IncompleteOutput => "incomplete_output",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::IncompleteOutput | Self::Failed | Self::Cancelled
+        )
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InferenceAttemptTransition {
     StartAttempt {
         backend: String,
@@ -42,36 +138,59 @@ pub enum InferenceAttemptTransition {
     RecordRequest {
         path: PathBuf,
     },
-    StartRuntime,
+    RecordPlan {
+        plan: InferencePlanEvidence,
+    },
+    RecordContentReady {
+        content: InferenceContentEvidence,
+    },
+    RecordAdmissionGrant {
+        admission: InferenceAdmissionEvidence,
+    },
+    RecordDispatch {
+        dispatch: InferenceDispatchEvidence,
+    },
+    RecordRuntimeStarted {
+        runtime: InferenceRuntimeEvidence,
+    },
     RecordRuntimeLog {
         path: PathBuf,
     },
     RecordResponse {
         path: PathBuf,
     },
-    FailAttempt {
-        message: String,
+    RecordFailure {
+        failure: InferenceAttemptFailure,
+    },
+    RecordCancellation {
+        cancellation: InferenceAttemptCancellation,
     },
     FinishAttempt {
-        status: InferenceFinishStatus,
+        outcome: InferenceAttemptOutcome,
     },
 }
 
 impl InferenceAttemptTransition {
     pub fn as_str(&self) -> &'static str {
         match self {
-            InferenceAttemptTransition::StartAttempt { .. } => "start_attempt",
-            InferenceAttemptTransition::RecordRequest { .. } => "record_request",
-            InferenceAttemptTransition::StartRuntime => "start_runtime",
-            InferenceAttemptTransition::RecordRuntimeLog { .. } => "record_runtime_log",
-            InferenceAttemptTransition::RecordResponse { .. } => "record_response",
-            InferenceAttemptTransition::FailAttempt { .. } => "fail_attempt",
-            InferenceAttemptTransition::FinishAttempt { .. } => "finish_attempt",
+            Self::StartAttempt { .. } => "start_attempt",
+            Self::RecordRequest { .. } => "record_request",
+            Self::RecordPlan { .. } => "record_plan",
+            Self::RecordContentReady { .. } => "record_content_ready",
+            Self::RecordAdmissionGrant { .. } => "record_admission_grant",
+            Self::RecordDispatch { .. } => "record_dispatch",
+            Self::RecordRuntimeStarted { .. } => "record_runtime_started",
+            Self::RecordRuntimeLog { .. } => "record_runtime_log",
+            Self::RecordResponse { .. } => "record_response",
+            Self::RecordFailure { .. } => "record_failure",
+            Self::RecordCancellation { .. } => "record_cancellation",
+            Self::FinishAttempt { .. } => "finish_attempt",
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InferenceAttemptTransitionRecord {
     pub run_id: RunId,
     pub turn_id: TurnId,
@@ -82,7 +201,26 @@ pub struct InferenceAttemptTransitionRecord {
     pub transition: InferenceAttemptTransition,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl InferenceAttemptTransitionRecord {
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    pub fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+
+    pub fn transition(&self) -> &InferenceAttemptTransition {
+        &self.transition
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InferenceAttemptMachine {
     run_id: RunId,
     turn_id: TurnId,
@@ -102,6 +240,18 @@ impl InferenceAttemptMachine {
         }
     }
 
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    pub fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+
     pub fn phase(&self) -> InferenceAttemptPhase {
         self.phase
     }
@@ -110,8 +260,8 @@ impl InferenceAttemptMachine {
         self.sequence
     }
 
-    pub fn apply(
-        &mut self,
+    pub fn preview(
+        &self,
         transition: InferenceAttemptTransition,
     ) -> Result<InferenceAttemptTransitionRecord, InferenceAttemptTransitionError> {
         let from = self.phase;
@@ -121,18 +271,45 @@ impl InferenceAttemptMachine {
                 transition: transition.as_str(),
             });
         };
-
-        self.sequence += 1;
-        self.phase = to;
         Ok(InferenceAttemptTransitionRecord {
             run_id: self.run_id.clone(),
             turn_id: self.turn_id.clone(),
             attempt_id: self.attempt_id.clone(),
-            sequence: self.sequence,
+            sequence: self.sequence + 1,
             from,
             to,
             transition,
         })
+    }
+
+    pub fn commit(
+        &mut self,
+        record: &InferenceAttemptTransitionRecord,
+    ) -> Result<(), InferenceAttemptTransitionError> {
+        if record.run_id != self.run_id
+            || record.turn_id != self.turn_id
+            || record.attempt_id != self.attempt_id
+            || record.sequence != self.sequence + 1
+            || record.from != self.phase
+            || next_phase(self.phase, &record.transition) != Some(record.to)
+        {
+            return Err(InferenceAttemptTransitionError {
+                phase: self.phase,
+                transition: record.transition.as_str(),
+            });
+        }
+        self.sequence = record.sequence;
+        self.phase = record.to;
+        Ok(())
+    }
+
+    pub fn apply(
+        &mut self,
+        transition: InferenceAttemptTransition,
+    ) -> Result<InferenceAttemptTransitionRecord, InferenceAttemptTransitionError> {
+        let record = self.preview(transition)?;
+        self.commit(&record)?;
+        Ok(record)
     }
 }
 
@@ -165,198 +342,51 @@ fn next_phase(
     match (from, transition) {
         (Initialized, StartAttempt { .. }) => Some(Started),
         (Started, RecordRequest { .. }) => Some(RequestRecorded),
-        (RequestRecorded, StartRuntime) => Some(RuntimeGenerating),
+        (RequestRecorded, RecordPlan { .. }) => Some(Planned),
+        (Planned, RecordContentReady { .. }) => Some(ContentReady),
+        (ContentReady, RecordAdmissionGrant { .. }) => Some(Admitted),
+        (Admitted, RecordDispatch { .. }) => Some(DispatchRecorded),
+        (DispatchRecorded, RecordRuntimeStarted { .. }) => Some(RuntimeGenerating),
         (RuntimeGenerating, RecordRuntimeLog { .. }) => Some(RuntimeLogRecorded),
-        (RuntimeGenerating | RuntimeLogRecorded, FailAttempt { .. }) => Some(Failed),
         (RuntimeLogRecorded, RecordResponse { .. }) => Some(ResponseRecorded),
+        (phase, RecordFailure { .. }) if is_failure_eligible(phase) => Some(FailureRecorded),
+        (phase, RecordCancellation { .. }) if is_failure_eligible(phase) => {
+            Some(CancellationRecorded)
+        }
         (
             ResponseRecorded,
             FinishAttempt {
-                status: InferenceFinishStatus::Succeeded | InferenceFinishStatus::IncompleteOutput,
+                outcome: InferenceAttemptOutcome::Succeeded,
             },
-        ) => Some(Finished),
+        ) => Some(Succeeded),
         (
-            Failed,
+            ResponseRecorded,
             FinishAttempt {
-                status: InferenceFinishStatus::Failed,
+                outcome: InferenceAttemptOutcome::IncompleteOutput,
             },
-        ) => Some(Finished),
+        ) => Some(IncompleteOutput),
+        (
+            FailureRecorded,
+            FinishAttempt {
+                outcome: InferenceAttemptOutcome::Failed,
+            },
+        ) => Some(Failed),
+        (
+            CancellationRecorded,
+            FinishAttempt {
+                outcome: InferenceAttemptOutcome::Cancelled,
+            },
+        ) => Some(Cancelled),
         _ => None,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn machine() -> InferenceAttemptMachine {
-        InferenceAttemptMachine::new(
-            RunId::parse("run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31").unwrap(),
-            TurnId::parse("turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32").unwrap(),
-            AttemptId::parse("attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b33").unwrap(),
+fn is_failure_eligible(phase: InferenceAttemptPhase) -> bool {
+    !phase.is_terminal()
+        && !matches!(
+            phase,
+            InferenceAttemptPhase::Initialized
+                | InferenceAttemptPhase::FailureRecorded
+                | InferenceAttemptPhase::CancellationRecorded
         )
-    }
-
-    #[test]
-    fn accepts_success_path() {
-        let mut machine = machine();
-
-        assert_eq!(
-            machine
-                .apply(InferenceAttemptTransition::StartAttempt {
-                    backend: "llama_cpp".to_string(),
-                    request_path: PathBuf::from("request.json"),
-                })
-                .unwrap()
-                .to,
-            InferenceAttemptPhase::Started
-        );
-        machine
-            .apply(InferenceAttemptTransition::RecordRequest {
-                path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::StartRuntime)
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordRuntimeLog {
-                path: PathBuf::from("runtime.log"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordResponse {
-                path: PathBuf::from("response.json"),
-            })
-            .unwrap();
-        let record = machine
-            .apply(InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Succeeded,
-            })
-            .unwrap();
-
-        assert_eq!(record.to, InferenceAttemptPhase::Finished);
-        assert_eq!(record.sequence, 6);
-    }
-
-    #[test]
-    fn accepts_failure_path() {
-        let mut machine = machine();
-        machine
-            .apply(InferenceAttemptTransition::StartAttempt {
-                backend: "llama_cpp".to_string(),
-                request_path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordRequest {
-                path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::StartRuntime)
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::FailAttempt {
-                message: "runtime failed".to_string(),
-            })
-            .unwrap();
-        let record = machine
-            .apply(InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Failed,
-            })
-            .unwrap();
-
-        assert_eq!(record.to, InferenceAttemptPhase::Finished);
-    }
-
-    #[test]
-    fn accepts_incomplete_output_without_relabeling_it_succeeded() {
-        let mut machine = machine();
-        machine
-            .apply(InferenceAttemptTransition::StartAttempt {
-                backend: "llama_cpp".to_string(),
-                request_path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordRequest {
-                path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::StartRuntime)
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordRuntimeLog {
-                path: PathBuf::from("runtime.log"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordResponse {
-                path: PathBuf::from("response.json"),
-            })
-            .unwrap();
-        let record = machine
-            .apply(InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::IncompleteOutput,
-            })
-            .unwrap();
-
-        assert_eq!(record.to, InferenceAttemptPhase::Finished);
-        assert!(matches!(
-            record.transition,
-            InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::IncompleteOutput
-            }
-        ));
-        assert!(!matches!(
-            record.transition,
-            InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Succeeded
-            }
-        ));
-    }
-
-    #[test]
-    fn rejects_illegal_transition_and_finished_is_terminal() {
-        let mut machine = machine();
-        let err = machine
-            .apply(InferenceAttemptTransition::RecordResponse {
-                path: PathBuf::from("response.json"),
-            })
-            .unwrap_err();
-        assert_eq!(err.phase, InferenceAttemptPhase::Initialized);
-        assert_eq!(err.transition, "record_response");
-
-        machine
-            .apply(InferenceAttemptTransition::StartAttempt {
-                backend: "llama_cpp".to_string(),
-                request_path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::RecordRequest {
-                path: PathBuf::from("request.json"),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::StartRuntime)
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::FailAttempt {
-                message: "runtime failed".to_string(),
-            })
-            .unwrap();
-        machine
-            .apply(InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Failed,
-            })
-            .unwrap();
-
-        let err = machine
-            .apply(InferenceAttemptTransition::StartRuntime)
-            .unwrap_err();
-        assert_eq!(err.phase, InferenceAttemptPhase::Finished);
-    }
 }

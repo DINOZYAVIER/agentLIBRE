@@ -28,7 +28,7 @@ const CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DOWNLOAD_RETRY_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Debug, Default)]
-struct WorkerClientConfig {
+struct DownloaderConfig {
     cache_dir: Option<PathBuf>,
     endpoint: Option<String>,
     token: Option<String>,
@@ -64,16 +64,28 @@ impl ArtifactDownloadSpec {
     pub fn from_package(package: &ModelPackage) -> Vec<Self> {
         package
             .required_artifacts()
-            .map(|artifact| Self {
-                package_id: Some(package.id.clone()),
-                model_id: artifact.model_id.clone(),
-                role: artifact.role,
-                repository: package.repository.clone(),
-                revision: package.revision.clone(),
-                filename: artifact.filename.clone(),
-                byte_size: artifact.byte_size,
-                sha256: artifact.sha256.clone(),
-                additional_files: Vec::new(),
+            .map(|artifact| {
+                let primary = artifact.primary_file();
+                Self {
+                    package_id: Some(package.id.clone()),
+                    model_id: artifact.model_id.clone(),
+                    role: artifact.role,
+                    repository: package.repository.clone(),
+                    revision: package.revision.clone(),
+                    filename: primary.filename.clone(),
+                    byte_size: primary.byte_size,
+                    sha256: primary.sha256.clone(),
+                    additional_files: artifact
+                        .files
+                        .iter()
+                        .skip(1)
+                        .map(|file| ArtifactFileDownloadSpec {
+                            filename: file.filename.clone(),
+                            byte_size: file.byte_size,
+                            sha256: file.sha256.clone(),
+                        })
+                        .collect(),
+                }
             })
             .collect()
     }
@@ -278,7 +290,7 @@ pub enum ModelDownloadError {
     #[error("model download queue is full")]
     QueueFull,
     #[error("model download worker is unavailable")]
-    WorkerUnavailable,
+    DownloaderUnavailable,
     #[error("model download was cancelled")]
     Cancelled,
     #[error("Hugging Face authentication is required for {repository}")]
@@ -362,7 +374,7 @@ impl SplitDescriptor {
     }
 }
 
-enum WorkerCommand {
+enum DownloadCommand {
     Download {
         job_id: u64,
         request: ModelDownloadRequest,
@@ -384,7 +396,7 @@ enum WorkerCommand {
 
 #[derive(Clone)]
 pub struct ModelDownloadHandle {
-    sender: mpsc::SyncSender<WorkerCommand>,
+    sender: mpsc::SyncSender<DownloadCommand>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -394,19 +406,19 @@ impl ModelDownloadHandle {
         request: ModelDownloadRequest,
     ) -> Result<Vec<ModelCacheStatus>, ModelDownloadError> {
         if self.shutdown.load(Ordering::Acquire) {
-            return Err(ModelDownloadError::WorkerUnavailable);
+            return Err(ModelDownloadError::DownloaderUnavailable);
         }
         validate_download_request(&request)?;
         let (result, receiver) = mpsc::sync_channel(1);
         self.sender
-            .try_send(WorkerCommand::CacheStatus { request, result })
+            .try_send(DownloadCommand::CacheStatus { request, result })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => ModelDownloadError::QueueFull,
-                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::WorkerUnavailable,
+                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::DownloaderUnavailable,
             })?;
         receiver
             .recv()
-            .map_err(|_| ModelDownloadError::WorkerUnavailable)?
+            .map_err(|_| ModelDownloadError::DownloaderUnavailable)?
     }
 
     pub fn inspect(
@@ -415,22 +427,22 @@ impl ModelDownloadHandle {
         offline: bool,
     ) -> Result<HubInspection, ModelDownloadError> {
         if self.shutdown.load(Ordering::Acquire) {
-            return Err(ModelDownloadError::WorkerUnavailable);
+            return Err(ModelDownloadError::DownloaderUnavailable);
         }
         let (result, receiver) = mpsc::sync_channel(1);
         self.sender
-            .try_send(WorkerCommand::Inspect {
+            .try_send(DownloadCommand::Inspect {
                 source,
                 offline,
                 result,
             })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => ModelDownloadError::QueueFull,
-                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::WorkerUnavailable,
+                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::DownloaderUnavailable,
             })?;
         receiver
             .recv()
-            .map_err(|_| ModelDownloadError::WorkerUnavailable)?
+            .map_err(|_| ModelDownloadError::DownloaderUnavailable)?
     }
 
     pub fn submit(
@@ -438,7 +450,7 @@ impl ModelDownloadHandle {
         request: ModelDownloadRequest,
     ) -> Result<ModelDownloadJob, ModelDownloadError> {
         if self.shutdown.load(Ordering::Acquire) {
-            return Err(ModelDownloadError::WorkerUnavailable);
+            return Err(ModelDownloadError::DownloaderUnavailable);
         }
         validate_download_request(&request)?;
         let job_id = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
@@ -449,7 +461,7 @@ impl ModelDownloadHandle {
             .try_send(ModelProgressEvent::Queued { job_id })
             .expect("new progress channel has capacity");
         self.sender
-            .try_send(WorkerCommand::Download {
+            .try_send(DownloadCommand::Download {
                 job_id,
                 request,
                 cancelled: Arc::clone(&cancelled),
@@ -458,7 +470,7 @@ impl ModelDownloadHandle {
             })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => ModelDownloadError::QueueFull,
-                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::WorkerUnavailable,
+                mpsc::TrySendError::Disconnected(_) => ModelDownloadError::DownloaderUnavailable,
             })?;
         Ok(ModelDownloadJob {
             id: job_id,
@@ -503,7 +515,7 @@ impl ModelDownloadJob {
             .expect("download result receiver is present");
         let result = receiver
             .recv()
-            .map_err(|_| ModelDownloadError::WorkerUnavailable)?;
+            .map_err(|_| ModelDownloadError::DownloaderUnavailable)?;
         self.finished = true;
         result
     }
@@ -529,7 +541,7 @@ impl ModelDownloadJob {
                     return result;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(ModelDownloadError::WorkerUnavailable);
+                    return Err(ModelDownloadError::DownloaderUnavailable);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -539,7 +551,7 @@ impl ModelDownloadJob {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let result = receiver
                         .recv()
-                        .map_err(|_| ModelDownloadError::WorkerUnavailable)?;
+                        .map_err(|_| ModelDownloadError::DownloaderUnavailable)?;
                     self.finished = true;
                     return result;
                 }
@@ -556,28 +568,28 @@ impl Drop for ModelDownloadJob {
     }
 }
 
-pub struct ModelDownloadWorker {
+pub struct ModelDownloader {
     handle: ModelDownloadHandle,
     thread: Option<thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
 }
 
-impl ModelDownloadWorker {
+impl ModelDownloader {
     pub fn spawn() -> Result<Self, ModelDownloadError> {
-        Self::spawn_with_client_config(WorkerClientConfig {
+        Self::spawn_with_client_config(DownloaderConfig {
             offline: crate::hugging_face_offline(),
-            ..WorkerClientConfig::default()
+            ..DownloaderConfig::default()
         })
     }
 
-    fn spawn_with_client_config(config: WorkerClientConfig) -> Result<Self, ModelDownloadError> {
+    fn spawn_with_client_config(config: DownloaderConfig) -> Result<Self, ModelDownloadError> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
         let thread = thread::Builder::new()
             .name("agl-model-download".to_string())
-            .spawn(move || worker_main(receiver, worker_shutdown, config))
-            .map_err(|_| ModelDownloadError::WorkerUnavailable)?;
+            .spawn(move || downloader_main(receiver, worker_shutdown, config))
+            .map_err(|_| ModelDownloadError::DownloaderUnavailable)?;
         Ok(Self {
             handle: ModelDownloadHandle {
                 sender,
@@ -598,26 +610,26 @@ impl ModelDownloadWorker {
 
     fn stop_and_join(&mut self) -> Result<(), ModelDownloadError> {
         self.shutdown.store(true, Ordering::Release);
-        let _ = self.handle.sender.send(WorkerCommand::Shutdown);
+        let _ = self.handle.sender.send(DownloadCommand::Shutdown);
         if let Some(thread) = self.thread.take() {
             thread
                 .join()
-                .map_err(|_| ModelDownloadError::WorkerUnavailable)?;
+                .map_err(|_| ModelDownloadError::DownloaderUnavailable)?;
         }
         Ok(())
     }
 }
 
-impl Drop for ModelDownloadWorker {
+impl Drop for ModelDownloader {
     fn drop(&mut self) {
         let _ = self.stop_and_join();
     }
 }
 
-fn worker_main(
-    receiver: mpsc::Receiver<WorkerCommand>,
+fn downloader_main(
+    receiver: mpsc::Receiver<DownloadCommand>,
     shutdown: Arc<AtomicBool>,
-    config: WorkerClientConfig,
+    config: DownloaderConfig,
 ) {
     let force_offline = config.offline;
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -657,7 +669,7 @@ fn worker_main(
     };
     while let Ok(command) = receiver.recv() {
         match command {
-            WorkerCommand::Download {
+            DownloadCommand::Download {
                 job_id,
                 mut request,
                 cancelled,
@@ -673,7 +685,7 @@ fn worker_main(
                     break;
                 }
             }
-            WorkerCommand::Inspect {
+            DownloadCommand::Inspect {
                 source,
                 offline,
                 result,
@@ -682,11 +694,11 @@ fn worker_main(
                     runtime.block_on(run_inspection(&client, source, offline || force_offline));
                 let _ = result.send(value);
             }
-            WorkerCommand::CacheStatus { request, result } => {
+            DownloadCommand::CacheStatus { request, result } => {
                 let value = runtime.block_on(run_cache_status(&client, request));
                 let _ = result.send(value);
             }
-            WorkerCommand::Shutdown => break,
+            DownloadCommand::Shutdown => break,
         }
     }
 }
@@ -2225,7 +2237,7 @@ mod tests {
 
     #[test]
     fn empty_worker_plan_is_rejected_before_admission() {
-        let worker = ModelDownloadWorker::spawn().unwrap();
+        let worker = ModelDownloader::spawn().unwrap();
         let error = worker
             .handle()
             .submit(ModelDownloadRequest {
@@ -2261,7 +2273,7 @@ mod tests {
         let body = b"GGUFpinned-without-repo-commit-header".to_vec();
         let hub = TestHub::start_without_repo_commit(body.clone(), revision.clone());
         let cache = test_root("missing-repo-commit").join("hub");
-        let worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(cache.clone()),
             endpoint: Some(hub.endpoint.clone()),
             token: None,
@@ -2307,7 +2319,7 @@ mod tests {
         std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
         std::fs::write(&blob, &body).unwrap();
         publish_snapshot_pointer(&blob, &snapshot).unwrap();
-        let worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(cache),
             endpoint: Some(hub.endpoint.clone()),
             token: None,
@@ -2386,7 +2398,7 @@ mod tests {
         body.extend((0..512 * 1024).map(|index| (index % 251) as u8));
         let hub = TestHub::start(body.clone(), revision.clone(), Some("test-token"), true, 0);
         let cache = test_root("resume").join("hub");
-        let worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(cache.clone()),
             endpoint: Some(hub.endpoint.clone()),
             token: Some("test-token".to_string()),
@@ -2442,7 +2454,7 @@ mod tests {
         let body = b"GGUFknown-good-payload".to_vec();
         let hub = TestHub::start(body.clone(), revision.clone(), None, false, 0);
         let cache = test_root("repair-corrupt").join("hub");
-        let worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(cache.clone()),
             endpoint: Some(hub.endpoint.clone()),
             token: None,
@@ -2494,7 +2506,7 @@ mod tests {
             false,
             0,
         );
-        let auth_worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let auth_worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(test_root("auth").join("hub")),
             endpoint: Some(auth_hub.endpoint.clone()),
             token: Some("wrong-token".to_string()),
@@ -2514,7 +2526,7 @@ mod tests {
         auth_worker.shutdown().unwrap();
 
         let retry_hub = TestHub::start(body.clone(), revision.clone(), None, false, 1);
-        let retry_worker = ModelDownloadWorker::spawn_with_client_config(WorkerClientConfig {
+        let retry_worker = ModelDownloader::spawn_with_client_config(DownloaderConfig {
             cache_dir: Some(test_root("retry").join("hub")),
             endpoint: Some(retry_hub.endpoint.clone()),
             token: Some("test-token".to_string()),
@@ -2549,7 +2561,7 @@ mod tests {
         body.extend((0..256 * 1024).map(|index| (index % 239) as u8));
         let hub = TestHub::start(body.clone(), revision.clone(), None, true, 0);
         let cache = test_root("concurrent").join("hub");
-        let config = WorkerClientConfig {
+        let config = DownloaderConfig {
             cache_dir: Some(cache),
             endpoint: Some(hub.endpoint.clone()),
             token: Some("test-token".to_string()),
@@ -2557,8 +2569,8 @@ mod tests {
             retry_base_delay: Some(Duration::from_millis(1)),
             offline: false,
         };
-        let first = ModelDownloadWorker::spawn_with_client_config(config.clone()).unwrap();
-        let second = ModelDownloadWorker::spawn_with_client_config(config).unwrap();
+        let first = ModelDownloader::spawn_with_client_config(config.clone()).unwrap();
+        let second = ModelDownloader::spawn_with_client_config(config).unwrap();
         let request = test_download_request(&body, &revision, false);
         let first_job = first.handle().submit(request.clone()).unwrap();
         let second_job = second.handle().submit(request).unwrap();
@@ -2589,7 +2601,7 @@ mod tests {
         body.extend((0..256 * 1024).map(|index| (index % 233) as u8));
         let hub = TestHub::start(body.clone(), revision.clone(), None, true, 0);
         let cache = test_root("shutdown").join("hub");
-        let config = WorkerClientConfig {
+        let config = DownloaderConfig {
             cache_dir: Some(cache.clone()),
             endpoint: Some(hub.endpoint.clone()),
             token: Some("test-token".to_string()),
@@ -2597,7 +2609,7 @@ mod tests {
             retry_base_delay: Some(Duration::from_millis(1)),
             offline: false,
         };
-        let worker = ModelDownloadWorker::spawn_with_client_config(config.clone()).unwrap();
+        let worker = ModelDownloader::spawn_with_client_config(config.clone()).unwrap();
         let job = worker
             .handle()
             .submit(test_download_request(&body, &revision, false))
@@ -2625,7 +2637,7 @@ mod tests {
         assert!(lock.try_lock().is_ok());
         drop(lock);
 
-        let resumed = ModelDownloadWorker::spawn_with_client_config(config).unwrap();
+        let resumed = ModelDownloader::spawn_with_client_config(config).unwrap();
         resumed
             .handle()
             .submit(test_download_request(&body, &revision, false))

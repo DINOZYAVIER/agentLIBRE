@@ -10,7 +10,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -18,10 +18,14 @@ package:
     - skill:repo-status@*
 title: Coding
 model:
-  config: inference.toml
+  profile: gpu-exact
 runtime:
   tool_mode: write
   max_tool_calls: 32
+  max_output_tokens: 256
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 validation:
   runtime_identity:
     required: true
@@ -38,8 +42,7 @@ skills:
     let (front_matter, body) = parse_function_document(content).unwrap();
 
     assert_eq!(front_matter.id(), "coding");
-    assert_eq!(front_matter.model_profile(), None);
-    assert_eq!(front_matter.model_config_path(), Some("inference.toml"));
+    assert_eq!(front_matter.model_profile(), Some("gpu-exact"));
     assert_eq!(
         front_matter.runtime_tool_mode(),
         Some(FunctionToolMode::Write)
@@ -67,7 +70,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -154,7 +157,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
         std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - extension:core.process@^1.0\ntitle: Policy {index}\n{}---\n",
+                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v3\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - extension:core.process@^1.0\ntitle: Policy {index}\n{}---\n",
                 case.tools_yaml
             ),
         )
@@ -186,14 +189,14 @@ fn runtime_function_preserves_function_tool_policy_states() {
 }
 
 #[test]
-fn rejects_model_profile_and_config_together() {
+fn rejects_legacy_model_config_field() {
     let content = r#"---
 package:
   schema: agentlibre.package/v1
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -210,7 +213,7 @@ model:
 
     assert!(
         err.to_string()
-            .contains("model.profile and model.config cannot both be set")
+            .contains("unknown model front matter field `config`")
     );
 }
 
@@ -222,7 +225,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]

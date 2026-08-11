@@ -19,7 +19,6 @@ use crate::admission::{
 use crate::durable_health::{
     DurableHealthStore, ResourceEstimateQuarantine, ResourceQuarantineKey,
 };
-use crate::evidence::InferenceFinishStatus;
 use crate::worker_protocol::{
     AllocationReceipt as WireAllocationReceipt, ContextResourceId, Handshake, HostCommand,
     HostControlChannel, ModelResourceId, OperationId, Ready, SealedPayloadTransfer,
@@ -32,8 +31,10 @@ use crate::worker_supervisor::{
     WorkerHealthState, WorkerLifecyclePhase, WorkerSupervisorError, WorkerSupervisorState,
 };
 use crate::{
-    InferenceAttemptMachine, InferenceAttemptPhase, InferenceAttemptTransition,
-    InferenceOutputEvent,
+    InferenceAdmissionEvidence, InferenceAttemptFailure, InferenceAttemptMachine,
+    InferenceAttemptOutcome, InferenceAttemptPhase, InferenceAttemptTransition,
+    InferenceContentEvidence, InferenceDispatchEvidence, InferenceOutputEvent,
+    InferencePlanEvidence, InferenceRejectionStage, InferenceRuntimeEvidence,
 };
 
 const WORKER_BUILD: &str = "scripted-worker-build";
@@ -185,20 +186,24 @@ fn post_handshake_failure_matrix_is_exactly_once_and_preserves_pending_queue() {
                 assert_eq!(supervisor_terminal, None);
             }
             durable_attempt
-                .apply(InferenceAttemptTransition::FailAttempt {
-                    message: observed_kind.code().to_string(),
+                .apply(InferenceAttemptTransition::RecordFailure {
+                    failure: InferenceAttemptFailure {
+                        code: observed_kind.code().to_string(),
+                        stage: InferenceRejectionStage::Engine,
+                        message: observed_kind.code().to_string(),
+                    },
                 })
                 .unwrap();
             durable_attempt
                 .apply(InferenceAttemptTransition::FinishAttempt {
-                    status: InferenceFinishStatus::Failed,
+                    outcome: InferenceAttemptOutcome::Failed,
                 })
                 .unwrap();
-            assert_eq!(durable_attempt.phase(), InferenceAttemptPhase::Finished);
+            assert_eq!(durable_attempt.phase(), InferenceAttemptPhase::Failed);
             assert!(
                 durable_attempt
                     .apply(InferenceAttemptTransition::FinishAttempt {
-                        status: InferenceFinishStatus::Failed,
+                        outcome: InferenceAttemptOutcome::Failed,
                     })
                     .is_err(),
                 "the durable attempt cannot close twice"
@@ -600,9 +605,40 @@ fn active_attempt_machine() -> InferenceAttemptMachine {
             path: PathBuf::from("request.json"),
         })
         .unwrap();
-    machine
-        .apply(InferenceAttemptTransition::StartRuntime)
-        .unwrap();
+    for transition in [
+        InferenceAttemptTransition::RecordPlan {
+            plan: InferencePlanEvidence {
+                plan_digest: "plan".to_owned(),
+                package_refs: Vec::new(),
+                profile_id: "fixture".to_owned(),
+            },
+        },
+        InferenceAttemptTransition::RecordContentReady {
+            content: InferenceContentEvidence {
+                content_digest: "content".to_owned(),
+                resolved_bytes: 0,
+            },
+        },
+        InferenceAttemptTransition::RecordAdmissionGrant {
+            admission: InferenceAdmissionEvidence {
+                reservation_id: "reservation".to_owned(),
+                resource_components: Vec::new(),
+            },
+        },
+        InferenceAttemptTransition::RecordDispatch {
+            dispatch: InferenceDispatchEvidence {
+                descriptor_set_id: "descriptors".to_owned(),
+                engine_generation: "generation".to_owned(),
+            },
+        },
+        InferenceAttemptTransition::RecordRuntimeStarted {
+            runtime: InferenceRuntimeEvidence {
+                allocation_receipt_id: "receipt".to_owned(),
+            },
+        },
+    ] {
+        machine.apply(transition).unwrap();
+    }
     machine
 }
 

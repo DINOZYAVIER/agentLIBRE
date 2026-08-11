@@ -10,10 +10,10 @@ use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind};
 use agl_model::{
     HostResources, InstallRecordState, InstallSource, LlamaDeviceInfo, LlamaDeviceKind,
     ModelArtifactRole, ModelBindingPatch, ModelCacheStatus, ModelCatalog, ModelDownloadRequest,
-    ModelDownloadWorker, ModelFit, ModelFitKind, ModelInstallRecord, ModelInstallStore,
-    ModelPackage, ModelPackageId, ModelProgressEvent, PlannedArtifactRole, RuntimePlan,
-    RuntimePlanSet, RuntimePlanner, SetupCheckpoint, SetupCheckpointStore, SetupPhase,
-    setup_plan_hash, validate_gguf,
+    ModelDownloader, ModelFit, ModelFitKind, ModelInstallRecord, ModelInstallStore,
+    ModelInstallTransaction, ModelInstallTransactionInput, ModelPackage, ModelPackageId,
+    ModelProgressEvent, PlannedArtifactRole, RuntimePlan, RuntimePlanSet, RuntimePlanner,
+    SetupCheckpoint, SetupCheckpointStore, SetupPhase, setup_plan_hash, validate_gguf,
 };
 use agl_package::{PackageRef, WorkspaceConfigReferences, WorkspaceManifest, WorkspacePolicy};
 use agl_repo::read_workspace_default_function;
@@ -84,6 +84,11 @@ struct SetupIntentFingerprint {
 struct SetupIntentArtifact {
     role: ModelArtifactRole,
     model_id: ModelId,
+    files: Vec<SetupIntentArtifactFile>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SetupIntentArtifactFile {
     filename: String,
     byte_size: u64,
     sha256: String,
@@ -167,7 +172,7 @@ fn run_init_inner(
         .package(&requested_package_id)
         .with_context(|| format!("model package `{requested_package_id}` is not in the catalog"))?;
 
-    let worker = ModelDownloadWorker::spawn().context("failed to start model download worker")?;
+    let worker = ModelDownloader::spawn().context("failed to start model downloader")?;
     let handle = worker.handle();
     let package_cache = catalog
         .packages
@@ -266,7 +271,7 @@ fn run_init_inner(
         checkpoint.package_id == package.id && checkpoint.plan_hash == plan_hash
     });
     let mut plan = SetupPlanReport {
-        version: 1,
+        version: 2,
         workspace_root: workspace_root.clone(),
         host,
         packages: package_reports,
@@ -550,9 +555,15 @@ fn setup_fingerprint(
             .map(|artifact| SetupIntentArtifact {
                 role: artifact.role,
                 model_id: artifact.model_id.clone(),
-                filename: artifact.filename.clone(),
-                byte_size: artifact.byte_size,
-                sha256: artifact.sha256.clone(),
+                files: artifact
+                    .files
+                    .iter()
+                    .map(|file| SetupIntentArtifactFile {
+                        filename: file.filename.clone(),
+                        byte_size: file.byte_size,
+                        sha256: file.sha256.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
         nominal_memory_class_bytes: host.nominal_memory_class_bytes,
@@ -579,6 +590,7 @@ fn verified_package_records(
 ) -> Result<Option<Vec<ModelInstallRecord>>> {
     let mut records = Vec::new();
     for artifact in package.required_artifacts() {
+        let primary = artifact.primary_file();
         let Some(record) = store.get(&artifact.model_id)? else {
             return Ok(None);
         };
@@ -593,16 +605,23 @@ fn verified_package_records(
                     filename,
                 } if repository == &package.repository
                     && revision == &package.revision
-                    && filename == &artifact.filename
+                    && filename == &primary.filename
             )
-            && record.additional_files.is_empty();
+            && record.additional_files.len() + 1 == artifact.files.len()
+            && record
+                .additional_files
+                .iter()
+                .zip(artifact.files.iter().skip(1))
+                .all(|(recorded, declared)| {
+                    recorded.filename == declared.filename
+                        && recorded.byte_size == declared.byte_size
+                        && recorded.sha256 == declared.sha256
+                });
         if !provenance_matches
-            || validate_gguf(
-                &record.path,
-                Some(artifact.byte_size),
-                Some(&artifact.sha256),
-            )
-            .is_err()
+            || validate_gguf(&record.path, Some(primary.byte_size), Some(&primary.sha256)).is_err()
+            || record.additional_files.iter().any(|file| {
+                validate_gguf(&file.path, Some(file.byte_size), Some(&file.sha256)).is_err()
+            })
         {
             return Ok(None);
         }
@@ -711,16 +730,11 @@ fn commit_staged_setup(
             "staged model binding `{id}` changed before commit"
         );
     }
-    let receipt =
-        install_store.commit_with_bindings(records, &patch, published_bindings_path, true)?;
-    if let Err(error) = write_workspace_default(workspace_root, function_id) {
-        if let Err(rollback) = receipt.rollback() {
-            return Err(anyhow::anyhow!(
-                "failed to commit workspace default after staged smoke: {error:#}; model rollback also failed: {rollback:#}"
-            ));
-        }
-        return Err(error).context("failed to commit workspace default after staged smoke");
-    }
+    ModelInstallTransaction::new(install_store.clone(), published_bindings_path)?.commit(
+        ModelInstallTransactionInput::new(records.to_vec(), patch, true),
+    )?;
+    write_workspace_default(workspace_root, function_id)
+        .context("failed to commit workspace default after model install transaction")?;
     Ok(())
 }
 

@@ -1,13 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_config::{
-    ModelBinding, ModelBindings, ModelId, load_model_bindings_or_empty, write_model_bindings,
-};
+use agl_config::{ModelBinding, ModelBindings, ModelId};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -208,46 +206,6 @@ pub struct ModelInstallStore {
     root: PathBuf,
 }
 
-#[must_use = "keep the receipt while an outer commit may still need rollback"]
-pub struct ModelInstallCommitReceipt {
-    store: ModelInstallStore,
-    bindings_path: PathBuf,
-    bindings_existed: bool,
-    previous_bindings: ModelBindings,
-    previous_records: BTreeMap<ModelId, Option<ModelInstallRecord>>,
-    _lock: File,
-}
-
-impl ModelInstallCommitReceipt {
-    pub fn rollback(self) -> Result<()> {
-        self.restore()
-    }
-
-    fn restore(&self) -> Result<()> {
-        let mut failures = Vec::new();
-        for (id, record) in &self.previous_records {
-            let result = match record {
-                Some(record) => self.store.write(record),
-                None => self.store.delete_record(id),
-            };
-            if let Err(error) = result {
-                failures.push(format!(
-                    "failed to restore install record `{id}`: {error:#}"
-                ));
-            }
-        }
-        if let Err(error) = restore_model_bindings(
-            &self.bindings_path,
-            self.bindings_existed,
-            &self.previous_bindings,
-        ) {
-            failures.push(format!("failed to restore model bindings: {error:#}"));
-        }
-        ensure!(failures.is_empty(), "{}", failures.join("; "));
-        Ok(())
-    }
-}
-
 impl ModelInstallStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -312,138 +270,12 @@ impl ModelInstallStore {
         Ok(records)
     }
 
-    pub fn write(&self, record: &ModelInstallRecord) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn write(&self, record: &ModelInstallRecord) -> Result<()> {
         record.validate()?;
         let bytes = serde_json::to_vec_pretty(record)?;
         atomic_write(&self.record_path(&record.model_id), &bytes)
     }
-
-    pub fn mark_removed(&self, id: &ModelId) -> Result<ModelInstallRecord> {
-        let mut record = self
-            .get(id)?
-            .with_context(|| format!("model `{id}` has no agentLIBRE install record"))?;
-        record.state = InstallRecordState::Removed;
-        self.write(&record)?;
-        Ok(record)
-    }
-
-    pub fn delete_record(&self, id: &ModelId) -> Result<()> {
-        let path = self.record_path(id);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("failed to delete install record {}", path.display()))?;
-            if let Ok(directory) = File::open(&self.root) {
-                let _ = directory.sync_all();
-            }
-        }
-        Ok(())
-    }
-
-    pub fn commit_with_bindings(
-        &self,
-        records: &[ModelInstallRecord],
-        binding_patch: &ModelBindingPatch,
-        bindings_path: impl AsRef<Path>,
-        replace: bool,
-    ) -> Result<ModelInstallCommitReceipt> {
-        ensure!(!records.is_empty(), "model install commit is empty");
-        let mut record_ids = BTreeSet::new();
-        for record in records {
-            record.validate()?;
-            ensure!(
-                record_ids.insert(record.model_id.clone()),
-                "model install commit contains duplicate record `{}`",
-                record.model_id
-            );
-            let binding = binding_patch
-                .models
-                .get(&record.model_id)
-                .with_context(|| {
-                    format!(
-                        "model install commit has no binding for record `{}`",
-                        record.model_id
-                    )
-                })?;
-            ensure!(
-                binding.path == record.path,
-                "model install commit binding for `{}` does not match its record path",
-                record.model_id
-            );
-        }
-        ensure!(
-            binding_patch.models.len() == records.len(),
-            "model install commit contains a binding without a matching record"
-        );
-
-        std::fs::create_dir_all(&self.root)
-            .with_context(|| format!("failed to create install store {}", self.root.display()))?;
-        let lock_path = self.root.join(".commit.lock");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open model commit lock {}", lock_path.display()))?;
-        lock.lock().with_context(|| {
-            format!("failed to lock model commit state {}", lock_path.display())
-        })?;
-
-        let bindings_path = bindings_path.as_ref().to_path_buf();
-        let bindings_existed = bindings_path.is_file();
-        let previous_bindings = load_model_bindings_or_empty(&bindings_path)?;
-        let mut next_bindings = previous_bindings.clone();
-        binding_patch.merge_into(&mut next_bindings, replace)?;
-        let previous_records = records
-            .iter()
-            .map(|record| {
-                self.get(&record.model_id)
-                    .map(|previous| (record.model_id.clone(), previous))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let receipt = ModelInstallCommitReceipt {
-            store: self.clone(),
-            bindings_path: bindings_path.clone(),
-            bindings_existed,
-            previous_bindings,
-            previous_records,
-            _lock: lock,
-        };
-
-        let apply = || -> Result<()> {
-            write_model_bindings(&bindings_path, &next_bindings)?;
-            for record in records {
-                self.write(record)?;
-            }
-            Ok(())
-        };
-        if let Err(error) = apply() {
-            return match receipt.restore() {
-                Ok(()) => Err(error).context("failed to commit model records and bindings"),
-                Err(rollback) => Err(anyhow::anyhow!(
-                    "failed to commit model records and bindings: {error:#}; rollback also failed: {rollback:#}"
-                )),
-            };
-        }
-        Ok(receipt)
-    }
-}
-
-fn restore_model_bindings(path: &Path, existed: bool, previous: &ModelBindings) -> Result<()> {
-    if existed {
-        return write_model_bindings(path, previous);
-    }
-    if !path.exists() {
-        return Ok(());
-    }
-    std::fs::remove_file(path)
-        .with_context(|| format!("failed to remove new model bindings {}", path.display()))?;
-    if let Some(parent) = path.parent()
-        && let Ok(directory) = File::open(parent)
-    {
-        let _ = directory.sync_all();
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -471,13 +303,6 @@ impl ModelBindingPatch {
         }
         bindings.models.extend(self.models.clone());
         bindings.validate()
-    }
-
-    pub fn commit(&self, bindings_path: impl AsRef<Path>, replace: bool) -> Result<()> {
-        let bindings_path = bindings_path.as_ref();
-        let mut bindings = load_model_bindings_or_empty(bindings_path)?;
-        self.merge_into(&mut bindings, replace)?;
-        write_model_bindings(bindings_path, &bindings)
     }
 }
 
@@ -718,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn install_commit_receipt_restores_previous_records_and_bindings() {
+    fn install_transaction_replaces_records_and_bindings_together() {
         let old_path = temp_file("old.gguf", b"GGUFold-model");
         let root = old_path.parent().unwrap();
         let new_path = root.join("new.gguf");
@@ -728,33 +553,34 @@ mod tests {
         let new = import_local_model(&new_path, Some(id.clone()), ModelArtifactRole::Main).unwrap();
         let store = ModelInstallStore::new(root.join("records"));
         let bindings_path = root.join("models.toml");
-        store.write(&old.record).unwrap();
-        old.binding_patch.commit(&bindings_path, false).unwrap();
-
-        let receipt = store
-            .commit_with_bindings(
-                std::slice::from_ref(&new.record),
-                &new.binding_patch,
-                &bindings_path,
+        crate::ModelInstallTransaction::new(store.clone(), &bindings_path)
+            .unwrap()
+            .commit(crate::ModelInstallTransactionInput::new(
+                vec![old.record.clone()],
+                old.binding_patch.clone(),
+                false,
+            ))
+            .unwrap();
+        crate::ModelInstallTransaction::new(store.clone(), &bindings_path)
+            .unwrap()
+            .commit(crate::ModelInstallTransactionInput::new(
+                vec![new.record.clone()],
+                new.binding_patch,
                 true,
-            )
+            ))
             .unwrap();
         assert_eq!(store.get(&id).unwrap(), Some(new.record));
         assert_eq!(
-            load_model_bindings_or_empty(&bindings_path).unwrap().models[&id].path,
+            agl_config::load_model_bindings_or_empty(&bindings_path)
+                .unwrap()
+                .models[&id]
+                .path,
             std::fs::canonicalize(&new_path).unwrap()
-        );
-
-        receipt.rollback().unwrap();
-        assert_eq!(store.get(&id).unwrap(), Some(old.record));
-        assert_eq!(
-            load_model_bindings_or_empty(&bindings_path).unwrap().models[&id].path,
-            std::fs::canonicalize(&old_path).unwrap()
         );
     }
 
     #[test]
-    fn install_commit_receipt_removes_new_state_on_rollback() {
+    fn install_transaction_publishes_new_state() {
         let path = temp_file("new-only.gguf", b"GGUFnew-only");
         let root = path.parent().unwrap();
         let imported = import_local_model(
@@ -766,19 +592,15 @@ mod tests {
         let store = ModelInstallStore::new(root.join("records"));
         let bindings_path = root.join("models.toml");
 
-        let receipt = store
-            .commit_with_bindings(
-                std::slice::from_ref(&imported.record),
-                &imported.binding_patch,
-                &bindings_path,
+        crate::ModelInstallTransaction::new(store.clone(), &bindings_path)
+            .unwrap()
+            .commit(crate::ModelInstallTransactionInput::new(
+                vec![imported.record.clone()],
+                imported.binding_patch,
                 false,
-            )
+            ))
             .unwrap();
         assert!(bindings_path.is_file());
         assert!(store.get(&imported.record.model_id).unwrap().is_some());
-
-        receipt.rollback().unwrap();
-        assert!(!bindings_path.exists());
-        assert!(store.get(&imported.record.model_id).unwrap().is_none());
     }
 }

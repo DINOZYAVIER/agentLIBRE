@@ -4,7 +4,9 @@ use agl_events::{EventDraft, EventScope, RuntimeEvent, RuntimeEventWriter};
 use agl_ids::{RequestId, SessionId};
 use anyhow::Result;
 
-use crate::{InferenceAttemptTransition, InferenceAttemptTransitionRecord};
+use crate::{
+    InferenceAttemptOutcome, InferenceAttemptTransition, InferenceAttemptTransitionRecord,
+};
 
 #[derive(Clone, Debug)]
 pub struct InferenceEventWriter {
@@ -61,17 +63,33 @@ fn payload_for_transition(transition: &InferenceAttemptTransition) -> Option<Run
         InferenceAttemptTransition::RecordResponse { path } => {
             Some(RuntimeEvent::InferenceResponseRecorded { path: path.clone() })
         }
-        InferenceAttemptTransition::FailAttempt { message } => {
+        InferenceAttemptTransition::RecordFailure { failure } => {
             Some(RuntimeEvent::InferenceAttemptFailed {
-                message: message.clone(),
+                message: failure.code.clone(),
             })
         }
-        InferenceAttemptTransition::FinishAttempt { status } => {
+        InferenceAttemptTransition::FinishAttempt { outcome } => {
             Some(RuntimeEvent::InferenceAttemptFinished {
-                finish_status: *status,
+                finish_status: match outcome {
+                    InferenceAttemptOutcome::Succeeded => {
+                        agl_events::InferenceFinishStatus::Succeeded
+                    }
+                    InferenceAttemptOutcome::IncompleteOutput => {
+                        agl_events::InferenceFinishStatus::IncompleteOutput
+                    }
+                    InferenceAttemptOutcome::Failed => agl_events::InferenceFinishStatus::Failed,
+                    InferenceAttemptOutcome::Cancelled => {
+                        agl_events::InferenceFinishStatus::Cancelled
+                    }
+                },
             })
         }
-        InferenceAttemptTransition::StartRuntime
-        | InferenceAttemptTransition::RecordRuntimeLog { .. } => None,
+        InferenceAttemptTransition::RecordPlan { .. }
+        | InferenceAttemptTransition::RecordContentReady { .. }
+        | InferenceAttemptTransition::RecordAdmissionGrant { .. }
+        | InferenceAttemptTransition::RecordDispatch { .. }
+        | InferenceAttemptTransition::RecordRuntimeStarted { .. }
+        | InferenceAttemptTransition::RecordRuntimeLog { .. }
+        | InferenceAttemptTransition::RecordCancellation { .. } => None,
     }
 }

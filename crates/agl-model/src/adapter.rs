@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub const MODEL_FILE_NAME: &str = "MODEL.toml";
-pub const MODEL_PAYLOAD_SCHEMA: &str = "agentlibre.model/v2";
+pub const MODEL_PAYLOAD_SCHEMA: &str = "agentlibre.model/v3";
 
 #[derive(Clone, Debug)]
 pub struct ModelPackageAdapter {

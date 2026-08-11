@@ -3,8 +3,8 @@ package:
   schema: agentlibre.package/v1
   type: function
   id: gemma4-e4b
-  version: 1.1.0
-  payload_schema: agentlibre.function/v2
+  version: 1.2.0
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -15,10 +15,13 @@ package:
 title: Gemma 4 E4B
 description: Conservative local Gemma 4 E4B QAT function with vision and native tool calls.
 model:
-  config: inference.toml
+  profile: gpu-rx7900xtx-32768
 runtime:
   tool_mode: read-only
   max_output_tokens: 256
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 skills:
   use: []
 subagents:

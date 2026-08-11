@@ -64,4 +64,5 @@ pub enum InferenceFinishStatus {
     Succeeded,
     IncompleteOutput,
     Failed,
+    Cancelled,
 }
