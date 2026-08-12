@@ -131,6 +131,7 @@ fn observation_events_preserve_full_request_correlation() {
         InferenceAttemptTransition::StartAttempt {
             backend: "fake-backend".to_string(),
             request_path: paths.request_json().to_path_buf(),
+            projection_root: None,
         },
     );
     append_transition(
@@ -143,6 +144,18 @@ fn observation_events_preserve_full_request_correlation() {
     for transition in test_live_start_transitions() {
         append_transition(&writer, &mut machine, transition);
     }
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::RecordGenerationMetrics {
+            generation: crate::InferenceGenerationEvidence {
+                input_tokens: 10,
+                output_tokens: 2,
+                configured_batch_size: 8,
+                prefill_chunks: 2,
+            },
+        },
+    );
     append_transition(
         &writer,
         &mut machine,
@@ -206,6 +219,7 @@ fn test_live_start_transitions() -> [InferenceAttemptTransition; 5] {
                 plan_digest: "plan".to_owned(),
                 package_refs: vec!["function@1".to_owned(), "model@1".to_owned()],
                 profile_id: "cpu".to_owned(),
+                product_resolution: None,
             },
         },
         InferenceAttemptTransition::RecordContentReady {
@@ -217,6 +231,8 @@ fn test_live_start_transitions() -> [InferenceAttemptTransition; 5] {
         InferenceAttemptTransition::RecordAdmissionGrant {
             admission: InferenceAdmissionEvidence {
                 reservation_id: "reservation".to_owned(),
+                engine_reservation_id: "reservation:1".to_owned(),
+                reused_resident_allocation: false,
                 resource_components: Vec::new(),
             },
         },
@@ -229,6 +245,13 @@ fn test_live_start_transitions() -> [InferenceAttemptTransition; 5] {
         InferenceAttemptTransition::RecordRuntimeStarted {
             runtime: InferenceRuntimeEvidence {
                 allocation_receipt_id: "receipt".to_owned(),
+                plan_digest: format!("sha256:{}", "a".repeat(64)),
+                reservation_id: "reservation:1".to_owned(),
+                engine_generation: "engine:1".to_owned(),
+                selected_device: Some("Vulkan0".to_owned()),
+                host_bytes: 1,
+                device_bytes: 2,
+                shared_bytes: 0,
             },
         },
     ]

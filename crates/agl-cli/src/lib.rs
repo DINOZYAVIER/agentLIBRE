@@ -2,7 +2,7 @@ use std::env;
 use std::fmt;
 use std::path::PathBuf;
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
     ChatOptions, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
@@ -19,12 +19,10 @@ use agl_daemon::{
     default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 use agl_ids::{RunId, SessionId};
-use agl_inference::{
-    InferenceDeviceInfo, InferenceDeviceKind, ModelManager, ModelManagerOptions, WorkerModelRuntime,
-};
+use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind, InferenceHost, InferenceHostConfig};
 use agl_protocol::{
     AssistantItemState, DaemonTool, InferenceStatusRequest, ModelReleaseOutcome,
-    ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState,
+    ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceEngineState,
     ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
     RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionListRequest,
     SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
@@ -58,10 +56,10 @@ mod trace;
 use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
-    CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, InferenceCommand,
-    RunOptions, ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions,
-    SkillListSourceArg, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
-    SkillVerifyOptions, parse_cli, print_completion,
+    CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, RunOptions,
+    ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions, SkillListSourceArg,
+    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli,
+    print_completion,
 };
 use artifact::run_artifact;
 use config::run_config;
@@ -233,8 +231,8 @@ enum CliRuntimeProfile {
 pub(crate) enum InferenceAuthoritySurface {
     DirectRun,
     Cron,
-    InitInventory,
     FunctionSmoke,
+    InitInventory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,8 +268,8 @@ pub(crate) const fn inference_authority_decision(
         DaemonConnectionClass::Unavailable => match surface {
             InferenceAuthoritySurface::DirectRun
             | InferenceAuthoritySurface::Cron
-            | InferenceAuthoritySurface::InitInventory
-            | InferenceAuthoritySurface::FunctionSmoke => InferenceAuthorityDecision::Standalone,
+            | InferenceAuthoritySurface::FunctionSmoke
+            | InferenceAuthoritySurface::InitInventory => InferenceAuthorityDecision::Standalone,
         },
         DaemonConnectionClass::Incompatible => InferenceAuthorityDecision::Reject,
     }
@@ -279,9 +277,7 @@ pub(crate) const fn inference_authority_decision(
 
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Run(_) | CliCommand::Inference(InferenceCommand::Run(_)) => {
-            CliRuntimeProfile::Interactive
-        }
+        CliCommand::Run(_) => CliRuntimeProfile::Interactive,
         CliCommand::Config(_)
         | CliCommand::Package(_)
         | CliCommand::Artifact(_)
@@ -298,10 +294,9 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Trace(_)
         | CliCommand::RuntimeIdentity
         | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
-        CliCommand::Serve(_)
-        | CliCommand::Inference(InferenceCommand::Serve(_))
-        | CliCommand::HelpPrinted
-        | CliCommand::Completion { .. } => CliRuntimeProfile::FullBatch,
+        CliCommand::Serve(_) | CliCommand::HelpPrinted | CliCommand::Completion { .. } => {
+            CliRuntimeProfile::FullBatch
+        }
     }
 }
 
@@ -328,7 +323,6 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Trace(command) => run_trace(command),
         CliCommand::RuntimeIdentity => runtime::print_runtime_identity(),
         CliCommand::Serve(options) => run_serve(options, runtime),
-        CliCommand::Inference(command) => run_inference(command, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
         CliCommand::Run(options) => run_one_shot(options, runtime),
     }
@@ -473,14 +467,12 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
     } else {
         None
     };
-    let inference_config_present = runtime.paths.default_local_inference_config().exists();
     let report = serde_json::json!({
         "ok": true,
         "target_kind": job.target_kind.as_str(),
         "target_ref": job.target_ref,
         "prompt_ready": job.target_kind != CronTargetKind::Skill || prompt.is_some(),
         "prompt_preview": prompt.as_deref().map(prompt_preview),
-        "inference_config_present": inference_config_present,
         "records_run": false,
     });
     if json {
@@ -496,7 +488,6 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
             job.target_ref
         );
         println!("core.cron:preflight.records_run=false");
-        println!("core.cron:preflight.inference_config_present={inference_config_present}");
     }
     Ok(())
 }
@@ -1068,7 +1059,6 @@ fn inference_options_from_serve_options(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<InferenceOptions> {
     let run_options = RunOptions {
-        config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         workspace_root: options.workspace_root.clone(),
         ..RunOptions::default()
@@ -1098,7 +1088,6 @@ fn inference_options_from_serve_options(
             .unwrap_or(false);
 
     Ok(InferenceOptions {
-        config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
         workspace_root: options.workspace_root.clone(),
@@ -1106,9 +1095,6 @@ fn inference_options_from_serve_options(
         tool_mode: chat_tool_mode(tool_mode),
         skills: options.skills.clone(),
         memory,
-        model_bindings_path: None,
-        model_bindings_override: None,
-        runtime_plan_override: None,
     })
 }
 
@@ -1153,7 +1139,6 @@ fn inference_options_from_run_options(
             .unwrap_or(false);
 
     Ok(InferenceOptions {
-        config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
         workspace_root: options.workspace_root.clone(),
@@ -1161,9 +1146,6 @@ fn inference_options_from_run_options(
         tool_mode: chat_tool_mode(tool_mode),
         skills: options.skills.clone(),
         memory,
-        model_bindings_path: None,
-        model_bindings_override: None,
-        runtime_plan_override: None,
     })
 }
 
@@ -1201,13 +1183,11 @@ fn resolve_run_function_defaults(
         .map(|reference| {
             let workspace_root =
                 runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
-            let require_profile = options.config.is_none()
-                && std::env::var_os("AGL_LOCAL_INFERENCE_CONFIG").is_none();
             agl_runtime::resolve_composed_runtime_function(
                 &runtime.paths,
                 &workspace_root,
                 reference,
-                require_profile,
+                true,
             )
             .with_context(|| format!("failed to resolve function `{reference}`"))
         })
@@ -1262,27 +1242,89 @@ fn apply_workspace_default_function_to_serve(
     Ok(())
 }
 
-fn run_inference(command: InferenceCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    match command {
-        InferenceCommand::Run(options) => run_one_shot_raw(options, runtime),
-        InferenceCommand::Serve(options) => run_serve_raw(options, runtime),
-    }
+fn process_local_inference_host(runtime: &AgentLibreRuntimeConfig) -> Result<InferenceHost> {
+    InferenceHost::start_with_journal_root(
+        InferenceHostConfig::development_default(
+            runtime.paths.inference_state_root().join("authority"),
+            runtime.paths.default_artifact_root(),
+            std::time::Duration::from_secs(runtime.inference.residency.context_idle_seconds),
+            std::time::Duration::from_secs(runtime.inference.residency.model_idle_seconds),
+        )?,
+        runtime.paths.inference_state_root().join("attempts"),
+    )
+    .context("failed to start process-local inference host")
 }
 
-fn process_local_model_manager(runtime: &AgentLibreRuntimeConfig) -> Result<ModelManager> {
-    let inference_runtime =
-        WorkerModelRuntime::discover(runtime.paths.inference_worker_temp_root())
-            .context("failed to prepare isolated process-local inference worker")?;
-    ModelManager::spawn(
-        ModelManagerOptions::default()
-            .with_residency_durations(
-                Duration::from_secs(runtime.inference.residency.context_idle_seconds),
-                Duration::from_secs(runtime.inference.residency.model_idle_seconds),
-            )
-            .with_model_lease_root(runtime.paths.model_lease_root()),
-        inference_runtime,
-    )
-    .context("failed to start process-local model manager")
+pub(crate) fn daemon_first_inference_inventory(
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<Vec<InferenceDeviceInfo>> {
+    let socket_path = default_socket_path(&runtime.paths);
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build daemon inference inventory runtime")?;
+    let connection = async_runtime.block_on(runtime::connect_daemon(&socket_path));
+    let authority = inference_authority_decision(
+        InferenceAuthoritySurface::InitInventory,
+        classify_daemon_connection(&connection),
+    );
+    match (authority, connection) {
+        (InferenceAuthorityDecision::Daemon, Ok(client)) => {
+            let hello = client.hello().context("failed to read daemon identity")?;
+            ensure!(
+                hello.tools.contains(&DaemonTool::InferenceInventory),
+                "daemon at {} does not provide canonical inference inventory",
+                socket_path.display()
+            );
+            let inventory = async_runtime
+                .block_on(client.inference_inventory())
+                .context("daemon inference inventory failed")?;
+            Ok(inventory
+                .devices
+                .into_iter()
+                .map(|device| InferenceDeviceInfo {
+                    physical_device_id: device.physical_device_id,
+                    pci_device_id: device.pci_device_id,
+                    pci_subsystem_id: device.pci_subsystem_id,
+                    driver_build_id: device.driver_build_id,
+                    backend_name: device.backend_name,
+                    description: device.description,
+                    kind: match device.kind {
+                        ProtocolInferenceDeviceKind::Cpu => InferenceDeviceKind::Cpu,
+                        ProtocolInferenceDeviceKind::DiscreteGpu => {
+                            InferenceDeviceKind::DiscreteGpu
+                        }
+                        ProtocolInferenceDeviceKind::IntegratedGpu => {
+                            InferenceDeviceKind::IntegratedGpu
+                        }
+                        ProtocolInferenceDeviceKind::Accelerator => {
+                            InferenceDeviceKind::Accelerator
+                        }
+                        ProtocolInferenceDeviceKind::Metadata => InferenceDeviceKind::Metadata,
+                        ProtocolInferenceDeviceKind::Unknown => InferenceDeviceKind::Unknown,
+                    },
+                    free_memory_bytes: device.free_memory_bytes,
+                    total_memory_bytes: device.total_memory_bytes,
+                    usable: device.usable,
+                    supports_gpu_offload: device.supports_gpu_offload,
+                })
+                .collect())
+        }
+        (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
+            let host = process_local_inference_host(runtime)
+                .context("no daemon is running and standalone inference inventory failed")?;
+            let inventory = InferenceClientHandle::from(host.clone())
+                .device_inventory()
+                .context("standalone inference inventory failed")?;
+            host.shutdown();
+            Ok(inventory)
+        }
+        (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
+            "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone inference",
+            socket_path.display()
+        ),
+        _ => unreachable!("inference authority decision diverged from connection state"),
+    }
 }
 
 enum CliCronInference {
@@ -1291,7 +1333,7 @@ enum CliCronInference {
         client: AgentLibreClient,
     },
     Standalone {
-        _manager: ModelManager,
+        _host: Box<InferenceHost>,
         client: InferenceClientHandle,
     },
 }
@@ -1344,92 +1386,17 @@ fn daemon_first_cron_inference(runtime: &AgentLibreRuntimeConfig) -> Result<CliC
             })
         }
         (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
-            let manager = process_local_model_manager(runtime).context(
+            let host = process_local_inference_host(runtime).context(
                 "no daemon is running and the isolated standalone cron inference authority failed",
             )?;
-            let client = InferenceClientHandle::from(manager.handle());
+            let client = InferenceClientHandle::from(host.clone());
             Ok(CliCronInference::Standalone {
-                _manager: manager,
+                _host: Box::new(host),
                 client,
             })
         }
         (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
             "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone cron inference",
-            socket_path.display()
-        ),
-        _ => unreachable!("daemon connection classification and authority decision diverged"),
-    }
-}
-
-pub(crate) fn daemon_first_inference_inventory(
-    runtime: &AgentLibreRuntimeConfig,
-) -> Result<Vec<InferenceDeviceInfo>> {
-    let socket_path = default_socket_path(&runtime.paths);
-    let async_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build daemon inference inventory runtime")?;
-    let connection = async_runtime.block_on(runtime::connect_daemon(&socket_path));
-    let authority = inference_authority_decision(
-        InferenceAuthoritySurface::InitInventory,
-        classify_daemon_connection(&connection),
-    );
-    match (authority, connection) {
-        (InferenceAuthorityDecision::Daemon, Ok(client)) => {
-            let hello = client.hello().context("failed to read daemon identity")?;
-            if !hello.tools.contains(&DaemonTool::InferenceInventory) {
-                bail!(
-                    "daemon at {} does not provide the current inference inventory tool; refusing process-local inference while a daemon is active",
-                    socket_path.display()
-                );
-            }
-            let inventory = async_runtime
-                .block_on(client.inference_inventory())
-                .context("daemon inference inventory failed")?;
-            Ok(inventory
-                .devices
-                .into_iter()
-                .map(|device| InferenceDeviceInfo {
-                    physical_device_id: device.physical_device_id,
-                    pci_device_id: device.pci_device_id,
-                    pci_subsystem_id: device.pci_subsystem_id,
-                    driver_build_id: device.driver_build_id,
-                    backend_name: device.backend_name,
-                    description: device.description,
-                    kind: match device.kind {
-                        ProtocolInferenceDeviceKind::Cpu => InferenceDeviceKind::Cpu,
-                        ProtocolInferenceDeviceKind::DiscreteGpu => {
-                            InferenceDeviceKind::DiscreteGpu
-                        }
-                        ProtocolInferenceDeviceKind::IntegratedGpu => {
-                            InferenceDeviceKind::IntegratedGpu
-                        }
-                        ProtocolInferenceDeviceKind::Accelerator => {
-                            InferenceDeviceKind::Accelerator
-                        }
-                        ProtocolInferenceDeviceKind::Metadata => InferenceDeviceKind::Metadata,
-                        ProtocolInferenceDeviceKind::Unknown => InferenceDeviceKind::Unknown,
-                    },
-                    free_memory_bytes: device.free_memory_bytes,
-                    total_memory_bytes: device.total_memory_bytes,
-                    usable: device.usable,
-                    supports_gpu_offload: device.supports_gpu_offload,
-                })
-                .collect())
-        }
-        (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
-            let manager = process_local_model_manager(runtime).context(
-                "no daemon is running and the isolated standalone inference authority failed",
-            )?;
-            let inventory = manager
-                .handle()
-                .device_inventory()
-                .context("standalone inference inventory failed")?;
-            drop(manager);
-            Ok(inventory)
-        }
-        (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
-            "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone inference",
             socket_path.display()
         ),
         _ => unreachable!("daemon connection classification and authority decision diverged"),
@@ -1639,13 +1606,12 @@ async fn run_one_shot_via_daemon(
 ) -> Result<()> {
     let json = options.json;
     if options.function_ref.is_none()
-        || options.config.is_some()
         || options.artifact_root.is_some()
         || options.max_output_tokens.is_some()
         || options.memory
     {
         bail!(
-            "the active daemon at {} cannot represent this direct-run override; stop it explicitly before using standalone --config/--artifact-root/--max-output-tokens/--memory or raw `agl inference run`",
+            "the active daemon at {} cannot represent this direct-run override; stop it explicitly before using standalone --artifact-root/--max-output-tokens/--memory",
             socket_path.display()
         );
     }
@@ -1806,8 +1772,8 @@ fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfi
         .context("run requires PROMPT or --prompt TEXT")?;
     let chat_options = one_shot_chat_options_from_run_options(&options, runtime)?;
     let tool_mode = chat_options.inference.tool_mode;
-    let model_manager = process_local_model_manager(runtime)?;
-    let inference_client = InferenceClientHandle::from(model_manager.handle());
+    let inference_host = process_local_inference_host(runtime)?;
+    let inference_client = InferenceClientHandle::from(inference_host);
     let chat = OneShotSession::open(chat_options, runtime, inference_client)?;
     let summary = chat.summary()?;
     tracing::info!(
@@ -1877,16 +1843,6 @@ fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfi
             }
         }
         ChatTurnStatus::Failed { message } => {
-            let message = if let Some(cpu) =
-                cpu_fallback_for_failed_turn(summary.automatic_runtime_plan.as_ref(), &message)
-            {
-                format!(
-                    "GPU inference failed: {message}\nA benchmarked CPU fallback is available (profile {}, context {}, expected speed {}), but non-interactive `agl run` never switches devices automatically. Select the CPU runtime explicitly and retry.",
-                    cpu.profile_id, cpu.runtime.context_tokens, cpu.expected_speed
-                )
-            } else {
-                message
-            };
             return Err(run_failure_from_evidence_path(
                 &session_id,
                 &run_id,
@@ -2001,24 +1957,16 @@ fn run_daemon_status(
                         "runtime_executable_digest={}",
                         hello.daemon_runtime.executable_digest
                     );
-                    println!("worker_build_id={}", hello.worker_build_id);
+                    println!("engine_protocol_id={}", hello.engine_protocol_id);
+                    println!("inference_engine_protocol_id={}", status.engine_protocol_id);
                     println!(
-                        "native_bundle_id={}",
-                        hello.native_bundle_id.as_deref().unwrap_or("none")
+                        "engine_state={}",
+                        inference_engine_state_label(status.engine_state)
                     );
+                    println!("engine_pid={}", optional_status_value(status.engine_pid));
                     println!(
-                        "composite_worker_build_id={}",
-                        hello.composite_worker_build_id.as_deref().unwrap_or("none")
-                    );
-                    println!("inference_worker_build_id={}", status.worker_build_id);
-                    println!(
-                        "worker_state={}",
-                        inference_worker_state_label(status.worker_state)
-                    );
-                    println!("worker_pid={}", optional_status_value(status.worker_pid));
-                    println!(
-                        "worker_launch_generation={}",
-                        optional_status_value(status.launch_generation)
+                        "engine_generation={}",
+                        optional_status_value(status.engine_generation)
                     );
                     println!(
                         "accelerator_physical_device_id={}",
@@ -2122,13 +2070,13 @@ fn model_release_outcome_label(outcome: ModelReleaseOutcome) -> &'static str {
     }
 }
 
-fn inference_worker_state_label(state: ProtocolInferenceWorkerState) -> &'static str {
+fn inference_engine_state_label(state: ProtocolInferenceEngineState) -> &'static str {
     match state {
-        ProtocolInferenceWorkerState::Cold => "cold",
-        ProtocolInferenceWorkerState::Starting => "starting",
-        ProtocolInferenceWorkerState::Ready => "ready",
-        ProtocolInferenceWorkerState::Busy => "busy",
-        ProtocolInferenceWorkerState::CoolingDown => "cooling_down",
+        ProtocolInferenceEngineState::Cold => "cold",
+        ProtocolInferenceEngineState::Starting => "starting",
+        ProtocolInferenceEngineState::Ready => "ready",
+        ProtocolInferenceEngineState::Busy => "busy",
+        ProtocolInferenceEngineState::CoolingDown => "cooling_down",
     }
 }
 
@@ -2232,24 +2180,6 @@ fn print_cron_run(run: &CronRun) {
     if let Some(supervisor_run_id) = &run.supervisor_run_id {
         println!("cron_run.{}.supervisor_run_id={supervisor_run_id}", run.id);
     }
-}
-
-fn cpu_fallback_for_failed_turn<'a>(
-    plans: Option<&'a agl_model::RuntimePlanSet>,
-    message: &str,
-) -> Option<&'a agl_model::RuntimePlan> {
-    let plans = plans?;
-    (plans.selected.runtime.gpu_layers > 0 && is_gpu_load_failure_message(message))
-        .then_some(plans.cpu_fallback.as_ref())
-        .flatten()
-}
-
-fn is_gpu_load_failure_message(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
-    message.contains("failed to load")
-        || message.contains("explicit runtime plan is not a current")
-        || ((message.contains("gpu") || message.contains("vulkan") || message.contains("cuda"))
-            && (message.contains("memory") || message.contains("device")))
 }
 
 #[cfg(all(test, unix))]
@@ -2364,11 +2294,10 @@ mod tests {
     #[cfg(unix)]
     use agl_chat::{ChatInferenceJob, InferenceClient};
     #[cfg(unix)]
-    use agl_config::ResolvedInferenceConfig;
     #[cfg(unix)]
     use agl_inference::{
-        InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
-        WorkerRuntimeStatusHandle,
+        EngineRuntimeStatusHandle, InferenceFinishReason, InferenceResponse,
+        InferenceResponseMetadata, ModelManagerStatus,
     };
 
     use crate::args::ConfigCommand;
@@ -2379,7 +2308,6 @@ mod tests {
         ServeOptions {
             socket_path: None,
             systemd_activation: false,
-            config: None,
             function_ref: None,
             artifact_root: None,
             workspace_root: None,
@@ -2398,6 +2326,34 @@ mod tests {
 
     #[cfg(unix)]
     impl InferenceClient for DaemonTestInference {
+        fn static_capabilities(&self) -> anyhow::Result<agl_model::HostCapabilities> {
+            Ok(agl_model::HostCapabilities {
+                physical_host_bytes: 64_000_000_000,
+                physical_cpu_cores: 8,
+                logical_cpu_cores: 8,
+                devices: vec![
+                    agl_model::HostCapabilityDevice {
+                        identity: "CPU".to_owned(),
+                        kind: agl_model::HostCapabilityDeviceKind::Cpu,
+                        pci_device_id: None,
+                        pci_subsystem_id: None,
+                        physical_pool_bytes: 64_000_000_000,
+                        usable: true,
+                        supports_gpu_offload: false,
+                    },
+                    agl_model::HostCapabilityDevice {
+                        identity: "test-rx7900xtx".to_owned(),
+                        kind: agl_model::HostCapabilityDeviceKind::DiscreteGpu,
+                        pci_device_id: Some("1002:744c".to_owned()),
+                        pci_subsystem_id: Some("1da2:471e".to_owned()),
+                        physical_pool_bytes: 24_000_000_000,
+                        usable: true,
+                        supports_gpu_offload: true,
+                    },
+                ],
+            })
+        }
+
         fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(InferenceResponse {
@@ -2410,24 +2366,18 @@ mod tests {
                     duration_ms: 1,
                     input_tokens: 4,
                     output_tokens: 4,
+                    configured_batch_size: 0,
+                    prefill_chunks: 0,
                     resource_admission: None,
                 },
             })
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &agl_ids::SessionId,
-        ) -> anyhow::Result<()> {
+        fn clear_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &agl_ids::SessionId,
-        ) -> anyhow::Result<()> {
+        fn release_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -2435,7 +2385,7 @@ mod tests {
             Ok(ModelManagerStatus::default())
         }
 
-        fn device_inventory(&self) -> anyhow::Result<Vec<InferenceDeviceInfo>> {
+        fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
             Ok(Vec::new())
         }
     }
@@ -2458,44 +2408,52 @@ mod tests {
 
     #[cfg(unix)]
     fn install_daemon_test_model(runtime: &AgentLibreRuntimeConfig) {
-        let model_path = runtime.paths.data_dir.join("fake-model.gguf");
-        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
-        std::fs::write(&model_path, b"fake model fixture").unwrap();
-        let config_path = runtime.paths.default_local_inference_config();
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            config_path,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 4096
-threads = 2
-batch_size = 128
-ubatch_size = 64
-
-[model]
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#,
-                model_path.display()
+        let model_root = runtime.paths.data_dir.join("test-models");
+        std::fs::create_dir_all(&model_root).unwrap();
+        let store = agl_model::ModelInstallStore::new(runtime.paths.model_install_root());
+        std::fs::create_dir_all(store.root()).unwrap();
+        for (id, role, filename, byte_size, sha256) in [
+            (
+                "gemma4-e4b",
+                agl_model::ModelArtifactRole::Main,
+                "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf",
+                4_215_693_760,
+                "b3052f962d6449b4eb2075733c068bdec1c51eadb7b237e6c3157bfbb7b1dae0",
             ),
-        )
-        .unwrap();
-        agl_config::write_model_bindings(
-            agl_config::model_bindings_path(&runtime.paths.config_dir),
-            &agl_config::ModelBindings {
+            (
+                "gemma4-e4b-mmproj",
+                agl_model::ModelArtifactRole::Projector,
+                "mmproj-F16.gguf",
+                990_372_672,
+                "6a255159ee4b01b304f633a57f017dd7d5a69d30fff52abb2614bf0813cef034",
+            ),
+        ] {
+            let path = model_root.join(filename);
+            std::fs::write(&path, b"GGUF daemon fixture").unwrap();
+            let model_id = agl_config::ModelId::new(id).unwrap();
+            let record = agl_model::ModelInstallRecord {
                 version: 1,
-                models: std::collections::BTreeMap::from([(
-                    agl_config::ModelId::new("fake-daemon-model").unwrap(),
-                    agl_config::ModelBinding { path: model_path },
-                )]),
-            },
-        )
-        .unwrap();
+                model_id: model_id.clone(),
+                package_id: Some(agl_model::ModelPackageId::new("gemma4-e4b").unwrap()),
+                role,
+                source: agl_model::InstallSource::HuggingFace {
+                    repository: "unsloth/gemma-4-E4B-it-qat-GGUF".to_owned(),
+                    revision: "e4a9ed86f935b06e87808789db3c56bba24cbd49".to_owned(),
+                    filename: filename.to_owned(),
+                },
+                path,
+                byte_size,
+                sha256: sha256.to_owned(),
+                additional_files: Vec::new(),
+                installed_at_unix_ms: 1,
+                state: agl_model::InstallRecordState::Active,
+            };
+            std::fs::write(
+                store.record_path(&model_id),
+                serde_json::to_vec_pretty(&record).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -2522,7 +2480,7 @@ tool_call_format = "gemma_function_call"
                     runtime,
                     InferenceOptions::default(),
                     InferenceClientHandle::new(DaemonTestInference { calls }),
-                    WorkerRuntimeStatusHandle::default(),
+                    EngineRuntimeStatusHandle::default(),
                 );
                 agl_daemon::serve_connection(stream, &state).await
             })
@@ -2564,7 +2522,6 @@ tool_call_format = "gemma_function_call"
         let surfaces = [
             InferenceAuthoritySurface::DirectRun,
             InferenceAuthoritySurface::Cron,
-            InferenceAuthoritySurface::InitInventory,
             InferenceAuthoritySurface::FunctionSmoke,
         ];
         for surface in surfaces {
@@ -2581,7 +2538,6 @@ tool_call_format = "gemma_function_call"
         for surface in [
             InferenceAuthoritySurface::DirectRun,
             InferenceAuthoritySurface::Cron,
-            InferenceAuthoritySurface::InitInventory,
             InferenceAuthoritySurface::FunctionSmoke,
         ] {
             assert_eq!(
@@ -2635,19 +2591,6 @@ tool_call_format = "gemma_function_call"
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn cpu_fallback_classifier_accepts_load_device_failures_only() {
-        assert!(is_gpu_load_failure_message(
-            "model abc failed to load: Vulkan device is out of memory"
-        ));
-        assert!(is_gpu_load_failure_message(
-            "CUDA device disappeared while loading weights"
-        ));
-        assert!(!is_gpu_load_failure_message(
-            "inference generation failed: malformed tool output"
-        ));
-    }
-
     #[cfg(unix)]
     #[test]
     fn cron_inference_never_falls_back_from_an_active_incomplete_daemon() {
@@ -2684,9 +2627,7 @@ tool_call_format = "gemma_function_call"
                         product_version: "test".to_owned(),
                         daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
                         daemon_runtime: client_runtime,
-                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
-                        native_bundle_id: None,
-                        composite_worker_build_id: None,
+                        engine_protocol_id: format!("sha256:{}", "d".repeat(64)),
                         tools: Vec::new(),
                     }),
                 ),
@@ -2736,14 +2677,21 @@ package:
   type: function
   id: daemon-test
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
-  requires: []
+  requires:
+    - model:gemma4-e4b@^1.0
 title: Daemon test
+model:
+  profile: cpu-8gb-32768
 runtime:
   tool_mode: read-only
+  max_output_tokens: 64
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 skills:
   use: []
 subagents:
@@ -2827,22 +2775,11 @@ subagents:
             process_mode_for_command(&serve),
             AgentLibreProcessMode::Batch
         );
-        let inference_serve = CliCommand::Inference(InferenceCommand::Serve(serve_options()));
-        assert_eq!(
-            cli_runtime_profile(&inference_serve),
-            CliRuntimeProfile::FullBatch
-        );
-
         let run = CliCommand::Run(RunOptions::default());
         assert_eq!(cli_runtime_profile(&run), CliRuntimeProfile::Interactive);
         assert_eq!(
             process_mode_for_command(&run),
             AgentLibreProcessMode::Interactive
-        );
-        let inference_run = CliCommand::Inference(InferenceCommand::Run(RunOptions::default()));
-        assert_eq!(
-            cli_runtime_profile(&inference_run),
-            CliRuntimeProfile::Interactive
         );
     }
 
@@ -2933,7 +2870,7 @@ package:
   type: function
   id: coding
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]

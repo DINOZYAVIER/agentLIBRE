@@ -270,7 +270,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use agl_config::ResolvedInferenceConfig;
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
     };
@@ -282,7 +281,7 @@ mod tests {
     struct ScriptState {
         responses: Arc<Mutex<VecDeque<String>>>,
         jobs: Arc<Mutex<Vec<JobEvidence>>>,
-        released_contexts: Arc<Mutex<Vec<SessionId>>>,
+        released_contexts: Arc<Mutex<Vec<String>>>,
         grant_store_root: Option<PathBuf>,
         late_grant_id: Arc<Mutex<Option<String>>>,
     }
@@ -317,7 +316,11 @@ mod tests {
                 let mut jobs = self.state.jobs.lock().unwrap();
                 jobs.push(JobEvidence {
                     session_id: job.session_id.clone(),
-                    model_path: job.config.backend.model.clone(),
+                    model_path: job
+                        .artifacts
+                        .first()
+                        .map(|artifact| artifact.path.clone())
+                        .context("delegation job has no Model artifact")?,
                     rendered: serde_json::to_string(&job.request.rendered)?,
                     tools: job
                         .request
@@ -358,29 +361,23 @@ mod tests {
                     duration_ms: 1,
                     input_tokens: 5,
                     output_tokens: 3,
+                    configured_batch_size: 0,
+                    prefill_chunks: 0,
                     resource_admission: None,
                 },
             })
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn clear_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            session_id: &SessionId,
-        ) -> Result<()> {
+        fn release_context(&self, context: &agl_model::ModelContextKey) -> Result<()> {
             self.state
                 .released_contexts
                 .lock()
                 .unwrap()
-                .push(session_id.clone());
+                .push(context.as_str().to_owned());
             Ok(())
         }
 
@@ -426,14 +423,22 @@ package:
   type: function
   id: coordinator
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
   requires:
     - function:reviewer@^1.0
+    - model:test-model@^1.0
 title: Coordinator
 description: Delegates one review.
+model:
+  profile: local
+runtime:
+  max_output_tokens: 128
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 subagents:
   use:
     - reviewer
@@ -457,7 +462,7 @@ package:
   type: function
   id: reviewer
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -504,53 +509,6 @@ Only return the child verdict.
 "#,
         )
         .unwrap();
-        let config_path = root.join("inference.toml");
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 256
-threads = 1
-batch_size = 32
-ubatch_size = 32
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-                root.join("missing.gguf").display()
-            ),
-        )
-        .unwrap();
-        let child_profile = root.join(".agl/inference/profiles/reviewer.toml");
-        std::fs::create_dir_all(child_profile.parent().unwrap()).unwrap();
-        std::fs::write(
-            &child_profile,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 256
-threads = 1
-batch_size = 32
-ubatch_size = 32
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-                root.join("missing-child.gguf").display()
-            ),
-        )
-        .unwrap();
         let runtime = AgentLibreRuntimeConfig {
             paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
@@ -559,6 +517,7 @@ tool_call_format = "hermes_json"
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
+        crate::test_support::install_package_bound_test_model(&root, &runtime);
         let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
                 r#"<tool_call>{"name":"agent.supervisor:delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
@@ -572,7 +531,6 @@ tool_call_format = "hermes_json"
         };
         let options = ChatOptions {
             inference: crate::InferenceOptions {
-                config: Some(config_path),
                 function_ref: Some("coordinator".to_string()),
                 artifact_root: Some(root.join("artifacts")),
                 workspace_root: Some(root.clone()),
@@ -580,9 +538,6 @@ tool_call_format = "hermes_json"
                 tool_mode: ToolAccessMode::Execute,
                 skills: Vec::new(),
                 memory: false,
-                model_bindings_path: None,
-                model_bindings_override: None,
-                runtime_plan_override: None,
             },
             workspace_root: Some(root.clone()),
             session_id: None,
@@ -696,9 +651,9 @@ tool_call_format = "hermes_json"
         assert_eq!(jobs.len(), 3);
         assert_eq!(jobs[0].session_id, jobs[2].session_id);
         assert_ne!(jobs[0].session_id, jobs[1].session_id);
-        assert_eq!(jobs[0].model_path, root.join("missing.gguf"));
-        assert_eq!(jobs[1].model_path, root.join("missing-child.gguf"));
-        assert_eq!(jobs[2].model_path, root.join("missing.gguf"));
+        assert_eq!(jobs[0].model_path, root.join("test-model.gguf"));
+        assert_eq!(jobs[1].model_path, root.join("test-model.gguf"));
+        assert_eq!(jobs[2].model_path, root.join("test-model.gguf"));
         assert!(
             jobs[0]
                 .tools
@@ -720,10 +675,7 @@ tool_call_format = "hermes_json"
                 .rendered
                 .contains("Child verdict CHILD_VERDICT_PRIVATE_SENTINEL")
         );
-        assert_eq!(
-            state.released_contexts.lock().unwrap().as_slice(),
-            &[jobs[1].session_id.clone()]
-        );
+        assert_eq!(state.released_contexts.lock().unwrap().len(), 1);
         let late_grant_id = state.late_grant_id.lock().unwrap().clone().unwrap();
         assert_eq!(
             store

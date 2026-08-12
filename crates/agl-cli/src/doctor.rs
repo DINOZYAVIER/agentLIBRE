@@ -7,13 +7,11 @@ use agl_chat::{
 };
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
 use agl_function::{FunctionStatusReport, function_status_from_loaded};
-use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
-use agl_model::RuntimePlan;
+use agl_inference::{InferenceHost, InferenceHostConfig};
 use agl_protocol::{
     AssistantItemState, DaemonTool, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
     RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,
-    SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest, SetupSmokeRuntimePlan,
-    SetupSmokeSessionOpenRequest,
+    SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::RunBudget;
@@ -29,8 +27,6 @@ use crate::{
 pub(crate) struct FunctionSmokeRequest {
     pub(crate) reference: String,
     pub(crate) workspace_root: PathBuf,
-    pub(crate) bindings_path: Option<PathBuf>,
-    pub(crate) runtime_plan_override: Option<RuntimePlan>,
     pub(crate) timeout: Duration,
     pub(crate) max_output_tokens: u32,
 }
@@ -61,8 +57,15 @@ pub(crate) fn run_function_smoke(
         loaded.clone(),
         &request.workspace_root,
         &runtime.paths.config_dir,
-        request.bindings_path.as_deref(),
+        None,
     );
+    let runtime_profile_id = agl_runtime::resolve_composed_runtime_function(
+        &runtime.paths,
+        &request.workspace_root,
+        &request.reference,
+        true,
+    )?
+    .model_profile;
     ensure!(
         static_status.errors.is_empty(),
         "function static validation failed: {}",
@@ -91,34 +94,6 @@ pub(crate) fn run_function_smoke(
     );
     match (authority, connection) {
         (InferenceAuthorityDecision::Daemon, Ok(client)) => {
-            let setup_request = match (
-                request.bindings_path.as_deref(),
-                request.runtime_plan_override.as_ref(),
-            ) {
-                (Some(bindings_path), Some(runtime_plan)) => {
-                    let staged_bindings = agl_config::load_model_bindings(bindings_path)
-                        .context("failed to load staged model bindings for daemon setup smoke")?;
-                    Some(SetupSmokeSessionOpenRequest {
-                        workspace_root: request.workspace_root.to_string_lossy().into_owned(),
-                        function_ref: request.reference.clone(),
-                        staged_bindings,
-                        runtime_plan: SetupSmokeRuntimePlan {
-                            profile_id: runtime_plan.profile_id.clone(),
-                            selected_device: runtime_plan.selected_device.clone(),
-                            selected_device_identity: runtime_plan.selected_device_identity.clone(),
-                            model: runtime_plan.model.clone(),
-                            runtime: runtime_plan.runtime.clone(),
-                            smoke_timeout_seconds: runtime_plan.smoke_timeout_seconds,
-                            expected_speed: runtime_plan.expected_speed.clone(),
-                        },
-                        max_output_tokens: request.max_output_tokens,
-                    })
-                }
-                (None, None) => None,
-                _ => {
-                    bail!("staged model bindings and setup runtime plan must be supplied together")
-                }
-            };
             let timeout_ms = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
             let started = Instant::now();
             let answer = async_runtime.block_on(run_daemon_function_smoke(
@@ -128,7 +103,6 @@ pub(crate) fn run_function_smoke(
                 &prompt,
                 timeout_ms,
                 request.max_output_tokens,
-                setup_request,
             ))?;
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             ensure!(
@@ -143,10 +117,7 @@ pub(crate) fn run_function_smoke(
                 answer,
                 elapsed_ms,
                 timeout_ms,
-                runtime_profile_id: request
-                    .runtime_plan_override
-                    .as_ref()
-                    .map(|plan| plan.profile_id.clone()),
+                runtime_profile_id,
             });
         }
         (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {}
@@ -163,8 +134,6 @@ pub(crate) fn run_function_smoke(
         artifact_root: Some(runtime.paths.setup_state_root().join("smoke-artifacts")),
         max_output_tokens: request.max_output_tokens,
         tool_mode: ToolAccessMode::ReadOnly,
-        model_bindings_path: request.bindings_path,
-        runtime_plan_override: request.runtime_plan_override.clone(),
         ..InferenceOptions::default()
     };
     // Keep these internal overrides explicit even if defaults change later.
@@ -177,20 +146,17 @@ pub(crate) fn run_function_smoke(
         no_history: true,
         new_session: true,
     };
-    let inference_runtime =
-        WorkerModelRuntime::discover(runtime.paths.inference_worker_temp_root())
-            .context("failed to prepare isolated inference worker for function smoke")?;
-    let model_manager = ModelManager::spawn(
-        ModelManagerOptions::default()
-            .with_residency_durations(
-                Duration::from_secs(runtime.inference.residency.context_idle_seconds),
-                Duration::from_secs(runtime.inference.residency.model_idle_seconds),
-            )
-            .with_model_lease_root(runtime.paths.model_lease_root()),
-        inference_runtime,
+    let inference_host = InferenceHost::start_with_journal_root(
+        InferenceHostConfig::development_default(
+            runtime.paths.inference_state_root().join("authority"),
+            runtime.paths.default_artifact_root(),
+            std::time::Duration::from_secs(runtime.inference.residency.context_idle_seconds),
+            std::time::Duration::from_secs(runtime.inference.residency.model_idle_seconds),
+        )?,
+        runtime.paths.inference_state_root().join("attempts"),
     )
-    .context("failed to start model manager for function smoke")?;
-    let inference_client = InferenceClientHandle::from(model_manager.handle());
+    .context("failed to start inference host for function smoke")?;
+    let inference_client = InferenceClientHandle::from(inference_host);
     let chat = SupervisedChat::open(options, runtime, inference_client)
         .context("failed to open normal chat path for function smoke")?;
     let timeout_ms = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
@@ -241,7 +207,7 @@ pub(crate) fn run_function_smoke(
         answer,
         elapsed_ms,
         timeout_ms,
-        runtime_profile_id: request.runtime_plan_override.map(|plan| plan.profile_id),
+        runtime_profile_id,
     })
 }
 
@@ -252,7 +218,6 @@ async fn run_daemon_function_smoke(
     prompt: &str,
     timeout_ms: u64,
     max_output_tokens: u32,
-    setup_request: Option<SetupSmokeSessionOpenRequest>,
 ) -> Result<String> {
     let mut required = vec![
         DaemonTool::RunSubmit,
@@ -260,11 +225,7 @@ async fn run_daemon_function_smoke(
         DaemonTool::SessionPresentation,
         DaemonTool::SessionFinish,
     ];
-    required.push(if setup_request.is_some() {
-        DaemonTool::SetupSmokeSessionOpen
-    } else {
-        DaemonTool::SessionOpen
-    });
+    required.push(DaemonTool::SessionOpen);
     let hello = client.hello().context("failed to read daemon identity")?;
     if let Some(missing) = required
         .into_iter()
@@ -272,22 +233,17 @@ async fn run_daemon_function_smoke(
     {
         bail!("daemon lacks required function-smoke tool {missing:?}");
     }
-    let opened = match setup_request {
-        Some(request) => client.open_setup_smoke_session(request).await,
-        None => {
-            client
-                .open_session(SessionOpenRequest {
-                    session_id: None,
-                    new_session: true,
-                    workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
-                    function_ref: Some(reference.to_owned()),
-                    skills: Vec::new(),
-                    tool_mode: ProtocolToolMode::ReadOnly,
-                })
-                .await
-        }
-    }
-    .context("daemon rejected the function smoke session")?;
+    let opened = client
+        .open_session(SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+            function_ref: Some(reference.to_owned()),
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        })
+        .await
+        .context("daemon rejected the function smoke session")?;
     let session_id = opened.session_id;
     let turn = async {
         let accepted = client
@@ -377,271 +333,5 @@ async fn run_daemon_function_smoke(
         (Err(error), Ok(_)) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(turn), Err(finish)) => Err(anyhow!("{turn:#}; additionally {finish:#}")),
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use agl_chat::{ChatInferenceJob, InferenceClient};
-    use agl_config::ResolvedInferenceConfig;
-    use agl_ids::SessionId;
-    use agl_inference::{
-        InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
-        WorkerRuntimeStatusHandle,
-    };
-    use agl_runtime::{
-        AgentLibreExecutionConfig, AgentLibreHistoryConfig, AgentLibreLoggingConfig,
-        AgentLibrePaths, AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig,
-    };
-
-    use super::*;
-
-    #[derive(Clone)]
-    struct SmokeInference {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl InferenceClient for SmokeInference {
-        fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(InferenceResponse {
-                attempt_id: job.request.attempt_id,
-                content: "daemon setup smoke answer".to_owned(),
-                finish_reason: InferenceFinishReason::Stop,
-                metadata: InferenceResponseMetadata {
-                    model_state: Some("fake-daemon".to_owned()),
-                    selected_device: None,
-                    duration_ms: 1,
-                    input_tokens: 4,
-                    output_tokens: 4,
-                    resource_admission: None,
-                },
-            })
-        }
-
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn status(&self) -> anyhow::Result<ModelManagerStatus> {
-            Ok(ModelManagerStatus::default())
-        }
-
-        fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
-            Ok(Vec::new())
-        }
-    }
-
-    fn runtime(root: &std::path::Path) -> AgentLibreRuntimeConfig {
-        AgentLibreRuntimeConfig {
-            paths: AgentLibrePaths::from_agl_home(root.join("home")),
-            logging: AgentLibreLoggingConfig::default(),
-            history: AgentLibreHistoryConfig::default(),
-            workspace: AgentLibreWorkspaceConfig::default(),
-            inference: agl_runtime::AgentLibreInferenceConfig::default(),
-            execution: AgentLibreExecutionConfig::default(),
-        }
-    }
-
-    fn runtime_plan() -> RuntimePlan {
-        RuntimePlan {
-            profile_id: "setup-cpu".to_owned(),
-            selected_device: None,
-            selected_device_identity: None,
-            model: test_runtime_plan_model_identity(),
-            runtime: agl_config::InferenceRuntimeConfig {
-                gpu_layers: 0,
-                context_tokens: 4_096,
-                threads: 2,
-                device: None,
-                batch_size: Some(128),
-                ubatch_size: Some(64),
-                flash_attention: Some(agl_config::RuntimeSwitch::Off),
-                cache_type_k: None,
-                cache_type_v: None,
-                mmap: Some(true),
-                kv_unified: Some(true),
-                structured_decoding: agl_config::StructuredDecodingMode::Auto,
-                repair_malformed_tool_calls: true,
-                mtp: agl_config::MtpRuntimeConfig::default(),
-            },
-            smoke_timeout_seconds: 30,
-            expected_speed: "test".to_owned(),
-        }
-    }
-
-    fn test_runtime_plan_model_identity() -> agl_model::RuntimePlanModelIdentity {
-        serde_json::from_value(serde_json::json!({
-            "provenance": {
-                "reference": "model:setup-smoke-model@=1.0.0",
-                "source_id": "test",
-                "source_tier": "workspace",
-                "source_kind": "directory",
-                "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "weights": [{
-                "role": "main",
-                "model_id": "setup-smoke-model",
-                "filename": "setup-smoke-model.gguf",
-                "byte_size": 18,
-                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-                "required": true
-            }]
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn compatible_daemon_executes_staged_setup_smoke_without_local_worker() {
-        let root = std::env::temp_dir().join(format!("agl-cli-ds-{}", std::process::id()));
-        let runtime = runtime(&root);
-        let workspace = root.join("workspace");
-        let function_root = workspace.join(".agl/functions/setup-smoke");
-        std::fs::create_dir_all(&function_root).unwrap();
-        std::fs::write(
-            workspace.join(".agl/workspace.toml"),
-            "version = 3\ndefault_function = \"function:setup-smoke@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            function_root.join("FUNCTION.md"),
-            r#"---
-package:
-  schema: agentlibre.package/v1
-  type: function
-  id: setup-smoke
-  version: 1.0.0
-  payload_schema: agentlibre.function/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires:
-    - model:gemma4-e4b@^1.0
-title: Setup smoke
-model:
-  config: inference.toml
-runtime:
-  tool_mode: read-only
-  max_output_tokens: 32
-skills:
-  use: []
-subagents:
-  use: []
-doctor:
-  smoke_prompt: "Reply with setup smoke ready."
----
-"#,
-        )
-        .unwrap();
-        std::fs::write(function_root.join("SYSTEM.md"), "Run the setup smoke.\n").unwrap();
-        std::fs::write(
-            function_root.join("inference.toml"),
-            r#"[backend]
-kind = "llama_cpp"
-model_id = "gemma4-e4b"
-
-[runtime]
-mode = "fixed"
-gpu_layers = 0
-context_tokens = 4096
-threads = 2
-batch_size = 128
-ubatch_size = 64
-
-[model]
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#,
-        )
-        .unwrap();
-        let model = root.join("staged-model.gguf");
-        std::fs::write(&model, b"test model fixture").unwrap();
-        let staged_bindings_path = root.join("staged-models.toml");
-        agl_config::write_model_bindings(
-            &staged_bindings_path,
-            &agl_config::ModelBindings {
-                version: 1,
-                models: std::collections::BTreeMap::from([(
-                    agl_config::ModelId::new("gemma4-e4b").unwrap(),
-                    agl_config::ModelBinding { path: model },
-                )]),
-            },
-        )
-        .unwrap();
-        let published_bindings_path = agl_config::model_bindings_path(&runtime.paths.config_dir);
-        agl_config::write_model_bindings(
-            &published_bindings_path,
-            &agl_config::ModelBindings::empty(),
-        )
-        .unwrap();
-
-        let socket_path = agl_daemon::default_socket_path(&runtime.paths);
-        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let server_calls = Arc::clone(&calls);
-        let server_runtime = runtime.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let server = std::thread::spawn(move || -> anyhow::Result<()> {
-            let _terminal_service = crate::TestTerminalService::start(&server_runtime);
-            let async_runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            async_runtime.block_on(async move {
-                let listener = tokio::net::UnixListener::bind(&socket_path)?;
-                ready_tx.send(()).unwrap();
-                let (stream, _) = listener.accept().await?;
-                let state = agl_daemon::SharedDaemonState::new(
-                    server_runtime,
-                    InferenceOptions::default(),
-                    InferenceClientHandle::new(SmokeInference {
-                        calls: server_calls,
-                    }),
-                    WorkerRuntimeStatusHandle::default(),
-                );
-                agl_daemon::serve_connection(stream, &state).await
-            })
-        });
-        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-
-        let report = run_function_smoke(
-            &runtime,
-            FunctionSmokeRequest {
-                reference: "setup-smoke".to_owned(),
-                workspace_root: workspace,
-                bindings_path: Some(staged_bindings_path),
-                runtime_plan_override: Some(runtime_plan()),
-                timeout: Duration::from_secs(5),
-                max_output_tokens: 32,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(report.answer, "daemon setup smoke answer");
-        assert_eq!(report.runtime_profile_id.as_deref(), Some("setup-cpu"));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(!runtime.paths.inference_worker_temp_root().exists());
-        assert!(
-            agl_config::load_model_bindings(&published_bindings_path)
-                .unwrap()
-                .models
-                .is_empty()
-        );
-        server.join().unwrap().unwrap();
-        let _ = std::fs::remove_dir_all(root);
     }
 }

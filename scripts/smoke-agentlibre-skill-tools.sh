@@ -6,7 +6,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 # shellcheck source=smoke-lib.sh
 source "$script_dir/smoke-lib.sh"
 
-config="${AGL_SMOKE_CONFIG:-}"
+function_ref="${AGL_SMOKE_FUNCTION:-gemma4-12b}"
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-056-skill-tools-smoke}"
 agl_bin="${AGL_SMOKE_AGL_BIN:-$repo_root/target/debug/agl}"
 max_output_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-160}"
@@ -44,10 +44,6 @@ need_tool git
 need_tool grep
 need_tool python3
 
-[[ -n "$config" ]] || fail "AGL_SMOKE_CONFIG must point to a local inference TOML file"
-[[ -f "$config" ]] || fail "missing smoke config: $config"
-config="$(smoke_abs_path "$config")"
-
 cd "$repo_root"
 cargo build \
   -p agl-cli \
@@ -69,8 +65,8 @@ skill tools smoke ok. Verification: fs.read loaded facts.txt.'
 
 (
   cd "$workspace"
-  "$agl_bin" inference run \
-    --config "$config" \
+  "$agl_bin" run \
+    --function "$function_ref" \
     --artifact-root "$run_root" \
     --workspace-root "$workspace" \
     --skill repo-status \
@@ -117,12 +113,12 @@ require_contains "$events" '"status":"answered"'
 require_contains "$stdout_path" "skill tools smoke ok"
 require_contains "$stdout_path" "Verification:"
 require_not_contains "$stdout_path" "stopped=true"
-[[ ! -e "$run_dir/function-resolution.json" ]] || fail "raw inference run wrote function evidence"
+[[ -e "$run_dir/runtime-resolution.json" ]] || fail "Function run omitted runtime evidence"
 [[ "$latest_content" == *"skill tools smoke ok"* ]] || fail "latest response did not contain expected final answer: $latest_content"
 [[ "$latest_content" == *"Verification:"* ]] || fail "latest response did not contain verification evidence: $latest_content"
 
 echo "AGL_HOME: $AGL_HOME"
-echo "config path: $config"
+echo "function: $function_ref"
 echo "workspace root: $workspace"
 echo "artifact root: $run_root"
 echo "run dir: $run_dir"

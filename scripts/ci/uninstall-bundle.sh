@@ -79,12 +79,10 @@ seed_legacy_generation() {
 seed_current_generation() {
   local root="$1"
   local name="$2"
-  local digest
   local generation="$root/libexec/agentlibre/generations/$name"
-  digest="$(printf 'a%.0s' {1..64})"
-  mkdir -p "$generation/agl-inference-native/sha256-$digest"
+  mkdir -p "$generation"
   write_executable "$generation/agl"
-  write_executable "$generation/agl-inference-worker"
+  write_executable "$generation/llama-server"
   for library in \
     libllama-common.so.0 \
     libmtmd.so.0 \
@@ -93,15 +91,12 @@ seed_current_generation() {
     libggml-base.so.0 \
     libggml-cpu-test.so
   do
-    : >"$generation/agl-inference-native/sha256-$digest/$library"
-    chmod 0555 "$generation/agl-inference-native/sha256-$digest/$library"
+    : >"$generation/$library"
+    chmod 0555 "$generation/$library"
   done
   printf '{}\n' >"$generation/runtime-manifest.json"
   chmod 0444 "$generation/runtime-manifest.json"
-  chmod 0555 \
-    "$generation/agl-inference-native/sha256-$digest" \
-    "$generation/agl-inference-native" \
-    "$generation"
+  chmod 0555 "$generation"
 }
 
 seed_surface() {
@@ -141,7 +136,7 @@ seed_standard_units() {
 [Unit]
 Requires=agentlibre-daemon.socket
 [Service]
-ExecStart="$root/bin/agl" serve --systemd-activation --config /tmp/local.toml
+ExecStart="$root/bin/agl" serve --systemd-activation
 EOF
   cat >"$fake_systemd_units/agentlibre-daemon.socket" <<'EOF'
 [Socket]

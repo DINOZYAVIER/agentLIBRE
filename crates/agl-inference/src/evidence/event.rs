@@ -53,6 +53,7 @@ fn payload_for_transition(transition: &InferenceAttemptTransition) -> Option<Run
         InferenceAttemptTransition::StartAttempt {
             backend,
             request_path,
+            ..
         } => Some(RuntimeEvent::InferenceAttemptStarted {
             backend: backend.clone(),
             request_path: request_path.clone(),
@@ -89,6 +90,7 @@ fn payload_for_transition(transition: &InferenceAttemptTransition) -> Option<Run
         | InferenceAttemptTransition::RecordAdmissionGrant { .. }
         | InferenceAttemptTransition::RecordDispatch { .. }
         | InferenceAttemptTransition::RecordRuntimeStarted { .. }
+        | InferenceAttemptTransition::RecordGenerationMetrics { .. }
         | InferenceAttemptTransition::RecordRuntimeLog { .. }
         | InferenceAttemptTransition::RecordCancellation { .. } => None,
     }

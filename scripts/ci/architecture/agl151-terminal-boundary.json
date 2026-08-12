@@ -26,9 +26,7 @@
       {"name": "agl-host-tools", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-ids", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-inference", "owner": "agentLIBRE", "category": "inference"},
-      {"name": "agl-inference-worker", "owner": "agentLIBRE", "category": "inference"},
       {"name": "agl-kernel", "owner": "agentLIBRE", "category": "core"},
-      {"name": "agl-llama-cpp-sys", "owner": "agentLIBRE", "category": "inference"},
       {"name": "agl-matrix-bridge", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-memory", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-model", "owner": "agentLIBRE", "category": "inference"},
@@ -112,7 +110,7 @@
       "id": "inference-no-terminal",
       "description": "Inference packages cannot depend on terminal packages",
       "selector": {
-        "name": ["agl-inference", "agl-inference-worker", "agl-llama-cpp-sys", "agl-model"]
+        "name": ["agl-inference", "agl-model"]
       },
       "forbidden_dependencies": {
         "category": "terminal"

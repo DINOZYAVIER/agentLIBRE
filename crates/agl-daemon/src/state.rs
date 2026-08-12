@@ -33,13 +33,12 @@ use agl_exec::{
 };
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
-use agl_inference::worker_protocol::WORKER_BUILD_ID;
+use agl_inference::ENGINE_PROTOCOL_ID;
 use agl_inference::worker_supervisor::WorkerLifecyclePhase;
 use agl_inference::{
-    InferenceDeviceKind, ModelManagerStatus, ModelManagerStatusDetail,
+    EngineRuntimeStatusHandle, InferenceDeviceKind, ModelManagerStatus, ModelManagerStatusDetail,
     ModelReleaseOutcome as ManagerReleaseOutcome, ModelReleaseReason as ManagerReleaseReason,
     ModelUnloadOutcome as ManagerUnloadOutcome, ModelUnloadTarget as ManagerUnloadTarget,
-    WorkerRuntimeStatusHandle,
 };
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, DaemonTool, HelloEvent,
@@ -47,7 +46,7 @@ use agl_protocol::{
     InferenceStatusRequest, ModelReleaseOutcome, ModelReleaseReason, ModelUnloadEvent,
     ModelUnloadOutcome, ModelUnloadRequest, ModelUnloadTarget, PROTOCOL_VERSION, ProtocolError,
     ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceDeviceKind,
-    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
+    ProtocolInferenceEngineState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
     RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent, RunTreeNodeEvent,
     RunUsageEvent, RuntimeGenerationIdentity, RuntimeGenerationKind,
     SessionActiveWorkCancelledEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent,
@@ -104,7 +103,7 @@ pub struct DaemonState {
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
     inference_client: InferenceClientHandle,
-    inference_status: WorkerRuntimeStatusHandle,
+    inference_status: EngineRuntimeStatusHandle,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     chat_factory: ChatSupervisorFactory,
     presentation_proxy: agl_app::TurnPresentationProxy,
@@ -322,7 +321,7 @@ impl DaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
     ) -> Self {
         Self::open(
             runtime,
@@ -337,7 +336,7 @@ impl DaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
     ) -> Result<Self> {
         let runtime_identity =
             current_runtime_identity().context("failed to verify daemon runtime identity")?;
@@ -355,13 +354,13 @@ impl DaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
         runtime_identity: CurrentRuntimeIdentity,
     ) -> Result<Self> {
         if runtime_identity.sealed() {
             ensure!(
-                runtime_identity.worker_build_id() == Some(WORKER_BUILD_ID),
-                "sealed daemon runtime manifest worker build ID does not match this daemon"
+                runtime_identity.engine_protocol_id() == Some(ENGINE_PROTOCOL_ID),
+                "sealed daemon runtime manifest engine protocol ID does not match this daemon"
             );
         }
         let store_root = runtime.paths.store_root();
@@ -414,9 +413,6 @@ impl DaemonState {
         let result = match request.kind {
             DaemonRequestKind::Hello(request) => self.hello(request),
             DaemonRequestKind::SessionOpen(request) => self.open_session(request),
-            DaemonRequestKind::SetupSmokeSessionOpen(request) => {
-                self.open_setup_smoke_session(*request)
-            }
             DaemonRequestKind::SessionClear(request) => self.clear_session(request.session_id),
             DaemonRequestKind::SessionCancelActive(request) => self
                 .cancel_active_session_work(request.session_id, context)
@@ -625,21 +621,14 @@ impl DaemonState {
                 daemon: daemon_runtime,
             }));
         }
-        let native_bundle_id = self.runtime_identity.native_bundle_id().map(str::to_owned);
-        let composite_worker_build_id = native_bundle_id
-            .as_ref()
-            .map(|native| format!("{WORKER_BUILD_ID}+{native}"));
         Ok(DaemonEventKind::Hello(HelloEvent {
             protocol_version: PROTOCOL_VERSION.to_string(),
             product_version: env!("CARGO_PKG_VERSION").to_string(),
             daemon_instance_id: self.daemon_instance_id.clone(),
             daemon_runtime,
-            worker_build_id: WORKER_BUILD_ID.to_string(),
-            native_bundle_id,
-            composite_worker_build_id,
+            engine_protocol_id: ENGINE_PROTOCOL_ID.to_string(),
             tools: vec![
                 DaemonTool::SessionOpen,
-                DaemonTool::SetupSmokeSessionOpen,
                 DaemonTool::SessionClear,
                 DaemonTool::SessionCancelActive,
                 DaemonTool::SessionFinish,
@@ -715,16 +704,16 @@ impl DaemonState {
             .map_err(runtime_error)?;
         let worker = self.inference_status.snapshot();
         Ok(DaemonEventKind::InferenceStatus(InferenceStatusEvent {
-            worker_build_id: worker.worker_build_id().to_owned(),
-            worker_state: match worker.phase() {
-                WorkerLifecyclePhase::Cold => ProtocolInferenceWorkerState::Cold,
-                WorkerLifecyclePhase::Starting => ProtocolInferenceWorkerState::Starting,
-                WorkerLifecyclePhase::Ready => ProtocolInferenceWorkerState::Ready,
-                WorkerLifecyclePhase::Busy => ProtocolInferenceWorkerState::Busy,
-                WorkerLifecyclePhase::CoolingDown => ProtocolInferenceWorkerState::CoolingDown,
+            engine_protocol_id: worker.engine_protocol_id().to_owned(),
+            engine_state: match worker.phase() {
+                WorkerLifecyclePhase::Cold => ProtocolInferenceEngineState::Cold,
+                WorkerLifecyclePhase::Starting => ProtocolInferenceEngineState::Starting,
+                WorkerLifecyclePhase::Ready => ProtocolInferenceEngineState::Ready,
+                WorkerLifecyclePhase::Busy => ProtocolInferenceEngineState::Busy,
+                WorkerLifecyclePhase::CoolingDown => ProtocolInferenceEngineState::CoolingDown,
             },
-            worker_pid: worker.worker_pid(),
-            launch_generation: worker.launch_generation(),
+            engine_pid: worker.engine_pid(),
+            engine_generation: worker.launch_generation(),
             physical_device_id: worker.physical_device_id().map(str::to_owned),
             reserved_bytes: worker.reserved_bytes(),
             cooldown_not_before_unix_ms: worker.cooldown_not_before_unix_ms(),
@@ -899,88 +888,6 @@ impl DaemonState {
         Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
             session_id,
             resumed: summary.resumed,
-        }))
-    }
-
-    fn open_setup_smoke_session(
-        &mut self,
-        request: agl_protocol::SetupSmokeSessionOpenRequest,
-    ) -> Result<DaemonEventKind, ProtocolError> {
-        request
-            .staged_bindings
-            .validate()
-            .map_err(|error| invalid(format!("invalid staged model bindings: {error}")))?;
-        request
-            .runtime_plan
-            .runtime
-            .validate()
-            .map_err(|error| invalid(format!("invalid setup runtime plan: {error}")))?;
-        let runtime_plan = agl_model::RuntimePlan {
-            profile_id: request.runtime_plan.profile_id,
-            selected_device: request.runtime_plan.selected_device,
-            selected_device_identity: request.runtime_plan.selected_device_identity,
-            model: request.runtime_plan.model,
-            runtime: request.runtime_plan.runtime,
-            smoke_timeout_seconds: request.runtime_plan.smoke_timeout_seconds,
-            expected_speed: request.runtime_plan.expected_speed,
-        };
-        let workspace_root = PathBuf::from(request.workspace_root);
-        let options = ChatOptions {
-            inference: InferenceOptions {
-                config: None,
-                function_ref: Some(request.function_ref),
-                artifact_root: Some(
-                    self.runtime
-                        .paths
-                        .setup_state_root()
-                        .join("daemon-smoke-artifacts"),
-                ),
-                workspace_root: Some(workspace_root.clone()),
-                max_output_tokens: request.max_output_tokens,
-                tool_mode: ChatToolMode::ReadOnly,
-                skills: Vec::new(),
-                memory: false,
-                model_bindings_path: None,
-                model_bindings_override: Some(request.staged_bindings),
-                runtime_plan_override: Some(runtime_plan),
-            },
-            workspace_root: Some(workspace_root),
-            session_id: None,
-            no_history: true,
-            new_session: true,
-        };
-        let service = ChatService::open(
-            options.clone(),
-            &self.runtime,
-            self.inference_client.clone(),
-        )
-        .map_err(runtime_error)?;
-        let summary = service.summary();
-        let selected_model_id = service.selected_model_id();
-        let runtime_context_revision = service.runtime_selection_revision();
-        let execution_context = service.execution_context().clone();
-        let delegation_plan = service.delegation_plan();
-        let session_id = summary.session_id.clone();
-        self.chat_factory.register(service).map_err(runtime_error)?;
-        self.sessions.insert(
-            session_id.clone(),
-            SessionRuntime {
-                status: SessionStatus::Open,
-                resumed: false,
-                options: ChatOptions {
-                    session_id: Some(session_id.clone()),
-                    new_session: false,
-                    ..options
-                },
-                delegation_plan,
-                execution_context,
-                selected_model_id,
-                runtime_context_revision,
-            },
-        );
-        Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
-            session_id,
-            resumed: false,
         }))
     }
 
@@ -4879,7 +4786,7 @@ impl SharedDaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
     ) -> Self {
         Self::from_state(DaemonState::new(
             runtime,
@@ -4894,7 +4801,7 @@ impl SharedDaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
     ) -> Result<Self> {
         Self::from_state(DaemonState::open(
             runtime,
@@ -4909,7 +4816,7 @@ impl SharedDaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
-        inference_status: WorkerRuntimeStatusHandle,
+        inference_status: EngineRuntimeStatusHandle,
         runtime_identity: CurrentRuntimeIdentity,
     ) -> Result<Self> {
         Self::from_state(DaemonState::open_with_runtime_identity(

@@ -1279,6 +1279,7 @@ mod tests {
         );
     }
 
+    // MIW-ADM-006.
     #[test]
     fn receipt_over_the_admitted_envelope_is_not_grown_opportunistically() {
         let estimate = AllocationEstimate {
@@ -1489,6 +1490,7 @@ mod tests {
         );
     }
 
+    // MIW-ADM-005.
     #[test]
     fn eviction_is_idle_only_pinned_safe_and_deterministic() {
         let (mut ledger, snapshot) = ledger(64, 2);

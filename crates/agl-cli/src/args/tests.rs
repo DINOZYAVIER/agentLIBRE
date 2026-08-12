@@ -74,7 +74,6 @@ fn serve_options_default() -> ServeOptions {
     ServeOptions {
         socket_path: None,
         systemd_activation: false,
-        config: None,
         function_ref: None,
         artifact_root: None,
         workspace_root: None,
@@ -131,8 +130,6 @@ fn parse_run_command_with_options() {
         [
             "agl",
             "run",
-            "--config",
-            "local.toml",
             "--artifact-root",
             "artifacts",
             "--prompt",
@@ -147,7 +144,6 @@ fn parse_run_command_with_options() {
             "write",
         ],
         CliCommand::Run(RunOptions {
-            config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
@@ -223,8 +219,6 @@ fn parse_serve_command_with_daemon_options() {
             "serve",
             "--socket",
             "/tmp/agl.sock",
-            "--config",
-            "local.toml",
             "--artifact-root",
             "artifacts",
             "--workspace-root",
@@ -239,7 +233,6 @@ fn parse_serve_command_with_daemon_options() {
         CliCommand::Serve(ServeOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             systemd_activation: false,
-            config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
@@ -283,21 +276,23 @@ fn parse_function_commands() {
         })),
     );
     assert_command(
+        ["agl", "function", "init", "coding", "--workspace"],
+        CliCommand::Function(FunctionCommand::Init(FunctionInitOptions {
+            id: "coding".to_string(),
+            workspace: true,
+            json: false,
+        })),
+    );
+    assert_parse_error_contains(
         [
             "agl",
             "function",
             "init",
             "coding",
-            "--workspace",
             "--model-profile",
             "local",
         ],
-        CliCommand::Function(FunctionCommand::Init(FunctionInitOptions {
-            id: "coding".to_string(),
-            workspace: true,
-            model_profile: Some("local".to_string()),
-            json: false,
-        })),
+        "unexpected argument '--model-profile'",
     );
 }
 
@@ -314,47 +309,11 @@ fn parse_run_command_with_function_ref() {
 }
 
 #[test]
-fn parse_inference_commands_are_raw_without_function_refs() {
-    assert_command(
-        [
-            "agl",
-            "inference",
-            "run",
-            "--config",
-            "local.toml",
-            "--prompt",
-            "hello",
-        ],
-        CliCommand::Inference(InferenceCommand::Run(RunOptions {
-            config: Some(PathBuf::from("local.toml")),
-            function_ref: None,
-            prompt: Some("hello".to_string()),
-            ..RunOptions::default()
-        })),
-    );
-    assert_parse_error_contains(["agl", "inference", "chat"], "unrecognized subcommand");
-    assert_command(
-        ["agl", "inference", "serve", "--config", "local.toml"],
-        CliCommand::Inference(InferenceCommand::Serve(ServeOptions {
-            config: Some(PathBuf::from("local.toml")),
-            ..serve_options_default()
-        })),
-    );
-}
-
-#[test]
-fn parse_inference_rejects_function_ref() {
+fn raw_inference_namespace_and_config_override_are_removed() {
+    assert_parse_error_contains(["agl", "inference", "run"], "unrecognized subcommand");
     assert_parse_error_contains(
-        [
-            "agl",
-            "inference",
-            "run",
-            "--function",
-            "coding",
-            "--prompt",
-            "hello",
-        ],
-        "unexpected argument",
+        ["agl", "run", "--config", "local.toml", "hello"],
+        "unexpected argument '--config'",
     );
 }
 
@@ -1141,17 +1100,8 @@ fn parse_config_paths_command() {
 #[test]
 fn parse_config_status_command() {
     assert_command(
-        [
-            "agl",
-            "config",
-            "status",
-            "--config",
-            "local.toml",
-            "--json",
-            "--strict",
-        ],
+        ["agl", "config", "status", "--json", "--strict"],
         CliCommand::Config(ConfigCommand::Status(ConfigStatusOptions {
-            config: Some(PathBuf::from("local.toml")),
             json: true,
             strict: true,
         })),

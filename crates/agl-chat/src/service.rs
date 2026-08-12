@@ -15,7 +15,6 @@ use agl_kernel::{
     TurnRequestOutcome, TurnRequestResult, TurnTerminal,
 };
 use agl_kernel::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
-use agl_model::RuntimePlanSet;
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
 use anyhow::{Context, Result, bail, ensure};
@@ -36,7 +35,6 @@ pub struct ChatSessionSummary {
     pub history_enabled: bool,
     pub resumed: bool,
     pub replayed_messages: usize,
-    pub automatic_runtime_plan: Option<RuntimePlanSet>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,7 +230,7 @@ impl ChatService {
                     Some(ChatSessionStore::start(
                         runtime.paths.sessions_root(),
                         session_id.clone(),
-                        session.config_path().to_path_buf(),
+                        session.model_profile_id().to_owned(),
                         session.backend_name(),
                         admitted_execution_context.clone(),
                         agl_session::SessionRuntimeSelection {
@@ -329,11 +327,6 @@ impl ChatService {
             history_enabled: self.history_enabled,
             resumed: self.resumed_session,
             replayed_messages: self.messages.len(),
-            automatic_runtime_plan: self
-                .turn_runtime
-                .session()
-                .automatic_runtime_plan()
-                .cloned(),
         }
     }
 
@@ -555,34 +548,9 @@ impl ChatService {
         if self.context_released {
             bail!("cannot select a model after the session context was released");
         }
-        let retained_bytes = self
-            .messages
-            .iter()
-            .map(|message| serde_json::to_vec(message).map(|bytes| bytes.len()))
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .sum::<usize>();
-        let conservative_tokens = retained_bytes.saturating_add(3) / 4;
-        let limit = self.turn_runtime.session().context_limit_tokens() as usize;
-        ensure!(
-            conservative_tokens < limit,
-            "retained conversation requires about {conservative_tokens} tokens but the model context limit is {limit}"
-        );
-        let previous_model_id = self.turn_runtime.session().selected_model_id();
-        let previous_model_path = self.turn_runtime.session().current_model_path();
         self.turn_runtime
             .session_mut()
-            .select_model(model_id, model_path)?;
-        if let Err(error) = self.persist_runtime_selection() {
-            if let Some(previous_model_id) = previous_model_id {
-                self.turn_runtime
-                    .session_mut()
-                    .select_model(&previous_model_id, previous_model_path)
-                    .context("failed to roll back model selection")?;
-            }
-            return Err(error).context("failed to persist model selection");
-        }
-        Ok(())
+            .select_model(model_id, model_path)
     }
 
     pub fn select_operation_mode(&mut self, mode: ToolAccessMode) -> Result<()> {
@@ -822,12 +790,7 @@ impl ChatService {
             context_messages: &self.messages,
             hook_batches: self.turn_runtime.session().turn_hook_batches(),
             hook_payload: self.turn_runtime.session().turn_hook_payload(),
-            repair_malformed_tool_calls: self
-                .turn_runtime
-                .session()
-                .inference_config()
-                .runtime
-                .repair_malformed_tool_calls,
+            repair_malformed_tool_calls: self.turn_runtime.session().repair_malformed_tool_calls(),
             max_tool_calls: self.max_tool_calls,
             visible_tools: self.turn_runtime.session().turn_visible_tools(),
             tool_policy_hash,
@@ -1726,7 +1689,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use agl_config::ResolvedInferenceConfig;
     use agl_events::{
         EVENT_SCHEMA, EventDraft, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus,
     };
@@ -1862,30 +1824,6 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let config_path = root.join("inference.toml");
-        let missing_model = root.join("missing-model.gguf");
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-                missing_model.display()
-            ),
-        )
-        .unwrap();
         write_service_test_function(&root);
         let runtime = AgentLibreRuntimeConfig {
             paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
@@ -1895,10 +1833,10 @@ tool_call_format = "hermes_json"
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
+        crate::test_support::install_package_bound_test_model(&root, &runtime);
         agl_store::AglStore::migrate_at(runtime.paths.store_root()).unwrap();
         let options = ChatOptions {
             inference: crate::InferenceOptions {
-                config: Some(config_path),
                 function_ref: Some("service-test".to_owned()),
                 artifact_root: Some(root.join("artifacts")),
                 workspace_root: Some(root.clone()),
@@ -1924,7 +1862,7 @@ tool_call_format = "hermes_json"
         .unwrap();
         std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
-            "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: service-test\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Service test\nruntime:\n  tool_mode: read-only\n  max_output_tokens: 1\nskills:\n  use: []\nsubagents:\n  use: []\n---\n",
+            "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: service-test\n  version: 1.0.0\n  payload_schema: agentlibre.function/v3\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - model:test-model@^1.0\ntitle: Service test\nmodel:\n  profile: local\nruntime:\n  tool_mode: read-only\n  max_output_tokens: 1\n  stop_rules: []\n  structured_generation: lazy_tool\n  repair_malformed_tool_calls: true\nskills:\n  use: []\nsubagents:\n  use: []\n---\n",
         )
         .unwrap();
         std::fs::write(
@@ -1936,8 +1874,8 @@ tool_call_format = "hermes_json"
 
     #[derive(Default)]
     struct ContextLifecycleCalls {
-        cleared: Vec<SessionId>,
-        released: Vec<SessionId>,
+        cleared: Vec<String>,
+        released: Vec<String>,
     }
 
     struct ContextLifecycleClient {
@@ -1949,21 +1887,21 @@ tool_call_format = "hermes_json"
             bail!("context lifecycle test does not generate")
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            session_id: &SessionId,
-        ) -> Result<()> {
-            self.calls.lock().unwrap().cleared.push(session_id.clone());
+        fn clear_context(&self, context: &agl_model::ModelContextKey) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .cleared
+                .push(context.as_str().to_owned());
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            session_id: &SessionId,
-        ) -> Result<()> {
-            self.calls.lock().unwrap().released.push(session_id.clone());
+        fn release_context(&self, context: &agl_model::ModelContextKey) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .released
+                .push(context.as_str().to_owned());
             Ok(())
         }
 
@@ -1994,24 +1932,18 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    configured_batch_size: 0,
+                    prefill_chunks: 0,
                     resource_admission: None,
                 },
             })
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn clear_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn release_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
@@ -2065,24 +1997,18 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    configured_batch_size: 0,
+                    prefill_chunks: 0,
                     resource_admission: None,
                 },
             })
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn clear_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn release_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
@@ -2259,24 +2185,18 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    configured_batch_size: 0,
+                    prefill_chunks: 0,
                     resource_admission: None,
                 },
             })
         }
 
-        fn clear_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn clear_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
-        fn release_context(
-            &self,
-            _config: &ResolvedInferenceConfig,
-            _session_id: &SessionId,
-        ) -> Result<()> {
+        fn release_context(&self, _context: &agl_model::ModelContextKey) -> Result<()> {
             Ok(())
         }
 
@@ -2462,7 +2382,7 @@ tool_call_format = "hermes_json"
             "stepping-tool",
             false,
             scripted_inference_client(&[
-                r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"inference.toml"}}</tool_call>"#,
+                r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"test-model.gguf"}}</tool_call>"#,
                 "tool complete",
             ]),
         );
@@ -2505,7 +2425,7 @@ tool_call_format = "hermes_json"
                 }),
                 ..
             } if tool_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
-                && path == "inference.toml"
+                && path == "test-model.gguf"
                 && *bytes > 0
         )));
         let safe_presentation = format!("{presentation_events:?}");
@@ -2572,7 +2492,6 @@ tool_call_format = "hermes_json"
             calls: Arc::clone(&calls),
         });
         let mut chat = test_chat_service_with_client("context-lifecycle", false, client);
-        let session_id = chat.service.session_id().clone();
         chat.service.messages.push(TurnMessage::User {
             content: text("discard me"),
         });
@@ -2583,8 +2502,8 @@ tool_call_format = "hermes_json"
         chat.service.request_exit().unwrap();
 
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.cleared, vec![session_id.clone()]);
-        assert_eq!(calls.released, vec![session_id]);
+        assert_eq!(calls.cleared.len(), 1);
+        assert_eq!(calls.released, calls.cleared);
     }
 
     #[test]
@@ -2602,7 +2521,7 @@ tool_call_format = "hermes_json"
 
         drop(chat);
 
-        assert_eq!(calls.lock().unwrap().released, vec![session_id]);
+        assert_eq!(calls.lock().unwrap().released.len(), 1);
     }
 
     #[test]
@@ -2704,6 +2623,7 @@ tool_call_format = "hermes_json"
         let next_root = chat.root.join("next-workspace");
         std::fs::create_dir_all(&next_root).unwrap();
         write_service_test_function(&next_root);
+        crate::test_support::install_package_bound_test_model(&next_root, &chat.service.runtime);
         let next_root = next_root.canonicalize().unwrap();
         let session_id = chat.service.session_id().clone();
 

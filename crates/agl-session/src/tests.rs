@@ -18,7 +18,7 @@ const NEXT_TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b34";
 const TEST_ATTEMPT_ID: &str = "attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b35";
 const NEXT_ATTEMPT_ID: &str = "attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b36";
 const TEST_REQUEST_ID: &str = "req_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b37";
-const TEST_CONFIG_PATH: &str = "/tmp/local.toml";
+const TEST_MODEL_PROFILE_ID: &str = "cpu-32k";
 const TEST_BACKEND: &str = "llama_cpp";
 
 fn temp_root(name: &str) -> PathBuf {
@@ -181,7 +181,7 @@ fn start_session(root: impl AsRef<std::path::Path>, session_id: SessionId) -> Ch
     ChatSessionStore::start(
         root,
         session_id,
-        TEST_CONFIG_PATH,
+        TEST_MODEL_PROFILE_ID,
         TEST_BACKEND,
         execution_context(),
         runtime_selection(),
@@ -660,7 +660,7 @@ fn start_refuses_existing_session_but_allows_precreated_run_directory() {
     let err = ChatSessionStore::start(
         &root,
         id,
-        TEST_CONFIG_PATH,
+        TEST_MODEL_PROFILE_ID,
         TEST_BACKEND,
         execution_context(),
         runtime_selection(),

@@ -22,9 +22,7 @@
 | agl-host-tools | Tooling |
 | agl-ids | Identity |
 | agl-inference | AI/ML |
-| agl-inference-worker | AI/ML |
 | agl-kernel | Runtime |
-| agl-llama-cpp-sys | AI/ML |
 | agl-matrix-bridge | Communication |
 | agl-memory | Storage |
 | agl-model | AI/ML |

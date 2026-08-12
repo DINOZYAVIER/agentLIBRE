@@ -1,9 +1,10 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use agl_client::{AgentLibreClient, ClientError};
-use agl_inference::worker_protocol::WORKER_BUILD_ID;
+use agl_inference::{
+    ENGINE_BINARY_NAME, ENGINE_PROTOCOL_ID, EngineExecutable, InferenceHost, InferenceHostConfig,
+};
 use agl_protocol::{RuntimeGenerationIdentity, RuntimeGenerationKind};
 use agl_runtime::{
     RuntimeSourceEvidence, RuntimeSourceState, current_executable_is_in, current_runtime_identity,
@@ -57,31 +58,46 @@ pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
         } else {
             parent
         };
-        let worker_path = directory.join(agl_inference::worker_protocol::WORKER_BINARY_NAME);
-        let worker = agl_inference::worker_protocol::WorkerExecutable::open_exact(&worker_path)
-            .map_err(anyhow::Error::from)
-            .context("inference worker trust verification failed")?;
-        let process =
-            agl_inference::worker_protocol::WorkerProcess::spawn(&worker, Duration::from_secs(5))
-                .map_err(anyhow::Error::from)
-                .context("inference worker identity verification failed")?;
+        let engine_path = directory.join(ENGINE_BINARY_NAME);
+        let expected = runtime_identity
+            .manifest
+            .as_ref()
+            .and_then(|manifest| {
+                manifest
+                    .content
+                    .executables
+                    .iter()
+                    .find(|file| file.path == ENGINE_BINARY_NAME)
+            })
+            .map(|file| file.sha256.clone())
+            .context("runtime manifest has no exact llama-server executable")?;
+        let host = InferenceHost::start(InferenceHostConfig {
+            executable: EngineExecutable {
+                path: engine_path,
+                sha256: expected,
+            },
+            queue_capacity: 1,
+            external_host_reserve_bytes: 0,
+            authority_root: runtime
+                .paths
+                .inference_state_root()
+                .join("identity-authority"),
+            context_idle_duration: std::time::Duration::from_secs(
+                runtime.inference.residency.context_idle_seconds,
+            ),
+            model_idle_duration: std::time::Duration::from_secs(
+                runtime.inference.residency.model_idle_seconds,
+            ),
+            evidence_root: runtime.paths.default_artifact_root(),
+        })
+        .context("inference engine identity verification failed")?;
         if runtime_identity.sealed() {
             ensure!(
-                runtime_identity.worker_build_id() == Some(process.identity().build_id()),
-                "sealed runtime manifest worker build ID does not match the exact worker"
-            );
-            ensure!(
-                runtime_identity.native_bundle_id() == Some(process.native_bundle_id()),
-                "sealed runtime manifest native bundle ID does not match the exact worker"
+                runtime_identity.engine_protocol_id() == Some(ENGINE_PROTOCOL_ID),
+                "sealed runtime manifest engine protocol ID does not match this host"
             );
         }
-        process
-            .shutdown(
-                agl_inference::worker_protocol::ShutdownReason::Requested,
-                Duration::from_secs(5),
-            )
-            .map_err(anyhow::Error::from)
-            .context("inference worker identity verification shutdown failed")?;
+        host.shutdown();
     }
     Ok(())
 }
@@ -101,7 +117,7 @@ fn protocol_identity(identity: &agl_runtime::CurrentRuntimeIdentity) -> RuntimeG
 fn seal_staged_runtime(directory: &Path) -> Result<()> {
     current_executable_is_in(directory)?;
     let source = source_evidence_from_environment()?;
-    let manifest = seal_runtime_manifest(directory, source, WORKER_BUILD_ID)?;
+    let manifest = seal_runtime_manifest(directory, source, ENGINE_PROTOCOL_ID)?;
     crate::print_json(&manifest)
 }
 

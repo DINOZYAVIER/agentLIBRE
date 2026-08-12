@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agl_config::ResolvedInferenceConfig;
 use agl_content::Content;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
@@ -43,7 +42,8 @@ pub enum ChatRunInput {
         execution_turn_id: agl_ids::TurnId,
         workspace_root: PathBuf,
         artifact_root: PathBuf,
-        inference_config: ResolvedInferenceConfig,
+        function_plan_input: agl_model::ResolvedFunctionPlanInput,
+        model_plan_input: Box<agl_model::ResolvedModelPlanInput>,
         delegation_plan: RuntimeDelegationPlan,
         authority_ceiling: BTreeSet<ToolId>,
     },
@@ -302,7 +302,8 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                 execution_turn_id,
                 workspace_root,
                 artifact_root,
-                inference_config,
+                function_plan_input,
+                model_plan_input,
                 delegation_plan,
                 authority_ceiling,
             } => {
@@ -330,9 +331,11 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                         "child specification digest differs from its admitted snapshot".to_string(),
                     ));
                 }
-                let config_digest =
-                    crate::delegation::inference_config_digest(&inference_config)
-                        .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+                let config_digest = crate::delegation::model_plan_inputs_digest(
+                    &function_plan_input,
+                    model_plan_input.as_ref(),
+                )
+                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
                 if run.model_profile_digest.as_deref() != Some(config_digest.as_str()) {
                     return Err(SupervisorError::Driver(
                         "child model profile digest differs from its admitted snapshot".to_string(),
@@ -360,7 +363,8 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                         })?;
                         ChatService::open_subagent(
                             crate::session::SubagentSessionConfig {
-                                inference_config,
+                                function_plan_input,
+                                model_plan_input: *model_plan_input,
                                 spec,
                                 delegation_plan,
                                 authority_ceiling,
@@ -451,7 +455,8 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                 && service.effective_policy_hash() != expected_policy_hash
             {
                 return Err(SupervisorError::Driver(format!(
-                    "effective tool policy differs from the {label} snapshot"
+                    "effective tool policy differs from the {label} snapshot: expected {expected_policy_hash}, got {}",
+                    service.effective_policy_hash()
                 )));
             }
         }

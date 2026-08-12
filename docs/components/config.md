@@ -1,11 +1,11 @@
 # Config
 
-Config covers XDG paths, workspace settings, function defaults, inference
-profiles, and runtime options.
+Config covers XDG paths, workspace settings, function defaults, and host
+runtime options. Model inference profiles belong to Model packages.
 
 Use `agl config paths` for raw resolved paths and `agl config status` for a
-health report that checks the runtime config, active local inference profile,
-logs, session/store roots, and skill trust store.
+health report that checks the runtime config, logs, session/store roots, and
+skill trust store.
 
 Function-backed runtime commands resolve an agentFUNCTION before loading a
 model. `agl init` writes the workspace default in `.agl/workspace.toml`:
@@ -16,10 +16,8 @@ default = "gemma4-e4b"
 ```
 
 `agl run`, bare `agl`, and `agl serve` use that function when `--function` is
-omitted. `--config PATH` on the non-interactive runtime commands overrides the
-selected function's model config for one invocation; it does not disable
-function context, skills, tools, subagents, memory policy, identity hooks, or
-function evidence. Interactive sessions use the daemon's resolved profile.
+omitted. Every surface resolves the same Function-owned generation policy and
+Model-owned runtime profile; there is no per-invocation fixed-config override.
 
 Packaged functions contain portable model ids. Bind those ids to files on this
 machine in `$AGL_HOME/config/models.toml`:
@@ -39,14 +37,6 @@ model from its filename. `agl init` normally creates these bindings from
 validated HF cache entries. `agl function status <id>` reports required ids,
 resolved paths, and the binding file to repair when an id is missing.
 
-The active local inference profile is resolved for low-level inference
-commands, config health checks, and function profile resolution in this order:
-
-1. `--config PATH` on `agl inference run`, `agl inference serve`, or
-   `agl config status`.
-2. `AGL_LOCAL_INFERENCE_CONFIG`.
-3. `local_inference_config` from `agl config paths`.
-
 The runtime config is `runtime_config` from `agl config paths`. Create a starter
 file with:
 
@@ -55,9 +45,8 @@ agl config init
 ```
 
 Changing logging or workspace runtime config affects the next command
-invocation. Changing the selected function, local inference profile, or model
-requires starting a new `agl run`, interactive session, `agl serve`, or
-`agl inference ...` process.
+invocation. Changing the selected Function or Model package/profile requires
+starting a new `agl run`, interactive session, or `agl serve` process.
 
 ## Inference residency
 

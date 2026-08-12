@@ -194,6 +194,18 @@ fn package_bound_v3_is_the_only_model_runtime_format() {
             );
         }
     }
+    for crate_name in ["agl-config", "agl-cli", "agl-protocol"] {
+        assert_absent(
+            crate_name,
+            &[
+                "ResolvedInferenceConfig",
+                "InferencePresetRuntimeConfig",
+                "FixedRuntimePreset",
+                "load_local_inference_config",
+                "AGL_LOCAL_INFERENCE_CONFIG",
+            ],
+        );
+    }
 }
 
 // MIW-TXN-005. Records and bindings have one durable transaction owner.
@@ -219,6 +231,24 @@ fn model_bindings_have_no_independent_commit_bypass() {
 fn model_downloader_name_and_owner_modules_are_unambiguous() {
     let model_src = workspace_root().join("crates/agl-model/src");
     assert!(model_src.join("downloader.rs").is_file());
+    assert!(model_src.join("downloader/cache.rs").is_file());
     assert!(!model_src.join("worker.rs").exists());
     assert_absent("agl-model", &["ModelDownloadWorker", "worker_main"]);
+
+    let inference_src = workspace_root().join("crates/agl-inference/src");
+    for relative in [
+        "engine/process.rs",
+        "engine/request.rs",
+        "engine/transport.rs",
+        "host/attempt.rs",
+        "host/config.rs",
+        "host/descriptors.rs",
+        "host/media.rs",
+        "host/resource_ledger.rs",
+    ] {
+        assert!(
+            inference_src.join(relative).is_file(),
+            "selected 13A owner module is missing: {relative}"
+        );
+    }
 }

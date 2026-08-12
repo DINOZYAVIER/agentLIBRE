@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-build = "build.rs"
 
 [dependencies]
 agl-actions.workspace = true
@@ -12,6 +11,7 @@ agl-config.workspace = true
 agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
+agl-model.workspace = true
 agl-oven.workspace = true
 agl-store.workspace = true
 anyhow.workspace = true
@@ -19,11 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 libc.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
-
-[build-dependencies]
-sha2.workspace = true
 
 [dev-dependencies]
 agl-process.workspace = true

@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agl_client::ClientError;
-use agl_config::{InferencePreset, bind_inference_preset, load_inference_preset_from_str};
+use agl_config::load_model_bindings_or_empty;
 use agl_function::{
     FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionPackageSource,
     FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status_from_loaded,
     load_function_candidate, workspace_functions_root,
 };
-use agl_model::{CatalogRuntimeProfile, ProfileDevice};
+use agl_model::CatalogRuntimeProfile;
 use agl_package::{
     PackageRef, PackageSourceDeclaration, PackageSourceId, PackageSourceKind, PackageSourceTier,
     PackageTypeId, WorkspaceConfigReferences, WorkspaceManifest, WorkspacePolicy,
@@ -49,7 +49,7 @@ struct DaemonRuntimeDiagnostics {
 
 #[derive(Debug, Serialize)]
 struct FunctionInferenceDiagnostics {
-    preset: InferencePreset,
+    model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     selected_profile: Option<CatalogRuntimeProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,30 +258,27 @@ fn function_inference_diagnostics(
     runtime: &AgentLibreRuntimeConfig,
     bundle: &agl_runtime::ResolvedRuntimeBundle,
 ) -> Result<Option<FunctionInferenceDiagnostics>> {
-    let Some(config) = bundle.function.inference_config_toml.as_deref() else {
+    let Some(profile_id) = bundle.function.model_profile.as_deref() else {
         return Ok(None);
     };
-    let preset = load_inference_preset_from_str("resolved Function inference.toml", config)?;
-    let selected_profile = match (preset.runtime.auto_policy(), bundle.model.as_ref()) {
-        (Some(policy), Some(model)) if policy.device.is_some() => {
-            let matches = model
-                .package
-                .profiles
-                .iter()
-                .filter(|profile| profile.context_tokens == policy.max_context_tokens)
-                .filter(|profile| profile.device == ProfileDevice::Gpu)
-                .cloned()
-                .collect::<Vec<_>>();
-            ensure!(
-                matches.len() == 1,
-                "Function inference profile selection is ambiguous for exact context {} and device {:?}",
-                policy.max_context_tokens,
-                policy.device
-            );
-            matches.into_iter().next()
-        }
-        _ => None,
-    };
+    let model = bundle
+        .model
+        .as_ref()
+        .context("Function model.profile has no resolved Model package")?;
+    let selected_profile = Some(
+        model
+            .package
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .with_context(|| format!("resolved Model has no profile `{profile_id}`"))?,
+    );
+    let main = model
+        .package
+        .required_artifacts()
+        .find(|artifact| artifact.role == agl_model::ModelArtifactRole::Main)
+        .context("resolved Model has no main artifact")?;
     let model_reference = bundle.model.as_ref().map(|model| model.node_key.clone());
     let model_package_digest = bundle.model.as_ref().and_then(|model| {
         bundle
@@ -291,23 +288,24 @@ fn function_inference_diagnostics(
             .map(|node| node.package_tree_digest.to_string())
     });
     let bindings_path = agl_config::model_bindings_path(&runtime.paths.config_dir);
-    let (binding, binding_error) = match bind_inference_preset(preset.clone(), &bindings_path) {
-        Ok(bound) => (
+    let bindings = load_model_bindings_or_empty(&bindings_path)?;
+    let (binding, binding_error) = match bindings.models.get(&main.model_id) {
+        Some(bound) => (
             Some(FunctionModelBindingDiagnostics {
-                model_id: bound.backend.model_id.to_string(),
-                model_path: bound.backend.model,
-                multimodal_projector_id: bound
-                    .backend
-                    .multimodal_projector_id
-                    .map(|id| id.to_string()),
-                multimodal_projector_path: bound.backend.multimodal_projector,
+                model_id: main.model_id.to_string(),
+                model_path: bound.path.clone(),
+                multimodal_projector_id: None,
+                multimodal_projector_path: None,
             }),
             None,
         ),
-        Err(error) => (None, Some(format!("{error:#}"))),
+        None => (
+            None,
+            Some(format!("model `{}` is not bound", main.model_id)),
+        ),
     };
     Ok(Some(FunctionInferenceDiagnostics {
-        preset,
+        model_id: main.model_id.to_string(),
         selected_profile,
         model_reference,
         model_package_digest,
@@ -413,7 +411,7 @@ fn run_function_init(
         .create_new(true)
         .open(&path)
         .with_context(|| format!("failed to create function {}", path.display()))?;
-    file.write_all(function_template(&options.id, options.model_profile.as_deref()).as_bytes())
+    file.write_all(function_template(&options.id).as_bytes())
         .with_context(|| format!("failed to write function {}", path.display()))?;
     let mut system_prompt_file = std::fs::OpenOptions::new()
         .write(true)
@@ -526,8 +524,6 @@ fn run_function_doctor(
         FunctionSmokeRequest {
             reference: options.reference,
             workspace_root,
-            bindings_path: None,
-            runtime_plan_override: None,
             timeout,
             max_output_tokens: 32,
         },
@@ -561,25 +557,16 @@ fn doctor_timeout(
     )?;
     let seconds = bundle
         .function
-        .inference_config_toml
+        .model_profile
         .as_deref()
-        .and_then(|toml| {
-            agl_config::load_inference_preset_from_str("function doctor inference.toml", toml).ok()
-        })
-        .and_then(|preset| {
+        .and_then(|profile_id| {
             bundle.model.as_ref().and_then(|model| {
                 model
                     .package
-                    .artifact(&preset.backend.model_id)
-                    .is_some()
-                    .then_some(&model.package)
-                    .and_then(|package| {
-                        package
-                            .profiles
-                            .iter()
-                            .map(|profile| profile.smoke_timeout_seconds)
-                            .max()
-                    })
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                    .map(|profile| profile.smoke_timeout_seconds)
             })
         })
         .unwrap_or(300);
@@ -660,19 +647,12 @@ fn print_function_resolution(report: &FunctionResolutionDiagnostics) {
         }
     }
     if let Some(inference) = &report.inference {
-        println!("inference.model_id={}", inference.preset.backend.model_id);
+        println!("inference.model_id={}", inference.model_id);
         if let Some(reference) = &inference.model_reference {
             println!("inference.model_reference={reference}");
         }
         if let Some(digest) = &inference.model_package_digest {
             println!("inference.model_digest={digest}");
-        }
-        if let Some(policy) = inference.preset.runtime.auto_policy() {
-            println!(
-                "inference.requested_context_tokens={}",
-                policy.max_context_tokens
-            );
-            println!("inference.requested_device={:?}", policy.device);
         }
         if let Some(profile) = &inference.selected_profile {
             println!("inference.profile_id={}", profile.id);
@@ -718,9 +698,6 @@ fn print_loaded_function(function: &LoadedFunction) {
     if let Some(profile) = function.front_matter.model_profile() {
         println!("function.model.profile={profile}");
     }
-    if let Some(path) = &function.inference_config_path {
-        println!("function.model.config_path={}", path.display());
-    }
     if let Some(tool_mode) = function.front_matter.runtime_tool_mode() {
         println!("function.runtime.tool_mode={}", tool_mode.as_str());
     }
@@ -749,14 +726,6 @@ fn print_loaded_function(function: &LoadedFunction) {
     }
     println!("--- {} ---", FUNCTION_SYSTEM_PROMPT_FILE_NAME);
     println!("{}", function.system_prompt.trim());
-    if let Some(config) = function
-        .inference_config_toml
-        .as_deref()
-        .filter(|config| !config.trim().is_empty())
-    {
-        println!("--- inference.toml ---");
-        println!("{}", config.trim());
-    }
 }
 
 fn print_function_status_report(report: &FunctionStatusReport) {
@@ -779,43 +748,6 @@ fn print_function_status_report(report: &FunctionStatusReport) {
     }
     if let Some(profile) = &report.profile {
         println!("function.model.profile={profile}");
-    }
-    if let Some(profile_path) = &report.profile_path {
-        println!("function.model.profile_path={}", profile_path.display());
-    }
-    if let Some(config_path) = &report.inference_config_path {
-        println!("function.model.config_path={}", config_path.display());
-        println!(
-            "function.model.config_embedded={}",
-            report.inference_config_embedded
-        );
-    }
-    if let Some(model_path) = &report.inference_model_path {
-        println!("function.model.path={}", model_path.display());
-    }
-    if let Some(model_id) = &report.inference_model_id {
-        println!("function.model.id={model_id}");
-    }
-    if let Some(projector_id) = &report.inference_multimodal_projector_id {
-        println!("function.model.multimodal_projector_id={projector_id}");
-    }
-    if let Some(projector_path) = &report.inference_multimodal_projector_path {
-        println!(
-            "function.model.multimodal_projector_path={}",
-            projector_path.display()
-        );
-    }
-    if let Some(draft_model_id) = &report.inference_draft_model_id {
-        println!("function.model.draft_model_id={draft_model_id}");
-    }
-    if let Some(draft_model_path) = &report.inference_draft_model_path {
-        println!(
-            "function.model.draft_model_path={}",
-            draft_model_path.display()
-        );
-    }
-    if let Some(model_exists) = report.inference_model_exists {
-        println!("function.model.exists={model_exists}");
     }
     if report.id.is_some() {
         print_function_tool_policy(report.tool_policy.as_ref());
@@ -866,9 +798,8 @@ fn print_function_tool_policy(policy: Option<&FunctionToolPolicy>) {
     );
 }
 
-fn function_template(id: &str, model_profile: Option<&str>) -> String {
+fn function_template(id: &str) -> String {
     let title = title_from_id(id);
-    let model_profile = model_profile.unwrap_or("local");
     format!(
         r#"---
 package:
@@ -876,14 +807,12 @@ package:
   type: function
   id: {id}
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
   requires: []
 title: {title}
-model:
-  profile: {model_profile}
 runtime:
   tool_mode: read-only
 skills:
@@ -978,13 +907,13 @@ mod tests {
             let profile = diagnostic.selected_profile.unwrap();
             assert_eq!(profile.id, profile_id);
             assert_eq!(profile.context_tokens, context_tokens);
-            assert_eq!(profile.required_vram_bytes, required_vram_bytes);
+            assert_eq!(profile.device_private_bytes, required_vram_bytes);
             assert_eq!(profile.gpu_layers, 999);
             assert_eq!(profile.pci_device_id.as_deref(), Some("1002:744c"));
             assert_eq!(profile.pci_subsystem_id.as_deref(), Some("1da2:471e"));
             let identity = bundle.identity();
-            assert_eq!(identity.root, format!("function:{reference}@1.2.0"));
-            assert_eq!(identity.model.as_deref(), Some("model:gemma4-31b@1.2.0"));
+            assert_eq!(identity.root, format!("function:{reference}@1.3.0"));
+            assert_eq!(identity.model.as_deref(), Some("model:gemma4-31b@1.3.0"));
             assert_eq!(identity.nodes.len(), 4);
         }
         std::fs::remove_dir_all(root).unwrap();

@@ -16,6 +16,38 @@ fn plan(fixture: &PlanFixture) -> agl_model::ModelExecutionPlan {
     .expect("canonical fixture must resolve")
 }
 
+// MIW-MEDIA-001. The opaque plan carries the package capability authority;
+// inference must not infer vision support merely from native server features.
+#[test]
+fn plan_binds_model_capabilities_into_its_audit_identity() {
+    let text = plan(&PlanFixture::canonical_v3());
+    let vision = plan(&PlanFixture::canonical_v3().with_capabilities(vec![
+        agl_model::CatalogCapability::Text,
+        agl_model::CatalogCapability::Tools,
+        agl_model::CatalogCapability::Vision,
+    ]));
+    assert!(!text.supports(agl_model::CatalogCapability::Vision));
+    assert!(vision.supports(agl_model::CatalogCapability::Vision));
+    assert_ne!(text.digest(), vision.digest());
+    assert_eq!(text.model_key(), vision.model_key());
+}
+
+// MIW-MODEL-007 and MIW-WRK-002. Speculative settings are package-owned,
+// typed, and part of native load identity rather than inherited defaults.
+#[test]
+fn draft_mtp_shape_is_complete_and_changes_native_load_identity() {
+    let ordinary = plan(&PlanFixture::canonical_v3());
+    let mtp = plan(&PlanFixture::canonical_v3().with_mtp());
+    let shape = mtp.runtime().mtp().unwrap();
+    assert_eq!(shape.max_draft_tokens(), 4);
+    assert_eq!(shape.min_draft_tokens(), 1);
+    assert_eq!(shape.p_min_millionths(), 250_000);
+    assert_eq!(shape.gpu_layers(), 17);
+    assert_eq!(shape.key_cache_type(), "q8_0");
+    assert_eq!(shape.value_cache_type(), "q4_0");
+    assert_ne!(ordinary.model_key(), mtp.model_key());
+}
+
 // MIW-MODEL-001. v3 is the only accepted schema and its canonical fixture
 // projects every runtime/resource field into the opaque plan.
 #[test]
@@ -54,6 +86,7 @@ fn model_v3_is_complete_and_v2_is_rejected() {
 
 // MIW-MODEL-002. Exact profile matching rejects drift; it never clamps or
 // substitutes the package-owned load/process shape.
+// MIW-ADM-007: live pressure and failure never authorize profile fallback.
 #[test]
 fn exact_profile_values_are_not_clamped_or_reselected() {
     let fixture = PlanFixture::canonical_v3();

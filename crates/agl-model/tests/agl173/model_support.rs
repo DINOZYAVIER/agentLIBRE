@@ -1,9 +1,9 @@
 use agl_config::{KvCacheType, ModelId};
 use agl_model::{
-    CatalogCapability, CatalogRuntimeProfile, GenerationPolicy, HostCapabilities,
-    HostCapabilityDevice, HostCapabilityDeviceKind, ModelArtifact, ModelArtifactFile,
-    ModelArtifactRole, ModelPackage, ModelPackageId, PackagePlanIdentity, ProfileDevice,
-    ResolvedFunctionPlanInput, ResolvedModelPlanInput, StructuredGenerationMode,
+    CatalogCapability, CatalogMtpProfile, CatalogRuntimeProfile, GenerationPolicy,
+    HostCapabilities, HostCapabilityDevice, HostCapabilityDeviceKind, ModelArtifact,
+    ModelArtifactFile, ModelArtifactRole, ModelPackage, ModelPackageId, PackagePlanIdentity,
+    ProfileDevice, ResolvedFunctionPlanInput, ResolvedModelPlanInput, StructuredGenerationMode,
 };
 
 #[derive(Clone)]
@@ -102,6 +102,7 @@ impl PlanFixture {
                 mmap: true,
                 unified_kv: false,
                 slot_count: 1,
+                mtp: None,
                 smoke_timeout_seconds: 120,
                 expected_speed: "fast".to_owned(),
             }],
@@ -169,6 +170,34 @@ impl PlanFixture {
     }
 
     pub fn with_live_available_bytes(self, _host: u64, _device: u64) -> Self {
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: Vec<CatalogCapability>) -> Self {
+        self.model.model.capabilities = capabilities;
+        self
+    }
+
+    pub fn with_mtp(mut self) -> Self {
+        self.model.model.capabilities = vec![CatalogCapability::Text, CatalogCapability::Tools];
+        self.model.model.artifacts.push(ModelArtifact {
+            role: ModelArtifactRole::Draft,
+            model_id: ModelId::new("fixture-draft").unwrap(),
+            files: vec![ModelArtifactFile {
+                filename: "fixture-draft.gguf".to_owned(),
+                byte_size: 512,
+                sha256: "4".repeat(64),
+            }],
+            required: true,
+        });
+        self.model.model.profiles[0].mtp = Some(CatalogMtpProfile {
+            max_draft_tokens: 4,
+            min_draft_tokens: 1,
+            p_min_millionths: 250_000,
+            gpu_layers: 17,
+            cache_type_k: KvCacheType::Q8_0,
+            cache_type_v: KvCacheType::Q4_0,
+        });
         self
     }
 

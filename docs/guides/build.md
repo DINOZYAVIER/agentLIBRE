@@ -1,14 +1,11 @@
 # Build
 
-For development builds, use `scripts/build-llama-cpp.sh` for llama.cpp and
-build the command-only agent CLI and its private inference worker:
+For development builds, build the constrained private `llama-server`, then the
+command-only agent CLI:
 
 ```sh
-cargo build \
-  -p agl-cli \
-  -p agl-inference-worker \
-  --bin agl \
-  --bin agl-inference-worker
+scripts/build-llama-cpp.sh
+cargo build -p agl-cli --bin agl
 ```
 
 For local installation into `~/.cargo/bin`, use:
@@ -26,7 +23,7 @@ new invocations use the newly published generation. The installer serializes
 publication with a private root lock and retains prior generations; it does not
 garbage-collect them. The systemd installer finds `agl` on `PATH` by default,
 normalizes aliases to that managed stable entrypoint, validates its private
-inference worker, and orders the daemon after the separately installed
+`llama-server` generation, and orders the daemon after the separately installed
 `agl-terminald.service`. It
 rejects mutable build-tree binaries such as `target/release/agl`; run those in
 the foreground for development instead of installing them as the durable user

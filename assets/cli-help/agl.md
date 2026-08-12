@@ -19,4 +19,4 @@ Common commands:
   agl function list
   agl skill list --trusted-only
   agl run --prompt "Summarize this workspace"
-  agl inference run --config /path/to/local.toml --prompt "Reply once."
+  agl run --function function:gemma4-e4b --prompt "Reply once."

@@ -20,7 +20,6 @@ pub(crate) enum CliCommand {
     Cron(CronCommand),
     Store(StoreCommand),
     Function(FunctionCommand),
-    Inference(InferenceCommand),
     Init(SetupInitOptions),
     Model(ModelCommand),
     Memory(MemoryCommand),
@@ -208,12 +207,6 @@ pub(crate) enum FunctionCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum InferenceCommand {
-    Run(RunOptions),
-    Serve(ServeOptions),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CronCommand {
     Add(CronAddOptions),
     List(CronListOptions),
@@ -359,7 +352,6 @@ pub(crate) enum SkillListSourceArg {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigStatusOptions {
-    pub(crate) config: Option<PathBuf>,
     pub(crate) json: bool,
     pub(crate) strict: bool,
 }
@@ -647,7 +639,6 @@ pub(crate) struct CronDeleteOptions {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RunOptions {
-    pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) workspace_root: Option<PathBuf>,
@@ -684,7 +675,6 @@ pub(crate) struct FunctionStatusOptions {
 pub(crate) struct FunctionInitOptions {
     pub(crate) id: String,
     pub(crate) workspace: bool,
-    pub(crate) model_profile: Option<String>,
     pub(crate) json: bool,
 }
 
@@ -698,7 +688,6 @@ pub(crate) struct FunctionDoctorOptions {
 pub(crate) struct ServeOptions {
     pub(crate) socket_path: Option<PathBuf>,
     pub(crate) systemd_activation: bool,
-    pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) workspace_root: Option<PathBuf>,

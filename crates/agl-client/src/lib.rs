@@ -313,19 +313,6 @@ impl AgentLibreClient {
         }
     }
 
-    pub async fn open_setup_smoke_session(
-        &self,
-        request: SetupSmokeSessionOpenRequest,
-    ) -> Result<SessionOpenedEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::SetupSmokeSessionOpen(Box::new(request)))
-            .await?
-        {
-            DaemonEventKind::SessionOpened(event) => Ok(event),
-            other => Err(unexpected("session_opened", &other)),
-        }
-    }
-
     pub async fn clear_session(
         &self,
         request: SessionClearRequest,
@@ -1229,11 +1216,7 @@ impl Expected {
     fn for_request(kind: &DaemonRequestKind, stream: bool) -> Option<Self> {
         Some(match kind {
             DaemonRequestKind::Hello(_) if !stream => Self::Hello,
-            DaemonRequestKind::SessionOpen(_) | DaemonRequestKind::SetupSmokeSessionOpen(_)
-                if !stream =>
-            {
-                Self::SessionOpened
-            }
+            DaemonRequestKind::SessionOpen(_) if !stream => Self::SessionOpened,
             DaemonRequestKind::SessionClear(_) | DaemonRequestKind::SessionStatus(_) if !stream => {
                 Self::SessionStatus
             }
@@ -1672,9 +1655,7 @@ mod tests {
                         product_version: "test".to_owned(),
                         daemon_instance_id,
                         daemon_runtime: runtime_identity('a'),
-                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
-                        native_bundle_id: None,
-                        composite_worker_build_id: None,
+                        engine_protocol_id: format!("sha256:{}", "d".repeat(64)),
                         tools: Vec::new(),
                     }),
                 ))
@@ -1683,68 +1664,6 @@ mod tests {
             .await
             .unwrap();
         server
-    }
-
-    fn setup_smoke_request() -> SetupSmokeSessionOpenRequest {
-        SetupSmokeSessionOpenRequest {
-            workspace_root: "/workspace".to_owned(),
-            function_ref: "gemma4-12b".to_owned(),
-            staged_bindings: agl_config::ModelBindings {
-                version: 1,
-                models: BTreeMap::from([(
-                    agl_config::ModelId::new("gemma4-12b").unwrap(),
-                    agl_config::ModelBinding {
-                        path: "/models/gemma4-12b.gguf".into(),
-                    },
-                )]),
-            },
-            runtime_plan: SetupSmokeRuntimePlan {
-                profile_id: "cpu-test".to_owned(),
-                selected_device: None,
-                selected_device_identity: None,
-                model: test_runtime_plan_model_identity("gemma4-12b"),
-                runtime: agl_config::InferenceRuntimeConfig {
-                    gpu_layers: 0,
-                    context_tokens: 4_096,
-                    threads: 2,
-                    device: None,
-                    batch_size: Some(128),
-                    ubatch_size: Some(64),
-                    flash_attention: Some(agl_config::RuntimeSwitch::Off),
-                    cache_type_k: None,
-                    cache_type_v: None,
-                    mmap: Some(true),
-                    kv_unified: Some(true),
-                    structured_decoding: agl_config::StructuredDecodingMode::Auto,
-                    repair_malformed_tool_calls: true,
-                    mtp: agl_config::MtpRuntimeConfig::default(),
-                },
-                smoke_timeout_seconds: 30,
-                expected_speed: "test".to_owned(),
-            },
-            max_output_tokens: 32,
-        }
-    }
-
-    fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
-        serde_json::from_value(serde_json::json!({
-            "provenance": {
-                "reference": format!("model:{id}@=1.0.0"),
-                "source_id": "test",
-                "source_tier": "workspace",
-                "source_kind": "directory",
-                "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "weights": [{
-                "role": "main",
-                "model_id": id,
-                "filename": format!("{id}.gguf"),
-                "byte_size": 18,
-                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-                "required": true
-            }]
-        }))
-        .unwrap()
     }
 
     async fn send_snapshot_transfer(
@@ -1937,10 +1856,10 @@ mod tests {
                     serde_json::to_string(&DaemonEvent::new(
                         Some(request.request_id),
                         DaemonEventKind::InferenceStatus(InferenceStatusEvent {
-                            worker_build_id: "sha256:test-worker".to_owned(),
-                            worker_state: ProtocolInferenceWorkerState::CoolingDown,
-                            worker_pid: None,
-                            launch_generation: None,
+                            engine_protocol_id: "sha256:test-worker".to_owned(),
+                            engine_state: ProtocolInferenceEngineState::CoolingDown,
+                            engine_pid: None,
+                            engine_generation: None,
                             physical_device_id: Some("pci:0000:03:00.0".to_owned()),
                             reserved_bytes: 0,
                             cooldown_not_before_unix_ms: Some(9_000),
@@ -1970,10 +1889,10 @@ mod tests {
             .inference_status(InferenceStatusRequest { detail: true })
             .await
             .unwrap();
-        assert_eq!(status.worker_build_id, "sha256:test-worker");
+        assert_eq!(status.engine_protocol_id, "sha256:test-worker");
         assert_eq!(
-            status.worker_state,
-            ProtocolInferenceWorkerState::CoolingDown
+            status.engine_state,
+            ProtocolInferenceEngineState::CoolingDown
         );
         assert_eq!(status.cooldown_not_before_unix_ms, Some(9_000));
         assert_eq!(status.resident_models, 1);
@@ -2080,45 +1999,6 @@ mod tests {
                 retryable: true,
             }
         );
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn setup_smoke_session_open_routes_only_the_typed_request() {
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let expected = setup_smoke_request();
-        let server_expected = expected.clone();
-        let session_id = agl_ids::SessionId::generate();
-        let server_session_id = session_id.clone();
-        let server = tokio::spawn(async move {
-            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
-            let request: DaemonRequest =
-                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
-            assert_eq!(
-                request.kind,
-                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(server_expected))
-            );
-            server
-                .send(
-                    serde_json::to_string(&DaemonEvent::new(
-                        Some(request.request_id),
-                        DaemonEventKind::SessionOpened(SessionOpenedEvent {
-                            session_id: server_session_id,
-                            resumed: false,
-                        }),
-                    ))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-        });
-
-        let client = AgentLibreClient::from_test_stream(client_stream)
-            .await
-            .unwrap();
-        let opened = client.open_setup_smoke_session(expected).await.unwrap();
-        assert_eq!(opened.session_id, session_id);
-        assert!(!opened.resumed);
         server.await.unwrap();
     }
 

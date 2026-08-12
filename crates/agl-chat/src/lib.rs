@@ -4,18 +4,21 @@ mod execution_owner;
 mod inference_client;
 mod options;
 mod presentation;
-mod prompt;
 mod service;
 mod session;
 mod supervised_chat;
 mod supervisor_driver;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod tools;
 mod turn_runtime;
 
 pub use agl_inference::{InferenceProductStage, InferenceProgressUnit, InferenceStageEvent};
 pub use agl_kernel::IncompleteOutputReason;
-pub use inference_client::{ChatInferenceJob, InferenceClient, InferenceClientHandle};
+pub use inference_client::{
+    ChatInferenceJob, ChatPlanRejection, InferenceClient, InferenceClientHandle,
+};
 pub use options::{ChatOptions, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions, ToolAccessMode};
 pub use presentation::{
     ChildRunPresentation, ModelAttemptOutcome, NoopTurnPresentationSink, PolicyPresentationOutcome,

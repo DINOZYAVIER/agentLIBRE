@@ -38,7 +38,6 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "function");
     assert_contains(&stdout, "package");
     assert_contains(&stdout, "model");
-    assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
     assert_contains(&stdout, "store");
@@ -152,9 +151,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["model", "unbind", "--help"][..],
         &["model", "remove", "--help"][..],
         &["model", "prune", "--help"][..],
-        &["inference", "--help"][..],
-        &["inference", "run", "--help"][..],
-        &["inference", "serve", "--help"][..],
         &["skill", "--help"][..],
         &["skill", "list", "--help"][..],
         &["skill", "inspect", "--help"][..],
@@ -225,7 +221,7 @@ default_function = "function:gemma4-e4b@^1.0"
     assert_success_no_stderr(&list);
     let listed: serde_json::Value = serde_json::from_str(&stdout(&list)).unwrap();
     assert!(listed.as_array().unwrap().iter().any(|package| {
-        package["exact_reference"] == "function:gemma4-e4b@1.1.0"
+        package["exact_reference"] == "function:gemma4-e4b@1.2.0"
             && package["source_tier"] == "builtin"
             && package["package_tree_digest"]
                 .as_str()
@@ -263,7 +259,7 @@ default_function = "function:gemma4-e4b@^1.0"
     );
     assert_success_no_stderr(&resolve);
     let resolved: serde_json::Value = serde_json::from_str(&stdout(&resolve)).unwrap();
-    assert_eq!(resolved["root"], "function:gemma4-e4b@1.1.0");
+    assert_eq!(resolved["root"], "function:gemma4-e4b@1.2.0");
     assert!(resolved["nodes"].as_array().unwrap().len() >= 2);
 
     let lock = run_agl_in(
@@ -438,7 +434,7 @@ package:
   type: function
   id: gemma4-e4b
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1408,10 +1404,10 @@ fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads()
     let (output, request) =
         run_agl_with_fake_daemon(&home, &["daemon", "status", "--detail"], |_| {
             agl_protocol::DaemonEventKind::InferenceStatus(agl_protocol::InferenceStatusEvent {
-                worker_build_id: "sha256:test-worker".to_owned(),
-                worker_state: agl_protocol::ProtocolInferenceWorkerState::CoolingDown,
-                worker_pid: None,
-                launch_generation: None,
+                engine_protocol_id: "sha256:test-worker".to_owned(),
+                engine_state: agl_protocol::ProtocolInferenceEngineState::CoolingDown,
+                engine_pid: None,
+                engine_generation: None,
                 physical_device_id: Some("pci:0000:03:00.0".to_owned()),
                 reserved_bytes: 64 * 1024 * 1024,
                 cooldown_not_before_unix_ms: Some(12_345),
@@ -1447,14 +1443,12 @@ fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads()
     assert_contains(&stdout, "runtime_executable_digest=sha256:");
     assert_contains(
         &stdout,
-        &format!("worker_build_id=sha256:{}", "d".repeat(64)),
+        &format!("engine_protocol_id=sha256:{}", "d".repeat(64)),
     );
-    assert_contains(&stdout, "native_bundle_id=none");
-    assert_contains(&stdout, "composite_worker_build_id=none");
-    assert_contains(&stdout, "inference_worker_build_id=sha256:test-worker");
-    assert_contains(&stdout, "worker_state=cooling_down");
-    assert_contains(&stdout, "worker_pid=none");
-    assert_contains(&stdout, "worker_launch_generation=none");
+    assert_contains(&stdout, "inference_engine_protocol_id=sha256:test-worker");
+    assert_contains(&stdout, "engine_state=cooling_down");
+    assert_contains(&stdout, "engine_pid=none");
+    assert_contains(&stdout, "engine_generation=none");
     assert_contains(&stdout, "accelerator_physical_device_id=pci:0000:03:00.0");
     assert_contains(&stdout, "accelerator_reserved_bytes=67108864");
     assert_contains(&stdout, "accelerator_cooldown_not_before_unix_ms=12345");
@@ -1572,8 +1566,21 @@ fn daemon_status_reports_connected_invalid_protocol_as_unhealthy() {
         fs::remove_file(&socket_path).unwrap();
     }
     let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("fake inventory daemon accept failed: {error}"),
+            }
+        };
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
@@ -1629,10 +1636,6 @@ fn home_override_roots_config_paths_in_requested_home() {
     assert_contains(&stdout, &format!("config_dir={home_arg}/config"));
     assert_contains(&stdout, &format!("data_dir={home_arg}/data"));
     assert_contains(&stdout, &format!("state_dir={home_arg}/state"));
-    assert_contains(
-        &stdout,
-        &format!("local_inference_config={home_arg}/config/inference/local.toml"),
-    );
     assert_contains(&stdout, &format!("sessions_root={home_arg}/data/sessions"));
 }
 
@@ -1641,14 +1644,6 @@ fn function_commands_manage_workspace_function_artifact() {
     let repo = TempRepo::new("function-workspace");
     let home = TempHome::new("function-workspace");
     let home_arg = home.path_string();
-    let local_profile = home
-        .path()
-        .join("config")
-        .join("inference")
-        .join("local.toml");
-    fs::create_dir_all(local_profile.parent().unwrap()).unwrap();
-    fs::write(&local_profile, "").unwrap();
-
     let init = run_agl_in(
         repo.path(),
         &[
@@ -1682,10 +1677,7 @@ fn function_commands_manage_workspace_function_artifact() {
     let status_stdout = stdout(&status);
     assert_contains(&status_stdout, "state=ok");
     assert_contains(&status_stdout, ".agl/functions/coding/SYSTEM.md");
-    assert_contains(
-        &status_stdout,
-        &format!("function.model.profile_path={}", local_profile.display()),
-    );
+    assert!(!status_stdout.contains("function.model.profile="));
 
     let list = run_agl_in(repo.path(), &["--home", &home_arg, "function", "list"]);
     assert_success_no_stderr(&list);
@@ -1740,16 +1732,12 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     let status_stdout = stdout(&status);
     assert_contains(&status_stdout, "state=");
     assert_contains(&status_stdout, "function.source=builtin");
+    assert_contains(&status_stdout, "inference.model_id=gemma4-12b");
     assert_contains(
         &status_stdout,
-        "function.model.config_path=builtin:function/gemma4-12b/inference.toml",
+        "inference.model_reference=model:gemma4-12b@1.2.0",
     );
-    assert_contains(&status_stdout, "function.model.config_embedded=true");
-    assert_contains(&status_stdout, "function.model.id=gemma4-12b");
-    assert_contains(
-        &status_stdout,
-        "function.model.multimodal_projector_id=gemma4-12b-mmproj",
-    );
+    assert_contains(&status_stdout, "inference.profile_id=gpu-rx7900xtx-65536");
     assert_contains(&status_stdout, "models.toml");
 
     let show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-12b"]);
@@ -1760,14 +1748,14 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         &show_stdout,
         "You are an agentLIBRE function running on local Gemma4 12B.",
     );
-    assert_contains(&show_stdout, "--- inference.toml ---");
-    assert_contains(&show_stdout, "tool_call_format = \"gemma_function_call\"");
+    assert_contains(&show_stdout, "function.model.profile=gpu-rx7900xtx-65536");
+    assert!(!show_stdout.contains("inference.toml"));
 
     let e2b_status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-e2b"]);
     assert_success_no_stderr(&e2b_status);
     let e2b_status_stdout = stdout(&e2b_status);
     assert_contains(&e2b_status_stdout, "function.source=builtin");
-    assert_contains(&e2b_status_stdout, "function.model.id=gemma4-e2b");
+    assert_contains(&e2b_status_stdout, "inference.model_id=gemma4-e2b");
     assert!(
         !e2b_status_stdout.contains("function.model.multimodal_projector_id="),
         "Gemma 4 E2B must not require a projector"
@@ -1780,7 +1768,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         &e2b_show_stdout,
         "You are an agentLIBRE function running on local Gemma 4 E2B.",
     );
-    assert_contains(&e2b_show_stdout, "max_context_tokens = 32768");
+    assert_contains(&e2b_show_stdout, "inference.context_tokens=32768");
     assert!(!e2b_show_stdout.contains("multimodal_projector_id"));
     assert!(!e2b_show_stdout.contains("[runtime.mtp]"));
 
@@ -1790,35 +1778,53 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         let stdout = stdout(&show);
         assert_contains(&stdout, "function.runtime.max_tool_calls=32");
         assert_contains(&stdout, "function.runtime.max_output_tokens=4096");
-        assert_contains(&stdout, &format!("max_context_tokens = {context_tokens}"));
-        assert_contains(&stdout, "device = \"vulkan0\"");
+        assert_contains(
+            &stdout,
+            &format!("inference.context_tokens={context_tokens}"),
+        );
+        assert_contains(&stdout, "inference.pci_device_id=1002:744c");
     }
     let ambiguous = run_agl(&["--home", &home_arg, "function", "show", "gemma4-31b"]);
     assert!(!ambiguous.status.success());
 }
 
 #[test]
-fn function_run_rejects_missing_model_binding_before_admission() {
+fn function_run_rejects_static_profile_mismatch_before_live_admission() {
+    let repo = TempRepo::new("missing-function-model-binding");
     let home = TempHome::new("missing-function-model-binding");
     let home_arg = home.path_string();
-    let config_dir = home.path().join("config");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(config_dir.join("models.toml"), "version = 1\nmodels = {}\n").unwrap();
-
-    let output = run_agl(&[
-        "--home",
-        &home_arg,
-        "run",
-        "--function",
-        "gemma4-12b",
-        "--prompt",
-        "This prompt must not reach model admission.",
-    ]);
+    let output = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "run",
+            "--function",
+            "gemma4-12b",
+            "--prompt",
+            "This prompt must not reach model admission.",
+        ],
+    );
 
     assert_failure(&output);
     assert_empty_stdout(&output);
-    assert_contains(&stderr(&output), "model `gemma4-12b` is not configured");
-    assert!(!home.path().join("data/runs").exists());
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "has static capability mismatches");
+    assert_contains(&stderr, "DeviceKind");
+    let attempt_id = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("attempt_id="))
+        .expect("accepted generation command reports its AttemptId");
+    let journal = fs::read_to_string(
+        home.path()
+            .join("state/inference/attempts")
+            .join(attempt_id)
+            .join("transitions.jsonl"),
+    )
+    .expect("static plan rejection has a durable attempt journal");
+    assert_contains(&journal, "static_profile_mismatch");
+    assert_contains(&journal, "\"stage\":\"plan\"");
+    assert_contains(&journal, "\"to\":\"failed\"");
 }
 
 #[test]
@@ -1858,21 +1864,12 @@ fn blank_run_prompt_fails_before_inference_path() {
 }
 
 #[test]
-fn missing_default_inference_config_points_to_next_steps() {
-    let home = TempHome::new("missing-config");
-    let home_arg = home.path_string();
-    let output = run_agl(&["--home", &home_arg, "inference", "run", "hello"]);
+fn raw_inference_namespace_is_removed() {
+    let output = run_agl(&["inference", "run", "hello"]);
 
     assert_failure(&output);
     let stderr = stderr(&output);
-    assert_contains(&stderr, "local inference config not found");
-    assert_contains(&stderr, "Create this file or pass --config PATH");
-    assert_contains(&stderr, "agl config paths");
-    assert_contains(&stderr, "Run `agl init` for guided model setup");
-    assert!(
-        !stderr.contains("No such file or directory"),
-        "missing config should not expose raw IO as the primary error:\n{stderr}"
-    );
+    assert_contains(&stderr, "unrecognized subcommand 'inference'");
 }
 
 #[test]
@@ -1948,9 +1945,7 @@ where
                     product_version: env!("CARGO_PKG_VERSION").to_string(),
                     daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
                     daemon_runtime: client_runtime,
-                    worker_build_id: format!("sha256:{}", "d".repeat(64)),
-                    native_bundle_id: None,
-                    composite_worker_build_id: None,
+                    engine_protocol_id: format!("sha256:{}", "d".repeat(64)),
                     tools: Vec::new(),
                 }),
             ),
@@ -2025,8 +2020,21 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
         fs::remove_file(&socket_path).unwrap();
     }
     let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("fake inventory daemon accept failed: {error}"),
+            }
+        };
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
@@ -2046,9 +2054,7 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
                     product_version: env!("CARGO_PKG_VERSION").to_string(),
                     daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
                     daemon_runtime: client_runtime,
-                    worker_build_id: format!("sha256:{}", "d".repeat(64)),
-                    native_bundle_id: None,
-                    composite_worker_build_id: None,
+                    engine_protocol_id: format!("sha256:{}", "d".repeat(64)),
                     tools: vec![DaemonTool::InferenceInventory],
                 }),
             ),
@@ -2064,7 +2070,34 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
             &DaemonEvent::new(
                 Some(inventory.request_id),
                 DaemonEventKind::InferenceInventory(InferenceInventoryEvent {
-                    devices: Vec::new(),
+                    devices: vec![
+                        agl_protocol::InferenceDeviceEvent {
+                            physical_device_id: "CPU".to_owned(),
+                            pci_device_id: None,
+                            pci_subsystem_id: None,
+                            driver_build_id: "host-cpu".to_owned(),
+                            backend_name: "CPU".to_owned(),
+                            description: "test CPU".to_owned(),
+                            kind: agl_protocol::ProtocolInferenceDeviceKind::Cpu,
+                            free_memory_bytes: 64_000_000_000,
+                            total_memory_bytes: 64_000_000_000,
+                            usable: true,
+                            supports_gpu_offload: false,
+                        },
+                        agl_protocol::InferenceDeviceEvent {
+                            physical_device_id: "Vulkan0".to_owned(),
+                            pci_device_id: Some("1002:744c".to_owned()),
+                            pci_subsystem_id: Some("1da2:471e".to_owned()),
+                            driver_build_id: "test-vulkan".to_owned(),
+                            backend_name: "Vulkan0".to_owned(),
+                            description: "test RX 7900 XTX".to_owned(),
+                            kind: agl_protocol::ProtocolInferenceDeviceKind::DiscreteGpu,
+                            free_memory_bytes: 24_000_000_000,
+                            total_memory_bytes: 24_000_000_000,
+                            usable: true,
+                            supports_gpu_offload: true,
+                        },
+                    ],
                 }),
             ),
         );
@@ -2236,8 +2269,18 @@ impl TempRepo {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(path.join(".git"))
+        fs::create_dir_all(&path)
             .unwrap_or_else(|err| panic!("failed to create temp repo {}: {err}", path.display()));
+        let initialized = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&path)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to initialize {}: {error}", path.display()));
+        assert!(
+            initialized.success(),
+            "git init failed in {}",
+            path.display()
+        );
         Self { path }
     }
 

@@ -58,13 +58,8 @@ default function in `.agl/workspace.toml`:
 default = "gemma4-e4b"
 ```
 
-Direct model/config execution is reserved for explicit low-level inference
-commands:
-
-```bash
-agl inference run --config /path/to/local.toml --prompt "Reply once."
-agl inference serve --config /path/to/local.toml
-```
+Model-backed execution always resolves a package-bound Function. The removed
+raw inference namespace and local config override have no compatibility path.
 
 Inspect and control daemon-owned background processes with `agl process`:
 

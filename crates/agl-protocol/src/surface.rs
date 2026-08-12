@@ -50,8 +50,6 @@ pub const MAX_INFERENCE_RESIDENT_MODELS: u32 = 64;
 pub const MAX_INFERENCE_RESIDENT_CONTEXTS: u32 = 64 * 64;
 pub const MAX_INFERENCE_STATUS_MODEL_DIGESTS: usize = 16;
 pub const MAX_INFERENCE_RESIDENCY_DEADLINE_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
-pub const MAX_SETUP_SMOKE_MODEL_BINDINGS: usize = 16;
-pub const MAX_SETUP_SMOKE_OUTPUT_TOKENS: u32 = 4_096;
 
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_LABEL_BYTES: usize = 512;
@@ -2158,7 +2156,6 @@ impl DaemonRequestKind {
     pub fn validate_surface(&self) -> Result<(), SurfaceValidationError> {
         match self {
             Self::Hello(request) => validate_hello_request(request),
-            Self::SetupSmokeSessionOpen(request) => validate_setup_smoke_session_open(request),
             Self::ModelUnload(request) => validate_model_unload_target(&request.target),
             Self::CommandCatalog(request) => {
                 bound_count(
@@ -2205,115 +2202,6 @@ impl DaemonRequestKind {
             _ => Ok(()),
         }
     }
-}
-
-fn validate_setup_smoke_session_open(
-    request: &crate::SetupSmokeSessionOpenRequest,
-) -> Result<(), SurfaceValidationError> {
-    bound_string(
-        &request.workspace_root,
-        MAX_PATH_BYTES,
-        "setup smoke workspace root",
-        false,
-    )?;
-    if !std::path::Path::new(&request.workspace_root).is_absolute()
-        || request.workspace_root.contains('\0')
-    {
-        return Err(SurfaceValidationError::new(
-            "setup smoke workspace root must be an absolute path without NUL bytes",
-        ));
-    }
-    bound_string(
-        &request.function_ref,
-        MAX_PATH_BYTES,
-        "setup smoke function reference",
-        false,
-    )?;
-    if request.function_ref.contains('\0') {
-        return Err(SurfaceValidationError::new(
-            "setup smoke function reference cannot contain NUL bytes",
-        ));
-    }
-    if request.max_output_tokens == 0 || request.max_output_tokens > MAX_SETUP_SMOKE_OUTPUT_TOKENS {
-        return Err(SurfaceValidationError::new(format!(
-            "setup smoke output limit must be between 1 and {MAX_SETUP_SMOKE_OUTPUT_TOKENS}"
-        )));
-    }
-    request.staged_bindings.validate().map_err(|error| {
-        SurfaceValidationError::new(format!("invalid staged bindings: {error}"))
-    })?;
-    bound_count(
-        request.staged_bindings.models.len(),
-        MAX_SETUP_SMOKE_MODEL_BINDINGS,
-        "setup smoke model bindings",
-    )?;
-    for binding in request.staged_bindings.models.values() {
-        let path = binding.path.to_str().ok_or_else(|| {
-            SurfaceValidationError::new("setup smoke model binding path must be UTF-8")
-        })?;
-        bound_string(
-            path,
-            MAX_PATH_BYTES,
-            "setup smoke model binding path",
-            false,
-        )?;
-        if !binding.path.is_absolute() || path.contains('\0') {
-            return Err(SurfaceValidationError::new(
-                "setup smoke model binding path must be absolute and contain no NUL bytes",
-            ));
-        }
-    }
-    bound_string(
-        &request.runtime_plan.profile_id,
-        MAX_IDENTIFIER_BYTES,
-        "setup smoke runtime profile ID",
-        false,
-    )?;
-    bound_optional_string(
-        request.runtime_plan.selected_device.as_deref(),
-        MAX_LABEL_BYTES,
-        "setup smoke selected device",
-    )?;
-    bound_string(
-        &request.runtime_plan.expected_speed,
-        MAX_LABEL_BYTES,
-        "setup smoke expected speed",
-        false,
-    )?;
-    if request.runtime_plan.smoke_timeout_seconds == 0
-        || request.runtime_plan.smoke_timeout_seconds > 3_600
-    {
-        return Err(SurfaceValidationError::new(
-            "setup smoke runtime timeout must be between 1 and 3600 seconds",
-        ));
-    }
-    request
-        .runtime_plan
-        .runtime
-        .validate()
-        .map_err(|error| SurfaceValidationError::new(format!("invalid runtime plan: {error}")))?;
-    bound_optional_string(
-        request.runtime_plan.runtime.device.as_deref(),
-        MAX_LABEL_BYTES,
-        "setup smoke runtime device",
-    )?;
-    if let Some(draft_model) = request.runtime_plan.runtime.mtp.draft_model.as_deref() {
-        let path = draft_model.to_str().ok_or_else(|| {
-            SurfaceValidationError::new("setup smoke MTP draft model path must be UTF-8")
-        })?;
-        bound_string(
-            path,
-            MAX_PATH_BYTES,
-            "setup smoke MTP draft model path",
-            false,
-        )?;
-        if !draft_model.is_absolute() || path.contains('\0') {
-            return Err(SurfaceValidationError::new(
-                "setup smoke MTP draft model path must be absolute and contain no NUL bytes",
-            ));
-        }
-    }
-    Ok(())
 }
 
 impl DaemonEventKind {
@@ -2408,26 +2296,7 @@ fn validate_hello_event(event: &crate::HelloEvent) -> Result<(), SurfaceValidati
         false,
     )?;
     validate_runtime_generation_identity(&event.daemon_runtime)?;
-    validate_sha256_identity(&event.worker_build_id, "worker build ID")?;
-    match (
-        event.native_bundle_id.as_deref(),
-        event.composite_worker_build_id.as_deref(),
-    ) {
-        (Some(native), Some(composite)) => {
-            validate_sha256_identity(native, "native bundle ID")?;
-            if composite != format!("{}+{native}", event.worker_build_id) {
-                return Err(SurfaceValidationError::new(
-                    "composite worker build ID does not match its components",
-                ));
-            }
-        }
-        (None, None) => {}
-        _ => {
-            return Err(SurfaceValidationError::new(
-                "native and composite worker identities must be present together",
-            ));
-        }
-    }
+    validate_sha256_identity(&event.engine_protocol_id, "engine protocol ID")?;
     bound_count(event.tools.len(), 64, "daemon tools")?;
     ensure_unique_copy(&event.tools, "daemon tools")
 }
@@ -2550,22 +2419,22 @@ fn validate_inference_status(
     status: &crate::InferenceStatusEvent,
 ) -> Result<(), SurfaceValidationError> {
     bound_string(
-        &status.worker_build_id,
+        &status.engine_protocol_id,
         MAX_DIGEST_BYTES,
-        "inference worker build ID",
+        "inference engine protocol ID",
         false,
     )?;
-    if status.worker_pid == Some(0) {
+    if status.engine_pid == Some(0) {
         return Err(SurfaceValidationError::new(
             "inference worker PID must be nonzero",
         ));
     }
-    if status.launch_generation == Some(0) {
+    if status.engine_generation == Some(0) {
         return Err(SurfaceValidationError::new(
             "inference worker launch generation must be nonzero",
         ));
     }
-    if status.worker_pid.is_some() != status.launch_generation.is_some() {
+    if status.engine_pid.is_some() != status.engine_generation.is_some() {
         return Err(SurfaceValidationError::new(
             "inference worker PID and launch generation must be present together",
         ));
@@ -3776,10 +3645,10 @@ mod tests {
     #[test]
     fn inference_status_is_bounded_and_requires_complete_worker_identity() {
         let status = crate::InferenceStatusEvent {
-            worker_build_id: "sha256:worker".to_owned(),
-            worker_state: crate::ProtocolInferenceWorkerState::Busy,
-            worker_pid: Some(42),
-            launch_generation: Some(7),
+            engine_protocol_id: "sha256:worker".to_owned(),
+            engine_state: crate::ProtocolInferenceEngineState::Busy,
+            engine_pid: Some(42),
+            engine_generation: Some(7),
             physical_device_id: Some("pci:0000:03:00.0".to_owned()),
             reserved_bytes: 16 * 1024 * 1024,
             cooldown_not_before_unix_ms: None,
@@ -3809,7 +3678,7 @@ mod tests {
         let incomplete_identity = DaemonEvent::new(
             Some(request_id()),
             crate::DaemonEventKind::InferenceStatus(crate::InferenceStatusEvent {
-                launch_generation: None,
+                engine_generation: None,
                 ..status
             }),
         );
@@ -3899,10 +3768,10 @@ mod tests {
         let detailed = crate::DaemonEvent::new(
             Some(request_id()),
             crate::DaemonEventKind::InferenceStatus(crate::InferenceStatusEvent {
-                worker_build_id: "sha256:worker".to_owned(),
-                worker_state: crate::ProtocolInferenceWorkerState::Ready,
-                worker_pid: Some(42),
-                launch_generation: Some(7),
+                engine_protocol_id: "sha256:worker".to_owned(),
+                engine_state: crate::ProtocolInferenceEngineState::Ready,
+                engine_pid: Some(42),
+                engine_generation: Some(7),
                 physical_device_id: Some("pci:0000:03:00.0".to_owned()),
                 reserved_bytes: 16,
                 cooldown_not_before_unix_ms: None,

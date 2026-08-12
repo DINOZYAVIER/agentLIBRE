@@ -2,10 +2,7 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use agl_config::{
-    InferencePresetRuntimeConfig, ModelId, load_inference_preset_from_str,
-    load_model_bindings_or_empty, model_bindings_path,
-};
+use agl_config::{ModelId, load_model_bindings_or_empty, model_bindings_path};
 use agl_daemon::default_socket_path;
 use agl_model::{
     ArtifactDownloadSpec, ArtifactFileDownloadSpec, HfSource, HfSourceKind, HubFileCandidate,
@@ -642,15 +639,43 @@ fn ensure_download_disk_space(plan: &ModelPullPlan) -> Result<()> {
     if plan.bytes_to_download == 0 {
         return Ok(());
     }
-    let host = agl_model::HostResources::inspect(agl_model::hugging_face_cache_dir(), Vec::new())?;
+    let cache_dir = agl_model::hugging_face_cache_dir();
+    let probe = cache_dir
+        .ancestors()
+        .find(|path| path.exists())
+        .context("model cache path has no existing ancestor")?;
+    let available_bytes = available_filesystem_bytes(probe)?;
     ensure!(
-        host.disk.available_bytes >= plan.bytes_to_download,
+        available_bytes >= plan.bytes_to_download,
         "model download needs {} but only {} is free on {}",
         human_bytes(plan.bytes_to_download),
-        human_bytes(host.disk.available_bytes),
-        host.disk.mount_point.display()
+        human_bytes(available_bytes),
+        probe.display()
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn available_filesystem_bytes(path: &std::path::Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes())
+        .context("filesystem probe path contains a NUL byte")?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` points to writable storage.
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect model-cache filesystem");
+    }
+    // SAFETY: successful statvfs initializes the output structure.
+    let stats = unsafe { stats.assume_init() };
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+fn available_filesystem_bytes(_path: &std::path::Path) -> Result<u64> {
+    Ok(u64::MAX)
 }
 
 fn print_pull_plan(plan: &ModelPullPlan, json: bool) -> Result<()> {
@@ -786,17 +811,23 @@ fn protected_model_ids(runtime: &AgentLibreRuntimeConfig) -> Result<BTreeSet<Mod
             &reference.to_string(),
             true,
         )
-        && let Some(toml) = function.inference_config_toml
+        && function.model_profile.is_some()
     {
-        let preset = load_inference_preset_from_str("active function inference.toml", &toml)?;
-        protected.insert(preset.backend.model_id);
-        if let Some(projector) = preset.backend.multimodal_projector_id {
-            protected.insert(projector);
-        }
-        if let InferencePresetRuntimeConfig::Fixed(fixed) = preset.runtime
-            && let Some(draft) = fixed.mtp.draft_model_id
+        let composition = agl_runtime::compose_packages(&runtime.paths, &workspace)?;
+        if let Ok(bundle) = composition.resolve_runtime_bundle(
+            &workspace,
+            &runtime.paths.config_dir,
+            &reference.to_string(),
+            true,
+            &[],
+        ) && let Some(model) = bundle.model
         {
-            protected.insert(draft);
+            protected.extend(
+                model
+                    .package
+                    .required_artifacts()
+                    .map(|artifact| artifact.model_id.clone()),
+            );
         }
     }
     let checkpoint_store = SetupCheckpointStore::new(runtime.paths.setup_state_root());
@@ -963,13 +994,20 @@ mod tests {
         }
     }
 
+    fn seed_record(store: &ModelInstallStore, record: &ModelInstallRecord) {
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(
+            store.record_path(&record.model_id),
+            serde_json::to_vec_pretty(record).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn pull_rejects_an_unbound_install_record_collision() {
         let root = root("record-collision");
         let store = ModelInstallStore::new(root.join("records"));
-        store
-            .write(&record(root.join("old.gguf"), "owner/old"))
-            .unwrap();
+        seed_record(&store, &record(root.join("old.gguf"), "owner/old"));
         let error = preflight_pull(
             &[selected(None, "owner/new")],
             &store,
@@ -988,13 +1026,18 @@ mod tests {
         let model_path = root.join("model.gguf");
         std::fs::write(&model_path, b"GGUFmodel!").unwrap();
         let store = ModelInstallStore::new(root.join("records"));
-        store
-            .write(&record(model_path.clone(), "owner/repo"))
-            .unwrap();
+        let install_record = record(model_path.clone(), "owner/repo");
         let bindings_path = root.join("models.toml");
         let mut patch = ModelBindingPatch::default();
         patch.insert(ModelId::new("test-model").unwrap(), model_path.clone());
-        patch.commit(&bindings_path, false).unwrap();
+        ModelInstallTransaction::new(store.clone(), &bindings_path)
+            .unwrap()
+            .commit(ModelInstallTransactionInput::new(
+                vec![install_record],
+                patch,
+                false,
+            ))
+            .unwrap();
 
         let report = preflight_pull(
             &[selected(Some(model_path), "owner/repo")],
@@ -1020,7 +1063,7 @@ mod tests {
             import_local_model(&first_path, Some(id.clone()), ModelArtifactRole::Main).unwrap();
         let second = import_local_model(&second_path, Some(id), ModelArtifactRole::Main).unwrap();
         let store = ModelInstallStore::new(root.join("records"));
-        store.write(&first.record).unwrap();
+        seed_record(&store, &first.record);
 
         let error = preflight_import_records(&[second], &store, false)
             .unwrap_err()

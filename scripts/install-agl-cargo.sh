@@ -146,6 +146,9 @@ fi
 if [[ "$dry_run" -eq 0 ]]; then
   missing_llama_lib=0
   llama_lib_dir="${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}/bin"
+  if [[ ! -x "$llama_lib_dir/llama-server" ]]; then
+    missing_llama_lib=1
+  fi
   for library in \
     libllama-common.so \
     libllama.so \
@@ -188,49 +191,8 @@ cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 if [[ "$cargo_target_dir" != /* ]]; then
   cargo_target_dir="$repo_root/$cargo_target_dir"
 fi
-native_bundle_build_base="$cargo_target_dir/$cargo_profile/agl-inference-native"
-
-resolve_native_bundle_relative() {
-  local worker="$1"
-  local dynamic
-  local runpath
-  local component
-  local relative
-  local -a matches=()
-
-  [[ -f "$worker" && ! -L "$worker" ]] ||
-    fail "cannot resolve native bundle from a non-regular inference worker: $worker"
-  dynamic="$(LC_ALL=C readelf -d -- "$worker")" ||
-    fail "failed to inspect inference worker RUNPATH: $worker"
-  while IFS= read -r runpath; do
-    IFS=: read -r -a components <<<"$runpath"
-    for component in "${components[@]}"; do
-      if [[ "$component" == '$ORIGIN/'* ]]; then
-        relative="${component#\$ORIGIN/}"
-        if [[ "$relative" == agl-inference-native/* ]]; then
-          [[ "$relative" =~ ^agl-inference-native/sha256-[0-9a-f]{64}$ ]] ||
-            fail "inference worker names an invalid content-addressed native bundle: $component"
-          matches+=("$relative")
-        fi
-      fi
-    done
-  done < <(sed -n -E 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
-
-  if (( ${#matches[@]} != 1 )); then
-    fail "inference worker must select exactly one content-addressed native bundle: $worker"
-  fi
-  printf '%s\n' "${matches[0]}"
-}
-
 set_install_args() {
   local stage_root="$1"
-  worker_install_args=(
-    install
-    --path "$repo_root/crates/agl-inference-worker"
-    --bin agl-inference-worker
-    "${install_options[@]}"
-    --root "$stage_root"
-  )
   agl_install_args=(
     install
     --path "$repo_root/crates/agl-cli"
@@ -243,13 +205,10 @@ set_install_args() {
 if [[ "$dry_run" -eq 1 ]]; then
   dry_stage_root="$generations_dir/.staging.DRY-RUN/.cargo-root"
   set_install_args "$dry_stage_root"
-  run cargo "${worker_install_args[@]}"
   run cargo "${agl_install_args[@]}"
-  printf '+ resolve exact content-addressed native bundle from %q\n' \
-    "$dry_stage_root/bin/agl-inference-worker"
-  printf '+ copy selected %q/sha256-DIGEST to %q\n' \
-    "$native_bundle_build_base" "$dry_stage_root/bin/agl-inference-native"
-  printf '+ seal runtime-manifest.json from final copied executable/native bytes and explicit Git source state\n'
+  printf '+ copy private llama-server and exact lib*.so* closure from %q into runtime generation\n' \
+    "${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}/bin"
+  printf '+ seal runtime-manifest.json from final copied executable/engine-library bytes and explicit Git source state\n'
   printf '+ validate sealed runtime identity before and after atomic generation publication\n'
   printf '+ pin exact Nix runtime references below final generation .nix-gc-roots\n'
   printf '+ publish complete generation through %q\n' "$current_link"
@@ -346,7 +305,6 @@ cleanup_transaction() {
         current_generation="$(readlink -f -- "$current_link" 2>/dev/null || true)"
         if [[ "$current_generation" != "$unpublished_generation" ]]; then
           chmod u+rwx -- "$unpublished_generation" 2>/dev/null || true
-          chmod -R u+rwX -- "$unpublished_generation/agl-inference-native" 2>/dev/null || true
           chmod u+rwx -- "$unpublished_generation/.nix-gc-roots" 2>/dev/null || true
           rm -rf -- "$unpublished_generation"
         fi
@@ -386,11 +344,11 @@ validate_generation() {
     fail "runtime generation is not an exact immutable directory: $generation"
   [[ -f "$generation/agl" && -x "$generation/agl" && ! -L "$generation/agl" ]] ||
     fail "runtime generation has no regular executable agl: $generation"
-  [[ -f "$generation/agl-inference-worker" && -x "$generation/agl-inference-worker" && ! -L "$generation/agl-inference-worker" ]] ||
-    fail "runtime generation has no regular executable inference worker: $generation"
+  [[ -f "$generation/llama-server" && -x "$generation/llama-server" && ! -L "$generation/llama-server" ]] ||
+    fail "runtime generation has no regular private llama-server: $generation"
   for executable in \
     "$generation/agl" \
-    "$generation/agl-inference-worker"
+    "$generation/llama-server"
   do
     [[ "$(stat -c '%a' -- "$executable")" == 555 &&
       "$(stat -c '%u' -- "$executable")" == "$(id -u)" &&
@@ -406,7 +364,7 @@ validate_generation() {
   for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
     name="${entry##*/}"
     case "$name" in
-      agl | agl-inference-worker | agl-inference-native | runtime-manifest.json) ;;
+      agl | llama-server | lib*.so | lib*.so.* | runtime-manifest.json) ;;
       .nix-gc-roots) has_gc_roots=1 ;;
       *)
         shopt -u nullglob
@@ -416,11 +374,20 @@ validate_generation() {
     entry_count=$((entry_count + 1))
   done
   shopt -u nullglob
-  (( entry_count == 4 || (entry_count == 5 && has_gc_roots == 1) )) ||
+  (( entry_count >= 4 )) ||
     fail "runtime generation does not have the exact manifest-bearing layout: $generation"
-  validate_native_bundle \
-    "$generation/agl-inference-native" \
-    "$generation/agl-inference-worker"
+  shopt -s nullglob
+  local -a engine_libraries=("$generation"/lib*.so*)
+  shopt -u nullglob
+  (( ${#engine_libraries[@]} > 0 )) ||
+    fail "runtime generation has no private llama-server library closure: $generation"
+  for entry in "${engine_libraries[@]}"; do
+    [[ -f "$entry" && ! -L "$entry" &&
+      "$(stat -c '%a' -- "$entry")" == 555 &&
+      "$(stat -c '%u' -- "$entry")" == "$(id -u)" &&
+      "$(stat -c '%h' -- "$entry")" == 1 ]] ||
+      fail "runtime engine library is not an exact immutable single-link file: $entry"
+  done
   "$generation/agl" runtime identity >/dev/null ||
     fail "runtime generation manifest or component identity failed verification: $generation"
 }
@@ -449,82 +416,6 @@ reject_obsolete_combined_generation() {
   fail "move or remove the listed obsolete artifacts, then rerun the installer"
 }
 
-validate_native_bundle() {
-  local base="$1"
-  local worker="$2"
-  local relative
-  local leaf_name
-  local directory
-  local base_entry
-  local base_count=0
-  [[ -d "$base" && ! -L "$base" ]] ||
-    fail "runtime generation has no exact native inference bundle base: $base"
-  [[ "$(stat -c '%a' -- "$base")" == 555 ]] ||
-    fail "native inference bundle base is not immutable: $base"
-  [[ "$(stat -c '%u' -- "$base")" == "$(id -u)" ]] ||
-    fail "native inference bundle base has the wrong owner: $base"
-  relative="$(resolve_native_bundle_relative "$worker")"
-  leaf_name="${relative#agl-inference-native/}"
-  shopt -s nullglob
-  for base_entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
-    ((base_count += 1))
-    [[ "${base_entry##*/}" == "$leaf_name" ]] ||
-      fail "published native bundle contains a leaf not selected by the exact worker: $base_entry"
-  done
-  shopt -u nullglob
-  (( base_count == 1 )) ||
-    fail "published native bundle must contain exactly one selected leaf: $base"
-  directory="$base/$leaf_name"
-  validate_native_bundle_leaf "$directory"
-}
-
-validate_native_bundle_leaf() {
-  local directory="$1"
-  local entry
-  local name
-  local mode
-  local count=0
-  local cpu_count=0
-  local total_bytes=0
-  local size
-  local required
-  [[ -d "$directory" && ! -L "$directory" ]] ||
-    fail "runtime generation has no exact native inference bundle leaf: $directory"
-  mode="$(stat -c '%a' -- "$directory")"
-  [[ "$mode" == 555 ]] || fail "native inference bundle directory is not immutable: $directory"
-  [[ "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] ||
-    fail "native inference bundle directory has the wrong owner: $directory"
-  shopt -s nullglob
-  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
-    name="${entry##*/}"
-    [[ -f "$entry" && ! -L "$entry" && "$(stat -c '%h' -- "$entry")" == 1 ]] ||
-      fail "native inference bundle entry is not an exact single-link regular file: $entry"
-    case "$name" in
-      libllama-common.so.0 | libmtmd.so.0 | libllama.so.0 | libggml.so.0 | libggml-base.so.0 | libggml-vulkan.so) ;;
-      libggml-cpu-*.so) cpu_count=$((cpu_count + 1)) ;;
-      *) fail "native inference bundle contains an unexpected file: $entry" ;;
-    esac
-    mode="$(stat -c '%a' -- "$entry")"
-    [[ "$mode" == 555 ]] || fail "native inference bundle file is not immutable: $entry"
-    [[ "$(stat -c '%u' -- "$entry")" == "$(id -u)" ]] ||
-      fail "native inference bundle file has the wrong owner: $entry"
-    size="$(stat -c '%s' -- "$entry")"
-    [[ "$size" =~ ^[0-9]+$ ]] || fail "native inference bundle file has an invalid size: $entry"
-    (( size <= 1024 * 1024 * 1024 )) || fail "native inference bundle file exceeds its size bound: $entry"
-    total_bytes=$((total_bytes + size))
-    (( total_bytes <= 4 * 1024 * 1024 * 1024 )) ||
-      fail "native inference bundle exceeds its aggregate size bound: $directory"
-    count=$((count + 1))
-    (( count <= 64 )) || fail "native inference bundle exceeds its file bound: $directory"
-  done
-  shopt -u nullglob
-  (( cpu_count > 0 )) || fail "native inference bundle has no CPU backend: $directory"
-  for required in libllama-common.so.0 libmtmd.so.0 libllama.so.0 libggml.so.0 libggml-base.so.0; do
-    [[ -f "$directory/$required" && ! -L "$directory/$required" ]] ||
-      fail "native inference bundle is missing $required: $directory"
-  done
-}
-
 collect_nix_runtime_references() {
   local generation="$1"
   local output_name="$2"
@@ -534,10 +425,10 @@ collect_nix_runtime_references() {
   local reference
   local -a objects=(
     "$generation/agl"
-    "$generation/agl-inference-worker"
+    "$generation/llama-server"
   )
   shopt -s nullglob
-  objects+=("$generation/agl-inference-native"/*/*)
+  objects+=("$generation"/lib*.so*)
   shopt -u nullglob
   output=()
   for object in "${objects[@]}"; do
@@ -717,42 +608,32 @@ stage_root="$generation_staging/.cargo-root"
 mkdir -p "$stage_root"
 set_install_args "$stage_root"
 
-run cargo "${worker_install_args[@]}"
 run cargo "${agl_install_args[@]}"
-
-native_bundle_relative="$(
-  resolve_native_bundle_relative "$stage_root/bin/agl-inference-worker"
-)"
-native_bundle_leaf_name="${native_bundle_relative#agl-inference-native/}"
-native_bundle_build_leaf="$cargo_target_dir/$cargo_profile/$native_bundle_relative"
-validate_native_bundle_leaf "$native_bundle_build_leaf"
-mkdir -p -- "$stage_root/bin/agl-inference-native"
-cp -a -- \
-  "$native_bundle_build_leaf" \
-  "$stage_root/bin/agl-inference-native/$native_bundle_leaf_name"
-# Keep the private transaction directory owner-mutable until its final atomic
-# rename. The worker accepts owner-only staging authority, while the published
-# generation is sealed to 0555 below.
-chmod 0755 "$stage_root/bin/agl-inference-native"
 
 [[ -x "$stage_root/bin/agl" && ! -L "$stage_root/bin/agl" ]] ||
   fail "staged cargo install did not produce a regular executable agl"
-[[ -x "$stage_root/bin/agl-inference-worker" && ! -L "$stage_root/bin/agl-inference-worker" ]] ||
-  fail "staged cargo install did not produce a regular executable inference worker"
+llama_build_bin="${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}/bin"
+[[ -x "$llama_build_bin/llama-server" && ! -L "$llama_build_bin/llama-server" ]] ||
+  fail "llama.cpp build did not produce a regular llama-server"
 run "$stage_root/bin/agl" --version
-run env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$stage_root/bin/agl"
 
 # Cargo profile outputs and cargo-install staging files may be hard-linked on
 # the same filesystem. Publish fresh inodes so no writable build-tree alias can
 # mutate an allegedly immutable runtime executable after installation.
 cp -- "$stage_root/bin/agl" "$generation_staging/agl"
-cp -- "$stage_root/bin/agl-inference-worker" "$generation_staging/agl-inference-worker"
-mv -- "$stage_root/bin/agl-inference-native" "$generation_staging/agl-inference-native"
+cp -- "$llama_build_bin/llama-server" "$generation_staging/llama-server"
+shopt -s nullglob
+llama_libraries=("$llama_build_bin"/lib*.so*)
+shopt -u nullglob
+(( ${#llama_libraries[@]} > 0 )) || fail "llama.cpp build has no shared-library closure"
+for library in "${llama_libraries[@]}"; do
+  cp -L -- "$library" "$generation_staging/${library##*/}"
+done
 rm -rf -- "$stage_root"
-chmod 0555 "$generation_staging/agl-inference-native"
 chmod 0555 \
   "$generation_staging/agl" \
-  "$generation_staging/agl-inference-worker"
+  "$generation_staging/llama-server" \
+  "$generation_staging"/lib*.so*
 
 runtime_source_state="unavailable"
 runtime_source_revision=""
@@ -816,18 +697,18 @@ else
 fi
 
 resolved_agl="$(readlink -f -- "$installed_agl")"
-resolved_worker="$(readlink -f -- "$new_generation/agl-inference-worker")"
+resolved_engine="$(readlink -f -- "$new_generation/llama-server")"
 [[ "$resolved_agl" == "$new_generation/agl" ]] ||
   fail "installed agl did not resolve through the published generation"
-[[ "$resolved_worker" == "$new_generation/agl-inference-worker" ]] ||
-  fail "installed inference worker did not remain private to the published generation"
+[[ "$resolved_engine" == "$new_generation/llama-server" ]] ||
+  fail "installed llama-server did not remain private to the published generation"
 [[ ! -e "$forbidden_public_worker" && ! -L "$forbidden_public_worker" ]] ||
   fail "refusing a public inference worker command under $install_bin"
 [[ ! -e "$forbidden_public_launcher" && ! -L "$forbidden_public_launcher" ]] ||
   fail "refusing a terminal-owned launcher command under $install_bin"
 
 echo "installed agl: $installed_agl -> $resolved_agl"
-echo "installed private inference worker: $resolved_worker"
+echo "installed private llama-server: $resolved_engine"
 run "$installed_agl" --version
 run "$installed_agl" runtime identity
 

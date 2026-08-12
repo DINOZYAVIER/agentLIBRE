@@ -1281,6 +1281,7 @@ mod tests {
         assert_eq!(supervisor.health().crash_streak(), 0);
     }
 
+    // MIW-SUP-001.
     #[test]
     fn worker_failure_cannot_consume_or_fail_pending_queue_entries() {
         let mut pending = VecDeque::from([attempt(2), attempt(3), attempt(4)]);

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::InferenceClientHandle;
 use agl_cron::{CronJob, CronRepository, CronRunStatus};
-use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
+use agl_inference::{EngineRuntimeStatusHandle, InferenceHost, InferenceHostConfig};
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     PresentationSubscriptionFinishReason, ProtocolError, ProtocolErrorCode,
@@ -75,22 +75,20 @@ impl DaemonServer {
         };
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
-        let inference_runtime =
-            WorkerModelRuntime::discover(self.runtime.paths.inference_worker_temp_root())
-                .context("failed to prepare isolated daemon inference worker")?;
-        let inference_status = inference_runtime.status_handle();
-        let residency = &self.runtime.inference.residency;
-        let model_manager = ModelManager::spawn(
-            ModelManagerOptions::default()
-                .with_residency_durations(
-                    Duration::from_secs(residency.context_idle_seconds),
-                    Duration::from_secs(residency.model_idle_seconds),
-                )
-                .with_model_lease_root(self.runtime.paths.model_lease_root()),
-            inference_runtime,
+        let inference_host = InferenceHost::start_with_journal_root(
+            InferenceHostConfig::development_default(
+                self.runtime.paths.inference_state_root().join("authority"),
+                self.runtime.paths.default_artifact_root(),
+                std::time::Duration::from_secs(
+                    self.runtime.inference.residency.context_idle_seconds,
+                ),
+                std::time::Duration::from_secs(self.runtime.inference.residency.model_idle_seconds),
+            )?,
+            self.runtime.paths.inference_state_root().join("attempts"),
         )
-        .context("failed to start daemon model manager")?;
-        let inference_client = InferenceClientHandle::from(model_manager.handle());
+        .context("failed to start daemon inference host")?;
+        let inference_status = EngineRuntimeStatusHandle::default();
+        let inference_client = InferenceClientHandle::from(inference_host);
         tracing::info!(
             target: "agentlibre::daemon",
             listener = %self.options.listener_source,
