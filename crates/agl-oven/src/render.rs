@@ -18,6 +18,35 @@ pub struct RenderedModelRequest {
     pub tools: Vec<RenderedTool>,
 }
 
+/// Renders the engine-neutral request consumed by the AGL llama-server
+/// adapter. Model-specific chat templates and Tool syntax are applied exactly
+/// once inside the pinned native server.
+pub fn render_engine_request(request: &ModelRequest) -> Result<RenderedModelRequest> {
+    let messages = request
+        .messages
+        .iter()
+        .map(|message| render_message(message, ToolCallFormat::StructuredToolCalls))
+        .collect::<Result<Vec<_>>>()?;
+    let tools = request
+        .visible_tools
+        .iter()
+        .map(|tool| RenderedTool {
+            name: tool.id.as_str().to_string(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+        })
+        .collect();
+    Ok(RenderedModelRequest {
+        run_id: request.run_id.clone(),
+        turn_id: request.turn_id.clone(),
+        request_index: request.request_index,
+        dialect: ModelDialect::Generic,
+        tool_call_format: ToolCallFormat::StructuredToolCalls,
+        messages,
+        tools,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub role: RenderedMessageRole,

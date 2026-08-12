@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{CatalogRuntimeProfile, ModelArtifactRole, ModelPackage, ProfileDevice};
+use crate::{
+    CatalogCapability, CatalogRuntimeProfile, ModelArtifactRole, ModelPackage, ProfileDevice,
+};
 
 pub const MODEL_EXECUTION_PLAN_IDENTITY_VERSION: u32 = 1;
 
@@ -17,18 +19,13 @@ pub struct PackagePlanIdentity {
     pub package_tree_digest: PackageTreeDigest,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuredGenerationMode {
     Disabled,
+    #[default]
     LazyTool,
     RequiredTool,
-}
-
-impl Default for StructuredGenerationMode {
-    fn default() -> Self {
-        Self::LazyTool
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -107,7 +104,8 @@ pub struct ResolvedFunctionPlanInput {
     pub visible_tools_digest: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedModelPlanInput {
     pub package: PackagePlanIdentity,
     pub payload_schema: String,
@@ -158,7 +156,8 @@ pub enum ProfileMismatchPredicate {
     CpuCoreCount,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Error)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelPlanRejection {
     #[error("unsupported Model payload schema `{schema}`; expected agentlibre.model/v3")]
     UnsupportedModelSchema { schema: String },
@@ -173,8 +172,24 @@ pub enum ModelPlanRejection {
     InvalidArtifact { role: String, reason: String },
     #[error("invalid Function generation policy: {reason}")]
     InvalidGenerationPolicy { reason: String },
+    #[error("invalid Model runtime shape: {reason}")]
+    InvalidRuntimeShape { reason: String },
     #[error("failed to encode canonical execution-plan identity: {reason}")]
     IdentityEncoding { reason: String },
+}
+
+impl ModelPlanRejection {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedModelSchema { .. } => "unsupported_model_schema",
+            Self::UnknownProfile { .. } => "unknown_profile",
+            Self::StaticMismatch { .. } => "static_profile_mismatch",
+            Self::InvalidArtifact { .. } => "invalid_model_artifact",
+            Self::InvalidGenerationPolicy { .. } => "invalid_generation_policy",
+            Self::InvalidRuntimeShape { .. } => "invalid_runtime_shape",
+            Self::IdentityEncoding { .. } => "plan_identity_encoding_failed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -235,6 +250,39 @@ pub struct ModelRuntimeShape {
     mmap: bool,
     unified_kv: bool,
     slot_count: u32,
+    mtp: Option<ModelMtpShape>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelMtpShape {
+    max_draft_tokens: u32,
+    min_draft_tokens: u32,
+    p_min_millionths: u32,
+    gpu_layers: u32,
+    key_cache_type: String,
+    value_cache_type: String,
+}
+
+impl ModelMtpShape {
+    pub fn max_draft_tokens(&self) -> u32 {
+        self.max_draft_tokens
+    }
+    pub fn min_draft_tokens(&self) -> u32 {
+        self.min_draft_tokens
+    }
+    pub fn p_min_millionths(&self) -> u32 {
+        self.p_min_millionths
+    }
+    pub fn gpu_layers(&self) -> u32 {
+        self.gpu_layers
+    }
+    pub fn key_cache_type(&self) -> &str {
+        &self.key_cache_type
+    }
+    pub fn value_cache_type(&self) -> &str {
+        &self.value_cache_type
+    }
 }
 
 impl ModelRuntimeShape {
@@ -270,6 +318,9 @@ impl ModelRuntimeShape {
     }
     pub fn slot_count(&self) -> u32 {
         self.slot_count
+    }
+    pub fn mtp(&self) -> Option<&ModelMtpShape> {
+        self.mtp.as_ref()
     }
 }
 
@@ -334,6 +385,7 @@ pub struct ModelExecutionPlan {
     function_package: PackagePlanIdentity,
     model_package: PackagePlanIdentity,
     profile_id: String,
+    capabilities: Vec<CatalogCapability>,
     selected_device: Option<HostCapabilityDevice>,
     artifacts: Vec<ModelArtifactPlan>,
     runtime: ModelRuntimeShape,
@@ -357,6 +409,12 @@ impl ModelExecutionPlan {
     }
     pub fn profile_id(&self) -> &str {
         &self.profile_id
+    }
+    pub fn capabilities(&self) -> &[CatalogCapability] {
+        &self.capabilities
+    }
+    pub fn supports(&self, capability: CatalogCapability) -> bool {
+        self.capabilities.contains(&capability)
     }
     pub fn selected_device(&self) -> Option<&HostCapabilityDevice> {
         self.selected_device.as_ref()
@@ -398,6 +456,7 @@ struct PlanDigestMaterial<'a> {
     function_package: &'a PackagePlanIdentity,
     model_package: &'a PackagePlanIdentity,
     profile_id: &'a str,
+    capabilities: &'a [CatalogCapability],
     selected_device: &'a Option<HostCapabilityDevice>,
     artifacts: &'a [ModelArtifactPlan],
     runtime: &'a ModelRuntimeShape,
@@ -435,6 +494,7 @@ pub fn resolve_execution_plan(
         })?;
     let selected_device = match_static_profile(profile, capabilities)?;
     let artifacts = planned_artifacts(&model.model)?;
+    validate_runtime_feature_matrix(&model.model, profile)?;
     let runtime = runtime_shape(profile);
     let resources = resource_envelope(profile);
     let model_key = ModelLoadKey(digest_json(&ModelKeyMaterial {
@@ -449,6 +509,7 @@ pub fn resolve_execution_plan(
         function_package: &function.package,
         model_package: &model.package,
         profile_id: &function.selected_profile_id,
+        capabilities: &model.model.capabilities,
         selected_device: &selected_device,
         artifacts: &artifacts,
         runtime: &runtime,
@@ -462,6 +523,7 @@ pub fn resolve_execution_plan(
         function_package: function.package.clone(),
         model_package: model.package.clone(),
         profile_id: function.selected_profile_id.clone(),
+        capabilities: model.model.capabilities.clone(),
         selected_device,
         artifacts,
         runtime,
@@ -472,6 +534,36 @@ pub fn resolve_execution_plan(
         digest,
         model_key,
     })
+}
+
+fn validate_runtime_feature_matrix(
+    model: &ModelPackage,
+    profile: &CatalogRuntimeProfile,
+) -> Result<(), ModelPlanRejection> {
+    let has_draft = model
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.role == ModelArtifactRole::Draft && artifact.required);
+    if has_draft != profile.mtp.is_some() {
+        return Err(ModelPlanRejection::InvalidRuntimeShape {
+            reason: "Draft artifact and MTP profile must be present together".to_owned(),
+        });
+    }
+    if profile.mtp.is_some() && model.capabilities.contains(&CatalogCapability::Vision) {
+        return Err(ModelPlanRejection::InvalidRuntimeShape {
+            reason: "vision and speculative MTP cannot share one profile".to_owned(),
+        });
+    }
+    if let Some(mtp) = &profile.mtp
+        && (!(1..=64).contains(&mtp.max_draft_tokens)
+            || mtp.min_draft_tokens > mtp.max_draft_tokens
+            || mtp.p_min_millionths > 1_000_000)
+    {
+        return Err(ModelPlanRejection::InvalidRuntimeShape {
+            reason: "MTP token or probability bounds are invalid".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn match_static_profile(
@@ -609,6 +701,14 @@ fn runtime_shape(profile: &CatalogRuntimeProfile) -> ModelRuntimeShape {
         mmap: profile.mmap,
         unified_kv: profile.unified_kv,
         slot_count: profile.slot_count,
+        mtp: profile.mtp.as_ref().map(|mtp| ModelMtpShape {
+            max_draft_tokens: mtp.max_draft_tokens,
+            min_draft_tokens: mtp.min_draft_tokens,
+            p_min_millionths: mtp.p_min_millionths,
+            gpu_layers: mtp.gpu_layers,
+            key_cache_type: kv_cache_type_name(mtp.cache_type_k).to_owned(),
+            value_cache_type: kv_cache_type_name(mtp.cache_type_v).to_owned(),
+        }),
     }
 }
 

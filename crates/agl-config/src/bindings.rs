@@ -3,13 +3,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Deserializer, Serialize};
-
-use crate::{
-    InferenceBackendConfig, InferencePreset, InferencePresetRuntimeConfig, ModelConfig,
-    PromptConfig, ResolvedInferenceConfig,
-};
 
 pub const MODEL_BINDINGS_FILE_NAME: &str = "models.toml";
 
@@ -95,33 +90,6 @@ impl ModelBindings {
         }
         Ok(())
     }
-
-    fn resolve(&self, id: &ModelId, source: &Path) -> Result<PathBuf> {
-        let binding = self
-            .models
-            .get(id)
-            .with_context(|| format!("model `{id}` is not configured in {}", source.display()))?;
-        validate_model_file(id, &binding.path)
-            .with_context(|| format!("invalid model `{id}` binding in {}", source.display()))?;
-        Ok(binding.path.clone())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundInferenceBackendConfig {
-    pub kind: crate::BackendKind,
-    pub model_id: ModelId,
-    pub model: PathBuf,
-    pub multimodal_projector_id: Option<ModelId>,
-    pub multimodal_projector: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundInferencePreset {
-    pub backend: BoundInferenceBackendConfig,
-    pub runtime: InferencePresetRuntimeConfig,
-    pub model: ModelConfig,
-    pub prompt: PromptConfig,
 }
 
 pub fn model_bindings_path(config_dir: impl AsRef<Path>) -> PathBuf {
@@ -154,79 +122,6 @@ pub fn write_model_bindings(path: impl AsRef<Path>, bindings: &ModelBindings) ->
     let text = toml::to_string_pretty(bindings).context("failed to serialize model bindings")?;
     atomic_write(path, text.as_bytes())
         .with_context(|| format!("failed to write model bindings {}", path.display()))
-}
-
-pub fn bind_inference_preset(
-    preset: InferencePreset,
-    bindings_path: impl AsRef<Path>,
-) -> Result<BoundInferencePreset> {
-    let bindings_path = bindings_path.as_ref();
-    let bindings = load_model_bindings(bindings_path)?;
-    bind_inference_preset_with_bindings(preset, &bindings, bindings_path)
-}
-
-pub fn bind_inference_preset_with_bindings(
-    preset: InferencePreset,
-    bindings: &ModelBindings,
-    bindings_path: &Path,
-) -> Result<BoundInferencePreset> {
-    preset.validate()?;
-    let model = bindings.resolve(&preset.backend.model_id, bindings_path)?;
-    let multimodal_projector = preset
-        .backend
-        .multimodal_projector_id
-        .as_ref()
-        .map(|id| bindings.resolve(id, bindings_path))
-        .transpose()?;
-    Ok(BoundInferencePreset {
-        backend: BoundInferenceBackendConfig {
-            kind: preset.backend.kind,
-            model_id: preset.backend.model_id,
-            model,
-            multimodal_projector_id: preset.backend.multimodal_projector_id,
-            multimodal_projector,
-        },
-        runtime: preset.runtime,
-        model: preset.model,
-        prompt: preset.prompt,
-    })
-}
-
-pub fn resolve_inference_preset(
-    preset: InferencePreset,
-    bindings_path: impl AsRef<Path>,
-) -> Result<ResolvedInferenceConfig> {
-    let bindings_path = bindings_path.as_ref();
-    let bindings = load_model_bindings(bindings_path)?;
-    resolve_inference_preset_with_bindings(preset, &bindings, bindings_path)
-}
-
-pub fn resolve_inference_preset_with_bindings(
-    preset: InferencePreset,
-    bindings: &ModelBindings,
-    bindings_path: &Path,
-) -> Result<ResolvedInferenceConfig> {
-    let draft_model_id = preset
-        .runtime
-        .fixed()
-        .and_then(|runtime| runtime.mtp.draft_model_id.clone());
-    let bound = bind_inference_preset_with_bindings(preset, bindings, bindings_path)?;
-    let draft_model = draft_model_id
-        .as_ref()
-        .map(|id| bindings.resolve(id, bindings_path))
-        .transpose()?;
-    let config = ResolvedInferenceConfig {
-        backend: InferenceBackendConfig {
-            kind: bound.backend.kind,
-            model: bound.backend.model,
-            multimodal_projector: bound.backend.multimodal_projector,
-        },
-        runtime: bound.runtime.into_fixed_resolved(draft_model)?,
-        model: bound.model,
-        prompt: bound.prompt,
-    };
-    config.validate()?;
-    Ok(config)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -262,19 +157,6 @@ fn validate_model_path_value(id: &ModelId, path: &Path) -> Result<()> {
     ensure!(
         !path.as_os_str().is_empty() && !path.as_os_str().to_string_lossy().trim().is_empty(),
         "model `{id}` path cannot be blank"
-    );
-    Ok(())
-}
-
-fn validate_model_file(id: &ModelId, path: &Path) -> Result<()> {
-    validate_model_path_value(id, path)?;
-    if !path.exists() {
-        bail!("model `{id}` file does not exist: {}", path.display());
-    }
-    ensure!(
-        path.is_file(),
-        "model `{id}` path is not a file: {}",
-        path.display()
     );
     Ok(())
 }

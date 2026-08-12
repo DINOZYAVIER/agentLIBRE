@@ -56,10 +56,6 @@ impl AgentLibrePaths {
         }
     }
 
-    pub fn default_local_inference_config(&self) -> PathBuf {
-        self.config_dir.join("inference").join("local.toml")
-    }
-
     pub fn runtime_config_path(&self) -> PathBuf {
         self.config_dir.join("agentlibre.toml")
     }
@@ -184,10 +180,6 @@ mod tests {
         let session_id = SessionId::parse("ses_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31").unwrap();
         let run_id = RunId::parse("run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32").unwrap();
 
-        assert_eq!(
-            paths.default_local_inference_config(),
-            PathBuf::from("/tmp/agl-home/config/inference/local.toml")
-        );
         assert_eq!(
             paths.runtime_config_path(),
             PathBuf::from("/tmp/agl-home/config/agentlibre.toml")

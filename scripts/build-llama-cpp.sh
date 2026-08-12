@@ -145,7 +145,9 @@ cmake_args=(
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_TOOLS=ON \
-  -DLLAMA_BUILD_SERVER=OFF \
+  -DLLAMA_BUILD_SERVER=ON \
+  -DLLAMA_BUILD_UI=OFF \
+  -DLLAMA_USE_PREBUILT_UI=OFF \
   -DLLAMA_BUILD_APP=OFF \
   -DMTMD_VIDEO=OFF
 )
@@ -194,7 +196,7 @@ fi
 
 cmake "${cmake_args[@]}"
 
-cmake --build "$build_dir" --target llama llama-common mtmd llama-completion --parallel "$jobs"
+cmake --build "$build_dir" --target llama llama-common mtmd llama-completion llama-server --parallel "$jobs"
 
 if [[ "$vulkan_enabled" == "ON" ]]; then
   vulkan_module="$build_dir/bin/libggml-vulkan.so"

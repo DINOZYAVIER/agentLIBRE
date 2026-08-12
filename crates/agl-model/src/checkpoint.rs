@@ -46,7 +46,6 @@ pub struct SetupCheckpoint {
     pub planned_artifacts: Vec<PlannedArtifactRole>,
     pub low_memory_consent: bool,
     pub plan_hash: String,
-    pub cpu_fallback_consent_plan_hash: Option<String>,
     pub completed_phases: Vec<SetupPhase>,
 }
 
@@ -73,7 +72,6 @@ impl SetupCheckpoint {
             planned_artifacts,
             low_memory_consent,
             plan_hash,
-            cpu_fallback_consent_plan_hash: None,
             completed_phases: Vec::new(),
         };
         checkpoint.validate()?;
@@ -92,13 +90,6 @@ impl SetupCheckpoint {
             "setup workspace digest does not match its recorded identity"
         );
         validate_digest("plan_hash", &self.plan_hash)?;
-        if let Some(consent) = &self.cpu_fallback_consent_plan_hash {
-            validate_digest("cpu_fallback_consent_plan_hash", consent)?;
-            ensure!(
-                consent == &self.plan_hash,
-                "CPU fallback consent must match the current setup plan"
-            );
-        }
         ensure!(
             !self.planned_artifacts.is_empty(),
             "setup checkpoint has no planned artifacts"
@@ -145,10 +136,6 @@ impl SetupCheckpoint {
         );
         self.completed_phases.push(phase);
         Ok(())
-    }
-
-    pub fn consent_to_cpu_fallback(&mut self) {
-        self.cpu_fallback_consent_plan_hash = Some(self.plan_hash.clone());
     }
 }
 
@@ -370,42 +357,6 @@ mod tests {
 
         store.remove(&workspace).unwrap();
         assert!(store.load(&workspace).unwrap().is_none());
-    }
-
-    #[test]
-    fn cpu_fallback_consent_is_scoped_to_one_exact_plan() {
-        let workspace = workspace();
-        let planned = vec![PlannedArtifactRole {
-            role: ModelArtifactRole::Main,
-            model_id: agl_config::ModelId::new("gemma4-e4b").unwrap(),
-        }];
-        let mut original = SetupCheckpoint::new(
-            &workspace,
-            ModelPackageId::new("gemma4-e4b").unwrap(),
-            planned.clone(),
-            true,
-            "d".repeat(64),
-        )
-        .unwrap();
-        original.consent_to_cpu_fallback();
-        original.validate().unwrap();
-        assert_eq!(
-            original.cpu_fallback_consent_plan_hash,
-            Some("d".repeat(64))
-        );
-
-        let replacement = SetupCheckpoint::new(
-            &workspace,
-            ModelPackageId::new("gemma4-12b").unwrap(),
-            planned,
-            true,
-            "e".repeat(64),
-        )
-        .unwrap();
-        assert!(replacement.cpu_fallback_consent_plan_hash.is_none());
-
-        original.plan_hash = "e".repeat(64);
-        assert!(original.validate().is_err());
     }
 
     #[test]

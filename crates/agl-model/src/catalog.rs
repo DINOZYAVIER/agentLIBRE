@@ -84,8 +84,21 @@ pub struct CatalogRuntimeProfile {
     pub mmap: bool,
     pub unified_kv: bool,
     pub slot_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtp: Option<CatalogMtpProfile>,
     pub smoke_timeout_seconds: u64,
     pub expected_speed: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogMtpProfile {
+    pub max_draft_tokens: u32,
+    pub min_draft_tokens: u32,
+    pub p_min_millionths: u32,
+    pub gpu_layers: u32,
+    pub cache_type_k: agl_config::KvCacheType,
+    pub cache_type_v: agl_config::KvCacheType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -265,6 +278,34 @@ fn validate_package(package: &ModelPackage) -> Result<()> {
             "vision package `{}` must contain a required projector",
             package.id
         );
+    }
+    let draft = package
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.role == ModelArtifactRole::Draft && artifact.required);
+    for profile in &package.profiles {
+        ensure!(
+            draft.is_some() == profile.mtp.is_some(),
+            "package `{}` profile `{}` must bind Draft artifact and MTP shape together",
+            package.id,
+            profile.id
+        );
+        if let Some(mtp) = &profile.mtp {
+            ensure!(
+                !package.capabilities.contains(&CatalogCapability::Vision),
+                "package `{}` profile `{}` cannot combine vision and MTP",
+                package.id,
+                profile.id
+            );
+            ensure!(
+                (1..=64).contains(&mtp.max_draft_tokens)
+                    && mtp.min_draft_tokens <= mtp.max_draft_tokens
+                    && mtp.p_min_millionths <= 1_000_000,
+                "package `{}` profile `{}` has an invalid MTP shape",
+                package.id,
+                profile.id
+            );
+        }
     }
     let mut filenames = BTreeSet::new();
     for artifact in &package.artifacts {

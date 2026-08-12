@@ -1,24 +1,20 @@
-use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agl_config::{
-    InferencePresetRuntimeConfig, ModelId, load_inference_preset_from_str,
-    load_model_bindings_or_empty, model_bindings_path, write_model_bindings,
+    ModelId, load_model_bindings_or_empty, model_bindings_path, write_model_bindings,
 };
-use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind};
 use agl_model::{
-    HostResources, InstallRecordState, InstallSource, LlamaDeviceInfo, LlamaDeviceKind,
-    ModelArtifactRole, ModelBindingPatch, ModelCacheStatus, ModelCatalog, ModelDownloadRequest,
-    ModelDownloader, ModelFit, ModelFitKind, ModelInstallRecord, ModelInstallStore,
-    ModelInstallTransaction, ModelInstallTransactionInput, ModelPackage, ModelPackageId,
-    ModelProgressEvent, PlannedArtifactRole, RuntimePlan, RuntimePlanSet, RuntimePlanner,
-    SetupCheckpoint, SetupCheckpointStore, SetupPhase, setup_plan_hash, validate_gguf,
+    HostCapabilities, InstallRecordState, InstallSource, ModelArtifactRole, ModelBindingPatch,
+    ModelCacheStatus, ModelCatalog, ModelDownloadRequest, ModelDownloader, ModelExecutionPlan,
+    ModelInstallRecord, ModelInstallStore, ModelInstallTransaction, ModelInstallTransactionInput,
+    ModelPackage, ModelPackageId, ModelProgressEvent, PlannedArtifactRole, SetupCheckpoint,
+    SetupCheckpointStore, SetupPhase, setup_plan_hash, validate_gguf,
 };
 use agl_package::{PackageRef, WorkspaceConfigReferences, WorkspaceManifest, WorkspacePolicy};
 use agl_repo::read_workspace_default_function;
 use agl_runtime::AgentLibreRuntimeConfig;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use crate::args::SetupInitOptions;
@@ -35,19 +31,20 @@ struct PackageChoiceReport {
     total_bytes: u64,
     bytes_to_download: u64,
     cache: Vec<ModelCacheStatus>,
-    fit: ModelFit,
+    compatible: bool,
+    compatibility: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct SetupPlanReport {
     version: u32,
     workspace_root: PathBuf,
-    host: HostResources,
+    host: HostCapabilities,
     packages: Vec<PackageChoiceReport>,
     selected_package: ModelPackageId,
     repository: String,
     revision: String,
-    runtime: RuntimePlanSet,
+    runtime: SetupRuntimeReport,
     staged_bindings_path: PathBuf,
     published_bindings_path: PathBuf,
     binding_changes: Vec<SetupBindingChange>,
@@ -73,10 +70,8 @@ struct SetupIntentFingerprint {
     repository: String,
     revision: String,
     artifacts: Vec<SetupIntentArtifact>,
-    nominal_memory_class_bytes: u64,
-    physical_cores: usize,
-    devices: Vec<SetupIntentDevice>,
-    runtime: RuntimePlanSet,
+    host: HostCapabilities,
+    runtime: SetupRuntimeReport,
     low_memory_consent: bool,
 }
 
@@ -95,12 +90,13 @@ struct SetupIntentArtifactFile {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct SetupIntentDevice {
-    name: String,
-    kind: LlamaDeviceKind,
-    total_memory_bytes: u64,
-    usable: bool,
-    supports_gpu_offload: bool,
+struct SetupRuntimeReport {
+    profile_id: String,
+    selected_device: Option<String>,
+    context_tokens: u32,
+    gpu_layers: u32,
+    smoke_timeout_seconds: u64,
+    expected_speed: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,11 +158,23 @@ fn run_init_inner(
     let recommended_function = workspace_default
         .as_deref()
         .unwrap_or(agl_repo::DEFAULT_FUNCTION);
+    let recommended_model = agl_runtime::compose_packages(&runtime.paths, &workspace_root)?
+        .resolve_runtime_bundle(
+            &workspace_root,
+            &runtime.paths.config_dir,
+            recommended_function,
+            true,
+            &[],
+        )?
+        .model
+        .context("recommended Function has no Model dependency")?
+        .package
+        .id;
     let requested_package_id = select_package_id(
         options.model.as_deref(),
         previous_checkpoint.as_ref(),
         &catalog,
-        recommended_function,
+        &recommended_model,
     )?;
     let package = catalog
         .package(&requested_package_id)
@@ -183,59 +191,58 @@ fn run_init_inner(
                 .map(|status| (package.id.clone(), status))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let devices = crate::daemon_first_inference_inventory(runtime)
-        .context("failed to inspect daemon-first inference devices")?
-        .into_iter()
-        .map(model_device_info)
-        .collect::<Vec<_>>();
-    let host = HostResources::inspect(agl_model::hugging_face_cache_dir(), devices)?;
+    let host = agl_inference::project_host_capabilities(
+        crate::daemon_first_inference_inventory(runtime)
+            .context("failed to inspect daemon-first inference devices")?,
+    )?;
     let effective_low_memory_consent = options.allow_low_memory
         || previous_checkpoint
             .as_ref()
             .is_some_and(|checkpoint| checkpoint.low_memory_consent);
-    if host.below_recommended_floor() && !effective_low_memory_consent {
-        bail!(
-            "low_memory_not_recommended: Detected memory is below the recommended 8 GB minimum. Continuing may cause heavy swapping, an out-of-memory kill, or system stalls. To attempt best-effort setup: agl init --allow-low-memory"
-        );
-    }
-
-    let planner = RuntimePlanner;
     let package_reports = catalog
         .packages
         .iter()
         .map(|candidate| {
             let cache = cache_for_package(&package_cache, &candidate.id);
             let bytes_to_download = missing_cache_bytes(cache);
+            let compatibility = resolve_setup_execution_plan(
+                candidate.id.as_str(),
+                &workspace_root,
+                runtime,
+                &host,
+            );
             PackageChoiceReport {
                 package_id: candidate.id.clone(),
                 display_name: candidate.display_name.clone(),
-                default: candidate.id.as_str() == recommended_function,
+                default: candidate.id == recommended_model,
                 total_bytes: candidate.total_required_bytes(),
                 bytes_to_download,
                 cache: cache.to_vec(),
-                fit: planner.fit(
-                    candidate,
-                    &host,
-                    bytes_to_download,
-                    effective_low_memory_consent,
-                ),
+                compatible: compatibility.is_ok(),
+                compatibility: compatibility
+                    .map(|plan| format!("exact profile {}", plan.profile_id()))
+                    .unwrap_or_else(|error| error.to_string()),
             }
         })
         .collect::<Vec<_>>();
     let selected_choice = package_reports
         .iter()
         .find(|choice| choice.package_id == package.id)
-        .expect("selected catalog package has a fit report");
-    ensure_supported_fit(&selected_choice.fit, &host, package)?;
+        .expect("selected catalog package has a compatibility report");
+    ensure!(
+        selected_choice.compatible,
+        "selected Model package is incompatible with this host: {}",
+        selected_choice.compatibility
+    );
     let selected_bytes_to_download = selected_choice.bytes_to_download;
 
-    let auto_policy = package_auto_policy(package, &workspace_root, runtime)?;
-    let runtime_plans =
-        planner.plan_set(package, &host, &auto_policy, effective_low_memory_consent)?;
+    let execution_plan =
+        resolve_setup_execution_plan(package.id.as_str(), &workspace_root, runtime, &host)?;
+    let runtime_plan = setup_runtime_report(package, &execution_plan)?;
     let fingerprint = setup_fingerprint(
         package,
         &host,
-        runtime_plans.clone(),
+        runtime_plan.clone(),
         effective_low_memory_consent,
     );
     let plan_hash = setup_plan_hash(&fingerprint)?;
@@ -278,7 +285,7 @@ fn run_init_inner(
         selected_package: package.id.clone(),
         repository: package.repository.clone(),
         revision: package.revision.clone(),
-        runtime: runtime_plans,
+        runtime: runtime_plan,
         staged_bindings_path: staged_bindings_path.clone(),
         published_bindings_path,
         binding_changes,
@@ -335,12 +342,6 @@ fn run_init_inner(
             plan_hash,
         )?;
         checkpoint.advance(SetupPhase::Confirmed)?;
-        if (!io::stdin().is_terminal() || options.non_interactive)
-            && options.yes
-            && plan.runtime.cpu_fallback.is_some()
-        {
-            checkpoint.consent_to_cpu_fallback();
-        }
         checkpoint_store.save(&checkpoint)?;
         checkpoint
     };
@@ -388,6 +389,13 @@ fn run_init_inner(
         SetupPhase::BindingsStaged,
     )?;
 
+    commit_model_install(
+        &install_store,
+        &records,
+        &plan.published_bindings_path,
+        &staged_bindings_path,
+    )?;
+
     let smoke = run_setup_smoke(
         runtime,
         package,
@@ -399,14 +407,8 @@ fn run_init_inner(
     )?;
     advance_checkpoint(&checkpoint_store, &mut checkpoint, SetupPhase::SmokePassed)?;
 
-    commit_staged_setup(
-        &workspace_root,
-        &install_store,
-        &records,
-        &plan.published_bindings_path,
-        &staged_bindings_path,
-        package.id.as_str(),
-    )?;
+    write_workspace_default(&workspace_root, package.id.as_str())
+        .context("failed to commit workspace default after verified smoke")?;
     advance_checkpoint(&checkpoint_store, &mut checkpoint, SetupPhase::Committed)?;
     let completed_phases = checkpoint.completed_phases.clone();
     checkpoint_store.remove(&workspace_root)?;
@@ -428,7 +430,7 @@ fn select_package_id(
     explicit: Option<&str>,
     checkpoint: Option<&SetupCheckpoint>,
     catalog: &ModelCatalog,
-    recommended_function: &str,
+    recommended_model: &ModelPackageId,
 ) -> Result<ModelPackageId> {
     if let Some(explicit) = explicit {
         let id = ModelPackageId::new(explicit)?;
@@ -446,10 +448,7 @@ fn select_package_id(
     }
     Ok(checkpoint
         .map(|checkpoint| checkpoint.package_id.clone())
-        .unwrap_or_else(|| {
-            ModelPackageId::new(recommended_function)
-                .expect("workspace default function must be a valid package id")
-        }))
+        .unwrap_or_else(|| recommended_model.clone()))
 }
 
 fn cache_for_package<'a>(
@@ -471,78 +470,49 @@ fn missing_cache_bytes(cache: &[ModelCacheStatus]) -> u64 {
         .sum()
 }
 
-fn ensure_supported_fit(
-    fit: &ModelFit,
-    host: &HostResources,
-    package: &ModelPackage,
-) -> Result<()> {
-    match fit.kind {
-        ModelFitKind::Recommended | ModelFitKind::Fits | ModelFitKind::Slow => Ok(()),
-        ModelFitKind::InsufficientMemory
-            if !host.below_recommended_floor()
-                && host.available_memory_bytes < host.detected_total_memory_bytes / 2 =>
-        {
-            bail!(
-                "temporarily_low_available_memory: model `{}` cannot start safely now: {}. Close memory-heavy applications and run `agl init` again",
-                package.id,
-                fit.reason
-            )
-        }
-        ModelFitKind::InsufficientDisk => bail!(
-            "insufficient_disk: model `{}` cannot be acquired: {}",
-            package.id,
-            fit.reason
-        ),
-        ModelFitKind::UnsupportedBackend => bail!(
-            "unsupported_backend: model `{}` is not offered because {}",
-            package.id,
-            fit.reason
-        ),
-        ModelFitKind::InsufficientMemory => bail!(
-            "insufficient_memory: model `{}` cannot start safely: {}",
-            package.id,
-            fit.reason
-        ),
-    }
-}
-
-fn package_auto_policy(
-    package: &ModelPackage,
+fn resolve_setup_execution_plan(
+    function_ref: &str,
     workspace_root: &Path,
     runtime: &AgentLibreRuntimeConfig,
-) -> Result<agl_config::AutoRuntimePolicy> {
-    let function = agl_runtime::resolve_composed_runtime_function(
-        &runtime.paths,
+    host: &HostCapabilities,
+) -> Result<ModelExecutionPlan> {
+    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root.to_path_buf())?;
+    let bundle = composition.resolve_runtime_bundle(
         workspace_root,
-        package.id.as_str(),
+        &runtime.paths.config_dir,
+        function_ref,
         true,
+        &[],
     )?;
-    let toml = function
-        .inference_config_toml
-        .context("catalog function has no embedded inference preset")?;
-    let preset = load_inference_preset_from_str("catalog function inference.toml", &toml)?;
-    let InferencePresetRuntimeConfig::Auto(policy) = preset.runtime else {
-        bail!(
-            "catalog function `{}` must use runtime mode = \"auto\"",
-            package.id
-        );
-    };
-    ensure!(
-        preset.backend.model_id
-            == package
-                .required_artifacts()
-                .find(|artifact| artifact.role == ModelArtifactRole::Main)
-                .expect("validated package has a main artifact")
-                .model_id,
-        "catalog function main model does not match package"
-    );
-    Ok(policy)
+    let (function, model) = bundle
+        .model_execution_inputs(format!("sha256:{}", "0".repeat(64)))?
+        .context("Function has no package-bound Model")?;
+    Ok(agl_model::resolve_execution_plan(&function, &model, host)?)
+}
+
+fn setup_runtime_report(
+    package: &ModelPackage,
+    plan: &ModelExecutionPlan,
+) -> Result<SetupRuntimeReport> {
+    let profile = package
+        .profiles
+        .iter()
+        .find(|profile| profile.id == plan.profile_id())
+        .context("selected Model profile disappeared")?;
+    Ok(SetupRuntimeReport {
+        profile_id: profile.id.clone(),
+        selected_device: plan.selected_device().map(|device| device.identity.clone()),
+        context_tokens: profile.context_tokens,
+        gpu_layers: profile.gpu_layers,
+        smoke_timeout_seconds: profile.smoke_timeout_seconds,
+        expected_speed: profile.expected_speed.clone(),
+    })
 }
 
 fn setup_fingerprint(
     package: &ModelPackage,
-    host: &HostResources,
-    runtime: RuntimePlanSet,
+    host: &HostCapabilities,
+    runtime: SetupRuntimeReport,
     low_memory_consent: bool,
 ) -> SetupIntentFingerprint {
     SetupIntentFingerprint {
@@ -566,19 +536,7 @@ fn setup_fingerprint(
                     .collect(),
             })
             .collect(),
-        nominal_memory_class_bytes: host.nominal_memory_class_bytes,
-        physical_cores: host.cpu.physical_cores,
-        devices: host
-            .devices
-            .iter()
-            .map(|device| SetupIntentDevice {
-                name: device.name.clone(),
-                kind: device.kind,
-                total_memory_bytes: device.total_memory_bytes,
-                usable: device.usable,
-                supports_gpu_offload: device.supports_gpu_offload,
-            })
-            .collect(),
+        host: host.clone(),
         runtime,
         low_memory_consent,
     }
@@ -651,76 +609,25 @@ fn run_setup_smoke(
     runtime: &AgentLibreRuntimeConfig,
     package: &ModelPackage,
     plan: &SetupPlanReport,
-    staged_bindings_path: &Path,
-    checkpoint_store: &SetupCheckpointStore,
-    checkpoint: &mut SetupCheckpoint,
-    options: &SetupInitOptions,
+    _staged_bindings_path: &Path,
+    _checkpoint_store: &SetupCheckpointStore,
+    _checkpoint: &mut SetupCheckpoint,
+    _options: &SetupInitOptions,
 ) -> Result<FunctionSmokeReport> {
-    let request = |runtime_plan: RuntimePlan| FunctionSmokeRequest {
+    let request = FunctionSmokeRequest {
         reference: package.id.as_str().to_owned(),
         workspace_root: plan.workspace_root.clone(),
-        bindings_path: Some(staged_bindings_path.to_path_buf()),
-        timeout: Duration::from_secs(runtime_plan.smoke_timeout_seconds),
-        runtime_plan_override: Some(runtime_plan),
+        timeout: Duration::from_secs(plan.runtime.smoke_timeout_seconds),
         max_output_tokens: 32,
     };
-    match run_function_smoke(runtime, request(plan.runtime.selected.clone())) {
-        Ok(report) => Ok(report),
-        Err(gpu_error)
-            if plan.runtime.selected.runtime.gpu_layers > 0
-                && plan.runtime.cpu_fallback.is_some()
-                && is_gpu_load_failure(&gpu_error) =>
-        {
-            let cpu_plan = plan
-                .runtime
-                .cpu_fallback
-                .clone()
-                .expect("guard checked CPU fallback");
-            let offer = RuntimePlanner.cpu_fallback_offer(
-                package,
-                &plan.host,
-                &package_auto_policy(package, &plan.workspace_root, runtime)?,
-                checkpoint.low_memory_consent,
-                format!("{gpu_error:#}"),
-            )?;
-            eprintln!("GPU setup failed: {}", offer.gpu_failure);
-            eprintln!(
-                "CPU fallback: context {}, expected speed {}, {}",
-                offer.context_tokens, offer.expected_speed, offer.memory_fit
-            );
-            let consented = checkpoint.cpu_fallback_consent_plan_hash.as_deref()
-                == Some(checkpoint.plan_hash.as_str());
-            if !consented {
-                confirm(
-                    options.yes,
-                    options.non_interactive,
-                    "Retry this setup with the displayed CPU plan? [y/N] ",
-                )?;
-                checkpoint.consent_to_cpu_fallback();
-                checkpoint_store.save(checkpoint)?;
-            }
-            run_function_smoke(runtime, request(cpu_plan))
-                .context("CPU fallback smoke failed after explicit consent")
-        }
-        Err(error) => Err(error),
-    }
+    run_function_smoke(runtime, request)
 }
 
-fn is_gpu_load_failure(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    message.contains("failed to load")
-        || message.contains("explicit runtime plan is not a current")
-        || ((message.contains("gpu") || message.contains("vulkan") || message.contains("cuda"))
-            && (message.contains("memory") || message.contains("device")))
-}
-
-fn commit_staged_setup(
-    workspace_root: &Path,
+fn commit_model_install(
     install_store: &ModelInstallStore,
     records: &[ModelInstallRecord],
     published_bindings_path: &Path,
     staged_bindings_path: &Path,
-    function_id: &str,
 ) -> Result<()> {
     let staged = agl_config::load_model_bindings(staged_bindings_path)?;
     let patch = binding_patch_from_records(records);
@@ -733,8 +640,6 @@ fn commit_staged_setup(
     ModelInstallTransaction::new(install_store.clone(), published_bindings_path)?.commit(
         ModelInstallTransactionInput::new(records.to_vec(), patch, true),
     )?;
-    write_workspace_default(workspace_root, function_id)
-        .context("failed to commit workspace default after model install transaction")?;
     Ok(())
 }
 
@@ -775,27 +680,6 @@ fn cleanup_staged_state(staged_bindings_path: &Path) {
     }
 }
 
-fn model_device_info(device: InferenceDeviceInfo) -> LlamaDeviceInfo {
-    LlamaDeviceInfo {
-        name: device.backend_name,
-        description: device.description,
-        kind: match device.kind {
-            InferenceDeviceKind::Cpu => LlamaDeviceKind::Cpu,
-            InferenceDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
-            InferenceDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
-            InferenceDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
-            InferenceDeviceKind::Metadata => LlamaDeviceKind::Metadata,
-            InferenceDeviceKind::Unknown => LlamaDeviceKind::Unknown,
-        },
-        pci_device_id: device.pci_device_id,
-        pci_subsystem_id: device.pci_subsystem_id,
-        free_memory_bytes: device.free_memory_bytes,
-        total_memory_bytes: device.total_memory_bytes,
-        usable: device.usable,
-        supports_gpu_offload: device.supports_gpu_offload,
-    }
-}
-
 fn print_setup_plan(plan: &SetupPlanReport, json: bool) -> Result<()> {
     if json {
         eprintln!("{}", serde_json::to_string_pretty(plan)?);
@@ -804,9 +688,8 @@ fn print_setup_plan(plan: &SetupPlanReport, json: bool) -> Result<()> {
     println!("agentLIBRE setup plan");
     println!("Workspace: {}", plan.workspace_root.display());
     println!(
-        "Memory: {} total, {} currently available",
-        human_bytes(plan.host.detected_total_memory_bytes),
-        human_bytes(plan.host.available_memory_bytes)
+        "Host memory: {} physical",
+        human_bytes(plan.host.physical_host_bytes)
     );
     println!("Available model packages:");
     for package in &plan.packages {
@@ -816,27 +699,25 @@ fn print_setup_plan(plan: &SetupPlanReport, json: bool) -> Result<()> {
             ""
         };
         println!(
-            "  {}{} — {:?}; {}, download {}",
+            "  {}{} — {}; {}, download {}",
             package.package_id,
             selected,
-            package.fit.kind,
-            package.fit.reason,
+            if package.compatible {
+                "compatible"
+            } else {
+                "incompatible"
+            },
+            package.compatibility,
             human_bytes(package.bytes_to_download)
         );
     }
     println!(
         "Runtime: {} (gpu_layers={}, context={}, expected {})",
-        plan.runtime.selected.profile_id,
-        plan.runtime.selected.runtime.gpu_layers,
-        plan.runtime.selected.runtime.context_tokens,
-        plan.runtime.selected.expected_speed
+        plan.runtime.profile_id,
+        plan.runtime.gpu_layers,
+        plan.runtime.context_tokens,
+        plan.runtime.expected_speed
     );
-    if let Some(cpu) = &plan.runtime.cpu_fallback {
-        println!(
-            "Eligible CPU fallback: {} (context={}, expected {})",
-            cpu.profile_id, cpu.runtime.context_tokens, cpu.expected_speed
-        );
-    }
     if plan.binding_changes.is_empty() {
         println!("Bindings: already match the selected package");
     } else {

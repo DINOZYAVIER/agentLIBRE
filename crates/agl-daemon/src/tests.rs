@@ -9,26 +9,24 @@ use agl_app::{
 };
 use agl_chat::{
     ChatInferenceJob, ChatRunInput, InferenceClient, InferenceClientHandle, InferenceOptions,
-    ToolAccessMode,
 };
-use agl_config::ResolvedInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
 use agl_ids::{MessageId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::{
-    InferenceFinishReason, InferenceOutputEvent, InferenceProductStage, InferenceProgressUnit,
-    InferenceResponse, InferenceResponseMetadata, InferenceStageEvent, ModelManagerError,
-    ModelManagerStatus, ModelManagerStatusDetail, ModelUnloadOutcome as ManagerUnloadOutcome,
-    ModelUnloadResult, ModelUnloadTarget as ManagerUnloadTarget, OutputDelivery,
-    WorkerRuntimeStatusHandle,
+    EngineRuntimeStatusHandle, InferenceFinishReason, InferenceOutputEvent, InferenceProductStage,
+    InferenceProgressUnit, InferenceResponse, InferenceResponseMetadata, InferenceStageEvent,
+    ModelManagerError, ModelManagerStatus, ModelManagerStatusDetail,
+    ModelUnloadOutcome as ManagerUnloadOutcome, ModelUnloadResult,
+    ModelUnloadTarget as ManagerUnloadTarget, OutputDelivery,
 };
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, DaemonTool, HelloRequest,
     InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest, ModelUnloadTarget,
-    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceWorkerState,
+    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceEngineState,
     ProtocolRunKind, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest,
     RunEventsRequest, RunStatusRequest, RunSubmitRequest, RunTreeRequest, SessionFinishReason,
     SessionFinishRequest, SessionListRequest, SessionOpenRequest, SessionStatus,
-    SessionStatusRequest, SetupSmokeSessionOpenRequest,
+    SessionStatusRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -42,27 +40,6 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use super::*;
 
 static TEST_RUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
-    serde_json::from_value(serde_json::json!({
-        "provenance": {
-            "reference": format!("model:{id}@=1.0.0"),
-            "source_id": "test",
-            "source_tier": "workspace",
-            "source_kind": "directory",
-            "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        },
-        "weights": [{
-            "role": "main",
-            "model_id": id,
-            "filename": format!("{id}.gguf"),
-            "byte_size": 18,
-            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-            "required": true
-        }]
-    }))
-    .unwrap()
-}
 
 #[test]
 fn default_root_run_budget_is_identical_across_protocol_application_and_store() {
@@ -115,29 +92,6 @@ impl TestRuntime {
         let root = std::env::temp_dir().join(format!("agl-dt-{}-{index}", std::process::id()));
         let paths = AgentLibrePaths::from_agl_home(root.clone());
         std::fs::create_dir_all(&root).unwrap();
-        let config = root.join("inference.toml");
-        std::fs::write(
-            &config,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-                root.join("unused-test-model.gguf").display()
-            ),
-        )
-        .unwrap();
         let runtime = AgentLibreRuntimeConfig {
             paths,
             logging: AgentLibreLoggingConfig::from_env(),
@@ -148,16 +102,182 @@ tool_call_format = "hermes_json"
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
+        install_daemon_test_package_graph(&root, &runtime, true);
         let terminal = TestTerminalService::start(&runtime);
         Self {
             runtime,
             inference: InferenceOptions {
-                config: Some(config),
+                function_ref: Some("daemon-test".to_owned()),
+                workspace_root: Some(root),
                 ..InferenceOptions::default()
             },
             terminal: Some(terminal),
         }
     }
+}
+
+fn install_daemon_test_package_graph(
+    workspace: &std::path::Path,
+    runtime: &AgentLibreRuntimeConfig,
+    include_default_function: bool,
+) {
+    let agl_root = workspace.join(".agl");
+    std::fs::create_dir_all(&agl_root).unwrap();
+    std::fs::write(
+        agl_root.join("workspace.toml"),
+        r#"version = 3
+default_function = "function:daemon-test@^1"
+
+[[sources]]
+id = "workspace"
+tier = "workspace"
+kind = "directory"
+path = ".agl"
+
+[policy]
+[config]
+"#,
+    )
+    .unwrap();
+
+    if include_default_function {
+        let function_root = agl_root.join("functions/daemon-test");
+        std::fs::create_dir_all(&function_root).unwrap();
+        std::fs::write(
+            function_root.join(agl_function::FUNCTION_FILE_NAME),
+            r#"---
+package:
+  schema: agentlibre.package/v1
+  type: function
+  id: daemon-test
+  version: 1.0.0
+  payload_schema: agentlibre.function/v3
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - extension:core.workspace@^1.0
+    - model:test-model@^1.0
+title: Daemon test
+model:
+  profile: local
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 64
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
+skills:
+  use: []
+subagents:
+  use: []
+---
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            function_root.join(agl_function::FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+            "Daemon test function.\n",
+        )
+        .unwrap();
+    }
+
+    let model_path = workspace.join("test-model.gguf");
+    std::fs::write(&model_path, b"GGUF-test-fixture").unwrap();
+    let model_root = agl_root.join("models/test-model");
+    std::fs::create_dir_all(model_root.join("evidence")).unwrap();
+    std::fs::write(
+        model_root.join("MODEL.toml"),
+        r#"package = { schema = "agentlibre.package/v1", type = "model", id = "test-model", version = "1.0.0", payload_schema = "agentlibre.model/v3", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+
+display_name = "Daemon test model"
+capabilities = ["text", "tools"]
+license = "test-only"
+license_url = "https://example.invalid/license"
+repository = "agentlibre/test-model"
+upstream_revision = "1111111111111111111111111111111111111111"
+
+[[weights]]
+role = "main"
+model_id = "test-model"
+files = [{ filename = "test-model.gguf", byte_size = 17, sha256 = "2222222222222222222222222222222222222222222222222222222222222222" }]
+required = true
+
+[[profiles]]
+id = "local"
+device = "cpu"
+benchmark_evidence = "evidence/local.md"
+required_total_ram_bytes = 1
+host_private_bytes = 1
+device_private_bytes = 0
+shared_bytes = 0
+decoder_scratch_bytes = 0
+gpu_layers = 0
+context_tokens = 256
+batch_size = 32
+ubatch_size = 32
+threads = 1
+flash_attention = false
+cache_type_k = "f16"
+cache_type_v = "f16"
+mmap = true
+unified_kv = false
+slot_count = 1
+smoke_timeout_seconds = 30
+expected_speed = "fixture"
+
+[[profiles]]
+id = "reviewer"
+device = "cpu"
+benchmark_evidence = "evidence/reviewer.md"
+required_total_ram_bytes = 1
+host_private_bytes = 1
+device_private_bytes = 0
+shared_bytes = 0
+decoder_scratch_bytes = 0
+gpu_layers = 0
+context_tokens = 256
+batch_size = 32
+ubatch_size = 32
+threads = 1
+flash_attention = false
+cache_type_k = "f16"
+cache_type_v = "f16"
+mmap = true
+unified_kv = false
+slot_count = 1
+smoke_timeout_seconds = 30
+expected_speed = "fixture"
+"#,
+    )
+    .unwrap();
+    std::fs::write(model_root.join("evidence/local.md"), "Test evidence.\n").unwrap();
+    std::fs::write(model_root.join("evidence/reviewer.md"), "Test evidence.\n").unwrap();
+
+    let record = agl_model::ModelInstallRecord {
+        version: 1,
+        model_id: agl_config::ModelId::new("test-model").unwrap(),
+        package_id: Some(agl_model::ModelPackageId::new("test-model").unwrap()),
+        role: agl_model::ModelArtifactRole::Main,
+        source: agl_model::InstallSource::HuggingFace {
+            repository: "agentlibre/test-model".to_owned(),
+            revision: "1".repeat(40),
+            filename: "test-model.gguf".to_owned(),
+        },
+        path: model_path,
+        byte_size: 17,
+        sha256: "2".repeat(64),
+        additional_files: Vec::new(),
+        installed_at_unix_ms: 1,
+        state: agl_model::InstallRecordState::Active,
+    };
+    let store = agl_model::ModelInstallStore::new(runtime.paths.model_install_root());
+    std::fs::create_dir_all(store.root()).unwrap();
+    std::fs::write(
+        store.record_path(&record.model_id),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
 }
 
 impl Drop for TestRuntime {
@@ -400,7 +520,6 @@ struct InferenceControl {
     finish_with_length: AtomicBool,
     emit_scripted_progress: AtomicBool,
     requests: Mutex<Vec<agl_inference::InferenceRequest>>,
-    configs: Mutex<Vec<ResolvedInferenceConfig>>,
     manager_status: Mutex<Option<ModelManagerStatus>>,
     unload_result: Mutex<Option<Result<ModelUnloadResult, ModelManagerError>>>,
     unload_targets: Mutex<Vec<ManagerUnloadTarget>>,
@@ -424,6 +543,10 @@ struct ScriptedDelegationClient {
 }
 
 impl InferenceClient for ScriptedDelegationClient {
+    fn static_capabilities(&self) -> anyhow::Result<agl_model::HostCapabilities> {
+        Ok(daemon_test_host_capabilities())
+    }
+
     fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
         let content = self
             .responses
@@ -441,24 +564,18 @@ impl InferenceClient for ScriptedDelegationClient {
                 duration_ms: 1,
                 input_tokens: 4,
                 output_tokens: 2,
+                configured_batch_size: 0,
+                prefill_chunks: 0,
                 resource_admission: None,
             },
         })
     }
 
-    fn clear_context(
-        &self,
-        _config: &ResolvedInferenceConfig,
-        _session_id: &SessionId,
-    ) -> anyhow::Result<()> {
+    fn clear_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn release_context(
-        &self,
-        _config: &ResolvedInferenceConfig,
-        _session_id: &SessionId,
-    ) -> anyhow::Result<()> {
+    fn release_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -472,12 +589,11 @@ impl InferenceClient for ScriptedDelegationClient {
 }
 
 impl InferenceClient for ControlledInferenceClient {
+    fn static_capabilities(&self) -> anyhow::Result<agl_model::HostCapabilities> {
+        Ok(daemon_test_host_capabilities())
+    }
+
     fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
-        self.control
-            .configs
-            .lock()
-            .unwrap()
-            .push(job.config.clone());
         self.control
             .requests
             .lock()
@@ -570,24 +686,18 @@ impl InferenceClient for ControlledInferenceClient {
                 duration_ms: 0,
                 input_tokens: 4,
                 output_tokens: 2,
+                configured_batch_size: 0,
+                prefill_chunks: 0,
                 resource_admission: None,
             },
         })
     }
 
-    fn clear_context(
-        &self,
-        _config: &ResolvedInferenceConfig,
-        _session_id: &SessionId,
-    ) -> anyhow::Result<()> {
+    fn clear_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn release_context(
-        &self,
-        _config: &ResolvedInferenceConfig,
-        _session_id: &SessionId,
-    ) -> anyhow::Result<()> {
+    fn release_context(&self, _context: &agl_model::ModelContextKey) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -631,12 +741,29 @@ impl InferenceClient for ControlledInferenceClient {
     }
 }
 
+fn daemon_test_host_capabilities() -> agl_model::HostCapabilities {
+    agl_model::HostCapabilities {
+        physical_host_bytes: u64::MAX / 2,
+        physical_cpu_cores: 4,
+        logical_cpu_cores: 4,
+        devices: vec![agl_model::HostCapabilityDevice {
+            identity: "CPU".to_owned(),
+            kind: agl_model::HostCapabilityDeviceKind::Cpu,
+            pci_device_id: None,
+            pci_subsystem_id: None,
+            physical_pool_bytes: u64::MAX / 2,
+            usable: true,
+            supports_gpu_offload: false,
+        }],
+    }
+}
+
 fn daemon(test: &TestRuntime, control: Arc<InferenceControl>) -> DaemonState {
     DaemonState::new(
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient { control }),
-        WorkerRuntimeStatusHandle::default(),
+        EngineRuntimeStatusHandle::default(),
     )
 }
 
@@ -670,7 +797,7 @@ async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::new(InferenceControl::default()),
         }),
-        WorkerRuntimeStatusHandle::default(),
+        EngineRuntimeStatusHandle::default(),
     );
     let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
     let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
@@ -766,191 +893,6 @@ fn resume_of_an_already_loaded_session_is_idempotent() {
         }
         other => panic!("unexpected resume event: {other:?}"),
     }
-}
-
-#[test]
-fn setup_smoke_session_uses_inline_staged_state_without_publishing_it() {
-    let test = TestRuntime::new();
-    let control = Arc::new(InferenceControl::default());
-    let mut state = daemon(&test, Arc::clone(&control));
-    let root = test.runtime.paths.config_dir.parent().unwrap();
-    let workspace = root.join("workspace");
-    let function_root = workspace.join(".agl/functions/setup-smoke");
-    std::fs::create_dir_all(&function_root).unwrap();
-    std::fs::write(
-        function_root.join("FUNCTION.md"),
-        r#"---
-package:
-  schema: agentlibre.package/v1
-  type: function
-  id: setup-smoke
-  version: 1.0.0
-  payload_schema: agentlibre.function/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires:
-    - model:setup-smoke-model@^1.0
-title: Setup smoke
-model:
-  config: inference.toml
-runtime:
-  tool_mode: read-only
-  max_output_tokens: 32
-skills:
-  use: []
-subagents:
-  use: []
-doctor:
-  smoke_prompt: "Reply with setup smoke ready."
----
-"#,
-    )
-    .unwrap();
-    std::fs::write(function_root.join("SYSTEM.md"), "Run the setup smoke.\n").unwrap();
-    let model_root = workspace.join(".agl/models/setup-smoke-model");
-    std::fs::create_dir_all(model_root.join("evidence")).unwrap();
-    std::fs::write(
-        model_root.join("MODEL.toml"),
-        r#"package = { schema = "agentlibre.package/v1", type = "model", id = "setup-smoke-model", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
-
-display_name = "Setup smoke fixture"
-capabilities = ["text", "tools"]
-license = "test-only"
-license_url = "https://example.invalid/license"
-repository = "agentlibre/setup-smoke-fixture"
-upstream_revision = "0000000000000000000000000000000000000000"
-
-[[weights]]
-role = "main"
-model_id = "setup-smoke-model"
-filename = "setup-smoke-model.gguf"
-byte_size = 18
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-required = true
-
-[[profiles]]
-id = "cpu-test"
-device = "cpu"
-benchmark_evidence = "evidence/cpu.md"
-required_total_ram_bytes = 1024
-required_available_ram_bytes = 512
-required_vram_bytes = 0
-gpu_layers = 0
-context_tokens = 4096
-batch_size = 128
-ubatch_size = 64
-threads = 2
-smoke_timeout_seconds = 30
-expected_speed = "test"
-"#,
-    )
-    .unwrap();
-    std::fs::write(model_root.join("evidence/cpu.md"), "Test-only evidence.\n").unwrap();
-    std::fs::write(
-        function_root.join("inference.toml"),
-        r#"[backend]
-kind = "llama_cpp"
-model_id = "setup-smoke-model"
-
-[runtime]
-mode = "fixed"
-gpu_layers = 0
-context_tokens = 4096
-threads = 2
-batch_size = 128
-ubatch_size = 64
-
-[model]
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#,
-    )
-    .unwrap();
-    let staged_model = root.join("staged-model.gguf");
-    std::fs::write(&staged_model, b"test model fixture").unwrap();
-    let published_bindings_path = agl_config::model_bindings_path(&test.runtime.paths.config_dir);
-    agl_config::write_model_bindings(
-        &published_bindings_path,
-        &agl_config::ModelBindings::empty(),
-    )
-    .unwrap();
-
-    let event = state.handle_request(request(DaemonRequestKind::SetupSmokeSessionOpen(Box::new(
-        SetupSmokeSessionOpenRequest {
-            workspace_root: workspace.to_string_lossy().into_owned(),
-            function_ref: "setup-smoke".to_owned(),
-            staged_bindings: agl_config::ModelBindings {
-                version: 1,
-                models: std::collections::BTreeMap::from([(
-                    agl_config::ModelId::new("setup-smoke-model").unwrap(),
-                    agl_config::ModelBinding {
-                        path: staged_model.clone(),
-                    },
-                )]),
-            },
-            runtime_plan: agl_protocol::SetupSmokeRuntimePlan {
-                profile_id: "setup-cpu".to_owned(),
-                selected_device: None,
-                selected_device_identity: None,
-                model: test_runtime_plan_model_identity("setup-smoke-model"),
-                runtime: agl_config::InferenceRuntimeConfig {
-                    gpu_layers: 0,
-                    context_tokens: 4_096,
-                    threads: 2,
-                    device: None,
-                    batch_size: Some(128),
-                    ubatch_size: Some(64),
-                    flash_attention: Some(agl_config::RuntimeSwitch::Off),
-                    cache_type_k: None,
-                    cache_type_v: None,
-                    mmap: Some(true),
-                    kv_unified: Some(true),
-                    structured_decoding: agl_config::StructuredDecodingMode::Auto,
-                    repair_malformed_tool_calls: true,
-                    mtp: agl_config::MtpRuntimeConfig::default(),
-                },
-                smoke_timeout_seconds: 30,
-                expected_speed: "test".to_owned(),
-            },
-            max_output_tokens: 32,
-        },
-    ))));
-    let session_id = match event.kind {
-        DaemonEventKind::SessionOpened(opened) => {
-            assert!(!opened.resumed);
-            opened.session_id
-        }
-        other => panic!("unexpected setup smoke open event: {other:?}"),
-    };
-    let snapshot = state.application_snapshot(&session_id).unwrap();
-    assert_eq!(snapshot.header.operation_mode, ToolAccessMode::ReadOnly);
-    assert!(snapshot.header.selected_skills.is_empty());
-    assert!(!ChatSessionStore::exists(
-        test.runtime.paths.sessions_root(),
-        &session_id
-    ));
-
-    let accepted = submit(
-        &mut state,
-        &session_id,
-        "Run the bounded smoke.",
-        Some("setup-smoke-submit"),
-    );
-    wait_for_calls(&control, 1);
-    let outcome = wait_for_terminal(&state, &accepted.run_id);
-    assert_eq!(outcome.status.state, RunState::Succeeded);
-    assert_eq!(
-        control.configs.lock().unwrap()[0].backend.model,
-        staged_model
-    );
-    assert!(
-        agl_config::load_model_bindings(&published_bindings_path)
-            .unwrap()
-            .models
-            .is_empty(),
-        "daemon setup smoke must not publish staged bindings"
-    );
 }
 
 fn submit(
@@ -1380,10 +1322,7 @@ fn hello_declares_strict_run_capabilities() {
     match event.kind {
         DaemonEventKind::Hello(hello) => {
             assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
-            assert_eq!(
-                hello.worker_build_id,
-                agl_inference::worker_protocol::WORKER_BUILD_ID
-            );
+            assert_eq!(hello.engine_protocol_id, agl_inference::ENGINE_PROTOCOL_ID);
             assert_eq!(
                 hello.daemon_runtime.generation_id,
                 expected_runtime.generation_id
@@ -1479,10 +1418,10 @@ fn inference_status_uses_the_captured_worker_status_handle() {
     )));
     match event.kind {
         DaemonEventKind::InferenceStatus(status) => {
-            assert!(!status.worker_build_id.is_empty());
-            assert_eq!(status.worker_state, ProtocolInferenceWorkerState::Cold);
-            assert_eq!(status.worker_pid, None);
-            assert_eq!(status.launch_generation, None);
+            assert!(!status.engine_protocol_id.is_empty());
+            assert_eq!(status.engine_state, ProtocolInferenceEngineState::Cold);
+            assert_eq!(status.engine_pid, None);
+            assert_eq!(status.engine_generation, None);
             assert_eq!(status.reserved_bytes, 0);
             assert_eq!(status.cooldown_not_before_unix_ms, None);
         }
@@ -1598,6 +1537,7 @@ fn daemon_delegation_uses_the_same_durable_child_path() {
         .parent()
         .unwrap()
         .join("delegation-workspace");
+    install_daemon_test_package_graph(&workspace, &test.runtime, false);
     let function_root = workspace.join(".agl/functions/coordinator");
     std::fs::create_dir_all(function_root.join("subagents")).unwrap();
     std::fs::write(
@@ -1608,13 +1548,22 @@ package:
   type: function
   id: coordinator
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
   requires:
     - function:reviewer@^1.0
+    - model:test-model@^1.0
 title: Coordinator
+model:
+  profile: local
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 64
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 subagents:
   use:
     - reviewer
@@ -1639,7 +1588,7 @@ package:
   type: function
   id: reviewer
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1693,7 +1642,7 @@ Return the daemon child verdict.
                 "Daemon parent answer".to_string(),
             ])),
         }),
-        WorkerRuntimeStatusHandle::default(),
+        EngineRuntimeStatusHandle::default(),
     );
     let opened = state.handle_request(request(DaemonRequestKind::SessionOpen(
         SessionOpenRequest {
@@ -1749,6 +1698,7 @@ fn oversized_activity_budget_is_rejected_before_root_run_persistence() {
         .parent()
         .unwrap()
         .join("activity-capacity-workspace");
+    install_daemon_test_package_graph(&workspace, &test.runtime, false);
     let function_root = workspace.join(".agl/functions/wide-coordinator");
     std::fs::create_dir_all(function_root.join("subagents")).unwrap();
     std::fs::write(
@@ -1759,13 +1709,22 @@ package:
   type: function
   id: wide-coordinator
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
   requires:
     - function:reviewer@^1.0
+    - model:test-model@^1.0
 title: Wide Coordinator
+model:
+  profile: local
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 64
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
 subagents:
   use:
     - reviewer
@@ -1790,7 +1749,7 @@ package:
   type: function
   id: reviewer
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -2229,7 +2188,7 @@ async fn server_run_submit_uses_the_shared_prompt_projection() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
-        WorkerRuntimeStatusHandle::default(),
+        EngineRuntimeStatusHandle::default(),
     );
     let application = state.application();
     let opened = application
@@ -2338,7 +2297,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
-        WorkerRuntimeStatusHandle::default(),
+        EngineRuntimeStatusHandle::default(),
     );
     let store = agl_store::AglStore::open_current_at(test.runtime.paths.store_root()).unwrap();
     let repository = CronRepository::new(&store);

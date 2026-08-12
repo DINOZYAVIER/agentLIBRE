@@ -7,8 +7,8 @@ start another service. Interactive presentation belongs to `agl-terminal`.
 
 The daemon also owns inference admission, queuing, reservations, and recovery,
 but never owns native llama.cpp, ggml, or Vulkan objects. Those live in an exact
-private `agl-inference-worker` sibling behind an inherited `SOCK_SEQPACKET`
-channel. Worker loss closes the current attempt once, reaps the native process,
+private constrained `llama-server` child behind inherited private data and
+control descriptors. Engine loss closes the current attempt once, reaps the native process,
 releases its generation's reservations, and preserves the daemon socket,
 session, presentation stream, and terminal PTYs.
 

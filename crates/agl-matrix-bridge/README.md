@@ -18,7 +18,7 @@ cargo build --release \
   -p agl-matrix-bridge \
   --bin agl \
   --bin agl-matrix-bridge
-./target/release/agl serve --config /path/to/local-inference.toml
+./target/release/agl serve --function function:gemma4-e4b
 ```
 
 For a user-systemd daemon:

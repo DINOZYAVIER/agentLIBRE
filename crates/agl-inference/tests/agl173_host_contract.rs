@@ -1,308 +1,268 @@
-use agl_inference::test_support::{
-    AdmissionFixture, ConversionFixture, HostFixture, LeaseFixture, PoolCharge, QueueFixture,
-    ReceiptMutation, ResidentFixture, SupervisorFixture,
-};
+use std::fs;
+use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use agl_config::{ModelDialect, ToolCallFormat};
+use agl_ids::{AttemptId, RunId, TurnId};
 use agl_inference::{
-    InferenceFailure, InferenceHost, InferenceHostStartError, InferenceQueueRejection,
-    LiveAdmissionRejection,
+    AttemptJournal, EngineExecutable, InferenceAttemptMachine, InferenceAttemptPhase,
+    InferenceAttemptTransition, InferenceHost, InferenceHostConfig, InferenceHostStartError,
+    InferencePlanRejectionEvidence, InferenceRequest,
 };
+use agl_model::{
+    GenerationPolicy, ModelPackage, ModelPackageId, ModelPlanRejection, PackagePlanIdentity,
+    ResolvedFunctionPlanInput, ResolvedModelPlanInput, StructuredGenerationMode,
+};
+use agl_oven::RenderedModelRequest;
+use sha2::{Digest, Sha256};
 
-fn start(fixture: &HostFixture) -> InferenceHost {
-    InferenceHost::start(fixture.config()).expect("host fixture must start")
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+// MIW-ARCH-004, MIW-TYPE-001 and MIW-ENG-013.
+#[test]
+fn the_host_supplies_capabilities_from_the_sealed_engine_inventory() {
+    let executable = inventory_fixture(false);
+    let host = InferenceHost::start(config(&executable)).unwrap();
+    assert!(host.static_capabilities().physical_cpu_cores > 0);
+    assert_eq!(host.static_capabilities().devices.len(), 1);
+    assert_eq!(host.static_capabilities().devices[0].identity, "CPU");
+    assert_eq!(host.engine_inventory().llama_cpp_commit, "0123456");
 }
 
-// MIW-TYPE-001. Canonical host conversion is exhaustive and rejects every
-// impossible or foreign native value.
+// MIW-ENG-001 and MIW-ID-001.
 #[test]
-fn host_engine_native_conversions_are_checked() {
-    for fixture in ConversionFixture::valid_variants() {
-        let host = InferenceHost::start(fixture.config()).unwrap();
-        assert_eq!(host.static_capabilities(), fixture.expected_capabilities());
-    }
-    for fixture in ConversionFixture::invalid_variants() {
-        assert!(matches!(
-            InferenceHost::start(fixture.config()),
-            Err(InferenceHostStartError::InvalidEngineInventory { .. })
-        ));
-    }
-    for mutation in ReceiptMutation::invalid_variants() {
-        let fixture = AdmissionFixture::canonical().mutate_receipt(mutation);
-        assert!(matches!(
-            fixture.run(),
-            Err(InferenceFailure::InvalidAllocationReceipt { .. })
-        ));
-    }
-}
-
-// MIW-ADM-001. CPU still reserves host RAM and rejects before any engine
-// request when the complete envelope does not fit.
-#[test]
-fn cpu_generation_is_admitted_through_the_host_ram_ledger() {
-    let fixture = AdmissionFixture::cpu().available_host_bytes(63 << 20);
-    let before = fixture.ledger_snapshot();
+fn executable_identity_drift_fails_before_inventory_is_trusted() {
+    let executable = inventory_fixture(false);
+    let mut bad = config(&executable);
+    bad.executable.sha256 = "0".repeat(64);
     assert!(matches!(
-        fixture.run(),
-        Err(InferenceFailure::Admission(
-            LiveAdmissionRejection::InsufficientHostMemory { .. }
-        ))
+        InferenceHost::start(bad),
+        Err(InferenceHostStartError::ExecutableIdentityMismatch { .. })
     ));
-    assert_eq!(fixture.ledger_snapshot(), before);
-    assert_eq!(fixture.engine_dispatch_count(), 0);
 }
 
-// MIW-ADM-002. RAM, every VRAM pool and shared memory commit atomically.
+// MIW-TYPE-001 and MIW-ENG-013.
 #[test]
-fn complete_resource_envelope_is_reserved_atomically() {
-    for fixture in AdmissionFixture::each_insufficient_dimension() {
-        let before = fixture.ledger_snapshot();
-        assert!(fixture.run().is_err());
-        assert_eq!(fixture.ledger_snapshot(), before, "{}", fixture.label());
-        assert_eq!(fixture.engine_dispatch_count(), 0);
-    }
-
-    let fixture = AdmissionFixture::canonical();
-    fixture.run().unwrap();
-    assert_eq!(
-        fixture.reservation().host_bytes(),
-        fixture.required_host_bytes()
-    );
-    assert_eq!(
-        fixture.reservation().device_bytes(),
-        fixture.required_device_bytes()
-    );
-    assert_eq!(
-        fixture.reservation().shared_bytes(),
-        fixture.required_shared_bytes()
-    );
-}
-
-// MIW-ADM-003. Every component maps to exactly one physical pool for discrete
-// and unified-memory hosts.
-#[test]
-fn discrete_and_unified_memory_components_are_charged_once() {
-    let discrete = AdmissionFixture::discrete().run_and_observe().unwrap();
-    assert_eq!(
-        discrete.charges(),
-        &[
-            PoolCharge::host_private(discrete.expected_host_private()),
-            PoolCharge::device_private(discrete.expected_device_private()),
-            PoolCharge::shared(discrete.expected_shared()),
-        ]
-    );
-    discrete.assert_every_component_classified_once();
-
-    let unified = AdmissionFixture::unified().run_and_observe().unwrap();
-    assert_eq!(unified.physical_shared_charge(), unified.expected_shared());
-    unified.assert_every_component_classified_once();
-    assert_eq!(
-        unified.total_physical_charge(),
-        unified.expected_total_without_double_count()
-    );
-}
-
-// MIW-ADM-004. Daemon clients share one queue/ledger; standalone owns host and
-// selected-device lifetime leases.
-#[test]
-fn daemon_and_standalone_have_one_live_resource_authority_each() {
-    let daemon = AdmissionFixture::two_daemon_clients();
-    daemon.submit_both();
-    assert_eq!(daemon.ledger_identity_count(), 1);
-    assert!(daemon.combined_reservations_fit_one_ledger());
-
-    let standalone = LeaseFixture::standalone();
-    let host = start(standalone.host_fixture());
-    assert!(standalone.host_lease_is_held());
-    assert_eq!(
-        standalone.held_device_leases(),
-        standalone.selected_devices()
-    );
-    drop(host);
-    standalone.assert_all_leases_released();
-
-    let blocked = LeaseFixture::standalone().with_device_lease_held_elsewhere();
+fn malformed_native_inventory_is_terminal() {
+    let executable = inventory_fixture(true);
     assert!(matches!(
-        InferenceHost::start(blocked.host_fixture().config()),
+        InferenceHost::start(config(&executable)),
+        Err(InferenceHostStartError::InvalidEngineInventory { .. })
+    ));
+}
+
+// MIW-JRN-004 and MIW-FSM-004. A durable nonterminal attempt is never
+// re-executed after host replacement; recovery records one typed failure.
+#[test]
+fn host_recovery_finishes_a_nonterminal_attempt_without_retry() {
+    let executable = inventory_fixture(false);
+    let root = std::env::temp_dir().join(format!(
+        "agl173-host-recovery-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let attempt_id = AttemptId::generate();
+    let path = root.join(attempt_id.as_str()).join("transitions.jsonl");
+    let mut journal = AttemptJournal::create(&path).unwrap();
+    let mut machine =
+        InferenceAttemptMachine::new(RunId::generate(), TurnId::generate(), attempt_id);
+    journal
+        .append(
+            &mut machine,
+            InferenceAttemptTransition::StartAttempt {
+                backend: "llama_cpp".to_owned(),
+                request_path: PathBuf::from("request.json"),
+                projection_root: None,
+            },
+        )
+        .unwrap();
+    drop(journal);
+
+    let _host = InferenceHost::start_with_journal_root(config(&executable), &root).unwrap();
+    let bytes = fs::read(path).unwrap();
+    let replay = AttemptJournal::replay(&bytes).unwrap();
+    assert_eq!(replay.machine().phase(), InferenceAttemptPhase::Failed);
+    let encoded = String::from_utf8(bytes).unwrap();
+    assert_eq!(encoded.matches("host_restarted").count(), 1);
+}
+
+// MIW-FSM-004 and MIW-JRN-005. Static planning failure happens after command
+// identity allocation and is terminal in the same durable attempt journal.
+#[test]
+fn plan_rejection_has_exact_identity_and_durable_typed_evidence() {
+    let executable = inventory_fixture(false);
+    let config = config(&executable);
+    let journal_root = executable.parent().unwrap().join("journals");
+    let host = InferenceHost::start_with_journal_root(config.clone(), &journal_root).unwrap();
+    let run_id = RunId::generate();
+    let turn_id = TurnId::generate();
+    let request = InferenceRequest {
+        run_id: run_id.clone(),
+        turn_id: turn_id.clone(),
+        attempt_id: AttemptId::generate(),
+        session_id: None,
+        request_id: None,
+        rendered: RenderedModelRequest {
+            run_id,
+            turn_id,
+            request_index: 0,
+            dialect: ModelDialect::Generic,
+            tool_call_format: ToolCallFormat::StructuredToolCalls,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
+    };
+    let function = ResolvedFunctionPlanInput {
+        package: package_identity("function:rejected@=1.0.0", 'a'),
+        selected_profile_id: "gpu-required".to_owned(),
+        generation_policy: GenerationPolicy::greedy(
+            32,
+            Vec::new(),
+            StructuredGenerationMode::Disabled,
+            false,
+        )
+        .unwrap(),
+        prompt_template_digest: digest('b'),
+        visible_tools_digest: digest('c'),
+    };
+    let model = ResolvedModelPlanInput {
+        package: package_identity("model:rejected@=1.0.0", 'd'),
+        payload_schema: "agentlibre.model/v3".to_owned(),
+        model: ModelPackage {
+            id: ModelPackageId::new("rejected").unwrap(),
+            provenance: None,
+            display_name: "Rejected fixture".to_owned(),
+            capabilities: Vec::new(),
+            license: "test".to_owned(),
+            license_url: "https://example.invalid".to_owned(),
+            repository: "test/rejected".to_owned(),
+            revision: "0".repeat(40),
+            artifacts: Vec::new(),
+            profiles: Vec::new(),
+        },
+    };
+    let rejection = ModelPlanRejection::UnknownProfile {
+        profile_id: function.selected_profile_id.clone(),
+    };
+    let projection_root = config
+        .evidence_root
+        .join(request.run_id.as_str())
+        .join("attempts")
+        .join(request.attempt_id.as_str());
+    fs::create_dir_all(&projection_root).unwrap();
+
+    host.record_plan_rejection(
+        &request,
+        InferencePlanRejectionEvidence::new(
+            &function,
+            &model,
+            rejection,
+            Some(serde_json::json!({"source": "product"})),
+        ),
+        Some(&projection_root),
+    )
+    .unwrap();
+
+    let path = journal_root
+        .join(request.attempt_id.as_str())
+        .join("transitions.jsonl");
+    let bytes = fs::read(path).unwrap();
+    let replay = AttemptJournal::replay(&bytes).unwrap();
+    assert_eq!(replay.machine().phase(), InferenceAttemptPhase::Failed);
+    let encoded = String::from_utf8(bytes).unwrap();
+    assert!(encoded.contains(request.run_id.as_str()));
+    assert!(encoded.contains(request.attempt_id.as_str()));
+    assert!(encoded.contains("unknown_profile"));
+    assert!(encoded.contains("function:rejected@=1.0.0"));
+    assert!(encoded.contains("model:rejected@=1.0.0"));
+}
+
+// MIW-ADM-004 and MIW-SUP-002. The host and selected-device leases are held
+// for the complete host lifetime and become available only after handoff.
+#[test]
+fn a_second_host_cannot_oversubscribe_the_same_authority() {
+    let executable = inventory_fixture(false);
+    let config = config(&executable);
+    let first = InferenceHost::start(config.clone()).unwrap();
+    assert!(matches!(
+        InferenceHost::start(config.clone()),
         Err(InferenceHostStartError::LeaseUnavailable { .. })
     ));
+    assert_eq!(first.status().authority_leases, 1);
+    drop(first);
+    InferenceHost::start(config).unwrap();
 }
 
-// MIW-ADM-005. Only idle unpinned entries evict and bytes return after the
-// matching unload acknowledgement, followed by exactly one re-evaluation.
-#[test]
-fn eviction_waits_for_exact_engine_unload_acknowledgement() {
-    let fixture = AdmissionFixture::needs_eviction();
-    fixture.run().unwrap();
-    assert_eq!(
-        fixture.evicted_entries(),
-        fixture.expected_idle_unpinned_entries()
-    );
-    assert!(
-        fixture
-            .active_entries()
-            .iter()
-            .all(|entry| !entry.evicted())
-    );
-    assert!(
-        fixture
-            .pinned_entries()
-            .iter()
-            .all(|entry| !entry.evicted())
-    );
-    assert!(fixture.bytes_release_happened_after_unload_ack());
-    assert_eq!(fixture.admission_evaluation_count(), 2);
-
-    let missing_ack = AdmissionFixture::needs_eviction().without_unload_ack();
-    assert!(missing_ack.run().is_err());
-    assert_eq!(missing_ack.released_bytes(), 0);
-}
-
-// MIW-ADM-006 and MIW-ADM-007. Receipts bind all authority identities, and
-// rejection has no fallback/reselection/retry side effects.
-#[test]
-fn receipt_mismatch_and_capacity_rejection_fail_closed() {
-    for mutation in ReceiptMutation::plan_device_reservation_and_generation() {
-        let fixture = AdmissionFixture::canonical().mutate_receipt(mutation);
-        assert!(matches!(
-            fixture.run(),
-            Err(InferenceFailure::InvalidAllocationReceipt { .. })
-        ));
-        assert!(fixture.quarantined());
-    }
-
-    let rejected = AdmissionFixture::insufficient_vram();
-    let selected = rejected.selected_shape();
-    assert!(rejected.run().is_err());
-    assert_eq!(rejected.selected_shape(), selected);
-    assert_eq!(rejected.engine_allocation_count(), 0);
-    assert_eq!(rejected.retry_count(), 0);
-    assert!(!rejected.cpu_fallback_attempted());
-}
-
-// MIW-ADM-008. Resolved media, transport copies and decoder allowance join the
-// same atomic host-RAM reservation and always release at terminal.
-#[test]
-fn media_memory_is_admitted_before_engine_visibility() {
-    let fixture = AdmissionFixture::with_media();
-    fixture.run().unwrap();
-    assert_eq!(
-        fixture.reserved_media_bytes(),
-        fixture.content_bytes() + fixture.transport_bytes() + fixture.decoder_allowance_bytes()
-    );
-    assert!(fixture.media_became_visible_after_admission());
-    assert_eq!(fixture.media_bytes_after_terminal(), 0);
-
-    let rejected = AdmissionFixture::with_media().insufficient_for_media();
-    assert!(rejected.run().is_err());
-    assert_eq!(rejected.engine_media_bytes_seen(), 0);
-    assert_eq!(rejected.media_bytes_after_terminal(), 0);
-}
-
-// MIW-ADM-009. Exact resident identity earns only the already charged model
-// credit; any key/generation/receipt drift earns none.
-#[test]
-fn resident_model_credit_requires_exact_key_and_generation() {
-    let exact = ResidentFixture::exact_second_plan();
-    exact.run().unwrap();
-    assert_eq!(exact.selected_device(), exact.original_device());
-    assert_eq!(exact.newly_reserved_bytes(), exact.incremental_bytes());
-    assert_eq!(exact.model_load_count(), 1);
-
-    for fixture in ResidentFixture::mismatched_reuse_cases() {
-        assert_eq!(fixture.reuse_credit_bytes(), 0, "{}", fixture.label());
-        assert!(fixture.run().is_err());
-        assert!(!fixture.cpu_fallback_attempted());
+fn config(path: &Path) -> InferenceHostConfig {
+    InferenceHostConfig {
+        executable: EngineExecutable {
+            path: path.to_path_buf(),
+            sha256: sha256(path),
+        },
+        queue_capacity: 2,
+        external_host_reserve_bytes: 0,
+        authority_root: path.parent().unwrap().join("authority"),
+        context_idle_duration: std::time::Duration::from_secs(900),
+        model_idle_duration: std::time::Duration::from_secs(300),
+        evidence_root: path.parent().unwrap().join("evidence"),
     }
 }
 
-// MIW-QUE-001. Queue cancellation/deadline removal is immediate, FIFO and
-// exactly-once under pop races.
-#[test]
-fn queued_cancellation_and_deadline_races_preserve_fifo_and_capacity() {
-    for mut fixture in QueueFixture::cancel_and_deadline_races() {
-        let cancelled = fixture.target_id();
-        fixture.run_race();
-        assert_eq!(fixture.completion_count(cancelled), 1);
-        assert!(!fixture.pending_ids().contains(&cancelled));
-        assert_eq!(fixture.pending_len(), fixture.capacity_used());
-        assert_eq!(
-            fixture.survivor_pop_order(),
-            fixture.original_survivor_order()
-        );
-    }
-}
-
-// MIW-QUE-002. One fixed slot serializes generation; active work is separate
-// from pending capacity and shutdown closes every waiter deterministically.
-#[test]
-fn one_slot_queue_is_bounded_and_shutdown_is_total() {
-    let mut fixture = QueueFixture::one_active_and_full_pending();
-    assert_eq!(fixture.active_generation_count(), 1);
-    assert_eq!(fixture.engine_slot_count(), 1);
-    assert_eq!(fixture.pending_len(), fixture.pending_capacity());
-    assert!(matches!(
-        fixture.submit_one_more(),
-        Err(InferenceFailure::Queue(InferenceQueueRejection::Full {
-            retryable: true,
-            ..
-        }))
+fn inventory_fixture(malformed: bool) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "agl173-inventory-{}-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
+        if malformed { "bad" } else { "good" }
     ));
-
-    fixture.shutdown();
-    assert!(matches!(
-        fixture.submit_one_more(),
-        Err(InferenceFailure::Queue(
-            InferenceQueueRejection::ShuttingDown
-        ))
-    ));
-    assert!(fixture.all_pending_cancelled());
-    assert!(fixture.active_attempt_was_signalled());
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("llama-server");
+    let payload = if malformed {
+        r#"{"schema":"wrong","llama_cpp_commit":"0123456","devices":[]}"#
+    } else {
+        r#"{"schema":"agentlibre.llama-inventory/v1","llama_cpp_commit":"0123456","devices":[{"identity":"CPU","description":"fixture","native_device_id":"","kind":"cpu","available_pool_bytes":1073741824,"physical_pool_bytes":1073741824}]}"#
+    };
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}' >&$AGL_LLAMA_SERVER_INVENTORY_FD\n",
+            payload
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
 }
 
-// MIW-SUP-001. Crash/device loss closes the active attempt once, keeps pending
-// FIFO work and starts a clean generation only for a later explicit request.
-#[test]
-fn engine_failure_does_not_retry_the_current_attempt() {
-    for mut fixture in SupervisorFixture::crash_and_device_loss() {
-        fixture.fail_active_generation();
-        assert_eq!(fixture.active_terminal_count(), 1);
-        assert_eq!(fixture.current_attempt_retry_count(), 0);
-        assert_eq!(fixture.pending_ids(), fixture.original_pending_ids());
-        assert!(fixture.cooldown_is_bounded_and_lazy());
-        assert_eq!(fixture.generation_start_count(), 1);
-        fixture.submit_after_cooldown();
-        assert_eq!(fixture.generation_start_count(), 2);
-        assert_ne!(fixture.latest_generation(), fixture.failed_generation());
+fn sha256(path: &Path) -> String {
+    let mut file = fs::File::open(path).unwrap();
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn package_identity(reference: &str, fill: char) -> PackagePlanIdentity {
+    PackagePlanIdentity {
+        reference: reference.parse().unwrap(),
+        source_id: "test".parse().unwrap(),
+        package_tree_digest: digest(fill).parse().unwrap(),
     }
 }
 
-// MIW-SUP-002. Every host/process termination route reaps the exact child,
-// closes unrelated FDs and reconciles reservations without losing durable
-// quarantine/cooldown identity.
-#[test]
-fn supervisor_reaps_and_reconciles_every_generation_boundary() {
-    for mut fixture in SupervisorFixture::termination_cases() {
-        fixture.terminate();
-        assert_eq!(fixture.exact_child_reap_count(), 1);
-        assert!(fixture.unrelated_fds_are_closed());
-        assert_eq!(fixture.unreconciled_reservation_bytes(), 0);
-        let health = fixture.durable_health_identity();
-        fixture.handoff_to_new_host();
-        assert_eq!(fixture.durable_health_identity(), health);
-        assert!(fixture.cooldown_and_quarantine_preserved());
-    }
-}
-
-// MIW-SEC-001. Same-UID access is not a sandbox boundary.
-#[test]
-fn native_process_has_only_admitted_descriptors_and_devices() {
-    let fixture = HostFixture::sandbox_negative_probes();
-    let host = start(&fixture);
-    let probes = fixture.run_same_uid_probes(&host);
-    assert!(probes.network_denied());
-    assert!(probes.workspace_denied());
-    assert!(probes.content_store_denied());
-    assert!(probes.database_denied());
-    assert!(probes.pty_denied());
-    assert!(probes.unrelated_fds_denied());
-    assert!(probes.unadmitted_devices_denied());
+fn digest(fill: char) -> String {
+    format!("sha256:{}", fill.to_string().repeat(64))
 }

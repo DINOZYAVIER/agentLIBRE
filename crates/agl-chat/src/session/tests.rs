@@ -99,7 +99,7 @@ package:
   type: function
   id: external-extension
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -173,7 +173,7 @@ package:
   type: function
   id: skill-snapshot
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -251,7 +251,6 @@ fn runtime_resolution_is_one_atomic_canonical_record() {
     let workspace = root.join("workspace");
     let function_root = workspace.join(".agl/functions/evidence-function");
     let artifact_root = root.join("artifacts");
-    let config_path = root.join("inference.toml");
     declare_workspace_source(&workspace);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::write(
@@ -262,13 +261,16 @@ package:
   type: function
   id: evidence-function
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
   requires:
     - extension:core.workspace@^1.0
+    - model:test-model@^1.0
 title: Evidence function
+model:
+  profile: local
 runtime:
   tool_mode: read-only
   max_output_tokens: 64
@@ -288,28 +290,6 @@ doctor:
         "Write canonical evidence.\n",
     )
     .unwrap();
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-            root.join("missing-model.gguf").display()
-        ),
-    )
-    .unwrap();
     let runtime = AgentLibreRuntimeConfig {
         paths: AgentLibrePaths::from_agl_home(root.join("home")),
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
@@ -318,12 +298,12 @@ tool_call_format = "hermes_json"
         inference: agl_runtime::AgentLibreInferenceConfig::default(),
         execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
+    crate::test_support::install_package_bound_test_model(&workspace, &runtime);
     let session_id = session_id();
     let run_id = run_id();
     let turn_id = turn_id();
     let mut session = InferenceSession::new(
         InferenceOptions {
-            config: Some(config_path),
             function_ref: Some("evidence-function".to_owned()),
             artifact_root: Some(artifact_root.clone()),
             workspace_root: Some(workspace),
@@ -366,7 +346,7 @@ tool_call_format = "hermes_json"
     );
     assert_eq!(record["function_policy"]["max_tool_calls"], 3);
     assert_eq!(record["admission"]["fallback_allowed"], false);
-    assert_eq!(record["admission"]["status"], "pre_effect_admitted");
+    assert_eq!(record["admission"]["status"], "preview_non_authoritative");
     assert!(record["model_reuse_key"].as_str().is_some());
     assert!(record["context_reuse_key"].as_str().is_some());
     assert_eq!(record["client_runtime"], record["daemon_runtime"]);
@@ -376,19 +356,6 @@ tool_call_format = "hermes_json"
         context_tokens: 65_536,
         model_key: record["model_reuse_key"].as_str().unwrap().to_owned(),
         context_key: record["context_reuse_key"].as_str().unwrap().to_owned(),
-        snapshot: agl_inference::admission::DeviceMemorySnapshot {
-            physical_device_id: "drm-render-128".to_owned(),
-            driver_id: "amdgpu-test".to_owned(),
-            total_bytes: 25_752_453_120,
-            available_bytes: 22_516_338_688,
-            observed_at_unix_ms: 1_000,
-        },
-        estimate: agl_inference::admission::AllocationEstimate {
-            model_bytes: 17_773_363_200,
-            context_bytes: 4_037_017_600,
-            transient_bytes: 335_544_320,
-            uncertainty_bytes: 268_435_456,
-        },
         required_bytes: 23_488_102_400,
         available_bytes: 22_516_338_688,
         reserved_bytes: 0,
@@ -424,8 +391,8 @@ tool_call_format = "hermes_json"
         details.selected_profile_id
     );
     assert_eq!(
-        rejected["admission"]["error"]["details"]["estimate"]["context_bytes"],
-        details.estimate.context_bytes
+        rejected["admission"]["error"]["details"]["required_bytes"],
+        details.required_bytes
     );
     assert_eq!(
         rejected["admission"]["error"]["details"]["model_load_started"],
@@ -457,10 +424,6 @@ tool_call_format = "hermes_json"
 
 #[test]
 fn build_request_uses_agentlibre_boundaries() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let session_id = session_id();
     let request_id = request_id();
     let effective = effective_capabilities(&[]);
@@ -476,7 +439,6 @@ fn build_request_uses_agentlibre_boundaries() {
             visible_tools: Vec::new(),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             session_id: Some(&session_id),
             request_id: Some(&request_id),
@@ -495,19 +457,15 @@ fn build_request_uses_agentlibre_boundaries() {
     assert_eq!(request.rendered.turn_id, turn_id());
     assert_eq!(request.rendered.request_index, 7);
     assert_eq!(request.rendered.messages.len(), 1);
-    assert_eq!(request.rendered.dialect, ModelDialect::Qwen3);
+    assert_eq!(request.rendered.dialect, ModelDialect::Generic);
     assert_eq!(
         request.rendered.tool_call_format,
-        ToolCallFormat::HermesJson
+        ToolCallFormat::StructuredToolCalls
     );
 }
 
 #[test]
 fn build_request_prepends_configured_system_prompt() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
@@ -521,7 +479,6 @@ fn build_request_prepends_configured_system_prompt() {
             visible_tools: Vec::new(),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("demo system"),
             effective_capabilities: Some(&effective),
@@ -548,10 +505,6 @@ fn build_request_prepends_configured_system_prompt() {
 
 #[test]
 fn build_request_prepends_skill_context_after_system_prompt() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
@@ -565,7 +518,6 @@ fn build_request_prepends_skill_context_after_system_prompt() {
             visible_tools: Vec::new(),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
@@ -586,10 +538,6 @@ fn build_request_prepends_skill_context_after_system_prompt() {
 
 #[test]
 fn build_request_rejects_skill_routing_parity_failure_before_inference() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&["core.workspace:fs.read"]);
     let skill_id = SkillId::new("forged-routing").unwrap();
     let routing = SkillToolRoutingView::new([(
@@ -616,7 +564,6 @@ fn build_request_rejects_skill_routing_parity_failure_before_inference() {
             visible_tools: visible_tools_from_effective(&effective),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             skill_context: Some("<agentlibre_skill_context>\nforged\n</agentlibre_skill_context>"),
             skill_tool_routing: Some(&routing),
@@ -635,10 +582,6 @@ fn build_request_rejects_skill_routing_parity_failure_before_inference() {
 
 #[test]
 fn build_request_prepends_memory_context_before_skill_context() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
@@ -652,7 +595,6 @@ fn build_request_prepends_memory_context_before_skill_context() {
             visible_tools: Vec::new(),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             memory_context: Some("memory context"),
@@ -678,10 +620,6 @@ fn build_request_prepends_memory_context_before_skill_context() {
 
 #[test]
 fn build_request_injects_runtime_features_before_tools() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&[
         "core.workspace:fs.list",
         "core.workspace:fs.read",
@@ -706,7 +644,6 @@ fn build_request_injects_runtime_features_before_tools() {
             visible_tools,
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             runtime_feature_context: Some(&runtime_context.content),
@@ -753,10 +690,6 @@ fn build_request_injects_runtime_features_before_tools() {
 
 #[test]
 fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
     let effective = effective_capabilities(&["core.workspace:fs.read"]);
 
     let request = build_inference_request(
@@ -770,7 +703,6 @@ fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
             visible_tools: visible_tools_from_effective(&effective),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
@@ -795,10 +727,6 @@ fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
 
 #[test]
 fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
-    let config = ModelConfig {
-        dialect: ModelDialect::Gemma4,
-        tool_call_format: ToolCallFormat::GemmaFunctionCall,
-    };
     let effective = effective_capabilities(&["core.workspace:fs.read"]);
 
     let request = build_inference_request(
@@ -812,7 +740,6 @@ fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
             visible_tools: visible_tools_from_effective(&effective),
         },
         AttemptId::generate(),
-        &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
@@ -837,20 +764,13 @@ fn rendered_tool_keeps_the_exact_input_schema() {
         .tool(&ToolId::new("core.workspace:fs.read").unwrap())
         .unwrap()
         .declaration();
-    let config = ModelConfig {
-        dialect: ModelDialect::Qwen3,
-        tool_call_format: ToolCallFormat::HermesJson,
-    };
-    let rendered = render_model_request(
-        &ModelRequest {
-            run_id: run_id(),
-            turn_id: turn_id(),
-            request_index: 0,
-            messages: vec![],
-            visible_tools: visible_tools_from_effective(&effective),
-        },
-        &config,
-    )
+    let rendered = render_engine_request(&ModelRequest {
+        run_id: run_id(),
+        turn_id: turn_id(),
+        request_index: 0,
+        messages: vec![],
+        visible_tools: visible_tools_from_effective(&effective),
+    })
     .unwrap();
 
     assert_eq!(rendered.tools[0].input_schema, declaration.input_schema);
@@ -1298,31 +1218,8 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
     ];
     let root = temp_store_root("function-policy-session");
     let workspace = root.join("workspace");
-    let config_path = root.join("inference.toml");
     declare_workspace_source(&workspace);
     std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-            root.join("missing-model.gguf").display()
-        ),
-    )
-    .unwrap();
     let runtime = AgentLibreRuntimeConfig {
         paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
@@ -1331,6 +1228,7 @@ tool_call_format = "hermes_json"
         inference: agl_runtime::AgentLibreInferenceConfig::default(),
         execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
+    crate::test_support::install_package_bound_test_model(&workspace, &runtime);
     let catalog = full_tool_catalog();
     let catalog_ids = catalog
         .extensions()
@@ -1345,7 +1243,7 @@ tool_call_format = "hermes_json"
         std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
             format!(
-                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Function policy test\n{}---\n",
+                "---\npackage:\n  schema: agentlibre.package/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v3\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\n    - model:test-model@^1.0\ntitle: Function policy test\nmodel:\n  profile: local\nruntime:\n  max_output_tokens: 64\n  stop_rules: []\n  structured_generation: lazy_tool\n  repair_malformed_tool_calls: true\n{}---\n",
                 case.id, case.tools_yaml
             ),
         )
@@ -1358,7 +1256,6 @@ tool_call_format = "hermes_json"
 
         let session = InferenceSession::new(
             InferenceOptions {
-                config: Some(config_path.clone()),
                 function_ref: Some(case.id.to_string()),
                 artifact_root: Some(root.join("artifacts").join(case.id)),
                 workspace_root: Some(workspace.clone()),
@@ -1406,7 +1303,6 @@ tool_call_format = "hermes_json"
                 visible_tools: session.turn_visible_tools().to_vec(),
             },
             AttemptId::generate(),
-            &session.model_config,
             InferenceRequestContexts {
                 system_prompt: session.system_prompt.as_deref(),
                 runtime_feature_context: session.runtime_feature_context.as_deref(),
@@ -1466,7 +1362,7 @@ package:
   type: function
   id: locked
   version: 1.0.0
-  payload_schema: agentlibre.function/v2
+  payload_schema: agentlibre.function/v3
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
@@ -1499,7 +1395,6 @@ title: Locked Function
     };
     let error = match InferenceSession::new(
         InferenceOptions {
-            config: Some(root.join("unused-config.toml")),
             function_ref: Some("locked".to_owned()),
             workspace_root: Some(workspace),
             ..Default::default()
@@ -2586,55 +2481,10 @@ fn resolves_default_paths_from_runtime_config() {
         inference: agl_runtime::AgentLibreInferenceConfig::default(),
         execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
-    let options = InferenceOptions::default();
-
-    assert_eq!(
-        InferenceSession::resolve_config_path(&options, &runtime, None),
-        PathBuf::from("/tmp/agl-home/config/inference/local.toml")
-    );
     assert_eq!(
         InferenceSession::default_artifact_root(&runtime),
         PathBuf::from("/tmp/agl-home/data")
     );
-}
-
-#[test]
-fn embedded_function_profile_rejects_external_config_override() {
-    let root = temp_store_root("embedded-function-config-override");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let runtime = AgentLibreRuntimeConfig {
-        paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
-        logging: agl_runtime::AgentLibreLoggingConfig::default(),
-        history: agl_runtime::AgentLibreHistoryConfig::default(),
-        workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
-        inference: agl_runtime::AgentLibreInferenceConfig::default(),
-        execution: agl_runtime::AgentLibreExecutionConfig::default(),
-    };
-
-    let error = InferenceSession::new(
-        InferenceOptions {
-            config: Some(root.join("override.toml")),
-            function_ref: Some("gemma4-31b-32k".to_owned()),
-            artifact_root: Some(root.join("artifacts")),
-            workspace_root: Some(workspace),
-            ..Default::default()
-        },
-        &runtime,
-        None,
-        session_id(),
-        crate::inference_client::test_inference_client(),
-    )
-    .err()
-    .expect("external config must not replace an embedded Function profile");
-
-    let rendered = format!("{error:#}");
-    assert!(
-        rendered.contains("function:gemma4-31b-32k@1.2.0"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("owns an embedded inference profile"));
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

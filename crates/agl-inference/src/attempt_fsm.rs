@@ -34,6 +34,8 @@ pub struct InferenceAttemptFailure {
     pub code: String,
     pub stage: InferenceRejectionStage,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_rejection: Option<InferencePlanRejectionEvidence>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -48,6 +50,34 @@ pub struct InferencePlanEvidence {
     pub plan_digest: String,
     pub package_refs: Vec<String>,
     pub profile_id: String,
+    pub product_resolution: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferencePlanRejectionEvidence {
+    pub function_package: String,
+    pub model_package: String,
+    pub profile_id: String,
+    pub rejection: agl_model::ModelPlanRejection,
+    pub product_resolution: Option<serde_json::Value>,
+}
+
+impl InferencePlanRejectionEvidence {
+    pub fn new(
+        function: &agl_model::ResolvedFunctionPlanInput,
+        model: &agl_model::ResolvedModelPlanInput,
+        rejection: agl_model::ModelPlanRejection,
+        product_resolution: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            function_package: function.package.reference.to_string(),
+            model_package: model.package.reference.to_string(),
+            profile_id: function.selected_profile_id.clone(),
+            rejection,
+            product_resolution,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -61,6 +91,8 @@ pub struct InferenceContentEvidence {
 #[serde(deny_unknown_fields)]
 pub struct InferenceAdmissionEvidence {
     pub reservation_id: String,
+    pub engine_reservation_id: String,
+    pub reused_resident_allocation: bool,
     pub resource_components: Vec<(String, u64)>,
 }
 
@@ -75,6 +107,22 @@ pub struct InferenceDispatchEvidence {
 #[serde(deny_unknown_fields)]
 pub struct InferenceRuntimeEvidence {
     pub allocation_receipt_id: String,
+    pub plan_digest: String,
+    pub reservation_id: String,
+    pub engine_generation: String,
+    pub selected_device: Option<String>,
+    pub host_bytes: u64,
+    pub device_bytes: u64,
+    pub shared_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceGenerationEvidence {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub configured_batch_size: u32,
+    pub prefill_chunks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -88,6 +136,7 @@ pub enum InferenceAttemptPhase {
     Admitted,
     DispatchRecorded,
     RuntimeGenerating,
+    RuntimeMeasured,
     RuntimeLogRecorded,
     ResponseRecorded,
     FailureRecorded,
@@ -109,6 +158,7 @@ impl InferenceAttemptPhase {
             Self::Admitted => "admitted",
             Self::DispatchRecorded => "dispatch_recorded",
             Self::RuntimeGenerating => "runtime_generating",
+            Self::RuntimeMeasured => "runtime_measured",
             Self::RuntimeLogRecorded => "runtime_log_recorded",
             Self::ResponseRecorded => "response_recorded",
             Self::FailureRecorded => "failure_recorded",
@@ -134,6 +184,7 @@ pub enum InferenceAttemptTransition {
     StartAttempt {
         backend: String,
         request_path: PathBuf,
+        projection_root: Option<PathBuf>,
     },
     RecordRequest {
         path: PathBuf,
@@ -152,6 +203,9 @@ pub enum InferenceAttemptTransition {
     },
     RecordRuntimeStarted {
         runtime: InferenceRuntimeEvidence,
+    },
+    RecordGenerationMetrics {
+        generation: InferenceGenerationEvidence,
     },
     RecordRuntimeLog {
         path: PathBuf,
@@ -180,6 +234,7 @@ impl InferenceAttemptTransition {
             Self::RecordAdmissionGrant { .. } => "record_admission_grant",
             Self::RecordDispatch { .. } => "record_dispatch",
             Self::RecordRuntimeStarted { .. } => "record_runtime_started",
+            Self::RecordGenerationMetrics { .. } => "record_generation_metrics",
             Self::RecordRuntimeLog { .. } => "record_runtime_log",
             Self::RecordResponse { .. } => "record_response",
             Self::RecordFailure { .. } => "record_failure",
@@ -347,7 +402,8 @@ fn next_phase(
         (ContentReady, RecordAdmissionGrant { .. }) => Some(Admitted),
         (Admitted, RecordDispatch { .. }) => Some(DispatchRecorded),
         (DispatchRecorded, RecordRuntimeStarted { .. }) => Some(RuntimeGenerating),
-        (RuntimeGenerating, RecordRuntimeLog { .. }) => Some(RuntimeLogRecorded),
+        (RuntimeGenerating, RecordGenerationMetrics { .. }) => Some(RuntimeMeasured),
+        (RuntimeMeasured, RecordRuntimeLog { .. }) => Some(RuntimeLogRecorded),
         (RuntimeLogRecorded, RecordResponse { .. }) => Some(ResponseRecorded),
         (phase, RecordFailure { .. }) if is_failure_eligible(phase) => Some(FailureRecorded),
         (phase, RecordCancellation { .. }) if is_failure_eligible(phase) => {

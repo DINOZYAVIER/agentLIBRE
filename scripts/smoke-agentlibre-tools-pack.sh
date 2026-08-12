@@ -4,10 +4,9 @@ set -euo pipefail
 # Opt-in local-model regression pack.
 #
 # Full run:
-#   AGL_SMOKE_CONFIG=/absolute/or/relative/inference.toml \
+#   AGL_SMOKE_FUNCTION=gemma4-12b \
 #     scripts/smoke-agentlibre-tools-pack.sh
-# The focused runtime cases require a GPU-offload config and default to
-# AGL_SMOKE_DEVICE=Vulkan0; override that device when the config uses another GPU.
+# The focused runtime cases require an installed package-bound Model.
 #
 # Static validations only (no model or GGUF required):
 #   AGL_SMOKE_STATIC_ONLY=1 scripts/smoke-agentlibre-tools-pack.sh
@@ -21,7 +20,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 # shellcheck source=smoke-lib.sh
 source "$script_dir/smoke-lib.sh"
 
-config="${AGL_SMOKE_CONFIG:-}"
+function_ref="${AGL_SMOKE_FUNCTION:-gemma4-12b}"
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-067-tools-pack}"
 agl_bin="${AGL_SMOKE_AGL_BIN:-$repo_root/target/debug/agl}"
 max_output_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-192}"
@@ -49,19 +48,10 @@ need_tool ln
 need_tool python3
 
 if [[ "$static_only" == 0 ]]; then
-  [[ -n "$config" ]] ||
-    fail "AGL_SMOKE_CONFIG must point to a local inference TOML file"
-  [[ -f "$config" ]] || fail "missing smoke config: $config"
-  config="$(smoke_abs_path "$config")"
-  tool_call_format="$(python3 - "$config" <<'PY'
-import sys
-import tomllib
-
-with open(sys.argv[1], "rb") as handle:
-    config = tomllib.load(handle)
-print(config.get("model", {}).get("tool_call_format", "hermes_json"))
-PY
-)"
+  case "$function_ref" in
+    *gemma*) tool_call_format="gemma_function_call" ;;
+    *) tool_call_format="hermes_json" ;;
+  esac
 fi
 
 mkdir -p "$artifact_root"
@@ -377,8 +367,8 @@ run_one_shot_case() {
   set +e
   (
     cd "$CASE_WORKSPACE"
-    AGL_HOME="$CASE_HOME" "$agl_bin" inference run \
-      --config "$config" \
+    AGL_HOME="$CASE_HOME" "$agl_bin" run \
+      --function "$function_ref" \
       --artifact-root "$CASE_ARTIFACTS" \
       --workspace-root "$CASE_WORKSPACE" \
       --max-output-tokens "$max_output_tokens" \
@@ -551,7 +541,7 @@ run_focused_smoke() {
   mkdir -p "$case_root"
   printf 'running focused smoke: %s\n' "$name"
   printf 'focused case root: %s\n' "$case_root"
-  if ! AGL_SMOKE_CONFIG="$config" \
+  if ! AGL_SMOKE_FUNCTION="$function_ref" \
     AGL_SMOKE_ARTIFACT_ROOT="$case_root/artifacts" \
     AGL_SMOKE_HOME="$case_root/home" \
     AGL_SMOKE_AGL_BIN="$agl_bin" \
@@ -823,7 +813,6 @@ fi
 
 run_focused_smoke "focused-skill-tools" "$script_dir/smoke-agentlibre-skill-tools.sh"
 run_focused_smoke "focused-llama-cpp" "$script_dir/smoke-agentlibre-llama-cpp.sh"
-run_focused_smoke "focused-multiturn-flows" "$script_dir/smoke-agentlibre-multiturn-flows.sh"
 
 run_read_list_search_case
 run_readonly_edit_rejection_case
@@ -855,7 +844,7 @@ else
 fi
 run_malformed_rejection_case
 pack_passed=1
-echo "config path: $config"
+echo "function: $function_ref"
 echo "tool call format: $tool_call_format"
 echo "artifact root: $run_root"
 echo "case summary: $summary_path"

@@ -60,6 +60,66 @@ pub struct InstalledArtifactFile {
     pub sha256: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedModelArtifactFile {
+    pub role: ModelArtifactRole,
+    pub basename: String,
+    pub path: PathBuf,
+    pub byte_size: u64,
+    pub sha256: String,
+}
+
+pub fn resolve_installed_plan_files(
+    plan: &crate::ModelExecutionPlan,
+    store: &ModelInstallStore,
+) -> Result<Vec<ResolvedModelArtifactFile>> {
+    let mut resolved = Vec::new();
+    for artifact in plan.artifact_roles() {
+        let model_id = ModelId::new(artifact.model_id())?;
+        let record = store
+            .get(&model_id)?
+            .with_context(|| format!("Model artifact `{model_id}` is not installed"))?;
+        ensure!(
+            record.state == InstallRecordState::Active && record.role == artifact.role(),
+            "installed Model artifact `{model_id}` has the wrong role or state"
+        );
+        let files = std::iter::once(InstalledArtifactFile {
+            filename: record
+                .path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .context("installed primary Model filename is not UTF-8")?
+                .to_owned(),
+            path: record.path.clone(),
+            byte_size: record.byte_size,
+            sha256: record.sha256.clone(),
+        })
+        .chain(record.additional_files.clone())
+        .collect::<Vec<_>>();
+        ensure!(
+            files.len() == artifact.files().len(),
+            "installed Model artifact `{model_id}` file count does not match the execution plan"
+        );
+        for (installed, planned) in files.into_iter().zip(artifact.files()) {
+            ensure!(
+                installed.filename == planned.basename()
+                    && installed.byte_size == planned.byte_size()
+                    && installed.sha256 == planned.sha256(),
+                "installed Model artifact `{model_id}` does not match planned file `{}`",
+                planned.basename()
+            );
+            resolved.push(ResolvedModelArtifactFile {
+                role: artifact.role(),
+                basename: installed.filename,
+                path: installed.path,
+                byte_size: installed.byte_size,
+                sha256: installed.sha256,
+            });
+        }
+    }
+    Ok(resolved)
+}
+
 impl ModelInstallRecord {
     pub fn from_downloaded(artifact: &crate::DownloadedArtifact) -> Result<Self> {
         let path = absolute_path(&artifact.path)?;

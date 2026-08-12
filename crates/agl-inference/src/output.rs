@@ -348,6 +348,7 @@ struct PublicInferenceOutputState {
     private_validator: InferenceStageValidator,
     public_validator: InferenceStageValidator,
     delivery_suspended: bool,
+    last_delta_sequence: u64,
 }
 
 impl PublicInferenceOutputBroker {
@@ -357,6 +358,7 @@ impl PublicInferenceOutputBroker {
                 private_validator: InferenceStageValidator::worker(attempt_id.clone()),
                 public_validator: InferenceStageValidator::host(attempt_id.clone()),
                 delivery_suspended: false,
+                last_delta_sequence: 0,
             }),
             attempt_id,
             downstream,
@@ -373,8 +375,37 @@ impl PublicInferenceOutputBroker {
         self.deliver(&mut state, InferenceOutputEvent::Stage(event));
     }
 
+    pub(crate) fn emit_engine_stage(&self, stage: InferenceProductStage) {
+        debug_assert!(stage.is_worker_owned());
+        let mut state = self.lock_state();
+        let private = InferenceStageEvent {
+            attempt_id: self.attempt_id.clone(),
+            stage_sequence: state.private_validator.last_sequence() + 1,
+            stage,
+            completed: None,
+            total: None,
+            unit: None,
+        };
+        if state.private_validator.accept(&private).is_err() {
+            return;
+        }
+        let Some(public) = next_public_event(&mut state, &self.attempt_id, stage, None, None, None)
+        else {
+            return;
+        };
+        self.deliver(&mut state, InferenceOutputEvent::Stage(public));
+    }
+
     pub(crate) fn last_public_stage(&self) -> Option<InferenceProductStage> {
         self.lock_state().public_validator.last_stage()
+    }
+
+    pub(crate) fn emit_text_delta(&self, sequence: u64, text: String) -> OutputDelivery {
+        self.try_emit(InferenceOutputEvent::TextDelta {
+            attempt_id: self.attempt_id.clone(),
+            sequence,
+            text,
+        })
     }
 
     #[cfg(test)]
@@ -410,6 +441,18 @@ impl InferenceOutputSink for PublicInferenceOutputBroker {
                 if attempt_id != self.attempt_id {
                     return OutputDelivery::Closed;
                 }
+                let Some(expected) = state.last_delta_sequence.checked_add(1) else {
+                    return OutputDelivery::Closed;
+                };
+                if sequence != expected
+                    || text.is_empty()
+                    || state.public_validator.last_stage().is_none_or(|stage| {
+                        stage != InferenceProductStage::Generation || stage.is_terminal()
+                    })
+                {
+                    return OutputDelivery::Closed;
+                }
+                state.last_delta_sequence = sequence;
                 self.deliver(
                     &mut state,
                     InferenceOutputEvent::TextDelta {
@@ -639,6 +682,51 @@ mod tests {
                 None,
             ))),
             OutputDelivery::Closed
+        );
+    }
+
+    // MIW-PROTO-001 and MIW-ENG-005.
+    #[test]
+    fn text_deltas_require_exact_attempt_order_and_generation_stage() {
+        let attempt_id = AttemptId::generate();
+        let foreign_attempt = AttemptId::generate();
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+            delivery: OutputDelivery::Delivered,
+        });
+        let broker = PublicInferenceOutputBroker::new(attempt_id.clone(), sink.clone());
+        assert_eq!(
+            broker.emit_text_delta(1, "early".to_owned()),
+            OutputDelivery::Closed
+        );
+        broker.emit_host_stage(InferenceProductStage::Queued);
+        broker.emit_host_stage(InferenceProductStage::Admission);
+        broker.emit_engine_stage(InferenceProductStage::ModelReuse);
+        broker.emit_engine_stage(InferenceProductStage::ContextReuse);
+        broker.emit_engine_stage(InferenceProductStage::Generation);
+        assert_eq!(
+            broker.emit_text_delta(1, "one".to_owned()),
+            OutputDelivery::Delivered
+        );
+        assert_eq!(
+            broker.emit_text_delta(1, "duplicate".to_owned()),
+            OutputDelivery::Closed
+        );
+        assert_eq!(
+            broker.emit_text_delta(3, "gap".to_owned()),
+            OutputDelivery::Closed
+        );
+        assert_eq!(
+            broker.try_emit(InferenceOutputEvent::TextDelta {
+                attempt_id: foreign_attempt,
+                sequence: 2,
+                text: "foreign".to_owned(),
+            }),
+            OutputDelivery::Closed
+        );
+        assert_eq!(
+            broker.emit_text_delta(2, "two".to_owned()),
+            OutputDelivery::Delivered
         );
     }
 

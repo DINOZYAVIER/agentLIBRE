@@ -4,12 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
-config="${1:-${AGL_SMOKE_CONFIG:-}}"
-[[ -n "$config" ]] || {
-  echo "usage: scripts/agl-daemon-live-smoke.sh /path/to/local-inference.toml" >&2
-  echo "set AGL_SMOKE_SERVE_MODE=function|inference to select the daemon surface" >&2
-  exit 2
-}
+function_ref="${1:-${AGL_SMOKE_FUNCTION:-gemma4-12b}}"
 
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-073-daemon-smoke}"
 run_suffix="agl-073-$(date +%s)-$$"
@@ -20,20 +15,7 @@ daemon_log="$home/daemon.log"
 prompt="${AGL_SMOKE_PROMPT:-Say 'daemon smoke ok' in one short sentence.}"
 max_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-64}"
 timeout_seconds="${AGL_SMOKE_TIMEOUT_SECONDS:-180}"
-serve_mode="${AGL_SMOKE_SERVE_MODE:-function}"
-
-case "$serve_mode" in
-  function)
-    serve_command=(serve)
-    ;;
-  inference)
-    serve_command=(inference serve)
-    ;;
-  *)
-    echo "unsupported AGL_SMOKE_SERVE_MODE: $serve_mode" >&2
-    exit 2
-    ;;
-esac
+serve_command=(serve)
 
 cleanup() {
   if [[ -n "${daemon_pid:-}" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
@@ -53,7 +35,7 @@ cargo build \
   --home "$home" \
   "${serve_command[@]}" \
   --socket "$socket" \
-  --config "$config" \
+  --function "$function_ref" \
   --max-output-tokens "$max_tokens" \
   >"$daemon_log" 2>&1 &
 daemon_pid=$!

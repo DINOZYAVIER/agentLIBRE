@@ -106,62 +106,6 @@ require_exact_executable() {
     fail "$label is not an immutable owned single-link executable: $path"
 }
 
-validate_native_bundle() {
-  local base="$1"
-  local entry
-  local leaf=""
-  local name
-  local cpu_count=0
-  local entry_count=0
-  local -A required=(
-    [libllama-common.so.0]=0
-    [libmtmd.so.0]=0
-    [libllama.so.0]=0
-    [libggml.so.0]=0
-    [libggml-base.so.0]=0
-  )
-  [[ -d "$base" && ! -L "$base" &&
-    "$(stat -c '%a' -- "$base")" == 555 &&
-    "$(stat -c '%u' -- "$base")" == "$current_uid" ]] ||
-    fail "native inference bundle base is not exact: $base"
-  shopt -s nullglob
-  for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
-    [[ -z "$leaf" ]] || fail "native inference bundle has multiple leaves: $base"
-    leaf="$entry"
-  done
-  shopt -u nullglob
-  [[ -n "$leaf" && -d "$leaf" && ! -L "$leaf" &&
-    "${leaf##*/}" =~ ^sha256-[0-9a-f]{64}$ &&
-    "$(stat -c '%a' -- "$leaf")" == 555 &&
-    "$(stat -c '%u' -- "$leaf")" == "$current_uid" ]] ||
-    fail "native inference bundle leaf is not exact: $base"
-  shopt -s nullglob
-  for entry in "$leaf"/* "$leaf"/.[!.]* "$leaf"/..?*; do
-    name="${entry##*/}"
-    [[ -f "$entry" && ! -L "$entry" &&
-      "$(stat -c '%a' -- "$entry")" == 555 &&
-      "$(stat -c '%u' -- "$entry")" == "$current_uid" &&
-      "$(stat -c '%h' -- "$entry")" == 1 ]] ||
-      fail "native inference bundle entry is not exact: $entry"
-    case "$name" in
-      libllama-common.so.0 | libmtmd.so.0 | libllama.so.0 | libggml.so.0 | libggml-base.so.0)
-        required["$name"]=1
-        ;;
-      libggml-cpu-*.so) cpu_count=$((cpu_count + 1)) ;;
-      libggml-vulkan.so) ;;
-      *) fail "native inference bundle contains an unexpected entry: $entry" ;;
-    esac
-    entry_count=$((entry_count + 1))
-    (( entry_count <= 64 )) || fail "native inference bundle exceeds its file bound: $leaf"
-  done
-  shopt -u nullglob
-  (( cpu_count > 0 )) || fail "native inference bundle has no CPU backend: $leaf"
-  for name in "${!required[@]}"; do
-    [[ "${required[$name]}" == 1 ]] ||
-      fail "native inference bundle is missing $name: $leaf"
-  done
-}
-
 validate_nix_gc_roots() {
   local directory="$1"
   local entry
@@ -189,8 +133,8 @@ validate_generation() {
   local entry
   local name
   local entry_count=0
-  local has_worker=0
-  local has_native=0
+  local has_engine=0
+  local library_count=0
   local has_manifest=0
   local has_gc_roots=0
   [[ -d "$generation" && ! -L "$generation" &&
@@ -204,8 +148,15 @@ validate_generation() {
     name="${entry##*/}"
     case "$name" in
       agl) ;;
-      agl-inference-worker) has_worker=1 ;;
-      agl-inference-native) has_native=1 ;;
+      llama-server) has_engine=1 ;;
+      lib*.so | lib*.so.*)
+        [[ -f "$entry" && ! -L "$entry" &&
+          "$(stat -c '%a' -- "$entry")" == 555 &&
+          "$(stat -c '%u' -- "$entry")" == "$current_uid" &&
+          "$(stat -c '%h' -- "$entry")" == 1 ]] ||
+          fail "runtime engine library is not exact: $entry"
+        library_count=$((library_count + 1))
+        ;;
       runtime-manifest.json) has_manifest=1 ;;
       .nix-gc-roots) has_gc_roots=1 ;;
       *)
@@ -217,19 +168,14 @@ validate_generation() {
   done
   shopt -u nullglob
   require_exact_executable "$generation/agl" "agl"
-  (( has_worker == 1 && has_native == 1 && has_manifest == 1 &&
-    (entry_count == 4 || entry_count == 5) )) ||
+  (( has_engine == 1 && library_count > 0 && has_manifest == 1 )) ||
     fail "runtime generation is not the exact sealed-manifest alpha layout: $generation"
-  if (( (entry_count == 5) != (has_gc_roots == 1) )); then
-    fail "runtime generation has an inconsistent Nix GC-root layout: $generation"
-  fi
   [[ -f "$generation/runtime-manifest.json" && ! -L "$generation/runtime-manifest.json" &&
     "$(stat -c '%a' -- "$generation/runtime-manifest.json")" == 444 &&
     "$(stat -c '%u' -- "$generation/runtime-manifest.json")" == "$current_uid" &&
     "$(stat -c '%h' -- "$generation/runtime-manifest.json")" == 1 ]] ||
     fail "runtime manifest is not an immutable owned single-link file: $generation/runtime-manifest.json"
-  require_exact_executable "$generation/agl-inference-worker" "inference worker"
-  validate_native_bundle "$generation/agl-inference-native"
+  require_exact_executable "$generation/llama-server" "private llama-server"
   if (( has_gc_roots == 1 )); then
     validate_nix_gc_roots "$generation/.nix-gc-roots"
   fi
@@ -306,7 +252,7 @@ done
 
 declare -A managed_executable_inodes=()
 for generation in "${generation_paths[@]}"; do
-  for executable_name in agl agl-inference-worker; do
+  for executable_name in agl llama-server; do
     executable="$generation/$executable_name"
     if [[ -f "$executable" && ! -L "$executable" ]]; then
       managed_executable_inodes["$(stat -Lc '%d:%i' -- "$executable")"]=1

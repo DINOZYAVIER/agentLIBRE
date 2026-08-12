@@ -225,9 +225,7 @@ mod tests {
                             builtin_catalog_digest: format!("sha256:{}", "b".repeat(64)),
                             executable_digest: format!("sha256:{}", "c".repeat(64)),
                         },
-                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
-                        native_bundle_id: None,
-                        composite_worker_build_id: None,
+                        engine_protocol_id: format!("sha256:{}", "d".repeat(64)),
                         tools: Vec::new(),
                     }),
                 );

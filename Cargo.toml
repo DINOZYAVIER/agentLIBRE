@@ -13,9 +13,7 @@ members = [
     "crates/agl-host-tools",
     "crates/agl-ids",
     "crates/agl-inference",
-    "crates/agl-inference-worker",
     "crates/agl-kernel",
-    "crates/agl-llama-cpp-sys",
     "crates/agl-memory",
     "crates/agl-model",
     "crates/agl-notes",
@@ -65,7 +63,6 @@ agl-host-tools = { path = "crates/agl-host-tools" }
 agl-ids = { path = "crates/agl-ids" }
 agl-inference = { path = "crates/agl-inference" }
 agl-kernel = { path = "crates/agl-kernel" }
-agl-llama-cpp-sys = { path = "crates/agl-llama-cpp-sys" }
 agl-memory = { path = "crates/agl-memory" }
 agl-model = { path = "crates/agl-model" }
 agl-notes = { path = "crates/agl-notes" }

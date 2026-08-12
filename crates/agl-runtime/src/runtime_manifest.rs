@@ -11,15 +11,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 pub const RUNTIME_MANIFEST_FILE_NAME: &str = "runtime-manifest.json";
-pub const RUNTIME_MANIFEST_SCHEMA: &str = "agentlibre.runtime-manifest/v1";
+pub const RUNTIME_MANIFEST_SCHEMA: &str = "agentlibre.runtime-manifest/v2";
 pub const RUNTIME_IDENTITY_SCHEMA: &str = "agentlibre.runtime-identity/v1";
 
 const GENERATION_ID_DOMAIN: &[u8] = b"agentlibre.runtime-manifest.v1\0";
 const DEVELOPMENT_ID_DOMAIN: &[u8] = b"agentlibre.development-runtime.v1\0";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_NATIVE_FILES: usize = 64;
-const RUNTIME_EXECUTABLES: [&str; 2] = ["agl", "agl-inference-worker"];
+const RUNTIME_EXECUTABLES: [&str; 2] = ["agl", "llama-server"];
 
 static CURRENT_RUNTIME_IDENTITY: OnceLock<std::result::Result<CurrentRuntimeIdentity, String>> =
     OnceLock::new();
@@ -92,22 +91,14 @@ pub struct RuntimeBuiltinCatalog {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RuntimeNativeBundle {
-    pub identity: String,
-    pub files: Vec<RuntimeManifestFile>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RuntimeManifestContent {
     pub schema: String,
     pub product_version: String,
     pub source: RuntimeSourceEvidence,
     pub builtin_catalog: RuntimeBuiltinCatalog,
     pub executables: Vec<RuntimeManifestFile>,
-    pub native_bundle: RuntimeNativeBundle,
-    pub worker_build_id: String,
-    pub composite_worker_build_id: String,
+    pub engine_libraries: Vec<RuntimeManifestFile>,
+    pub engine_protocol_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -144,27 +135,21 @@ impl CurrentRuntimeIdentity {
         self.kind == RuntimeIdentityKind::Sealed
     }
 
-    pub fn worker_build_id(&self) -> Option<&str> {
+    pub fn engine_protocol_id(&self) -> Option<&str> {
         self.manifest
             .as_ref()
-            .map(|manifest| manifest.content.worker_build_id.as_str())
-    }
-
-    pub fn native_bundle_id(&self) -> Option<&str> {
-        self.manifest
-            .as_ref()
-            .map(|manifest| manifest.content.native_bundle.identity.as_str())
+            .map(|manifest| manifest.content.engine_protocol_id.as_str())
     }
 }
 
 pub fn seal_runtime_manifest(
     directory: impl AsRef<Path>,
     source: RuntimeSourceEvidence,
-    worker_build_id: &str,
+    engine_protocol_id: &str,
 ) -> Result<RuntimeArtifactManifest> {
     let directory = directory.as_ref();
     source.validate()?;
-    validate_sha256(worker_build_id, "worker build ID")?;
+    validate_sha256(engine_protocol_id, "engine protocol ID")?;
     let manifest_path = directory.join(RUNTIME_MANIFEST_FILE_NAME);
     ensure!(
         !manifest_path.exists(),
@@ -176,16 +161,15 @@ pub fn seal_runtime_manifest(
         .into_iter()
         .map(|name| manifest_file(directory, name))
         .collect::<Result<Vec<_>>>()?;
-    let native_bundle = inspect_native_bundle(directory)?;
+    let engine_libraries = inspect_engine_libraries(directory)?;
     let content = RuntimeManifestContent {
         schema: RUNTIME_MANIFEST_SCHEMA.to_string(),
         product_version: env!("CARGO_PKG_VERSION").to_string(),
         source,
         builtin_catalog: compiled_builtin_catalog(),
         executables,
-        composite_worker_build_id: format!("{worker_build_id}+{}", native_bundle.identity),
-        native_bundle,
-        worker_build_id: worker_build_id.to_string(),
+        engine_libraries,
+        engine_protocol_id: engine_protocol_id.to_string(),
     };
     let generation_id = generation_id(&content)?;
     let manifest = RuntimeArtifactManifest {
@@ -322,19 +306,7 @@ fn validate_manifest_shape(manifest: &RuntimeArtifactManifest) -> Result<()> {
         manifest.content.builtin_catalog == compiled_builtin_catalog(),
         "runtime manifest builtin catalog does not match this executable"
     );
-    validate_sha256(&manifest.content.worker_build_id, "worker build ID")?;
-    validate_sha256(
-        &manifest.content.native_bundle.identity,
-        "native bundle identity",
-    )?;
-    ensure!(
-        manifest.content.composite_worker_build_id
-            == format!(
-                "{}+{}",
-                manifest.content.worker_build_id, manifest.content.native_bundle.identity
-            ),
-        "runtime manifest composite worker identity is inconsistent"
-    );
+    validate_sha256(&manifest.content.engine_protocol_id, "engine protocol ID")?;
     let executable_names = manifest
         .content
         .executables
@@ -347,11 +319,13 @@ fn validate_manifest_shape(manifest: &RuntimeArtifactManifest) -> Result<()> {
     );
     validate_file_inventory(&manifest.content.executables, "runtime executables")?;
     ensure!(
-        !manifest.content.native_bundle.files.is_empty()
-            && manifest.content.native_bundle.files.len() <= MAX_NATIVE_FILES,
-        "runtime manifest native file inventory is outside its bound"
+        !manifest.content.engine_libraries.is_empty(),
+        "runtime engine library closure is empty"
     );
-    validate_file_inventory(&manifest.content.native_bundle.files, "native bundle files")?;
+    validate_file_inventory(
+        &manifest.content.engine_libraries,
+        "runtime engine libraries",
+    )?;
     Ok(())
 }
 
@@ -363,7 +337,7 @@ fn validate_manifest_components(
         .content
         .executables
         .iter()
-        .chain(&manifest.content.native_bundle.files)
+        .chain(&manifest.content.engine_libraries)
     {
         let actual = manifest_file(directory, &entry.path)?;
         ensure!(
@@ -372,12 +346,27 @@ fn validate_manifest_components(
             entry.path
         );
     }
-    let actual_native = inspect_native_bundle(directory)?;
     ensure!(
-        actual_native == manifest.content.native_bundle,
-        "runtime native bundle identity drifted"
+        inspect_engine_libraries(directory)? == manifest.content.engine_libraries,
+        "runtime engine library closure drifted"
     );
     Ok(())
+}
+
+fn inspect_engine_libraries(directory: &Path) -> Result<Vec<RuntimeManifestFile>> {
+    let mut names = fs::read_dir(directory)
+        .with_context(|| format!("failed to list runtime directory {}", directory.display()))?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| name.starts_with("lib") && name.contains(".so"))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| manifest_file(directory, &name))
+        .collect()
 }
 
 fn generation_id(content: &RuntimeManifestContent) -> Result<String> {
@@ -413,50 +402,6 @@ fn compiled_builtin_catalog() -> RuntimeBuiltinCatalog {
     }
 }
 
-fn inspect_native_bundle(directory: &Path) -> Result<RuntimeNativeBundle> {
-    let base = directory.join("agl-inference-native");
-    let leaves = exact_directory_entries(&base)?;
-    ensure!(
-        leaves.len() == 1,
-        "runtime native bundle must contain exactly one leaf"
-    );
-    let leaf = &leaves[0];
-    let leaf_name = leaf
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("runtime native bundle leaf is not UTF-8")?;
-    let digest = leaf_name
-        .strip_prefix("sha256-")
-        .context("runtime native bundle leaf is not content addressed")?;
-    let identity = format!("sha256:{digest}");
-    validate_sha256(&identity, "native bundle identity")?;
-    let leaf_metadata = fs::symlink_metadata(leaf)
-        .with_context(|| format!("failed to inspect {}", leaf.display()))?;
-    ensure!(
-        leaf_metadata.is_dir() && !leaf_metadata.file_type().is_symlink(),
-        "runtime native bundle leaf is not an exact directory"
-    );
-    let mut files = exact_directory_entries(leaf)?
-        .into_iter()
-        .map(|path| {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("runtime native bundle filename is not UTF-8")?;
-            manifest_file(
-                directory,
-                &format!("agl-inference-native/{leaf_name}/{name}"),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    files.sort_by(|left, right| left.path.cmp(&right.path));
-    ensure!(
-        !files.is_empty() && files.len() <= MAX_NATIVE_FILES,
-        "runtime native bundle file inventory is outside its bound"
-    );
-    Ok(RuntimeNativeBundle { identity, files })
-}
-
 fn manifest_file(root: &Path, relative: &str) -> Result<RuntimeManifestFile> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
@@ -477,22 +422,6 @@ fn manifest_file(root: &Path, relative: &str) -> Result<RuntimeManifestFile> {
         byte_size: metadata.len(),
         sha256: sha256_file(&path)?,
     })
-}
-
-fn exact_directory_entries(directory: &Path) -> Result<Vec<PathBuf>> {
-    let metadata = fs::symlink_metadata(directory)
-        .with_context(|| format!("failed to inspect {}", directory.display()))?;
-    ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "runtime path is not an exact directory: {}",
-        directory.display()
-    );
-    let mut entries = fs::read_dir(directory)
-        .with_context(|| format!("failed to list {}", directory.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort();
-    Ok(entries)
 }
 
 fn validate_file_inventory(files: &[RuntimeManifestFile], label: &str) -> Result<()> {
@@ -646,8 +575,7 @@ mod tests {
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(format!("agl-inference-native/sha256-{}", "a".repeat(64))))
-            .unwrap();
+        fs::create_dir_all(&root).unwrap();
         for executable in RUNTIME_EXECUTABLES {
             fs::write(
                 root.join(executable),
@@ -655,14 +583,7 @@ mod tests {
             )
             .unwrap();
         }
-        fs::write(
-            root.join(format!(
-                "agl-inference-native/sha256-{}/libfixture.so",
-                "a".repeat(64)
-            )),
-            b"native fixture",
-        )
-        .unwrap();
+        fs::write(root.join("libfixture.so"), b"native fixture").unwrap();
         root
     }
 
@@ -686,15 +607,15 @@ mod tests {
     fn sealed_manifest_is_path_independent_and_detects_component_drift() {
         let first = fixture("first");
         let second = fixture("second");
-        let worker = format!("sha256:{}", "b".repeat(64));
+        let engine = format!("sha256:{}", "b".repeat(64));
         let first_manifest =
-            seal_runtime_manifest(&first, RuntimeSourceEvidence::unavailable(), &worker).unwrap();
+            seal_runtime_manifest(&first, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
         let second_manifest =
-            seal_runtime_manifest(&second, RuntimeSourceEvidence::unavailable(), &worker).unwrap();
+            seal_runtime_manifest(&second, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
 
         assert_eq!(first_manifest.generation_id, second_manifest.generation_id);
         assert_eq!(load_runtime_manifest(&first).unwrap(), first_manifest);
-        fs::write(first.join("agl-inference-worker"), b"tampered").unwrap();
+        fs::write(first.join("llama-server"), b"tampered").unwrap();
         assert!(
             load_runtime_manifest(&first)
                 .unwrap_err()
@@ -709,9 +630,9 @@ mod tests {
     fn source_state_is_explicit_and_generation_identity_binds_it() {
         let unavailable = fixture("unavailable");
         let dirty = fixture("dirty");
-        let worker = format!("sha256:{}", "b".repeat(64));
+        let engine = format!("sha256:{}", "b".repeat(64));
         let unavailable_manifest =
-            seal_runtime_manifest(&unavailable, RuntimeSourceEvidence::unavailable(), &worker)
+            seal_runtime_manifest(&unavailable, RuntimeSourceEvidence::unavailable(), &engine)
                 .unwrap();
         let dirty_manifest = seal_runtime_manifest(
             &dirty,
@@ -720,7 +641,7 @@ mod tests {
                 revision: Some("c".repeat(40)),
                 tree: Some("d".repeat(40)),
             },
-            &worker,
+            &engine,
         )
         .unwrap();
         assert_ne!(
@@ -738,16 +659,9 @@ mod tests {
     #[test]
     fn sealed_manifest_rejects_native_file_drift() {
         let root = fixture("native-drift");
-        let worker = format!("sha256:{}", "b".repeat(64));
-        seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &worker).unwrap();
-        fs::write(
-            root.join(format!(
-                "agl-inference-native/sha256-{}/libfixture.so",
-                "a".repeat(64)
-            )),
-            b"tampered native fixture",
-        )
-        .unwrap();
+        let engine = format!("sha256:{}", "b".repeat(64));
+        seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
+        fs::write(root.join("libfixture.so"), b"tampered native fixture").unwrap();
 
         assert!(
             load_runtime_manifest(&root)
@@ -761,9 +675,9 @@ mod tests {
     #[test]
     fn sealed_manifest_rejects_recomputed_builtin_inventory_drift() {
         let root = fixture("catalog-drift");
-        let worker = format!("sha256:{}", "b".repeat(64));
+        let engine = format!("sha256:{}", "b".repeat(64));
         let mut manifest =
-            seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &worker).unwrap();
+            seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
         manifest.content.builtin_catalog.packages[0].digest = format!("sha256:{}", "f".repeat(64));
         manifest.generation_id = generation_id(&manifest.content).unwrap();
         rewrite_manifest(&root, &manifest);

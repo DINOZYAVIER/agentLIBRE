@@ -16,7 +16,6 @@ Options:
   --unit NAME           systemd user service unit name
   --cwd PATH            working directory for the service
   --binary PATH         installed managed agl runtime path or alias
-  --config PATH         local inference config TOML path (without --function)
   --function ID_OR_PATH Function with an authoritative embedded profile
   --socket PATH         daemon Unix socket path
   --workspace-root PATH workspace root passed to agl serve
@@ -32,7 +31,6 @@ Defaults:
   --unit              agentlibre-daemon.service
   --cwd               current git repo root, or current directory outside git
   --binary            installed agl resolved from PATH
-  --config            ~/.config/agentLIBRE/inference/local.toml
   --function          unset; use the workspace default Function
   --socket            ~/.local/state/agentLIBRE/daemon/agl.sock
   --workspace-root    repo root
@@ -54,11 +52,6 @@ cwd="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null || printf '%s' 
 binary="${AGL_DAEMON_BINARY:-}"
 if [[ -z "$binary" ]]; then
   binary="$(command -v agl || true)"
-fi
-config="${AGL_DAEMON_CONFIG:-$config_home/agentLIBRE/inference/local.toml}"
-config_explicit=0
-if [[ -v AGL_DAEMON_CONFIG ]]; then
-  config_explicit=1
 fi
 function_ref="${AGL_DAEMON_FUNCTION:-}"
 socket="${AGL_DAEMON_SOCKET:-$state_home/agentLIBRE/daemon/agl.sock}"
@@ -92,11 +85,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --binary)
       binary="${2:?missing value for --binary}"
-      shift 2
-      ;;
-    --config)
-      config="${2:?missing value for --config}"
-      config_explicit=1
       shift 2
       ;;
     --function)
@@ -168,94 +156,8 @@ binary="$runtime_root/bin/agl"
 surface_worker="$runtime_root/bin/agl-inference-worker"
 forbidden_surface_launcher="$runtime_root/bin/agl-process-launcher"
 current_link="$runtime_dir/current"
-worker="$generation_dir/agl-inference-worker"
-native_bundle="$generation_dir/agl-inference-native"
+engine="$generation_dir/llama-server"
 runtime_manifest="$generation_dir/runtime-manifest.json"
-
-resolve_native_bundle_relative() {
-  local worker_elf="$1"
-  local dynamic
-  local runpath
-  local component
-  local relative
-  local -a matches=()
-  command -v readelf >/dev/null 2>&1 || return 1
-  [[ -f "$worker_elf" && ! -L "$worker_elf" ]] || return 1
-  dynamic="$(LC_ALL=C readelf -d -- "$worker_elf")" || return 1
-  while IFS= read -r runpath; do
-    IFS=: read -r -a components <<<"$runpath"
-    for component in "${components[@]}"; do
-      if [[ "$component" == '$ORIGIN/'* ]]; then
-        relative="${component#\$ORIGIN/}"
-        if [[ "$relative" == agl-inference-native/* ]]; then
-          [[ "$relative" =~ ^agl-inference-native/sha256-[0-9a-f]{64}$ ]] ||
-            return 1
-          matches+=("$relative")
-        fi
-      fi
-    done
-  done < <(sed -n -E 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
-  (( ${#matches[@]} == 1 )) || return 1
-  printf '%s\n' "${matches[0]}"
-}
-
-validate_native_bundle() {
-  local base="$1"
-  local worker_elf="$2"
-  local relative
-  local leaf_name
-  local directory
-  local base_entry
-  local base_count=0
-  [[ -d "$base" && ! -L "$base" ]] || return 1
-  [[ "$(stat -c '%a' -- "$base" 2>/dev/null || true)" == 555 &&
-    "$(stat -c '%u' -- "$base" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
-  relative="$(resolve_native_bundle_relative "$worker_elf")" || return 1
-  leaf_name="${relative#agl-inference-native/}"
-  shopt -s nullglob
-  for base_entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
-    ((base_count += 1))
-    [[ "${base_entry##*/}" == "$leaf_name" ]] || return 1
-  done
-  shopt -u nullglob
-  (( base_count == 1 )) || return 1
-  directory="$base/$leaf_name"
-  local entry
-  local name
-  local count=0
-  local cpu_count=0
-  local total_bytes=0
-  local size
-  local required
-  [[ -d "$directory" && ! -L "$directory" ]] || return 1
-  [[ "$(stat -c '%a' -- "$directory" 2>/dev/null || true)" == 555 &&
-    "$(stat -c '%u' -- "$directory" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
-  shopt -s nullglob
-  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
-    name="${entry##*/}"
-    [[ -f "$entry" && ! -L "$entry" &&
-      "$(stat -c '%a' -- "$entry" 2>/dev/null || true)" == 555 &&
-      "$(stat -c '%u' -- "$entry" 2>/dev/null || true)" == "$(id -u)" &&
-      "$(stat -c '%h' -- "$entry" 2>/dev/null || true)" == 1 ]] || return 1
-    case "$name" in
-      libllama-common.so.0 | libmtmd.so.0 | libllama.so.0 | libggml.so.0 | libggml-base.so.0 | libggml-vulkan.so) ;;
-      libggml-cpu-*.so) cpu_count=$((cpu_count + 1)) ;;
-      *) return 1 ;;
-    esac
-    size="$(stat -c '%s' -- "$entry" 2>/dev/null || true)"
-    [[ "$size" =~ ^[0-9]+$ ]] || return 1
-    (( size <= 1024 * 1024 * 1024 )) || return 1
-    total_bytes=$((total_bytes + size))
-    (( total_bytes <= 4 * 1024 * 1024 * 1024 )) || return 1
-    count=$((count + 1))
-    (( count <= 64 )) || return 1
-  done
-  shopt -u nullglob
-  (( cpu_count > 0 )) || return 1
-  for required in libllama-common.so.0 libmtmd.so.0 libllama.so.0 libggml.so.0 libggml-base.so.0; do
-    [[ -f "$directory/$required" && ! -L "$directory/$required" ]] || return 1
-  done
-}
 
 collect_nix_runtime_references() {
   local generation="$1"
@@ -266,10 +168,10 @@ collect_nix_runtime_references() {
   local reference
   local -a objects=(
     "$generation/agl"
-    "$generation/agl-inference-worker"
+    "$generation/llama-server"
   )
   shopt -s nullglob
-  objects+=("$generation/agl-inference-native"/*/*)
+  objects+=("$generation"/lib*.so*)
   shopt -u nullglob
   output=()
   for object in "${objects[@]}"; do
@@ -333,8 +235,7 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(basename -- "$runtime_dir")" != "agentlibre" ||
       "$(basename -- "$libexec_dir")" != "libexec" ||
       ! -f "$resolved_binary" || -L "$resolved_binary" ||
-      ! -f "$worker" || -L "$worker" ||
-      ! -d "$native_bundle" || -L "$native_bundle" ||
+      ! -f "$engine" || -L "$engine" ||
       ! -f "$runtime_manifest" || -L "$runtime_manifest" ||
       -e "$surface_worker" || -L "$surface_worker" ||
       -e "$forbidden_surface_launcher" || -L "$forbidden_surface_launcher" ||
@@ -347,11 +248,11 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(realpath -e -- "$runtime_root/bin" 2>/dev/null || true)" != "$runtime_root/bin" ||
       "$(stat -c '%a' -- "$generation_dir" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%a' -- "$resolved_binary" 2>/dev/null || true)" != "555" ||
-      "$(stat -c '%a' -- "$worker" 2>/dev/null || true)" != "555" ||
+      "$(stat -c '%a' -- "$engine" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%u' -- "$resolved_binary" 2>/dev/null || true)" != "$(id -u)" ||
-      "$(stat -c '%u' -- "$worker" 2>/dev/null || true)" != "$(id -u)" ||
+      "$(stat -c '%u' -- "$engine" 2>/dev/null || true)" != "$(id -u)" ||
       "$(stat -c '%h' -- "$resolved_binary" 2>/dev/null || true)" != "1" ||
-      "$(stat -c '%h' -- "$worker" 2>/dev/null || true)" != "1" ||
+      "$(stat -c '%h' -- "$engine" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%a' -- "$runtime_manifest" 2>/dev/null || true)" != "444" ||
       "$(stat -c '%u' -- "$runtime_manifest" 2>/dev/null || true)" != "$(id -u)" ||
       "$(stat -c '%h' -- "$runtime_manifest" 2>/dev/null || true)" != "1" ||
@@ -386,10 +287,6 @@ for managed_ancestor in "${managed_ancestors[@]}"; do
   fi
 done
 
-if ! validate_native_bundle "$native_bundle" "$worker"; then
-  echo "$managed_layout_error: invalid exact native inference bundle $native_bundle" >&2
-  exit 1
-fi
 if ! command -v readelf >/dev/null 2>&1 ||
   ! validate_nix_runtime_roots "$generation_dir"; then
   echo "$managed_layout_error: incomplete or invalid Nix runtime GC roots in $generation_dir" >&2
@@ -406,10 +303,8 @@ agl_systemd_validate_absolute_vars \
   requested_binary \
   binary \
   resolved_binary \
-  worker \
-  native_bundle \
+  engine \
   runtime_manifest \
-  config \
   socket \
   workspace_root
 
@@ -427,16 +322,10 @@ case "$tool_mode" in
 esac
 
 agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
-config_argument=" --config $(agl_systemd_quote "$config")"
 function_argument=""
 if [[ -n "$function_ref" ]]; then
-  if [[ "$config_explicit" -eq 1 ]]; then
-    echo "--function owns its inference profile and cannot be combined with --config or AGL_DAEMON_CONFIG" >&2
-    exit 2
-  fi
   agl_systemd_validate_nonempty_no_newline "--function" "$function_ref"
   function_argument=" --function $(agl_systemd_quote "$function_ref")"
-  config_argument=""
 fi
 if [[ -n "$vulkan_driver_environment" ]]; then
   if [[ -z "$vulkan_driver_files" ||
@@ -467,14 +356,11 @@ fi
 agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_dir "$dry_run" "$workspace_root" "workspace root"
 agl_systemd_require_executable "$dry_run" "$binary"
-agl_systemd_require_executable "$dry_run" "$worker"
+agl_systemd_require_executable "$dry_run" "$engine"
 if [[ "$dry_run" -eq 0 ]] &&
   ! env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$resolved_binary" >/dev/null; then
-  echo "agl and its private inference worker do not have matching build identities: $resolved_binary" >&2
+  echo "agl and its private llama-server do not have matching runtime identities: $resolved_binary" >&2
   exit 1
-fi
-if [[ -z "$function_ref" ]]; then
-  agl_systemd_require_file "$dry_run" "$config" "config file"
 fi
 agl_systemd_prepare_private_socket_parent "$dry_run" "$socket"
 
@@ -493,7 +379,7 @@ UMask=0077
 WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
-${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation${config_argument} --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
+${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
 Restart=on-failure
 RestartSec=5
 "
@@ -520,14 +406,13 @@ echo "cwd: $cwd"
 echo "requested binary: $requested_binary"
 echo "binary: $binary"
 echo "resolved binary: $resolved_binary"
-echo "private inference worker: $worker"
-echo "native inference bundle: $native_bundle"
+echo "private llama-server: $engine"
 echo "runtime manifest: $runtime_manifest"
 echo "Nix runtime roots: $generation_dir/.nix-gc-roots (required only for Nix-linked ELF objects)"
 if [[ -n "$function_ref" ]]; then
-  echo "function profile: $function_ref (embedded; local inference config disabled)"
+  echo "function profile: $function_ref"
 else
-  echo "config: $config"
+  echo "function profile: workspace default"
 fi
 echo "socket: $socket"
 echo "workspace root: $workspace_root"

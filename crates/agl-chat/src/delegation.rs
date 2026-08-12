@@ -3,7 +3,6 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
 use agl_function::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
@@ -32,7 +31,8 @@ struct DelegationContext {
     workspace_root: PathBuf,
     artifact_root: PathBuf,
     trust_store_path: PathBuf,
-    parent_inference_config: ResolvedInferenceConfig,
+    parent_function_plan_input: agl_model::ResolvedFunctionPlanInput,
+    parent_model_plan_input: agl_model::ResolvedModelPlanInput,
     plan: RuntimeDelegationPlan,
     children: BTreeSet<String>,
     authority_ceiling: BTreeSet<ToolId>,
@@ -59,6 +59,8 @@ impl DelegationHandler {
             return None;
         }
         let authority_ceiling = session.delegation_authority_ceiling().clone();
+        let (parent_function_plan_input, parent_model_plan_input) =
+            session.model_plan_inputs().ok()?;
         Some(Self {
             context: Some(DelegationContext {
                 store_root: session.store_root().to_path_buf(),
@@ -66,7 +68,8 @@ impl DelegationHandler {
                 workspace_root: session.workspace_root().to_path_buf(),
                 artifact_root: session.artifact_root().to_path_buf(),
                 trust_store_path: session.trust_store_path().to_path_buf(),
-                parent_inference_config: session.inference_config().clone(),
+                parent_function_plan_input,
+                parent_model_plan_input,
                 plan,
                 children,
                 authority_ceiling,
@@ -116,7 +119,6 @@ impl DelegationHandler {
         let parent = store
             .run(&parent_run_id)?
             .with_context(|| format!("parent run {parent_run_id} disappeared"))?;
-        let inference_config = resolve_child_inference_config(context, spec)?;
         let effective = crate::session::resolve_subagent_effective_capabilities(
             spec,
             &context.authority_ceiling,
@@ -125,6 +127,8 @@ impl DelegationHandler {
             &context.trust_store_path,
             context.runtime_bundle.as_ref(),
         )?;
+        let (function_plan_input, model_plan_input) =
+            resolve_child_model_inputs(context, spec, &effective)?;
         let execution_session_id = SessionId::generate();
         let execution_turn_id = TurnId::generate();
         let task = Content::text(args.task.clone())?;
@@ -134,7 +138,8 @@ impl DelegationHandler {
             execution_turn_id,
             workspace_root: context.workspace_root.clone(),
             artifact_root: context.artifact_root.clone(),
-            inference_config: inference_config.clone(),
+            function_plan_input: function_plan_input.clone(),
+            model_plan_input: Box::new(model_plan_input.clone()),
             delegation_plan: context.plan.clone(),
             authority_ceiling: context.authority_ceiling.clone(),
         };
@@ -170,7 +175,10 @@ impl DelegationHandler {
                 tool_calls: spec.limits.max_tool_calls,
             },
             child_spec_digest: spec.spec_digest.clone(),
-            model_profile_digest: inference_config_digest(&inference_config)?,
+            model_profile_digest: model_plan_inputs_digest(
+                &function_plan_input,
+                &model_plan_input,
+            )?,
             tree_budget,
             execution_context: context
                 .execution_context_state
@@ -210,32 +218,40 @@ impl ToolHandler for DelegationHandler {
     }
 }
 
-fn resolve_child_inference_config(
+fn resolve_child_model_inputs(
     context: &DelegationContext,
     spec: &RuntimeSubagentSpec,
-) -> Result<ResolvedInferenceConfig> {
-    if spec.model.inherit {
-        return Ok(context.parent_inference_config.clone());
-    }
-    let path = spec
-        .model
-        .profile_path
-        .as_ref()
-        .context("explicit subagent model profile has no resolved path")?;
-    let expected_digest = spec
-        .model
-        .profile_digest
-        .as_deref()
-        .context("explicit subagent model profile has no source digest")?;
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read subagent profile {}", path.display()))?;
-    let actual_digest = sha256_bytes(&bytes);
-    ensure!(
-        actual_digest == expected_digest,
-        "subagent model profile changed after function resolution"
-    );
-    load_local_inference_config(path)
-        .with_context(|| format!("failed to load subagent profile {}", path.display()))
+    effective: &agl_kernel::EffectiveToolSet,
+) -> Result<(
+    agl_model::ResolvedFunctionPlanInput,
+    agl_model::ResolvedModelPlanInput,
+)> {
+    let mut function = context.parent_function_plan_input.clone();
+    function.selected_profile_id = if spec.model.inherit {
+        context
+            .parent_function_plan_input
+            .selected_profile_id
+            .clone()
+    } else {
+        spec.model
+            .profile
+            .clone()
+            .context("subagent Model selection has neither inherit nor profile")?
+    };
+    let parent_policy = &context.parent_function_plan_input.generation_policy;
+    function.generation_policy = agl_model::GenerationPolicy::greedy(
+        u32::try_from(spec.limits.max_output_tokens)
+            .context("subagent max_output_tokens exceeds the inference limit")?,
+        parent_policy.stop_rules().to_vec(),
+        parent_policy.structured_mode(),
+        parent_policy.repair_malformed_tool_calls(),
+    )?;
+    function.prompt_template_digest = sha256_bytes(spec.system_body.as_bytes());
+    let visible_tools = crate::session::visible_tools_from_effective(effective);
+    let visible_tools_value = serde_json::to_value(visible_tools)?;
+    function.visible_tools_digest =
+        sha256_bytes(agl_kernel::render_canonical_json(&visible_tools_value).as_bytes());
+    Ok((function, context.parent_model_plan_input.clone()))
 }
 
 fn validate_existing_child(
@@ -258,7 +274,8 @@ fn validate_existing_child(
         task,
         workspace_root,
         artifact_root,
-        inference_config,
+        function_plan_input,
+        model_plan_input,
         delegation_plan,
         authority_ceiling,
         ..
@@ -277,7 +294,9 @@ fn validate_existing_child(
             && authority_ceiling == context.authority_ceiling
             && child.child_spec_digest.as_deref() == Some(spec.spec_digest.as_str())
             && child.model_profile_digest.as_deref()
-                == Some(inference_config_digest(&inference_config)?.as_str()),
+                == Some(
+                    model_plan_inputs_digest(&function_plan_input, &model_plan_input,)?.as_str()
+                ),
         "durable child snapshot differs from the delegation invocation"
     );
     Ok(())
@@ -328,8 +347,11 @@ pub(crate) fn result_is_waiting(result: &agl_kernel::TurnRequestResult) -> bool 
     )
 }
 
-pub(crate) fn inference_config_digest(config: &ResolvedInferenceConfig) -> Result<String> {
-    Ok(sha256_bytes(&serde_json::to_vec(config)?))
+pub(crate) fn model_plan_inputs_digest(
+    function: &agl_model::ResolvedFunctionPlanInput,
+    model: &agl_model::ResolvedModelPlanInput,
+) -> Result<String> {
+    Ok(sha256_bytes(&serde_json::to_vec(&(function, model))?))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {

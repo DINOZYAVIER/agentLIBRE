@@ -11,10 +11,9 @@ Usage:
   scripts/agl-nix-vulkan.sh
   scripts/agl-nix-vulkan.sh --diagnose
   scripts/agl-nix-vulkan.sh --build
-  scripts/agl-nix-vulkan.sh --smoke-tools /path/to/local-inference.toml
-  scripts/agl-nix-vulkan.sh --smoke-tools-pack /path/to/local-inference.toml
-  scripts/agl-nix-vulkan.sh --smoke-llama /path/to/local-inference.toml
-  scripts/agl-nix-vulkan.sh --smoke-multiturn /path/to/local-inference.toml
+  scripts/agl-nix-vulkan.sh --smoke-tools FUNCTION
+  scripts/agl-nix-vulkan.sh --smoke-tools-pack FUNCTION
+  scripts/agl-nix-vulkan.sh --smoke-llama FUNCTION
   scripts/agl-nix-vulkan.sh -- <command> [args...]
 
 Runs agentLIBRE local llama.cpp development commands inside a Nix shell with
@@ -73,58 +72,32 @@ diagnose() {
   fi
   echo
 
-  if [[ -x "$repo_root/target/debug/agl-inference-worker" ]]; then
-    echo "target/debug/agl-inference-worker native links:"
-    readelf -d "$repo_root/target/debug/agl-inference-worker" |
+  if [[ -x "$repo_root/target/llama-cpp/build/bin/llama-server" ]]; then
+    echo "private llama-server native links:"
+    readelf -d "$repo_root/target/llama-cpp/build/bin/llama-server" |
       grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true
   else
-    echo "target/debug/agl-inference-worker native links: target/debug/agl-inference-worker is not built"
+    echo "private llama-server native links: target/llama-cpp/build/bin/llama-server is not built"
   fi
 }
 
 build_local() {
   "$repo_root/scripts/build-llama-cpp.sh"
-  cargo build \
-    -p agl-cli \
-    -p agl-inference-worker \
-    --bin agl \
-    --bin agl-inference-worker
+  cargo build -p agl-cli --bin agl
 }
 
 smoke_tools() {
-  local config="${1:-}"
-  [[ -n "$config" ]] || {
-    echo "missing local inference config path" >&2
-    exit 2
-  }
-  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-skill-tools.sh"
+  local function_ref="${1:-gemma4-12b}"
+  AGL_SMOKE_FUNCTION="$function_ref" "$repo_root/scripts/smoke-agentlibre-skill-tools.sh"
 }
 
 smoke_tools_pack() {
-  local config="${1:-}"
-  [[ -n "$config" ]] || {
-    echo "missing local inference config path" >&2
-    exit 2
-  }
-  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-tools-pack.sh"
+  local function_ref="${1:-gemma4-12b}"
+  AGL_SMOKE_FUNCTION="$function_ref" "$repo_root/scripts/smoke-agentlibre-tools-pack.sh"
 }
 
 smoke_llama() {
-  local config="${1:-}"
-  [[ -n "$config" ]] || {
-    echo "missing local inference config path" >&2
-    exit 2
-  }
-  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-llama-cpp.sh"
-}
-
-smoke_multiturn() {
-  local config="${1:-}"
-  [[ -n "$config" ]] || {
-    echo "missing local inference config path" >&2
-    exit 2
-  }
-  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-multiturn-flows.sh"
+  "$repo_root/scripts/smoke-agentlibre-llama-cpp.sh"
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -162,10 +135,6 @@ case "${1:-}" in
   --smoke-llama)
     shift
     smoke_llama "$@"
-    ;;
-  --smoke-multiturn)
-    shift
-    smoke_multiturn "$@"
     ;;
   --)
     shift

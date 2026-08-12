@@ -96,7 +96,6 @@ impl<'de> Deserialize<'de> for DaemonRequest {
 pub enum DaemonRequestKind {
     Hello(HelloRequest),
     SessionOpen(SessionOpenRequest),
-    SetupSmokeSessionOpen(Box<SetupSmokeSessionOpenRequest>),
     SessionClear(SessionClearRequest),
     SessionCancelActive(SessionCancelActiveRequest),
     SessionFinish(SessionFinishRequest),
@@ -289,11 +288,7 @@ pub struct HelloEvent {
     pub product_version: String,
     pub daemon_instance_id: DaemonInstanceId,
     pub daemon_runtime: RuntimeGenerationIdentity,
-    pub worker_build_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_bundle_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub composite_worker_build_id: Option<String>,
+    pub engine_protocol_id: String,
     pub tools: Vec<DaemonTool>,
 }
 
@@ -342,7 +337,7 @@ pub struct InferenceStatusRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProtocolInferenceWorkerState {
+pub enum ProtocolInferenceEngineState {
     Cold,
     Starting,
     Ready,
@@ -376,12 +371,12 @@ pub enum ModelReleaseOutcome {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InferenceStatusEvent {
-    pub worker_build_id: String,
-    pub worker_state: ProtocolInferenceWorkerState,
+    pub engine_protocol_id: String,
+    pub engine_state: ProtocolInferenceEngineState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_pid: Option<u32>,
+    pub engine_pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub launch_generation: Option<u64>,
+    pub engine_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical_device_id: Option<String>,
     pub reserved_bytes: u64,
@@ -438,7 +433,6 @@ pub struct ModelUnloadEvent {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonTool {
     SessionOpen,
-    SetupSmokeSessionOpen,
     SessionClear,
     SessionCancelActive,
     SessionFinish,
@@ -479,34 +473,6 @@ pub struct SessionOpenRequest {
     pub skills: Vec<String>,
     #[serde(default)]
     pub tool_mode: ProtocolToolMode,
-}
-
-/// Opens one daemon-owned setup smoke session with staged model state.
-///
-/// The daemon fixes this session to read-only, no-history execution. This
-/// request deliberately carries no generic Chat/session authority knobs.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetupSmokeSessionOpenRequest {
-    pub workspace_root: String,
-    pub function_ref: String,
-    pub staged_bindings: agl_config::ModelBindings,
-    pub runtime_plan: SetupSmokeRuntimePlan,
-    pub max_output_tokens: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetupSmokeRuntimePlan {
-    pub profile_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_device: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_device_identity: Option<agl_model::LlamaDeviceInfo>,
-    pub model: agl_model::RuntimePlanModelIdentity,
-    pub runtime: agl_config::InferenceRuntimeConfig,
-    pub smoke_timeout_seconds: u64,
-    pub expected_speed: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1054,125 +1020,6 @@ mod tests {
         assert_eq!(decoded, request);
     }
 
-    fn setup_smoke_request() -> SetupSmokeSessionOpenRequest {
-        SetupSmokeSessionOpenRequest {
-            workspace_root: "/workspace".to_owned(),
-            function_ref: "gemma4-12b".to_owned(),
-            staged_bindings: agl_config::ModelBindings {
-                version: 1,
-                models: BTreeMap::from([(
-                    agl_config::ModelId::new("gemma4-12b").unwrap(),
-                    agl_config::ModelBinding {
-                        path: "/models/gemma4-12b.gguf".into(),
-                    },
-                )]),
-            },
-            runtime_plan: SetupSmokeRuntimePlan {
-                profile_id: "gpu-64k".to_owned(),
-                selected_device: Some("pci:0000:03:00.0".to_owned()),
-                selected_device_identity: Some(agl_model::LlamaDeviceInfo {
-                    name: "pci:0000:03:00.0".to_owned(),
-                    description: "test GPU".to_owned(),
-                    kind: agl_model::LlamaDeviceKind::DiscreteGpu,
-                    pci_device_id: Some("1002:744c".to_owned()),
-                    pci_subsystem_id: Some("1da2:471e".to_owned()),
-                    free_memory_bytes: 20_000_000_000,
-                    total_memory_bytes: 24_000_000_000,
-                    usable: true,
-                    supports_gpu_offload: true,
-                }),
-                model: test_runtime_plan_model_identity("gemma4-12b"),
-                runtime: agl_config::InferenceRuntimeConfig {
-                    gpu_layers: 65,
-                    context_tokens: 65_536,
-                    threads: 8,
-                    device: Some("pci:0000:03:00.0".to_owned()),
-                    batch_size: Some(1_024),
-                    ubatch_size: Some(256),
-                    flash_attention: Some(agl_config::RuntimeSwitch::On),
-                    cache_type_k: Some(agl_config::KvCacheType::Q8_0),
-                    cache_type_v: Some(agl_config::KvCacheType::Q8_0),
-                    mmap: Some(true),
-                    kv_unified: Some(true),
-                    structured_decoding: agl_config::StructuredDecodingMode::Auto,
-                    repair_malformed_tool_calls: true,
-                    mtp: agl_config::MtpRuntimeConfig::default(),
-                },
-                smoke_timeout_seconds: 300,
-                expected_speed: "interactive".to_owned(),
-            },
-            max_output_tokens: 32,
-        }
-    }
-
-    fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
-        serde_json::from_value(serde_json::json!({
-            "provenance": {
-                "reference": format!("model:{id}@=1.0.0"),
-                "source_id": "test",
-                "source_tier": "workspace",
-                "source_kind": "directory",
-                "package_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "weights": [{
-                "role": "main",
-                "model_id": id,
-                "filename": format!("{id}.gguf"),
-                "byte_size": 18,
-                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-                "required": true
-            }]
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn setup_smoke_session_request_is_typed_bounded_and_exact() {
-        let request = DaemonRequest::new(
-            request_id(),
-            DaemonRequestKind::SetupSmokeSessionOpen(Box::new(setup_smoke_request())),
-        );
-        request.validate().unwrap();
-        let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["kind"], "setup_smoke_session_open");
-        assert_eq!(
-            value["payload"]["staged_bindings"]["models"]["gemma4-12b"]["path"],
-            "/models/gemma4-12b.gguf"
-        );
-        assert_eq!(
-            serde_json::from_value::<DaemonRequest>(value).unwrap(),
-            request
-        );
-
-        let mut relative = setup_smoke_request();
-        relative
-            .staged_bindings
-            .models
-            .values_mut()
-            .next()
-            .unwrap()
-            .path = "relative.gguf".into();
-        assert!(
-            DaemonRequest::new(
-                request_id(),
-                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(relative))
-            )
-            .validate()
-            .is_err()
-        );
-
-        let mut unbounded = setup_smoke_request();
-        unbounded.max_output_tokens = MAX_SETUP_SMOKE_OUTPUT_TOKENS + 1;
-        assert!(
-            DaemonRequest::new(
-                request_id(),
-                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(unbounded))
-            )
-            .validate()
-            .is_err()
-        );
-    }
-
     #[test]
     fn hello_event_declares_version_and_capabilities() {
         let event = DaemonEvent::new(
@@ -1182,13 +1029,7 @@ mod tests {
                 product_version: "1.0.0-alpha.6".to_string(),
                 daemon_instance_id: DaemonInstanceId::generate(),
                 daemon_runtime: runtime_identity('a'),
-                worker_build_id: format!("sha256:{}", "b".repeat(64)),
-                native_bundle_id: Some(format!("sha256:{}", "c".repeat(64))),
-                composite_worker_build_id: Some(format!(
-                    "sha256:{}+sha256:{}",
-                    "b".repeat(64),
-                    "c".repeat(64)
-                )),
+                engine_protocol_id: format!("sha256:{}", "b".repeat(64)),
                 tools: vec![
                     DaemonTool::SessionOpen,
                     DaemonTool::RunSubmit,
@@ -1407,10 +1248,10 @@ mod tests {
         let event = DaemonEvent::new(
             Some(request_id()),
             DaemonEventKind::InferenceStatus(InferenceStatusEvent {
-                worker_build_id: "sha256:worker".to_owned(),
-                worker_state: ProtocolInferenceWorkerState::Cold,
-                worker_pid: None,
-                launch_generation: None,
+                engine_protocol_id: "sha256:worker".to_owned(),
+                engine_state: ProtocolInferenceEngineState::Cold,
+                engine_pid: None,
+                engine_generation: None,
                 physical_device_id: None,
                 reserved_bytes: 0,
                 cooldown_not_before_unix_ms: None,

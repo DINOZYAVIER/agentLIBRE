@@ -2,7 +2,7 @@ mod render;
 
 pub use render::{
     RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
-    render_model_request,
+    render_engine_request, render_model_request,
 };
 
 #[cfg(test)]

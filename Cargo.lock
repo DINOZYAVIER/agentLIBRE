@@ -384,6 +384,7 @@ dependencies = [
  "agl-content",
  "agl-events",
  "agl-ids",
+ "agl-model",
  "agl-oven",
  "agl-process",
  "agl-store",
@@ -392,26 +393,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sysinfo 0.39.6",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
-]
-
-[[package]]
-name = "agl-inference-worker"
-version = "1.0.0-alpha.12"
-dependencies = [
- "agl-actions",
- "agl-config",
- "agl-content",
- "agl-ids",
- "agl-inference",
- "agl-llama-cpp-sys",
- "agl-oven",
- "anyhow",
- "libc",
- "serde",
- "serde_json",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -428,13 +413,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "agl-llama-cpp-sys"
-version = "1.0.0-alpha.12"
-dependencies = [
- "cc",
 ]
 
 [[package]]

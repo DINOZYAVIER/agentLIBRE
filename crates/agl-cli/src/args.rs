@@ -58,9 +58,6 @@ mod help {
     pub(super) const DAEMON: &str = cli_help!("daemon");
     pub(super) const DAEMON_STATUS: &str = cli_help!("daemon/status");
     pub(super) const INIT: &str = cli_help!("init");
-    pub(super) const INFERENCE: &str = cli_help!("inference");
-    pub(super) const INFERENCE_RUN: &str = cli_help!("inference/run");
-    pub(super) const INFERENCE_SERVE: &str = cli_help!("inference/serve");
     pub(super) const INSTALL_HOOKS: &str = cli_help!("install-hooks");
     pub(super) const MEMORY: &str = cli_help!("memory");
     pub(super) const MEMORY_ADD: &str = cli_help!("memory/add");
@@ -190,12 +187,6 @@ enum Commands {
         #[command(subcommand)]
         command: ModelCommands,
     },
-    /// Low-level direct local inference commands.
-    #[command(long_about = help::INFERENCE)]
-    Inference {
-        #[command(subcommand)]
-        command: InferenceCommands,
-    },
     /// Manage local scheduled agentLIBRE jobs.
     #[command(long_about = help::CRON)]
     Cron {
@@ -320,7 +311,7 @@ enum ConfigCommands {
     /// Print resolved config, data, state, cache, log, and session paths.
     #[command(long_about = help::CONFIG_PATHS)]
     Paths,
-    /// Report runtime config, local inference profile, logs, and repair hints.
+    /// Report runtime config, logs, and repair hints.
     #[command(long_about = help::CONFIG_STATUS)]
     Status(ConfigStatusArgs),
     /// Write a default runtime config.
@@ -393,16 +384,6 @@ enum ModelCommands {
     /// Release resident model and context resources from the running daemon.
     #[command(long_about = help::MODEL_UNLOAD)]
     Unload(ModelUnloadArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum InferenceCommands {
-    /// Run one direct inference prompt and print the final answer.
-    #[command(long_about = help::INFERENCE_RUN)]
-    Run(InferenceRunArgs),
-    /// Run the direct inference daemon in the foreground.
-    #[command(long_about = help::INFERENCE_SERVE)]
-    Serve(InferenceServeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -870,10 +851,6 @@ struct ModelUnloadArgs {
 
 #[derive(Debug, Args)]
 struct ConfigStatusArgs {
-    /// Local inference config TOML path to inspect.
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -999,10 +976,6 @@ struct FunctionInitArgs {
     /// Create the function in the current workspace .agl directory.
     #[arg(long)]
     workspace: bool,
-
-    /// Named inference profile to reference.
-    #[arg(long = "model-profile", value_name = "ID")]
-    model_profile: Option<String>,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1555,10 +1528,6 @@ struct SkillRevokeArgs {
 
 #[derive(Debug, Args)]
 struct CommonRunArgs {
-    /// Local inference config TOML path.
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
     /// agentFUNCTION id or path to load for this turn/session.
     #[arg(long = "function", value_name = "ID_OR_PATH")]
     function_ref: Option<String>,
@@ -1621,61 +1590,6 @@ struct ServeArgs {
 }
 
 #[derive(Debug, Args)]
-struct CommonInferenceArgs {
-    /// Local inference config TOML path.
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
-    /// Inference artifact root directory.
-    #[arg(long, value_name = "DIR")]
-    artifact_root: Option<PathBuf>,
-
-    /// Workspace root for filesystem tools.
-    #[arg(long, value_name = "DIR")]
-    workspace_root: Option<PathBuf>,
-
-    /// Maximum response tokens.
-    #[arg(long, value_name = "N")]
-    max_output_tokens: Option<u32>,
-
-    /// Filesystem tool access mode.
-    #[arg(long, value_enum)]
-    tool_mode: Option<ToolAccessMode>,
-
-    /// Core or trusted workspace skill id to inject for this turn/session.
-    #[arg(long = "skill", value_name = "ID")]
-    skills: Vec<String>,
-
-    /// Inject explicit user memory into the model context.
-    #[arg(long)]
-    memory: bool,
-}
-
-#[derive(Debug, Args)]
-struct InferenceRunArgs {
-    #[command(flatten)]
-    common: CommonInferenceArgs,
-
-    /// Prompt text.
-    #[arg(long = "prompt", value_name = "TEXT", conflicts_with = "prompt")]
-    prompt_option: Option<String>,
-
-    /// Prompt text.
-    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
-    prompt: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-struct InferenceServeArgs {
-    #[command(flatten)]
-    common: CommonInferenceArgs,
-
-    /// Unix socket path for the daemon.
-    #[arg(long, value_name = "PATH")]
-    socket: Option<PathBuf>,
-}
-
-#[derive(Debug, Args)]
 struct StatusArgs {
     /// Unix socket path for the daemon.
     #[arg(long, value_name = "PATH")]
@@ -1719,7 +1633,6 @@ impl Cli {
             Some(Commands::Config { command }) => CliCommand::Config(match command {
                 ConfigCommands::Paths => ConfigCommand::Paths,
                 ConfigCommands::Status(args) => ConfigCommand::Status(ConfigStatusOptions {
-                    config: args.config,
                     json: args.json,
                     strict: args.strict,
                 }),
@@ -1739,9 +1652,6 @@ impl Cli {
                 CliCommand::Function(function_command(command)?)
             }
             Some(Commands::Model { command }) => CliCommand::Model(model_command(command)),
-            Some(Commands::Inference { command }) => {
-                CliCommand::Inference(inference_command(command)?)
-            }
             Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
@@ -2032,13 +1942,9 @@ fn function_command(command: FunctionCommands) -> Result<FunctionCommand> {
         }
         FunctionCommands::Init(args) => {
             agl_function::validate_function_id("function id", &args.id)?;
-            if let Some(profile) = &args.model_profile {
-                agl_function::validate_function_id("model profile", profile)?;
-            }
             FunctionCommand::Init(FunctionInitOptions {
                 id: args.id,
                 workspace: args.workspace,
-                model_profile: args.model_profile,
                 json: args.json,
             })
         }
@@ -2048,17 +1954,6 @@ fn function_command(command: FunctionCommands) -> Result<FunctionCommand> {
                 reference: args.reference,
                 json: args.json,
             })
-        }
-    })
-}
-
-fn inference_command(command: InferenceCommands) -> Result<InferenceCommand> {
-    Ok(match command {
-        InferenceCommands::Run(args) => {
-            InferenceCommand::Run(inference_run_options_from_args(args)?)
-        }
-        InferenceCommands::Serve(args) => {
-            InferenceCommand::Serve(inference_serve_options_from_args(args)?)
         }
     })
 }
@@ -2380,45 +2275,7 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
         systemd_activation: args.systemd_activation,
-        config: args.common.config,
         function_ref: args.common.function_ref,
-        artifact_root: args.common.artifact_root,
-        workspace_root: args.common.workspace_root,
-        max_output_tokens: args
-            .common
-            .max_output_tokens
-            .map(validate_max_output_tokens)
-            .transpose()?,
-        tool_mode: args.common.tool_mode,
-        skills: validate_skill_ids(args.common.skills)?,
-        memory: args.common.memory,
-    })
-}
-
-fn inference_run_options_from_args(args: InferenceRunArgs) -> Result<RunOptions> {
-    let prompt = args.prompt_option.or_else(|| {
-        if args.prompt.is_empty() {
-            None
-        } else {
-            Some(join_prompt(args.prompt))
-        }
-    });
-    if let Some(prompt) = &prompt {
-        validate_prompt(prompt)?;
-    }
-
-    Ok(RunOptions {
-        prompt,
-        ..run_options_from_inference_common(args.common)?
-    })
-}
-
-fn inference_serve_options_from_args(args: InferenceServeArgs) -> Result<ServeOptions> {
-    Ok(ServeOptions {
-        socket_path: args.socket,
-        systemd_activation: false,
-        config: args.common.config,
-        function_ref: None,
         artifact_root: args.common.artifact_root,
         workspace_root: args.common.workspace_root,
         max_output_tokens: args
@@ -2434,7 +2291,6 @@ fn inference_serve_options_from_args(args: InferenceServeArgs) -> Result<ServeOp
 
 fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
     Ok(RunOptions {
-        config: common.config,
         function_ref: common.function_ref,
         artifact_root: common.artifact_root,
         workspace_root: common.workspace_root,
@@ -2450,27 +2306,6 @@ fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
         memory: common.memory,
         prompt: None,
         json: common.json,
-    })
-}
-
-fn run_options_from_inference_common(common: CommonInferenceArgs) -> Result<RunOptions> {
-    Ok(RunOptions {
-        config: common.config,
-        function_ref: None,
-        artifact_root: common.artifact_root,
-        workspace_root: common.workspace_root,
-        session_id: None,
-        no_history: false,
-        new_session: false,
-        max_output_tokens: common
-            .max_output_tokens
-            .map(validate_max_output_tokens)
-            .transpose()?,
-        tool_mode: common.tool_mode,
-        skills: validate_skill_ids(common.skills)?,
-        memory: common.memory,
-        prompt: None,
-        json: false,
     })
 }
 
@@ -2587,11 +2422,6 @@ enum PublicCompletionCommands {
     Model {
         #[command(subcommand)]
         command: ModelCommands,
-    },
-    /// Low-level direct local inference commands.
-    Inference {
-        #[command(subcommand)]
-        command: InferenceCommands,
     },
     /// Manage local scheduled agentLIBRE jobs.
     Cron {

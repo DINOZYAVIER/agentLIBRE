@@ -4,12 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use agl_config::{
-    ModelConfig, ResolvedInferenceConfig, bind_inference_preset,
-    bind_inference_preset_with_bindings, load_inference_preset_from_str,
-    load_local_inference_config, model_bindings_path, resolve_inference_preset,
-    resolve_inference_preset_with_bindings,
-};
 use agl_content::Content;
 use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
@@ -18,8 +12,8 @@ use agl_function::{
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    ContextKey, InferenceCancellation, InferenceDeviceInfo, InferenceDeviceKind,
-    InferenceOutputSink, InferenceRequest, InferenceResponse, ModelKey, ModelManagerError,
+    ArtifactFileHandle, InferenceCancellation, InferenceOutputSink, InferencePlanRejectionEvidence,
+    InferenceRequest, InferenceResponse, ModelManagerError, ResolvedMediaAttachment,
     ResourceAdmissionDetails,
 };
 use agl_kernel::ToolCatalog;
@@ -33,10 +27,10 @@ use agl_kernel::{
 use agl_kernel::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_model::{
-    HostResources, LlamaDeviceInfo, LlamaDeviceKind, RuntimePlanSet, RuntimePlanner,
-    hugging_face_cache_dir,
+    ModelArtifactRole, ModelExecutionPlan, ModelPlanRejection, ResolvedFunctionPlanInput,
+    ResolvedModelPlanInput,
 };
-use agl_oven::render_model_request;
+use agl_oven::render_engine_request;
 use agl_package::PackageSourceTier;
 use agl_runtime::{
     AgentLibrePaths, AgentLibreRuntimeConfig, PackageComposition, RenderedRuntimeFeatureContext,
@@ -47,23 +41,25 @@ use agl_skill::{
     SkillTrustState, build_verified_context_bundle,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
-use crate::{ChatInferenceJob, InferenceClientHandle, InferenceOptions, ToolAccessMode};
+use crate::{
+    ChatInferenceJob, ChatPlanRejection, InferenceClientHandle, InferenceOptions, ToolAccessMode,
+};
 
-const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 const MEMORY_CONTEXT_ENTRY_LIMIT: usize = 8;
 
 #[derive(Clone)]
 pub struct InferenceSession {
     inference_client: InferenceClientHandle,
-    inference_config: ResolvedInferenceConfig,
+    inference_plan: std::result::Result<agl_model::ModelExecutionPlan, ModelPlanRejection>,
+    inference_artifacts: Vec<ArtifactFileHandle>,
+    function_plan_input: ResolvedFunctionPlanInput,
+    model_plan_input: ResolvedModelPlanInput,
     session_id: SessionId,
     scope_session_id: Option<SessionId>,
-    max_output_tokens: u32,
-    model_config: ModelConfig,
     system_prompt: Option<String>,
     runtime_feature_context: Option<String>,
     runtime_feature_evidence: Option<agl_runtime::RuntimeFeatureContextEvidence>,
@@ -86,7 +82,6 @@ pub struct InferenceSession {
     permission_grants: RuntimePermissionGrantSnapshot,
     tool_mode: ToolAccessMode,
     store_root: PathBuf,
-    config_dir: PathBuf,
     runtime_paths: AgentLibrePaths,
     workspace_root: PathBuf,
     trust_store_path: PathBuf,
@@ -94,7 +89,7 @@ pub struct InferenceSession {
     option_skills: Vec<String>,
     selected_skills: Vec<SkillId>,
     memory_enabled: bool,
-    config_path: PathBuf,
+    model_profile_id: String,
     artifact_root: PathBuf,
     delegation_plan: Option<RuntimeDelegationPlan>,
     delegation_children: Vec<String>,
@@ -102,11 +97,11 @@ pub struct InferenceSession {
     authority_ceiling: Option<BTreeSet<ToolId>>,
     allow_dynamic_grants: bool,
     tool_policy_override: Option<FunctionToolPolicy>,
-    automatic_runtime_plan: Option<RuntimePlanSet>,
 }
 
 pub(crate) struct SubagentSessionConfig {
-    pub inference_config: ResolvedInferenceConfig,
+    pub function_plan_input: ResolvedFunctionPlanInput,
+    pub model_plan_input: ResolvedModelPlanInput,
     pub spec: RuntimeSubagentSpec,
     pub delegation_plan: RuntimeDelegationPlan,
     pub authority_ceiling: BTreeSet<ToolId>,
@@ -228,8 +223,9 @@ struct RuntimeResolutionRecord<'a> {
     artifacts: agl_runtime::RuntimeBundleIdentity,
     function_policy: RuntimeResolutionFunctionPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
-    model_plan: Option<&'a RuntimePlanSet>,
-    effective_inference_config: &'a ResolvedInferenceConfig,
+    model_plan: Option<&'a ModelExecutionPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_plan_rejection: Option<&'a ModelPlanRejection>,
     extension_catalog_digest: agl_kernel::CatalogDigest,
     extension_bindings: &'a BTreeMap<String, RuntimeExtensionExtensionBinding>,
     skills: Vec<RuntimeResolutionSkillIdentity>,
@@ -255,10 +251,8 @@ impl InferenceSession {
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
         let store_root = runtime.paths.store_root();
-        let config_dir = runtime.paths.config_dir.clone();
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
-        let function_profile_required =
-            options.config.is_none() && env::var_os(CONFIG_ENV).is_none();
+        let function_profile_required = true;
         let (artifact_composition, mut runtime_bundle) = resolve_session_bundle(
             options.function_ref.as_deref(),
             &runtime.paths,
@@ -280,182 +274,26 @@ impl InferenceSession {
         } else {
             BTreeMap::new()
         };
-        let function_config_path = runtime_function
+        let bundle = runtime_bundle
             .as_ref()
-            .and_then(|function| function.inference_config_path.as_deref());
-        let function_embedded_config = runtime_function
+            .context("inference requires a resolved package-bound Function")?;
+        bundle
+            .model
             .as_ref()
-            .and_then(|function| function.inference_config_toml.as_deref());
-        let external_config_requested =
-            options.config.is_some() || env::var_os(CONFIG_ENV).is_some();
-        ensure!(
-            function_embedded_config.is_none() || !external_config_requested,
-            "Function `{}` owns an embedded inference profile; --config and {CONFIG_ENV} cannot override it",
-            runtime_function
-                .as_ref()
-                .map(|function| function.reference.as_str())
-                .unwrap_or("<unresolved>")
-        );
-        let use_function_embedded_config = function_embedded_config.is_some();
-        ensure!(
-            options.model_bindings_path.is_none() || options.model_bindings_override.is_none(),
-            "model bindings path and inline model bindings override are mutually exclusive"
-        );
-        if let Some(bindings) = &options.model_bindings_override {
-            bindings
-                .validate()
-                .context("invalid inline model bindings override")?;
-        }
-        let config_path = if use_function_embedded_config {
-            function_config_path
-                .expect("embedded Function config has a diagnostic path")
-                .to_path_buf()
-        } else {
-            Self::resolve_config_path(&options, runtime, function_config_path)
-        };
-
-        tracing::info!(
-            target: "agentlibre::app",
-            config_path = %config_path.display(),
-            artifact_root = %artifact_root.display(),
-            "resolved inference session paths"
-        );
-
-        if !use_function_embedded_config && !config_path.is_file() {
-            bail!(
-                "local inference config not found: {}\nCreate this file or pass --config PATH.\nRun `agl init` for guided model setup, or `agl config paths` to inspect locations.",
-                config_path.display()
-            );
-        }
-
-        let (config, automatic_runtime_plan) = if use_function_embedded_config {
-            let preset = load_inference_preset_from_str(
-                &config_path.display().to_string(),
-                function_embedded_config.expect("checked above"),
-            )
-            .with_context(|| {
-                format!(
-                    "failed to load function inference config {}",
-                    config_path.display()
-                )
-            })?;
-            extend_runtime_bundle_skills(
-                &mut runtime_bundle,
-                artifact_composition.as_ref(),
-                &workspace_root,
-                &preset.prompt.skills,
-            )?;
-            let bindings_path = options
-                .model_bindings_path
-                .clone()
-                .unwrap_or_else(|| model_bindings_path(&config_dir));
-            let bindings_source = Path::new("<inline-setup-smoke-bindings>");
-            let bound = match &options.model_bindings_override {
-                Some(bindings) => {
-                    bind_inference_preset_with_bindings(preset, bindings, bindings_source)
-                }
-                None => bind_inference_preset(preset, &bindings_path),
-            }
-            .with_context(|| {
-                format!(
-                    "failed to bind function inference models for {}",
-                    config_path.display()
-                )
-            })?;
-            match &bound.runtime {
-                agl_config::InferencePresetRuntimeConfig::Auto(_) => {
-                    let package = runtime_bundle
-                        .as_ref()
-                        .and_then(|bundle| bundle.model.as_ref())
-                        .map(|model| &model.package)
-                        .with_context(|| {
-                            format!(
-                                "automatic runtime model `{}` has no exact Model artifact in the admitted Function graph",
-                                bound.backend.model_id
-                            )
-                        })?;
-                    ensure!(
-                        package.artifact(&bound.backend.model_id).is_some(),
-                        "automatic runtime model `{}` is not declared by exact artifact `{}`",
-                        bound.backend.model_id,
-                        package.id
-                    );
-                    let devices = inference_client
-                        .device_inventory()
-                        .context("failed to inspect isolated inference worker devices")?
-                        .into_iter()
-                        .map(model_device_info)
-                        .collect();
-                    let host = HostResources::inspect(hugging_face_cache_dir(), devices)?;
-                    let planner = RuntimePlanner;
-                    let policy = bound
-                        .runtime
-                        .auto_policy()
-                        .context("automatic runtime preset lost its policy")?;
-                    // A plan override is an internal setup/repair path whose
-                    // low-memory consent was already recorded by `agl init`.
-                    let allow_low_memory = options.runtime_plan_override.is_some();
-                    let plan_set = planner
-                        .plan_set(package, &host, policy, allow_low_memory)
-                        .with_context(|| {
-                            format!(
-                                "failed to plan automatic runtime for {}",
-                                config_path.display()
-                            )
-                        })?;
-                    let active_plan = options
-                        .runtime_plan_override
-                        .as_ref()
-                        .unwrap_or(&plan_set.selected);
-                    let config = planner
-                        .resolve_bound_with_plan(
-                            bound,
-                            package,
-                            &host,
-                            allow_low_memory,
-                            active_plan,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "failed to plan automatic runtime for {}",
-                                config_path.display()
-                            )
-                        })?;
-                    (config, Some(plan_set))
-                }
-                agl_config::InferencePresetRuntimeConfig::Fixed(_) => {
-                    let preset = load_inference_preset_from_str(
-                        &config_path.display().to_string(),
-                        function_embedded_config.expect("checked above"),
-                    )?;
-                    let config = match &options.model_bindings_override {
-                        Some(bindings) => resolve_inference_preset_with_bindings(
-                            preset,
-                            bindings,
-                            bindings_source,
-                        ),
-                        None => resolve_inference_preset(preset, &bindings_path),
-                    }?;
-                    (config, None)
-                }
-            }
-        } else {
-            let config = load_local_inference_config(&config_path).with_context(|| {
-                format!(
-                    "failed to load local inference config {}",
-                    config_path.display()
-                )
-            })?;
-            (config, None)
-        };
+            .context("inference Function has no resolved Model package")?;
+        bundle
+            .function
+            .model_profile
+            .as_deref()
+            .context("inference Function has no selected Model profile")?;
+        let config_skills = Vec::new();
         extend_runtime_bundle_skills(
             &mut runtime_bundle,
             artifact_composition.as_ref(),
             &workspace_root,
-            &config.prompt.skills,
+            &config_skills,
         )?;
-        let model_config = config.model.clone();
-        let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
+        let system_prompt = None;
         let tool_mode = options.tool_mode;
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
         let function_skills = runtime_function
@@ -478,7 +316,7 @@ impl InferenceSession {
             .map(|plan| plan.root_subagents.clone())
             .unwrap_or_default();
         let skill_context = resolve_skill_context(SkillContextRequest {
-            config_skills: &config.prompt.skills,
+            config_skills: &config_skills,
             function_skills: &function_skills,
             option_skills: &options.skills,
             function_policy: runtime_function
@@ -517,11 +355,10 @@ impl InferenceSession {
             tool_mode,
             &skill_context.visible_tools,
         )?;
-        let config_skills = config.prompt.skills.clone();
         let option_skills = options.skills.clone();
         let memory_context = resolve_memory_context(MemoryContextRequest {
             enabled: options.memory,
-            config_skills: &config.prompt.skills,
+            config_skills: &config_skills,
             function_skills: &function_skills,
             option_skills: &options.skills,
             workspace_root: &workspace_root,
@@ -532,13 +369,28 @@ impl InferenceSession {
             store_root: &store_root,
             runtime_bundle: runtime_bundle.as_ref(),
         })?;
+        let visible_tools_value = serde_json::to_value(&skill_context.visible_tools)?;
+        let visible_tools_digest = sha256_text(&render_canonical_json(&visible_tools_value));
+        let (function_input, model_input) = runtime_bundle
+            .as_ref()
+            .expect("package-bound bundle was checked above")
+            .model_execution_inputs(visible_tools_digest)?
+            .context("selected Function has no Model execution inputs")?;
+        let model_profile_id = function_input.selected_profile_id.clone();
+        let (inference_plan, inference_artifacts) = resolve_session_plan(
+            &function_input,
+            &model_input,
+            &inference_client,
+            &runtime.paths,
+        )?;
         Ok(Self {
             inference_client,
-            inference_config: config,
+            inference_plan,
+            inference_artifacts,
+            function_plan_input: function_input,
+            model_plan_input: model_input,
             scope_session_id: Some(session_id.clone()),
             session_id,
-            max_output_tokens: options.max_output_tokens,
-            model_config,
             system_prompt,
             runtime_feature_context: Some(runtime_features.content),
             runtime_feature_evidence: Some(runtime_features.evidence),
@@ -560,7 +412,6 @@ impl InferenceSession {
             permission_grants: skill_context.permission_grants,
             tool_mode,
             store_root,
-            config_dir,
             runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
@@ -568,7 +419,7 @@ impl InferenceSession {
             option_skills,
             selected_skills: skill_context.selected_skills,
             memory_enabled: options.memory,
-            config_path,
+            model_profile_id,
             artifact_root,
             delegation_plan,
             delegation_children,
@@ -576,7 +427,6 @@ impl InferenceSession {
             authority_ceiling: None,
             allow_dynamic_grants: true,
             tool_policy_override: None,
-            automatic_runtime_plan,
             runtime_bundle,
         })
     }
@@ -587,7 +437,8 @@ impl InferenceSession {
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         let SubagentSessionConfig {
-            inference_config,
+            function_plan_input,
+            model_plan_input,
             spec,
             delegation_plan,
             authority_ceiling,
@@ -595,11 +446,7 @@ impl InferenceSession {
             workspace_root,
             execution_session_id,
         } = config;
-        inference_config.validate()?;
-        let max_output_tokens = u32::try_from(spec.limits.max_output_tokens)
-            .context("subagent max_output_tokens exceeds the inference limit")?;
         let store_root = runtime.paths.store_root();
-        let config_dir = runtime.paths.config_dir.clone();
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
         let function_skills = spec.skills.clone();
         let function_extensions = extensions_for_tools(&authority_ceiling)?;
@@ -651,20 +498,21 @@ impl InferenceSession {
         )?;
         let delegation_authority_ceiling =
             delegable_tool_ids(&skill_context.effective_capabilities);
-        let config_path = spec
-            .model
-            .profile_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("<inherited-subagent-profile>"));
-        let model_config = inference_config.model.clone();
-
+        let model_profile_id = function_plan_input.selected_profile_id.clone();
+        let (inference_plan, inference_artifacts) = resolve_session_plan(
+            &function_plan_input,
+            &model_plan_input,
+            &inference_client,
+            &runtime.paths,
+        )?;
         Ok(Self {
             inference_client,
-            inference_config,
+            inference_plan,
+            inference_artifacts,
+            function_plan_input,
+            model_plan_input,
             session_id: execution_session_id,
             scope_session_id: None,
-            max_output_tokens,
-            model_config,
             system_prompt: Some(spec.system_body.clone()),
             runtime_feature_context: Some(runtime_features.content),
             runtime_feature_evidence: Some(runtime_features.evidence),
@@ -687,7 +535,6 @@ impl InferenceSession {
             permission_grants: skill_context.permission_grants,
             tool_mode,
             store_root,
-            config_dir,
             runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
@@ -695,7 +542,7 @@ impl InferenceSession {
             option_skills,
             selected_skills: skill_context.selected_skills,
             memory_enabled,
-            config_path,
+            model_profile_id,
             artifact_root,
             delegation_plan: Some(delegation_plan),
             delegation_children,
@@ -703,21 +550,7 @@ impl InferenceSession {
             authority_ceiling: Some(authority_ceiling),
             allow_dynamic_grants: false,
             tool_policy_override: Some(tool_policy),
-            automatic_runtime_plan: None,
         })
-    }
-
-    pub fn resolve_config_path(
-        options: &InferenceOptions,
-        runtime: &AgentLibreRuntimeConfig,
-        function_config_path: Option<&std::path::Path>,
-    ) -> PathBuf {
-        options
-            .config
-            .clone()
-            .or_else(|| env::var_os(CONFIG_ENV).map(PathBuf::from))
-            .or_else(|| function_config_path.map(Path::to_path_buf))
-            .unwrap_or_else(|| runtime.paths.default_local_inference_config())
     }
 
     pub fn resolve_artifact_root(options: &InferenceOptions) -> Option<PathBuf> {
@@ -731,16 +564,12 @@ impl InferenceSession {
         runtime.paths.default_artifact_root()
     }
 
-    pub fn config_path(&self) -> &std::path::Path {
-        &self.config_path
+    pub fn model_profile_id(&self) -> &str {
+        &self.model_profile_id
     }
 
     pub fn artifact_root(&self) -> &std::path::Path {
         &self.artifact_root
-    }
-
-    pub(crate) fn automatic_runtime_plan(&self) -> Option<&RuntimePlanSet> {
-        self.automatic_runtime_plan.as_ref()
     }
 
     pub(crate) fn delegation_plan(&self) -> Option<&RuntimeDelegationPlan> {
@@ -755,8 +584,16 @@ impl InferenceSession {
         &self.delegation_authority_ceiling
     }
 
-    pub(crate) fn inference_config(&self) -> &ResolvedInferenceConfig {
-        &self.inference_config
+    pub(crate) fn model_plan_inputs(
+        &self,
+    ) -> Result<(ResolvedFunctionPlanInput, ResolvedModelPlanInput)> {
+        let visible_tools = serde_json::to_value(&self.visible_tools)?;
+        let visible_tools_digest = sha256_text(&render_canonical_json(&visible_tools));
+        self.runtime_bundle
+            .as_ref()
+            .context("delegation requires the admitted runtime bundle")?
+            .model_execution_inputs(visible_tools_digest)?
+            .context("delegation requires package-bound Model inputs")
     }
 
     pub(crate) fn runtime_bundle(&self) -> Option<&ResolvedRuntimeBundle> {
@@ -781,7 +618,13 @@ impl InferenceSession {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        self.inference_config.backend.kind.as_str()
+        "llama_cpp"
+    }
+
+    pub(crate) fn repair_malformed_tool_calls(&self) -> bool {
+        self.function_plan_input
+            .generation_policy
+            .repair_malformed_tool_calls()
     }
 
     pub fn event_stream_path(&self, run_id: &RunId) -> PathBuf {
@@ -865,13 +708,15 @@ impl InferenceSession {
                 "inference request session does not match its managed context"
             );
         }
-        self.write_runtime_resolution(
+        let product_resolution = self.write_runtime_resolution(
             &request.run_id,
             Some(&request.turn_id),
             Some(&attempt_id),
             None,
             None,
         )?;
+        let evidence_root =
+            InferenceArtifactRoot::new(self.artifact_root.clone()).run_dir(&request.run_id);
         let evidence_run_id = request.run_id.clone();
         let evidence_turn_id = request.turn_id.clone();
         let evidence_attempt_id = attempt_id.clone();
@@ -881,7 +726,6 @@ impl InferenceSession {
         let request = build_inference_request(
             request,
             attempt_id,
-            &self.model_config,
             InferenceRequestContexts {
                 session_id: Some(&self.session_id),
                 request_id: request_id.as_ref(),
@@ -894,16 +738,35 @@ impl InferenceSession {
                 effective_capabilities: Some(effective_capabilities),
             },
         )?;
+        let plan = match &self.inference_plan {
+            Ok(plan) => plan.clone(),
+            Err(rejection) => {
+                self.inference_client
+                    .record_plan_rejection(ChatPlanRejection {
+                        request,
+                        rejection: InferencePlanRejectionEvidence::new(
+                            &self.function_plan_input,
+                            &self.model_plan_input,
+                            rejection.clone(),
+                            Some(product_resolution),
+                        ),
+                        evidence_root: Some(evidence_root),
+                    })?;
+                return Err(rejection.clone().into());
+            }
+        };
+        let media = resolve_request_media(&request, &self.store_root)?;
         let result = self.inference_client.generate(ChatInferenceJob {
-            config: self.inference_config.clone(),
-            artifact_root: InferenceArtifactRoot::new(self.artifact_root.clone()),
-            content_store_root: self.store_root.clone(),
-            max_output_tokens: self.max_output_tokens,
+            plan,
+            artifacts: self.inference_artifacts.clone(),
+            media,
             session_id: self.session_id.clone(),
             request,
             cancellation: control.cancellation,
             deadline: control.deadline,
             output_sink: control.output_sink,
+            evidence_root: Some(evidence_root),
+            product_resolution: Some(product_resolution),
         });
         match &result {
             Ok(response) => {
@@ -939,23 +802,22 @@ impl InferenceSession {
     }
 
     pub fn clear_context(&self) -> Result<()> {
+        let Ok(plan) = &self.inference_plan else {
+            return Ok(());
+        };
+        let context = plan.context_key(self.session_id.as_str());
         self.inference_client
-            .clear_context(&self.inference_config, &self.session_id)
+            .clear_context(&context)
             .context("failed to clear managed inference context")
     }
 
     pub(crate) fn selected_model_id(&self) -> Option<String> {
-        let bindings_path = agl_config::model_bindings_path(&self.config_dir);
-        agl_config::load_model_bindings_or_empty(bindings_path)
-            .ok()?
-            .models
-            .into_iter()
-            .find(|(_, binding)| binding.path == self.inference_config.backend.model)
-            .map(|(id, _)| id.to_string())
-    }
-
-    pub(crate) fn current_model_path(&self) -> PathBuf {
-        self.inference_config.backend.model.clone()
+        self.model_plan_input
+            .model
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.role == ModelArtifactRole::Main)
+            .map(|artifact| artifact.model_id.to_string())
     }
 
     pub(crate) fn function_ref(&self) -> Option<String> {
@@ -969,36 +831,17 @@ impl InferenceSession {
     }
 
     pub(crate) fn context_limit_tokens(&self) -> u32 {
-        self.inference_config.runtime.context_tokens
+        self.model_plan_input
+            .model
+            .profiles
+            .iter()
+            .find(|profile| profile.id == self.function_plan_input.selected_profile_id)
+            .map_or(u32::MAX, |profile| profile.context_tokens)
     }
 
     pub(crate) fn select_model(&mut self, model_id: &str, model_path: PathBuf) -> Result<()> {
-        ensure!(
-            model_path.is_file(),
-            "selected model is not an installed file"
-        );
-        let parsed_id = agl_config::ModelId::new(model_id.to_owned())?;
-        let bindings_path = agl_config::model_bindings_path(&self.config_dir);
-        let bindings = agl_config::load_model_bindings_or_empty(&bindings_path)?;
-        let binding = bindings
-            .models
-            .get(&parsed_id)
-            .with_context(|| format!("model `{model_id}` is not installed"))?;
-        ensure!(
-            binding.path == model_path,
-            "selected model path differs from its installed binding"
-        );
-        let mut next = self.inference_config.clone();
-        next.backend.model = model_path;
-        next.backend.multimodal_projector = None;
-        next.runtime.mtp.enabled = false;
-        next.runtime.mtp.draft_model = None;
-        next.validate()?;
-        self.inference_client
-            .release_context(&self.inference_config, &self.session_id)
-            .context("failed to release the previous model context")?;
-        self.inference_config = next;
-        Ok(())
+        let _ = (model_id, model_path);
+        anyhow::bail!("live model mutation was removed; select a different package-bound Function")
     }
 
     pub(crate) fn select_operation_mode(&mut self, mode: ToolAccessMode) -> Result<()> {
@@ -1029,8 +872,12 @@ impl InferenceSession {
     }
 
     pub fn release_context(&self) -> Result<()> {
+        let Ok(plan) = &self.inference_plan else {
+            return Ok(());
+        };
+        let context = plan.context_key(self.session_id.as_str());
         self.inference_client
-            .release_context(&self.inference_config, &self.session_id)
+            .release_context(&context)
             .context("failed to release managed inference context")
     }
 
@@ -1134,6 +981,28 @@ impl InferenceSession {
             store_root: &self.store_root,
             runtime_bundle: self.runtime_bundle.as_ref(),
         })?;
+        let visible_tools_value = serde_json::to_value(&self.visible_tools)?;
+        let visible_tools_digest = sha256_text(&render_canonical_json(&visible_tools_value));
+        let (function_plan_input, model_plan_input) = if let Some(bundle) = &self.runtime_bundle {
+            bundle
+                .model_execution_inputs(visible_tools_digest)?
+                .context("selected Function has no Model execution inputs")?
+        } else {
+            let mut function = self.function_plan_input.clone();
+            function.visible_tools_digest = visible_tools_digest;
+            (function, self.model_plan_input.clone())
+        };
+        let (inference_plan, inference_artifacts) = resolve_session_plan(
+            &function_plan_input,
+            &model_plan_input,
+            &self.inference_client,
+            &self.runtime_paths,
+        )?;
+        self.model_profile_id = function_plan_input.selected_profile_id.clone();
+        self.function_plan_input = function_plan_input;
+        self.model_plan_input = model_plan_input;
+        self.inference_plan = inference_plan;
+        self.inference_artifacts = inference_artifacts;
         let runtime_features = build_runtime_feature_context(
             &self.workspace_root,
             self.tool_mode,
@@ -1154,13 +1023,13 @@ impl InferenceSession {
         attempt_id: Option<&AttemptId>,
         admission_error: Option<&ModelManagerError>,
         admission_grant: Option<&ResourceAdmissionDetails>,
-    ) -> Result<()> {
+    ) -> Result<serde_json::Value> {
         ensure!(
             admission_error.is_none() || admission_grant.is_none(),
             "runtime resolution admission cannot be both granted and rejected"
         );
         let Some(bundle) = self.runtime_bundle.as_ref() else {
-            return Ok(());
+            return Ok(serde_json::Value::Null);
         };
         let function = &bundle.function;
         let canonical_root = self
@@ -1205,9 +1074,16 @@ impl InferenceSession {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let model_reuse_key = ModelKey::from_config(&self.inference_config)?;
-        let context_reuse_key =
-            ContextKey::for_conversation(&self.inference_config, self.session_id.as_str())?;
+        let model_reuse_key = self
+            .inference_plan
+            .as_ref()
+            .ok()
+            .map(ModelExecutionPlan::model_key);
+        let context_reuse_key = self
+            .inference_plan
+            .as_ref()
+            .ok()
+            .map(|plan| plan.context_key(self.session_id.as_str()));
         let admission_error = admission_error.map(|error| RuntimeResolutionAdmissionError {
             code: error.code().to_owned(),
             message: error.to_string(),
@@ -1244,8 +1120,8 @@ impl InferenceSession {
                 delegation: function.delegation.clone(),
                 runtime_identity_validation: function.runtime_identity_validation.clone(),
             },
-            model_plan: self.automatic_runtime_plan.as_ref(),
-            effective_inference_config: &self.inference_config,
+            model_plan: self.inference_plan.as_ref().ok(),
+            model_plan_rejection: self.inference_plan.as_ref().err(),
             extension_catalog_digest: agl_kernel::CatalogDigest::from_admitted(
                 crate::tools::chat_product_factories()
                     .iter()
@@ -1262,7 +1138,7 @@ impl InferenceSession {
                 } else if admission_grant.is_some() {
                     "granted".to_owned()
                 } else {
-                    "pre_effect_admitted".to_owned()
+                    "preview_non_authoritative".to_owned()
                 },
                 fallback_allowed: admission_details.is_some_and(|details| details.fallback_allowed),
                 model_load_started: admission_grant.is_some()
@@ -1272,9 +1148,11 @@ impl InferenceSession {
                 error: admission_error,
                 grant: admission_grant.cloned(),
             },
-            model_reuse_key: Some(model_reuse_key.digest().to_owned()),
-            context_reuse_key: Some(context_reuse_key.digest().to_owned()),
+            model_reuse_key: model_reuse_key.map(|key| key.as_str().to_owned()),
+            context_reuse_key: context_reuse_key.map(|key| key.as_str().to_owned()),
         };
+        let value = serde_json::to_value(&record)
+            .context("failed to serialize runtime resolution projection context")?;
         let run_dir = InferenceArtifactRoot::new(self.artifact_root.clone()).run_dir(run_id);
         std::fs::create_dir_all(&run_dir).with_context(|| {
             format!(
@@ -1296,7 +1174,7 @@ impl InferenceSession {
         })?;
         std::fs::rename(&temporary, &path)
             .with_context(|| format!("failed to commit runtime resolution {}", path.display()))?;
-        Ok(())
+        Ok(value)
     }
 
     fn delegation_available(&self, run_id: Option<&RunId>) -> Result<bool> {
@@ -1352,27 +1230,6 @@ impl InferenceSession {
             && run.usage.model_input_tokens < run.budget.model_input_tokens
             && run.usage.model_attempts < run.budget.model_attempts
             && run.usage.tool_calls < run.budget.tool_calls)
-    }
-}
-
-fn model_device_info(device: InferenceDeviceInfo) -> LlamaDeviceInfo {
-    LlamaDeviceInfo {
-        name: device.backend_name,
-        description: device.description,
-        kind: match device.kind {
-            InferenceDeviceKind::Cpu => LlamaDeviceKind::Cpu,
-            InferenceDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
-            InferenceDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
-            InferenceDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
-            InferenceDeviceKind::Metadata => LlamaDeviceKind::Metadata,
-            InferenceDeviceKind::Unknown => LlamaDeviceKind::Unknown,
-        },
-        pci_device_id: device.pci_device_id,
-        pci_subsystem_id: device.pci_subsystem_id,
-        free_memory_bytes: device.free_memory_bytes,
-        total_memory_bytes: device.total_memory_bytes,
-        usable: device.usable,
-        supports_gpu_offload: device.supports_gpu_offload,
     }
 }
 
@@ -1509,7 +1366,6 @@ fn add_identity_hook_batch(
 fn build_inference_request(
     request: ModelRequest,
     attempt_id: AttemptId,
-    model_config: &ModelConfig,
     contexts: InferenceRequestContexts<'_>,
 ) -> Result<InferenceRequest> {
     let run_id = request.run_id.clone();
@@ -1563,7 +1419,7 @@ fn build_inference_request(
         messages: request_messages,
         visible_tools: request.visible_tools,
     };
-    let rendered = render_model_request(&model_request, model_config)?;
+    let rendered = render_engine_request(&model_request)?;
     Ok(InferenceRequest {
         run_id,
         turn_id,
@@ -2287,7 +2143,7 @@ fn resolve_effective_capabilities(
     input.resolve().context("failed to resolve tool policy")
 }
 
-fn visible_tools_from_effective(effective: &EffectiveToolSet) -> Vec<VisibleTool> {
+pub(crate) fn visible_tools_from_effective(effective: &EffectiveToolSet) -> Vec<VisibleTool> {
     effective
         .tools()
         .map(|tool| VisibleTool::from_declaration(tool.declaration()))
@@ -2628,6 +2484,69 @@ fn sha256_text(value: &str) -> String {
         write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
     }
     rendered
+}
+
+fn resolve_session_plan(
+    function: &ResolvedFunctionPlanInput,
+    model: &ResolvedModelPlanInput,
+    client: &InferenceClientHandle,
+    paths: &AgentLibrePaths,
+) -> Result<(
+    std::result::Result<ModelExecutionPlan, ModelPlanRejection>,
+    Vec<ArtifactFileHandle>,
+)> {
+    let plan = agl_model::resolve_execution_plan(function, model, &client.static_capabilities()?);
+    let artifacts = match &plan {
+        Ok(plan) => resolve_plan_artifact_handles(plan, paths)?,
+        Err(_) => Vec::new(),
+    };
+    Ok((plan, artifacts))
+}
+
+fn resolve_plan_artifact_handles(
+    plan: &ModelExecutionPlan,
+    paths: &AgentLibrePaths,
+) -> Result<Vec<ArtifactFileHandle>> {
+    Ok(agl_model::resolve_installed_plan_files(
+        plan,
+        &agl_model::ModelInstallStore::new(paths.model_install_root()),
+    )?
+    .into_iter()
+    .map(|file| ArtifactFileHandle {
+        role: file.role,
+        basename: file.basename,
+        path: file.path,
+    })
+    .collect())
+}
+
+fn resolve_request_media(
+    request: &InferenceRequest,
+    store_root: &Path,
+) -> Result<Vec<ResolvedMediaAttachment>> {
+    let references = request
+        .rendered
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_ref())
+        .flat_map(Content::attachments)
+        .cloned()
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = AglStore::open_current_at(store_root)
+        .context("failed to open content attachment repository for inference")?;
+    references
+        .into_iter()
+        .map(|reference| {
+            let resolved = store
+                .resolve_content_attachment(&request.run_id, &reference)
+                .context("failed to resolve inference content attachment")?;
+            ResolvedMediaAttachment::new(resolved.reference, resolved.bytes)
+                .map_err(anyhow::Error::from)
+        })
+        .collect()
 }
 
 fn core_tool_ids(selected_extensions: &BTreeSet<ExtensionId>) -> Result<BTreeSet<ToolId>> {

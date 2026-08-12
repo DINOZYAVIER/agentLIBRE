@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Host-safe accelerator classification without native backend handles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,6 +28,68 @@ pub struct InferenceDeviceInfo {
     pub total_memory_bytes: u64,
     pub usable: bool,
     pub supports_gpu_offload: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum HostCapabilityProjectionError {
+    #[error("host memory or CPU topology is unavailable")]
+    MissingHostCapacity,
+    #[error("inference device `{identity}` has an invalid physical pool")]
+    InvalidDevicePool { identity: String },
+}
+
+/// The sole product-inventory to static-planner conversion boundary.
+pub fn project_host_capabilities(
+    devices: impl IntoIterator<Item = InferenceDeviceInfo>,
+) -> Result<agl_model::HostCapabilities, HostCapabilityProjectionError> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    system.refresh_cpu_all();
+    let physical_host_bytes = system.total_memory();
+    let physical_cpu_cores = sysinfo::System::physical_core_count().unwrap_or(0);
+    let logical_cpu_cores = system.cpus().len();
+    if physical_host_bytes == 0 || physical_cpu_cores == 0 || logical_cpu_cores < physical_cpu_cores
+    {
+        return Err(HostCapabilityProjectionError::MissingHostCapacity);
+    }
+    let devices = devices
+        .into_iter()
+        .map(|device| {
+            if device.total_memory_bytes == 0 {
+                return Err(HostCapabilityProjectionError::InvalidDevicePool {
+                    identity: device.physical_device_id,
+                });
+            }
+            Ok(agl_model::HostCapabilityDevice {
+                identity: device.physical_device_id,
+                kind: match device.kind {
+                    InferenceDeviceKind::Cpu => agl_model::HostCapabilityDeviceKind::Cpu,
+                    InferenceDeviceKind::DiscreteGpu => {
+                        agl_model::HostCapabilityDeviceKind::DiscreteGpu
+                    }
+                    InferenceDeviceKind::IntegratedGpu => {
+                        agl_model::HostCapabilityDeviceKind::IntegratedGpu
+                    }
+                    InferenceDeviceKind::Accelerator => {
+                        agl_model::HostCapabilityDeviceKind::Accelerator
+                    }
+                    InferenceDeviceKind::Metadata => agl_model::HostCapabilityDeviceKind::Metadata,
+                    InferenceDeviceKind::Unknown => agl_model::HostCapabilityDeviceKind::Unknown,
+                },
+                pci_device_id: device.pci_device_id,
+                pci_subsystem_id: device.pci_subsystem_id,
+                physical_pool_bytes: device.total_memory_bytes,
+                usable: device.usable,
+                supports_gpu_offload: device.supports_gpu_offload,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(agl_model::HostCapabilities {
+        physical_host_bytes,
+        physical_cpu_cores,
+        logical_cpu_cores,
+        devices,
+    })
 }
 
 #[cfg(test)]

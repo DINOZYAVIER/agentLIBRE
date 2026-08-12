@@ -6,7 +6,6 @@ mod execution_plan;
 mod install;
 mod install_transaction;
 mod lifecycle;
-mod planner;
 mod source;
 mod status;
 
@@ -15,8 +14,9 @@ pub use adapter::{
     parse_model_package,
 };
 pub use catalog::{
-    CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactFile, ModelArtifactRole,
-    ModelCatalog, ModelPackage, ModelPackageId, ModelPackageProvenance, ProfileDevice,
+    CatalogCapability, CatalogMtpProfile, CatalogRuntimeProfile, ModelArtifact, ModelArtifactFile,
+    ModelArtifactRole, ModelCatalog, ModelPackage, ModelPackageId, ModelPackageProvenance,
+    ProfileDevice,
 };
 pub use checkpoint::{
     PlannedArtifactRole, SetupCheckpoint, SetupCheckpointStore, SetupPhase,
@@ -31,15 +31,15 @@ pub use downloader::{
 pub use execution_plan::{
     GenerationPolicy, HostCapabilities, HostCapabilityDevice, HostCapabilityDeviceKind,
     MODEL_EXECUTION_PLAN_IDENTITY_VERSION, ModelArtifactPlan, ModelContextKey, ModelExecutionPlan,
-    ModelExecutionPlanDigest, ModelLoadKey, ModelPlanRejection, ModelResourceEnvelope,
-    ModelRuntimeShape, PackagePlanIdentity, PlannedArtifactFile, ProfileMismatchPredicate,
-    ResolvedFunctionPlanInput, ResolvedModelPlanInput, StructuredGenerationMode,
-    resolve_execution_plan,
+    ModelExecutionPlanDigest, ModelLoadKey, ModelMtpShape, ModelPlanRejection,
+    ModelResourceEnvelope, ModelRuntimeShape, PackagePlanIdentity, PlannedArtifactFile,
+    ProfileMismatchPredicate, ResolvedFunctionPlanInput, ResolvedModelPlanInput,
+    StructuredGenerationMode, resolve_execution_plan,
 };
 pub use install::{
     ImportedModel, InstallRecordState, InstallSource, InstalledArtifactFile, ModelBindingPatch,
-    ModelInstallRecord, ModelInstallStore, derive_hf_model_id, derive_model_id_from_path,
-    import_local_model, validate_gguf,
+    ModelInstallRecord, ModelInstallStore, ResolvedModelArtifactFile, derive_hf_model_id,
+    derive_model_id_from_path, import_local_model, resolve_installed_plan_files, validate_gguf,
 };
 pub use install_transaction::{
     ModelInstallRecovery, ModelInstallTransaction, ModelInstallTransactionError,
@@ -48,10 +48,6 @@ pub use install_transaction::{
 pub use lifecycle::{
     ModelLifecycleOperation, ModelLifecyclePlan, ModelLifecycleService, ModelLifecycleTarget,
     ModelPruneBlob, ModelPruneEntry,
-};
-pub use planner::{
-    CpuFallbackOffer, CpuResources, DiskResources, HostResources, LlamaDeviceInfo, LlamaDeviceKind,
-    ModelFit, ModelFitKind, RuntimePlan, RuntimePlanModelIdentity, RuntimePlanSet, RuntimePlanner,
 };
 pub use source::{HfSource, HfSourceKind};
 pub use status::{
