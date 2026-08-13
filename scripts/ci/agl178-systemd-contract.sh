@@ -15,7 +15,7 @@ trap cleanup EXIT
 
 runtime_root="$temporary_root/runtime root %25"
 generation="$runtime_root/libexec/agentlibre/generations/generation-test"
-mkdir -p "$runtime_root/bin" "$generation" "$temporary_root/workspace" \
+mkdir -p "$runtime_root/bin" "$generation" "$temporary_root/workspace root" \
   "$temporary_root/state"
 printf '#!/bin/sh\nexit 0\n' >"$generation/agl"
 printf '#!/bin/sh\nexit 0\n' >"$generation/llama-server"
@@ -28,7 +28,7 @@ chmod 0555 "$generation"
 ln -s generations/generation-test "$runtime_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$runtime_root/bin/agl"
 
-socket="$temporary_root/state/agl.sock"
+socket="$temporary_root/state path/agl.sock"
 output="$(
   HOME="$temporary_root/home" \
   XDG_CONFIG_HOME="$temporary_root/config" \
@@ -36,8 +36,8 @@ output="$(
     scripts/agentlibre-daemon-systemd-service.sh \
       --dry-run \
       --binary "$runtime_root/bin/agl" \
-      --cwd "$temporary_root/workspace" \
-      --workspace-root "$temporary_root/workspace" \
+      --cwd "$temporary_root/workspace root" \
+      --workspace-root "$temporary_root/workspace root" \
       --function service-test \
       --socket "$socket" \
       --max-output-tokens 64 \
@@ -53,6 +53,10 @@ unit_generation="${generation//\%/%%}"
   ci_fail "daemon unit omitted terminal service requirement: $output"
 [[ "$output" == *"After=agentlibre-daemon.socket agl-terminald.service"* ]] ||
   ci_fail "daemon unit omitted terminal readiness ordering: $output"
+[[ "$output" == *"WorkingDirectory=$temporary_root/workspace\\x20root"* ]] ||
+  ci_fail "daemon unit did not scalar-escape its working directory: $output"
+[[ "$output" == *"ListenStream=$temporary_root/state\\x20path/agl.sock"* ]] ||
+  ci_fail "daemon socket did not scalar-escape its address: $output"
 
 hostile_config="$temporary_root/hostile-config"
 hostile_unit_dir="$hostile_config/systemd/user"
@@ -64,8 +68,8 @@ XDG_CONFIG_HOME="$hostile_config" \
 XDG_STATE_HOME="$temporary_root/state" \
   scripts/agentlibre-daemon-systemd-service.sh \
     --binary "$runtime_root/bin/agl" \
-    --cwd "$temporary_root/workspace" \
-    --workspace-root "$temporary_root/workspace" \
+    --cwd "$temporary_root/workspace root" \
+    --workspace-root "$temporary_root/workspace root" \
     --socket "$socket" \
     >"$temporary_root/hostile-unit.out" 2>&1 || hostile_status=$?
 [[ "$hostile_status" -ne 0 ]] || ci_fail "daemon unit installer replaced an unmanaged fragment"
@@ -79,8 +83,8 @@ XDG_CONFIG_HOME="$hostile_config" \
 XDG_STATE_HOME="$temporary_root/state" \
   scripts/agentlibre-daemon-systemd-service.sh \
     --binary "$runtime_root/bin/agl" \
-    --cwd "$temporary_root/workspace" \
-    --workspace-root "$temporary_root/workspace" \
+    --cwd "$temporary_root/workspace root" \
+    --workspace-root "$temporary_root/workspace root" \
     --socket "$socket" \
     >"$temporary_root/hostile-dropin.out" 2>&1 || dropin_status=$?
 [[ "$dropin_status" -ne 0 ]] || ci_fail "daemon unit installer accepted a drop-in surface"

@@ -382,8 +382,8 @@ After=$socket_unit agl-terminald.service
 [Service]
 Type=simple
 UMask=0077
-WorkingDirectory=$cwd
-Environment=AGL_LOG=$log_filter
+WorkingDirectory=$(agl_systemd_escape_scalar "$cwd")
+Environment=$(agl_systemd_quote "AGL_LOG=$log_filter")
 Environment=AGL_LOG_STDERR=always
 ${agl_home_environment_line}${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$resolved_binary") serve --systemd-activation --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
 Restart=on-failure
@@ -395,7 +395,7 @@ socket_content="# Managed-by: agentLIBRE runtime installer v3
 Description=agentLIBRE daemon socket
 
 [Socket]
-ListenStream=$socket
+ListenStream=$(agl_systemd_escape_scalar "$socket")
 FileDescriptorName=agentlibre
 SocketMode=0600
 DirectoryMode=0700

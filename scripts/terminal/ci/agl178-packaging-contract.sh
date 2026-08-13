@@ -92,7 +92,7 @@ unit_output="$(
   XDG_CONFIG_HOME="$temporary_root/config" \
   XDG_DATA_HOME="$temporary_root/data" \
   XDG_STATE_HOME="$temporary_root/state" \
-  XDG_RUNTIME_DIR="$temporary_root/runtime" \
+  XDG_RUNTIME_DIR="$temporary_root/runtime path" \
     scripts/terminal/systemd-user-service.sh --prefix "$prefix"
 )"
 unit_generation="${first_generation//\%/%%}"
@@ -102,6 +102,10 @@ check "unit no longer supplies build identity as environment authority" \
   test "$(grep -c 'AGL_TERMINALD_BUILD_ID=' <<<"$unit_output" || true)" -eq 0
 check "unit no longer selects a launcher through the environment" \
   test "$(grep -c 'AGL_TERMINALD_LAUNCHER=' <<<"$unit_output" || true)" -eq 0
+check "scalar terminal socket path uses systemd escapes rather than argv quotes" \
+  contains "$unit_output" "ListenStream=$temporary_root/runtime\\x20path/agl-terminal/terminal.sock"
+check "environment-file path is a scalar absolute path" \
+  contains "$unit_output" "EnvironmentFile=$temporary_root/config/agl-terminal/service.env"
 
 hostile_config="$temporary_root/hostile-config"
 hostile_unit_dir="$hostile_config/systemd/user"

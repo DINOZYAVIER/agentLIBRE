@@ -97,6 +97,17 @@ quote_unit() {
   printf '"%s"' "$value"
 }
 
+escape_unit_scalar() {
+  local value="$1"
+  value="${value//\\/\\x5c}"
+  value="${value// /\\x20}"
+  value="${value//$'\t'/\\x09}"
+  value="${value//\"/\\x22}"
+  value="${value//\'/\\x27}"
+  value="${value//\%/%%}"
+  printf '%s' "$value"
+}
+
 environment_content="# Managed-by: agl-terminal generation installer v2
 AGL_TERMINALD_SOCKET=$(quote_env "$socket")
 AGL_TERMINALD_DATA_ROOT=$(quote_env "$data_root")
@@ -114,7 +125,7 @@ Before=agentlibre-daemon.service
 Type=notify
 NotifyAccess=main
 UMask=0077
-EnvironmentFile=$(quote_unit "$environment_file")
+EnvironmentFile=$(escape_unit_scalar "$environment_file")
 Environment=AGL_TERMINALD_SYSTEMD_ACTIVATION=1
 ExecStart=$(quote_unit "$service")
 Restart=on-failure
@@ -123,7 +134,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$(quote_unit "$data_root") $(quote_unit "$state_root") $(quote_unit "$runtime_root")
+ReadWritePaths=$(escape_unit_scalar "$data_root") $(escape_unit_scalar "$state_root") $(escape_unit_scalar "$runtime_root")
 "
 socket_content="# Managed-by: agl-terminal generation installer v2
 [Unit]
@@ -131,7 +142,7 @@ Description=agentLIBRE terminal runtime socket
 Before=agl-terminald.service agentlibre-daemon.service
 
 [Socket]
-ListenStream=$(quote_unit "$socket")
+ListenStream=$(escape_unit_scalar "$socket")
 FileDescriptorName=agl-terminal
 SocketMode=0600
 DirectoryMode=0700
