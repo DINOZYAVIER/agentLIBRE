@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,7 @@ use super::transport::{
 };
 
 const LISTEN_FD: RawFd = 190;
+const OWNER_LIFETIME_FD: RawFd = 191;
 pub(super) const ARTIFACT_FD_BASE: RawFd = 200;
 const EXECUTABLE_FD: RawFd = 189;
 
@@ -52,13 +53,13 @@ fn dri_prime_selector(native_device_id: &str) -> Result<String, InferenceFailure
 #[derive(Debug)]
 pub(crate) struct EngineProcess {
     child: Child,
-    connection: HttpConnection,
-    control: HttpConnection,
+    socket_path: PathBuf,
     directory: PathBuf,
     descriptors: VerifiedDescriptorSet,
     generation: u64,
     receipt: EngineAllocationReceipt,
     diagnostics: Arc<Mutex<Vec<u8>>>,
+    _owner_lifetime: OwnedFd,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,12 +200,12 @@ impl EngineProcess {
         let socket_path = directory.join("bootstrap.sock");
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| protocol_io_context("bind private listener", error))?;
-        let connection = UnixStream::connect(&socket_path)
-            .map_err(|error| protocol_io_context("connect private listener", error))?;
-        let control = UnixStream::connect(&socket_path)
-            .map_err(|error| protocol_io_context("connect private control listener", error))?;
-        fs::remove_file(&socket_path)
-            .map_err(|error| protocol_io_context("unlink private listener", error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| protocol_io_context("secure private listener", error))?;
+        }
         let mappings = descriptor_mappings(&directory, &descriptors)?;
         let slot_root = directory.join("slots");
         fs::create_dir(&slot_root)
@@ -229,6 +230,8 @@ impl EngineProcess {
             .transpose()?;
         let executable_fd = executable.as_raw_fd();
         let listener_fd = listener.as_raw_fd();
+        let (owner_lifetime_read, owner_lifetime_write) = owner_lifetime_pipe()?;
+        let owner_lifetime_read_fd = owner_lifetime_read.as_raw_fd();
         let artifact_fds = descriptors
             .files
             .iter()
@@ -252,6 +255,7 @@ impl EngineProcess {
             .args(args)
             .env_clear()
             .env("AGL_LLAMA_SERVER_LISTEN_FD", LISTEN_FD.to_string())
+            .env("AGL_LLAMA_SERVER_PARENT_FD", OWNER_LIFETIME_FD.to_string())
             .env("AGL_INFERENCE_PLAN_DIGEST", plan.digest().as_str())
             .env("AGL_INFERENCE_RESERVATION_ID", reservation_id.to_string())
             .env("AGL_INFERENCE_ENGINE_GENERATION", generation.to_string())
@@ -272,9 +276,6 @@ impl EngineProcess {
         // the parent before `fork`.
         unsafe {
             command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
                 if libc::getppid() != parent_pid {
                     return Err(std::io::Error::other(
                         "inference host exited during engine launch",
@@ -282,11 +283,12 @@ impl EngineProcess {
                 }
                 duplicate(executable_fd, EXECUTABLE_FD)?;
                 duplicate(listener_fd, LISTEN_FD)?;
+                duplicate(owner_lifetime_read_fd, OWNER_LIFETIME_FD)?;
                 for (source, target) in &artifact_fds {
                     duplicate(*source, *target)?;
                 }
                 mark_cloexec_range(3, EXECUTABLE_FD - 1)?;
-                mark_cloexec_range(LISTEN_FD + 1, ARTIFACT_FD_BASE - 1)?;
+                mark_cloexec_range(OWNER_LIFETIME_FD + 1, ARTIFACT_FD_BASE - 1)?;
                 mark_cloexec_range(artifact_fd_end, i32::MAX)?;
                 #[cfg(target_os = "linux")]
                 sandbox.enter()?;
@@ -300,6 +302,7 @@ impl EngineProcess {
                 return Err(protocol_io_context("spawn sealed llama-server", error));
             }
         };
+        drop(owner_lifetime_read);
         let stderr = child.stderr.take().ok_or_else(|| {
             protocol("sealed llama-server did not expose its diagnostic descriptor")
         })?;
@@ -312,8 +315,7 @@ impl EngineProcess {
         drop(listener);
         let mut process = Self {
             child,
-            connection: HttpConnection::new(connection),
-            control: HttpConnection::new(control),
+            socket_path,
             directory,
             descriptors,
             generation,
@@ -328,6 +330,7 @@ impl EngineProcess {
                 shared_bytes: 0,
             },
             diagnostics,
+            _owner_lifetime: owner_lifetime_write,
         };
         process.receipt = match process.verify_readiness(plan, reservation_id) {
             Ok(receipt) => receipt,
@@ -356,7 +359,9 @@ impl EngineProcess {
                 "llama-server exited before live inventory: {status}"
             )));
         }
-        let response = self.connection.request("GET", "/agl/v1/inventory", None)?;
+        let response = self
+            .fresh_connection()?
+            .request("GET", "/agl/v1/inventory", None)?;
         if response.status != 200 {
             return Err(protocol(&format!(
                 "live inventory returned HTTP {}; body: {}",
@@ -471,7 +476,8 @@ impl EngineProcess {
         }
         let body = request_body(plan, request, media)?;
         let started = Instant::now();
-        if let Err(error) = self.connection.write_request(
+        let mut connection = self.fresh_connection()?;
+        if let Err(error) = connection.write_request(
             "POST",
             "/agl/v1/generate",
             Some(&body.bytes),
@@ -486,7 +492,7 @@ impl EngineProcess {
         let mut expected_sequence = 1_u64;
         let mut streamed_raw = String::new();
         let mut terminal = None;
-        let response = match self.connection.read_generation_response(
+        let response = match connection.read_generation_response(
             Some(cancellation),
             deadline,
             |line| {
@@ -672,7 +678,7 @@ impl EngineProcess {
         }))
         .map_err(|error| protocol(&format!("failed to encode cancellation: {error}")))?;
         let cancellation = crate::InferenceCancellation::new();
-        let response = self.control.request_with_control(
+        let response = self.fresh_connection()?.request_with_control(
             "POST",
             "/agl/v1/control",
             Some(&body),
@@ -704,9 +710,20 @@ impl EngineProcess {
                 "llama-server exited before slot clear: {status}"
             )));
         }
-        let response = self
-            .connection
-            .request("POST", "/agl/v1/slot/0?action=erase", None)?;
+        let response = match self.fresh_connection()?.request(
+            "POST",
+            "/agl/v1/slot/0?action=erase",
+            None,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let status = self.child.try_wait().map_err(protocol_io)?;
+                return Err(protocol(&format!(
+                    "slot clear request failed ({error}); engine_status={status:?}; diagnostics={}",
+                    self.bounded_diagnostics()
+                )));
+            }
+        };
         if response.status != 200 {
             return Err(protocol(&format!(
                 "slot clear returned HTTP {}; body: {}",
@@ -730,7 +747,10 @@ impl EngineProcess {
                     self.bounded_diagnostics()
                 )));
             }
-            let response = match self.connection.request("GET", "/agl/v1/readiness", None) {
+            let response = match self
+                .fresh_connection()
+                .and_then(|mut connection| connection.request("GET", "/agl/v1/readiness", None))
+            {
                 Ok(response) => response,
                 Err(error) => {
                     let status = self.child.try_wait().map_err(protocol_io)?;
@@ -847,14 +867,40 @@ impl EngineProcess {
         })
     }
 
+    fn fresh_connection(&self) -> Result<HttpConnection, InferenceFailure> {
+        let metadata = fs::symlink_metadata(&self.socket_path)
+            .map_err(|error| protocol_io_context("inspect private engine listener", error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.mode() & 0o777 != 0o600
+                || metadata.nlink() != 1
+            {
+                return Err(protocol(
+                    "private engine listener is not an owned Unix socket",
+                ));
+            }
+        }
+        let stream = UnixStream::connect(&self.socket_path)
+            .map_err(|error| protocol_io_context("connect private engine listener", error))?;
+        Ok(HttpConnection::new(stream))
+    }
+
     fn bounded_diagnostics(&self) -> String {
         let bytes = self
             .diagnostics
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let text = String::from_utf8_lossy(&bytes);
+        let start = bytes.len().saturating_sub(16 * 1024);
+        let text = String::from_utf8_lossy(&bytes[start..]);
         text.chars()
+            .rev()
             .take(4096)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .map(|character| {
                 if character == '\n'
                     || character == '\r'
@@ -875,6 +921,23 @@ impl EngineProcess {
         }
         let _ = self.child.wait();
     }
+}
+
+fn owner_lifetime_pipe() -> Result<(OwnedFd, OwnedFd), InferenceFailure> {
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(protocol_io_context(
+            "create engine owner-lifetime channel",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: a successful pipe2 call returned two new owned descriptors.
+    Ok(unsafe {
+        (
+            OwnedFd::from_raw_fd(descriptors[0]),
+            OwnedFd::from_raw_fd(descriptors[1]),
+        )
+    })
 }
 
 fn typed_generation_error(body: &[u8]) -> Option<InferenceFailure> {
@@ -955,7 +1018,7 @@ impl Drop for EngineProcess {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixStream;
 
     use serde_json::json;
@@ -1034,6 +1097,20 @@ mod tests {
             validate_engine_output_projection("plain", &matching).is_err(),
             "normalized Tool projection cannot authorize a plain raw answer"
         );
+    }
+
+    #[test]
+    fn private_requests_close_their_one_response_connection() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut connection = HttpConnection::new(client);
+        connection
+            .write_request("GET", "/agl/v1/readiness", None, "application/json")
+            .unwrap();
+        let mut request = [0_u8; 512];
+        let read = server.read(&mut request).unwrap();
+        let request = std::str::from_utf8(&request[..read]).unwrap();
+        assert!(request.contains("Connection: close\r\n"));
+        assert!(!request.contains("Connection: keep-alive"));
     }
 
     // MIW-PROTO-001, MIW-ENG-005 and MIW-ENG-008.

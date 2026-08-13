@@ -72,7 +72,7 @@ impl HttpConnection {
         let body = body.unwrap_or_default();
         write!(
             self.stream,
-            "{method} {path} HTTP/1.1\r\nHost: agentlibre.internal\r\nX-AGL-Protocol: 1\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: agentlibre.internal\r\nX-AGL-Protocol: 1\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len(),
         )
         .map_err(protocol_io)?;
@@ -483,7 +483,10 @@ pub(super) fn drain_diagnostics(mut stderr: std::process::ChildStderr, sink: &Mu
         let mut collected = sink
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let remaining = MAX_ENGINE_DIAGNOSTIC_BYTES.saturating_sub(collected.len());
-        collected.extend_from_slice(&buffer[..read.min(remaining)]);
+        collected.extend_from_slice(&buffer[..read]);
+        if collected.len() > MAX_ENGINE_DIAGNOSTIC_BYTES {
+            let excess = collected.len() - MAX_ENGINE_DIAGNOSTIC_BYTES;
+            collected.drain(..excess);
+        }
     }
 }

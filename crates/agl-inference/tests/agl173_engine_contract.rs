@@ -133,9 +133,10 @@ fn launcher_applies_kernel_sandbox_before_exec() {
         fs::read_to_string(root().join("crates/agl-inference/src/engine/process.rs")).unwrap();
     let sandbox =
         fs::read_to_string(root().join("crates/agl-inference/src/engine/sandbox.rs")).unwrap();
+    let server =
+        fs::read_to_string(root().join("vendor/llama.cpp/tools/server/server.cpp")).unwrap();
     assert!(process.contains("sandbox.enter()?"));
     for mechanism in [
-        "PR_SET_PDEATHSIG",
         "PR_SET_NO_NEW_PRIVS",
         "landlock_restrict_self",
         "SECCOMP_MODE_FILTER",
@@ -148,5 +149,10 @@ fn launcher_applies_kernel_sandbox_before_exec() {
             "missing engine isolation mechanism {mechanism}"
         );
     }
+    assert!(process.contains("AGL_LLAMA_SERVER_PARENT_FD"));
+    assert!(process.contains("owner_lifetime_write"));
+    assert!(server.contains("AGL_LLAMA_SERVER_PARENT_FD"));
+    assert!(server.contains("agl_start_parent_watch"));
+    assert!(!process.contains("PR_SET_PDEATHSIG"));
     assert!(!process.contains("Stdio::inherit"));
 }
