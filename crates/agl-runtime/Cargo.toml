@@ -18,6 +18,7 @@ agl-model.workspace = true
 agl-process.workspace = true
 agl-repo.workspace = true
 agl-skill.workspace = true
+agl-terminal-protocol.workspace = true
 anyhow.workspace = true
 directories.workspace = true
 libc.workspace = true

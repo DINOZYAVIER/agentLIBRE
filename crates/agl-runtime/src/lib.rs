@@ -4,6 +4,8 @@ mod extension;
 mod features;
 mod paths;
 mod runtime_manifest;
+#[doc(hidden)]
+pub mod test_support;
 mod tracing_setup;
 
 pub use artifacts::*;

@@ -13,6 +13,9 @@ Installs the `agl` runtime bundle from this checkout with `cargo install`.
 
 Options:
   --root PATH          Install under PATH instead of the resolved explicit root.
+  --terminal-generation DIR
+                       Pair this agent generation with one exact immutable
+                       terminal generation directory (required).
   --debug              Use Cargo's debug install profile.
   --no-force           Do not replace an existing installed `agl`.
   --no-locked          Do not pass --locked to cargo install.
@@ -50,6 +53,7 @@ fail() {
 
 invocation_dir="$PWD"
 cargo_root=""
+terminal_generation=""
 debug=0
 force=1
 locked=1
@@ -65,6 +69,11 @@ while [[ $# -gt 0 ]]; do
         exit 2
       }
       cargo_root="$2"
+      shift 2
+      ;;
+    --terminal-generation)
+      [[ $# -ge 2 ]] || fail "--terminal-generation requires a directory"
+      terminal_generation="$2"
       shift 2
       ;;
     --debug)
@@ -103,6 +112,67 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -n "$terminal_generation" ]] || fail "--terminal-generation DIR is required"
+[[ "$terminal_generation" == /* ]] || terminal_generation="$invocation_dir/$terminal_generation"
+terminal_generation="$(realpath -m -s -- "$terminal_generation")"
+[[ ! -L "$terminal_generation" ]] || fail "terminal generation input must not be a symlink"
+resolved_terminal_generation="$(realpath -e -- "$terminal_generation" 2>/dev/null || true)"
+[[ -n "$resolved_terminal_generation" && "$resolved_terminal_generation" == "$terminal_generation" ]] ||
+  fail "terminal generation must be one canonical existing directory: $terminal_generation"
+[[ -d "$terminal_generation" && ! -L "$terminal_generation" &&
+  "$(stat -c '%a' -- "$terminal_generation")" == 555 &&
+  "$(stat -c '%u' -- "$terminal_generation")" == "$(id -u)" ]] ||
+  fail "terminal generation must be an immutable current-user directory: $terminal_generation"
+terminal_manifest="$terminal_generation/runtime-manifest.json"
+[[ -f "$terminal_manifest" && ! -L "$terminal_manifest" &&
+  "$(stat -c '%a' -- "$terminal_manifest")" == 444 &&
+  "$(stat -c '%h' -- "$terminal_manifest")" == 1 ]] ||
+  fail "terminal generation has no sealed runtime-manifest.json"
+grep -F '"schema":"agl-terminal.runtime-generation.v2"' "$terminal_manifest" >/dev/null ||
+  grep -F '"schema": "agl-terminal.runtime-generation.v2"' "$terminal_manifest" >/dev/null ||
+  fail "terminal generation manifest is not v2"
+terminal_revision="$(sed -n 's/.*"source_revision"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' "$terminal_manifest" | head -n1)"
+[[ -n "$terminal_revision" ]] || fail "terminal generation manifest has no canonical source revision"
+agent_source_revision="$(git -C "$repo_root" rev-parse --verify HEAD^{commit})" ||
+  fail "failed to resolve agent source revision"
+[[ "$terminal_revision" == "$agent_source_revision" ]] ||
+  fail "terminal generation source revision does not match this agent build source"
+for terminal_entry in agl-terminald agl-process-launcher agl-terminal; do
+  terminal_path="$terminal_generation/$terminal_entry"
+  [[ -f "$terminal_path" && -x "$terminal_path" && ! -L "$terminal_path" &&
+    "$(stat -c '%a' -- "$terminal_path")" == 555 &&
+    "$(stat -c '%h' -- "$terminal_path")" == 1 ]] ||
+    fail "terminal generation entry is not immutable: $terminal_path"
+  terminal_digest="sha256:$(sha256sum -- "$terminal_path" | awk '{print $1}')"
+  grep -F "\"sha256\":\"$terminal_digest\"" "$terminal_manifest" >/dev/null ||
+    grep -F "\"sha256\": \"$terminal_digest\"" "$terminal_manifest" >/dev/null ||
+    fail "terminal generation entry digest is not sealed: $terminal_entry"
+done
+terminal_manifest_digest="sha256:$(sha256sum -- "$terminal_manifest" | awk '{print $1}')"
+[[ "$(basename -- "$terminal_generation")" == "generation-${terminal_manifest_digest#sha256:}" ]] ||
+  fail "terminal generation directory does not match its full manifest digest"
+[[ "$(find "$terminal_generation" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" == $'agl-process-launcher\nagl-terminal\nagl-terminald\nruntime-manifest.json' ]] ||
+  fail "terminal generation inventory is not canonical"
+terminal_product_root="$(dirname -- "$(dirname -- "$terminal_generation")")"
+terminal_generations_root="$(dirname -- "$terminal_generation")"
+for terminal_ancestor in "$terminal_product_root" "$terminal_generations_root"; do
+  terminal_ancestor_mode="$(stat -c '%a' -- "$terminal_ancestor")"
+  [[ -d "$terminal_ancestor" && ! -L "$terminal_ancestor" &&
+    "$(realpath -e -- "$terminal_ancestor")" == "$terminal_ancestor" &&
+    "$(stat -c '%u' -- "$terminal_ancestor")" == "$(id -u)" ]] ||
+    fail "terminal generation has an unsafe managed ancestor: $terminal_ancestor"
+  (( (8#$terminal_ancestor_mode & 0022) == 0 )) ||
+    fail "terminal generation ancestor is group/other writable: $terminal_ancestor"
+done
+terminal_operation_lock="$terminal_product_root/.operation.lock"
+
+require_clean_agent_source() {
+  [[ "$(git -C "$repo_root" rev-parse --verify HEAD^{commit})" == "$agent_source_revision" ]] ||
+    fail "agent source revision changed during installation"
+  [[ -z "$(git -C "$repo_root" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)" ]] ||
+    fail "agent installation requires one clean root workspace"
+}
+
 if [[ -z "$cargo_root" ]]; then
   cargo_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-${HOME:?HOME is required}/.cargo}}"
 fi
@@ -132,6 +202,7 @@ if [[ "$dry_run" -eq 0 ]]; then
   need_tool git
   need_tool readelf
   need_tool sync
+  require_clean_agent_source
 fi
 
 if [[ "$dry_run" -eq 0 && "$skip_submodules" -eq 0 && -d "$repo_root/.git" ]]; then
@@ -203,12 +274,14 @@ set_install_args() {
 }
 
 if [[ "$dry_run" -eq 1 ]]; then
+  printf '+ verify exact terminal generation %s offline\n' "$terminal_generation"
+  printf '+ hold terminal operation lock %q through agent generation sealing\n' "$terminal_operation_lock"
   dry_stage_root="$generations_dir/.staging.DRY-RUN/.cargo-root"
   set_install_args "$dry_stage_root"
   run cargo "${agl_install_args[@]}"
   printf '+ copy private llama-server and exact lib*.so* closure from %q into runtime generation\n' \
     "${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}/bin"
-  printf '+ seal runtime-manifest.json from final copied executable/engine-library bytes and explicit Git source state\n'
+  printf '+ seal terminal manifest digest into agent runtime-manifest v3: %s\n' "$terminal_manifest_digest"
   printf '+ validate sealed runtime identity before and after atomic generation publication\n'
   printf '+ pin exact Nix runtime references below final generation .nix-gc-roots\n'
   printf '+ publish complete generation through %q\n' "$current_link"
@@ -246,6 +319,17 @@ require_managed_directory "$install_bin" "install bin directory"
 require_managed_directory "$cargo_root/libexec" "libexec directory"
 require_managed_directory "$runtime_dir" "runtime directory"
 require_managed_directory "$generations_dir" "runtime generations directory"
+
+if [[ -L "$terminal_operation_lock" || ( -e "$terminal_operation_lock" && ! -f "$terminal_operation_lock" ) ]]; then
+  fail "refusing non-regular terminal operation lock: $terminal_operation_lock"
+fi
+if [[ ! -e "$terminal_operation_lock" ]]; then
+  (umask 077 && : >>"$terminal_operation_lock")
+fi
+exec {terminal_operation_lock_fd}<>"$terminal_operation_lock"
+if ! flock --exclusive --nonblock "$terminal_operation_lock_fd"; then
+  fail "terminal generation is busy with another install/uninstall operation"
+fi
 
 if [[ -e "$forbidden_public_worker" || -L "$forbidden_public_worker" ]]; then
   fail "refusing a public inference worker command; remove it before installing the private runtime bundle: $forbidden_public_worker"
@@ -609,6 +693,7 @@ mkdir -p "$stage_root"
 set_install_args "$stage_root"
 
 run cargo "${agl_install_args[@]}"
+require_clean_agent_source
 
 [[ -x "$stage_root/bin/agl" && ! -L "$stage_root/bin/agl" ]] ||
   fail "staged cargo install did not produce a regular executable agl"
@@ -635,32 +720,19 @@ chmod 0555 \
   "$generation_staging/llama-server" \
   "$generation_staging"/lib*.so*
 
-runtime_source_state="unavailable"
-runtime_source_revision=""
-runtime_source_tree=""
-if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  runtime_source_revision="$(git -C "$repo_root" rev-parse --verify HEAD)" ||
-    fail "failed to resolve runtime source revision"
-  runtime_source_tree="$(git -C "$repo_root" rev-parse --verify 'HEAD^{tree}')" ||
-    fail "failed to resolve runtime source tree"
-  runtime_source_status="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)" ||
-    fail "failed to inspect runtime source state"
-  if [[ -n "$runtime_source_status" ]]; then
-    runtime_source_state="dirty"
-  else
-    runtime_source_state="clean"
-  fi
-fi
+runtime_source_state="clean"
+runtime_source_revision="$agent_source_revision"
+runtime_source_tree="$(git -C "$repo_root" rev-parse --verify 'HEAD^{tree}')" ||
+  fail "failed to resolve runtime source tree"
 runtime_seal_environment=(
   "AGL_INTERNAL_SEAL_RUNTIME_MANIFEST=$generation_staging"
   "AGL_INTERNAL_RUNTIME_SOURCE_STATE=$runtime_source_state"
+  "AGL_INTERNAL_TERMINAL_GENERATION=$terminal_generation"
 )
-if [[ "$runtime_source_state" != unavailable ]]; then
-  runtime_seal_environment+=(
-    "AGL_INTERNAL_RUNTIME_SOURCE_REVISION=$runtime_source_revision"
-    "AGL_INTERNAL_RUNTIME_SOURCE_TREE=$runtime_source_tree"
-  )
-fi
+runtime_seal_environment+=(
+  "AGL_INTERNAL_RUNTIME_SOURCE_REVISION=$runtime_source_revision"
+  "AGL_INTERNAL_RUNTIME_SOURCE_TREE=$runtime_source_tree"
+)
 run env "${runtime_seal_environment[@]}" "$generation_staging/agl"
 
 generation_nix_references=()

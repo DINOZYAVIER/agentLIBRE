@@ -16,6 +16,7 @@ const INTERNAL_SEAL_DIRECTORY: &str = "AGL_INTERNAL_SEAL_RUNTIME_MANIFEST";
 const INTERNAL_SOURCE_STATE: &str = "AGL_INTERNAL_RUNTIME_SOURCE_STATE";
 const INTERNAL_SOURCE_REVISION: &str = "AGL_INTERNAL_RUNTIME_SOURCE_REVISION";
 const INTERNAL_SOURCE_TREE: &str = "AGL_INTERNAL_RUNTIME_SOURCE_TREE";
+const INTERNAL_TERMINAL_GENERATION: &str = "AGL_INTERNAL_TERMINAL_GENERATION";
 
 pub(crate) fn internal_runtime_action() -> Option<Result<()>> {
     env::var_os(INTERNAL_SEAL_DIRECTORY).map(|directory| {
@@ -39,11 +40,6 @@ pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
     let runtime_identity = agl_runtime::current_runtime_identity()
         .context("runtime manifest identity verification failed")?;
     let runtime = agl_runtime::AgentLibreRuntimeConfig::from_env()?;
-    runtime
-        .execution
-        .terminal_endpoint(&runtime.paths)?
-        .read_identity()
-        .context("terminal service identity verification failed")?;
 
     #[cfg(target_os = "linux")]
     {
@@ -117,7 +113,18 @@ fn protocol_identity(identity: &agl_runtime::CurrentRuntimeIdentity) -> RuntimeG
 fn seal_staged_runtime(directory: &Path) -> Result<()> {
     current_executable_is_in(directory)?;
     let source = source_evidence_from_environment()?;
-    let manifest = seal_runtime_manifest(directory, source, ENGINE_PROTOCOL_ID)?;
+    let terminal_directory = PathBuf::from(required_environment(INTERNAL_TERMINAL_GENERATION)?);
+    let terminal =
+        agl_terminal_protocol::VerifiedTerminalGeneration::load_installed(&terminal_directory)
+            .context(
+                "failed to verify the selected terminal generation while sealing agent runtime",
+            )?;
+    let manifest = seal_runtime_manifest(
+        directory,
+        source,
+        ENGINE_PROTOCOL_ID,
+        terminal.identity().clone(),
+    )?;
     crate::print_json(&manifest)
 }
 

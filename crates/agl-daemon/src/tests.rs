@@ -114,6 +114,19 @@ impl TestRuntime {
             terminal: Some(terminal),
         }
     }
+
+    fn runtime_identity(&self) -> agl_runtime::CurrentRuntimeIdentity {
+        let mut identity = agl_runtime::current_runtime_identity().unwrap();
+        identity.terminal_generation = Some(
+            self.terminal
+                .as_ref()
+                .unwrap()
+                .identity
+                .installed_generation()
+                .clone(),
+        );
+        identity
+    }
 }
 
 fn install_daemon_test_package_graph(
@@ -290,6 +303,7 @@ impl Drop for TestRuntime {
 }
 
 struct TestTerminalService {
+    identity: agl_terminal_protocol::ServiceIdentity,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
 }
@@ -305,18 +319,21 @@ impl TestTerminalService {
         use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::net::UnixListener;
 
-        let state_root = runtime.paths.terminal_state_root();
-        std::fs::create_dir_all(&state_root).unwrap();
         let runtime_root = runtime.paths.terminal_runtime_root();
         std::fs::create_dir_all(&runtime_root).unwrap();
         let socket_path = runtime_root.join("terminal.sock");
-        let identity = agl_terminal_protocol::ServiceIdentity {
-            protocol_version: agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
-            crate_version: "1.0.0-alpha.1".to_owned(),
-            build_id: agl_exec::AuthorityFingerprint::new(agl_process::TERMINAL_BUILD_ID).unwrap(),
-            generation_id: agl_exec::ServiceGenerationId::generate(),
-        };
-        let identity_path = state_root.join("service-identity.json");
+        let identity = agl_terminal_protocol::ServiceIdentity::new(
+            agl_terminal_protocol::TerminalGenerationIdentity::new(
+                agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                "b".repeat(40),
+                agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+            )
+            .unwrap(),
+            agl_exec::ServiceGenerationId::generate(),
+        )
+        .unwrap();
+        let identity_path = runtime_root.join("service-identity.json");
         std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
         std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let listener = UnixListener::bind(socket_path).unwrap();
@@ -324,6 +341,7 @@ impl TestTerminalService {
 
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let thread_identity = identity.clone();
         let thread = std::thread::spawn(move || {
             let state = Mutex::new(TestTerminalState::default());
             while !thread_stop.load(Ordering::Acquire) {
@@ -335,11 +353,12 @@ impl TestTerminalService {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                serve_terminal_fixture_request(&mut stream, &identity, &state)?;
+                serve_terminal_fixture_request(&mut stream, &thread_identity, &state)?;
             }
             Ok(())
         });
         Self {
+            identity,
             stop,
             thread: Some(thread),
         }
@@ -506,7 +525,7 @@ fn fixture_descriptor(
         owner: record.owner.caller().clone(),
         authority_fingerprint: authority.clone(),
         profile: record.profile,
-        service_generation: identity.generation_id.clone(),
+        service_generation: identity.process_generation_id().clone(),
         state: record.state,
         command_sequence: record.command_sequence,
         output_sequence: 0,
@@ -791,14 +810,16 @@ fn open_session(state: &mut DaemonState) -> SessionId {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
     let test = TestRuntime::new();
-    let state = SharedDaemonState::new(
+    let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::new(InferenceControl::default()),
         }),
         EngineRuntimeStatusHandle::default(),
-    );
+        test.runtime_identity(),
+    )
+    .unwrap();
     let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
     let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
     let state_owner = Arc::clone(&state.inner);
@@ -2182,14 +2203,16 @@ async fn server_run_submit_uses_the_shared_prompt_projection() {
     let test = TestRuntime::new();
     let control = Arc::new(InferenceControl::default());
     control.blocked.store(true, Ordering::Release);
-    let state = SharedDaemonState::new(
+    let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
         EngineRuntimeStatusHandle::default(),
-    );
+        test.runtime_identity(),
+    )
+    .unwrap();
     let application = state.application();
     let opened = application
         .open_session(agl_app::SessionOpen {
@@ -2291,14 +2314,16 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
     let test = TestRuntime::new();
     let control = Arc::new(InferenceControl::default());
     control.blocked.store(true, Ordering::Release);
-    let state = SharedDaemonState::new(
+    let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
         EngineRuntimeStatusHandle::default(),
-    );
+        test.runtime_identity(),
+    )
+    .unwrap();
     let store = agl_store::AglStore::open_current_at(test.runtime.paths.store_root()).unwrap();
     let repository = CronRepository::new(&store);
     let mut draft = CronJobDraft::new(

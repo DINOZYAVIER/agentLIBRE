@@ -6,6 +6,10 @@ use agl_model::{
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 
+pub(crate) fn terminal_endpoint(root: &Path) -> agl_process::TerminalEndpoint {
+    agl_process::test_support::endpoint(&root.join("terminal-runtime"))
+}
+
 pub(crate) fn install_package_bound_test_model(
     workspace_root: &Path,
     runtime: &AgentLibreRuntimeConfig,

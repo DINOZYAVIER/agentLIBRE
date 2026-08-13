@@ -20,6 +20,7 @@
       {"name": "agl-core-tools", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-cron", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-daemon", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-exec", "owner": "terminal-runtime", "category": "terminal"},
       {"name": "agl-events", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-extension", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-function", "owner": "agentLIBRE", "category": "core"},
@@ -34,24 +35,22 @@
       {"name": "agl-oven", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-package", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-process", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-process-launcher", "owner": "terminal-runtime", "category": "terminal"},
       {"name": "agl-protocol", "owner": "agentLIBRE", "category": "protocol"},
       {"name": "agl-repo", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-runtime", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-session", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-skill", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-store", "owner": "agentLIBRE", "category": "store"},
-      {"name": "agl-supervisor", "owner": "agentLIBRE", "category": "core"}
+      {"name": "agl-supervisor", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-pty", "owner": "terminal-runtime", "category": "terminal"},
+      {"name": "agl-terminal", "owner": "terminal-runtime", "category": "terminal"},
+      {"name": "agl-terminal-client", "owner": "terminal-runtime", "category": "terminal"},
+      {"name": "agl-terminal-protocol", "owner": "terminal-runtime", "category": "terminal"},
+      {"name": "agl-terminal-ui", "owner": "terminal-runtime", "category": "terminal"},
+      {"name": "agl-terminald", "owner": "terminal-runtime", "category": "terminal"}
     ],
-    "future": [
-      {"name": "agl-exec", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
-      {"name": "agl-pty", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
-      {"name": "agl-terminal", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
-      {"name": "agl-terminal-protocol", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
-      {"name": "agl-terminal-client", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
-      {"name": "agl-process-launcher", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"},
-      {"name": "agl-terminald", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"},
-      {"name": "agl-terminal-ui", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"}
-    ]
+    "future": []
   },
   "rules": [
     {
@@ -115,16 +114,6 @@
       "forbidden_dependencies": {
         "category": "terminal"
       }
-    },
-    {
-      "id": "terminal-immutable-source",
-      "description": "Any present terminal package requires pinned immutable git source precise revision regardless of owner; path and mutable git are forbidden",
-      "selector": {
-        "category": "terminal",
-        "status": "present"
-      },
-      "requirement": "immutable_pinned_git_source",
-      "forbidden_source_types": ["path", "git-without-precise-rev", "mutable-git"]
     },
     {
       "id": "h01-future-optional",

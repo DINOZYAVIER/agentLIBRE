@@ -62,6 +62,11 @@ log_filter="${AGL_LOG:-agentlibre=info,warn}"
 vulkan_driver_files=""
 vulkan_driver_environment=""
 vulkan_environment_line="UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"$'\n'
+agl_home_environment_line=""
+if [[ -v AGL_HOME ]]; then
+  agl_systemd_validate_absolute_path "AGL_HOME" "$AGL_HOME"
+  agl_home_environment_line="Environment=$(agl_systemd_quote "AGL_HOME=$AGL_HOME")"$'\n'
+fi
 if [[ -v VK_DRIVER_FILES ]]; then
   vulkan_driver_files="$VK_DRIVER_FILES"
   vulkan_driver_environment="VK_DRIVER_FILES"
@@ -368,7 +373,8 @@ unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
 socket_unit="${unit%.service}.socket"
 socket_unit_file="$unit_dir/$socket_unit"
-service_content="[Unit]
+service_content="# Managed-by: agentLIBRE runtime installer v3
+[Unit]
 Description=agentLIBRE daemon
 Requires=$socket_unit agl-terminald.service
 After=$socket_unit agl-terminald.service
@@ -379,12 +385,13 @@ UMask=0077
 WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
-${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
+${agl_home_environment_line}${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$resolved_binary") serve --systemd-activation --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
 Restart=on-failure
 RestartSec=5
 "
 
-socket_content="[Unit]
+socket_content="# Managed-by: agentLIBRE runtime installer v3
+[Unit]
 Description=agentLIBRE daemon socket
 
 [Socket]
@@ -426,6 +433,26 @@ else
 fi
 echo "unit file: $unit_file"
 echo "socket unit file: $socket_unit_file"
+
+if [[ "$dry_run" -eq 0 ]]; then
+  managed_marker='# Managed-by: agentLIBRE runtime installer v3'
+  for owned_file in "$unit_file" "$socket_unit_file"; do
+    if [[ -e "$owned_file" || -L "$owned_file" ]]; then
+      [[ -f "$owned_file" && ! -L "$owned_file" &&
+        "$(stat -c '%u' -- "$owned_file")" == "$(id -u)" &&
+        "$(head -n1 -- "$owned_file")" == "$managed_marker" ]] || {
+        echo "refusing unmanaged agent systemd surface: $owned_file" >&2
+        exit 1
+      }
+    fi
+  done
+  for dropin_dir in "$unit_dir/$unit.d" "$unit_dir/$socket_unit.d"; do
+    [[ ! -e "$dropin_dir" && ! -L "$dropin_dir" ]] || {
+      echo "refusing agent systemd drop-in surface: $dropin_dir" >&2
+      exit 1
+    }
+  done
+fi
 
 agl_systemd_print_or_install_user_unit \
   "$dry_run" \

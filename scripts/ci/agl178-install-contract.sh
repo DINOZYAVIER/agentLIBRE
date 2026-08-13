@@ -26,11 +26,7 @@ contains() {
   [[ "$1" == *"$2"* ]]
 }
 
-terminal_revision="$({
-  sed -n \
-    's/.*agl-terminal.*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml
-} | head -n 1)"
-[[ -n "$terminal_revision" ]] || ci_fail "cannot resolve compiled terminal Git revision"
+terminal_revision="$(git rev-parse --verify HEAD^{commit})"
 
 generation="$temporary_root/terminal generation"
 mkdir -p "$generation"
@@ -65,6 +61,15 @@ file_entry() {
 } >"$generation/runtime-manifest.json"
 chmod 0444 "$generation/runtime-manifest.json"
 chmod 0555 "$generation"
+manifest_digest="$(sha256sum -- "$generation/runtime-manifest.json" | awk '{print $1}')"
+mkdir -p "$temporary_root/terminal/generations"
+canonical_generation="$temporary_root/terminal/generations/generation-$manifest_digest"
+mkdir "$canonical_generation"
+cp -a -- "$generation/." "$canonical_generation/"
+chmod 0555 "$canonical_generation"
+chmod 0755 "$generation"
+rm -rf -- "$generation"
+generation="$canonical_generation"
 
 help="$(scripts/install-agl-cargo.sh --help)"
 check "help exposes required exact generation input" \

@@ -177,6 +177,29 @@ impl ChatService {
         runtime: &AgentLibreRuntimeConfig,
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
+        Self::open_with_optional_terminal_endpoint(options, runtime, inference_client, None)
+    }
+
+    pub fn open_with_terminal_endpoint(
+        options: ChatOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+        terminal_endpoint: agl_process::TerminalEndpoint,
+    ) -> Result<Self> {
+        Self::open_with_optional_terminal_endpoint(
+            options,
+            runtime,
+            inference_client,
+            Some(terminal_endpoint),
+        )
+    }
+
+    fn open_with_optional_terminal_endpoint(
+        options: ChatOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+        terminal_endpoint: Option<agl_process::TerminalEndpoint>,
+    ) -> Result<Self> {
         if options.new_session && options.session_id.is_some() {
             bail!("new session cannot be requested with a specific session id");
         }
@@ -248,14 +271,25 @@ impl ChatService {
         } else {
             (None, None, admitted_execution_context)
         };
-        let turn_runtime = ChatTurnRuntime::new(
-            session,
-            runtime,
-            &workspace_root,
-            execution_context,
-            Some(session_id.clone()),
-            history_enabled,
-        )?;
+        let turn_runtime = match terminal_endpoint {
+            Some(terminal_endpoint) => ChatTurnRuntime::new_with_terminal_endpoint(
+                session,
+                runtime,
+                &workspace_root,
+                execution_context,
+                Some(session_id.clone()),
+                history_enabled,
+                terminal_endpoint,
+            )?,
+            None => ChatTurnRuntime::new(
+                session,
+                runtime,
+                &workspace_root,
+                execution_context,
+                Some(session_id.clone()),
+                history_enabled,
+            )?,
+        };
         let messages = replay
             .as_ref()
             .map(replay_turn_messages)
@@ -281,10 +315,11 @@ impl ChatService {
         })
     }
 
-    pub(crate) fn open_subagent(
+    pub(crate) fn open_subagent_with_optional_terminal_endpoint(
         config: SubagentSessionConfig,
         runtime: &AgentLibreRuntimeConfig,
         inference_client: InferenceClientHandle,
+        terminal_endpoint: Option<agl_process::TerminalEndpoint>,
     ) -> Result<Self> {
         let workspace_root = config.workspace_root.clone();
         let execution_session_id = config.execution_session_id.clone();
@@ -293,14 +328,25 @@ impl ChatService {
         let session = InferenceSession::new_subagent(config, runtime, inference_client)?;
         let tool_mode = session.tool_mode();
         let execution_context = runtime.execution.context_snapshot(&workspace_root)?;
-        let turn_runtime = ChatTurnRuntime::new(
-            session,
-            runtime,
-            &workspace_root,
-            execution_context,
-            None,
-            false,
-        )?;
+        let turn_runtime = match terminal_endpoint {
+            Some(terminal_endpoint) => ChatTurnRuntime::new_with_terminal_endpoint(
+                session,
+                runtime,
+                &workspace_root,
+                execution_context,
+                None,
+                false,
+                terminal_endpoint,
+            )?,
+            None => ChatTurnRuntime::new(
+                session,
+                runtime,
+                &workspace_root,
+                execution_context,
+                None,
+                false,
+            )?,
+        };
         Ok(Self {
             runtime: runtime.clone(),
             session_id: execution_session_id,
@@ -1848,7 +1894,14 @@ mod tests {
             no_history: !history_enabled,
             new_session: true,
         };
-        let service = ChatService::open(options, &runtime, inference_client).unwrap();
+        let terminal_endpoint = crate::test_support::terminal_endpoint(&root);
+        let service = ChatService::open_with_terminal_endpoint(
+            options,
+            &runtime,
+            inference_client,
+            terminal_endpoint,
+        )
+        .unwrap();
         TestChatService { service, root }
     }
 

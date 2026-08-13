@@ -1,0 +1,37 @@
+[package]
+name = "agl-terminal-ui"
+version = "1.0.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agl-terminal"
+path = "src/main.rs"
+
+[dependencies]
+agl-client.workspace = true
+agl-content.workspace = true
+agl-exec.workspace = true
+agl-ids.workspace = true
+agl-protocol.workspace = true
+agl-terminal.workspace = true
+agl-terminal-client.workspace = true
+agl-terminal-protocol.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+fs2.workspace = true
+libc.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml = "0.9.8"
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true

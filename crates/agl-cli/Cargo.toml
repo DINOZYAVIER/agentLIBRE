@@ -40,6 +40,7 @@ agl-repo.workspace = true
 agl-runtime.workspace = true
 agl-skill.workspace = true
 agl-store.workspace = true
+agl-terminal-protocol.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

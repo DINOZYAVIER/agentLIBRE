@@ -12,9 +12,7 @@
       "name": "terminal-engine-to-agent",
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-exec -> agl-actions crosses terminal-to-agent"],
-      "add_packages": [
-        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-actions", "kind": null }
       ]
@@ -23,9 +21,7 @@
       "name": "agent-sdk-below-ui",
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal-client -> agl-client crosses terminal-to-agent"],
-      "add_packages": [
-        { "name": "agl-terminal-client", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-terminal-client", "name": "agl-client", "kind": null }
       ]
@@ -34,9 +30,7 @@
       "name": "presentation-below-ui",
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal -> agl-app is forbidden below terminal UI"],
-      "add_packages": [
-        { "name": "agl-terminal", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-terminal", "name": "agl-app", "kind": null }
       ]
@@ -48,9 +42,7 @@
         "normal: agl-pty -> agl-protocol is forbidden below terminal UI",
         "normal: agl-pty -> agl-store is forbidden below terminal UI"
       ],
-      "add_packages": [
-        { "name": "agl-pty", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-pty", "name": "agl-protocol", "kind": null },
         { "from": "agl-pty", "name": "agl-store", "kind": null }
@@ -60,30 +52,10 @@
       "name": "inference-to-terminal",
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-inference -> agl-exec crosses inference-to-terminal"],
-      "add_packages": [
-        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-inference", "name": "agl-exec", "kind": null }
       ]
-    },
-    {
-      "name": "mutable-path-source",
-      "expected_exit": 1,
-      "expected_diagnostics": ["requires an immutable pinned git revision"],
-      "add_packages": [
-        { "name": "agl-terminal-ui", "source": null }
-      ],
-      "dependencies": []
-    },
-    {
-      "name": "external-pinned-exact-source",
-      "expected_exit": 0,
-      "expected_diagnostics": [],
-      "add_packages": [
-        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
-      "dependencies": []
     },
     {
       "name": "build-and-dev-kinds",
@@ -92,9 +64,7 @@
         "build: agl-exec -> agl-actions crosses terminal-to-agent",
         "dev: agl-exec -> agl-client crosses terminal-to-agent"
       ],
-      "add_packages": [
-        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-actions", "kind": "build" },
         { "from": "agl-exec", "name": "agl-client", "kind": "dev" }
@@ -104,9 +74,7 @@
       "name": "similar-name-exact-match",
       "expected_exit": 0,
       "expected_diagnostics": [],
-      "add_packages": [
-        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
-      ],
+      "add_packages": [],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-client-extra", "kind": null }
       ]

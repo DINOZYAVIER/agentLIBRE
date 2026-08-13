@@ -64,6 +64,7 @@ pub struct ChatSupervisorFactory {
     policy_hashes: Arc<Mutex<BTreeMap<SessionId, String>>>,
     runtime: Option<agl_runtime::AgentLibreRuntimeConfig>,
     inference_client: Option<crate::InferenceClientHandle>,
+    terminal_endpoint: Option<agl_process::TerminalEndpoint>,
     presentation_sink: Arc<dyn crate::TurnPresentationSink>,
 }
 
@@ -75,6 +76,7 @@ impl ChatSupervisorFactory {
             policy_hashes: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: None,
             inference_client: None,
+            terminal_endpoint: None,
             presentation_sink: Arc::new(crate::NoopTurnPresentationSink),
         }
     }
@@ -90,12 +92,21 @@ impl ChatSupervisorFactory {
             policy_hashes: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: Some(runtime),
             inference_client: Some(inference_client),
+            terminal_endpoint: None,
             presentation_sink: Arc::new(crate::NoopTurnPresentationSink),
         }
     }
 
     pub fn with_presentation_sink(mut self, sink: Arc<dyn crate::TurnPresentationSink>) -> Self {
         self.presentation_sink = sink;
+        self
+    }
+
+    pub fn with_terminal_endpoint(
+        mut self,
+        terminal_endpoint: agl_process::TerminalEndpoint,
+    ) -> Self {
+        self.terminal_endpoint = Some(terminal_endpoint);
         self
     }
 
@@ -229,8 +240,16 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                     })?;
                     options.session_id = Some(session_id.clone());
                     options.new_session = false;
-                    ChatService::open(options, runtime, inference_client)
-                        .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
+                    match self.terminal_endpoint.clone() {
+                        Some(terminal_endpoint) => ChatService::open_with_terminal_endpoint(
+                            options,
+                            runtime,
+                            inference_client,
+                            terminal_endpoint,
+                        ),
+                        None => ChatService::open(options, runtime, inference_client),
+                    }
+                    .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
                 })?;
             service.install_root_delegation_plan(delegation_plan);
             Ok(service)
@@ -361,7 +380,7 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                                 "subagent recovery inference client is missing".to_string(),
                             )
                         })?;
-                        ChatService::open_subagent(
+                        ChatService::open_subagent_with_optional_terminal_endpoint(
                             crate::session::SubagentSessionConfig {
                                 function_plan_input,
                                 model_plan_input: *model_plan_input,
@@ -374,6 +393,7 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                             },
                             runtime,
                             inference_client,
+                            self.terminal_endpoint.clone(),
                         )
                         .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
                     })?;

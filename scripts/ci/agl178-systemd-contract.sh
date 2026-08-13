@@ -43,8 +43,9 @@ output="$(
       --max-output-tokens 64 \
       --tool-mode execute
 )"
+unit_generation="${generation//\%/%%}"
 
-[[ "$output" == *"ExecStart=\"$generation/agl\" serve --systemd-activation"* ]] ||
+[[ "$output" == *"ExecStart=\"$unit_generation/agl\" serve --systemd-activation"* ]] ||
   ci_fail "daemon unit does not execute the immutable agent generation: $output"
 [[ "$output" != *"ExecStart=\"$runtime_root/bin/agl\""* ]] ||
   ci_fail "daemon unit still executes the mutable public link: $output"
@@ -52,5 +53,36 @@ output="$(
   ci_fail "daemon unit omitted terminal service requirement: $output"
 [[ "$output" == *"After=agentlibre-daemon.socket agl-terminald.service"* ]] ||
   ci_fail "daemon unit omitted terminal readiness ordering: $output"
+
+hostile_config="$temporary_root/hostile-config"
+hostile_unit_dir="$hostile_config/systemd/user"
+mkdir -p "$hostile_unit_dir"
+printf '# foreign unit\n' >"$hostile_unit_dir/agentlibre-daemon.service"
+hostile_status=0
+HOME="$temporary_root/home" \
+XDG_CONFIG_HOME="$hostile_config" \
+XDG_STATE_HOME="$temporary_root/state" \
+  scripts/agentlibre-daemon-systemd-service.sh \
+    --binary "$runtime_root/bin/agl" \
+    --cwd "$temporary_root/workspace" \
+    --workspace-root "$temporary_root/workspace" \
+    --socket "$socket" \
+    >"$temporary_root/hostile-unit.out" 2>&1 || hostile_status=$?
+[[ "$hostile_status" -ne 0 ]] || ci_fail "daemon unit installer replaced an unmanaged fragment"
+grep -F '# foreign unit' "$hostile_unit_dir/agentlibre-daemon.service" >/dev/null ||
+  ci_fail "daemon unit conflict changed the unmanaged fragment"
+rm -f -- "$hostile_unit_dir/agentlibre-daemon.service"
+mkdir "$hostile_unit_dir/agentlibre-daemon.socket.d"
+dropin_status=0
+HOME="$temporary_root/home" \
+XDG_CONFIG_HOME="$hostile_config" \
+XDG_STATE_HOME="$temporary_root/state" \
+  scripts/agentlibre-daemon-systemd-service.sh \
+    --binary "$runtime_root/bin/agl" \
+    --cwd "$temporary_root/workspace" \
+    --workspace-root "$temporary_root/workspace" \
+    --socket "$socket" \
+    >"$temporary_root/hostile-dropin.out" 2>&1 || dropin_status=$?
+[[ "$dropin_status" -ne 0 ]] || ci_fail "daemon unit installer accepted a drop-in surface"
 
 printf 'agl178-systemd: passed\n'

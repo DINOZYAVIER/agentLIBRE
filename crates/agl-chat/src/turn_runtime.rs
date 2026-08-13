@@ -240,6 +240,27 @@ impl ChatTurnRuntime {
         scope_session_id: Option<SessionId>,
         persist_session_context: bool,
     ) -> Result<Self> {
+        let terminal_endpoint = runtime.execution.terminal_endpoint(&runtime.paths)?;
+        Self::new_with_terminal_endpoint(
+            session,
+            runtime,
+            workspace_root,
+            execution_context,
+            scope_session_id,
+            persist_session_context,
+            terminal_endpoint,
+        )
+    }
+
+    pub(crate) fn new_with_terminal_endpoint(
+        session: InferenceSession,
+        runtime: &agl_runtime::AgentLibreRuntimeConfig,
+        workspace_root: impl AsRef<Path>,
+        execution_context: agl_exec::ExecutionContextSnapshot,
+        scope_session_id: Option<SessionId>,
+        persist_session_context: bool,
+        terminal_endpoint: agl_process::TerminalEndpoint,
+    ) -> Result<Self> {
         execution_context
             .validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -257,7 +278,7 @@ impl ChatTurnRuntime {
             scope_session_id,
             persist_session_context,
         });
-        let process_tools = build_process_tools(runtime, process_context)?;
+        let process_tools = build_process_tools(runtime, process_context, terminal_endpoint)?;
         let tool_runtime = build_chat_tool_runtime(
             &session,
             &core_tools,
@@ -1281,9 +1302,10 @@ fn permission_runtime_status(
 fn build_process_tools(
     runtime: &agl_runtime::AgentLibreRuntimeConfig,
     context: Arc<dyn agl_core_tools::ProcessExecutionContext>,
+    terminal_endpoint: agl_process::TerminalEndpoint,
 ) -> Result<agl_core_tools::ProcessTools> {
     agl_core_tools::ProcessTools::new(
-        Arc::new(runtime.execution.terminal_endpoint(&runtime.paths)?),
+        Arc::new(terminal_endpoint),
         context,
         agl_core_tools::ProcessToolRuntimeConfig {
             base_environment: runtime.execution.admitted_environment()?,
