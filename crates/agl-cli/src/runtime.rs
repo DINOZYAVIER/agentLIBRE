@@ -65,7 +65,8 @@ pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
                     .iter()
                     .find(|file| file.path == ENGINE_BINARY_NAME)
             })
-            .map(|file| file.sha256.clone())
+            .map(|file| engine_host_sha256(&file.sha256))
+            .transpose()?
             .context("runtime manifest has no exact llama-server executable")?;
         let host = InferenceHost::start(InferenceHostConfig {
             executable: EngineExecutable {
@@ -96,6 +97,20 @@ pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
         host.shutdown();
     }
     Ok(())
+}
+
+fn engine_host_sha256(canonical: &str) -> Result<String> {
+    let digest = canonical
+        .strip_prefix("sha256:")
+        .context("engine digest is not a canonical sha256 identity")?;
+    ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "engine digest is not a canonical lowercase SHA-256 identity"
+    );
+    Ok(digest.to_owned())
 }
 
 fn protocol_identity(identity: &agl_runtime::CurrentRuntimeIdentity) -> RuntimeGenerationIdentity {
@@ -155,5 +170,18 @@ fn optional_environment(name: &str) -> Result<Option<String>> {
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_host_sha256;
+
+    #[test]
+    fn sealed_digest_conversion_is_checked_and_removes_only_the_identity_prefix() {
+        let hex = "a".repeat(64);
+        assert_eq!(engine_host_sha256(&format!("sha256:{hex}")).unwrap(), hex);
+        assert!(engine_host_sha256(&"a".repeat(64)).is_err());
+        assert!(engine_host_sha256(&format!("sha256:{}", "A".repeat(64))).is_err());
     }
 }
