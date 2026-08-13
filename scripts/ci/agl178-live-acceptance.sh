@@ -25,7 +25,9 @@ fail() {
 systemctl --user show-environment >/dev/null ||
   fail "a live user systemd manager is required"
 
-live_root="$(mktemp -d)"
+live_parent="${XDG_STATE_HOME:-${HOME:?HOME is required}/.local/state}"
+mkdir -p "$live_parent"
+live_root="$(mktemp -d "$live_parent/agl178-live.XXXXXXXX")"
 terminal_prefix="$live_root/terminal-prefix"
 agent_root="$live_root/agent-root"
 agl_home="$live_root/agl-home"
@@ -34,6 +36,11 @@ unit_dir="$unit_home/systemd/user"
 backup="$live_root/unit-backup"
 mkdir -p "$backup" "$unit_dir" "$agl_home/runtime"
 chmod 0700 "$agl_home" "$agl_home/runtime"
+live_bin="$live_root/bin"
+mkdir "$live_bin"
+ln -s "$repo_root/scripts/ci/agl178-systemctl-wrapper.sh" "$live_bin/systemctl"
+real_systemctl="$(command -v systemctl)"
+manager_runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 units=(
   agl-terminald.service
@@ -112,6 +119,9 @@ terminal_generation="$(sed -n 's/^generation=//p' <<<"$terminal_output")"
 [[ -d "$terminal_generation" ]] || fail "terminal installer returned no generation"
 
 terminal_env=(
+  "PATH=$live_bin:$PATH"
+  "AGL178_REAL_SYSTEMCTL=$real_systemctl"
+  "AGL178_SYSTEMD_MANAGER_RUNTIME_DIR=$manager_runtime_dir"
   "XDG_CONFIG_HOME=$unit_home"
   "XDG_DATA_HOME=$agl_home/data"
   "XDG_STATE_HOME=$agl_home/state"

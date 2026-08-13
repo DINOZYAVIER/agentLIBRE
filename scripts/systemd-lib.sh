@@ -128,6 +128,17 @@ agl_systemd_quote() {
   printf '"%s"' "$value"
 }
 
+agl_systemd_escape_scalar() {
+  local value="$1"
+  value="${value//\\/\\x5c}"
+  value="${value// /\\x20}"
+  value="${value//$'\t'/\\x09}"
+  value="${value//\"/\\x22}"
+  value="${value//\'/\\x27}"
+  value="${value//\%/%%}"
+  printf '%s' "$value"
+}
+
 agl_systemd_install_user_unit() {
   local unit_dir="$1"
   local unit="$2"
