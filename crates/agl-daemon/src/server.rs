@@ -75,6 +75,7 @@ impl DaemonServer {
         };
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
+        crate::state::verify_terminal_handshake(&self.runtime).await?;
         let inference_host = InferenceHost::start_with_journal_root(
             InferenceHostConfig::development_default(
                 self.runtime.paths.inference_state_root().join("authority"),

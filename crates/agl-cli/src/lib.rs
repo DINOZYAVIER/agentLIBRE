@@ -2184,6 +2184,7 @@ fn print_cron_run(run: &CronRun) {
 
 #[cfg(all(test, unix))]
 struct TestTerminalService {
+    identity: agl_terminal_protocol::ServiceIdentity,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
 }
@@ -2194,24 +2195,28 @@ impl TestTerminalService {
         use std::os::unix::fs::PermissionsExt as _;
         use std::os::unix::net::UnixListener;
 
-        let state_root = runtime.paths.terminal_state_root();
-        std::fs::create_dir_all(&state_root).unwrap();
         let runtime_root = runtime.paths.terminal_runtime_root();
         std::fs::create_dir_all(&runtime_root).unwrap();
         let socket_path = runtime_root.join("terminal.sock");
-        let identity = agl_terminal_protocol::ServiceIdentity {
-            protocol_version: agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
-            crate_version: "1.0.0-alpha.1".to_owned(),
-            build_id: agl_exec::AuthorityFingerprint::new(agl_process::TERMINAL_BUILD_ID).unwrap(),
-            generation_id: agl_exec::ServiceGenerationId::generate(),
-        };
-        let identity_path = state_root.join("service-identity.json");
+        let identity = agl_terminal_protocol::ServiceIdentity::new(
+            agl_terminal_protocol::TerminalGenerationIdentity::new(
+                agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                "b".repeat(40),
+                agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+            )
+            .unwrap(),
+            agl_exec::ServiceGenerationId::generate(),
+        )
+        .unwrap();
+        let identity_path = runtime_root.join("service-identity.json");
         std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
         std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let listener = UnixListener::bind(socket_path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread_stop = std::sync::Arc::clone(&stop);
+        let thread_identity = identity.clone();
         let thread = std::thread::spawn(move || {
             use std::io::{Read as _, Write as _};
             use std::sync::atomic::Ordering;
@@ -2251,7 +2256,7 @@ impl TestTerminalService {
                 let response = agl_terminal_protocol::TerminalResponse {
                     schema: agl_terminal_protocol::TERMINAL_RESPONSE_SCHEMA.to_owned(),
                     request_id: request.request_id,
-                    service: identity.clone(),
+                    service: thread_identity.clone(),
                     response,
                 };
                 let encoded = serde_json::to_vec(&response)?;
@@ -2261,6 +2266,7 @@ impl TestTerminalService {
             Ok(())
         });
         Self {
+            identity,
             stop,
             thread: Some(thread),
         }
@@ -2468,7 +2474,7 @@ mod tests {
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || -> anyhow::Result<()> {
-            let _terminal_service = TestTerminalService::start(&runtime);
+            let terminal_service = TestTerminalService::start(&runtime);
             let async_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -2476,12 +2482,16 @@ mod tests {
                 let listener = tokio::net::UnixListener::bind(&socket_path)?;
                 ready_tx.send(()).unwrap();
                 let (stream, _) = listener.accept().await?;
-                let state = agl_daemon::SharedDaemonState::new(
+                let mut runtime_identity = agl_runtime::current_runtime_identity()?;
+                runtime_identity.terminal_generation =
+                    Some(terminal_service.identity.installed_generation().clone());
+                let state = agl_daemon::SharedDaemonState::open_with_runtime_identity(
                     runtime,
                     InferenceOptions::default(),
                     InferenceClientHandle::new(DaemonTestInference { calls }),
                     EngineRuntimeStatusHandle::default(),
-                );
+                    runtime_identity,
+                )?;
                 agl_daemon::serve_connection(stream, &state).await
             })
         });

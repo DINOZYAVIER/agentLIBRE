@@ -1,10 +1,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use agl_exec::{
-    AuthorityFingerprint, EnvironmentOverride, ExecutionContextSnapshot, ShellProfileSnapshot,
-};
-use agl_process::{TERMINAL_BUILD_ID, TERMINAL_SOURCE_REVISION, TerminalEndpoint};
+use agl_exec::{EnvironmentOverride, ExecutionContextSnapshot, ShellProfileSnapshot};
+use agl_process::TerminalEndpoint;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -343,13 +341,25 @@ impl AgentLibreExecutionConfig {
     }
 
     pub fn terminal_endpoint(&self, paths: &AgentLibrePaths) -> Result<TerminalEndpoint> {
-        let state_root = paths.terminal_state_root();
+        let runtime_identity = crate::current_runtime_identity()
+            .context("failed to verify current runtime identity for terminal pairing")?;
+        self.terminal_endpoint_for_identity(paths, &runtime_identity)
+    }
+
+    pub fn terminal_endpoint_for_identity(
+        &self,
+        paths: &AgentLibrePaths,
+        runtime_identity: &crate::CurrentRuntimeIdentity,
+    ) -> Result<TerminalEndpoint> {
+        let terminal_generation = runtime_identity
+            .terminal_generation()
+            .cloned()
+            .context("agent runtime identity has no sealed terminal generation")?;
+        let runtime_root = paths.terminal_runtime_root();
         TerminalEndpoint::new(
-            paths.terminal_runtime_root().join("terminal.sock"),
-            state_root.join("service-identity.json"),
-            AuthorityFingerprint::new(TERMINAL_BUILD_ID)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
-            TERMINAL_SOURCE_REVISION,
+            runtime_root.join("terminal.sock"),
+            runtime_root.join("service-identity.json"),
+            terminal_generation,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))
     }

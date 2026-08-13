@@ -44,7 +44,31 @@ impl SupervisedChat {
         inference_client: InferenceClientHandle,
         presentation_sink: Arc<dyn crate::TurnPresentationSink>,
     ) -> Result<Self> {
-        let service = ChatService::open(options.clone(), runtime, inference_client.clone())?;
+        Self::open_with_presentation_sink_and_terminal_endpoint(
+            options,
+            runtime,
+            inference_client,
+            presentation_sink,
+            None,
+        )
+    }
+
+    fn open_with_presentation_sink_and_terminal_endpoint(
+        options: ChatOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+        presentation_sink: Arc<dyn crate::TurnPresentationSink>,
+        terminal_endpoint: Option<agl_process::TerminalEndpoint>,
+    ) -> Result<Self> {
+        let service = match terminal_endpoint.clone() {
+            Some(terminal_endpoint) => ChatService::open_with_terminal_endpoint(
+                options.clone(),
+                runtime,
+                inference_client.clone(),
+                terminal_endpoint,
+            )?,
+            None => ChatService::open(options.clone(), runtime, inference_client.clone())?,
+        };
         let session_id = service.session_id().clone();
         let execution_context = service.execution_context().clone();
         let delegation_plan = service.delegation_plan();
@@ -54,9 +78,12 @@ impl SupervisedChat {
             ..options
         };
         let store_root = runtime.paths.store_root();
-        let factory =
+        let mut factory =
             ChatSupervisorFactory::with_runtime(&store_root, runtime.clone(), inference_client)
                 .with_presentation_sink(presentation_sink);
+        if let Some(terminal_endpoint) = terminal_endpoint {
+            factory = factory.with_terminal_endpoint(terminal_endpoint);
+        }
         factory.register(service)?;
         let supervisor = Supervisor::spawn(
             &store_root,
@@ -545,13 +572,14 @@ Only return the child verdict.
             new_session: true,
         };
         let presentation = Arc::new(RecordingPresentationSink::default());
-        let chat = SupervisedChat::open_with_presentation_sink(
+        let chat = SupervisedChat::open_with_presentation_sink_and_terminal_endpoint(
             options,
             &runtime,
             InferenceClientHandle::new(DelegationInferenceClient {
                 state: state.clone(),
             }),
             presentation.clone(),
+            Some(crate::test_support::terminal_endpoint(&root)),
         )
         .unwrap();
 

@@ -117,7 +117,6 @@ def validate_metadata(metadata):
 def dependency_diagnostics(packages, current, future):
     diagnostics = set()
     identities = current | future
-    future_names = set(future)
     for name, package in packages.items():
         info = identities.get(name)
         if info is None:
@@ -175,7 +174,7 @@ def dependency_diagnostics(packages, current, future):
                 or target_info["category"] in {"presentation", "inference"}
             ):
                 diagnostics.add(f"{kind}: {name} -> {target} is forbidden below terminal UI")
-            if category == "inference" and target in future_names:
+            if category == "inference" and target_info["category"] == "terminal":
                 diagnostics.add(f"{kind}: {name} -> {target} crosses inference-to-terminal")
     return diagnostics
 

@@ -15,10 +15,44 @@ cleanup() {
 }
 trap cleanup EXIT
 
+terminal_stage="$tmp_dir/terminal-stage"
+mkdir -p "$terminal_stage"
+for entry in agl-terminald agl-process-launcher agl-terminal; do
+  printf '%s fixture\n' "$entry" >"$terminal_stage/$entry"
+  chmod 0555 "$terminal_stage/$entry"
+done
+terminal_file_entry() {
+  local role="$1"
+  local path="$2"
+  printf '    {"role":"%s","path":"%s","byte_size":%s,"sha256":"sha256:%s"}' \
+    "$role" "$path" \
+    "$(stat -c '%s' -- "$terminal_stage/$path")" \
+    "$(sha256sum -- "$terminal_stage/$path" | awk '{print $1}')"
+}
+{
+  printf '{"schema":"agl-terminal.runtime-generation.v2","product_version":"1.0.0-alpha.1","source_revision":"%s","protocol_version":2,"files":[\n' \
+    "$(git rev-parse HEAD)"
+  terminal_file_entry service agl-terminald
+  printf ',\n'
+  terminal_file_entry launcher agl-process-launcher
+  printf ',\n'
+  terminal_file_entry ui agl-terminal
+  printf '\n]}\n'
+} >"$terminal_stage/runtime-manifest.json"
+chmod 0444 "$terminal_stage/runtime-manifest.json"
+chmod 0555 "$terminal_stage"
+terminal_digest="$(sha256sum -- "$terminal_stage/runtime-manifest.json" | awk '{print $1}')"
+terminal_generation="$tmp_dir/terminal/generations/generation-$terminal_digest"
+mkdir -p "$(dirname -- "$terminal_generation")"
+mkdir "$terminal_generation"
+cp -a -- "$terminal_stage/." "$terminal_generation/"
+chmod 0555 "$terminal_generation"
+
 install_root="$tmp_dir/install-plan"
 output="$(
   AGL_LLAMA_CPP_BUILD_DIR="$tmp_dir/llama" \
     scripts/install-agl-cargo.sh --dry-run --root "$install_root" \
+      --terminal-generation "$terminal_generation" \
       --skip-submodules --skip-llama-build
 )"
 agl_command="--path $AGL_CI_REPO_ROOT/crates/agl-cli --bin agl"
@@ -67,7 +101,9 @@ run_installer() {
     XDG_CONFIG_HOME="$tmp_dir/xdg" \
     HOME="$tmp_dir/home" \
     FAKE_BUNDLE_LABEL="$label" \
-    scripts/install-agl-cargo.sh --root "$root" --skip-submodules --skip-llama-build "$@"
+    scripts/install-agl-cargo.sh --root "$root" \
+      --terminal-generation "$terminal_generation" \
+      --skip-submodules --skip-llama-build "$@"
 }
 
 assert_generation() {

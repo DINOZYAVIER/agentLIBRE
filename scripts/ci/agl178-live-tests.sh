@@ -15,6 +15,6 @@ command -v systemctl >/dev/null 2>&1 || {
   exit 2
 }
 
-cargo test -p agl-runtime --test agl178_installed_live -- \
+AGL178_LIVE_APPLY=1 cargo test -p agl-runtime --test agl178_installed_live -- \
   --ignored --exact fresh_installed_product_runs_terminal_effect_and_32k_vulkan_inference \
   --nocapture

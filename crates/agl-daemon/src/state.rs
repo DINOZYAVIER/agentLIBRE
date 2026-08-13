@@ -317,17 +317,26 @@ struct SessionRuntime {
 }
 
 impl DaemonState {
+    #[cfg(test)]
     pub fn new(
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
         inference_status: EngineRuntimeStatusHandle,
     ) -> Self {
-        Self::open(
+        let mut runtime_identity =
+            current_runtime_identity().expect("test daemon runtime identity should initialize");
+        runtime_identity.terminal_generation = Some(
+            agl_process::test_support::endpoint(&runtime.paths.terminal_runtime_root())
+                .expected_generation()
+                .clone(),
+        );
+        Self::open_with_runtime_identity(
             runtime,
             inference_defaults,
             inference_client,
             inference_status,
+            runtime_identity,
         )
         .expect("test daemon state should initialize")
     }
@@ -364,16 +373,19 @@ impl DaemonState {
             );
         }
         let store_root = runtime.paths.store_root();
-        let terminal_bridge =
-            TerminalBridge::daemon(runtime.execution.terminal_endpoint(&runtime.paths)?)
-                .context("failed to configure terminal service adapter")?;
+        let terminal_endpoint = runtime
+            .execution
+            .terminal_endpoint_for_identity(&runtime.paths, &runtime_identity)?;
+        let terminal_bridge = TerminalBridge::daemon(terminal_endpoint.clone())
+            .context("failed to configure terminal service adapter")?;
         let presentation_proxy = agl_app::TurnPresentationProxy::new();
         let chat_factory = ChatSupervisorFactory::with_runtime(
             &store_root,
             runtime.clone(),
             inference_client.clone(),
         )
-        .with_presentation_sink(Arc::new(presentation_proxy.clone()));
+        .with_presentation_sink(Arc::new(presentation_proxy.clone()))
+        .with_terminal_endpoint(terminal_endpoint);
         let supervisor = Supervisor::spawn(
             &store_root,
             Arc::new(DaemonRunFactory::new(chat_factory.clone(), &store_root)),
@@ -530,10 +542,11 @@ impl DaemonState {
                         no_history: false,
                         new_session: true,
                     };
-                    let service = ChatService::open(
+                    let service = ChatService::open_with_terminal_endpoint(
                         options.clone(),
                         &self.runtime,
                         self.inference_client.clone(),
+                        self.terminal_bridge.endpoint(),
                     )
                     .map_err(runtime_error)?;
                     let session_id = service.session_id().clone();
@@ -836,10 +849,11 @@ impl DaemonState {
             no_history: false,
             new_session: request.new_session,
         };
-        let mut service = ChatService::open(
+        let mut service = ChatService::open_with_terminal_endpoint(
             options.clone(),
             &self.runtime,
             self.inference_client.clone(),
+            self.terminal_bridge.endpoint(),
         )
         .map_err(runtime_error)?;
         if let Some(model_id) = persisted_selection
@@ -4782,6 +4796,7 @@ pub struct SharedDaemonState {
 }
 
 impl SharedDaemonState {
+    #[cfg(test)]
     pub fn new(
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
@@ -5462,4 +5477,13 @@ fn busy_or_runtime(error: anyhow::Error, busy_message: &str) -> ProtocolError {
     } else {
         runtime_error(error)
     }
+}
+pub(crate) async fn verify_terminal_handshake(
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<agl_terminal_protocol::ServiceIdentity> {
+    let endpoint = runtime.execution.terminal_endpoint(&runtime.paths)?;
+    endpoint
+        .bootstrap(tokio_util::sync::CancellationToken::new())
+        .await
+        .context("terminal live generation handshake failed")
 }

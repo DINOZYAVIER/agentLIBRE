@@ -1,0 +1,15 @@
+[Unit]
+Description=agentLIBRE terminal runtime socket
+Before=agl-terminald.service agentlibre-daemon.service
+
+[Socket]
+ListenStream=%t/agl-terminal/terminal.sock
+FileDescriptorName=agl-terminal
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=true
+Accept=no
+Service=agl-terminald.service
+
+[Install]
+WantedBy=sockets.target

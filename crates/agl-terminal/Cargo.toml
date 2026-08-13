@@ -1,0 +1,16 @@
+[package]
+name = "agl-terminal"
+version = "1.0.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-exec.workspace = true
+agl-pty.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

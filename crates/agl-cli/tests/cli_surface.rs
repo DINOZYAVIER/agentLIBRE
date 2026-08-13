@@ -84,7 +84,7 @@ fn runtime_identity_query_is_machine_readable_and_explicitly_development() {
     assert_success_no_stderr(&output);
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("runtime identity must be JSON");
-    assert_eq!(value["schema"], "agentlibre.runtime-identity/v1");
+    assert_eq!(value["schema"], "agentlibre.runtime-identity/v2");
     assert_eq!(value["kind"], "development");
     assert_eq!(
         value["builtin_catalog_digest"],
@@ -1789,7 +1789,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
 }
 
 #[test]
-fn function_run_rejects_static_profile_mismatch_before_live_admission() {
+fn function_run_requires_the_package_bound_model_before_live_admission() {
     let repo = TempRepo::new("missing-function-model-binding");
     let home = TempHome::new("missing-function-model-binding");
     let home_arg = home.path_string();
@@ -1809,22 +1809,7 @@ fn function_run_rejects_static_profile_mismatch_before_live_admission() {
     assert_failure(&output);
     assert_empty_stdout(&output);
     let stderr = stderr(&output);
-    assert_contains(&stderr, "has static capability mismatches");
-    assert_contains(&stderr, "DeviceKind");
-    let attempt_id = stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("attempt_id="))
-        .expect("accepted generation command reports its AttemptId");
-    let journal = fs::read_to_string(
-        home.path()
-            .join("state/inference/attempts")
-            .join(attempt_id)
-            .join("transitions.jsonl"),
-    )
-    .expect("static plan rejection has a durable attempt journal");
-    assert_contains(&journal, "static_profile_mismatch");
-    assert_contains(&journal, "\"stage\":\"plan\"");
-    assert_contains(&journal, "\"to\":\"failed\"");
+    assert_contains(&stderr, "Model artifact `gemma4-12b` is not installed");
 }
 
 #[test]

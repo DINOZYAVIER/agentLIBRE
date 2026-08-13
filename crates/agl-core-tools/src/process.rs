@@ -2641,6 +2641,7 @@ mod tests {
     use agl_ids::{RunId, StepId};
     use agl_kernel::{DispatchDenialCode, ToolAccessMode, ToolOutcomeStatus, ToolPolicyInput};
     use agl_kernel::{ExtensionRegistration, ToolBinding, ToolDispatchControl};
+    use agl_terminal_protocol::{TERMINAL_PROTOCOL_VERSION, TerminalGenerationIdentity};
 
     use super::*;
 
@@ -3003,8 +3004,13 @@ mod tests {
                 TerminalEndpoint::new(
                     root.join("terminal.sock"),
                     root.join("service-identity.json"),
-                    AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-                    "b".repeat(40),
+                    TerminalGenerationIdentity::new(
+                        AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                        "b".repeat(40),
+                        AuthorityFingerprint::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                        TERMINAL_PROTOCOL_VERSION,
+                    )
+                    .unwrap(),
                 )
                 .unwrap(),
             ),

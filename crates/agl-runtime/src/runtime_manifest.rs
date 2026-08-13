@@ -6,15 +6,16 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use agl_terminal_protocol::TerminalGenerationIdentity;
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 pub const RUNTIME_MANIFEST_FILE_NAME: &str = "runtime-manifest.json";
-pub const RUNTIME_MANIFEST_SCHEMA: &str = "agentlibre.runtime-manifest/v2";
-pub const RUNTIME_IDENTITY_SCHEMA: &str = "agentlibre.runtime-identity/v1";
+pub const RUNTIME_MANIFEST_SCHEMA: &str = "agentlibre.runtime-manifest/v3";
+pub const RUNTIME_IDENTITY_SCHEMA: &str = "agentlibre.runtime-identity/v2";
 
-const GENERATION_ID_DOMAIN: &[u8] = b"agentlibre.runtime-manifest.v1\0";
+const GENERATION_ID_DOMAIN: &[u8] = b"agentlibre.runtime-manifest.v3\0";
 const DEVELOPMENT_ID_DOMAIN: &[u8] = b"agentlibre.development-runtime.v1\0";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -99,6 +100,7 @@ pub struct RuntimeManifestContent {
     pub executables: Vec<RuntimeManifestFile>,
     pub engine_libraries: Vec<RuntimeManifestFile>,
     pub engine_protocol_id: String,
+    pub terminal: TerminalGenerationIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -125,6 +127,8 @@ pub struct CurrentRuntimeIdentity {
     pub builtin_catalog_digest: String,
     pub executable_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_generation: Option<TerminalGenerationIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<RuntimeArtifactManifest>,
@@ -140,16 +144,34 @@ impl CurrentRuntimeIdentity {
             .as_ref()
             .map(|manifest| manifest.content.engine_protocol_id.as_str())
     }
+
+    pub fn terminal_generation(&self) -> Option<&TerminalGenerationIdentity> {
+        self.terminal_generation.as_ref()
+    }
 }
 
 pub fn seal_runtime_manifest(
     directory: impl AsRef<Path>,
     source: RuntimeSourceEvidence,
     engine_protocol_id: &str,
+    terminal: TerminalGenerationIdentity,
 ) -> Result<RuntimeArtifactManifest> {
     let directory = directory.as_ref();
     source.validate()?;
     validate_sha256(engine_protocol_id, "engine protocol ID")?;
+    terminal
+        .validate()
+        .map_err(|error| anyhow!("terminal generation identity is invalid: {error}"))?;
+    ensure!(
+        terminal.protocol_version() == agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+        "terminal generation protocol does not match this agent runtime"
+    );
+    if let Some(source_revision) = source.revision.as_deref() {
+        ensure!(
+            source_revision == terminal.source_revision(),
+            "terminal generation source revision does not match the agent runtime source revision"
+        );
+    }
     let manifest_path = directory.join(RUNTIME_MANIFEST_FILE_NAME);
     ensure!(
         !manifest_path.exists(),
@@ -170,6 +192,7 @@ pub fn seal_runtime_manifest(
         executables,
         engine_libraries,
         engine_protocol_id: engine_protocol_id.to_string(),
+        terminal,
     };
     let generation_id = generation_id(&content)?;
     let manifest = RuntimeArtifactManifest {
@@ -250,6 +273,7 @@ fn compute_current_runtime_identity() -> Result<CurrentRuntimeIdentity> {
             generation_id: manifest.generation_id.clone(),
             builtin_catalog_digest: manifest.content.builtin_catalog.digest.clone(),
             executable_digest,
+            terminal_generation: Some(manifest.content.terminal.clone()),
             manifest_path: Some(manifest_path),
             manifest: Some(manifest),
         });
@@ -270,6 +294,7 @@ fn compute_current_runtime_identity() -> Result<CurrentRuntimeIdentity> {
         generation_id: format!("sha256:{}", lowercase_hex(&digest.finalize())),
         builtin_catalog_digest: agl_assets::BUILTIN_PACKAGE_CATALOG_DIGEST.to_string(),
         executable_digest,
+        terminal_generation: None,
         manifest_path: None,
         manifest: None,
     })
@@ -307,6 +332,16 @@ fn validate_manifest_shape(manifest: &RuntimeArtifactManifest) -> Result<()> {
         "runtime manifest builtin catalog does not match this executable"
     );
     validate_sha256(&manifest.content.engine_protocol_id, "engine protocol ID")?;
+    manifest
+        .content
+        .terminal
+        .validate()
+        .map_err(|error| anyhow!("runtime terminal generation identity is invalid: {error}"))?;
+    ensure!(
+        manifest.content.terminal.protocol_version()
+            == agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+        "runtime terminal generation protocol does not match this executable"
+    );
     let executable_names = manifest
         .content
         .executables
@@ -587,6 +622,16 @@ mod tests {
         root
     }
 
+    fn terminal(source: char) -> TerminalGenerationIdentity {
+        TerminalGenerationIdentity::new(
+            agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            source.to_string().repeat(40),
+            agl_exec::AuthorityFingerprint::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+        )
+        .unwrap()
+    }
+
     fn rewrite_manifest(root: &Path, manifest: &RuntimeArtifactManifest) {
         let path = root.join(RUNTIME_MANIFEST_FILE_NAME);
         #[cfg(unix)]
@@ -608,10 +653,20 @@ mod tests {
         let first = fixture("first");
         let second = fixture("second");
         let engine = format!("sha256:{}", "b".repeat(64));
-        let first_manifest =
-            seal_runtime_manifest(&first, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
-        let second_manifest =
-            seal_runtime_manifest(&second, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
+        let first_manifest = seal_runtime_manifest(
+            &first,
+            RuntimeSourceEvidence::unavailable(),
+            &engine,
+            terminal('c'),
+        )
+        .unwrap();
+        let second_manifest = seal_runtime_manifest(
+            &second,
+            RuntimeSourceEvidence::unavailable(),
+            &engine,
+            terminal('c'),
+        )
+        .unwrap();
 
         assert_eq!(first_manifest.generation_id, second_manifest.generation_id);
         assert_eq!(load_runtime_manifest(&first).unwrap(), first_manifest);
@@ -631,9 +686,13 @@ mod tests {
         let unavailable = fixture("unavailable");
         let dirty = fixture("dirty");
         let engine = format!("sha256:{}", "b".repeat(64));
-        let unavailable_manifest =
-            seal_runtime_manifest(&unavailable, RuntimeSourceEvidence::unavailable(), &engine)
-                .unwrap();
+        let unavailable_manifest = seal_runtime_manifest(
+            &unavailable,
+            RuntimeSourceEvidence::unavailable(),
+            &engine,
+            terminal('c'),
+        )
+        .unwrap();
         let dirty_manifest = seal_runtime_manifest(
             &dirty,
             RuntimeSourceEvidence {
@@ -642,6 +701,7 @@ mod tests {
                 tree: Some("d".repeat(40)),
             },
             &engine,
+            terminal('c'),
         )
         .unwrap();
         assert_ne!(
@@ -660,7 +720,13 @@ mod tests {
     fn sealed_manifest_rejects_native_file_drift() {
         let root = fixture("native-drift");
         let engine = format!("sha256:{}", "b".repeat(64));
-        seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
+        seal_runtime_manifest(
+            &root,
+            RuntimeSourceEvidence::unavailable(),
+            &engine,
+            terminal('c'),
+        )
+        .unwrap();
         fs::write(root.join("libfixture.so"), b"tampered native fixture").unwrap();
 
         assert!(
@@ -676,8 +742,13 @@ mod tests {
     fn sealed_manifest_rejects_recomputed_builtin_inventory_drift() {
         let root = fixture("catalog-drift");
         let engine = format!("sha256:{}", "b".repeat(64));
-        let mut manifest =
-            seal_runtime_manifest(&root, RuntimeSourceEvidence::unavailable(), &engine).unwrap();
+        let mut manifest = seal_runtime_manifest(
+            &root,
+            RuntimeSourceEvidence::unavailable(),
+            &engine,
+            terminal('c'),
+        )
+        .unwrap();
         manifest.content.builtin_catalog.packages[0].digest = format!("sha256:{}", "f".repeat(64));
         manifest.generation_id = generation_id(&manifest.content).unwrap();
         rewrite_manifest(&root, &manifest);

@@ -30,6 +30,10 @@ impl TerminalBridge {
         self.authority.clone()
     }
 
+    pub(crate) fn endpoint(&self) -> TerminalEndpoint {
+        self.endpoint.as_ref().clone()
+    }
+
     pub(crate) fn with_authority(&self, authority: impl Into<String>) -> Result<Self> {
         Ok(Self {
             endpoint: Arc::clone(&self.endpoint),

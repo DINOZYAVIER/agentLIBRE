@@ -52,6 +52,12 @@ fn every_terminal_pair_field_changes_agent_generation_identity() {
 fn old_or_mismatched_terminal_pair_is_rejected() {
     assert!(RuntimeManifestFixture::legacy_v2().load().is_err());
     assert!(
+        RuntimeManifestFixture::canonical()
+            .mutate_terminal(TerminalPairMutation::ProtocolVersion)
+            .seal()
+            .is_err()
+    );
+    assert!(
         RuntimeManifestFixture::terminal_source_mismatch()
             .seal()
             .is_err()
