@@ -31,11 +31,20 @@ live_root="$(mktemp -d "$live_parent/agl178-live.XXXXXXXX")"
 terminal_prefix="$live_root/terminal-prefix"
 agent_root="$live_root/agent-root"
 agl_home="$live_root/agl-home"
+live_workspace="$live_root/workspace"
 unit_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
 unit_dir="$unit_home/systemd/user"
 backup="$live_root/unit-backup"
-mkdir -p "$backup" "$unit_dir" "$agl_home/runtime"
+mkdir -p "$backup" "$unit_dir" "$agl_home/runtime" "$live_workspace/.agl"
 chmod 0700 "$agl_home" "$agl_home/runtime"
+printf '%s\n' \
+  'version = 3' \
+  'default_function = "function:gemma4-31b-32k@^1"' \
+  '' \
+  '[policy]' \
+  '' \
+  '[config]' \
+  >"$live_workspace/.agl/workspace.toml"
 live_bin="$live_root/bin"
 mkdir "$live_bin"
 ln -s "$repo_root/scripts/ci/agl178-systemctl-wrapper.sh" "$live_bin/systemctl"
@@ -139,13 +148,21 @@ agl="$agent_root/bin/agl"
 
 AGL_HOME="$agl_home" "$agl" model import "$AGL_TEST_MODEL_GGUF" \
   --id gemma4-31b --replace --json >"$live_root/model-import.json"
+(
+  cd "$live_workspace"
+  AGL_HOME="$agl_home" "$agl" package lock --refresh --json \
+    >"$live_root/package-lock.json"
+)
+grep -A2 -F 'id = "gemma4-31b-32k"' \
+  "$live_workspace/.agl/package-lock.toml" | grep -F 'version = "1.3.0"' >/dev/null ||
+  fail "fresh Workspace v3 lock omitted the exact 32K Function"
 
 AGL_HOME="$agl_home" \
 XDG_CONFIG_HOME="$unit_home" \
   scripts/agentlibre-daemon-systemd-service.sh \
     --binary "$agl" \
     --socket "$agl_home/state/daemon/agl.sock" \
-    --workspace-root "$repo_root" \
+    --workspace-root "$live_workspace" \
     --function gemma4-31b-32k \
     --tool-mode execute \
     --max-output-tokens 256 \
@@ -170,16 +187,15 @@ grep -F '"terminal_generation"' "$live_root/runtime-identity.json" >/dev/null ||
   fail "agent runtime identity omitted the terminal pair"
 
 session_json="$(AGL_HOME="$agl_home" "$agl" session new \
-  --workspace-root "$repo_root" --json)"
+  --workspace-root "$live_workspace" --json)"
 session_id="$(sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p' <<<"$session_json" | head -n1)"
 [[ "$session_id" == ses_* ]] || fail "session new returned no typed SessionId"
 AGL_HOME="$agl_home" "$agl" session list --json | grep -F "$session_id" >/dev/null
 AGL_HOME="$agl_home" "$agl" session finish "$session_id" --json >/dev/null
 
-AGL_HOME="$agl_home" "$agl" run \
+AGL_HOME="$agl_home" AGL_WORKSPACE_ROOT="$live_workspace" "$agl" run \
   --function gemma4-31b-32k \
   --tool-mode execute \
-  --max-output-tokens 256 \
   --prompt 'Use the process tool to run printf AGL178_PROCESS_OK, then report its exact output.' \
   >"$live_root/run.out"
 grep -R -a -F 'AGL178_PROCESS_OK' \

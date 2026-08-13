@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_exec::{
@@ -141,6 +141,7 @@ impl ProcessTools {
         config: ProcessToolRuntimeConfig,
     ) -> Result<Self> {
         config.validate()?;
+        process_io_runtime()?;
         Ok(Self {
             terminal,
             context,
@@ -153,6 +154,10 @@ impl ProcessTools {
     }
 
     async fn execute(&self, context: ToolDispatchContext) -> Result<Value> {
+        ensure!(
+            tokio::runtime::Handle::try_current().is_ok(),
+            "process Tool dispatch is outside its owned Tokio runtime"
+        );
         let id = context.invocation().tool_id.as_str();
         match id {
             PROCESS_PWD_TOOL_ID => self.pwd(context),
@@ -1526,10 +1531,21 @@ impl ToolHandler for ProcessTools {
     }
 
     fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
+        let runtime = match process_io_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => return Box::pin(async move { Err(error.into()) }),
+        };
+        let tool_id = context.invocation().tool_id.as_str().to_owned();
+        let conditional_effects = context.authorized_conditional_effects().clone();
+        let tools = self.clone();
+        let task = runtime.spawn(async move { tools.execute(context).await });
         Box::pin(async move {
-            let tool_id = context.invocation().tool_id.as_str().to_owned();
-            let conditional_effects = context.authorized_conditional_effects().clone();
-            match self.execute(context).await {
+            let result = task.await.map_err(|error| {
+                ToolHandlerError::execution_failed(format!(
+                    "process Tool runtime task failed: {error}"
+                ))
+            })?;
+            match result {
                 Ok(data) => {
                     let observed = observed_process_effects(&tool_id, &conditional_effects, &data);
                     Ok(ToolResult::new(data).with_observed_effects(observed))
@@ -1541,6 +1557,21 @@ impl ToolHandler for ProcessTools {
             }
         })
     }
+}
+
+fn process_io_runtime() -> Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, String>> =
+        OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("agl-process-tool-io")
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("failed to start process Tool I/O runtime: {error}"))
 }
 
 fn observed_process_effects(

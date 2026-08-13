@@ -27,25 +27,25 @@ dependencies = []
 [[packages]]
 type_id = "function"
 id = "gemma4-31b-32k"
-version = "1.2.0"
+version = "1.3.0"
 source_tier = "builtin"
 source_kind = "embedded"
 source_id = "builtin"
-package_tree_digest = "sha256:396bf33edd5504fe20eec5cb76986d2d72d9ad18fce8cec49f7aa551e746240b"
+package_tree_digest = "sha256:47cc3be2e94a1a9d6b2c86e04841aded70926c03e2e77eba983ed294a6c3ccaf"
 envelope_schema = "agentlibre.package/v1"
-payload_schema = "agentlibre.function/v2"
-dependencies = ["extension:core.process@1.2.0", "extension:core.workspace@1.2.0", "model:gemma4-31b@1.2.0"]
+payload_schema = "agentlibre.function/v3"
+dependencies = ["extension:core.process@1.2.0", "extension:core.workspace@1.2.0", "model:gemma4-31b@1.3.0"]
 
 [[packages]]
 type_id = "model"
 id = "gemma4-31b"
-version = "1.2.0"
+version = "1.3.0"
 source_tier = "builtin"
 source_kind = "embedded"
 source_id = "builtin"
-package_tree_digest = "sha256:fd8fc2798a1b2c1a6a6075889e1fcb31e9ea7081e9a15a7100376d8cc5ed35ee"
+package_tree_digest = "sha256:132f7f824627b057fcf47beab585d94af4d6fc2ad17a47c8e99dd0030b184ce0"
 envelope_schema = "agentlibre.package/v1"
-payload_schema = "agentlibre.model/v2"
+payload_schema = "agentlibre.model/v3"
 dependencies = []
 
 [[packages]]
