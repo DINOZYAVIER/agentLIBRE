@@ -878,7 +878,9 @@ impl InferenceSession {
         let context = plan.context_key(self.session_id.as_str());
         self.inference_client
             .release_context(&context)
-            .context("failed to release managed inference context")
+            .map_err(|error| {
+                anyhow::anyhow!("failed to release managed inference context: {error:#}")
+            })
     }
 
     pub(crate) fn set_workspace_root_and_refresh(

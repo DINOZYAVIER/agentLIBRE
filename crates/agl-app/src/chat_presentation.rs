@@ -269,9 +269,9 @@ fn application_events(
             run_id,
             turn_id,
             attempt_id,
+            provisional_message_id,
             step_id,
             tool_id,
-            ..
         } => {
             let node = step_activity_node(
                 &run_id,
@@ -285,21 +285,23 @@ fn application_events(
             );
             let mut path = vec![run_node_id(&run_id), turn_node_id(&turn_id)];
             path.push(node.node_id.clone());
-            (
-                session_id,
-                vec![
-                    SessionPresentationEvent::ItemUpsert {
-                        item: SessionPresentationItem::AgentAction {
-                            run_id: run_id.clone(),
-                            step_id: step_id.clone(),
-                            tool_id: Some(tool_id.to_string()),
-                            summary: bounded_summary(tool_id.as_str()),
-                            state: ActionItemState::Running,
-                        },
-                    },
-                    activity_delta(vec![node], &path),
-                ],
-            )
+            let mut events = Vec::with_capacity(3);
+            if let Some(message_id) = provisional_message_id {
+                events.push(SessionPresentationEvent::ItemRemoved {
+                    item_key: message_id.to_string(),
+                });
+            }
+            events.push(SessionPresentationEvent::ItemUpsert {
+                item: SessionPresentationItem::AgentAction {
+                    run_id: run_id.clone(),
+                    step_id: step_id.clone(),
+                    tool_id: Some(tool_id.to_string()),
+                    summary: bounded_summary(tool_id.as_str()),
+                    state: ActionItemState::Running,
+                },
+            });
+            events.push(activity_delta(vec![node], &path));
+            (session_id, events)
         }
         TurnPresentationEvent::ToolActionFinished {
             session_id,
