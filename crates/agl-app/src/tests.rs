@@ -851,6 +851,17 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
         "a tool step after a terminal model attempt must remain graph-valid"
     );
     let during_tool = service.snapshot(&session_id).await.unwrap();
+    assert!(
+        during_tool.items.iter().all(|item| !matches!(
+            item,
+            SessionPresentationItem::AssistantMessage {
+                message_id: item_message_id,
+                state: AssistantItemState::Streaming,
+                ..
+            } if item_message_id == &message_id
+        )),
+        "a Tool call must retire the model attempt's provisional assistant item"
+    );
     let tool_graph = during_tool.activity.as_ref().unwrap();
     tool_graph.validate().unwrap();
     let tool_node = tool_graph
