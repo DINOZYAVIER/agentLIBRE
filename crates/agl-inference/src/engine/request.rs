@@ -92,7 +92,8 @@ pub(super) fn launch_args(
         "--slots".to_owned(),
         "--slot-save-path".to_owned(),
         slot_root.to_string_lossy().into_owned(),
-        "--log-disable".to_owned(),
+        "--log-verbosity".to_owned(),
+        "1".to_owned(),
     ];
     if let Some(device) = engine_device_identity {
         args.extend(["--device".to_owned(), device.to_owned()]);
