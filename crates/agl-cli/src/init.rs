@@ -158,18 +158,21 @@ fn run_init_inner(
     let recommended_function = workspace_default
         .as_deref()
         .unwrap_or(agl_repo::DEFAULT_FUNCTION);
-    let recommended_model = agl_runtime::compose_packages(&runtime.paths, &workspace_root)?
-        .resolve_runtime_bundle(
-            &workspace_root,
-            &runtime.paths.config_dir,
-            recommended_function,
-            true,
-            &[],
-        )?
-        .model
-        .context("recommended Function has no Model dependency")?
-        .package
-        .id;
+    let recommended_model = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(&workspace_root)?,
+    )?
+    .resolve_runtime_bundle(
+        &workspace_root,
+        &runtime.paths.config_dir,
+        recommended_function,
+        true,
+        &[],
+    )?
+    .model
+    .context("recommended Function has no Model dependency")?
+    .package
+    .id;
     let requested_package_id = select_package_id(
         options.model.as_deref(),
         previous_checkpoint.as_ref(),
@@ -476,7 +479,10 @@ fn resolve_setup_execution_plan(
     runtime: &AgentLibreRuntimeConfig,
     host: &HostCapabilities,
 ) -> Result<ModelExecutionPlan> {
-    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root.to_path_buf())?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(workspace_root)?,
+    )?;
     let bundle = composition.resolve_runtime_bundle(
         workspace_root,
         &runtime.paths.config_dir,

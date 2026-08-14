@@ -109,7 +109,10 @@ fn run_function_list(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let composition = agl_runtime::compose_packages(&runtime.paths, &workspace_root)?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(&workspace_root)?,
+    )?;
     let mut functions = Vec::new();
     for source in &composition.sources {
         for candidate in source.candidates(&PackageTypeId::function())? {
@@ -228,7 +231,10 @@ fn resolve_function_diagnostics(
     workspace_root: &std::path::Path,
     reference: &str,
 ) -> Result<(LoadedFunction, FunctionResolutionDiagnostics)> {
-    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(workspace_root)?,
+    )?;
     let bundle = composition.resolve_runtime_bundle(
         workspace_root,
         &runtime.paths.config_dir,
@@ -368,7 +374,10 @@ pub(crate) fn resolve_loaded_function(
     workspace_root: &std::path::Path,
     reference: &str,
 ) -> Result<LoadedFunction> {
-    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(workspace_root)?,
+    )?;
     let graph = composition.resolve_function_reference(workspace_root, reference)?;
     let root = graph
         .nodes
@@ -547,7 +556,10 @@ fn doctor_timeout(
     workspace_root: &std::path::Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<Duration> {
-    let composition = agl_runtime::compose_packages(&runtime.paths, workspace_root)?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(workspace_root)?,
+    )?;
     let bundle = composition.resolve_runtime_bundle(
         workspace_root,
         &runtime.paths.config_dir,
@@ -882,7 +894,11 @@ mod tests {
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
-        let composition = agl_runtime::compose_packages(&runtime.paths, &workspace).unwrap();
+        let composition = agl_runtime::compose_packages(
+            &runtime.paths,
+            agl_repo::package_composition_input(&workspace).unwrap(),
+        )
+        .unwrap();
 
         for (reference, context_tokens, profile_id, required_vram_bytes) in [
             (

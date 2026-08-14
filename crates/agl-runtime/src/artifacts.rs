@@ -9,10 +9,10 @@ use agl_function::FunctionPackageAdapter;
 use agl_model::{ModelPackage, ModelPackageAdapter, ModelPackageProvenance};
 use agl_package::{
     DirectoryPackageSource, DirectoryPackageView, InMemoryPackageView, PackageAdapter,
-    PackageAdapterRegistry, PackageCandidate, PackageLock, PackagePathRouter, PackageRef,
-    PackageResolver, PackageSource, PackageSourceId, PackageSourceKind, PackageSourceTier,
-    PackageTreeDigest, PackageTypeId, ResolvedPackage, ResolvedPackageGraph, StaticPackageSource,
-    WorkspaceManifest,
+    PackageAdapterRegistry, PackageCandidate, PackageCompositionInput, PackageLock,
+    PackagePathRouter, PackageRef, PackageResolver, PackageSource, PackageSourceId,
+    PackageSourceInput, PackageSourceKind, PackageSourceTier, PackageTreeDigest, PackageTypeId,
+    ResolvedPackage, ResolvedPackageGraph, StaticPackageSource,
 };
 use agl_skill::{
     RegisteredSkill, SkillHarness, SkillPackageAdapter, SkillRegistry, SkillSource, SkillTrustStore,
@@ -111,11 +111,10 @@ pub struct WorkspaceSkillRegistry {
 
 pub fn resolve_workspace_skills(
     paths: &AgentLibrePaths,
-    workspace_root: impl Into<PathBuf>,
+    input: PackageCompositionInput,
     trust_store_path: impl AsRef<Path>,
 ) -> Result<WorkspaceSkillRegistry> {
-    let workspace_root = workspace_root.into();
-    let composition = compose_packages(paths, workspace_root)?;
+    let composition = compose_packages(paths, input)?;
     let trust = SkillTrustStore::load(trust_store_path)?;
     let skill_type = PackageTypeId::new("skill")?;
     let mut ids = BTreeSet::new();
@@ -775,25 +774,25 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 
 pub fn resolve_composed_packages(
     paths: &AgentLibrePaths,
-    workspace_root: impl Into<PathBuf>,
+    input: PackageCompositionInput,
     root: &PackageRef,
 ) -> Result<ResolvedPackageGraph> {
-    compose_packages(paths, workspace_root)?.resolve(root)
+    compose_packages(paths, input)?.resolve(root)
 }
 
 pub fn resolve_composed_runtime_function(
     paths: &AgentLibrePaths,
-    workspace_root: impl AsRef<Path>,
+    input: PackageCompositionInput,
     reference: &str,
     require_profile: bool,
 ) -> Result<agl_function::RuntimeFunction> {
-    let workspace_root = workspace_root.as_ref();
-    let composition = compose_packages(paths, workspace_root)?;
-    let graph = composition.resolve_function_reference(workspace_root, reference)?;
+    let workspace_root = input.workspace_root().to_path_buf();
+    let composition = compose_packages(paths, input)?;
+    let graph = composition.resolve_function_reference(&workspace_root, reference)?;
     agl_function::runtime_function_from_resolved_graph(
         &graph,
         &composition.registry,
-        workspace_root,
+        &workspace_root,
         &paths.config_dir,
         require_profile,
     )
@@ -810,7 +809,7 @@ fn looks_like_function_path(reference: &str) -> bool {
 
 pub fn compose_packages(
     paths: &AgentLibrePaths,
-    workspace_root: impl Into<PathBuf>,
+    input: PackageCompositionInput,
 ) -> Result<PackageComposition> {
     let registry = Arc::new(PackageAdapterRegistry::from_dyn([
         Arc::new(FunctionPackageAdapter::default()) as Arc<dyn PackageAdapter>,
@@ -818,7 +817,7 @@ pub fn compose_packages(
         Arc::new(ModelPackageAdapter::default()) as Arc<dyn PackageAdapter>,
         Arc::new(ExtensionPackageAdapter::default()) as Arc<dyn PackageAdapter>,
     ])?);
-    let workspace_root = workspace_root.into();
+    let workspace_root = input.workspace_root().to_path_buf();
     let lock_path = workspace_root.join(".agl/package-lock.toml");
     let lock = match fs::read_to_string(&lock_path) {
         Ok(value) => Some(PackageLock::from_toml(&value)?),
@@ -849,7 +848,7 @@ pub fn compose_packages(
             registry.clone(),
         )));
     }
-    add_declared_sources(&mut sources, &workspace_root, &registry)?;
+    add_prepared_sources(&mut sources, input.sources(), &registry);
     sources.push(builtin_source()?);
     let sources = freeze_package_sources(&registry, sources)?;
     Ok(PackageComposition {
@@ -887,61 +886,24 @@ fn freeze_package_sources(
         .collect()
 }
 
-fn add_declared_sources(
+fn add_prepared_sources(
     sources: &mut Vec<Arc<dyn PackageSource>>,
-    workspace_root: &Path,
+    inputs: &[PackageSourceInput],
     registry: &Arc<PackageAdapterRegistry>,
-) -> Result<()> {
-    let manifest_path = workspace_root.join(".agl/workspace.toml");
-    if !manifest_path.is_file() {
-        return Ok(());
-    }
-    let manifest = WorkspaceManifest::from_toml(&fs::read_to_string(&manifest_path)?)?;
-    for declaration in manifest.sources {
-        let kind = declaration.kind;
-        let source_id = declaration.id.clone();
-        let root = match kind {
-            PackageSourceKind::Directory => {
-                let relative = declaration
-                    .path
-                    .as_ref()
-                    .context("declared package source path is missing")?;
-                let root = workspace_root.join(relative).canonicalize()?;
-                let workspace = workspace_root.canonicalize()?;
-                ensure!(
-                    root.starts_with(&workspace),
-                    "package source escapes workspace"
-                );
-                root
-            }
-            PackageSourceKind::Git => {
-                let relative = declaration
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from(".agl/sources").join(declaration.id.as_str()));
-                let root = workspace_root.join(relative).canonicalize()?;
-                let workspace = workspace_root.canonicalize()?;
-                ensure!(
-                    root.starts_with(&workspace),
-                    "package source escapes workspace"
-                );
-                root
-            }
-            PackageSourceKind::Embedded => continue,
-        };
-        let mut source =
-            DirectoryPackageSource::new(source_id, declaration.tier, kind, &root, registry.clone());
-        if kind == PackageSourceKind::Git {
-            let revision = declaration
-                .rev
-                .as_deref()
-                .context("declared Git package source revision is missing")?;
-            let provenance = agl_repo::verified_git_source_provenance(&root, revision)?;
-            source = source.with_source_provenance(provenance.revision, provenance.tree);
+) {
+    for input in inputs {
+        let mut source = DirectoryPackageSource::new(
+            input.id().clone(),
+            input.tier(),
+            input.kind(),
+            input.root(),
+            registry.clone(),
+        );
+        if let Some(provenance) = input.provenance() {
+            source = source.with_source_provenance(provenance.revision(), provenance.tree());
         }
         sources.push(Arc::new(source));
     }
-    Ok(())
 }
 
 fn system_data_roots() -> Vec<PathBuf> {
@@ -995,22 +957,6 @@ fn builtin_source() -> Result<Arc<dyn PackageSource>> {
 mod tests {
     use super::*;
     use agl_package::PackageTypeId;
-    use std::process::Command;
-
-    fn git(root: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
 
     fn write_test_function(root: &Path, id: &str) {
         let package = root.join("functions").join(id);
@@ -1058,6 +1004,25 @@ path = ".agl"
         .unwrap();
     }
 
+    fn empty_package_input(workspace: &Path) -> PackageCompositionInput {
+        PackageCompositionInput::new(workspace, []).unwrap()
+    }
+
+    fn workspace_package_input(workspace: &Path) -> PackageCompositionInput {
+        PackageCompositionInput::new(
+            workspace,
+            [PackageSourceInput::new(
+                "workspace".parse().unwrap(),
+                PackageSourceTier::Workspace,
+                PackageSourceKind::Directory,
+                workspace.join(".agl"),
+                None,
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn composition_registers_all_core_adapters_and_source_tiers() {
         let paths = AgentLibrePaths::from_agl_home(std::env::temp_dir().join("agl-app-test-home"));
@@ -1065,7 +1030,7 @@ path = ".agl"
             std::env::temp_dir().join(format!("agl-app-composition-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
         declare_workspace_source(&workspace);
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, workspace_package_input(&workspace)).unwrap();
         assert_eq!(composition.registry.iter().count(), 4);
         assert!(
             composition
@@ -1103,7 +1068,7 @@ path = ".agl"
             std::env::temp_dir().join(format!("agl-app-locked-resolution-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
         let root: PackageRef = "function:gemma4-e4b@^1.0".parse().unwrap();
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, empty_package_input(&workspace)).unwrap();
         let graph = composition.resolve_for_lock_refresh(&root).unwrap();
         let mut lock = graph.lock().unwrap();
         let package = lock.packages.first_mut().unwrap();
@@ -1115,7 +1080,8 @@ path = ".agl"
         fs::create_dir_all(workspace.join(".agl")).unwrap();
         lock.write_atomic(workspace.join(".agl/package-lock.toml"))
             .unwrap();
-        let error = resolve_composed_packages(&paths, &workspace, &root).unwrap_err();
+        let error =
+            resolve_composed_packages(&paths, empty_package_input(&workspace), &root).unwrap_err();
         assert_eq!(
             error
                 .downcast_ref::<agl_package::PackageError>()
@@ -1136,7 +1102,7 @@ path = ".agl"
         write_test_function(&paths.data_dir, "from-data");
         write_test_function(&paths.config_dir, "from-config");
 
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, empty_package_input(&workspace)).unwrap();
         let user = composition
             .sources
             .iter()
@@ -1150,103 +1116,6 @@ path = ".agl"
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["from-data"]);
 
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn git_workspace_source_is_locked_by_clean_declared_revision_and_tree() {
-        let home = std::env::temp_dir().join(format!(
-            "agl-runtime-git-workspace-source-{}",
-            std::process::id()
-        ));
-        let workspace = home.join("workspace");
-        let source = workspace.join(".agl/private-skills");
-        let skill = source.join("skills/private-notes");
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(&skill).unwrap();
-        fs::write(
-            skill.join("SKILL.md"),
-            r#"---
-package:
-  schema: agentlibre.package/v1
-  type: skill
-  id: private-notes
-  version: 1.0.0
-  payload_schema: agentlibre.skill/v2
-  agl:
-    compatible: ">=1.0.0-alpha.12"
-    tested: [1.0.0-alpha.12]
-  requires: []
-description: Fixture private skill.
-pack: agl
-required_hooks: []
-allowed_tools: []
-context_budget_tokens: 128
-references:
-  include: []
-guarantees:
-  - fixture guarantee
----
-
-Fixture.
-"#,
-        )
-        .unwrap();
-        git(&source, &["init", "-b", "main"]);
-        git(&source, &["config", "user.name", "Fixture"]);
-        git(
-            &source,
-            &["config", "user.email", "fixture@example.invalid"],
-        );
-        git(&source, &["add", "."]);
-        git(&source, &["commit", "-m", "fixture"]);
-        fs::write(
-            workspace.join(".agl/workspace.toml"),
-            r#"version = 3
-default_function = "function:gemma4-e4b@^1"
-
-[[sources]]
-id = "private-skills"
-tier = "workspace"
-kind = "git"
-path = ".agl/private-skills"
-url = "fixture"
-rev = "main"
-
-[policy]
-[config]
-"#,
-        )
-        .unwrap();
-        let paths = AgentLibrePaths::from_agl_home(&home);
-        let composition = compose_packages(&paths, &workspace).unwrap();
-        let graph = composition
-            .resolve_for_lock_refresh(&"skill:private-notes@*".parse().unwrap())
-            .unwrap();
-        let node = graph.nodes.get(&graph.root).unwrap();
-        assert_eq!(
-            node.candidate.source_revision.as_deref(),
-            Some(git(&source, &["rev-parse", "HEAD"]).as_str())
-        );
-        assert_eq!(
-            node.candidate.source_tree.as_deref(),
-            Some(git(&source, &["rev-parse", "HEAD^{tree}"]).as_str())
-        );
-        let lock = composition
-            .workspace_lock(&"function:gemma4-e4b@^1".parse().unwrap())
-            .unwrap();
-        assert!(
-            lock.packages
-                .iter()
-                .any(|package| package.key() == "skill:private-notes@1.0.0")
-        );
-
-        fs::write(skill.join("untracked.txt"), "dirty").unwrap();
-        let error = match compose_packages(&paths, &workspace) {
-            Ok(_) => panic!("dirty Git source unexpectedly produced a composition"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("uncommitted or ignored files"));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -1281,7 +1150,7 @@ title: Broken
         .unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
 
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, workspace_package_input(&workspace)).unwrap();
         let workspace_source = composition
             .sources
             .iter()
@@ -1325,7 +1194,7 @@ title: Broken
 
         let function = resolve_composed_runtime_function(
             &paths,
-            &workspace,
+            empty_package_input(&workspace),
             function_path.to_str().unwrap(),
             false,
         )
@@ -1353,7 +1222,7 @@ title: Broken
             .join("../../assets/functions/gemma4-31b-32k/FUNCTION.md")
             .canonicalize()
             .unwrap();
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, empty_package_input(&workspace)).unwrap();
 
         let graph = composition
             .resolve_function_reference(&workspace, function_path.to_str().unwrap())
@@ -1514,7 +1383,7 @@ expected_speed = "fixture"
         .unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
         let root: PackageRef = "function:workspace-model@=1.0.0".parse().unwrap();
-        let unlocked = compose_packages(&paths, &workspace).unwrap();
+        let unlocked = compose_packages(&paths, workspace_package_input(&workspace)).unwrap();
         let graph = unlocked.resolve_for_lock_refresh(&root).unwrap();
         fs::create_dir_all(workspace.join(".agl")).unwrap();
         graph
@@ -1523,7 +1392,7 @@ expected_speed = "fixture"
             .write_atomic(workspace.join(".agl/package-lock.toml"))
             .unwrap();
 
-        let composition = compose_packages(&paths, &workspace).unwrap();
+        let composition = compose_packages(&paths, workspace_package_input(&workspace)).unwrap();
         fs::write(model_root.join("MODEL.toml"), "mutated after admission").unwrap();
         let bundle = composition
             .resolve_runtime_bundle(&workspace, &paths.config_dir, "workspace-model", true, &[])
@@ -1577,7 +1446,7 @@ expected_speed = "fixture"
         fs::write(workspace.join(".agl/package-lock.toml"), "invalid lock = [").unwrap();
         let paths = AgentLibrePaths::from_agl_home(&home);
 
-        let error = match compose_packages(&paths, &workspace) {
+        let error = match compose_packages(&paths, empty_package_input(&workspace)) {
             Ok(_) => panic!("invalid lock unexpectedly produced a composition"),
             Err(error) => error,
         };

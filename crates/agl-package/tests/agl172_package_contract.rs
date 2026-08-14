@@ -3,8 +3,9 @@ use std::sync::Arc;
 use agl_package::{
     DirectoryPackageSource, ErasedPackagePayload, InMemoryPackageView, LockedPackage,
     PackageAdapter, PackageAdapterDescriptor, PackageAdapterRegistry, PackageCandidate,
-    PackageEnvelope, PackageError, PackageId, PackageLock, PackageRef, PackageRelativePath,
-    PackageResolver, PackageSchemaId, PackageSourceDeclaration, PackageSourceId, PackageSourceKind,
+    PackageCompositionInput, PackageEnvelope, PackageError, PackageId, PackageLock, PackageRef,
+    PackageRelativePath, PackageResolver, PackageSchemaId, PackageSourceDeclaration,
+    PackageSourceId, PackageSourceInput, PackageSourceKind, PackageSourceProvenance,
     PackageSourceTier, PackageTypeId, PackageVersion, ResolvedPackageGraph, StaticPackageSource,
     WorkspaceManifest, compute_package_digest,
 };
@@ -104,6 +105,100 @@ path = ".agl/packages"
     );
     assert!(WorkspaceManifest::from_toml("version = 2\ncomponents = {}\n").is_err());
     assert!(WorkspaceManifest::from_toml("version = 3\ncomponents = {}\n").is_err());
+}
+
+// AGL172-068. Package composition receives materialized source facts through
+// format-neutral values; constructing these values performs no repository I/O.
+#[test]
+fn package_composition_input_has_one_structurally_checked_source_boundary() {
+    let workspace = std::env::temp_dir().join("agl172-composition-input");
+    let directory = PackageSourceInput::new(
+        "workspace".parse().unwrap(),
+        PackageSourceTier::Workspace,
+        PackageSourceKind::Directory,
+        workspace.join("packages"),
+        None,
+    )
+    .unwrap();
+    let provenance = PackageSourceProvenance::new("a".repeat(40), "b".repeat(40));
+    let git = PackageSourceInput::new(
+        "private".parse().unwrap(),
+        PackageSourceTier::Workspace,
+        PackageSourceKind::Git,
+        workspace.join("private"),
+        Some(provenance.clone()),
+    )
+    .unwrap();
+    let input = PackageCompositionInput::new(&workspace, [directory.clone(), git.clone()]).unwrap();
+
+    assert_eq!(input.workspace_root(), workspace.as_path());
+    assert_eq!(input.sources(), &[directory, git]);
+    assert_eq!(input.sources()[1].provenance(), Some(&provenance));
+
+    assert!(
+        PackageSourceInput::new(
+            "git".parse().unwrap(),
+            PackageSourceTier::Workspace,
+            PackageSourceKind::Git,
+            workspace.join("git"),
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        PackageSourceInput::new(
+            "empty-provenance".parse().unwrap(),
+            PackageSourceTier::Workspace,
+            PackageSourceKind::Git,
+            workspace.join("empty-provenance"),
+            Some(PackageSourceProvenance::new("", "")),
+        )
+        .is_err()
+    );
+    assert!(
+        PackageSourceInput::new(
+            "directory".parse().unwrap(),
+            PackageSourceTier::Workspace,
+            PackageSourceKind::Directory,
+            workspace.join("directory"),
+            Some(provenance.clone()),
+        )
+        .is_err()
+    );
+    assert!(
+        PackageSourceInput::new(
+            "embedded".parse().unwrap(),
+            PackageSourceTier::Workspace,
+            PackageSourceKind::Embedded,
+            workspace.join("embedded"),
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        PackageCompositionInput::new(
+            &workspace,
+            [
+                PackageSourceInput::new(
+                    "duplicate".parse().unwrap(),
+                    PackageSourceTier::Workspace,
+                    PackageSourceKind::Directory,
+                    workspace.join("one"),
+                    None,
+                )
+                .unwrap(),
+                PackageSourceInput::new(
+                    "duplicate".parse().unwrap(),
+                    PackageSourceTier::Workspace,
+                    PackageSourceKind::Directory,
+                    workspace.join("two"),
+                    None,
+                )
+                .unwrap(),
+            ],
+        )
+        .is_err()
+    );
 }
 
 // AGL172-003.

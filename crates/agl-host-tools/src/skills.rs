@@ -15,21 +15,20 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct SkillTools {
-    workspace_root: PathBuf,
+    package_input: agl_package::PackageCompositionInput,
     trust_store_path: PathBuf,
     runtime_paths: agl_runtime::AgentLibrePaths,
 }
 
 impl SkillTools {
     pub fn new(
-        workspace_root: impl AsRef<Path>,
-        _trust_store_path: impl AsRef<Path>,
-        _agentlibre_version: impl Into<String>,
+        package_input: agl_package::PackageCompositionInput,
+        trust_store_path: impl AsRef<Path>,
         runtime_paths: agl_runtime::AgentLibrePaths,
     ) -> Self {
         Self {
-            workspace_root: workspace_root.as_ref().to_path_buf(),
-            trust_store_path: _trust_store_path.as_ref().to_path_buf(),
+            package_input,
+            trust_store_path: trust_store_path.as_ref().to_path_buf(),
             runtime_paths,
         }
     }
@@ -157,7 +156,7 @@ impl SkillTools {
     fn resolved(&self) -> Result<agl_runtime::WorkspaceSkillRegistry> {
         agl_runtime::resolve_workspace_skills(
             &self.runtime_paths,
-            &self.workspace_root,
+            self.package_input.clone(),
             &self.trust_store_path,
         )
     }
@@ -318,9 +317,8 @@ mod tests {
         let root = temp_root("list-inspect");
         std::fs::create_dir_all(&root).unwrap();
         let tools = SkillTools::new(
-            &root,
+            agl_package::PackageCompositionInput::new(&root, []).unwrap(),
             root.join("skill-trust.toml"),
-            "test",
             agl_runtime::AgentLibrePaths::from_agl_home(&root),
         );
 
@@ -360,9 +358,8 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join(".agl/skills")).unwrap();
         let tools = SkillTools::new(
-            &root,
+            agl_package::PackageCompositionInput::new(&root, []).unwrap(),
             root.join("skill-trust.toml"),
-            "test",
             agl_runtime::AgentLibrePaths::from_agl_home(&root),
         );
 
@@ -385,9 +382,8 @@ mod tests {
         let root = temp_root("unknown");
         std::fs::create_dir_all(&root).unwrap();
         let tools = SkillTools::new(
-            &root,
+            agl_package::PackageCompositionInput::new(&root, []).unwrap(),
             root.join("skill-trust.toml"),
-            "test",
             agl_runtime::AgentLibrePaths::from_agl_home(&root),
         );
         let error = tools

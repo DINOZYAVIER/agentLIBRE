@@ -1105,8 +1105,8 @@ impl InferenceSession {
                 root: canonical_root,
                 git_revision: workspace_git
                     .as_ref()
-                    .map(|identity| identity.revision.clone()),
-                git_tree: workspace_git.map(|identity| identity.tree),
+                    .map(|identity| identity.revision().to_owned()),
+                git_tree: workspace_git.map(|identity| identity.tree().to_owned()),
             },
             // First-party session creation has already required exact client /
             // daemon identity equality at the v8 handshake boundary.
@@ -1253,7 +1253,8 @@ fn resolve_session_bundle(
         None if additional_skills.is_empty() => return Ok((None, None)),
         None => agl_repo::DEFAULT_FUNCTION,
     };
-    let composition = agl_runtime::compose_packages(paths, workspace_root)?;
+    let composition =
+        agl_runtime::compose_packages(paths, agl_repo::package_composition_input(workspace_root)?)?;
     let bundle = composition
         .resolve_runtime_bundle(
             workspace_root,

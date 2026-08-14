@@ -82,6 +82,8 @@ pub enum PackageError {
     InvalidEntrypoint { value: String },
     #[error("invalid package source ID `{value}`")]
     InvalidSourceId { value: String },
+    #[error("invalid package source input `{source_id}`: {reason}")]
+    InvalidSourceInput { source_id: String, reason: String },
     #[error("package file `{path}` is duplicated")]
     DuplicatePackageFile { path: String },
     #[error("package file `{path}` was not found")]
@@ -183,6 +185,7 @@ impl PackageError {
             Self::InvalidRelativePath { .. } => "path_escape",
             Self::InvalidEntrypoint { .. } => "invalid_entrypoint",
             Self::InvalidSourceId { .. } => "invalid_source_id",
+            Self::InvalidSourceInput { .. } => "invalid_source_input",
             Self::DuplicatePackageFile { .. } => "duplicate_package_file",
             Self::PackageFileNotFound { .. } => "package_file_not_found",
             Self::PackagePathNotRegular { .. } => "package_path_not_regular",
@@ -1215,6 +1218,142 @@ pub struct PackageSourceDeclaration {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageSourceProvenance {
+    revision: String,
+    tree: String,
+}
+
+impl PackageSourceProvenance {
+    pub fn new(revision: impl Into<String>, tree: impl Into<String>) -> Self {
+        Self {
+            revision: revision.into(),
+            tree: tree.into(),
+        }
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageSourceInput {
+    id: PackageSourceId,
+    tier: PackageSourceTier,
+    kind: PackageSourceKind,
+    root: PathBuf,
+    provenance: Option<PackageSourceProvenance>,
+}
+
+impl PackageSourceInput {
+    pub fn new(
+        id: PackageSourceId,
+        tier: PackageSourceTier,
+        kind: PackageSourceKind,
+        root: impl Into<PathBuf>,
+        provenance: Option<PackageSourceProvenance>,
+    ) -> Result<Self, PackageError> {
+        let source_id = id.to_string();
+        if provenance
+            .as_ref()
+            .is_some_and(|value| value.revision.trim().is_empty() || value.tree.trim().is_empty())
+        {
+            return Err(PackageError::InvalidSourceInput {
+                source_id,
+                reason: "Git provenance revision and tree must be non-empty".to_owned(),
+            });
+        }
+        match (kind, provenance.is_some()) {
+            (PackageSourceKind::Directory, false) | (PackageSourceKind::Git, true) => {}
+            (PackageSourceKind::Directory, true) => {
+                return Err(PackageError::InvalidSourceInput {
+                    source_id,
+                    reason: "Directory source must not carry Git provenance".to_owned(),
+                });
+            }
+            (PackageSourceKind::Git, false) => {
+                return Err(PackageError::InvalidSourceInput {
+                    source_id,
+                    reason: "Git source requires verified revision and tree provenance".to_owned(),
+                });
+            }
+            (PackageSourceKind::Embedded, _) => {
+                return Err(PackageError::InvalidSourceInput {
+                    source_id,
+                    reason: "Embedded source is not a materialized workspace input".to_owned(),
+                });
+            }
+        }
+        Ok(Self {
+            id,
+            tier,
+            kind,
+            root: root.into(),
+            provenance,
+        })
+    }
+
+    pub fn id(&self) -> &PackageSourceId {
+        &self.id
+    }
+
+    pub fn tier(&self) -> PackageSourceTier {
+        self.tier
+    }
+
+    pub fn kind(&self) -> PackageSourceKind {
+        self.kind
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn provenance(&self) -> Option<&PackageSourceProvenance> {
+        self.provenance.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageCompositionInput {
+    workspace_root: PathBuf,
+    sources: Vec<PackageSourceInput>,
+}
+
+impl PackageCompositionInput {
+    pub fn new(
+        workspace_root: impl Into<PathBuf>,
+        sources: impl IntoIterator<Item = PackageSourceInput>,
+    ) -> Result<Self, PackageError> {
+        let sources = sources.into_iter().collect::<Vec<_>>();
+        let mut ids = BTreeSet::new();
+        for source in &sources {
+            if !ids.insert(source.id.clone()) {
+                return Err(PackageError::InvalidSourceId {
+                    value: source.id.to_string(),
+                });
+            }
+        }
+        Ok(Self {
+            workspace_root: workspace_root.into(),
+            sources,
+        })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub fn sources(&self) -> &[PackageSourceInput] {
+        &self.sources
+    }
 }
 
 impl PackageSourceDeclaration {

@@ -805,15 +805,19 @@ fn protected_model_ids(runtime: &AgentLibreRuntimeConfig) -> Result<BTreeSet<Mod
     let mut protected = BTreeSet::new();
     if let Ok(workspace) = runtime.resolve_workspace_root(None)
         && let Some(reference) = agl_repo::read_workspace_default_function(&workspace)?
+        && let Ok(input) = agl_repo::package_composition_input(&workspace)
         && let Ok(function) = agl_runtime::resolve_composed_runtime_function(
             &runtime.paths,
-            &workspace,
+            input,
             &reference.to_string(),
             true,
         )
         && function.model_profile.is_some()
     {
-        let composition = agl_runtime::compose_packages(&runtime.paths, &workspace)?;
+        let composition = agl_runtime::compose_packages(
+            &runtime.paths,
+            agl_repo::package_composition_input(&workspace)?,
+        )?;
         if let Ok(bundle) = composition.resolve_runtime_bundle(
             &workspace,
             &runtime.paths.config_dir,

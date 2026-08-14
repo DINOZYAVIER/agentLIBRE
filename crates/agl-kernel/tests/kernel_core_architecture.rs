@@ -492,6 +492,39 @@ fn package_artifact_workspace_and_git_owners_have_exact_dependencies() {
     assert!(!normal_dependencies("agl-runtime").contains("agl-repo"));
     assert!(!normal_dependencies("agl-kernel").contains("agl-artifact"));
     assert!(!normal_dependencies("agl-package").contains("agl-kernel"));
+
+    let runtime_git_access = matches_in(
+        production_rs_files(&workspace_root().join("crates/agl-runtime/src")),
+        &["agl_repo::", "Command::new(\"git\")"],
+    );
+    assert!(
+        runtime_git_access.is_empty(),
+        "agl-runtime opens package repositories directly: {runtime_git_access:#?}"
+    );
+}
+
+// AGL172-069. The product layer prepares repository-backed package sources
+// before runtime composition. The host Tool implementation only consumes the
+// typed value passed by agl-chat.
+#[test]
+fn product_composition_prepares_package_sources_before_runtime() {
+    let crates = workspace_root().join("crates");
+    for product in ["agl-cli", "agl-chat"] {
+        let sources = production_rs_files(&crates.join(product).join("src"));
+        let prepared = matches_in(sources, &["agl_repo::package_composition_input"]);
+        assert!(
+            !prepared.is_empty(),
+            "{product} does not prepare package composition input through agl-repo"
+        );
+    }
+    let host_repo_access = matches_in(
+        production_rs_files(&crates.join("agl-host-tools/src")),
+        &["agl_repo::"],
+    );
+    assert!(
+        host_repo_access.is_empty(),
+        "agl-host-tools opens repositories directly: {host_repo_access:#?}"
+    );
 }
 
 // AGL172-005, AGL172-010, AGL172-032, AGL172-047, AGL172-051,
@@ -571,18 +604,10 @@ fn package_wire_format_has_one_key_schema_and_lock_path() {
         entries.sort();
         for entry in entries {
             if entry.is_dir() {
-                let is_task_history = entry.file_name().and_then(|name| name.to_str())
-                    == Some("tasks")
-                    && entry
-                        .parent()
-                        .and_then(Path::file_name)
-                        .and_then(|name| name.to_str())
-                        == Some(".agl");
                 if matches!(
                     entry.file_name().and_then(|name| name.to_str()),
-                    Some(".git" | "target" | "vendor")
-                ) || is_task_history
-                {
+                    Some(".agl" | ".git" | "target" | "vendor")
+                ) {
                     continue;
                 }
                 visit(&entry, files);

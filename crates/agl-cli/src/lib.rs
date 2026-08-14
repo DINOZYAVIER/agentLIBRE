@@ -1012,7 +1012,7 @@ fn cli_workspace_skills(
 ) -> Result<agl_runtime::WorkspaceSkillRegistry> {
     agl_runtime::resolve_workspace_skills(
         &runtime.paths,
-        std::env::current_dir()?,
+        agl_repo::package_composition_input(std::env::current_dir()?)?,
         runtime.paths.state_dir.join("skill-trust.toml"),
     )
 }
@@ -1185,7 +1185,7 @@ fn resolve_run_function_defaults(
                 runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
             agl_runtime::resolve_composed_runtime_function(
                 &runtime.paths,
-                &workspace_root,
+                agl_repo::package_composition_input(&workspace_root)?,
                 reference,
                 true,
             )

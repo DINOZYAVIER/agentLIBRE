@@ -100,6 +100,7 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
 
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
     let mut core_tools = config.core_tools.clone();
+    let package_input = agl_repo::package_composition_input(config.workspace_root)?;
     let mut repo_tools =
         agl_core_tools::RepoTools::new(config.workspace_root).with_store_root(config.store_root);
     let mut host = product_host_builder()
@@ -193,9 +194,8 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
             host_binding_id(agl_core_tools::skills::EXTENSION_ID),
             1,
             Arc::new(agl_host_tools::SkillTools::new(
-                config.workspace_root,
+                package_input,
                 config.trust_store_path,
-                env!("CARGO_PKG_VERSION"),
                 config.runtime_paths.clone(),
             )),
         )
