@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 18;
+pub const CURRENT_SCHEMA_VERSION: u32 = 19;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -583,6 +583,17 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             );
             CREATE INDEX artifact_commit_operations_recovery_idx
                 ON artifact_commit_operations(state, operation_id);
+        "#,
+    },
+    StoreMigration {
+        version: 19,
+        name: "019_kernel_run_authority",
+        sql: r#"
+            ALTER TABLE runs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+                CHECK (revision > 0);
+            ALTER TABLE run_steps ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+                CHECK (revision > 0);
+            ALTER TABLE run_steps DROP COLUMN effect_kind;
         "#,
     },
 ];

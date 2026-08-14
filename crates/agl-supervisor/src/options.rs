@@ -25,7 +25,7 @@ impl SupervisorClock for SystemSupervisorClock {
 #[derive(Clone)]
 pub struct SupervisorOptions {
     pub owner_id: String,
-    pub worker_limit: usize,
+    pub max_active_runs: usize,
     pub command_capacity: usize,
     pub subscriber_capacity: usize,
     pub lease_duration: Duration,
@@ -44,7 +44,7 @@ impl Default for SupervisorOptions {
                 std::process::id(),
                 SystemSupervisorClock.now_ms()
             ),
-            worker_limit: 4,
+            max_active_runs: 4,
             command_capacity: 128,
             subscriber_capacity: 128,
             lease_duration: Duration::from_secs(30),
@@ -64,9 +64,10 @@ impl SupervisorOptions {
                 "owner_id cannot be blank".to_string(),
             ));
         }
-        if self.worker_limit == 0 || self.command_capacity == 0 || self.subscriber_capacity == 0 {
+        if self.max_active_runs == 0 || self.command_capacity == 0 || self.subscriber_capacity == 0
+        {
             return Err(SupervisorError::InvalidOptions(
-                "worker and queue capacities must be positive".to_string(),
+                "run-task and queue capacities must be positive".to_string(),
             ));
         }
         if self.heartbeat_interval.is_zero()

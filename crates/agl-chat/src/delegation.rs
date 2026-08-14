@@ -394,6 +394,7 @@ mod tests {
             turn_id: None,
             kind: RunKind::Subagent,
             state: RunState::Failed,
+            revision: agl_kernel::RunRevision::new(1),
             priority: 0,
             concurrency_key: None,
             input: serde_json::json!({}),

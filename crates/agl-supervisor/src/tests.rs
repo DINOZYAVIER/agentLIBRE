@@ -6,8 +6,12 @@ use std::time::{Duration, Instant};
 
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus};
 use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
+use agl_kernel::{
+    RunRequest, RunRequestResult, RunTerminalOutcome, ToolDispatchRequest, ToolId, TurnRequest,
+    TurnRequestKey, TurnRequestOutcome, TurnRequestResult,
+};
 use agl_store::{
-    AglStore, DurableRunDraft, DurableRunRecord, EffectDeliveryClass, RunBudget, RunKind, RunState,
+    AglStore, DurableRunDraft, DurableRunRecord, RunBudget, RunDelivery, RunKind, RunState,
     RunUsage,
 };
 use serde_json::json;
@@ -38,8 +42,8 @@ impl SupervisorClock for TestClock {
 }
 
 struct FakeBehavior {
-    effects: u64,
-    delivery: EffectDeliveryClass,
+    requests: u64,
+    delivery: RunDelivery,
     blocked: AtomicBool,
     fail_until_attempt: u32,
     attempts: AtomicU32,
@@ -49,9 +53,9 @@ struct FakeBehavior {
 }
 
 impl FakeBehavior {
-    fn new(effects: u64, delivery: EffectDeliveryClass) -> Self {
+    fn new(requests: u64, delivery: RunDelivery) -> Self {
         Self {
-            effects,
+            requests,
             delivery,
             blocked: AtomicBool::new(false),
             fail_until_attempt: 0,
@@ -120,7 +124,7 @@ struct FakeDriver {
     phase: u64,
     event_sequence: u64,
     events: Vec<SafeRuntimeEventEnvelope>,
-    terminal: Option<SupervisorTerminal>,
+    terminal: Option<RunTerminalOutcome>,
     usage: RunUsage,
 }
 
@@ -131,22 +135,18 @@ impl DurableRunDriver for FakeDriver {
                 "phase": self.phase,
                 "event_sequence": self.event_sequence,
             }),
-            pending_request: self.terminal.is_none().then(|| SupervisorEffect {
-                sequence: self.phase + 1,
-                kind: "fake_effect".to_string(),
-                delivery_class: self.behavior.delivery,
-                request: json!({"phase": self.phase}),
-            }),
+            pending_request: self.terminal.is_none().then(|| self.pending_request()),
             events: std::mem::take(&mut self.events),
             terminal: self.terminal.clone(),
             usage: self.usage.clone(),
         })
     }
 
-    fn execute_pending_effect(
+    fn execute_pending_request(
         &mut self,
-        context: &EffectExecutionContext,
-    ) -> std::result::Result<serde_json::Value, DriverEffectError> {
+        context: &RunRequestContext,
+    ) -> std::result::Result<RunRequestResult, RunRequestError> {
+        let pending_request = self.pending_request();
         self.behavior.attempts.fetch_add(1, Ordering::SeqCst);
         self.behavior
             .invocation_keys
@@ -178,13 +178,11 @@ impl DurableRunDriver for FakeDriver {
                     status: TurnFinishStatus::Cancelled,
                 },
             ));
-            self.terminal = Some(SupervisorTerminal {
-                state: RunState::Cancelled,
-                result: None,
+            self.terminal = Some(RunTerminalOutcome::Cancelled {
                 error_code: None,
                 error_message: None,
             });
-            return Ok(json!({"cancelled": true}));
+            return Ok(cancelled_result(&pending_request));
         }
 
         self.behavior
@@ -193,7 +191,7 @@ impl DurableRunDriver for FakeDriver {
             .unwrap()
             .insert(context.step_id.clone());
         if context.attempt <= self.behavior.fail_until_attempt {
-            return Err(DriverEffectError::new(
+            return Err(RunRequestError::new(
                 "fake.infrastructure",
                 "injected retryable failure",
                 true,
@@ -201,7 +199,7 @@ impl DurableRunDriver for FakeDriver {
         }
         self.phase += 1;
         self.usage.model_attempts += 1;
-        if self.phase == self.behavior.effects {
+        if self.phase == self.behavior.requests {
             self.event_sequence += 1;
             self.events.push(scoped_event(
                 &self.run_id,
@@ -220,15 +218,44 @@ impl DurableRunDriver for FakeDriver {
                     status: TurnFinishStatus::Answered,
                 },
             ));
-            self.terminal = Some(SupervisorTerminal {
-                state: RunState::Succeeded,
+            self.terminal = Some(RunTerminalOutcome::Succeeded {
                 result: Some(json!({"answer": "done"})),
-                error_code: None,
-                error_message: None,
             });
         }
-        Ok(json!({"phase": self.phase}))
+        Ok(cancelled_result(&pending_request))
     }
+}
+
+impl FakeDriver {
+    fn pending_request(&self) -> RunRequest {
+        let turn_id = self.turn_id.clone().unwrap_or_else(TurnId::generate);
+        RunRequest::new(
+            self.behavior.delivery,
+            TurnRequest::ToolDispatch {
+                key: TurnRequestKey {
+                    turn_id: turn_id.clone(),
+                    sequence: self.phase + 1,
+                },
+                request: ToolDispatchRequest {
+                    run_id: self.run_id.clone(),
+                    turn_id,
+                    tool_id: ToolId::new("agl:test.fake").unwrap(),
+                    arguments: json!({"phase": self.phase}),
+                },
+            },
+        )
+    }
+}
+
+fn cancelled_result(request: &RunRequest) -> RunRequestResult {
+    RunRequestResult::for_request(
+        request,
+        TurnRequestResult::ToolDispatch {
+            key: request.key().clone(),
+            outcome: Box::new(TurnRequestOutcome::Cancelled),
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -247,7 +274,7 @@ fn options_require_heartbeat_shorter_than_lease() {
 #[test]
 fn admission_is_immediate_and_active_cancel_is_durable() {
     let root = TempRoot::new("cancel");
-    let behavior = Arc::new(FakeBehavior::new(1, EffectDeliveryClass::ReplaySafe));
+    let behavior = Arc::new(FakeBehavior::new(1, RunDelivery::ReplaySafe));
     behavior.blocked.store(true, Ordering::Release);
     let supervisor = Supervisor::spawn(
         &root.path,
@@ -291,10 +318,10 @@ fn admission_is_immediate_and_active_cancel_is_durable() {
 }
 
 #[test]
-fn heartbeat_advances_while_effect_is_blocked() {
+fn heartbeat_advances_while_request_is_blocked() {
     let root = TempRoot::new("heartbeat");
     let clock = Arc::new(TestClock::new(1_000));
-    let behavior = Arc::new(FakeBehavior::new(1, EffectDeliveryClass::ReplaySafe));
+    let behavior = Arc::new(FakeBehavior::new(1, RunDelivery::ReplaySafe));
     behavior.blocked.store(true, Ordering::Release);
     let options = SupervisorOptions {
         clock: clock.clone(),
@@ -348,7 +375,7 @@ fn heartbeat_advances_while_effect_is_blocked() {
 #[test]
 fn idempotent_retry_reuses_the_stable_step_key() {
     let root = TempRoot::new("retry");
-    let mut configured = FakeBehavior::new(1, EffectDeliveryClass::Idempotent);
+    let mut configured = FakeBehavior::new(1, RunDelivery::Idempotent);
     configured.fail_until_attempt = 2;
     let behavior = Arc::new(configured);
     let supervisor = Supervisor::spawn(
@@ -385,7 +412,7 @@ fn idempotent_retry_reuses_the_stable_step_key() {
 #[test]
 fn subscriber_replays_without_gap_and_overflow_does_not_block_run() {
     let root = TempRoot::new("subscription");
-    let behavior = Arc::new(FakeBehavior::new(1, EffectDeliveryClass::ReplaySafe));
+    let behavior = Arc::new(FakeBehavior::new(1, RunDelivery::ReplaySafe));
     behavior.blocked.store(true, Ordering::Release);
     let options = SupervisorOptions {
         subscriber_capacity: 1,
@@ -433,7 +460,7 @@ fn subscriber_replays_without_gap_and_overflow_does_not_block_run() {
 
 fn fast_options() -> SupervisorOptions {
     SupervisorOptions {
-        worker_limit: 2,
+        max_active_runs: 2,
         heartbeat_interval: Duration::from_millis(50),
         lease_duration: Duration::from_millis(500),
         retry_base_delay: Duration::from_millis(2),
@@ -550,7 +577,7 @@ fn wait_for_event_count(handle: &SupervisorHandle, run_id: &RunId, count: usize)
 fn wait_for_attempts(behavior: &FakeBehavior, count: u32) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while behavior.attempts.load(Ordering::SeqCst) < count {
-        assert!(Instant::now() < deadline, "effect did not begin");
+        assert!(Instant::now() < deadline, "request did not begin");
         std::thread::sleep(Duration::from_millis(5));
     }
 }

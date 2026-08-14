@@ -5,6 +5,11 @@ use agl_exec::ExecutionContextSnapshot;
 use agl_ids::{RunId, SessionId, StepId, TurnId};
 use serde::{Deserialize, Serialize};
 
+pub use agl_kernel::{
+    DelegationTreeBudget, RunBudget, RunDelivery, RunKind, RunRequest, RunRequestResult,
+    RunRevision, RunState, RunStepRevision, RunStepState, RunUsage,
+};
+
 use crate::error::{Result, StoreError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -368,14 +373,6 @@ pub struct PermissionGrantRecord {
     pub consumed_at: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunKind {
-    Turn,
-    Cron,
-    Subagent,
-}
-
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RunConcurrencyKey(String);
@@ -420,180 +417,6 @@ impl From<RunConcurrencyKey> for String {
     fn from(value: RunConcurrencyKey) -> Self {
         value.0
     }
-}
-
-impl RunKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Turn => "turn",
-            Self::Cron => "cron",
-            Self::Subagent => "subagent",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "turn" => Ok(Self::Turn),
-            "cron" => Ok(Self::Cron),
-            "subagent" => Ok(Self::Subagent),
-            _ => invalid_run_value("runs.kind", value, "invalid run kind"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunState {
-    Queued,
-    Running,
-    Waiting,
-    Succeeded,
-    Incomplete,
-    Failed,
-    Cancelled,
-}
-
-impl RunState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Waiting => "waiting",
-            Self::Succeeded => "succeeded",
-            Self::Incomplete => "incomplete",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Incomplete | Self::Failed | Self::Cancelled
-        )
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "queued" => Ok(Self::Queued),
-            "running" => Ok(Self::Running),
-            "waiting" => Ok(Self::Waiting),
-            "succeeded" => Ok(Self::Succeeded),
-            "incomplete" => Ok(Self::Incomplete),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            _ => invalid_run_value("runs.state", value, "invalid run state"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStepState {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Cancelled,
-    OutcomeUnknown,
-}
-
-impl RunStepState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::OutcomeUnknown => "outcome_unknown",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            "succeeded" => Ok(Self::Succeeded),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            "outcome_unknown" => Ok(Self::OutcomeUnknown),
-            _ => invalid_run_value("run_steps.state", value, "invalid run step state"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectDeliveryClass {
-    ReplaySafe,
-    Idempotent,
-    AtMostOnce,
-}
-
-impl EffectDeliveryClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ReplaySafe => "replay_safe",
-            Self::Idempotent => "idempotent",
-            Self::AtMostOnce => "at_most_once",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "replay_safe" => Ok(Self::ReplaySafe),
-            "idempotent" => Ok(Self::Idempotent),
-            "at_most_once" => Ok(Self::AtMostOnce),
-            _ => invalid_run_value(
-                "run_steps.delivery_class",
-                value,
-                "invalid effect delivery class",
-            ),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunBudget {
-    pub wall_time_ms: u64,
-    pub model_input_tokens: u64,
-    pub model_output_tokens: u64,
-    pub model_attempts: u32,
-    pub tool_calls: u32,
-}
-
-impl Default for RunBudget {
-    fn default() -> Self {
-        Self {
-            wall_time_ms: 600_000,
-            model_input_tokens: 1_000_000,
-            model_output_tokens: 100_000,
-            model_attempts: 32,
-            tool_calls: 64,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunUsage {
-    pub wall_time_ms: u64,
-    pub model_input_tokens: u64,
-    pub model_output_tokens: u64,
-    pub model_attempts: u32,
-    pub tool_calls: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DelegationTreeBudget {
-    pub max_depth: u32,
-    pub max_children_per_run: u32,
-    pub max_descendants: u32,
-    pub max_total_output_tokens: u64,
-    pub timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -641,6 +464,7 @@ pub struct DurableRunRecord {
     pub turn_id: Option<TurnId>,
     pub kind: RunKind,
     pub state: RunState,
+    pub revision: RunRevision,
     pub priority: i32,
     pub concurrency_key: Option<RunConcurrencyKey>,
     pub input: serde_json::Value,
@@ -691,6 +515,7 @@ pub struct SafeRunStatus {
     pub turn_id: Option<TurnId>,
     pub kind: RunKind,
     pub state: RunState,
+    pub revision: RunRevision,
     pub priority: i32,
     pub concurrency_key: Option<RunConcurrencyKey>,
     pub usage: RunUsage,
@@ -722,11 +547,7 @@ pub struct RunLease {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunStepDraft {
     pub step_id: StepId,
-    pub turn_id: Option<TurnId>,
-    pub request_sequence: u64,
-    pub effect_kind: String,
-    pub delivery_class: EffectDeliveryClass,
-    pub request: serde_json::Value,
+    pub request: RunRequest,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -735,11 +556,10 @@ pub struct RunStepRecord {
     pub run_id: RunId,
     pub turn_id: Option<TurnId>,
     pub request_sequence: u64,
-    pub effect_kind: String,
-    pub delivery_class: EffectDeliveryClass,
-    pub request: serde_json::Value,
-    pub result: Option<serde_json::Value>,
+    pub request: RunRequest,
+    pub result: Option<RunRequestResult>,
     pub state: RunStepState,
+    pub revision: RunStepRevision,
     pub attempts: u32,
     pub lease_owner: Option<String>,
     pub lease_generation: u64,

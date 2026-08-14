@@ -3,9 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, StepId};
-use agl_kernel::CancellationSignal;
-use agl_store::{DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
-use serde::{Deserialize, Serialize};
+use agl_kernel::{CancellationSignal, RunRequest, RunRequestResult, RunTerminalOutcome, RunUsage};
+use agl_store::DurableRunRecord;
 
 use crate::Result;
 
@@ -43,35 +42,17 @@ impl std::fmt::Debug for RunCancellation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupervisorEffect {
-    pub sequence: u64,
-    pub kind: String,
-    pub delivery_class: EffectDeliveryClass,
-    pub request: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupervisorTerminal {
-    pub state: RunState,
-    pub result: Option<serde_json::Value>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriverSnapshot {
     pub checkpoint: serde_json::Value,
-    pub pending_request: Option<SupervisorEffect>,
+    pub pending_request: Option<RunRequest>,
     pub events: Vec<SafeRuntimeEventEnvelope>,
-    pub terminal: Option<SupervisorTerminal>,
+    pub terminal: Option<RunTerminalOutcome>,
     pub usage: RunUsage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DriverEffectError {
+pub struct RunRequestError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
@@ -79,14 +60,14 @@ pub struct DriverEffectError {
 }
 
 #[derive(Clone, Debug)]
-pub struct EffectExecutionContext {
+pub struct RunRequestContext {
     pub run_id: RunId,
     pub step_id: StepId,
     pub attempt: u32,
     pub cancellation: RunCancellation,
 }
 
-impl DriverEffectError {
+impl RunRequestError {
     pub fn new(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             code: code.into(),
@@ -109,10 +90,10 @@ impl DriverEffectError {
 pub trait DurableRunDriver: Send {
     fn snapshot(&mut self) -> Result<DriverSnapshot>;
 
-    fn execute_pending_effect(
+    fn execute_pending_request(
         &mut self,
-        context: &EffectExecutionContext,
-    ) -> std::result::Result<serde_json::Value, DriverEffectError>;
+        context: &RunRequestContext,
+    ) -> std::result::Result<RunRequestResult, RunRequestError>;
 }
 
 pub trait DurableRunDriverFactory: Send + Sync + 'static {

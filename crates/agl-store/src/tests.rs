@@ -8,6 +8,10 @@ use agl_content::{
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_exec::{ExecutionContextSnapshot, ShellProfileSnapshot};
 use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
+use agl_kernel::{
+    RunRequest, RunRequestResult, ToolDispatchRequest, ToolId, TurnRequest, TurnRequestKey,
+    TurnRequestOutcome, TurnRequestResult,
+};
 use serde_json::json;
 
 #[test]
@@ -95,8 +99,8 @@ fn migration_seventeen_rebuilds_live_run_table_without_losing_foreign_keys() {
 
     let report = AglStore::migrate_at(&root).unwrap();
     assert_eq!(report.before_schema_version, 16);
-    assert_eq!(report.after_schema_version, 18);
-    assert_eq!(report.applied_migrations.len(), 2);
+    assert_eq!(report.after_schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(report.applied_migrations.len(), 3);
 
     let store = AglStore::open_current_at(&root).unwrap();
     let foreign_key_errors: u64 = store
@@ -138,6 +142,232 @@ fn migration_seventeen_rebuilds_live_run_table_without_losing_foreign_keys() {
             .state,
         RunState::Incomplete
     );
+}
+
+#[test]
+fn migration_nineteen_converts_typed_steps_and_removes_only_store_status_trees() {
+    let root = temp_root("migrate-kernel-run-authority");
+    let conn = schema_eighteen_connection(&root);
+    let obsolete = [RunId::generate(), RunId::generate(), RunId::generate()];
+    for (run_id, state) in obsolete.iter().zip(["queued", "running", "succeeded"]) {
+        insert_schema_eighteen_run(
+            &conn,
+            run_id,
+            None,
+            None,
+            "cron",
+            state,
+            &json!({"builtin": "store-status"}),
+        );
+        if state != "queued" {
+            conn.execute(
+                "INSERT INTO run_steps
+                 (id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
+                  request_json, state, attempts, lease_generation, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, NULL, 1, 'store_status', 'replay_safe', ?3,
+                         ?4, 0, 0, 1, 1)",
+                rusqlite::params![
+                    StepId::generate().as_str(),
+                    run_id.as_str(),
+                    serde_json::to_string(&json!({"store_root": "private"})).unwrap(),
+                    if state == "running" {
+                        "running"
+                    } else {
+                        "succeeded"
+                    },
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO cron_jobs
+         (id, name, enabled, target_kind, target_ref, schedule_expr, timezone,
+          created_at, updated_at)
+         VALUES ('job-migration', 'Store status', 1, 'builtin', 'store-status',
+                 '* * * * *', 'UTC', 'before', 'before')",
+        [],
+    )
+    .unwrap();
+    for (index, (run_id, status)) in obsolete
+        .iter()
+        .zip(["queued", "running", "succeeded"])
+        .enumerate()
+    {
+        let cron_run_id = format!("cron_run_migration_{index}");
+        let scheduled = format!("2026-08-14T00:0{index}:00Z");
+        conn.execute(
+            "INSERT INTO cron_runs
+             (id, job_id, scheduled_for, started_at, finished_at, status, result_ref,
+              error, supervisor_run_id)
+             VALUES (?1, 'job-migration', ?2, NULL, NULL, ?3, ?4, NULL, ?5)",
+            rusqlite::params![
+                cron_run_id,
+                scheduled,
+                status,
+                format!("run:{run_id}"),
+                run_id.as_str(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO idempotency_keys
+             (namespace, key, fingerprint, status, result_ref, created_at, updated_at,
+              admitted_run_id, attempts)
+             VALUES ('core.cron:run', ?1, 'fixture', 'in_progress', ?2, 'before',
+                     'before', ?3, 0)",
+            rusqlite::params![
+                format!("job-migration:{scheduled}"),
+                cron_run_id,
+                run_id.as_str(),
+            ],
+        )
+        .unwrap();
+    }
+
+    let neighbor = RunId::generate();
+    let neighbor_session = SessionId::generate();
+    let neighbor_turn = TurnId::generate();
+    insert_schema_eighteen_run(
+        &conn,
+        &neighbor,
+        Some(&neighbor_session),
+        Some(&neighbor_turn),
+        "turn",
+        "running",
+        &json!({"prompt": "preserve"}),
+    );
+    let neighbor_request = typed_step_request(
+        Some(&neighbor_turn),
+        1,
+        RunDelivery::ReplaySafe,
+        json!({"fixture": true}),
+    );
+    conn.execute(
+        "INSERT INTO run_steps
+         (id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
+          request_json, result_json, state, attempts, lease_generation, created_at_ms,
+          updated_at_ms, finished_at_ms)
+         VALUES (?1, ?2, ?3, 1, 'tool_dispatch', 'replay_safe', ?4, ?5,
+                 'succeeded', 1, 1, 1, 1, 1)",
+        rusqlite::params![
+            StepId::generate().as_str(),
+            neighbor.as_str(),
+            neighbor_turn.as_str(),
+            serde_json::to_string(&neighbor_request.request).unwrap(),
+            serde_json::to_string(&typed_cancelled_result(&neighbor_request).result).unwrap(),
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    AglStore::migrate_at(&root).unwrap();
+    let store = AglStore::open_current_at(&root).unwrap();
+    for run_id in &obsolete {
+        assert!(store.run(run_id).unwrap().is_none());
+    }
+    assert!(store.run(&neighbor).unwrap().is_some());
+    assert_eq!(
+        store.run_steps(&neighbor).unwrap()[0].request,
+        neighbor_request
+    );
+    let effect_kind_column: u64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('run_steps') WHERE name = 'effect_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(effect_kind_column, 0);
+    let cron_job_count: u64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cron_jobs WHERE id = 'job-migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cron_job_count, 1);
+    let active_failed: u64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM cron_runs
+             WHERE status = 'failed' AND supervisor_run_id IS NULL
+               AND error = 'agl174 migration removed obsolete store-status supervisor run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_failed, 2);
+    let cron_idempotency_count: u64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM idempotency_keys
+             WHERE namespace = 'core.cron:run' AND admitted_run_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cron_idempotency_count, 3);
+    let terminal_preserved: String = store
+        .connection()
+        .query_row(
+            "SELECT status FROM cron_runs WHERE id = 'cron_run_migration_2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(terminal_preserved, "succeeded");
+}
+
+#[test]
+fn migration_nineteen_rolls_back_on_an_unknown_legacy_step() {
+    let root = temp_root("migrate-kernel-run-authority-rollback");
+    let conn = schema_eighteen_connection(&root);
+    let run_id = RunId::generate();
+    let session_id = SessionId::generate();
+    let turn_id = TurnId::generate();
+    insert_schema_eighteen_run(
+        &conn,
+        &run_id,
+        Some(&session_id),
+        Some(&turn_id),
+        "turn",
+        "running",
+        &json!({"prompt": "bad row"}),
+    );
+    conn.execute(
+        "INSERT INTO run_steps
+         (id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
+          request_json, state, attempts, lease_generation, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 1, 'unknown', 'replay_safe', '{\"opaque\":true}',
+                 'running', 1, 1, 1, 1)",
+        rusqlite::params![
+            StepId::generate().as_str(),
+            run_id.as_str(),
+            turn_id.as_str()
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    assert!(AglStore::migrate_at(&root).is_err());
+    let conn = rusqlite::Connection::open(default_database_path(&root).unwrap()).unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        18
+    );
+    let effect_kind_column: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('run_steps') WHERE name = 'effect_kind'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(effect_kind_column, 1);
 }
 
 #[test]
@@ -290,11 +520,12 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
     );
     let step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: first.turn_id.clone(),
-        request_sequence: 1,
-        effect_kind: "model_generation".to_string(),
-        delivery_class: EffectDeliveryClass::ReplaySafe,
-        request: json!({"effect": "model_generation"}),
+        request: typed_step_request(
+            first.turn_id.as_ref(),
+            1,
+            RunDelivery::ReplaySafe,
+            json!({}),
+        ),
     };
     store
         .publish_run_step(&lease, &json!({"phase": "pending"}), &step, &[event], 21)
@@ -307,7 +538,7 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
             &lease,
             &step_lease,
             RunStepState::Succeeded,
-            Some(&json!({"ok": true})),
+            Some(&typed_cancelled_result(&step.request)),
             &json!({"phase": "complete"}),
             &RunUsage::default(),
             &[],
@@ -327,7 +558,7 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
             None,
             24,
         ),
-        Err(StoreError::LeaseLost { .. })
+        Err(StoreError::TransitionRejected { .. })
     ));
     store
         .finish_run(
@@ -348,6 +579,105 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
     let events = store.run_events_after(&first.run_id, 0, 10).unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence, 1);
+}
+
+#[test]
+fn semantic_revision_is_independent_from_lease_generation_and_heartbeat() {
+    let (_root, store) = open_temp_store("semantic-revision");
+    let draft = run_draft(Some(SessionId::generate()));
+    let admitted = store.admit_run_at(&draft, 1).unwrap();
+    assert_eq!(admitted.revision.get(), 1);
+    assert_eq!(admitted.lease_generation, 0);
+
+    let lease = store.claim_next_run("owner", 2, 100).unwrap().unwrap();
+    let claimed = store.run(&draft.run_id).unwrap().unwrap();
+    assert_eq!(claimed.revision.get(), 2);
+    assert_eq!(claimed.lease_generation, 1);
+    store.heartbeat_run(&lease, 200, 3).unwrap();
+    let heartbeat = store.run(&draft.run_id).unwrap().unwrap();
+    assert_eq!(heartbeat.revision, claimed.revision);
+    assert_eq!(heartbeat.lease_generation, claimed.lease_generation);
+
+    let step = RunStepDraft {
+        step_id: StepId::generate(),
+        request: typed_step_request(
+            draft.turn_id.as_ref(),
+            1,
+            RunDelivery::ReplaySafe,
+            json!({}),
+        ),
+    };
+    let published = store
+        .publish_run_step(&lease, &json!({}), &step, &[], 4)
+        .unwrap();
+    assert_eq!(published.revision.get(), 1);
+    assert_eq!(published.lease_generation, 0);
+    let step_lease = store.claim_run_step(&lease, &step.step_id, 200, 5).unwrap();
+    let claimed_step = store.run_steps(&draft.run_id).unwrap().remove(0);
+    assert_eq!(claimed_step.revision.get(), 2);
+    assert_eq!(claimed_step.lease_generation, 1);
+
+    let cancellation = store.request_run_cancellation(&draft.run_id, 6).unwrap();
+    assert_eq!(cancellation.state, RunState::Running);
+    assert_eq!(cancellation.revision.get(), 3);
+    let replay = store.request_run_cancellation(&draft.run_id, 7).unwrap();
+    assert_eq!(replay.revision, cancellation.revision);
+
+    store
+        .complete_run_step(
+            &lease,
+            &step_lease,
+            RunStepState::Cancelled,
+            Some(&typed_cancelled_result(&step.request)),
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            None,
+            8,
+        )
+        .unwrap();
+    let terminal = store
+        .finish_run(
+            &lease,
+            RunState::Cancelled,
+            Some(&json!({})),
+            &RunUsage::default(),
+            None,
+            None,
+            None,
+            &[],
+            9,
+        )
+        .unwrap();
+    assert_eq!(terminal.revision.get(), 4);
+    let terminal_replay = store
+        .finish_run(
+            &lease,
+            RunState::Cancelled,
+            Some(&json!({})),
+            &RunUsage::default(),
+            None,
+            None,
+            None,
+            &[],
+            10,
+        )
+        .unwrap();
+    assert_eq!(terminal_replay.revision, terminal.revision);
+    assert!(matches!(
+        store.finish_run(
+            &lease,
+            RunState::Failed,
+            Some(&json!({})),
+            &RunUsage::default(),
+            None,
+            Some("different"),
+            Some("different"),
+            &[],
+            11,
+        ),
+        Err(StoreError::TransitionRejected { .. })
+    ));
 }
 
 #[test]
@@ -409,6 +739,7 @@ fn terminal_child_rolls_up_usage_and_is_delivered_once() {
         .retry_run_step(
             &parent_lease,
             &step_lease,
+            3,
             100,
             "delegation.child_waiting",
             &json!({"phase": "waiting"}),
@@ -463,7 +794,7 @@ fn terminal_child_rolls_up_usage_and_is_delivered_once() {
             &resumed,
             &resumed_step,
             RunStepState::Succeeded,
-            Some(&json!({"child_run_id": child.run_id, "status": "succeeded"})),
+            Some(&typed_cancelled_result(&step.request)),
             &json!({"phase": "resumed"}),
             &RunUsage::default(),
             &[],
@@ -491,8 +822,60 @@ fn terminal_child_rolls_up_usage_and_is_delivered_once() {
             None,
             11,
         ),
-        Err(StoreError::LeaseLost { .. })
+        Err(StoreError::TransitionRejected { .. })
     ));
+}
+
+#[test]
+fn terminal_child_records_actual_output_overrun_and_releases_reservation() {
+    let (_root, store) = open_temp_store("child-output-overrun");
+    let (parent, parent_lease, step, step_lease) = running_delegation_step(&store, 1);
+    let mut draft = child_run_draft(&parent.run_id, &step.step_id);
+    draft.tree_budget.max_total_output_tokens = 100;
+    let child = store.admit_child_run_at(&draft, 5).unwrap().run;
+    assert_eq!(child.budget.model_output_tokens, 100);
+    store
+        .retry_run_step(
+            &parent_lease,
+            &step_lease,
+            3,
+            100,
+            "delegation.child_waiting",
+            &json!({"phase": "waiting"}),
+            &RunUsage::default(),
+            &[],
+            6,
+        )
+        .unwrap();
+
+    let child_lease = store
+        .claim_next_run("child-owner", 7, 100)
+        .unwrap()
+        .unwrap();
+    let actual_usage = RunUsage {
+        model_output_tokens: 140,
+        ..RunUsage::default()
+    };
+    store
+        .finish_run(
+            &child_lease,
+            RunState::Succeeded,
+            None,
+            &actual_usage,
+            Some(&json!({"status": "answered", "answer": "overshot"})),
+            None,
+            None,
+            &[],
+            8,
+        )
+        .unwrap();
+
+    let root = store.run(&parent.run_id).unwrap().unwrap();
+    assert_eq!(root.delegation_reserved_output_tokens, 0);
+    assert_eq!(root.delegation_used_output_tokens, 140);
+    let persisted_child = store.run(&child.run_id).unwrap().unwrap();
+    assert_eq!(persisted_child.usage, actual_usage);
+    assert_eq!(persisted_child.tree_usage_recorded_at_ms, Some(8));
 }
 
 #[test]
@@ -536,6 +919,7 @@ fn cancellation_cascades_through_the_child_tree() {
         .retry_run_step(
             &root_lease,
             &root_step_lease,
+            3,
             100,
             "delegation.child_waiting",
             &json!({}),
@@ -550,11 +934,12 @@ fn cancellation_cascades_through_the_child_tree() {
         .unwrap();
     let nested_step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: None,
-        request_sequence: 1,
-        effect_kind: "tool_dispatch".to_string(),
-        delivery_class: EffectDeliveryClass::Idempotent,
-        request: json!({"subagent_id": "nested", "task": "work"}),
+        request: typed_step_request(
+            None,
+            1,
+            RunDelivery::Idempotent,
+            json!({"subagent_id": "nested", "task": "work"}),
+        ),
     };
     store
         .publish_run_step(&child_lease, &json!({}), &nested_step, &[], 8)
@@ -623,11 +1008,12 @@ fn tree_budget_denials_do_not_create_or_reserve_children() {
 
         let second_step = RunStepDraft {
             step_id: StepId::generate(),
-            turn_id: parent.turn_id.clone(),
-            request_sequence: 2,
-            effect_kind: "tool_dispatch".to_string(),
-            delivery_class: EffectDeliveryClass::Idempotent,
-            request: json!({"subagent_id": "reviewer", "task": "second"}),
+            request: typed_step_request(
+                parent.turn_id.as_ref(),
+                2,
+                RunDelivery::Idempotent,
+                json!({"subagent_id": "reviewer", "task": "second"}),
+            ),
         };
         store
             .publish_run_step(&parent_lease, &json!({}), &second_step, &[], 6)
@@ -679,6 +1065,7 @@ fn depth_budget_is_enforced_against_persisted_relationships() {
         .retry_run_step(
             &root_lease,
             &root_step_lease,
+            3,
             100,
             "delegation.child_waiting",
             &json!({}),
@@ -693,11 +1080,12 @@ fn depth_budget_is_enforced_against_persisted_relationships() {
         .unwrap();
     let step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: None,
-        request_sequence: 1,
-        effect_kind: "tool_dispatch".to_string(),
-        delivery_class: EffectDeliveryClass::Idempotent,
-        request: json!({"subagent_id": "nested", "task": "work"}),
+        request: typed_step_request(
+            None,
+            1,
+            RunDelivery::Idempotent,
+            json!({"subagent_id": "nested", "task": "work"}),
+        ),
     };
     store
         .publish_run_step(&child_lease, &json!({}), &step, &[], 8)
@@ -736,6 +1124,7 @@ fn absolute_tree_timeout_cancels_waiting_parent_and_queued_child() {
         .retry_run_step(
             &parent_lease,
             &step_lease,
+            3,
             100,
             "delegation.child_waiting",
             &json!({}),
@@ -770,6 +1159,7 @@ fn startup_recovery_reconciles_an_undelivered_terminal_child() {
         .retry_run_step(
             &parent_lease,
             &step_lease,
+            3,
             100,
             "delegation.child_waiting",
             &json!({}),
@@ -818,11 +1208,7 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     let safe_lease = store.claim_next_run("owner", 2, 10).unwrap().unwrap();
     let safe_step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: None,
-        request_sequence: 1,
-        effect_kind: "hook_batch".to_string(),
-        delivery_class: EffectDeliveryClass::ReplaySafe,
-        request: json!({}),
+        request: typed_step_request(None, 1, RunDelivery::ReplaySafe, json!({})),
     };
     store
         .publish_run_step(&safe_lease, &json!({}), &safe_step, &[], 3)
@@ -850,7 +1236,7 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
             &recovered_safe_lease,
             &recovered_step_lease,
             RunStepState::Succeeded,
-            Some(&json!({"ok": true})),
+            Some(&typed_cancelled_result(&safe_step.request)),
             &json!({}),
             &RunUsage::default(),
             &[],
@@ -876,11 +1262,7 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     assert_eq!(uncertain_lease.run_id, uncertain.run_id);
     let uncertain_step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: None,
-        request_sequence: 1,
-        effect_kind: "tool_dispatch".to_string(),
-        delivery_class: EffectDeliveryClass::AtMostOnce,
-        request: json!({}),
+        request: typed_step_request(None, 1, RunDelivery::AtMostOnce, json!({})),
     };
     store
         .publish_run_step(&uncertain_lease, &json!({}), &uncertain_step, &[], 19)
@@ -1886,6 +2268,76 @@ fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
     }
 }
 
+fn schema_eighteen_connection(root: &std::path::Path) -> rusqlite::Connection {
+    std::fs::create_dir_all(root).unwrap();
+    let connection = rusqlite::Connection::open(default_database_path(root).unwrap()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+    for migration in STORE_MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= 18)
+    {
+        if migration.version == 17 {
+            connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .unwrap();
+        }
+        connection
+            .execute_batch(&format!(
+                "BEGIN; {} INSERT INTO schema_migrations(version, applied_at)
+                 VALUES ({}, 'fixture'); PRAGMA user_version = {}; COMMIT;",
+                migration.sql, migration.version, migration.version
+            ))
+            .unwrap();
+        if migration.version == 17 {
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+        }
+    }
+    connection
+}
+
+fn insert_schema_eighteen_run(
+    connection: &rusqlite::Connection,
+    run_id: &RunId,
+    session_id: Option<&SessionId>,
+    turn_id: Option<&TurnId>,
+    kind: &str,
+    state: &str,
+    input: &serde_json::Value,
+) {
+    connection
+        .execute(
+            "INSERT INTO runs
+             (id, session_id, turn_id, kind, state, priority, input_json,
+              budget_json, usage_json, lease_generation, attempts, created_at_ms,
+              updated_at_ms, root_run_id, depth, delegation_reserved_descendants,
+              delegation_reserved_output_tokens, delegation_used_output_tokens,
+              execution_context_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, 0, 0, 1, 1,
+                     ?1, 0, 0, 0, 0, ?9)",
+            rusqlite::params![
+                run_id.as_str(),
+                session_id.map(SessionId::as_str),
+                turn_id.map(TurnId::as_str),
+                kind,
+                state,
+                serde_json::to_string(input).unwrap(),
+                serde_json::to_string(&RunBudget::default()).unwrap(),
+                serde_json::to_string(&RunUsage::default()).unwrap(),
+                serde_json::to_string(&execution_context()).unwrap(),
+            ],
+        )
+        .unwrap();
+}
+
 fn execution_context() -> ExecutionContextSnapshot {
     let workspace = std::env::temp_dir().canonicalize().unwrap();
     ExecutionContextSnapshot {
@@ -1905,6 +2357,41 @@ fn execution_context() -> ExecutionContextSnapshot {
     }
 }
 
+fn typed_step_request(
+    turn_id: Option<&TurnId>,
+    sequence: u64,
+    delivery: RunDelivery,
+    arguments: serde_json::Value,
+) -> RunRequest {
+    let turn_id = turn_id.cloned().unwrap_or_else(TurnId::generate);
+    RunRequest::new(
+        delivery,
+        TurnRequest::ToolDispatch {
+            key: TurnRequestKey {
+                turn_id: turn_id.clone(),
+                sequence,
+            },
+            request: ToolDispatchRequest {
+                run_id: RunId::generate(),
+                turn_id,
+                tool_id: ToolId::new("agl:agent.delegate").unwrap(),
+                arguments,
+            },
+        },
+    )
+}
+
+fn typed_cancelled_result(request: &RunRequest) -> RunRequestResult {
+    RunRequestResult::for_request(
+        request,
+        TurnRequestResult::ToolDispatch {
+            key: request.key().clone(),
+            outcome: Box::new(TurnRequestOutcome::Cancelled),
+        },
+    )
+    .unwrap()
+}
+
 fn running_delegation_step(
     store: &AglStore,
     admitted_at_ms: i64,
@@ -1917,11 +2404,12 @@ fn running_delegation_step(
         .unwrap();
     let step = RunStepDraft {
         step_id: StepId::generate(),
-        turn_id: parent.turn_id.clone(),
-        request_sequence: 1,
-        effect_kind: "tool_dispatch".to_string(),
-        delivery_class: EffectDeliveryClass::Idempotent,
-        request: json!({"subagent_id": "reviewer", "task": "review"}),
+        request: typed_step_request(
+            parent.turn_id.as_ref(),
+            1,
+            RunDelivery::Idempotent,
+            json!({"subagent_id": "reviewer", "task": "review"}),
+        ),
     };
     store
         .publish_run_step(

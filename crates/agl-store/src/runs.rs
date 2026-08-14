@@ -2,13 +2,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, SessionId, StepId, TurnId};
+use agl_kernel::{
+    RunBudgetDimension, RunBudgetError, RunBudgetLedger, RunChildReservationRequest,
+    RunChildUsageCommit, RunMachine, RunOperationId, RunStepMachine, RunStepOperationId,
+    RunTerminalOutcome,
+};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::{
     AglStore, ChildRunAdmission, ChildRunDraft, DurableRunAdmission, DurableRunDraft,
-    DurableRunRecord, EffectDeliveryClass, IdempotencyStatus, RecoveryReport, Result,
-    RunConcurrencyKey, RunLease, RunState, RunStepDraft, RunStepRecord, RunStepState, RunUsage,
-    SafeRunStatus, StepLease, StoreError,
+    DurableRunRecord, IdempotencyStatus, RecoveryReport, Result, RunConcurrencyKey, RunLease,
+    RunRequestResult, RunRevision, RunState, RunStepDraft, RunStepRecord, RunStepRevision,
+    RunStepState, RunUsage, SafeRunStatus, StepLease, StoreError,
 };
 
 const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, concurrency_key, input_json,
@@ -19,12 +24,12 @@ const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, concu
     subagent_id, spawned_by_step_id, child_spec_digest, model_profile_digest,
     result_delivered_at_ms, tree_usage_recorded_at_ms, delegation_budget_json,
     delegation_reserved_descendants, delegation_reserved_output_tokens,
-    delegation_used_output_tokens";
+    delegation_used_output_tokens, revision";
 
-const STEP_COLUMNS: &str = "id, run_id, turn_id, request_sequence, effect_kind,
+const STEP_COLUMNS: &str = "id, run_id, turn_id, request_sequence,
     delivery_class, request_json, result_json, state, attempts, lease_owner,
     lease_generation, lease_expires_at_ms, not_before_ms, error_code, created_at_ms,
-    updated_at_ms, finished_at_ms";
+    updated_at_ms, finished_at_ms, revision";
 
 impl AglStore {
     pub fn admit_run(&self, draft: &DurableRunDraft) -> Result<DurableRunRecord> {
@@ -88,6 +93,10 @@ impl AglStore {
 
     pub fn admit_run_at(&self, draft: &DurableRunDraft, now_ms: i64) -> Result<DurableRunRecord> {
         validate_run_draft(draft)?;
+        let mut machine = RunMachine::new();
+        machine
+            .admit(RunOperationId::new(format!("admit:{}", draft.run_id)))
+            .map_err(|error| machine_rejected(&draft.run_id, error))?;
         self.transaction(|tx| {
             insert_run(tx, draft, now_ms)?;
             load_run(tx, &draft.run_id)
@@ -104,6 +113,10 @@ impl AglStore {
         now_ms: i64,
     ) -> Result<ChildRunAdmission> {
         validate_child_run_draft(draft)?;
+        let mut machine = RunMachine::new();
+        machine
+            .admit(RunOperationId::new(format!("admit:{}", draft.run_id)))
+            .map_err(|error| machine_rejected(&draft.run_id, error))?;
         self.transaction(|tx| {
             if let Some(existing) = load_child_by_spawn_step(tx, &draft.spawned_by_step_id)? {
                 validate_child_replay(tx, draft, &existing)?;
@@ -120,7 +133,10 @@ impl AglStore {
             let step = load_step(tx, &draft.spawned_by_step_id)?;
             if step.run_id != parent.run_id
                 || step.state != RunStepState::Running
-                || step.effect_kind != "tool_dispatch"
+                || !matches!(
+                    step.request.request,
+                    agl_kernel::TurnRequest::ToolDispatch { .. }
+                )
             {
                 return delegation_denied("invalid_spawn_step");
             }
@@ -187,61 +203,30 @@ impl AglStore {
                 return delegation_denied("tree_timeout_exhausted");
             }
 
-            let parent_output_remaining = parent
-                .budget
-                .model_output_tokens
-                .saturating_sub(parent.usage.model_output_tokens)
-                .saturating_sub(parent.delegation_used_output_tokens)
-                .saturating_sub(parent.delegation_reserved_output_tokens);
             let tree_output_remaining = draft
                 .tree_budget
                 .max_total_output_tokens
                 .saturating_sub(root.delegation_used_output_tokens)
                 .saturating_sub(root.delegation_reserved_output_tokens);
-            let parent_wall_remaining = parent
-                .budget
-                .wall_time_ms
-                .saturating_sub(parent.usage.wall_time_ms);
-            let parent_input_remaining = parent
-                .budget
-                .model_input_tokens
-                .saturating_sub(parent.usage.model_input_tokens);
-            let parent_attempts_remaining = parent
-                .budget
-                .model_attempts
-                .saturating_sub(parent.usage.model_attempts);
-            let parent_calls_remaining = parent
-                .budget
-                .tool_calls
-                .saturating_sub(parent.usage.tool_calls);
-
-            let mut budget = draft.budget.clone();
-            budget.wall_time_ms = budget
-                .wall_time_ms
-                .min(u64::try_from(tree_wall_remaining).unwrap_or_default())
-                .min(parent_wall_remaining);
-            budget.model_input_tokens = budget.model_input_tokens.min(parent_input_remaining);
-            budget.model_output_tokens = budget
-                .model_output_tokens
-                .min(parent_output_remaining)
-                .min(tree_output_remaining);
-            budget.model_attempts = budget.model_attempts.min(parent_attempts_remaining);
-            budget.tool_calls = budget.tool_calls.min(parent_calls_remaining);
-            if budget.wall_time_ms == 0 {
-                return delegation_denied("wall_time_exhausted");
-            }
-            if budget.model_input_tokens == 0 {
-                return delegation_denied("model_input_exhausted");
-            }
-            if budget.model_output_tokens == 0 {
-                return delegation_denied("output_tokens_exhausted");
-            }
-            if budget.model_attempts == 0 {
-                return delegation_denied("model_attempts_exhausted");
-            }
-            if budget.tool_calls == 0 {
-                return delegation_denied("tool_calls_exhausted");
-            }
+            let mut ledger = RunBudgetLedger::restore(parent.budget.clone(), parent.usage.clone())
+                .with_delegated_output(
+                    parent.delegation_reserved_output_tokens,
+                    parent.delegation_used_output_tokens,
+                )
+                .map_err(map_budget_error)?;
+            let accepted_reservation = ledger
+                .reserve_child(
+                    format!("reserve-child:{}", draft.run_id),
+                    RunChildReservationRequest {
+                        reservation_id: draft.run_id.to_string(),
+                        requested: draft.budget.clone(),
+                        tree_wall_time_remaining_ms: u64::try_from(tree_wall_remaining)
+                            .unwrap_or_default(),
+                        tree_output_tokens_remaining: tree_output_remaining,
+                    },
+                )
+                .map_err(map_budget_error)?;
+            let budget = accepted_reservation.effective_budget;
 
             tx.execute(
                 "INSERT INTO runs
@@ -377,6 +362,11 @@ impl AglStore {
                 "lease must be future",
             );
         }
+
+        let mut machine = RunMachine::new();
+        machine
+            .admit(RunOperationId::new(format!("admit:{}", draft.run_id)))
+            .map_err(|error| machine_rejected(&draft.run_id, error))?;
 
         self.transaction(|tx| {
             let existing = load_idempotency_for_admission(tx, namespace, key)?;
@@ -531,9 +521,27 @@ impl AglStore {
                 return Ok(None);
             };
             let run_id = parse_run_id(&candidate, "runs.id")?;
+            let current = load_run(tx, &run_id)?;
+            let next_generation = current.lease_generation.checked_add(1).ok_or_else(|| {
+                StoreError::InvalidValue {
+                    field: "runs.lease_generation",
+                    value: current.lease_generation.to_string(),
+                    reason: "lease generation overflow",
+                }
+            })?;
+            let mut machine = RunMachine::restore(
+                current.state,
+                current.revision,
+                current.cancellation_requested_at_ms.is_some(),
+            );
+            let accepted = machine
+                .claim(RunOperationId::new(format!(
+                    "claim:{owner}:{next_generation}"
+                )))
+                .map_err(|error| machine_rejected(&run_id, error))?;
             let changed = tx.execute(
                 "UPDATE runs
-                 SET state = 'running', lease_owner = ?2,
+                 SET state = ?5, revision = ?6, lease_owner = ?2,
                      lease_generation = lease_generation + 1,
                      lease_expires_at_ms = ?3, attempts = attempts + 1,
                      started_at_ms = COALESCE(started_at_ms, MAX(?1, COALESCE((
@@ -546,9 +554,17 @@ impl AglStore {
                          WHERE previous.concurrency_key = runs.concurrency_key
                            AND previous.id != runs.id
                      ), ?1))
-                 WHERE id = ?4 AND state IN ('queued', 'waiting')
+                 WHERE id = ?4 AND revision = ?7 AND state IN ('queued', 'waiting')
                    AND cancellation_requested_at_ms IS NULL",
-                params![now_ms, owner, expires_at_ms, run_id.as_str()],
+                params![
+                    now_ms,
+                    owner,
+                    expires_at_ms,
+                    run_id.as_str(),
+                    accepted.to.as_str(),
+                    accepted.new_revision.get(),
+                    accepted.previous_revision.get(),
+                ],
             )?;
             if changed != 1 {
                 return Ok(None);
@@ -628,59 +644,79 @@ impl AglStore {
         now_ms: i64,
     ) -> Result<Vec<SafeRunStatus>> {
         self.transaction(|tx| {
-            load_run(tx, run_id)?;
-            tx.execute(
-                "WITH RECURSIVE subtree(id) AS (
-                     SELECT id FROM runs WHERE id = ?1
-                     UNION ALL
-                     SELECT child.id FROM runs child
-                     JOIN subtree parent ON child.parent_run_id = parent.id
-                 )
-                 UPDATE runs
-                 SET state = CASE
-                         WHEN state IN ('queued', 'waiting') THEN 'cancelled'
-                         ELSE state
-                     END,
-                     cancellation_requested_at_ms = COALESCE(cancellation_requested_at_ms, ?2),
-                     finished_at_ms = CASE
-                         WHEN state IN ('queued', 'waiting') THEN COALESCE(finished_at_ms, ?2)
-                         ELSE finished_at_ms
-                     END,
-                     lease_owner = CASE
-                         WHEN state IN ('queued', 'waiting') THEN NULL
-                         ELSE lease_owner
-                     END,
-                     lease_expires_at_ms = CASE
-                         WHEN state IN ('queued', 'waiting') THEN NULL
-                         ELSE lease_expires_at_ms
-                     END,
-                     updated_at_ms = ?2
-                 WHERE id IN (SELECT id FROM subtree)
-                   AND state NOT IN ('succeeded', 'failed', 'cancelled')",
-                params![run_id.as_str(), now_ms],
-            )?;
-            tx.execute(
-                "UPDATE run_steps
-                 SET state = 'cancelled', lease_owner = NULL, lease_expires_at_ms = NULL,
-                     error_code = COALESCE(error_code, 'run_cancelled'),
-                     updated_at_ms = ?2, finished_at_ms = ?2
-                 WHERE run_id IN (
-                     WITH RECURSIVE subtree(id) AS (
-                         SELECT id FROM runs WHERE id = ?1
-                         UNION ALL
-                         SELECT child.id FROM runs child
-                         JOIN subtree parent ON child.parent_run_id = parent.id
-                     )
-                     SELECT id FROM subtree
-                 )
-                   AND state IN ('pending', 'running')
-                   AND EXISTS (
-                       SELECT 1 FROM runs cancelled
-                       WHERE cancelled.id = run_steps.run_id
-                         AND cancelled.state = 'cancelled'
-                   )",
-                params![run_id.as_str(), now_ms],
-            )?;
+            let subtree = load_run_subtree(tx, run_id)?;
+            if subtree.first().is_some_and(|run| run.state.is_terminal()) {
+                return Err(StoreError::TransitionRejected {
+                    resource: format!("run {run_id}"),
+                    from: subtree[0].state.as_str().to_owned(),
+                    to: "request_cancellation".to_owned(),
+                });
+            }
+            for run in subtree {
+                if run.state.is_terminal() || run.cancellation_requested_at_ms.is_some() {
+                    continue;
+                }
+                let mut machine = RunMachine::restore(run.state, run.revision, false);
+                let accepted = machine
+                    .request_cancellation(RunOperationId::new(format!(
+                        "cancel:{}:{now_ms}",
+                        run.run_id
+                    )))
+                    .map_err(|error| machine_rejected(&run.run_id, error))?;
+                let terminal = accepted.to == RunState::Cancelled;
+                let changed = tx.execute(
+                    "UPDATE runs
+                     SET state = ?2, revision = ?3, cancellation_requested_at_ms = ?4,
+                         finished_at_ms = CASE WHEN ?5 THEN ?4 ELSE finished_at_ms END,
+                         lease_owner = CASE WHEN ?5 THEN NULL ELSE lease_owner END,
+                         lease_expires_at_ms = CASE WHEN ?5 THEN NULL ELSE lease_expires_at_ms END,
+                         updated_at_ms = ?4
+                     WHERE id = ?1 AND revision = ?6",
+                    params![
+                        run.run_id.as_str(),
+                        accepted.to.as_str(),
+                        accepted.new_revision.get(),
+                        now_ms,
+                        terminal,
+                        accepted.previous_revision.get(),
+                    ],
+                )?;
+                require_fenced_change(changed, format!("run {} revision", run.run_id))?;
+                if terminal {
+                    let steps = load_steps_for_run(tx, &run.run_id)?;
+                    for step in steps.into_iter().filter(|step| {
+                        matches!(step.state, RunStepState::Pending | RunStepState::Running)
+                    }) {
+                        let mut step_machine = RunStepMachine::restore(
+                            step.state,
+                            step.revision,
+                            step.request,
+                            step.attempts,
+                        );
+                        let step_accepted = step_machine
+                            .cancel_with_run(RunStepOperationId::new(format!(
+                                "cancel-with-run:{}:{now_ms}",
+                                step.step_id
+                            )))
+                            .map_err(|error| step_machine_rejected(&step.step_id, error))?;
+                        tx.execute(
+                            "UPDATE run_steps
+                             SET state = ?2, revision = ?3, lease_owner = NULL,
+                                 lease_expires_at_ms = NULL,
+                                 error_code = COALESCE(error_code, 'run_cancelled'),
+                                 updated_at_ms = ?4, finished_at_ms = ?4
+                             WHERE id = ?1 AND revision = ?5",
+                            params![
+                                step.step_id.as_str(),
+                                step_accepted.to.as_str(),
+                                step_accepted.new_revision.get(),
+                                now_ms,
+                                step_accepted.previous_revision.get(),
+                            ],
+                        )?;
+                    }
+                }
+            }
 
             let cancelled = load_run_subtree(tx, run_id)?;
             for run in &cancelled {
@@ -708,6 +744,13 @@ impl AglStore {
         now_ms: i64,
     ) -> Result<RunStepRecord> {
         validate_step_draft(lease, step)?;
+        let mut machine = RunStepMachine::new();
+        let accepted = machine
+            .publish(
+                RunStepOperationId::new(format!("publish:{}", step.step_id)),
+                step.request.clone(),
+            )
+            .map_err(|error| step_machine_rejected(&step.step_id, error))?;
         self.transaction(|tx| {
             require_run_lease(tx, lease)?;
             tx.execute(
@@ -720,21 +763,21 @@ impl AglStore {
             )?;
             tx.execute(
                 "INSERT INTO run_steps
-                 (id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
+                 (id, run_id, turn_id, request_sequence, delivery_class,
                   request_json, result_json, state, attempts, lease_owner,
                   lease_generation, lease_expires_at_ms, not_before_ms, error_code,
-                  created_at_ms, updated_at_ms, finished_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 'pending', 0,
-                         NULL, 0, NULL, NULL, NULL, ?8, ?8, NULL)",
+                  created_at_ms, updated_at_ms, finished_at_ms, revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending', 0,
+                         NULL, 0, NULL, NULL, NULL, ?7, ?7, NULL, ?8)",
                 params![
                     step.step_id.as_str(),
                     lease.run_id.as_str(),
-                    step.turn_id.as_ref().map(TurnId::as_str),
-                    step.request_sequence,
-                    step.effect_kind,
-                    step.delivery_class.as_str(),
+                    step.request.key().turn_id.as_str(),
+                    step.request.key().sequence,
+                    step.request.delivery.as_str(),
                     serde_json::to_string(&step.request)?,
-                    now_ms
+                    now_ms,
+                    accepted.new_revision.get(),
                 ],
             )?;
             append_events(tx, &lease.run_id, events)?;
@@ -751,19 +794,46 @@ impl AglStore {
     ) -> Result<StepLease> {
         self.transaction(|tx| {
             require_run_lease(tx, run_lease)?;
+            let current = load_step(tx, step_id)?;
+            let next_generation = current.lease_generation.checked_add(1).ok_or_else(|| {
+                StoreError::InvalidValue {
+                    field: "run_steps.lease_generation",
+                    value: current.lease_generation.to_string(),
+                    reason: "lease generation overflow",
+                }
+            })?;
+            let mut machine = RunStepMachine::restore(
+                current.state,
+                current.revision,
+                current.request.clone(),
+                current.attempts,
+            );
+            let accepted = machine
+                .claim(
+                    RunStepOperationId::new(format!(
+                        "claim:{}:{}:{next_generation}",
+                        step_id, run_lease.owner
+                    )),
+                    u32::MAX,
+                )
+                .map_err(|error| step_machine_rejected(step_id, error))?;
             let changed = tx.execute(
                 "UPDATE run_steps
-                 SET state = 'running', attempts = attempts + 1,
+                 SET state = ?6, revision = ?7, attempts = ?8,
                      lease_owner = ?1, lease_generation = lease_generation + 1,
                      lease_expires_at_ms = ?2, updated_at_ms = ?3
-                 WHERE id = ?4 AND run_id = ?5 AND state = 'pending'
+                 WHERE id = ?4 AND run_id = ?5 AND revision = ?9 AND state = 'pending'
                    AND (not_before_ms IS NULL OR not_before_ms <= ?3)",
                 params![
                     run_lease.owner,
                     expires_at_ms,
                     now_ms,
                     step_id.as_str(),
-                    run_lease.run_id.as_str()
+                    run_lease.run_id.as_str(),
+                    accepted.to.as_str(),
+                    accepted.new_revision.get(),
+                    accepted.attempts,
+                    accepted.previous_revision.get(),
                 ],
             )?;
             require_transition_change(changed, format!("step {step_id}"), "pending", "running")?;
@@ -788,7 +858,7 @@ impl AglStore {
         run_lease: &RunLease,
         step_lease: &StepLease,
         state: RunStepState,
-        result: Option<&serde_json::Value>,
+        result: Option<&RunRequestResult>,
         checkpoint: &serde_json::Value,
         usage: &RunUsage,
         events: &[SafeRuntimeEventEnvelope],
@@ -806,23 +876,55 @@ impl AglStore {
             );
         }
         self.transaction(|tx| {
+            let current = load_step(tx, &step_lease.step_id)?;
+            if current.state.is_terminal() {
+                if current.state == state
+                    && current.result.as_ref() == result
+                    && current.error_code.as_deref() == error_code
+                {
+                    return Ok(current);
+                }
+                return Err(StoreError::TransitionRejected {
+                    resource: format!("run step {} terminal replay", step_lease.step_id),
+                    from: current.state.as_str().to_owned(),
+                    to: state.as_str().to_owned(),
+                });
+            }
             require_run_lease(tx, run_lease)?;
+            let mut machine = RunStepMachine::restore(
+                current.state,
+                current.revision,
+                current.request.clone(),
+                current.attempts,
+            );
+            let accepted = machine
+                .complete(
+                    RunStepOperationId::new(format!(
+                        "complete:{}:{}:{}",
+                        step_lease.step_id, step_lease.owner, step_lease.generation
+                    )),
+                    state,
+                    result.cloned(),
+                )
+                .map_err(|error| step_machine_rejected(&step_lease.step_id, error))?;
             let changed = tx.execute(
                 "UPDATE run_steps
-                 SET state = ?1, result_json = ?2, error_code = ?3,
+                 SET state = ?1, revision = ?9, result_json = ?2, error_code = ?3,
                      lease_owner = NULL, lease_expires_at_ms = NULL,
                      updated_at_ms = ?4, finished_at_ms = ?4
                  WHERE id = ?5 AND run_id = ?6 AND state = 'running'
-                   AND lease_owner = ?7 AND lease_generation = ?8",
+                   AND lease_owner = ?7 AND lease_generation = ?8 AND revision = ?10",
                 params![
-                    state.as_str(),
+                    accepted.to.as_str(),
                     result.map(serde_json::to_string).transpose()?,
                     error_code,
                     now_ms,
                     step_lease.step_id.as_str(),
                     run_lease.run_id.as_str(),
                     step_lease.owner,
-                    step_lease.generation
+                    step_lease.generation,
+                    accepted.new_revision.get(),
+                    accepted.previous_revision.get(),
                 ],
             )?;
             require_fenced_change(changed, format!("step {}", step_lease.step_id))?;
@@ -868,6 +970,7 @@ impl AglStore {
         &self,
         run_lease: &RunLease,
         step_lease: &StepLease,
+        retry_limit: u32,
         not_before_ms: i64,
         error_code: &str,
         checkpoint: &serde_json::Value,
@@ -877,27 +980,62 @@ impl AglStore {
     ) -> Result<()> {
         self.transaction(|tx| {
             require_run_lease(tx, run_lease)?;
+            let current_step = load_step(tx, &step_lease.step_id)?;
+            let mut step_machine = RunStepMachine::restore(
+                current_step.state,
+                current_step.revision,
+                current_step.request.clone(),
+                current_step.attempts,
+            );
+            let step_accepted = step_machine
+                .retry(
+                    RunStepOperationId::new(format!(
+                        "retry:{}:{}:{}",
+                        step_lease.step_id, step_lease.owner, step_lease.generation
+                    )),
+                    error_code,
+                    true,
+                    retry_limit,
+                )
+                .map_err(|error| step_machine_rejected(&step_lease.step_id, error))?;
+            let current_run = load_run(tx, &run_lease.run_id)?;
+            let mut run_machine = RunMachine::restore(
+                current_run.state,
+                current_run.revision,
+                current_run.cancellation_requested_at_ms.is_some(),
+            );
+            let run_accepted = run_machine
+                .schedule_retry(RunOperationId::new(format!(
+                    "retry:{}:{}:{}",
+                    run_lease.run_id, run_lease.owner, run_lease.generation
+                )))
+                .map_err(|error| machine_rejected(&run_lease.run_id, error))?;
             let changed = tx.execute(
                 "UPDATE run_steps
-                 SET state = 'pending', lease_owner = NULL, lease_expires_at_ms = NULL,
+                 SET state = ?7, revision = ?8,
+                     lease_owner = NULL, lease_expires_at_ms = NULL,
                      not_before_ms = ?1, error_code = ?2, updated_at_ms = ?3
                  WHERE id = ?4 AND state = 'running' AND lease_owner = ?5
-                   AND lease_generation = ?6",
+                   AND lease_generation = ?6 AND revision = ?9",
                 params![
                     not_before_ms,
                     error_code,
                     now_ms,
                     step_lease.step_id.as_str(),
                     step_lease.owner,
-                    step_lease.generation
+                    step_lease.generation,
+                    step_accepted.to.as_str(),
+                    step_accepted.new_revision.get(),
+                    step_accepted.previous_revision.get(),
                 ],
             )?;
             require_fenced_change(changed, format!("step {}", step_lease.step_id))?;
             let changed = tx.execute(
-                "UPDATE runs SET state = 'waiting', not_before_ms = ?1,
+                "UPDATE runs SET state = ?8, revision = ?9, not_before_ms = ?1,
                      checkpoint_json = ?2, usage_json = ?3,
                      lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?4
-                 WHERE id = ?5 AND lease_owner = ?6 AND lease_generation = ?7",
+                 WHERE id = ?5 AND lease_owner = ?6 AND lease_generation = ?7
+                   AND revision = ?10",
                 params![
                     not_before_ms,
                     serde_json::to_string(checkpoint)?,
@@ -905,7 +1043,10 @@ impl AglStore {
                     now_ms,
                     run_lease.run_id.as_str(),
                     run_lease.owner,
-                    run_lease.generation
+                    run_lease.generation,
+                    run_accepted.to.as_str(),
+                    run_accepted.new_revision.get(),
+                    run_accepted.previous_revision.get(),
                 ],
             )?;
             require_fenced_change(changed, format!("run {}", run_lease.run_id))?;
@@ -935,17 +1076,67 @@ impl AglStore {
             );
         }
         self.transaction(|tx| {
+            let current = load_run(tx, &lease.run_id)?;
+            if current.state.is_terminal() {
+                if current.state == state
+                    && current.checkpoint.as_ref() == checkpoint
+                    && &current.usage == usage
+                    && current.terminal_result.as_ref() == terminal_result
+                    && current.error_code.as_deref() == error_code
+                    && current.error_message.as_deref() == error_message
+                {
+                    return Ok(current);
+                }
+                return Err(StoreError::TransitionRejected {
+                    resource: format!("run {} terminal replay", lease.run_id),
+                    from: current.state.as_str().to_owned(),
+                    to: state.as_str().to_owned(),
+                });
+            }
+            let outcome = match state {
+                RunState::Succeeded => RunTerminalOutcome::Succeeded {
+                    result: terminal_result.cloned(),
+                },
+                RunState::Incomplete => RunTerminalOutcome::Incomplete {
+                    result: terminal_result.cloned(),
+                    reason: error_message.unwrap_or("incomplete").to_owned(),
+                },
+                RunState::Failed => RunTerminalOutcome::Failed {
+                    error_code: error_code.unwrap_or("run_failed").to_owned(),
+                    error_message: error_message.unwrap_or("run failed").to_owned(),
+                },
+                RunState::Cancelled => RunTerminalOutcome::Cancelled {
+                    error_code: error_code.map(str::to_owned),
+                    error_message: error_message.map(str::to_owned),
+                },
+                RunState::Queued | RunState::Running | RunState::Waiting => unreachable!(),
+            };
+            let mut machine = RunMachine::restore(
+                current.state,
+                current.revision,
+                current.cancellation_requested_at_ms.is_some(),
+            );
+            let accepted = machine
+                .finish(
+                    RunOperationId::new(format!(
+                        "finish:{}:{}:{}",
+                        lease.run_id, lease.owner, lease.generation
+                    )),
+                    outcome,
+                )
+                .map_err(|error| machine_rejected(&lease.run_id, error))?;
             let changed = tx.execute(
                 "UPDATE runs
-                 SET state = ?1, checkpoint_json = COALESCE(?2, checkpoint_json),
+                 SET state = ?1, revision = ?11,
+                     checkpoint_json = COALESCE(?2, checkpoint_json),
                      usage_json = ?3, terminal_result_json = ?4,
                      error_code = ?5, error_message = ?6,
                      lease_owner = NULL, lease_expires_at_ms = NULL,
                      updated_at_ms = ?7, finished_at_ms = ?7
                  WHERE id = ?8 AND state = 'running' AND lease_owner = ?9
-                   AND lease_generation = ?10",
+                   AND lease_generation = ?10 AND revision = ?12",
                 params![
-                    state.as_str(),
+                    accepted.to.as_str(),
                     checkpoint.map(serde_json::to_string).transpose()?,
                     serde_json::to_string(usage)?,
                     terminal_result.map(serde_json::to_string).transpose()?,
@@ -954,19 +1145,47 @@ impl AglStore {
                     now_ms,
                     lease.run_id.as_str(),
                     lease.owner,
-                    lease.generation
+                    lease.generation,
+                    accepted.new_revision.get(),
+                    accepted.previous_revision.get(),
                 ],
             )?;
             require_fenced_change(changed, format!("run {}", lease.run_id))?;
             if state == RunState::Cancelled {
-                tx.execute(
-                    "UPDATE run_steps
-                     SET state = 'cancelled', lease_owner = NULL, lease_expires_at_ms = NULL,
-                         error_code = COALESCE(error_code, 'run_cancelled'),
-                         updated_at_ms = ?2, finished_at_ms = ?2
-                     WHERE run_id = ?1 AND state IN ('pending', 'running')",
-                    params![lease.run_id.as_str(), now_ms],
-                )?;
+                for step in load_steps_for_run(tx, &lease.run_id)?
+                    .into_iter()
+                    .filter(|step| {
+                        matches!(step.state, RunStepState::Pending | RunStepState::Running)
+                    })
+                {
+                    let mut step_machine = RunStepMachine::restore(
+                        step.state,
+                        step.revision,
+                        step.request,
+                        step.attempts,
+                    );
+                    let step_accepted = step_machine
+                        .cancel_with_run(RunStepOperationId::new(format!(
+                            "finish-cancel:{}:{}",
+                            step.step_id, lease.generation
+                        )))
+                        .map_err(|error| step_machine_rejected(&step.step_id, error))?;
+                    tx.execute(
+                        "UPDATE run_steps
+                         SET state = ?2, revision = ?3, lease_owner = NULL,
+                             lease_expires_at_ms = NULL,
+                             error_code = COALESCE(error_code, 'run_cancelled'),
+                             updated_at_ms = ?4, finished_at_ms = ?4
+                         WHERE id = ?1 AND revision = ?5",
+                        params![
+                            step.step_id.as_str(),
+                            step_accepted.to.as_str(),
+                            step_accepted.new_revision.get(),
+                            now_ms,
+                            step_accepted.previous_revision.get(),
+                        ],
+                    )?;
+                }
             }
             record_terminal_child_usage(tx, &lease.run_id, now_ms)?;
             append_events(tx, &lease.run_id, events)?;
@@ -1031,43 +1250,134 @@ impl AglStore {
 
     pub fn recover_expired_work(&self, now_ms: i64) -> Result<RecoveryReport> {
         self.transaction(|tx| {
-            let outcome_unknown_steps = tx.execute(
-                "UPDATE run_steps
-                 SET state = 'outcome_unknown', error_code = 'effect_outcome_unknown',
-                     lease_owner = NULL, lease_expires_at_ms = NULL,
-                     updated_at_ms = ?1, finished_at_ms = ?1
-                 WHERE state = 'running' AND delivery_class = 'at_most_once'
-                   AND lease_expires_at_ms <= ?1",
-                [now_ms],
-            )? as u64;
-            let failed_runs = tx.execute(
-                "UPDATE runs
-                 SET state = 'failed', error_code = 'effect_outcome_unknown',
-                     error_message = 'an at-most-once effect lease expired before its outcome was recorded',
-                     lease_owner = NULL, lease_expires_at_ms = NULL,
-                     updated_at_ms = ?1, finished_at_ms = ?1
-                 WHERE state = 'running' AND EXISTS (
-                     SELECT 1 FROM run_steps s
-                     WHERE s.run_id = runs.id AND s.state = 'outcome_unknown'
-                 )",
-                [now_ms],
-            )? as u64;
-            let requeued_steps = tx.execute(
-                "UPDATE run_steps
-                 SET state = 'pending', lease_owner = NULL, lease_expires_at_ms = NULL,
-                     not_before_ms = ?1, error_code = 'lease_expired', updated_at_ms = ?1
-                 WHERE state = 'running' AND delivery_class IN ('replay_safe', 'idempotent')
-                   AND lease_expires_at_ms <= ?1",
-                [now_ms],
-            )? as u64;
-            let requeued_runs = tx.execute(
-                "UPDATE runs
-                 SET state = 'queued', lease_owner = NULL, lease_expires_at_ms = NULL,
-                     not_before_ms = ?1, updated_at_ms = ?1
-                 WHERE state = 'running' AND lease_expires_at_ms <= ?1
-                   AND error_code IS NULL",
-                [now_ms],
-            )? as u64;
+            let expired_steps = {
+                let sql = format!(
+                    "SELECT {STEP_COLUMNS} FROM run_steps
+                     WHERE state = 'running' AND lease_expires_at_ms <= ?1
+                     ORDER BY run_id, request_sequence"
+                );
+                let mut statement = tx.prepare(&sql)?;
+                let rows = statement.query_map([now_ms], read_step_row)?;
+                rows.map(|row| decode_step(row?)).collect::<Result<Vec<_>>>()?
+            };
+            let mut outcome_unknown_steps = 0_u64;
+            let mut requeued_steps = 0_u64;
+            let mut failed_run_ids = Vec::new();
+            for step in expired_steps {
+                let mut machine = RunStepMachine::restore(
+                    step.state,
+                    step.revision,
+                    step.request.clone(),
+                    step.attempts,
+                );
+                let accepted = machine
+                    .recover_expired_lease(RunStepOperationId::new(format!(
+                        "recover:{}:{}",
+                        step.step_id, step.lease_generation
+                    )))
+                    .map_err(|error| step_machine_rejected(&step.step_id, error))?;
+                let unknown = accepted.to == RunStepState::OutcomeUnknown;
+                tx.execute(
+                    "UPDATE run_steps
+                     SET state = ?2, revision = ?3,
+                         error_code = ?4, lease_owner = NULL, lease_expires_at_ms = NULL,
+                         not_before_ms = CASE WHEN ?5 THEN not_before_ms ELSE ?6 END,
+                         updated_at_ms = ?6,
+                         finished_at_ms = CASE WHEN ?5 THEN ?6 ELSE finished_at_ms END
+                     WHERE id = ?1 AND revision = ?7",
+                    params![
+                        step.step_id.as_str(),
+                        accepted.to.as_str(),
+                        accepted.new_revision.get(),
+                        if unknown { "request_outcome_unknown" } else { "lease_expired" },
+                        unknown,
+                        now_ms,
+                        accepted.previous_revision.get(),
+                    ],
+                )?;
+                if unknown {
+                    outcome_unknown_steps += 1;
+                    failed_run_ids.push(step.run_id);
+                } else {
+                    requeued_steps += 1;
+                }
+            }
+
+            let mut failed_runs = 0_u64;
+            for run_id in failed_run_ids {
+                let run = load_run(tx, &run_id)?;
+                if run.state != RunState::Running {
+                    continue;
+                }
+                let mut machine = RunMachine::restore(
+                    run.state,
+                    run.revision,
+                    run.cancellation_requested_at_ms.is_some(),
+                );
+                let accepted = machine
+                    .recover_unknown_step(RunOperationId::new(format!(
+                        "recover-unknown:{}:{}",
+                        run.run_id, run.lease_generation
+                    )))
+                    .map_err(|error| machine_rejected(&run.run_id, error))?;
+                tx.execute(
+                    "UPDATE runs
+                     SET state = ?2, revision = ?3,
+                         error_code = 'request_outcome_unknown',
+                         error_message = 'an at-most-once request lease expired before its outcome was recorded',
+                         lease_owner = NULL, lease_expires_at_ms = NULL,
+                         updated_at_ms = ?4, finished_at_ms = ?4
+                     WHERE id = ?1 AND revision = ?5",
+                    params![
+                        run.run_id.as_str(),
+                        accepted.to.as_str(),
+                        accepted.new_revision.get(),
+                        now_ms,
+                        accepted.previous_revision.get(),
+                    ],
+                )?;
+                failed_runs += 1;
+            }
+
+            let expired_runs = {
+                let sql = format!(
+                    "SELECT {RUN_COLUMNS} FROM runs
+                     WHERE state = 'running' AND lease_expires_at_ms <= ?1
+                       AND error_code IS NULL ORDER BY created_at_ms, id"
+                );
+                let mut statement = tx.prepare(&sql)?;
+                let rows = statement.query_map([now_ms], read_run_row)?;
+                rows.map(|row| decode_run(row?)).collect::<Result<Vec<_>>>()?
+            };
+            let mut requeued_runs = 0_u64;
+            for run in expired_runs {
+                let mut machine = RunMachine::restore(
+                    run.state,
+                    run.revision,
+                    run.cancellation_requested_at_ms.is_some(),
+                );
+                let accepted = machine
+                    .recover_expired_lease(RunOperationId::new(format!(
+                        "recover:{}:{}",
+                        run.run_id, run.lease_generation
+                    )))
+                    .map_err(|error| machine_rejected(&run.run_id, error))?;
+                tx.execute(
+                    "UPDATE runs
+                     SET state = ?2, revision = ?3, lease_owner = NULL,
+                         lease_expires_at_ms = NULL, not_before_ms = ?4,
+                         updated_at_ms = ?4
+                     WHERE id = ?1 AND revision = ?5",
+                    params![
+                        run.run_id.as_str(),
+                        accepted.to.as_str(),
+                        accepted.new_revision.get(),
+                        now_ms,
+                        accepted.previous_revision.get(),
+                    ],
+                )?;
+                requeued_runs += 1;
+            }
             let reclaimed_idempotency_keys = tx.execute(
                 "UPDATE idempotency_keys
                  SET lease_owner = NULL, lease_expires_at_ms = NULL,
@@ -1311,22 +1621,34 @@ fn record_terminal_child_usage(
         .ok_or(StoreError::DelegationDenied {
             code: "missing_parent_run",
         })?;
-    if child.usage.model_output_tokens > child.budget.model_output_tokens {
-        return delegation_denied("child_output_budget_exceeded");
-    }
     let root = load_run(tx, &child.root_run_id)?;
-    let tree_budget = root
-        .delegation_budget
+    root.delegation_budget
         .as_ref()
         .ok_or(StoreError::DelegationDenied {
             code: "missing_tree_budget",
         })?;
-    if root
-        .delegation_used_output_tokens
-        .saturating_add(child.usage.model_output_tokens)
-        > tree_budget.max_total_output_tokens
-    {
-        return delegation_denied("tree_output_budget_exceeded");
+
+    let ancestors = load_ancestors(tx, child_run_id)?;
+    if ancestors.is_empty() {
+        return delegation_denied("missing_parent_chain");
+    }
+    for ancestor in &ancestors {
+        let mut ledger = RunBudgetLedger::restore(ancestor.budget.clone(), ancestor.usage.clone())
+            .with_delegated_output(
+                ancestor.delegation_reserved_output_tokens,
+                ancestor.delegation_used_output_tokens,
+            )
+            .map_err(map_budget_error)?;
+        ledger
+            .commit_child_usage(
+                format!("commit-child:{child_run_id}"),
+                RunChildUsageCommit {
+                    reservation_id: child_run_id.to_string(),
+                    reserved_output_tokens: child.budget.model_output_tokens,
+                    actual_output_tokens: child.usage.model_output_tokens,
+                },
+            )
+            .map_err(map_budget_error)?;
     }
 
     let (ancestor_count, under_reserved): (u32, u32) = tx.query_row(
@@ -1410,16 +1732,68 @@ fn record_terminal_child_usage(
     Ok(())
 }
 
+fn load_ancestors(tx: &Transaction<'_>, child_run_id: &RunId) -> Result<Vec<DurableRunRecord>> {
+    let sql = format!(
+        "WITH RECURSIVE ancestors(id) AS (
+             SELECT parent_run_id FROM runs WHERE id = ?1
+             UNION ALL
+             SELECT parent.parent_run_id FROM runs parent
+             JOIN ancestors child ON parent.id = child.id
+             WHERE parent.parent_run_id IS NOT NULL
+         )
+         SELECT {RUN_COLUMNS} FROM runs WHERE id IN (SELECT id FROM ancestors)
+         ORDER BY depth DESC"
+    );
+    let mut statement = tx.prepare(&sql)?;
+    let rows = statement.query_map([child_run_id.as_str()], read_run_row)?;
+    rows.map(|row| decode_run(row?)).collect()
+}
+
+fn map_budget_error(error: RunBudgetError) -> StoreError {
+    let code = match error {
+        RunBudgetError::BudgetExhausted { dimensions } => match dimensions.first() {
+            Some(RunBudgetDimension::WallTime) => "wall_time_exhausted",
+            Some(RunBudgetDimension::ModelInputTokens) => "model_input_exhausted",
+            Some(RunBudgetDimension::ModelOutputTokens) => "output_tokens_exhausted",
+            Some(RunBudgetDimension::ModelAttempts) => "model_attempts_exhausted",
+            Some(RunBudgetDimension::ToolCalls) => "tool_calls_exhausted",
+            None => "budget_exhausted",
+        },
+        RunBudgetError::UnderReserved { .. } => "tree_reservation_corrupt",
+        RunBudgetError::ArithmeticOverflow { .. } => "budget_arithmetic_overflow",
+        RunBudgetError::UsageDecreased { .. }
+        | RunBudgetError::OperationConflict { .. }
+        | RunBudgetError::ReservationConflict { .. }
+        | RunBudgetError::ReservationNotFound { .. } => "budget_operation_conflict",
+    };
+    StoreError::DelegationDenied { code }
+}
+
 fn delegation_denied<T>(code: &'static str) -> Result<T> {
     Err(StoreError::DelegationDenied { code })
 }
 
+fn machine_rejected(run_id: &RunId, error: impl std::fmt::Display) -> StoreError {
+    StoreError::TransitionRejected {
+        resource: format!("run {run_id}: {error}"),
+        from: "persisted".to_owned(),
+        to: "machine input".to_owned(),
+    }
+}
+
+fn step_machine_rejected(step_id: &StepId, error: impl std::fmt::Display) -> StoreError {
+    StoreError::TransitionRejected {
+        resource: format!("run step {step_id}: {error}"),
+        from: "persisted".to_owned(),
+        to: "machine input".to_owned(),
+    }
+}
+
 fn validate_step_draft(lease: &RunLease, step: &RunStepDraft) -> Result<()> {
-    if step.request_sequence == 0 {
+    if step.request.key().sequence == 0 {
         return invalid("run_steps.request_sequence", 0, "must be positive");
     }
-    validate_non_blank(&step.effect_kind, "run_steps.effect_kind")?;
-    if step.turn_id.is_some() && lease.run_id.as_str().is_empty() {
+    if lease.run_id.as_str().is_empty() {
         unreachable!("typed run IDs are never empty");
     }
     Ok(())
@@ -1598,6 +1972,7 @@ struct RawRunRow {
     delegation_reserved_descendants: u32,
     delegation_reserved_output_tokens: u64,
     delegation_used_output_tokens: u64,
+    revision: u64,
 }
 
 fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
@@ -1641,6 +2016,7 @@ fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
         delegation_reserved_descendants: row.get(36)?,
         delegation_reserved_output_tokens: row.get(37)?,
         delegation_used_output_tokens: row.get(38)?,
+        revision: row.get(39)?,
     })
 }
 
@@ -1657,8 +2033,17 @@ fn decode_run(raw: RawRunRow) -> Result<DurableRunRecord> {
             .as_deref()
             .map(|value| parse_turn_id(value, "runs.turn_id"))
             .transpose()?,
-        kind: crate::RunKind::parse(&raw.kind)?,
-        state: RunState::parse(&raw.state)?,
+        kind: crate::RunKind::parse(&raw.kind).ok_or_else(|| StoreError::InvalidValue {
+            field: "runs.kind",
+            value: raw.kind.clone(),
+            reason: "invalid run kind",
+        })?,
+        state: RunState::parse(&raw.state).ok_or_else(|| StoreError::InvalidValue {
+            field: "runs.state",
+            value: raw.state.clone(),
+            reason: "invalid run state",
+        })?,
+        revision: RunRevision::new(raw.revision),
         priority: raw.priority,
         concurrency_key: raw
             .concurrency_key
@@ -1738,6 +2123,7 @@ fn safe_status_with_state(run: DurableRunRecord, state: RunState) -> Result<Safe
         turn_id: run.turn_id,
         kind: run.kind,
         state,
+        revision: run.revision,
         priority: run.priority,
         concurrency_key: run.concurrency_key,
         usage: run.usage,
@@ -1770,13 +2156,23 @@ fn load_step(tx: &Transaction<'_>, step_id: &StepId) -> Result<RunStepRecord> {
         })
 }
 
+fn load_steps_for_run(
+    connection: &rusqlite::Connection,
+    run_id: &RunId,
+) -> Result<Vec<RunStepRecord>> {
+    let sql =
+        format!("SELECT {STEP_COLUMNS} FROM run_steps WHERE run_id = ?1 ORDER BY request_sequence");
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map([run_id.as_str()], read_step_row)?;
+    rows.map(|row| decode_step(row?)).collect()
+}
+
 #[derive(Debug)]
 struct RawStepRow {
     id: String,
     run_id: String,
     turn_id: Option<String>,
     request_sequence: u64,
-    effect_kind: String,
     delivery_class: String,
     request_json: String,
     result_json: Option<String>,
@@ -1790,6 +2186,7 @@ struct RawStepRow {
     created_at_ms: i64,
     updated_at_ms: i64,
     finished_at_ms: Option<i64>,
+    revision: u64,
 }
 
 fn read_step_row(row: &Row<'_>) -> rusqlite::Result<RawStepRow> {
@@ -1798,24 +2195,39 @@ fn read_step_row(row: &Row<'_>) -> rusqlite::Result<RawStepRow> {
         run_id: row.get(1)?,
         turn_id: row.get(2)?,
         request_sequence: row.get(3)?,
-        effect_kind: row.get(4)?,
-        delivery_class: row.get(5)?,
-        request_json: row.get(6)?,
-        result_json: row.get(7)?,
-        state: row.get(8)?,
-        attempts: row.get(9)?,
-        lease_owner: row.get(10)?,
-        lease_generation: row.get(11)?,
-        lease_expires_at_ms: row.get(12)?,
-        not_before_ms: row.get(13)?,
-        error_code: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        updated_at_ms: row.get(16)?,
-        finished_at_ms: row.get(17)?,
+        delivery_class: row.get(4)?,
+        request_json: row.get(5)?,
+        result_json: row.get(6)?,
+        state: row.get(7)?,
+        attempts: row.get(8)?,
+        lease_owner: row.get(9)?,
+        lease_generation: row.get(10)?,
+        lease_expires_at_ms: row.get(11)?,
+        not_before_ms: row.get(12)?,
+        error_code: row.get(13)?,
+        created_at_ms: row.get(14)?,
+        updated_at_ms: row.get(15)?,
+        finished_at_ms: row.get(16)?,
+        revision: row.get(17)?,
     })
 }
 
 fn decode_step(raw: RawStepRow) -> Result<RunStepRecord> {
+    let request: agl_kernel::RunRequest = serde_json::from_str(&raw.request_json)?;
+    let delivery = agl_kernel::RunDelivery::parse(&raw.delivery_class).ok_or_else(|| {
+        StoreError::InvalidValue {
+            field: "run_steps.delivery_class",
+            value: raw.delivery_class.clone(),
+            reason: "invalid run delivery class",
+        }
+    })?;
+    if request.delivery != delivery {
+        return invalid(
+            "run_steps.delivery_class",
+            raw.delivery_class,
+            "column does not match typed request",
+        );
+    }
     Ok(RunStepRecord {
         step_id: parse_step_id(&raw.id, "run_steps.id")?,
         run_id: parse_run_id(&raw.run_id, "run_steps.run_id")?,
@@ -1825,15 +2237,18 @@ fn decode_step(raw: RawStepRow) -> Result<RunStepRecord> {
             .map(|value| parse_turn_id(value, "run_steps.turn_id"))
             .transpose()?,
         request_sequence: raw.request_sequence,
-        effect_kind: raw.effect_kind,
-        delivery_class: EffectDeliveryClass::parse(&raw.delivery_class)?,
-        request: serde_json::from_str(&raw.request_json)?,
+        request,
         result: raw
             .result_json
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?,
-        state: RunStepState::parse(&raw.state)?,
+        state: RunStepState::parse(&raw.state).ok_or_else(|| StoreError::InvalidValue {
+            field: "run_steps.state",
+            value: raw.state.clone(),
+            reason: "invalid run step state",
+        })?,
+        revision: RunStepRevision::new(raw.revision),
         attempts: raw.attempts,
         lease_owner: raw.lease_owner,
         lease_generation: raw.lease_generation,

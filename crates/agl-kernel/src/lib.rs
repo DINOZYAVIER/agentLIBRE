@@ -8,6 +8,7 @@ mod hook_contract;
 mod outcome;
 mod policy;
 mod registry;
+mod run;
 mod schema;
 mod session;
 mod tool_contract;
@@ -58,6 +59,15 @@ pub use policy::{
 pub use registry::{
     HandlerCoverageError, ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime,
     verify_handler_coverage,
+};
+pub use run::{
+    DelegationTreeBudget, RunBudget, RunBudgetDimension, RunBudgetError, RunBudgetLedger,
+    RunChildReservationAccepted, RunChildReservationRequest, RunChildUsageAccepted,
+    RunChildUsageCommit, RunDelivery, RunKind, RunMachine, RunMachineError, RunOperationId,
+    RunRequest, RunRequestIdentityError, RunRequestResult, RunRevision, RunState, RunStepMachine,
+    RunStepMachineError, RunStepOperationId, RunStepRevision, RunStepState, RunStepTransitionInput,
+    RunStepTransitionRecord, RunTerminalOutcome, RunTransitionInput, RunTransitionRecord, RunUsage,
+    RunUsageAccepted,
 };
 pub use session::{
     AgentLibreSessionFinishReason, ChatSessionMachine, ChatSessionPhase, ChatSessionTransition,

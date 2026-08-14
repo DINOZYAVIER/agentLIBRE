@@ -123,6 +123,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Replacing an active socket unit and reloading the manager leaves the old
+# listener detached from the newly loaded unit. Stop the saved installation
+# before publishing the temporary pair so systemd creates the exact descriptors
+# declared by the new socket units. cleanup restores the original active state.
+systemctl --user stop agentlibre-daemon.service agl-terminald.service
+systemctl --user stop agentlibre-daemon.socket agl-terminald.socket
+
 terminal_output="$(scripts/terminal/install.sh --prefix "$terminal_prefix")"
 terminal_generation="$(sed -n 's/^generation=//p' <<<"$terminal_output")"
 [[ -d "$terminal_generation" ]] || fail "terminal installer returned no generation"

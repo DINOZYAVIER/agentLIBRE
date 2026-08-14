@@ -8,7 +8,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::InferenceClientHandle;
-use agl_cron::{CronJob, CronRepository, CronRunStatus};
+use agl_cron::{
+    CronJob, CronRepository, CronRunStatus, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
+    unsupported_builtin_cron_target_message,
+};
 use agl_inference::{EngineRuntimeStatusHandle, InferenceHost, InferenceHostConfig};
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
@@ -119,7 +122,7 @@ impl DaemonServer {
                 }
                 _ = cron_tick.tick() => {
                     let now = unix_now();
-                    let mut executor = DaemonCronExecutor { state: state.clone() };
+                    let mut executor = DaemonCronExecutor { state: state.clone(), store: &store };
                     let mut notifier = StoreCronNotifier { store: &store };
                     match run_cron_tick(&store, now, &mut executor, &mut notifier) {
                         Ok(report) if report.due_jobs > 0 => tracing::info!(
@@ -182,17 +185,39 @@ fn trace_model_manager_status(state: &SharedDaemonState) {
     }
 }
 
-struct DaemonCronExecutor {
+struct DaemonCronExecutor<'a> {
     state: SharedDaemonState,
+    store: &'a AglStore,
 }
 
-impl CronTargetExecutor for DaemonCronExecutor {
+impl CronTargetExecutor for DaemonCronExecutor<'_> {
     fn execute(&mut self, job: &CronJob, scheduled_for: &str) -> CronExecution {
+        if let Some(execution) = execute_builtin_cron_target(job, self.store) {
+            return execution;
+        }
         match self.state.submit_cron_job(job, scheduled_for) {
             Ok(accepted) => CronExecution::queued(accepted.status.run_id),
             Err(error) => CronExecution::failed(error.message),
         }
     }
+}
+
+fn execute_builtin_cron_target(job: &CronJob, store: &AglStore) -> Option<CronExecution> {
+    if job.target_kind != CronTargetKind::Builtin {
+        return None;
+    }
+    Some(match job.target_ref.as_str() {
+        STORE_STATUS_BUILTIN_CRON_TARGET => store
+            .health()
+            .map(|health| {
+                CronExecution::succeeded(format!(
+                    "builtin:store-status:schema:{}",
+                    health.migration_version
+                ))
+            })
+            .unwrap_or_else(|error| CronExecution::failed(error.to_string())),
+        _ => CronExecution::failed(unsupported_builtin_cron_target_message(&job.target_ref)),
+    })
 }
 
 fn spawn_cron_run_linkers(
@@ -1400,6 +1425,50 @@ async fn run_connection_writer<W>(
         }
     }
     let _ = shutdown.send(true);
+}
+
+#[cfg(test)]
+mod cron_authority_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_store_status_executes_without_a_durable_agent_run() {
+        let root = std::env::temp_dir().join(format!(
+            "agentlibre-agl174-cron-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let store = AglStore::open_at(&root).unwrap();
+        let job = CronJob {
+            id: "job-agl174".to_owned(),
+            name: "Store status".to_owned(),
+            enabled: true,
+            target_kind: CronTargetKind::Builtin,
+            target_ref: STORE_STATUS_BUILTIN_CRON_TARGET.to_owned(),
+            schedule_expr: "* * * * *".to_owned(),
+            timezone: "UTC".to_owned(),
+            notify_ref: None,
+            prompt: None,
+            input: None,
+            created_at: "2026-08-14T00:00:00Z".to_owned(),
+            updated_at: "2026-08-14T00:00:00Z".to_owned(),
+            deleted_at: None,
+        };
+
+        let execution = execute_builtin_cron_target(&job, &store).unwrap();
+        assert_eq!(execution.status, CronRunStatus::Succeeded);
+        let durable_runs: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+            .unwrap();
+        let durable_steps: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM run_steps", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((durable_runs, durable_steps), (0, 0));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(unix)]
