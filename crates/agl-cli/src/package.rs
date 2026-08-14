@@ -6,7 +6,7 @@ use agl_package::{
     PackageSourceTier, PackageTreeDigest, ResolvedPackage, ResolvedPackageGraph,
     compute_package_digest,
 };
-use agl_runtime::{AgentLibreRuntimeConfig, PackageComposition, compose_packages};
+use agl_runtime::{AgentLibreRuntimeConfig, PackageComposition};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -121,7 +121,10 @@ pub(crate) fn print_error_json(error: &anyhow::Error) {
 
 fn context(runtime: &AgentLibreRuntimeConfig) -> Result<PackageContext> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let composition = compose_packages(&runtime.paths, &workspace_root)?;
+    let composition = agl_runtime::compose_packages(
+        &runtime.paths,
+        agl_repo::package_composition_input(&workspace_root)?,
+    )?;
     Ok(PackageContext {
         composition,
         workspace_root,

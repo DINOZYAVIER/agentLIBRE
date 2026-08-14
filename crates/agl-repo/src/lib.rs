@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agl_artifact::ArtifactHandle;
-use agl_package::{PackageLock, PackageSourceDeclaration, PackageSourceKind, WorkspaceManifest};
+use agl_package::{
+    PackageCompositionInput, PackageLock, PackageSourceDeclaration, PackageSourceInput,
+    PackageSourceKind, PackageSourceProvenance, WorkspaceManifest,
+};
 use anyhow::{Context, Result, bail, ensure};
 
 mod git_artifact;
@@ -16,12 +19,6 @@ pub const AGL_DIR: &str = ".agl";
 pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
 pub const PACKAGE_LOCK_PATH: &str = ".agl/package-lock.toml";
 pub const DEFAULT_FUNCTION: &str = "function:gemma4-e4b@^1";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GitSourceProvenance {
-    pub revision: String,
-    pub tree: String,
-}
 
 pub fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
     let output = Command::new("git")
@@ -36,18 +33,18 @@ pub fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
 }
 
-pub fn git_source_provenance(root: impl AsRef<Path>) -> Result<GitSourceProvenance> {
+pub fn git_source_provenance(root: impl AsRef<Path>) -> Result<PackageSourceProvenance> {
     let root = root.as_ref();
-    Ok(GitSourceProvenance {
-        revision: git_output(root, &["rev-parse", "HEAD"])?,
-        tree: git_output(root, &["rev-parse", "HEAD^{tree}"])?,
-    })
+    Ok(PackageSourceProvenance::new(
+        git_output(root, &["rev-parse", "HEAD"])?,
+        git_output(root, &["rev-parse", "HEAD^{tree}"])?,
+    ))
 }
 
 pub fn verified_git_source_provenance(
     root: impl AsRef<Path>,
     revision: &str,
-) -> Result<GitSourceProvenance> {
+) -> Result<PackageSourceProvenance> {
     let root = root.as_ref();
     let head = git_output(root, &["rev-parse", "HEAD"])?;
     let revision = git_output(
@@ -72,6 +69,80 @@ pub fn verified_git_source_provenance(
         "Git package source has uncommitted or ignored files"
     );
     git_source_provenance(root)
+}
+
+pub fn package_composition_input(
+    workspace_root: impl AsRef<Path>,
+) -> Result<PackageCompositionInput> {
+    let workspace_root = workspace_root
+        .as_ref()
+        .canonicalize()
+        .context("failed to resolve package workspace root")?;
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    if !manifest_path.is_file() {
+        return PackageCompositionInput::new(workspace_root, []).map_err(Into::into);
+    }
+    let manifest = read_workspace_manifest(&manifest_path)?;
+    let mut sources = Vec::new();
+    for declaration in manifest.sources {
+        let root = match declaration.kind {
+            PackageSourceKind::Directory => {
+                let relative = declaration
+                    .path
+                    .as_ref()
+                    .context("declared package source path is missing")?;
+                canonical_workspace_source_root(&workspace_root, relative, &declaration)?
+            }
+            PackageSourceKind::Git => {
+                let relative = declaration
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(".agl/sources").join(declaration.id.as_str()));
+                canonical_workspace_source_root(&workspace_root, &relative, &declaration)?
+            }
+            PackageSourceKind::Embedded => continue,
+        };
+        let provenance = match declaration.kind {
+            PackageSourceKind::Git => {
+                let revision = declaration
+                    .rev
+                    .as_deref()
+                    .context("declared Git package source revision is missing")?;
+                Some(verified_git_source_provenance(&root, revision)?)
+            }
+            PackageSourceKind::Directory => None,
+            PackageSourceKind::Embedded => unreachable!("embedded sources were skipped"),
+        };
+        sources.push(PackageSourceInput::new(
+            declaration.id,
+            declaration.tier,
+            declaration.kind,
+            root,
+            provenance,
+        )?);
+    }
+    PackageCompositionInput::new(workspace_root, sources).map_err(Into::into)
+}
+
+fn canonical_workspace_source_root(
+    workspace_root: &Path,
+    relative: &Path,
+    declaration: &PackageSourceDeclaration,
+) -> Result<PathBuf> {
+    let root = workspace_root
+        .join(relative)
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "failed to resolve declared package source {}",
+                declaration.id
+            )
+        })?;
+    ensure!(
+        root.starts_with(workspace_root),
+        "package source escapes workspace"
+    );
+    Ok(root)
 }
 
 pub fn resolve_package_source_root(

@@ -61,7 +61,7 @@ pub(crate) fn run_function_smoke(
     );
     let runtime_profile_id = agl_runtime::resolve_composed_runtime_function(
         &runtime.paths,
-        &request.workspace_root,
+        agl_repo::package_composition_input(&request.workspace_root)?,
         &request.reference,
         true,
     )?

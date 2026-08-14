@@ -16,7 +16,6 @@ agl-exec.workspace = true
 agl-ids.workspace = true
 agl-model.workspace = true
 agl-process.workspace = true
-agl-repo.workspace = true
 agl-skill.workspace = true
 agl-terminal-protocol.workspace = true
 anyhow.workspace = true

@@ -128,7 +128,11 @@ doctor:
             .unwrap();
     agl_extension::package::ExtensionPackageBuilder::build(&input, &extension_root).unwrap();
     let paths = AgentLibrePaths::from_agl_home(root.join("home"));
-    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
+    let composition = agl_runtime::compose_packages(
+        &paths,
+        agl_repo::package_composition_input(&workspace).unwrap(),
+    )
+    .unwrap();
     let bundle = composition
         .resolve_runtime_bundle(
             &workspace,
@@ -224,7 +228,11 @@ guarantees:
     };
     std::fs::write(skill_root.join("SKILL.md"), skill_document("admitted body")).unwrap();
     let paths = AgentLibrePaths::from_agl_home(root.join("home"));
-    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
+    let composition = agl_runtime::compose_packages(
+        &paths,
+        agl_repo::package_composition_input(&workspace).unwrap(),
+    )
+    .unwrap();
     let bundle = composition
         .resolve_runtime_bundle(&workspace, &paths.config_dir, "skill-snapshot", false, &[])
         .unwrap();
@@ -1375,7 +1383,11 @@ title: Locked Function
     std::fs::write(function_root.join("SYSTEM.md"), "Original prompt.\n").unwrap();
     let paths = agl_runtime::AgentLibrePaths::from_agl_home(root.join("home"));
     let reference: agl_package::PackageRef = "function:locked@*".parse().unwrap();
-    let composition = agl_runtime::compose_packages(&paths, &workspace).unwrap();
+    let composition = agl_runtime::compose_packages(
+        &paths,
+        agl_repo::package_composition_input(&workspace).unwrap(),
+    )
+    .unwrap();
     let lock = composition
         .resolve_for_lock_refresh(&reference)
         .unwrap()
