@@ -8,8 +8,8 @@ pub use coordinator::{
     Supervisor, SupervisorHandle,
 };
 pub use driver::{
-    DriverEffectError, DriverSnapshot, DurableRunDriver, DurableRunDriverFactory,
-    EffectExecutionContext, RunCancellation, SupervisorEffect, SupervisorTerminal,
+    DriverSnapshot, DurableRunDriver, DurableRunDriverFactory, RunCancellation, RunRequestContext,
+    RunRequestError,
 };
 pub use error::{Result, SupervisorError};
 pub use options::{SupervisorClock, SupervisorOptions, SystemSupervisorClock};

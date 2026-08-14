@@ -761,8 +761,12 @@ where
         self.expected_generation
             .require_exact(response.service.installed_generation())
             .map_err(|_| ProtocolValidationError::ServiceIdentityMismatch)?;
-        if !matches!(response.response, TerminalResponseKind::Hello) {
-            return Err(ClientError::UnexpectedResponse);
+        match response.response {
+            TerminalResponseKind::Hello => {}
+            TerminalResponseKind::Failure { failure } => {
+                return Err(ClientError::Remote(TerminalFailureDisplay(failure)));
+            }
+            _ => return Err(ClientError::UnexpectedResponse),
         }
         let identity = response.service;
         if let Some(path) = &self.runtime_projection {

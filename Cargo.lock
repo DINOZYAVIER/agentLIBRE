@@ -642,6 +642,7 @@ dependencies = [
  "agl-events",
  "agl-exec",
  "agl-ids",
+ "agl-kernel",
  "agl-process",
  "libc",
  "rusqlite",

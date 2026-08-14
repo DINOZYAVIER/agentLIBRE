@@ -24,7 +24,7 @@ use agl_chat::{
     ChatOptions, ChatRunInput, ChatService, ChatSupervisorFactory, InferenceClientHandle,
     InferenceOptions, ToolAccessMode as ChatToolMode,
 };
-use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
+use agl_cron::{CronJob, CronTargetKind};
 use agl_exec::{
     CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionAuthorization,
     ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
@@ -75,7 +75,7 @@ use agl_terminal_protocol::TerminalAdmission;
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
-use crate::run_factory::{BuiltinCronRunInput, DaemonRunFactory};
+use crate::run_factory::DaemonRunFactory;
 use crate::terminal_bridge::TerminalBridge;
 use crate::transcript::transcript_event;
 
@@ -388,7 +388,7 @@ impl DaemonState {
         .with_terminal_endpoint(terminal_endpoint);
         let supervisor = Supervisor::spawn(
             &store_root,
-            Arc::new(DaemonRunFactory::new(chat_factory.clone(), &store_root)),
+            Arc::new(DaemonRunFactory::new(chat_factory.clone())),
             SupervisorOptions::default(),
         )
         .context("failed to start durable run supervisor")?;
@@ -505,29 +505,9 @@ impl DaemonState {
         let (session_id, turn_id, input, registered_session, execution_context) =
             match job.target_kind {
                 CronTargetKind::Builtin => {
-                    if job.target_ref != STORE_STATUS_BUILTIN_CRON_TARGET {
-                        return Err(invalid(format!(
-                            "unsupported builtin cron target {}",
-                            job.target_ref
-                        )));
-                    }
-                    let workspace = self
-                        .runtime
-                        .resolve_workspace_root(None)
-                        .map_err(runtime_error)?;
-                    (
-                        None,
-                        None,
-                        serde_json::to_value(BuiltinCronRunInput {
-                            builtin: job.target_ref.clone(),
-                        })
-                        .map_err(runtime_error)?,
-                        None,
-                        self.runtime
-                            .execution
-                            .context_snapshot(&workspace)
-                            .map_err(runtime_error)?,
-                    )
+                    return Err(invalid(
+                        "builtin Cron targets execute directly in the Cron scheduler",
+                    ));
                 }
                 CronTargetKind::Skill => {
                     let prompt =
@@ -582,7 +562,7 @@ impl DaemonState {
                     run_id,
                     session_id,
                     turn_id,
-                    kind: agl_store::RunKind::Cron,
+                    kind: agl_store::RunKind::Turn,
                     priority: 0,
                     concurrency_key: None,
                     input,

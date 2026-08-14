@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde::Deserialize;
 
 use crate::connection::{configure_read_only, secure_database_files};
 use crate::path::default_database_path;
@@ -175,9 +177,21 @@ impl AglStore {
         if rebuilds_referenced_runs_table {
             self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
         }
+        self.conn.execute_batch("BEGIN;")?;
+        let preparation = if migration.version == 19 {
+            prepare_kernel_run_authority_migration(&self.conn)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = preparation {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+            if rebuilds_referenced_runs_table {
+                self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            }
+            return Err(error);
+        }
         let batch = format!(
             r#"
-            BEGIN;
             {sql}
             INSERT INTO schema_migrations(version, applied_at)
             VALUES ({version}, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
@@ -215,6 +229,225 @@ impl AglStore {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
         Ok(version)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObsoleteStoreStatusRunInput {
+    builtin: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObsoleteStoreStatusRequest {
+    store_root: String,
+}
+
+fn prepare_kernel_run_authority_migration(connection: &Connection) -> Result<()> {
+    let mut obsolete_roots = BTreeSet::new();
+    {
+        let mut statement = connection.prepare("SELECT id, kind, input_json FROM runs")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (run_id, kind, input_json) = row?;
+            if kind == "cron"
+                && serde_json::from_str::<ObsoleteStoreStatusRunInput>(&input_json)
+                    .is_ok_and(|input| input.builtin == "store-status")
+            {
+                obsolete_roots.insert(run_id);
+            }
+        }
+    }
+
+    for run_id in &obsolete_roots {
+        reject_obsolete_run_reference(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE parent_run_id = ?1)",
+            run_id,
+            "obsolete store-status run has a child run",
+        )?;
+        reject_obsolete_run_reference(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM content_attachments WHERE run_id = ?1)",
+            run_id,
+            "obsolete store-status run has a content attachment",
+        )?;
+        reject_obsolete_run_reference(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM permission_grants WHERE last_admitted_run_id = ?1)",
+            run_id,
+            "obsolete store-status run is referenced by a permission grant",
+        )?;
+    }
+
+    let mut typed_steps = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT id, run_id, turn_id, request_sequence, effect_kind, delivery_class,
+                    request_json, result_json
+             FROM run_steps ORDER BY run_id, request_sequence",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        for row in rows {
+            let (step_id, run_id, turn_id, sequence, kind, delivery, request_json, result_json) =
+                row?;
+            if obsolete_roots.contains(&run_id) {
+                let exact_request =
+                    serde_json::from_str::<ObsoleteStoreStatusRequest>(&request_json)
+                        .is_ok_and(|request| request.store_root == "private");
+                if kind != "store_status" || !exact_request {
+                    return invalid_run_migration(
+                        step_id,
+                        "obsolete store-status run contains an unexpected step",
+                    );
+                }
+                continue;
+            }
+
+            let request: agl_kernel::TurnRequest =
+                serde_json::from_str(&request_json).map_err(|_| StoreError::InvalidValue {
+                    field: "run_steps.request_json",
+                    value: step_id.clone(),
+                    reason: "cannot migrate row to typed RunRequest",
+                })?;
+            if request.kind().as_str() != kind
+                || request.key().sequence != sequence
+                || turn_id.as_deref() != Some(request.key().turn_id.as_str())
+            {
+                return invalid_run_migration(
+                    step_id,
+                    "stored request identity does not match its RunStep columns",
+                );
+            }
+            let delivery = agl_kernel::RunDelivery::parse(&delivery).ok_or_else(|| {
+                StoreError::InvalidValue {
+                    field: "run_steps.delivery_class",
+                    value: delivery.clone(),
+                    reason: "cannot migrate unknown Run delivery",
+                }
+            })?;
+            let request = agl_kernel::RunRequest::new(delivery, request);
+            let result = result_json
+                .map(|raw| {
+                    let result: agl_kernel::TurnRequestResult = serde_json::from_str(&raw)?;
+                    agl_kernel::RunRequestResult::for_request(&request, result).map_err(|_| {
+                        StoreError::InvalidValue {
+                            field: "run_steps.result_json",
+                            value: step_id.clone(),
+                            reason: "stored result identity does not match its RunRequest",
+                        }
+                    })
+                })
+                .transpose()?;
+            typed_steps.push((
+                step_id,
+                serde_json::to_string(&request)?,
+                result
+                    .map(|result| serde_json::to_string(&result))
+                    .transpose()?,
+            ));
+        }
+    }
+
+    for (step_id, request_json, result_json) in typed_steps {
+        connection.execute(
+            "UPDATE run_steps SET request_json = ?2, result_json = ?3 WHERE id = ?1",
+            params![step_id, request_json, result_json],
+        )?;
+    }
+
+    for run_id in &obsolete_roots {
+        let stale_result_ref = format!("run:{run_id}");
+        let linked_cron_runs = {
+            let mut statement = connection.prepare(
+                "SELECT id, job_id, scheduled_for, status
+                 FROM cron_runs WHERE supervisor_run_id = ?1 ORDER BY id",
+            )?;
+            let rows = statement.query_map([run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (cron_run_id, job_id, scheduled_for, status) in linked_cron_runs {
+            let active = matches!(status.as_str(), "queued" | "running");
+            connection.execute(
+                "UPDATE cron_runs
+                 SET status = CASE WHEN ?3 THEN 'failed' ELSE status END,
+                     started_at = CASE WHEN ?3
+                         THEN COALESCE(started_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                         ELSE started_at END,
+                     finished_at = CASE WHEN ?3
+                         THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') ELSE finished_at END,
+                     error = CASE WHEN ?3
+                         THEN 'agl174 migration removed obsolete store-status supervisor run'
+                         ELSE error END,
+                     result_ref = CASE WHEN result_ref = ?2 THEN NULL ELSE result_ref END,
+                     supervisor_run_id = NULL
+                 WHERE id = ?1 AND supervisor_run_id = ?4",
+                params![cron_run_id, stale_result_ref, active, run_id],
+            )?;
+            connection.execute(
+                "UPDATE idempotency_keys
+                 SET status = CASE WHEN ?4 THEN 'failed' ELSE status END,
+                     result_ref = ?3, admitted_run_id = NULL,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+                     last_error_code = CASE WHEN ?4
+                         THEN 'agl174_obsolete_store_status_run_removed'
+                         ELSE last_error_code END
+                 WHERE namespace = 'core.cron:run' AND key = ?1 || ':' || ?2",
+                params![job_id, scheduled_for, cron_run_id, active],
+            )?;
+        }
+        connection.execute(
+            "DELETE FROM idempotency_keys
+             WHERE admitted_run_id = ?1 OR result_ref = ?2",
+            params![run_id, stale_result_ref],
+        )?;
+        connection.execute("DELETE FROM runs WHERE id = ?1", [run_id])?;
+    }
+    Ok(())
+}
+
+fn reject_obsolete_run_reference(
+    connection: &Connection,
+    query: &str,
+    run_id: &str,
+    reason: &'static str,
+) -> Result<()> {
+    if connection.query_row(query, [run_id], |row| row.get::<_, bool>(0))? {
+        return invalid_run_migration(run_id.to_owned(), reason);
+    }
+    Ok(())
+}
+
+fn invalid_run_migration<T>(value: String, reason: &'static str) -> Result<T> {
+    Err(StoreError::InvalidValue {
+        field: "store migration 019_kernel_run_authority",
+        value,
+        reason,
+    })
 }
 
 fn validate_migration_sequence(versions: &[u32]) -> Result<()> {

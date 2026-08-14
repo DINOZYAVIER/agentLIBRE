@@ -7,13 +7,14 @@ use std::time::{Duration, Instant};
 use agl_content::Content;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
-use agl_kernel::ToolId;
-use agl_kernel::{TurnRequest, TurnRequestOutcome, TurnRequestResult};
-use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunKind, RunState, RunUsage};
+use agl_kernel::{
+    RunDelivery, RunRequest, RunRequestResult, RunTerminalOutcome, RunUsage, ToolId, TurnRequest,
+    TurnRequestOutcome, TurnRequestResult,
+};
+use agl_store::{AglStore, DurableRunRecord, RunKind};
 use agl_supervisor::{
-    DriverEffectError, DriverSnapshot, DurableRunDriver, DurableRunDriverFactory,
-    EffectExecutionContext, Result as SupervisorResult, RunCancellation, SupervisorEffect,
-    SupervisorError, SupervisorTerminal,
+    DriverSnapshot, DurableRunDriver, DurableRunDriverFactory, Result as SupervisorResult,
+    RunCancellation, RunRequestContext, RunRequestError, SupervisorError,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -528,7 +529,7 @@ struct ChatSupervisorDriver {
     execution: ChatTurnExecution,
     cancellation: RunCancellation,
     bridge_finished: Arc<AtomicBool>,
-    terminal: Option<SupervisorTerminal>,
+    terminal: Option<RunTerminalOutcome>,
     usage: RunUsage,
 }
 
@@ -539,46 +540,34 @@ impl DurableRunDriver for ChatSupervisorDriver {
                 SupervisorError::Driver("terminal chat execution has no output".to_string())
             })?;
             self.terminal = Some(match output.status {
-                ChatTurnStatus::Answered { answer } => SupervisorTerminal {
-                    state: RunState::Succeeded,
+                ChatTurnStatus::Answered { answer } => RunTerminalOutcome::Succeeded {
                     result: Some(serde_json::json!({
                         "status": "answered",
                         "answer": answer,
                         "attempt_ids": output.attempt_ids,
                     })),
-                    error_code: None,
-                    error_message: None,
                 },
-                ChatTurnStatus::Incomplete { partial, reason } => SupervisorTerminal {
-                    state: RunState::Incomplete,
+                ChatTurnStatus::Incomplete { partial, reason } => RunTerminalOutcome::Incomplete {
                     result: Some(serde_json::json!({
                         "status": "incomplete_output",
                         "partial": partial,
-                        "reason": reason,
+                        "reason": reason.clone(),
                         "attempt_ids": output.attempt_ids,
                     })),
-                    error_code: None,
-                    error_message: None,
+                    reason: reason.as_str().to_string(),
                 },
-                ChatTurnStatus::Stopped { reason } => SupervisorTerminal {
-                    state: RunState::Succeeded,
+                ChatTurnStatus::Stopped { reason } => RunTerminalOutcome::Succeeded {
                     result: Some(serde_json::json!({
                         "status": "stopped",
                         "reason": reason,
                         "attempt_ids": output.attempt_ids,
                     })),
-                    error_code: None,
-                    error_message: None,
                 },
-                ChatTurnStatus::Failed { message } => SupervisorTerminal {
-                    state: RunState::Failed,
-                    result: None,
-                    error_code: Some("chat_turn_failed".to_string()),
-                    error_message: Some(message),
+                ChatTurnStatus::Failed { message } => RunTerminalOutcome::Failed {
+                    error_code: "chat_turn_failed".to_string(),
+                    error_message: message,
                 },
-                ChatTurnStatus::Cancelled => SupervisorTerminal {
-                    state: RunState::Cancelled,
-                    result: None,
+                ChatTurnStatus::Cancelled => RunTerminalOutcome::Cancelled {
                     error_code: None,
                     error_message: None,
                 },
@@ -587,18 +576,16 @@ impl DurableRunDriver for ChatSupervisorDriver {
         let pending_request = self
             .execution
             .pending_request()
-            .map(|request| -> SupervisorResult<SupervisorEffect> {
-                Ok(SupervisorEffect {
-                    sequence: request.key().sequence,
-                    kind: request.kind().as_str().to_string(),
-                    delivery_class: effect_delivery_class(
+            .map(|request| -> SupervisorResult<RunRequest> {
+                Ok(RunRequest::new(
+                    request_delivery(
                         self.service
                             .as_ref()
                             .expect("chat driver retains its service"),
                         request,
                     )?,
-                    request: serde_json::to_value(request)?,
-                })
+                    request.clone(),
+                ))
             })
             .transpose()?;
         let checkpoint = serde_json::to_value(ChatDriverCheckpoint {
@@ -624,15 +611,18 @@ impl DurableRunDriver for ChatSupervisorDriver {
         })
     }
 
-    fn execute_pending_effect(
+    fn execute_pending_request(
         &mut self,
-        context: &EffectExecutionContext,
-    ) -> std::result::Result<serde_json::Value, DriverEffectError> {
+        context: &RunRequestContext,
+    ) -> std::result::Result<RunRequestResult, RunRequestError> {
         if self.cancellation.is_cancelled() {
             self.execution
                 .request_cancellation()
-                .map_err(|error| DriverEffectError::new("turn.cancel", error.to_string(), false))?;
+                .map_err(|error| RunRequestError::new("turn.cancel", error.to_string(), false))?;
         }
+        let pending_request = self.execution.pending_request().cloned().ok_or_else(|| {
+            RunRequestError::new("turn.request_missing", "turn has no pending request", false)
+        })?;
         let service = self
             .service
             .as_mut()
@@ -665,7 +655,7 @@ impl DurableRunDriver for ChatSupervisorDriver {
         let result = service
             .execute_user_turn_request_with_step(&mut self.execution, Some(&context.step_id))
             .map_err(|error| {
-                DriverEffectError::new("chat.effect_execute", format!("{error:#}"), true)
+                RunRequestError::new("chat.request_execute", format!("{error:#}"), true)
             })?;
         let tokens_after = service.model_token_usage();
         self.usage.model_input_tokens = self
@@ -677,27 +667,34 @@ impl DurableRunDriver for ChatSupervisorDriver {
             .model_output_tokens
             .saturating_add(tokens_after.1.saturating_sub(tokens_before.1));
         if pending_is_delegation && crate::delegation::result_is_waiting(&result) {
-            return Err(DriverEffectError::durable_wait(
+            return Err(RunRequestError::durable_wait(
                 "delegation.child_waiting",
                 "delegated child run has not reached a terminal state",
             ));
         }
         if let Some(failure) = retryable_failure(&result) {
-            return Err(DriverEffectError::new(
+            return Err(RunRequestError::new(
                 failure.code.as_str(),
                 failure.message.clone(),
                 true,
             ));
         }
-        let evidence = serde_json::to_value(&result).map_err(|error| {
-            DriverEffectError::new("chat.effect_evidence", error.to_string(), false)
-        })?;
+        let durable_result = RunRequestResult::for_request(
+            &RunRequest::new(
+                request_delivery(service, &pending_request).map_err(|error| {
+                    RunRequestError::new("chat.request_delivery", error.to_string(), false)
+                })?,
+                pending_request,
+            ),
+            result.clone(),
+        )
+        .map_err(|error| RunRequestError::new("chat.request_identity", error.to_string(), false))?;
         service
             .resume_user_turn_request(&mut self.execution, result)
             .map_err(|error| {
-                DriverEffectError::new("chat.effect_resume", format!("{error:#}"), false)
+                RunRequestError::new("chat.request_resume", format!("{error:#}"), false)
             })?;
-        Ok(evidence)
+        Ok(durable_result)
     }
 }
 
@@ -725,14 +722,11 @@ impl Drop for ChatSupervisorDriver {
     }
 }
 
-fn effect_delivery_class(
-    service: &ChatService,
-    request: &TurnRequest,
-) -> SupervisorResult<EffectDeliveryClass> {
+fn request_delivery(service: &ChatService, request: &TurnRequest) -> SupervisorResult<RunDelivery> {
     match request {
         TurnRequest::HookBatch { .. }
         | TurnRequest::ModelGeneration { .. }
-        | TurnRequest::TranscriptAppend { .. } => Ok(EffectDeliveryClass::ReplaySafe),
+        | TurnRequest::TranscriptAppend { .. } => Ok(RunDelivery::ReplaySafe),
         TurnRequest::ToolDispatch { request, .. } => service
             .tool_delivery_class(&request.tool_id)
             .map_err(|error| SupervisorError::Driver(format!("{error:#}"))),

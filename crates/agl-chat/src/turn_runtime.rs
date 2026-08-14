@@ -11,6 +11,7 @@ use agl_ids::{
     AttemptId, EventId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
 use agl_inference::{InferenceCancellation, InferenceFinishReason, InferenceOutputSink};
+use agl_kernel::RunDelivery;
 use agl_kernel::{
     DispatchDenial, DispatchDenialCode, ToolEffectJournal, ToolEffectJournalError,
     ToolEffectJournalRecord, ToolRuntime,
@@ -20,7 +21,6 @@ use agl_kernel::{
     ModelRequest, ModelResponse, ModelResponseOutcome, ToolDispatchRequest, ToolDispatchResponse,
 };
 use agl_kernel::{HookInput, ToolId, ToolInvocation};
-use agl_store::EffectDeliveryClass;
 use anyhow::{Context, Result, ensure};
 
 use crate::session::{InferenceExecutionControl, InferenceSession};
@@ -751,21 +751,14 @@ impl ChatTurnRuntime {
             .to_string())
     }
 
-    pub(crate) fn tool_delivery_class(
-        &self,
-        tool_id: &agl_kernel::ToolId,
-    ) -> Result<EffectDeliveryClass> {
+    pub(crate) fn tool_delivery_class(&self, tool_id: &agl_kernel::ToolId) -> Result<RunDelivery> {
         let tool = self
             .active_effective_capabilities
             .as_ref()
             .context("turn tool snapshot is not initialized")?
             .tool(tool_id)
             .context("pending tool is not in the effective turn snapshot")?;
-        Ok(match tool.declaration().delivery {
-            agl_kernel::ToolDelivery::ReplaySafe => EffectDeliveryClass::ReplaySafe,
-            agl_kernel::ToolDelivery::IdempotentRunStep => EffectDeliveryClass::Idempotent,
-            agl_kernel::ToolDelivery::AtMostOnce => EffectDeliveryClass::AtMostOnce,
-        })
+        Ok(tool.declaration().delivery.into())
     }
 
     pub(crate) fn append_executor_events(

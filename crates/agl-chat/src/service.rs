@@ -426,7 +426,7 @@ impl ChatService {
     pub(crate) fn tool_delivery_class(
         &self,
         tool_id: &agl_kernel::ToolId,
-    ) -> Result<agl_store::EffectDeliveryClass> {
+    ) -> Result<agl_kernel::RunDelivery> {
         self.turn_runtime.tool_delivery_class(tool_id)
     }
 

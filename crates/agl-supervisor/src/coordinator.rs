@@ -7,15 +7,13 @@ use std::time::Duration;
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, StepId};
+use agl_kernel::{RunBudgetLedger, RunDelivery, RunTerminalOutcome, TurnRequestKind};
 use agl_store::{
-    AglStore, DurableRunDraft, DurableRunRecord, EffectDeliveryClass, RunLease, RunState,
-    RunStepDraft, RunStepState, SafeRunStatus,
+    AglStore, DurableRunDraft, DurableRunRecord, RunLease, RunState, RunStepDraft, RunStepState,
+    SafeRunStatus,
 };
 
-use crate::driver::{
-    DriverSnapshot, DurableRunDriverFactory, EffectExecutionContext, RunCancellation,
-    SupervisorTerminal,
-};
+use crate::driver::{DriverSnapshot, DurableRunDriverFactory, RunCancellation, RunRequestContext};
 use crate::{Result, SupervisorError, SupervisorOptions};
 
 #[derive(Clone, Debug)]
@@ -110,12 +108,12 @@ impl Supervisor {
         let store_root = store_root.as_ref().to_path_buf();
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity);
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
-        let worker_sender = sender.clone();
+        let run_task_sender = sender.clone();
         let join = thread::Builder::new()
             .name("agl-supervisor".to_string())
             .spawn(move || {
                 let result =
-                    Coordinator::open(store_root, factory, options, receiver, worker_sender);
+                    Coordinator::open(store_root, factory, options, receiver, run_task_sender);
                 match result {
                     Ok(mut coordinator) => {
                         let _ = init_sender.send(Ok(()));
@@ -241,7 +239,7 @@ impl SupervisorHandle {
 
 enum CoordinatorMessage {
     Command(Box<CommandRequest>),
-    Worker(WorkerMessage),
+    RunTask(RunTaskMessage),
 }
 
 enum CommandRequest {
@@ -279,7 +277,7 @@ enum CommandRequest {
     Shutdown,
 }
 
-enum WorkerMessage {
+enum RunTaskMessage {
     EventsCommitted {
         run_id: RunId,
         events: Vec<SafeRuntimeEventEnvelope>,
@@ -349,7 +347,7 @@ impl Coordinator {
                 Ok(CoordinatorMessage::Command(command)) => {
                     running = self.handle_command(*command);
                 }
-                Ok(CoordinatorMessage::Worker(message)) => self.handle_worker(message),
+                Ok(CoordinatorMessage::RunTask(message)) => self.handle_run_task(message),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -379,6 +377,7 @@ impl Coordinator {
                             turn_id: run.turn_id,
                             kind: run.kind,
                             state: run.state,
+                            revision: run.revision,
                             priority: run.priority,
                             concurrency_key: run.concurrency_key,
                             usage: run.usage,
@@ -527,9 +526,9 @@ impl Coordinator {
         })
     }
 
-    fn handle_worker(&mut self, message: WorkerMessage) {
+    fn handle_run_task(&mut self, message: RunTaskMessage) {
         match message {
-            WorkerMessage::EventsCommitted { run_id, events } => {
+            RunTaskMessage::EventsCommitted { run_id, events } => {
                 if let Some(subscribers) = self.subscribers.get_mut(&run_id) {
                     subscribers.retain_mut(|subscriber| {
                         for event in &events {
@@ -555,7 +554,7 @@ impl Coordinator {
                     });
                 }
             }
-            WorkerMessage::Finished { run_id } => {
+            RunTaskMessage::Finished { run_id } => {
                 self.active.remove(&run_id);
                 if self
                     .store
@@ -619,7 +618,7 @@ impl Coordinator {
         if !self.expire_delegation_trees(self.options.clock.now_ms()) {
             return;
         }
-        while self.active.len() < self.options.worker_limit {
+        while self.active.len() < self.options.max_active_runs {
             let now_ms = self.options.clock.now_ms();
             let lease = match self.store.claim_next_run(
                 &self.options.owner_id,
@@ -638,7 +637,7 @@ impl Coordinator {
                     cancellation: cancellation.clone(),
                 },
             );
-            spawn_worker(WorkerContext {
+            spawn_run_task(RunTaskContext {
                 store_root: self.store_root.clone(),
                 factory: self.factory.clone(),
                 options: self.options.clone(),
@@ -671,7 +670,7 @@ impl Coordinator {
     }
 }
 
-struct WorkerContext {
+struct RunTaskContext {
     store_root: PathBuf,
     factory: Arc<dyn DurableRunDriverFactory>,
     options: SupervisorOptions,
@@ -680,36 +679,36 @@ struct WorkerContext {
     cancellation: RunCancellation,
 }
 
-fn spawn_worker(context: WorkerContext) {
+fn spawn_run_task(context: RunTaskContext) {
     let name = format!("agl-run-{}", context.lease.run_id);
     let fallback_sender = context.sender.clone();
     let fallback_run_id = context.lease.run_id.clone();
     match thread::Builder::new()
         .name(name)
-        .spawn(move || run_worker(context))
+        .spawn(move || run_task(context))
     {
         Ok(_) => {}
         Err(_) => {
-            let _ = fallback_sender.send(CoordinatorMessage::Worker(WorkerMessage::Finished {
+            let _ = fallback_sender.send(CoordinatorMessage::RunTask(RunTaskMessage::Finished {
                 run_id: fallback_run_id,
             }));
         }
     }
 }
 
-fn run_worker(context: WorkerContext) {
+fn run_task(context: RunTaskContext) {
     let run_id = context.lease.run_id.clone();
-    if let Err(error) = run_worker_inner(&context) {
-        fail_worker_run(&context, &error);
+    if let Err(error) = run_task_inner(&context) {
+        fail_run_task(&context, &error);
     }
     let _ = context
         .sender
-        .send(CoordinatorMessage::Worker(WorkerMessage::Finished {
+        .send(CoordinatorMessage::RunTask(RunTaskMessage::Finished {
             run_id,
         }));
 }
 
-fn fail_worker_run(context: &WorkerContext, error: &SupervisorError) {
+fn fail_run_task(context: &RunTaskContext, error: &SupervisorError) {
     let Ok(store) = AglStore::open_current_at(&context.store_root) else {
         return;
     };
@@ -726,14 +725,14 @@ fn fail_worker_run(context: &WorkerContext, error: &SupervisorError) {
         Some(&checkpoint),
         &run.usage,
         None,
-        Some("supervisor_worker_failed"),
+        Some("supervisor_run_task_failed"),
         Some(&error.to_string()),
         &[],
         context.options.clock.now_ms(),
     );
 }
 
-fn run_worker_inner(context: &WorkerContext) -> Result<()> {
+fn run_task_inner(context: &RunTaskContext) -> Result<()> {
     let store = AglStore::open_current_at(&context.store_root)?;
     let run = store
         .run(&context.lease.run_id)?
@@ -750,9 +749,7 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                 &store,
                 context,
                 &snapshot,
-                SupervisorTerminal {
-                    state: RunState::Cancelled,
-                    result: None,
+                RunTerminalOutcome::Cancelled {
                     error_code: Some("budget_exhausted".to_string()),
                     error_message: Some("run budget exhausted".to_string()),
                 },
@@ -763,22 +760,18 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
             finish_terminal(&store, context, &snapshot, terminal)?;
             return Ok(());
         }
-        let effect = snapshot.pending_request.clone().ok_or_else(|| {
+        let request = snapshot.pending_request.clone().ok_or_else(|| {
             SupervisorError::Driver(
-                "driver snapshot has neither a pending effect nor a terminal state".to_string(),
+                "driver snapshot has neither a pending request nor a terminal state".to_string(),
             )
         })?;
-        let existing = store.run_step_by_sequence(&run.run_id, effect.sequence)?;
+        let existing = store.run_step_by_sequence(&run.run_id, request.key().sequence)?;
         let step = if let Some(existing) = existing {
             existing
         } else {
             let draft = RunStepDraft {
                 step_id: StepId::generate(),
-                turn_id: run.turn_id.clone(),
-                request_sequence: effect.sequence,
-                effect_kind: effect.kind.clone(),
-                delivery_class: effect.delivery_class,
-                request: effect.request.clone(),
+                request: request.clone(),
             };
             let step = store.publish_run_step(
                 &context.lease,
@@ -792,8 +785,9 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
         };
         if step.state != RunStepState::Pending {
             return Err(SupervisorError::Driver(format!(
-                "checkpoint pending effect {} has durable step state {:?}",
-                effect.sequence, step.state
+                "checkpoint pending request {} has durable step state {:?}",
+                request.key().sequence,
+                step.state
             )));
         }
         let now_ms = context.options.clock.now_ms();
@@ -804,13 +798,13 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
             now_ms,
         )?;
 
-        let execution_context = EffectExecutionContext {
+        let execution_context = RunRequestContext {
             run_id: run.run_id.clone(),
             step_id: step.step_id.clone(),
             attempt: step.attempts.saturating_add(1),
             cancellation: context.cancellation.clone(),
         };
-        let effect_result = driver.execute_pending_effect(&execution_context);
+        let request_result = driver.execute_pending_request(&execution_context);
         if context.cancellation.is_cancelled() {
             let mut cancelled = driver.snapshot()?;
             refresh_wall_time(&run, &mut cancelled, context.options.clock.now_ms());
@@ -818,7 +812,7 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                 &context.lease,
                 &step_lease,
                 RunStepState::Cancelled,
-                effect_result.as_ref().ok(),
+                request_result.as_ref().ok(),
                 &cancelled.checkpoint,
                 &cancelled.usage,
                 &cancelled.events,
@@ -831,20 +825,18 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                 &store,
                 context,
                 &cancelled,
-                SupervisorTerminal {
-                    state: RunState::Cancelled,
-                    result: None,
+                RunTerminalOutcome::Cancelled {
                     error_code: None,
                     error_message: None,
                 },
             )?;
             return Ok(());
         }
-        match effect_result {
+        match request_result {
             Ok(result) => {
                 let mut next = driver.snapshot()?;
                 refresh_wall_time(&run, &mut next, context.options.clock.now_ms());
-                let step_state = match next.terminal.as_ref().map(|terminal| terminal.state) {
+                let step_state = match next.terminal.as_ref().map(RunTerminalOutcome::state) {
                     Some(RunState::Cancelled) => RunStepState::Cancelled,
                     Some(RunState::Failed) => RunStepState::Failed,
                     _ => RunStepState::Succeeded,
@@ -857,16 +849,14 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                     &next.checkpoint,
                     &next.usage,
                     &next.events,
-                    next.terminal
-                        .as_ref()
-                        .and_then(|terminal| terminal.error_code.as_deref()),
+                    next.terminal.as_ref().and_then(terminal_error_code),
                     context.options.clock.now_ms(),
                 )?;
                 notify_events(context, &next.events);
             }
             Err(error)
                 if error.retryable
-                    && effect.delivery_class != EffectDeliveryClass::AtMostOnce
+                    && request.delivery != RunDelivery::AtMostOnce
                     && (error.retry_limit_exempt
                         || step.attempts.saturating_add(1) < context.options.retry_limit) =>
             {
@@ -880,6 +870,7 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                 store.retry_run_step(
                     &context.lease,
                     &step_lease,
+                    context.options.retry_limit,
                     not_before_ms,
                     &error.code,
                     &failed.checkpoint,
@@ -910,11 +901,9 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
                     &store,
                     context,
                     &failed,
-                    SupervisorTerminal {
-                        state: RunState::Failed,
-                        result: None,
-                        error_code: Some(error.code),
-                        error_message: Some(error.message),
+                    RunTerminalOutcome::Failed {
+                        error_code: error.code,
+                        error_message: error.message,
                     },
                 )?;
                 return Ok(());
@@ -923,20 +912,41 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
     }
 }
 
+fn terminal_error_code(terminal: &RunTerminalOutcome) -> Option<&str> {
+    match terminal {
+        RunTerminalOutcome::Failed { error_code, .. } => Some(error_code),
+        RunTerminalOutcome::Cancelled { error_code, .. } => error_code.as_deref(),
+        RunTerminalOutcome::Succeeded { .. } | RunTerminalOutcome::Incomplete { .. } => None,
+    }
+}
+
 fn finish_terminal(
     store: &AglStore,
-    context: &WorkerContext,
+    context: &RunTaskContext,
     snapshot: &DriverSnapshot,
-    terminal: SupervisorTerminal,
+    terminal: RunTerminalOutcome,
 ) -> Result<()> {
+    let state = terminal.state();
+    let (result, error_code, error_message) = match terminal {
+        RunTerminalOutcome::Succeeded { result } => (result, None, None),
+        RunTerminalOutcome::Incomplete { result, reason } => (result, None, Some(reason)),
+        RunTerminalOutcome::Failed {
+            error_code,
+            error_message,
+        } => (None, Some(error_code), Some(error_message)),
+        RunTerminalOutcome::Cancelled {
+            error_code,
+            error_message,
+        } => (None, error_code, error_message),
+    };
     store.finish_run(
         &context.lease,
-        terminal.state,
+        state,
         Some(&snapshot.checkpoint),
         &snapshot.usage,
-        terminal.result.as_ref(),
-        terminal.error_code.as_deref(),
-        terminal.error_message.as_deref(),
+        result.as_ref(),
+        error_code.as_deref(),
+        error_message.as_deref(),
         &snapshot.events,
         context.options.clock.now_ms(),
     )?;
@@ -944,45 +954,53 @@ fn finish_terminal(
     Ok(())
 }
 
-fn notify_events(context: &WorkerContext, events: &[SafeRuntimeEventEnvelope]) {
+fn notify_events(context: &RunTaskContext, events: &[SafeRuntimeEventEnvelope]) {
     if events.is_empty() {
         return;
     }
-    let _ = context
-        .sender
-        .send(CoordinatorMessage::Worker(WorkerMessage::EventsCommitted {
+    let _ = context.sender.send(CoordinatorMessage::RunTask(
+        RunTaskMessage::EventsCommitted {
             run_id: context.lease.run_id.clone(),
             events: events.to_vec(),
-        }));
+        },
+    ));
 }
 
 fn budget_exhausted(run: &DurableRunRecord, snapshot: &DriverSnapshot, now_ms: i64) -> bool {
     let elapsed = run
         .started_at_ms
         .map_or(0, |started| now_ms.saturating_sub(started).max(0) as u64);
-    let usage = &snapshot.usage;
-    let budget = &run.budget;
-    let aggregate_output_tokens = usage
-        .model_output_tokens
-        .saturating_add(run.delegation_used_output_tokens)
-        .saturating_add(run.delegation_reserved_output_tokens);
-    let pending_kind = snapshot
+    let mut observed = snapshot.usage.clone();
+    observed.wall_time_ms = observed.wall_time_ms.max(elapsed);
+    let Ok(mut ledger) = RunBudgetLedger::restore(run.budget.clone(), run.usage.clone())
+        .with_delegated_output(
+            run.delegation_reserved_output_tokens,
+            run.delegation_used_output_tokens,
+        )
+    else {
+        return true;
+    };
+    let Ok(accepted) = ledger.observe_usage(
+        format!("observe:{}:{}", run.run_id, run.revision.get()),
+        observed,
+    ) else {
+        return true;
+    };
+    if !accepted.exhausted.is_empty() {
+        return true;
+    }
+    if snapshot.terminal.is_some() {
+        return false;
+    }
+    match snapshot
         .pending_request
         .as_ref()
-        .map(|effect| effect.kind.as_str());
-    elapsed > budget.wall_time_ms
-        || usage.model_input_tokens > budget.model_input_tokens
-        || aggregate_output_tokens > budget.model_output_tokens
-        || usage.model_attempts > budget.model_attempts
-        || usage.tool_calls > budget.tool_calls
-        || (snapshot.terminal.is_none()
-            && (elapsed >= budget.wall_time_ms
-                || (pending_kind == Some("model_generation")
-                    && (usage.model_attempts >= budget.model_attempts
-                        || usage.model_input_tokens >= budget.model_input_tokens
-                        || aggregate_output_tokens >= budget.model_output_tokens))
-                || (pending_kind == Some("tool_dispatch")
-                    && usage.tool_calls >= budget.tool_calls)))
+        .map(|request| request.request.kind())
+    {
+        Some(TurnRequestKind::ModelGeneration) => ledger.authorize_model_request().is_err(),
+        Some(TurnRequestKind::ToolDispatch) => ledger.authorize_tool_request().is_err(),
+        Some(TurnRequestKind::HookBatch | TurnRequestKind::TranscriptAppend) | None => false,
+    }
 }
 
 fn refresh_wall_time(run: &DurableRunRecord, snapshot: &mut DriverSnapshot, now_ms: i64) {
