@@ -45,7 +45,7 @@ job_id="$(jq -er '.id' "$job_json")"
 "$agl_bin" cron history --home "$live_root" "$job_id" --json >"$history_json"
 "$agl_bin" store status --home "$live_root" --json >"$status_json"
 
-schema_version="$(jq -er '.schema_version' "$status_json")"
+schema_version="$(jq -er '.schema.schema_version' "$status_json")"
 jq -e \
   --arg schema "$schema_version" \
   '.run.status == "succeeded"

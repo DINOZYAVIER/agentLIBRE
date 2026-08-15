@@ -185,7 +185,7 @@ impl ArtifactGitRepository {
         &self,
         binding: &ArtifactBinding,
         request: ArtifactCommitRequest,
-        operations: &mut dyn ArtifactCommitRepository,
+        operations: &dyn ArtifactCommitRepository,
     ) -> Result<ArtifactCommitEvidence, ArtifactCommitError> {
         self.commit_artifact_inner(binding, request, operations, None)
     }
@@ -194,7 +194,7 @@ impl ArtifactGitRepository {
         &self,
         binding: &ArtifactBinding,
         request: ArtifactCommitRequest,
-        operations: &mut dyn ArtifactCommitRepository,
+        operations: &dyn ArtifactCommitRepository,
         failpoint: ArtifactCommitFailpoint,
     ) -> Result<ArtifactCommitEvidence, ArtifactCommitError> {
         self.commit_artifact_inner(binding, request, operations, Some(failpoint))
@@ -204,7 +204,7 @@ impl ArtifactGitRepository {
         &self,
         binding: &ArtifactBinding,
         request: ArtifactCommitRequest,
-        operations: &mut dyn ArtifactCommitRepository,
+        operations: &dyn ArtifactCommitRepository,
         failpoint: Option<ArtifactCommitFailpoint>,
     ) -> Result<ArtifactCommitEvidence, ArtifactCommitError> {
         if binding.artifact_id() != request.artifact_id() || !binding.is_verified() {
@@ -309,7 +309,7 @@ impl ArtifactGitRepository {
     fn advance(
         &self,
         mut record: ArtifactCommitRecord,
-        operations: &mut dyn ArtifactCommitRepository,
+        operations: &dyn ArtifactCommitRepository,
         failpoint: Option<ArtifactCommitFailpoint>,
     ) -> Result<ArtifactCommitEvidence, ArtifactCommitError> {
         loop {
@@ -471,7 +471,7 @@ impl ArtifactGitRepository {
 
     pub fn recover_incomplete(
         &self,
-        operations: &mut dyn ArtifactCommitRepository,
+        operations: &dyn ArtifactCommitRepository,
     ) -> Result<Vec<ArtifactCommitEvidence>, ArtifactCommitError> {
         operations
             .incomplete()

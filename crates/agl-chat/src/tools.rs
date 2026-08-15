@@ -15,7 +15,7 @@ use anyhow::Result;
 
 pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub core_tools: &'a agl_core_tools::CoreTools,
-    pub store_root: &'a Path,
+    pub repositories: &'a agl_runtime::StoreRepositories,
     pub trust_store_path: &'a Path,
     pub workspace_root: &'a Path,
     pub runtime_paths: &'a agl_runtime::AgentLibrePaths,
@@ -101,8 +101,10 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
     let mut core_tools = config.core_tools.clone();
     let package_input = agl_repo::package_composition_input(config.workspace_root)?;
-    let mut repo_tools =
-        agl_core_tools::RepoTools::new(config.workspace_root).with_store_root(config.store_root);
+    let mut repo_tools = agl_core_tools::RepoTools::new(
+        config.workspace_root,
+        config.repositories.artifact_commits.clone(),
+    );
     let mut host = product_host_builder()
         .binding(
             host_binding_id(agl_core_tools::guards::EXTENSION_ID),
@@ -117,22 +119,31 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .shared_tool_handler(
             host_binding_id(agl_core_tools::cron::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::CronTools::new(config.store_root)),
+            Arc::new(agl_core_tools::CronTools::new(
+                config.repositories.cron.clone(),
+                config.repositories.matrix_outbox.clone(),
+            )),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::matrix::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::MatrixTools::new(config.store_root)),
+            Arc::new(agl_core_tools::MatrixTools::new(
+                config.repositories.matrix_outbox.clone(),
+            )),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::memory::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::MemoryTools::new(config.store_root)),
+            Arc::new(agl_core_tools::MemoryTools::new(
+                config.repositories.memory.clone(),
+            )),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::notes::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::NotesTools::new(config.store_root)),
+            Arc::new(agl_core_tools::NotesTools::new(
+                config.repositories.notes.clone(),
+            )),
         );
     let repo_descriptor = agl_core_tools::repo::declaration();
     if let Some(declaration) = repo_descriptor
@@ -141,8 +152,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .find(|artifact| artifact.id.as_str() == "core.repo:tasks")
         && let Ok(repository) = agl_repo::ArtifactGitRepository::open(config.workspace_root)
     {
-        let mut store = agl_store::AglStore::open_at(config.store_root)?;
-        repository.recover_incomplete(&mut store)?;
+        repository.recover_incomplete(config.repositories.artifact_commits.as_ref())?;
         if let Ok(binding) = repository.verify_binding(declaration) {
             let handle = agl_artifact::ArtifactHandle::bind(declaration.clone(), binding.clone())?;
             core_tools =
@@ -155,8 +165,9 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
             );
         }
     }
-    let permission_tools = agl_core_tools::PermissionTools::new(config.store_root)
-        .with_runtime_status(config.permission_status);
+    let permission_tools =
+        agl_core_tools::PermissionTools::new(config.repositories.permissions.clone())
+            .with_runtime_status(config.permission_status);
     let permission_tools = config
         .process_tools
         .as_ref()
@@ -188,7 +199,9 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .shared_tool_handler(
             host_binding_id(agl_core_tools::store::EXTENSION_ID),
             1,
-            Arc::new(agl_core_tools::StoreTools::new(config.store_root)),
+            Arc::new(agl_core_tools::StoreTools::new(
+                config.repositories.administration.clone(),
+            )),
         )
         .shared_tool_handler(
             host_binding_id(agl_core_tools::skills::EXTENSION_ID),
@@ -203,7 +216,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
             host_binding_id(agl_host_tools::screen::EXTENSION_ID),
             1,
             Arc::new(agl_host_tools::ScreenTools::new(
-                config.store_root,
+                config.repositories.content.clone(),
                 config.screen_admitted_run,
             )),
         )
@@ -346,12 +359,14 @@ mod tests {
         let root = temp_root("tool-parity");
         let core_tools = agl_core_tools::CoreTools::new(&root).unwrap();
         let catalog = chat_extension_catalog().unwrap();
+        let runtime_paths = agl_runtime::AgentLibrePaths::from_agl_home(&root);
+        let store_runtime = agl_runtime::StoreRuntime::open(&runtime_paths).unwrap();
         let runtime = chat_tool_runtime(ChatToolRuntimeConfig {
             core_tools: &core_tools,
-            store_root: &root.join("store"),
+            repositories: store_runtime.repositories(),
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: &root,
-            runtime_paths: &agl_runtime::AgentLibrePaths::from_agl_home(&root),
+            runtime_paths: &runtime_paths,
             permission_status: agl_core_tools::PermissionRuntimeStatus::default(),
             process_tools: None,
             screen_admitted_run: None,
@@ -469,12 +484,14 @@ mod tests {
     }
 
     fn test_runtime(root: &Path, core_tools: &agl_core_tools::CoreTools) -> ToolRuntime {
+        let runtime_paths = agl_runtime::AgentLibrePaths::from_agl_home(root);
+        let store_runtime = agl_runtime::StoreRuntime::open(&runtime_paths).unwrap();
         chat_tool_runtime(ChatToolRuntimeConfig {
             core_tools,
-            store_root: &root.join("store"),
+            repositories: store_runtime.repositories(),
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: root,
-            runtime_paths: &agl_runtime::AgentLibrePaths::from_agl_home(root),
+            runtime_paths: &runtime_paths,
             permission_status: agl_core_tools::PermissionRuntimeStatus::default(),
             process_tools: None,
             screen_admitted_run: None,

@@ -10,9 +10,9 @@ agl-exec.workspace = true
 agl-kernel.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
-agl-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 agl-process.workspace = true
+agl-store.workspace = true

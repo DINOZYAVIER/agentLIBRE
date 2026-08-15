@@ -1,13 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agl_exec::AuthorityFingerprint;
 use agl_kernel::{
-    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
-    ToolDispatchContext, ToolHandler, ToolId, ToolResult,
+    EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, SensitiveInput,
+    ToolDeclaration, ToolDispatchContext, ToolHandler, ToolId, ToolInvocation, ToolResult,
+};
+use agl_permission::{
+    PermissionDuration, PermissionGrantDraft, PermissionOperationId, PermissionRepository,
+    PermissionRequestDraft, PermissionRequestRecord, PermissionRequestState,
 };
 use agl_process::TerminalEndpoint;
-use agl_store::{AglStore, PermissionGrantDraft, PermissionRequestDraft, PermissionRequestRecord};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,7 +27,7 @@ pub const PERMISSIONS_REVOKE_TOOL_ID: &str = "core.permission:revoke";
 
 #[derive(Clone)]
 pub struct PermissionTools {
-    store_root: PathBuf,
+    repository: Arc<dyn PermissionRepository>,
     runtime_status: PermissionRuntimeStatus,
     terminal_endpoint: Option<Arc<TerminalEndpoint>>,
 }
@@ -51,9 +54,9 @@ impl Default for PermissionRuntimeStatus {
 }
 
 impl PermissionTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
+    pub fn new(repository: Arc<dyn PermissionRepository>) -> Self {
         Self {
-            store_root: store_root.as_ref().to_path_buf(),
+            repository,
             runtime_status: PermissionRuntimeStatus::default(),
             terminal_endpoint: None,
         }
@@ -73,17 +76,19 @@ impl PermissionTools {
         match name {
             PERMISSIONS_STATUS_TOOL_ID => self.status(arguments),
             PERMISSIONS_REQUEST_TOOL_ID => self.request(arguments),
-            PERMISSIONS_GRANT_TOOL_ID => self.grant(arguments),
-            PERMISSIONS_REVOKE_TOOL_ID => self.revoke(arguments),
+            PERMISSIONS_GRANT_TOOL_ID | PERMISSIONS_REVOKE_TOOL_ID => bail!(
+                "{name} requires a request or run-step idempotency identity and must be dispatched through ToolHandler"
+            ),
             _ => anyhow::bail!("unknown permission tool `{name}`"),
         }
     }
 
     fn status(&self, arguments: Value) -> Result<Value> {
         parse_args::<StatusArgs>(PERMISSIONS_STATUS_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let pending = store.pending_permission_requests()?;
-        let active = store.active_permission_grants()?;
+        let pending = self
+            .repository
+            .requests_by_state(PermissionRequestState::Pending)?;
+        let active = self.repository.active_grants()?;
         let pending_requests = pending
             .into_iter()
             .map(|request| {
@@ -94,7 +99,7 @@ impl PermissionTools {
                     "state_effects": request.state_effects,
                     "sensitive_inputs": request.sensitive_inputs,
                     "duration": request.duration,
-                    "status": request.status.as_str(),
+                    "status": request.state.as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -108,7 +113,7 @@ impl PermissionTools {
                     "state_effects": grant.state_effects,
                     "sensitive_inputs": grant.sensitive_inputs,
                     "duration": grant.duration,
-                    "status": grant.status.as_str(),
+                    "status": grant.state.as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -139,18 +144,16 @@ impl PermissionTools {
         let max_operation_kind = args
             .max_operation_kind
             .unwrap_or(OperationKindArg::Write)
-            .as_str()
-            .to_string();
-        let duration = args.duration.unwrap_or_default().as_str().to_string();
+            .into();
+        let duration = args.duration.unwrap_or_default().into();
         let requester_ref = args
             .requester_ref
             .unwrap_or_else(|| "tool:core.permission:request".to_string());
-        let store = self.open_store_writable()?;
-        let request = store.create_permission_request(PermissionRequestDraft {
+        let request = self.repository.create_request(PermissionRequestDraft {
             requested_tools,
             max_operation_kind,
-            state_effects: args.state_effects.unwrap_or_default(),
-            sensitive_inputs: args.sensitive_inputs.unwrap_or_default(),
+            state_effects: parse_effects(args.state_effects)?,
+            sensitive_inputs: parse_sensitive_inputs(args.sensitive_inputs)?,
             scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
             duration,
             reason: args.reason,
@@ -159,33 +162,33 @@ impl PermissionTools {
         Ok(render_permission_request_result(&request))
     }
 
-    fn grant(&self, arguments: Value) -> Result<Value> {
+    fn grant(&self, arguments: Value, operation_id: PermissionOperationId) -> Result<Value> {
         let args = parse_args::<GrantArgs>(PERMISSIONS_GRANT_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
         let grants = match args {
-            GrantArgs::Request(args) => store.grant_permission_request(
+            GrantArgs::Request(args) => self.repository.grant_request(
                 &args.request_id,
                 args.granted_by_ref
                     .as_deref()
                     .unwrap_or("tool:core.permission:grant"),
+                operation_id,
                 args.resolution_ref.as_deref(),
             )?,
             GrantArgs::Direct(args) => {
-                validate_requested_tools(vec![args.tool_id.clone()])?;
+                let mut tools = validate_requested_tools(vec![args.tool_id])?;
+                let tool_id = tools.pop().expect("one validated tool");
                 let max_operation_kind = args
                     .max_operation_kind
                     .unwrap_or(OperationKindArg::Write)
-                    .as_str()
-                    .to_string();
+                    .into();
                 vec![
-                    store.create_permission_grant(PermissionGrantDraft {
+                    self.repository.create_grant(PermissionGrantDraft {
                         request_id: None,
-                        tool_id: args.tool_id,
+                        tool_id,
                         max_operation_kind,
-                        state_effects: args.state_effects.unwrap_or_default(),
-                        sensitive_inputs: args.sensitive_inputs.unwrap_or_default(),
+                        state_effects: parse_effects(args.state_effects)?,
+                        sensitive_inputs: parse_sensitive_inputs(args.sensitive_inputs)?,
                         scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
-                        duration: args.duration.unwrap_or_default().as_str().to_string(),
+                        duration: args.duration.unwrap_or_default().into(),
                         granted_by_ref: args
                             .granted_by_ref
                             .unwrap_or_else(|| "tool:core.permission:grant".to_string()),
@@ -202,7 +205,7 @@ impl PermissionTools {
                     "max_operation_kind": grant.max_operation_kind,
                     "sensitive_inputs": grant.sensitive_inputs,
                     "duration": grant.duration,
-                    "status": grant.status.as_str(),
+                    "status": grant.state.as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -214,15 +217,11 @@ impl PermissionTools {
         }))
     }
 
-    fn revoke(&self, arguments: Value) -> Result<Value> {
-        let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
-        self.commit_revocation(args, 0)
-    }
-
     async fn revoke_live(
         &self,
         arguments: Value,
         policy_hash: &agl_kernel::PolicyHash,
+        operation_id: PermissionOperationId,
     ) -> Result<Value> {
         let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
         let terminated_executions = if let Some(endpoint) = &self.terminal_endpoint {
@@ -237,37 +236,27 @@ impl PermissionTools {
         } else {
             0
         };
-        self.commit_revocation(args, terminated_executions)
+        self.commit_revocation(args, operation_id, terminated_executions)
     }
 
-    fn commit_revocation(&self, args: RevokeArgs, terminated_executions: u32) -> Result<Value> {
-        let store = self.open_store_writable()?;
-        let grant = store.revoke_permission_grant(&args.grant_id, args.revoke_ref.as_deref())?;
+    fn commit_revocation(
+        &self,
+        args: RevokeArgs,
+        operation_id: PermissionOperationId,
+        terminated_executions: u32,
+    ) -> Result<Value> {
+        let grant = self.repository.revoke_grant(
+            &args.grant_id,
+            operation_id,
+            args.revoke_ref.as_deref(),
+        )?;
         Ok(json!({
             "tool": PERMISSIONS_REVOKE_TOOL_ID,
             "grant_id": grant.id,
             "tool_id": grant.tool_id,
-            "status": grant.status.as_str(),
+            "status": grant.state.as_str(),
             "terminated_executions": terminated_executions,
         }))
-    }
-
-    fn open_store_read_only(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root).with_context(|| {
-            format!(
-                "failed to open permission store {}",
-                self.store_root.display()
-            )
-        })
-    }
-
-    fn open_store_writable(&self) -> Result<AglStore> {
-        AglStore::open_current_at(&self.store_root).with_context(|| {
-            format!(
-                "failed to open permission store {}",
-                self.store_root.display()
-            )
-        })
     }
 }
 
@@ -275,11 +264,17 @@ impl ToolHandler for PermissionTools {
     fn dispatch(&self, context: ToolDispatchContext) -> agl_kernel::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            let data = if invocation.tool_id.as_str() == PERMISSIONS_REVOKE_TOOL_ID {
-                self.revoke_live(invocation.arguments, &invocation.policy_hash)
-                    .await?
-            } else {
-                self.dispatch(invocation.tool_id.as_str(), invocation.arguments)?
+            let data = match invocation.tool_id.as_str() {
+                PERMISSIONS_GRANT_TOOL_ID => {
+                    let operation_id = permission_operation_id(&invocation)?;
+                    self.grant(invocation.arguments, operation_id)?
+                }
+                PERMISSIONS_REVOKE_TOOL_ID => {
+                    let operation_id = permission_operation_id(&invocation)?;
+                    self.revoke_live(invocation.arguments, &invocation.policy_hash, operation_id)
+                        .await?
+                }
+                _ => self.dispatch(invocation.tool_id.as_str(), invocation.arguments)?,
             };
             Ok(ToolResult::new(data))
         })
@@ -341,7 +336,21 @@ fn action<T: JsonSchema>(
     .with_state_effects(state_effects.iter().cloned())
 }
 
-fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
+fn permission_operation_id(invocation: &ToolInvocation) -> Result<PermissionOperationId> {
+    let identity = invocation
+        .run_step_idempotency_key()
+        .or_else(|| invocation.request_id.as_ref().map(ToString::to_string))
+        .with_context(|| {
+            format!(
+                "{} requires a request or run-step idempotency identity",
+                invocation.tool_id
+            )
+        })?;
+    PermissionOperationId::new(format!("{}:{identity}", invocation.tool_id))
+        .map_err(anyhow::Error::from)
+}
+
+fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<ToolId>> {
     if tools.is_empty() {
         bail!("core.permission:request tools cannot be empty");
     }
@@ -354,18 +363,37 @@ fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
         if id.extension_namespace() == "core.permission" {
             bail!("permission tools cannot request or grant permission tools");
         }
-        if seen.insert(id.as_str().to_string()) {
-            normalized.push(id.as_str().to_string());
+        if seen.insert(id.clone()) {
+            normalized.push(id);
         }
     }
     Ok(normalized)
+}
+
+fn parse_effects(effects: Option<Vec<String>>) -> Result<BTreeSet<EffectId>> {
+    effects
+        .unwrap_or_default()
+        .into_iter()
+        .map(|effect| EffectId::new(effect).map_err(anyhow::Error::from))
+        .collect()
+}
+
+fn parse_sensitive_inputs(inputs: Option<Vec<String>>) -> Result<BTreeSet<SensitiveInput>> {
+    inputs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|input| match input.as_str() {
+            "screen_capture" => Ok(SensitiveInput::ScreenCapture),
+            _ => bail!("unknown sensitive input `{input}`"),
+        })
+        .collect()
 }
 
 fn render_permission_request_result(request: &PermissionRequestRecord) -> Value {
     json!({
         "tool": PERMISSIONS_REQUEST_TOOL_ID,
         "request_id": request.id,
-        "status": request.status.as_str(),
+        "status": request.state.as_str(),
         "tools": request.requested_tools,
         "max_operation_kind": request.max_operation_kind,
         "sensitive_inputs": request.sensitive_inputs,
@@ -393,24 +421,26 @@ enum PermissionDurationArg {
     Session,
 }
 
-impl PermissionDurationArg {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::OneTurn => "one_turn",
-            Self::Session => "session",
+impl PermissionDurationArg {}
+
+impl From<PermissionDurationArg> for PermissionDuration {
+    fn from(value: PermissionDurationArg) -> Self {
+        match value {
+            PermissionDurationArg::OneTurn => Self::OneTurn,
+            PermissionDurationArg::Session => Self::Session,
         }
     }
 }
 
-impl OperationKindArg {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Request => "request",
-            Self::Write => "write",
-            Self::Execute => "execute",
-            Self::Approve => "approve",
-            Self::Admin => "admin",
+impl From<OperationKindArg> for OperationKind {
+    fn from(value: OperationKindArg) -> Self {
+        match value {
+            OperationKindArg::Read => Self::Read,
+            OperationKindArg::Request => Self::Request,
+            OperationKindArg::Write => Self::Write,
+            OperationKindArg::Execute => Self::Execute,
+            OperationKindArg::Approve => Self::Approve,
+            OperationKindArg::Admin => Self::Admin,
         }
     }
 }
@@ -470,14 +500,14 @@ struct RevokeArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::{migrated_temp_root, temp_root};
+    use crate::test_support::migrated_temp_store;
 
     use super::*;
 
     #[test]
     fn permission_request_creates_pending_one_turn_request() {
-        let root = migrated_temp_root("permission-request");
-        let tools = PermissionTools::new(&root);
+        let (_root, store) = migrated_temp_store("permission-request");
+        let tools = PermissionTools::new(store);
 
         let output = tools
             .dispatch(
@@ -510,8 +540,8 @@ mod tests {
 
     #[test]
     fn permission_request_rejects_permission_tools() {
-        let root = temp_root("permission-reject");
-        let tools = PermissionTools::new(&root);
+        let (_root, store) = migrated_temp_store("permission-reject");
+        let tools = PermissionTools::new(store);
 
         let err = tools
             .dispatch(
@@ -528,8 +558,8 @@ mod tests {
 
     #[test]
     fn permission_status_reports_runtime_snapshot() {
-        let root = migrated_temp_root("permission-status");
-        let tools = PermissionTools::new(&root).with_runtime_status(PermissionRuntimeStatus {
+        let (_root, store) = migrated_temp_store("permission-status");
+        let tools = PermissionTools::new(store).with_runtime_status(PermissionRuntimeStatus {
             current_mode: "read-only".to_string(),
             visible_tools: vec![
                 "core.workspace:fs.read".to_string(),

@@ -7,16 +7,24 @@ repository.workspace = true
 
 [dependencies]
 agl-artifact.workspace = true
+agl-content.workspace = true
+agl-core-tools.workspace = true
+agl-cron.workspace = true
 agl-extension.workspace = true
 agl-package.workspace = true
 agl-assets.workspace = true
 agl-function.workspace = true
 agl-kernel.workspace = true
+agl-matrix.workspace = true
+agl-memory.workspace = true
+agl-note.workspace = true
+agl-permission.workspace = true
 agl-exec.workspace = true
 agl-ids.workspace = true
 agl-model.workspace = true
 agl-process.workspace = true
 agl-skill.workspace = true
+agl-store.workspace = true
 agl-terminal-protocol.workspace = true
 anyhow.workspace = true
 directories.workspace = true

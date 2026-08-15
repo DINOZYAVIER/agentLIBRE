@@ -26,7 +26,7 @@
 | agl-matrix-bridge | Communication |
 | agl-memory | Storage |
 | agl-model | AI/ML |
-| agl-notes | Storage |
+| agl-note | Storage |
 | agl-oven | Tooling |
 | agl-package | Extensibility |
 | agl-process | Runtime (agent-side typed terminal client adapter) |

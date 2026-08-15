@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -7,10 +6,10 @@ use std::time::Duration;
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, StepId};
-use agl_kernel::{RunBudgetLedger, RunDelivery, RunTerminalOutcome, TurnRequestKind};
-use agl_store::{
-    AglStore, DurableRunDraft, DurableRunRecord, RunLease, RunState, RunStepDraft, RunStepState,
-    SafeRunStatus,
+use agl_kernel::{
+    DurableRunAdmission, DurableRunDraft, DurableRunRecord, RunBudgetLedger, RunDelivery, RunLease,
+    RunRepository, RunRepositoryError, RunState, RunStepDraft, RunStepState, RunTerminalOutcome,
+    SafeRunStatus, TurnRequestKind,
 };
 
 use crate::driver::{DriverSnapshot, DurableRunDriverFactory, RunCancellation, RunRequestContext};
@@ -100,12 +99,11 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn spawn(
-        store_root: impl AsRef<Path>,
+        repository: Arc<dyn RunRepository>,
         factory: Arc<dyn DurableRunDriverFactory>,
         options: SupervisorOptions,
     ) -> Result<Self> {
         options.validate()?;
-        let store_root = store_root.as_ref().to_path_buf();
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity);
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
         let run_task_sender = sender.clone();
@@ -113,7 +111,7 @@ impl Supervisor {
             .name("agl-supervisor".to_string())
             .spawn(move || {
                 let result =
-                    Coordinator::open(store_root, factory, options, receiver, run_task_sender);
+                    Coordinator::open(repository, factory, options, receiver, run_task_sender);
                 match result {
                     Ok(mut coordinator) => {
                         let _ = init_sender.send(Ok(()));
@@ -304,8 +302,7 @@ enum SubscriptionMessage {
 }
 
 struct Coordinator {
-    store_root: PathBuf,
-    store: AglStore,
+    repository: Arc<dyn RunRepository>,
     factory: Arc<dyn DurableRunDriverFactory>,
     options: SupervisorOptions,
     receiver: mpsc::Receiver<CoordinatorMessage>,
@@ -317,19 +314,17 @@ struct Coordinator {
 
 impl Coordinator {
     fn open(
-        store_root: PathBuf,
+        repository: Arc<dyn RunRepository>,
         factory: Arc<dyn DurableRunDriverFactory>,
         options: SupervisorOptions,
         receiver: mpsc::Receiver<CoordinatorMessage>,
         sender: mpsc::SyncSender<CoordinatorMessage>,
     ) -> Result<Self> {
-        let store = AglStore::open_at(&store_root)?;
         let now_ms = options.clock.now_ms();
-        store.recover_expired_work(now_ms)?;
-        store.expire_delegation_trees(now_ms)?;
+        repository.recover_expired_work(now_ms)?;
+        repository.expire_delegation_trees(now_ms)?;
         Ok(Self {
-            store_root,
-            store,
+            repository,
             factory,
             options,
             receiver,
@@ -366,10 +361,10 @@ impl Coordinator {
                 let _ = reply.send(result);
             }
             CommandRequest::Status { run_id, reply } => {
-                let _ = reply.send(self.store.safe_run_status(&run_id).map_err(Into::into));
+                let _ = reply.send(self.repository.safe_run_status(&run_id).map_err(Into::into));
             }
             CommandRequest::Outcome { run_id, reply } => {
-                let result = self.store.run(&run_id).map(|run| {
+                let result = self.repository.run(&run_id).map(|run| {
                     run.map(|run| RunOutcome {
                         status: SafeRunStatus {
                             run_id: run.run_id,
@@ -404,12 +399,12 @@ impl Coordinator {
                 let _ = reply.send(result.map_err(Into::into));
             }
             CommandRequest::Tree { run_id, reply } => {
-                let _ = reply.send(self.store.run_tree(&run_id).map_err(Into::into));
+                let _ = reply.send(self.repository.run_tree(&run_id).map_err(Into::into));
             }
             CommandRequest::Cancel { run_id, reply } => {
                 let now_ms = self.options.clock.now_ms();
                 let result = self
-                    .store
+                    .repository
                     .request_run_tree_cancellation(&run_id, now_ms)
                     .map_err(SupervisorError::from)
                     .and_then(|statuses| {
@@ -441,7 +436,7 @@ impl Coordinator {
                 reply,
             } => {
                 let _ = reply.send(
-                    self.store
+                    self.repository
                         .run_events_after(&run_id, after_sequence, limit)
                         .map_err(Into::into),
                 );
@@ -461,7 +456,7 @@ impl Coordinator {
     fn submit(&self, spec: RunSpec) -> Result<RunAccepted> {
         let now_ms = self.options.clock.now_ms();
         let admission = if let Some(idempotency) = spec.idempotency {
-            self.store.admit_idempotent_run(
+            self.repository.admit_idempotent_run(
                 &spec.run,
                 &idempotency.namespace,
                 &idempotency.key,
@@ -471,14 +466,14 @@ impl Coordinator {
                 now_ms,
             )?
         } else {
-            agl_store::DurableRunAdmission {
-                run: self.store.admit_run_at(&spec.run, now_ms)?,
+            DurableRunAdmission {
+                run: self.repository.admit_run_at(&spec.run, now_ms)?,
                 replayed: false,
             }
         };
         Ok(RunAccepted {
             status: self
-                .store
+                .repository
                 .safe_run_status(&admission.run.run_id)?
                 .expect("admitted run must be readable"),
             replayed: admission.replayed,
@@ -486,13 +481,13 @@ impl Coordinator {
     }
 
     fn subscribe(&mut self, run_id: RunId, after_sequence: u64) -> Result<RunSubscription> {
-        let status = self.store.safe_run_status(&run_id)?.ok_or_else(|| {
-            agl_store::StoreError::NotFound {
+        let status = self.repository.safe_run_status(&run_id)?.ok_or_else(|| {
+            RunRepositoryError::NotFound {
                 resource: format!("run {run_id}"),
             }
         })?;
-        let boundary = self.store.latest_run_event_sequence(&run_id)?;
-        let backlog = self.store.run_events_after(
+        let boundary = self.repository.latest_run_event_sequence(&run_id)?;
+        let backlog = self.repository.run_events_after(
             &run_id,
             after_sequence,
             usize::try_from(boundary.saturating_sub(after_sequence))
@@ -557,7 +552,7 @@ impl Coordinator {
             RunTaskMessage::Finished { run_id } => {
                 self.active.remove(&run_id);
                 if self
-                    .store
+                    .repository
                     .safe_run_status(&run_id)
                     .ok()
                     .flatten()
@@ -601,7 +596,7 @@ impl Coordinator {
             .active
             .iter()
             .filter_map(|(run_id, active)| {
-                self.store
+                self.repository
                     .heartbeat_run(&active.lease, expires_at_ms, now_ms)
                     .err()
                     .map(|_| run_id.clone())
@@ -620,7 +615,7 @@ impl Coordinator {
         }
         while self.active.len() < self.options.max_active_runs {
             let now_ms = self.options.clock.now_ms();
-            let lease = match self.store.claim_next_run(
+            let lease = match self.repository.claim_next_run(
                 &self.options.owner_id,
                 now_ms,
                 self.options.lease_duration_ms(),
@@ -638,7 +633,7 @@ impl Coordinator {
                 },
             );
             spawn_run_task(RunTaskContext {
-                store_root: self.store_root.clone(),
+                repository: self.repository.clone(),
                 factory: self.factory.clone(),
                 options: self.options.clone(),
                 sender: self.sender.clone(),
@@ -649,7 +644,7 @@ impl Coordinator {
     }
 
     fn expire_delegation_trees(&mut self, now_ms: i64) -> bool {
-        let statuses = match self.store.expire_delegation_trees(now_ms) {
+        let statuses = match self.repository.expire_delegation_trees(now_ms) {
             Ok(statuses) => statuses,
             Err(_) => {
                 for active in self.active.values() {
@@ -671,7 +666,7 @@ impl Coordinator {
 }
 
 struct RunTaskContext {
-    store_root: PathBuf,
+    repository: Arc<dyn RunRepository>,
     factory: Arc<dyn DurableRunDriverFactory>,
     options: SupervisorOptions,
     sender: mpsc::SyncSender<CoordinatorMessage>,
@@ -709,17 +704,14 @@ fn run_task(context: RunTaskContext) {
 }
 
 fn fail_run_task(context: &RunTaskContext, error: &SupervisorError) {
-    let Ok(store) = AglStore::open_current_at(&context.store_root) else {
-        return;
-    };
-    let Ok(Some(run)) = store.run(&context.lease.run_id) else {
+    let Ok(Some(run)) = context.repository.run(&context.lease.run_id) else {
         return;
     };
     if run.state != RunState::Running {
         return;
     }
     let checkpoint = run.checkpoint.unwrap_or(serde_json::Value::Null);
-    let _ = store.finish_run(
+    let _ = context.repository.finish_run(
         &context.lease,
         RunState::Failed,
         Some(&checkpoint),
@@ -733,10 +725,10 @@ fn fail_run_task(context: &RunTaskContext, error: &SupervisorError) {
 }
 
 fn run_task_inner(context: &RunTaskContext) -> Result<()> {
-    let store = AglStore::open_current_at(&context.store_root)?;
+    let store = context.repository.as_ref();
     let run = store
         .run(&context.lease.run_id)?
-        .ok_or_else(|| agl_store::StoreError::NotFound {
+        .ok_or_else(|| RunRepositoryError::NotFound {
             resource: format!("run {}", context.lease.run_id),
         })?;
     let mut driver = context.factory.open(&run, context.cancellation.clone())?;
@@ -746,7 +738,7 @@ fn run_task_inner(context: &RunTaskContext) -> Result<()> {
         refresh_wall_time(&run, &mut snapshot, context.options.clock.now_ms());
         if budget_exhausted(&run, &snapshot, context.options.clock.now_ms()) {
             finish_terminal(
-                &store,
+                store,
                 context,
                 &snapshot,
                 RunTerminalOutcome::Cancelled {
@@ -757,7 +749,7 @@ fn run_task_inner(context: &RunTaskContext) -> Result<()> {
             return Ok(());
         }
         if let Some(terminal) = snapshot.terminal.clone() {
-            finish_terminal(&store, context, &snapshot, terminal)?;
+            finish_terminal(store, context, &snapshot, terminal)?;
             return Ok(());
         }
         let request = snapshot.pending_request.clone().ok_or_else(|| {
@@ -822,7 +814,7 @@ fn run_task_inner(context: &RunTaskContext) -> Result<()> {
             notify_events(context, &cancelled.events);
             cancelled.events.clear();
             finish_terminal(
-                &store,
+                store,
                 context,
                 &cancelled,
                 RunTerminalOutcome::Cancelled {
@@ -898,7 +890,7 @@ fn run_task_inner(context: &RunTaskContext) -> Result<()> {
                 notify_events(context, &failed.events);
                 failed.events.clear();
                 finish_terminal(
-                    &store,
+                    store,
                     context,
                     &failed,
                     RunTerminalOutcome::Failed {
@@ -921,7 +913,7 @@ fn terminal_error_code(terminal: &RunTerminalOutcome) -> Option<&str> {
 }
 
 fn finish_terminal(
-    store: &AglStore,
+    store: &dyn RunRepository,
     context: &RunTaskContext,
     snapshot: &DriverSnapshot,
     terminal: RunTerminalOutcome,

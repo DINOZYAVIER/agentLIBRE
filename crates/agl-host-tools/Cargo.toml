@@ -14,7 +14,6 @@ agl-content.workspace = true
 agl-ids.workspace = true
 agl-skill.workspace = true
 agl-runtime.workspace = true
-agl-store.workspace = true
 agl-core-tools.workspace = true
 anyhow.workspace = true
 ashpd.workspace = true
@@ -28,3 +27,4 @@ url.workspace = true
 
 [dev-dependencies]
 agl-process.workspace = true
+agl-store.workspace = true

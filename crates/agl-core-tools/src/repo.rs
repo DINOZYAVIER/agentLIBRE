@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agl_artifact::{
-    ArtifactBinding, ArtifactCommitEntry, ArtifactCommitEntryKind, ArtifactCommitRequest,
-    ArtifactHandle,
+    ArtifactBinding, ArtifactCommitEntry, ArtifactCommitEntryKind, ArtifactCommitRepository,
+    ArtifactCommitRequest, ArtifactHandle,
 };
 use agl_kernel::{
     ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactKindId,
@@ -25,25 +26,23 @@ pub const TASKS_VERIFY_TOOL_ID: &str = "core.repo:tasks.verify";
 const ARTIFACT_REPOSITORY_EFFECT_ID: &str = "agl:artifact.repository";
 const REPO_GITLINK_EFFECT_ID: &str = "agl:repo.gitlink";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RepoTools {
     workspace_root: PathBuf,
-    store_root: Option<PathBuf>,
+    artifact_commits: Arc<dyn ArtifactCommitRepository + Send + Sync>,
     artifacts: BTreeMap<ArtifactId, (ArtifactBinding, ArtifactHandle)>,
 }
 
 impl RepoTools {
-    pub fn new(workspace_root: impl AsRef<Path>) -> Self {
+    pub fn new(
+        workspace_root: impl AsRef<Path>,
+        artifact_commits: Arc<dyn ArtifactCommitRepository + Send + Sync>,
+    ) -> Self {
         Self {
             workspace_root: workspace_root.as_ref().to_path_buf(),
-            store_root: None,
+            artifact_commits,
             artifacts: BTreeMap::new(),
         }
-    }
-
-    pub fn with_store_root(mut self, store_root: impl AsRef<Path>) -> Self {
-        self.store_root = Some(store_root.as_ref().to_path_buf());
-        self
     }
 
     pub fn with_artifact(
@@ -155,17 +154,10 @@ impl ToolHandler for RepoTools {
                 args.message,
             )
             .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
-            let store_root = self.store_root.as_ref().ok_or_else(|| {
-                agl_kernel::ToolHandlerError::from(anyhow::anyhow!(
-                    "Artifact commit store is not configured"
-                ))
-            })?;
-            let mut store = agl_store::AglStore::open_at(store_root)
-                .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
             let repository = agl_repo::ArtifactGitRepository::open(&self.workspace_root)
                 .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
             let result = repository
-                .commit_artifact(binding, request, &mut store)
+                .commit_artifact(binding, request, self.artifact_commits.as_ref())
                 .map_err(|error| agl_kernel::ToolHandlerError::from(anyhow::anyhow!(error)))?;
             let data = json!({
                 "tool": ARTIFACT_COMMIT_TOOL_ID,

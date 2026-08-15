@@ -2047,7 +2047,18 @@ fn decode_run(raw: RawRunRow) -> Result<DurableRunRecord> {
         priority: raw.priority,
         concurrency_key: raw
             .concurrency_key
-            .map(RunConcurrencyKey::parse)
+            .map(|value| {
+                RunConcurrencyKey::parse(value.clone()).map_err(|error| StoreError::InvalidValue {
+                    field: "runs.concurrency_key",
+                    value,
+                    reason: match error {
+                        agl_kernel::RunRepositoryError::InvalidValue { .. } => {
+                            "invalid run concurrency key"
+                        }
+                        _ => "failed to decode run concurrency key",
+                    },
+                })
+            })
             .transpose()?,
         input: serde_json::from_str(&raw.input_json)?,
         checkpoint: raw

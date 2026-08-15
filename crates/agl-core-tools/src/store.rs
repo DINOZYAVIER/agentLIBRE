@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use agl_kernel::{
     EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
-use agl_store::{AglStore, StoreDomain, StoreExportOptions};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::parse_tool_args as parse_args;
@@ -20,16 +20,89 @@ pub const STORE_MIGRATE_TOOL_ID: &str = "core.store:migrate";
 const DEFAULT_EXPORT_MAX_BYTES: usize = 16 * 1024;
 const MAX_EXPORT_BYTES: usize = 128 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum StoreAdminDomain {
+    Memory,
+    Notes,
+    Cron,
+    Permissions,
+}
+
+impl StoreAdminDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Notes => "notes",
+            Self::Cron => "cron",
+            Self::Permissions => "permissions",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreSchemaSnapshot {
+    pub database_path: PathBuf,
+    pub database_exists: bool,
+    pub schema_version: Option<u32>,
+    pub current_schema_version: u32,
+    pub applied_migrations: Vec<u32>,
+    pub migration_required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreDomainSnapshot {
+    pub name: String,
+    pub status: String,
+    pub total_rows: u64,
+    pub active_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreStatusSnapshot {
+    pub idempotency_in_progress: u64,
+    pub stale_idempotency_count: usize,
+    pub domains: Vec<StoreDomainSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreExportSnapshot {
+    pub record_count: usize,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreAppliedMigrationSnapshot {
+    pub version: u32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreMigrationSnapshot {
+    pub database_path: PathBuf,
+    pub before_schema_version: u32,
+    pub after_schema_version: u32,
+    pub applied_migrations: Vec<StoreAppliedMigrationSnapshot>,
+}
+
+pub trait StoreAdminPort: Send + Sync {
+    fn schema_status(&self) -> Result<StoreSchemaSnapshot>;
+    fn status(&self) -> Result<StoreStatusSnapshot>;
+    fn export_jsonl(
+        &self,
+        domain: StoreAdminDomain,
+        include_deleted: bool,
+    ) -> Result<StoreExportSnapshot>;
+    fn migrate(&self) -> Result<StoreMigrationSnapshot>;
+}
+
+#[derive(Clone)]
 pub struct StoreTools {
-    store_root: PathBuf,
+    administration: Arc<dyn StoreAdminPort>,
 }
 
 impl StoreTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
-        Self {
-            store_root: store_root.as_ref().to_path_buf(),
-        }
+    pub fn new(administration: Arc<dyn StoreAdminPort>) -> Self {
+        Self { administration }
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
@@ -43,23 +116,22 @@ impl StoreTools {
 
     fn status(&self, arguments: Value) -> Result<Value> {
         parse_args::<StatusArgs>(STORE_STATUS_TOOL_ID, arguments)?;
-        let schema = AglStore::schema_status_at(&self.store_root)?;
+        let schema = self.administration.schema_status()?;
         let (idempotency, domains) = if schema.migration_required {
             (Value::Null, Vec::new())
         } else {
-            let store = self.open_current_read_only_store()?;
-            let status = store.status()?;
+            let status = self.administration.status()?;
             let idempotency = json!({
-                "in_progress": status.idempotency.in_progress,
-                "stale_in_progress": status.idempotency.stale_in_progress.len(),
+                "in_progress": status.idempotency_in_progress,
+                "stale_in_progress": status.stale_idempotency_count,
             });
             let domains = status
                 .domains
                 .into_iter()
                 .map(|domain| {
                     json!({
-                        "name": domain.domain.as_str(),
-                        "status": domain.status.as_str(),
+                        "name": domain.name,
+                        "status": domain.status,
                         "total_rows": domain.total_rows,
                         "active_rows": domain.active_rows,
                     })
@@ -83,21 +155,15 @@ impl StoreTools {
 
     fn export(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ExportArgs>(STORE_EXPORT_TOOL_ID, arguments)?;
-        let domain = StoreDomain::from(args.domain);
+        let domain = StoreAdminDomain::from(args.domain);
         let max_bytes = args
             .max_bytes
             .unwrap_or(DEFAULT_EXPORT_MAX_BYTES)
             .min(MAX_EXPORT_BYTES);
-        let store = self.open_current_read_only_store()?;
-        let mut bytes = Vec::new();
-        let records = store.export_domain_jsonl(
-            &StoreExportOptions {
-                domain,
-                include_deleted: args.include_deleted.unwrap_or(false),
-            },
-            &mut bytes,
-        )?;
-        let body = String::from_utf8(bytes).context("store export was not valid UTF-8")?;
+        let export = self
+            .administration
+            .export_jsonl(domain, args.include_deleted.unwrap_or(false))?;
+        let body = String::from_utf8(export.bytes).context("store export was not valid UTF-8")?;
         let mut exported_bytes = 0usize;
         let mut exported_records = Vec::new();
         for line in body.lines() {
@@ -111,12 +177,12 @@ impl StoreTools {
             );
             exported_bytes += line_bytes;
         }
-        let truncated = exported_records.len() < records;
+        let truncated = exported_records.len() < export.record_count;
         Ok(json!({
             "tool": STORE_EXPORT_TOOL_ID,
             "status": "ok",
             "domain": domain.as_str(),
-            "record_count": records,
+            "record_count": export.record_count,
             "returned_count": exported_records.len(),
             "truncated": truncated,
             "bytes": exported_bytes,
@@ -126,8 +192,7 @@ impl StoreTools {
 
     fn migrate(&self, arguments: Value) -> Result<Value> {
         parse_args::<MigrateArgs>(STORE_MIGRATE_TOOL_ID, arguments)?;
-        let report = AglStore::migrate_at(&self.store_root)
-            .with_context(|| format!("failed to migrate store {}", self.store_root.display()))?;
+        let report = self.administration.migrate()?;
         let migrations = report
             .applied_migrations
             .into_iter()
@@ -146,15 +211,6 @@ impl StoreTools {
             "after_schema_version": report.after_schema_version,
             "applied_migrations": migrations,
         }))
-    }
-
-    fn open_current_read_only_store(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root).with_context(|| {
-            format!(
-                "failed to open current read-only store {}",
-                self.store_root.display()
-            )
-        })
     }
 }
 
@@ -229,7 +285,7 @@ enum StoreDomainArg {
     Permissions,
 }
 
-impl From<StoreDomainArg> for StoreDomain {
+impl From<StoreDomainArg> for StoreAdminDomain {
     fn from(value: StoreDomainArg) -> Self {
         match value {
             StoreDomainArg::Memory => Self::Memory,
@@ -244,28 +300,75 @@ impl From<StoreDomainArg> for StoreDomain {
 mod tests {
     use serde_json::json;
 
-    use crate::memory::{MEMORY_ADD_TOOL_ID, MemoryTools};
-    use crate::test_support::{migrated_temp_root, temp_root};
+    use std::sync::Mutex;
 
     use super::*;
 
+    #[derive(Default)]
+    struct FakeAdmin {
+        migrated: Mutex<bool>,
+    }
+
+    impl StoreAdminPort for FakeAdmin {
+        fn schema_status(&self) -> Result<StoreSchemaSnapshot> {
+            let migrated = *self.migrated.lock().unwrap();
+            Ok(StoreSchemaSnapshot {
+                database_path: PathBuf::from("/tmp/agentlibre.sqlite3"),
+                database_exists: migrated,
+                schema_version: migrated.then_some(20),
+                current_schema_version: 20,
+                applied_migrations: if migrated {
+                    (1..=20).collect()
+                } else {
+                    Vec::new()
+                },
+                migration_required: !migrated,
+            })
+        }
+
+        fn status(&self) -> Result<StoreStatusSnapshot> {
+            Ok(StoreStatusSnapshot {
+                idempotency_in_progress: 0,
+                stale_idempotency_count: 0,
+                domains: vec![StoreDomainSnapshot {
+                    name: "memory".to_owned(),
+                    status: "ok".to_owned(),
+                    total_rows: 1,
+                    active_rows: 1,
+                }],
+            })
+        }
+
+        fn export_jsonl(
+            &self,
+            _domain: StoreAdminDomain,
+            _include_deleted: bool,
+        ) -> Result<StoreExportSnapshot> {
+            Ok(StoreExportSnapshot {
+                record_count: 1,
+                bytes: b"{\"title\":\"Store export\"}\n".to_vec(),
+            })
+        }
+
+        fn migrate(&self) -> Result<StoreMigrationSnapshot> {
+            *self.migrated.lock().unwrap() = true;
+            Ok(StoreMigrationSnapshot {
+                database_path: PathBuf::from("/tmp/agentlibre.sqlite3"),
+                before_schema_version: 0,
+                after_schema_version: 20,
+                applied_migrations: vec![StoreAppliedMigrationSnapshot {
+                    version: 20,
+                    name: "020_domain_persistence_authority".to_owned(),
+                }],
+            })
+        }
+    }
+
     #[test]
     fn store_tools_report_status_and_export_known_domains() {
-        let root = migrated_temp_root("export");
-        let memory = MemoryTools::new(&root);
-        memory
-            .dispatch(
-                MEMORY_ADD_TOOL_ID,
-                json!({
-                    "scope": "user",
-                    "kind": "fact",
-                    "title": "Store export",
-                    "body": "Exports are bounded JSONL."
-                }),
-            )
-            .unwrap();
-
-        let tools = StoreTools::new(&root);
+        let admin = Arc::new(FakeAdmin::default());
+        *admin.migrated.lock().unwrap() = true;
+        let tools = StoreTools::new(admin);
         let status = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
         let export = tools
             .dispatch(
@@ -284,14 +387,11 @@ mod tests {
 
     #[test]
     fn store_tools_status_does_not_create_database_and_migrate_is_explicit() {
-        let root = temp_root("migrate");
-        let tools = StoreTools::new(&root);
+        let tools = StoreTools::new(Arc::new(FakeAdmin::default()));
 
         let status = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
         assert_eq!(status["database_exists"], false);
         assert_eq!(status["migration_required"], true);
-        assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-
         let migrated = tools.dispatch(STORE_MIGRATE_TOOL_ID, json!({})).unwrap();
         let current = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
 

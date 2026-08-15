@@ -11,7 +11,6 @@ use agl_ids::{
     AttemptId, EventId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
 use agl_inference::{InferenceCancellation, InferenceFinishReason, InferenceOutputSink};
-use agl_kernel::RunDelivery;
 use agl_kernel::{
     DispatchDenial, DispatchDenialCode, ToolEffectJournal, ToolEffectJournalError,
     ToolEffectJournalRecord, ToolRuntime,
@@ -21,6 +20,7 @@ use agl_kernel::{
     ModelRequest, ModelResponse, ModelResponseOutcome, ToolDispatchRequest, ToolDispatchResponse,
 };
 use agl_kernel::{HookInput, ToolId, ToolInvocation};
+use agl_kernel::{RunDelivery, RunRepository};
 use anyhow::{Context, Result, ensure};
 
 use crate::session::{InferenceExecutionControl, InferenceSession};
@@ -97,7 +97,7 @@ impl ToolEffectJournal for RuntimeToolEffectJournal {
 
 struct ChatProcessExecutionContext {
     state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
-    store_root: PathBuf,
+    runs: Arc<dyn RunRepository>,
     sessions_root: PathBuf,
     scope_session_id: Option<SessionId>,
     persist_session_context: bool,
@@ -108,9 +108,8 @@ impl ChatProcessExecutionContext {
         &self,
         scope: &ExecutionScope,
     ) -> Result<(agl_exec::ExecutionOwner, SessionId)> {
-        let store = agl_store::AglStore::open_current_read_only_at(&self.store_root)
-            .context("failed to open execution owner store")?;
-        let run = store
+        let run = self
+            .runs
             .run(scope.run_id())?
             .with_context(|| format!("execution owner run {} does not exist", scope.run_id()))?;
         match &self.scope_session_id {
@@ -130,7 +129,8 @@ impl ChatProcessExecutionContext {
                     scope.session_id().is_none() && run.session_id.is_none(),
                     "run-owned process invocation unexpectedly carries session authority"
                 );
-                let root_run = store
+                let root_run = self
+                    .runs
                     .run(&run.root_run_id)?
                     .with_context(|| format!("root run {} does not exist", run.root_run_id))?;
                 let durable_session_id = root_run.session_id.with_context(|| {
@@ -190,9 +190,11 @@ impl agl_core_tools::ProcessExecutionContext for ChatProcessExecutionContext {
                 next,
             )?
         } else {
-            let store = agl_store::AglStore::open_current_at(&self.store_root)
-                .context("failed to open durable run execution context")?;
-            store.compare_and_set_run_execution_context(scope.run_id(), expected_revision, &next)?
+            self.runs.compare_and_set_run_execution_context(
+                scope.run_id(),
+                expected_revision,
+                &next,
+            )?
         };
         *self
             .state
@@ -273,7 +275,7 @@ impl ChatTurnRuntime {
         let execution_context_state = Arc::new(Mutex::new(execution_context.clone()));
         let process_context = Arc::new(ChatProcessExecutionContext {
             state: Arc::clone(&execution_context_state),
-            store_root: runtime.paths.store_root(),
+            runs: session.repositories().runs.clone(),
             sessions_root: runtime.paths.sessions_root(),
             scope_session_id,
             persist_session_context,
@@ -1331,7 +1333,7 @@ fn build_chat_tool_runtime(
     let screen_id = agl_kernel::ToolId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
     chat_tool_runtime(ChatToolRuntimeConfig {
         core_tools,
-        store_root: session.store_root(),
+        repositories: session.repositories(),
         trust_store_path: session.trust_store_path(),
         workspace_root,
         runtime_paths: session.runtime_paths(),

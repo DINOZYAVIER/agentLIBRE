@@ -3,8 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, StepId};
-use agl_kernel::{CancellationSignal, RunRequest, RunRequestResult, RunTerminalOutcome, RunUsage};
-use agl_store::DurableRunRecord;
+use agl_kernel::{
+    CancellationSignal, DurableRunRecord, RunRequest, RunRequestResult, RunTerminalOutcome,
+    RunUsage,
+};
 
 use crate::Result;
 

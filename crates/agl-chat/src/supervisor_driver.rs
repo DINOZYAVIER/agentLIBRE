@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,10 +8,9 @@ use agl_content::Content;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
 use agl_kernel::{
-    RunDelivery, RunRequest, RunRequestResult, RunTerminalOutcome, RunUsage, ToolId, TurnRequest,
-    TurnRequestOutcome, TurnRequestResult,
+    DurableRunRecord, RunDelivery, RunKind, RunRepository, RunRequest, RunRequestResult,
+    RunTerminalOutcome, RunUsage, ToolId, TurnRequest, TurnRequestOutcome, TurnRequestResult,
 };
-use agl_store::{AglStore, DurableRunRecord, RunKind};
 use agl_supervisor::{
     DriverSnapshot, DurableRunDriver, DurableRunDriverFactory, Result as SupervisorResult,
     RunCancellation, RunRequestContext, RunRequestError, SupervisorError,
@@ -60,7 +59,7 @@ struct ChatDriverCheckpoint {
 
 #[derive(Clone)]
 pub struct ChatSupervisorFactory {
-    store_root: PathBuf,
+    repositories: agl_runtime::StoreRepositories,
     services: Arc<Mutex<BTreeMap<SessionId, ChatService>>>,
     policy_hashes: Arc<Mutex<BTreeMap<SessionId, String>>>,
     runtime: Option<agl_runtime::AgentLibreRuntimeConfig>,
@@ -70,9 +69,9 @@ pub struct ChatSupervisorFactory {
 }
 
 impl ChatSupervisorFactory {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
+    pub fn new(repositories: agl_runtime::StoreRepositories) -> Self {
         Self {
-            store_root: store_root.as_ref().to_path_buf(),
+            repositories,
             services: Arc::new(Mutex::new(BTreeMap::new())),
             policy_hashes: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: None,
@@ -83,12 +82,12 @@ impl ChatSupervisorFactory {
     }
 
     pub fn with_runtime(
-        store_root: impl AsRef<Path>,
+        repositories: agl_runtime::StoreRepositories,
         runtime: agl_runtime::AgentLibreRuntimeConfig,
         inference_client: crate::InferenceClientHandle,
     ) -> Self {
         Self {
-            store_root: store_root.as_ref().to_path_buf(),
+            repositories,
             services: Arc::new(Mutex::new(BTreeMap::new())),
             policy_hashes: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: Some(runtime),
@@ -192,13 +191,16 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
             let subagent_id = run.subagent_id.clone().ok_or_else(|| {
                 SupervisorError::Driver("subagent run has no subagent ID".to_string())
             })?;
-            let store = AglStore::open_current_at(&self.store_root)?;
-            let root = store.run(&run.root_run_id)?.ok_or_else(|| {
-                SupervisorError::Driver(format!(
-                    "subagent root run {} does not exist",
-                    run.root_run_id
-                ))
-            })?;
+            let root = self
+                .repositories
+                .runs
+                .run(&run.root_run_id)?
+                .ok_or_else(|| {
+                    SupervisorError::Driver(format!(
+                        "subagent root run {} does not exist",
+                        run.root_run_id
+                    ))
+                })?;
             let session_id = root.session_id.ok_or_else(|| {
                 SupervisorError::Driver(format!(
                     "subagent root run {} has no Human session",
@@ -245,10 +247,16 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                         Some(terminal_endpoint) => ChatService::open_with_terminal_endpoint(
                             options,
                             runtime,
+                            self.repositories.clone(),
                             inference_client,
                             terminal_endpoint,
                         ),
-                        None => ChatService::open(options, runtime, inference_client),
+                        None => ChatService::open(
+                            options,
+                            runtime,
+                            self.repositories.clone(),
+                            inference_client,
+                        ),
                     }
                     .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
                 })?;
@@ -393,6 +401,7 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                                 execution_session_id,
                             },
                             runtime,
+                            self.repositories.clone(),
                             inference_client,
                             self.terminal_endpoint.clone(),
                         )
@@ -424,9 +433,11 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
 
         let (mut execution, checkpoint_policy_hash) = if let Some(checkpoint) = &run.checkpoint {
             let checkpoint: ChatDriverCheckpoint = serde_json::from_value(checkpoint.clone())?;
-            let store = AglStore::open_current_at(&self.store_root)?;
-            let event_sequence = store.latest_run_event_sequence(&run.run_id)?;
-            let attempt_ids = durable_attempt_ids(&store, &run.run_id)?;
+            let event_sequence = self
+                .repositories
+                .runs
+                .latest_run_event_sequence(&run.run_id)?;
+            let attempt_ids = durable_attempt_ids(self.repositories.runs.as_ref(), &run.run_id)?;
             let execution = service
                 .resume_user_turn_from_checkpoint(DurableTurnResume {
                     run_id: run.run_id.clone(),
@@ -756,13 +767,13 @@ fn retryable_failure(result: &TurnRequestResult) -> Option<&agl_kernel::TurnRequ
 }
 
 fn durable_attempt_ids(
-    store: &AglStore,
+    runs: &dyn RunRepository,
     run_id: &agl_ids::RunId,
 ) -> SupervisorResult<Vec<AttemptId>> {
     let mut after_sequence = 0;
     let mut attempt_ids = BTreeSet::new();
     loop {
-        let events = store.run_events_after(run_id, after_sequence, 1_000)?;
+        let events = runs.run_events_after(run_id, after_sequence, 1_000)?;
         if events.is_empty() {
             break;
         }

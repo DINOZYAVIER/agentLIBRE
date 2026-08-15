@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 19;
+pub const CURRENT_SCHEMA_VERSION: u32 = 20;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -594,6 +594,185 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             ALTER TABLE run_steps ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
                 CHECK (revision > 0);
             ALTER TABLE run_steps DROP COLUMN effect_kind;
+        "#,
+    },
+    StoreMigration {
+        version: 20,
+        name: "020_domain_persistence_authority",
+        sql: r#"
+            ALTER TABLE permission_grants RENAME TO permission_grants_v19;
+            ALTER TABLE permission_requests RENAME TO permission_requests_v19;
+            DROP INDEX permission_grants_status_idx;
+            DROP INDEX permission_grants_tool_idx;
+            DROP INDEX permission_requests_status_idx;
+
+            CREATE TABLE permission_requests (
+                id TEXT PRIMARY KEY,
+                requested_tools_json TEXT NOT NULL,
+                max_operation_kind TEXT NOT NULL,
+                state_effects_json TEXT NOT NULL,
+                sensitive_inputs_json TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                duration TEXT NOT NULL CHECK (duration IN ('one_turn', 'session')),
+                reason TEXT NOT NULL,
+                requester_ref TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('pending', 'granted', 'denied', 'revoked')),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolution_ref TEXT,
+                resolution_note TEXT,
+                transition_operation_id TEXT
+            );
+            CREATE INDEX permission_requests_state_idx
+                ON permission_requests(state, updated_at);
+
+            INSERT INTO permission_requests (
+                id, requested_tools_json, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, reason, requester_ref,
+                state, revision, created_at, updated_at, resolved_at, resolution_ref,
+                resolution_note, transition_operation_id
+            )
+            SELECT
+                id, requested_tools_json, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, reason, requester_ref,
+                status, 1, created_at, updated_at, resolved_at, resolution_ref,
+                resolution_note, NULL
+            FROM permission_requests_v19;
+
+            CREATE TABLE permission_grants (
+                id TEXT PRIMARY KEY,
+                request_id TEXT REFERENCES permission_requests(id),
+                tool_id TEXT NOT NULL,
+                max_operation_kind TEXT NOT NULL,
+                state_effects_json TEXT NOT NULL,
+                sensitive_inputs_json TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                duration TEXT NOT NULL CHECK (duration IN ('one_turn', 'session')),
+                granted_by_ref TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'expired', 'revoked')),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revoked_at TEXT,
+                revoke_ref TEXT,
+                admitted_at TEXT,
+                last_admitted_run_id TEXT REFERENCES runs(id),
+                consumed_at TEXT,
+                transition_operation_id TEXT,
+                CHECK (
+                    (duration = 'one_turn' AND state = 'consumed' AND last_admitted_run_id IS NOT NULL)
+                    OR (duration = 'one_turn' AND state IN ('active', 'revoked') AND last_admitted_run_id IS NULL)
+                    OR (duration = 'session' AND state IN ('active', 'expired', 'revoked'))
+                )
+            );
+            CREATE INDEX permission_grants_state_idx
+                ON permission_grants(state, updated_at);
+            CREATE INDEX permission_grants_tool_idx
+                ON permission_grants(tool_id, state);
+
+            INSERT INTO permission_grants (
+                id, request_id, tool_id, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, granted_by_ref, state,
+                revision, created_at, updated_at, revoked_at, revoke_ref, admitted_at,
+                last_admitted_run_id, consumed_at, transition_operation_id
+            )
+            SELECT
+                id, request_id, tool_id, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, granted_by_ref,
+                CASE
+                    WHEN duration = 'one_turn' AND status = 'expired' THEN 'consumed'
+                    ELSE status
+                END,
+                1, created_at, updated_at, revoked_at, revoke_ref, admitted_at,
+                last_admitted_run_id, consumed_at, NULL
+            FROM permission_grants_v19;
+
+            DROP TABLE permission_grants_v19;
+            DROP TABLE permission_requests_v19;
+
+            CREATE TABLE permission_operations (
+                operation_id TEXT PRIMARY KEY,
+                target_kind TEXT NOT NULL CHECK (target_kind IN ('request', 'grant')),
+                target_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX permission_operations_target_idx
+                ON permission_operations(target_kind, target_id);
+
+            CREATE TABLE permission_grant_admissions (
+                grant_id TEXT NOT NULL REFERENCES permission_grants(id) ON DELETE CASCADE,
+                operation_id TEXT NOT NULL UNIQUE REFERENCES permission_operations(operation_id),
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                admitted_at TEXT NOT NULL,
+                PRIMARY KEY (grant_id, operation_id)
+            );
+            CREATE INDEX permission_grant_admissions_run_idx
+                ON permission_grant_admissions(run_id, grant_id);
+
+            ALTER TABLE matrix_notification_outbox RENAME TO matrix_notification_outbox_v19;
+            DROP INDEX matrix_notification_outbox_status_idx;
+            CREATE TABLE matrix_notification_outbox (
+                id TEXT PRIMARY KEY,
+                notify_ref TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                body TEXT NOT NULL,
+                payload_fingerprint TEXT NOT NULL,
+                transaction_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL CHECK (state IN ('queued', 'delivering', 'sent', 'failed')),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                not_before_ms INTEGER,
+                lease_owner TEXT,
+                lease_expires_at_ms INTEGER,
+                attempts INTEGER NOT NULL CHECK (attempts >= 0),
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT,
+                CHECK (
+                    (state = 'queued' AND not_before_ms IS NOT NULL AND lease_owner IS NULL AND lease_expires_at_ms IS NULL)
+                    OR (state = 'delivering' AND not_before_ms IS NULL AND lease_owner IS NOT NULL AND lease_expires_at_ms IS NOT NULL)
+                    OR (state IN ('sent', 'failed') AND not_before_ms IS NULL AND lease_owner IS NULL AND lease_expires_at_ms IS NULL)
+                )
+            );
+            CREATE INDEX matrix_notification_outbox_delivery_idx
+                ON matrix_notification_outbox(state, not_before_ms, updated_at);
+            CREATE INDEX matrix_notification_outbox_lease_idx
+                ON matrix_notification_outbox(state, lease_expires_at_ms);
+
+            CREATE TABLE matrix_outbox_operations (
+                operation_id TEXT PRIMARY KEY,
+                outbox_id TEXT NOT NULL REFERENCES matrix_notification_outbox(id) ON DELETE CASCADE,
+                fingerprint TEXT NOT NULL,
+                resulting_revision INTEGER NOT NULL CHECK (resulting_revision > 0),
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX matrix_outbox_operations_item_idx
+                ON matrix_outbox_operations(outbox_id, resulting_revision);
+
+            INSERT INTO matrix_notification_outbox (
+                id, notify_ref, source_kind, source_id, dedupe_key, body,
+                payload_fingerprint, transaction_id, state, revision, not_before_ms,
+                lease_owner, lease_expires_at_ms, attempts, last_error, created_at,
+                updated_at, delivered_at
+            )
+            SELECT
+                old.id, old.notify_ref, old.source_kind, old.source_id, old.dedupe_key,
+                old.body, prepared.payload_fingerprint, prepared.transaction_id,
+                old.status, 1,
+                CASE WHEN old.status = 'queued' THEN 0 ELSE NULL END,
+                NULL, NULL, 0,
+                CASE WHEN old.status = 'failed' THEN COALESCE(old.error, 'legacy permanent delivery failure') ELSE old.error END,
+                old.created_at, old.updated_at, old.delivered_at
+            FROM matrix_notification_outbox_v19 old
+            JOIN agl175_matrix_migration prepared ON prepared.id = old.id;
+
+            DROP TABLE matrix_notification_outbox_v19;
+            DROP TABLE agl175_matrix_migration;
         "#,
     },
 ];

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
-    ContentPart, ImageDimensions, MediaType,
+    ContentAttachmentWrite, ContentPart, ContentRepository, ImageDimensions, MediaType,
 };
 use agl_ids::RunId;
 use agl_kernel::{
@@ -17,7 +17,6 @@ use agl_kernel::{
     ToolDeclaration, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
     ToolResult,
 };
-use agl_store::AglStore;
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -98,27 +97,23 @@ impl ScreenCaptureBackend for PortalScreenCaptureBackend {
 
 #[derive(Clone)]
 pub struct ScreenTools {
-    store_root: PathBuf,
+    content: Arc<dyn ContentRepository>,
     admitted_run: Option<RunId>,
     backend: Arc<dyn ScreenCaptureBackend>,
 }
 
 impl ScreenTools {
-    pub fn new(store_root: impl AsRef<Path>, admitted_run: Option<RunId>) -> Self {
-        Self::with_backend(
-            store_root,
-            admitted_run,
-            Arc::new(PortalScreenCaptureBackend),
-        )
+    pub fn new(content: Arc<dyn ContentRepository>, admitted_run: Option<RunId>) -> Self {
+        Self::with_backend(content, admitted_run, Arc::new(PortalScreenCaptureBackend))
     }
 
     pub fn with_backend(
-        store_root: impl AsRef<Path>,
+        content: Arc<dyn ContentRepository>,
         admitted_run: Option<RunId>,
         backend: Arc<dyn ScreenCaptureBackend>,
     ) -> Self {
         Self {
-            store_root: store_root.as_ref().to_path_buf(),
+            content,
             admitted_run,
             backend,
         }
@@ -146,21 +141,20 @@ impl ScreenTools {
             Err(error) => return Err(error),
         };
         let normalized = normalize_image(capture.bytes())?;
-        let store = AglStore::open_current_at(&self.store_root)
-            .map_err(|error| ScreenCaptureError::Store(error.to_string()))?;
-        let stored = store
-            .write_content_attachment(
-                invocation.scope.run_id(),
-                MediaType::ImagePng,
-                &normalized.png,
-                Some(normalized.dimensions),
-                ArtifactSensitivity::Sensitive,
-                ArtifactSource {
+        let stored = self
+            .content
+            .write(ContentAttachmentWrite {
+                run_id: invocation.scope.run_id().clone(),
+                media_type: MediaType::ImagePng,
+                bytes: normalized.png,
+                image: Some(normalized.dimensions),
+                sensitivity: ArtifactSensitivity::Sensitive,
+                source: ArtifactSource {
                     kind: ArtifactSourceKind::ScreenCapture,
                     extension: Some("xdg-desktop-portal".to_string()),
                 },
-                ArtifactRetention::RunScoped,
-            )
+                retention: ArtifactRetention::RunScoped,
+            })
             .map_err(|error| ScreenCaptureError::Store(error.to_string()))?;
         let _ = self.backend.cleanup(&mut capture);
         let reference = stored.reference;
@@ -479,8 +473,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use agl_ids::ExecutionScope;
-    use agl_kernel::{DeclarationDigest, PolicyHash};
-    use agl_store::{DurableRunDraft, RunBudget, RunKind};
+    use agl_kernel::{
+        DeclarationDigest, DurableRunDraft, PolicyHash, RunBudget, RunKind, RunRepository,
+    };
 
     use super::*;
 
@@ -539,8 +534,8 @@ mod tests {
         ))
     }
 
-    fn admitted_run(root: &Path) -> RunId {
-        let store = AglStore::open_at(root).unwrap();
+    fn admitted_run(root: &Path) -> (RunId, Arc<agl_store::StoreHandle>) {
+        let store = Arc::new(agl_store::StoreHandle::open_at(root).unwrap());
         let run_id = RunId::generate();
         store
             .admit_run(&DurableRunDraft {
@@ -558,7 +553,7 @@ mod tests {
                 not_before_ms: None,
             })
             .unwrap();
-        run_id
+        (run_id, store)
     }
 
     fn test_execution_context() -> agl_exec::ExecutionContextSnapshot {
@@ -605,9 +600,9 @@ mod tests {
     #[test]
     fn permission_denial_happens_before_portal_probe() {
         let root = temp_root("denied");
-        let run_id = admitted_run(&root);
+        let (run_id, store) = admitted_run(&root);
         let backend = Arc::new(FakeBackend::new(true, [FakeOutcome::Capture(png(2, 2))]));
-        let tools = ScreenTools::with_backend(&root, None, backend.clone());
+        let tools = ScreenTools::with_backend(store, None, backend.clone());
 
         let error = tools.capture(&invocation(&run_id)).unwrap_err();
 
@@ -620,9 +615,9 @@ mod tests {
     #[test]
     fn portal_cancel_returns_typed_result_without_artifact() {
         let root = temp_root("cancelled");
-        let run_id = admitted_run(&root);
+        let (run_id, store) = admitted_run(&root);
         let backend = Arc::new(FakeBackend::new(true, [FakeOutcome::Cancelled]));
-        let tools = ScreenTools::with_backend(&root, Some(run_id.clone()), backend.clone());
+        let tools = ScreenTools::with_backend(store, Some(run_id.clone()), backend.clone());
 
         let result = tools.capture(&invocation(&run_id)).unwrap();
 
@@ -636,17 +631,14 @@ mod tests {
     #[test]
     fn capture_sanitizes_stores_and_returns_one_sensitive_reference() {
         let root = temp_root("success");
-        let run_id = admitted_run(&root);
+        let (run_id, store) = admitted_run(&root);
         let backend = Arc::new(FakeBackend::new(true, [FakeOutcome::Capture(png(3, 2))]));
-        let tools = ScreenTools::with_backend(&root, Some(run_id.clone()), backend.clone());
+        let tools = ScreenTools::with_backend(store.clone(), Some(run_id.clone()), backend.clone());
 
         let result = tools.capture(&invocation(&run_id)).unwrap();
         let content = result.content.unwrap();
         let reference = content.attachments().next().unwrap();
-        let store = AglStore::open_current_at(&root).unwrap();
-        let resolved = store
-            .resolve_content_attachment(&run_id, reference)
-            .unwrap();
+        let resolved = store.resolve(&run_id, reference).unwrap();
 
         assert_eq!(content.attachment_count(), 1);
         assert_eq!(reference.media_type, MediaType::ImagePng);

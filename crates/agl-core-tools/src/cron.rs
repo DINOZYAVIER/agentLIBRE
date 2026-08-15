@@ -1,12 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_cron::{
-    CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun, CronRunAdmission, CronRunStatus,
-    CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET, validate_job_draft,
+    CronIdempotencyOutcome, CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun,
+    CronRunAdmission, CronRunStatus, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
+    validate_job_draft,
 };
 use agl_kernel::{ToolDispatchContext, ToolHandler, ToolResult};
-use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
+use agl_matrix::{MatrixOutboxDraft, MatrixOutboxRepository};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -34,15 +35,20 @@ pub const CRON_TICK_TOOL_ID: &str = "core.cron:tick";
 const DEFAULT_HISTORY_LIMIT: usize = 20;
 const MAX_HISTORY_LIMIT: usize = 100;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CronTools {
-    store_root: PathBuf,
+    cron: Arc<dyn CronRepository>,
+    matrix_outbox: Arc<dyn MatrixOutboxRepository>,
 }
 
 impl CronTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
+    pub fn new(
+        cron: Arc<dyn CronRepository>,
+        matrix_outbox: Arc<dyn MatrixOutboxRepository>,
+    ) -> Self {
         Self {
-            store_root: store_root.as_ref().to_path_buf(),
+            cron,
+            matrix_outbox,
         }
     }
 
@@ -65,9 +71,7 @@ impl CronTools {
 
     fn list(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(CRON_LIST_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let cron = CronRepository::new(&store);
-        let jobs = cron.list_jobs(args.include_deleted.unwrap_or(false))?;
+        let jobs = self.cron.list_jobs(args.include_deleted.unwrap_or(false))?;
         let jobs = jobs.iter().map(job_value).collect::<Vec<_>>();
         Ok(json!({
             "tool": CRON_LIST_TOOL_ID,
@@ -79,9 +83,8 @@ impl CronTools {
 
     fn show(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(CRON_SHOW_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let cron = CronRepository::new(&store);
-        let job = cron
+        let job = self
+            .cron
             .job(&args.id)?
             .with_context(|| format!("cron job not found: {}", args.id))?;
         Ok(json!({
@@ -97,9 +100,7 @@ impl CronTools {
             .limit
             .unwrap_or(DEFAULT_HISTORY_LIMIT)
             .min(MAX_HISTORY_LIMIT);
-        let store = self.open_store_read_only()?;
-        let cron = CronRepository::new(&store);
-        let mut runs = cron.history(&args.job_id)?;
+        let mut runs = self.cron.history(&args.job_id)?;
         runs.truncate(limit);
         let runs = runs.iter().map(run_value).collect::<Vec<_>>();
         Ok(json!({
@@ -127,9 +128,7 @@ impl CronTools {
 
     fn add(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<JobDraftArgs>(CRON_ADD_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
-        let job = cron.add_job(args.into_draft()?)?;
+        let job = self.cron.add_job(args.into_draft()?)?;
         Ok(json!({
             "tool": CRON_ADD_TOOL_ID,
             "status": "created",
@@ -141,9 +140,7 @@ impl CronTools {
     fn update(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<UpdateArgs>(CRON_UPDATE_TOOL_ID, arguments)?;
         let id = args.id.clone();
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
-        let job = cron.update_job(&id, args.into_update()?)?;
+        let job = self.cron.update_job(&id, args.into_update()?)?;
         Ok(json!({
             "tool": CRON_UPDATE_TOOL_ID,
             "status": "updated",
@@ -154,9 +151,7 @@ impl CronTools {
 
     fn delete(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(CRON_DELETE_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
-        let job = cron.delete_job(&args.id)?;
+        let job = self.cron.delete_job(&args.id)?;
         Ok(json!({
             "tool": CRON_DELETE_TOOL_ID,
             "status": "deleted",
@@ -172,9 +167,7 @@ impl CronTools {
             CRON_DISABLE_TOOL_ID
         };
         let args = parse_args::<IdArgs>(tool_id, arguments)?;
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
-        let job = cron.set_enabled(&args.id, enabled)?;
+        let job = self.cron.set_enabled(&args.id, enabled)?;
         Ok(json!({
             "tool": tool_id,
             "status": "updated",
@@ -186,10 +179,8 @@ impl CronTools {
     fn run(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RunArgs>(CRON_RUN_TOOL_ID, arguments)?;
         let status = args.status.unwrap_or(CronRunStatusArg::Succeeded).into();
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
         let (run, outcome) = if let Some(scheduled_for) = args.scheduled_for {
-            cron.record_run_for(
+            self.cron.record_run_for(
                 &args.job_id,
                 &scheduled_for,
                 status,
@@ -197,7 +188,7 @@ impl CronTools {
                 args.error.as_deref(),
             )?
         } else {
-            cron.record_manual_run_result(
+            self.cron.record_manual_run_result(
                 &args.job_id,
                 status,
                 args.result_ref.as_deref(),
@@ -215,16 +206,14 @@ impl CronTools {
         let args = parse_args::<TickArgs>(CRON_TICK_TOOL_ID, arguments)?;
         let unix_seconds = args.unix_seconds.unwrap_or_else(current_unix_seconds);
         let mock_skill_execution = args.mock_skill_execution.unwrap_or(true);
-        let store = self.open_store_writable()?;
-        let cron = CronRepository::new(&store);
-        let due_jobs = cron.due_jobs(unix_seconds)?;
+        let due_jobs = self.cron.due_jobs(unix_seconds)?;
         let mut recorded = Vec::new();
         let mut notifications = 0usize;
         let mut replays = 0usize;
         let mut pending = 0usize;
 
         for due in due_jobs {
-            match cron.begin_run_for(&due.job, &due.scheduled_for)? {
+            match self.cron.begin_run_for(&due.job, &due.scheduled_for)? {
                 CronRunAdmission::Replayed(run, _) => {
                     replays += 1;
                     recorded.push(run);
@@ -235,7 +224,7 @@ impl CronTools {
                 CronRunAdmission::Inserted(_) => {
                     let (status, result_ref, error) =
                         execute_tick_target(&due.job, mock_skill_execution);
-                    let run = cron.record_admitted_run(
+                    let run = self.cron.record_admitted_run(
                         &due.job.id,
                         &due.scheduled_for,
                         status,
@@ -245,7 +234,12 @@ impl CronTools {
                     if let Some(notify_ref) = &due.job.notify_ref
                         && notify_ref.starts_with("matrix-room:")
                     {
-                        enqueue_cron_notification(&store, &due.job, &run, notify_ref)?;
+                        enqueue_cron_notification(
+                            self.matrix_outbox.as_ref(),
+                            &due.job,
+                            &run,
+                            notify_ref,
+                        )?;
                         notifications += 1;
                     }
                     recorded.push(run);
@@ -264,16 +258,6 @@ impl CronTools {
             "notification_count": notifications,
             "runs": runs,
         }))
-    }
-
-    fn open_store_read_only(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root)
-            .with_context(|| format!("failed to open cron store {}", self.store_root.display()))
-    }
-
-    fn open_store_writable(&self) -> Result<AglStore> {
-        AglStore::open_current_at(&self.store_root)
-            .with_context(|| format!("failed to open cron store {}", self.store_root.display()))
     }
 }
 
@@ -323,21 +307,15 @@ fn run_value(run: &CronRun) -> Value {
 fn render_run_with_idempotency(
     tool_id: &str,
     run: &CronRun,
-    outcome: &IdempotencyOutcome,
+    outcome: &CronIdempotencyOutcome,
 ) -> Value {
-    let (admission, namespace, key, initial_status) = match outcome {
-        IdempotencyOutcome::Inserted(record) => (
-            "inserted",
-            record.namespace.as_str(),
-            record.key.as_str(),
-            record.status.as_str(),
-        ),
-        IdempotencyOutcome::Replayed(record) => (
-            "replayed",
-            record.namespace.as_str(),
-            record.key.as_str(),
-            record.status.as_str(),
-        ),
+    let (admission, key, initial_status) = match outcome {
+        CronIdempotencyOutcome::Inserted(record) => {
+            ("inserted", record.key.as_str(), record.status.as_str())
+        }
+        CronIdempotencyOutcome::Replayed(record) => {
+            ("replayed", record.key.as_str(), record.status.as_str())
+        }
     };
     json!({
         "tool": tool_id,
@@ -346,7 +324,7 @@ fn render_run_with_idempotency(
         "run": run_value(run),
         "idempotency": {
             "admission": admission,
-            "namespace": namespace,
+            "namespace": "cron-run",
             "key": key,
             "initial_status": initial_status,
         },
@@ -388,7 +366,7 @@ fn execute_tick_target(
 }
 
 fn enqueue_cron_notification(
-    store: &AglStore,
+    matrix_outbox: &dyn MatrixOutboxRepository,
     job: &CronJob,
     run: &CronRun,
     notify_ref: &str,
@@ -401,13 +379,13 @@ fn enqueue_cron_notification(
         run.scheduled_for
     );
     let dedupe_key = format!("cron:{}:{notify_ref}", run.id);
-    store.enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+    matrix_outbox.enqueue(MatrixOutboxDraft::new(
         notify_ref.to_string(),
         "cron".to_string(),
         run.id.clone(),
         dedupe_key,
         body,
-    ))?;
+    )?)?;
     Ok(())
 }
 

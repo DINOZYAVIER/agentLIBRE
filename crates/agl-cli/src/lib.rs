@@ -10,7 +10,7 @@ use agl_chat::{
 };
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
 use agl_cron::{
-    CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind,
+    CronIdempotencyOutcome, CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind,
     STORE_STATUS_BUILTIN_CRON_TARGET, unsupported_builtin_cron_target_message,
     validate_builtin_cron_target,
 };
@@ -20,6 +20,7 @@ use agl_daemon::{
 };
 use agl_ids::{RunId, SessionId};
 use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind, InferenceHost, InferenceHostConfig};
+use agl_matrix::MatrixOutboxDraft;
 use agl_protocol::{
     AssistantItemState, DaemonTool, InferenceStatusRequest, ModelReleaseOutcome,
     ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceEngineState,
@@ -30,10 +31,10 @@ use agl_protocol::{
 use agl_repo::read_workspace_default_function;
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
-    AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
+    AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, StoreRepositories, StoreRuntime,
+    init_tracing,
 };
 use agl_skill::{SkillPermissions, SkillSource, SkillTrustStore, builtin_registry};
-use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 mod args;
@@ -310,13 +311,22 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Package(command) => run_package(command, runtime),
         CliCommand::Artifact(command) => run_artifact(command, runtime),
-        CliCommand::Cron(command) => run_cron(command, runtime),
+        CliCommand::Cron(command) => {
+            let repositories = open_store_repositories(runtime)?;
+            run_cron(command, runtime, &repositories)
+        }
         CliCommand::Store(command) => run_store(command, runtime),
         CliCommand::Function(command) => run_function(command, runtime),
         CliCommand::Init(options) => run_init(options, runtime),
         CliCommand::Model(command) => run_model(command, runtime),
-        CliCommand::Memory(command) => run_memory(command, runtime),
-        CliCommand::Notes(command) => run_notes(command, runtime),
+        CliCommand::Memory(command) => {
+            let repositories = open_store_repositories(runtime)?;
+            run_memory(command, repositories.memory.as_ref())
+        }
+        CliCommand::Notes(command) => {
+            let repositories = open_store_repositories(runtime)?;
+            run_notes(command, repositories.notes.as_ref())
+        }
         CliCommand::Repo(command) => run_repo(command),
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Session(options) => run_session(options, runtime),
@@ -328,28 +338,36 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     }
 }
 
-fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+fn open_store_repositories(runtime: &AgentLibreRuntimeConfig) -> Result<StoreRepositories> {
+    StoreRuntime::open(&runtime.paths)
+        .context("failed to open agent store runtime")
+        .map(StoreRuntime::into_repositories)
+}
+
+fn run_cron(
+    command: CronCommand,
+    runtime: &AgentLibreRuntimeConfig,
+    repositories: &StoreRepositories,
+) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "cron", "starting command");
-    let store =
-        AglStore::open_at(runtime.paths.store_root()).context("failed to open cron store")?;
-    let cron = CronRepository::new(&store);
+    let cron = repositories.cron.as_ref();
 
     match command {
-        CronCommand::Add(options) => run_cron_add(options, &cron, runtime),
-        CronCommand::List(options) => run_cron_list(options, &cron),
-        CronCommand::Show(options) => run_cron_show(options, &cron),
-        CronCommand::Enable(options) => run_cron_enable(options, &cron),
-        CronCommand::Disable(options) => run_cron_disable(options, &cron),
-        CronCommand::Run(options) => run_cron_run(options, &cron, &store, runtime),
-        CronCommand::Tick(options) => run_cron_tick_command(options, &store, runtime),
-        CronCommand::History(options) => run_cron_history(options, &cron),
-        CronCommand::Delete(options) => run_cron_delete(options, &cron),
+        CronCommand::Add(options) => run_cron_add(options, cron, runtime),
+        CronCommand::List(options) => run_cron_list(options, cron),
+        CronCommand::Show(options) => run_cron_show(options, cron),
+        CronCommand::Enable(options) => run_cron_enable(options, cron),
+        CronCommand::Disable(options) => run_cron_disable(options, cron),
+        CronCommand::Run(options) => run_cron_run(options, cron, repositories, runtime),
+        CronCommand::Tick(options) => run_cron_tick_command(options, repositories, runtime),
+        CronCommand::History(options) => run_cron_history(options, cron),
+        CronCommand::Delete(options) => run_cron_delete(options, cron),
     }
 }
 
 fn run_cron_add(
     options: CronAddOptions,
-    cron: &CronRepository<'_>,
+    cron: &dyn CronRepository,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     validate_cron_target(&options.target, runtime)?;
@@ -371,14 +389,14 @@ fn run_cron_add(
     crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
-fn run_cron_list(options: CronListOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_list(options: CronListOptions, cron: &dyn CronRepository) -> Result<()> {
     let jobs = cron
         .list_jobs(options.include_deleted)
         .context("failed to list cron jobs")?;
     crate::print_json_or(options.json, &jobs, || print_cron_jobs(&jobs))
 }
 
-fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_show(options: CronShowOptions, cron: &dyn CronRepository) -> Result<()> {
     let job = cron
         .job(&options.id)
         .context("failed to read cron job")?
@@ -386,14 +404,14 @@ fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<
     crate::print_json_or(options.json, &job, || print_cron_job_detail(&job))
 }
 
-fn run_cron_enable(options: CronEnableOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_enable(options: CronEnableOptions, cron: &dyn CronRepository) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, true)
         .context("failed to enable cron job")?;
     crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
-fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_disable(options: CronDisableOptions, cron: &dyn CronRepository) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, false)
         .context("failed to disable cron job")?;
@@ -402,8 +420,8 @@ fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> R
 
 fn run_cron_run(
     options: CronRunOptions,
-    cron: &CronRepository<'_>,
-    store: &AglStore,
+    cron: &dyn CronRepository,
+    repositories: &StoreRepositories,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let _ = options.now;
@@ -423,7 +441,7 @@ fn run_cron_run(
     };
     let execution = execute_cron_target(
         &job,
-        store,
+        repositories,
         runtime,
         options.mock_skill_execution,
         inference.as_mut(),
@@ -436,7 +454,7 @@ fn run_cron_run(
             execution.error.as_deref(),
         )
         .context("failed to record cron run")?;
-    let idempotency = idempotency_report(store, &outcome)?;
+    let idempotency = idempotency_report(&outcome, &run);
 
     if options.json {
         crate::print_json(&serde_json::json!({
@@ -494,12 +512,13 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
 
 fn run_cron_tick_command(
     options: CronTickOptions,
-    store: &AglStore,
+    repositories: &StoreRepositories,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let unix_seconds = options.at.unwrap_or_else(unix_now);
     let needs_inference = !options.mock_skill_execution
-        && CronRepository::new(store)
+        && repositories
+            .cron
             .due_jobs(unix_seconds)
             .context("failed to inspect due cron jobs for inference authority")?
             .iter()
@@ -508,14 +527,21 @@ fn run_cron_tick_command(
         .then(|| daemon_first_cron_inference(runtime))
         .transpose()?;
     let mut executor = CliCronExecutor {
-        store,
+        repositories,
         runtime,
         mock_skill_execution: options.mock_skill_execution,
         inference,
     };
-    let mut notifier = CliStoreCronNotifier { store };
-    let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
-        .context("failed to run cron scheduler tick")?;
+    let mut notifier = CliStoreCronNotifier {
+        matrix_outbox: repositories.matrix_outbox.as_ref(),
+    };
+    let report = run_cron_tick(
+        repositories.cron.as_ref(),
+        unix_seconds,
+        &mut executor,
+        &mut notifier,
+    )
+    .context("failed to run cron scheduler tick")?;
     if options.json {
         crate::print_json(&serde_json::json!({
             "at": unix_seconds,
@@ -536,14 +562,14 @@ fn run_cron_tick_command(
     Ok(())
 }
 
-fn run_cron_history(options: CronHistoryOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_history(options: CronHistoryOptions, cron: &dyn CronRepository) -> Result<()> {
     let runs = cron
         .history(&options.id)
         .context("failed to read cron run history")?;
     crate::print_json_or(options.json, &runs, || print_cron_runs(&runs))
 }
 
-fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Result<()> {
+fn run_cron_delete(options: CronDeleteOptions, cron: &dyn CronRepository) -> Result<()> {
     let job = cron
         .delete_job(&options.id)
         .context("failed to delete cron job")?;
@@ -593,12 +619,12 @@ fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) ->
 
 fn execute_cron_target(
     job: &CronJob,
-    store: &AglStore,
+    repositories: &StoreRepositories,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
     inference: Option<&mut CliCronInference>,
 ) -> CronExecution {
-    match run_cron_target(job, store, runtime, mock_skill_execution, inference) {
+    match run_cron_target(job, repositories, runtime, mock_skill_execution, inference) {
         Ok(result_ref) => CronExecution::succeeded(result_ref),
         Err(err) => CronExecution::failed(format!("{err:#}")),
     }
@@ -606,27 +632,34 @@ fn execute_cron_target(
 
 fn run_cron_target(
     job: &CronJob,
-    store: &AglStore,
+    repositories: &StoreRepositories,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
     inference: Option<&mut CliCronInference>,
 ) -> Result<String> {
     match job.target_kind {
-        CronTargetKind::Builtin => run_builtin_cron_target(job, store),
+        CronTargetKind::Builtin => {
+            run_builtin_cron_target(job, repositories.administration.as_ref())
+        }
         CronTargetKind::Skill if mock_skill_execution => run_mock_skill_cron_target(job),
         CronTargetKind::Skill => inference
             .context("cron skill inference authority is not initialized")?
-            .run_skill(job, runtime),
+            .run_skill(job, runtime, repositories),
     }
 }
 
-fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
+fn run_builtin_cron_target(
+    job: &CronJob,
+    administration: &dyn agl_core_tools::StoreAdminPort,
+) -> Result<String> {
     match job.target_ref.as_str() {
         STORE_STATUS_BUILTIN_CRON_TARGET => {
-            let health = store.health().context("failed to check store health")?;
+            let schema = administration
+                .schema_status()
+                .context("failed to check store health")?;
             Ok(format!(
                 "builtin:store-status:schema:{}",
-                health.migration_version
+                schema.schema_version.unwrap_or_default()
             ))
         }
         _ => bail!(
@@ -639,6 +672,7 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
 fn run_skill_cron_target(
     job: &CronJob,
     runtime: &AgentLibreRuntimeConfig,
+    repositories: &StoreRepositories,
     inference_client: &InferenceClientHandle,
 ) -> Result<String> {
     let prompt = render_cron_skill_prompt(job)?;
@@ -654,6 +688,7 @@ fn run_skill_cron_target(
             new_session: true,
         },
         runtime,
+        repositories.clone(),
         inference_client.clone(),
     )?;
     let session_id = chat.session_id().clone();
@@ -788,30 +823,29 @@ fn prompt_preview(prompt: &str) -> String {
     prompt.chars().take(LIMIT).collect()
 }
 
-fn idempotency_report(store: &AglStore, outcome: &IdempotencyOutcome) -> Result<serde_json::Value> {
+fn idempotency_report(outcome: &CronIdempotencyOutcome, run: &CronRun) -> serde_json::Value {
     let (admission, initial) = match outcome {
-        IdempotencyOutcome::Inserted(record) => ("inserted", record),
-        IdempotencyOutcome::Replayed(record) => ("replayed", record),
+        CronIdempotencyOutcome::Inserted(record) => ("inserted", record),
+        CronIdempotencyOutcome::Replayed(record) => ("replayed", record),
     };
-    let final_record = store
-        .idempotency_record(&initial.namespace, &initial.key)
-        .context("failed to read final idempotency record")?
-        .unwrap_or_else(|| initial.clone());
-    Ok(serde_json::json!({
+    let final_status = match run.status {
+        agl_cron::CronRunStatus::Succeeded => "completed",
+        agl_cron::CronRunStatus::Failed => "failed",
+        agl_cron::CronRunStatus::Skipped => "skipped",
+        agl_cron::CronRunStatus::Queued | agl_cron::CronRunStatus::Running => "in_progress",
+    };
+    serde_json::json!({
         "admission": admission,
-        "namespace": initial.namespace,
         "key": initial.key,
         "fingerprint": initial.fingerprint,
         "initial_status": initial.status.as_str(),
-        "final_status": final_record.status.as_str(),
-        "result_ref": final_record.result_ref,
-        "created_at": initial.created_at,
-        "updated_at": final_record.updated_at,
-    }))
+        "final_status": final_status,
+        "result_ref": initial.result_ref,
+    })
 }
 
 struct CliCronExecutor<'a> {
-    store: &'a AglStore,
+    repositories: &'a StoreRepositories,
     runtime: &'a AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
     inference: Option<CliCronInference>,
@@ -821,7 +855,7 @@ impl CronTargetExecutor for CliCronExecutor<'_> {
     fn execute(&mut self, job: &CronJob, _scheduled_for: &str) -> CronExecution {
         execute_cron_target(
             job,
-            self.store,
+            self.repositories,
             self.runtime,
             self.mock_skill_execution,
             self.inference.as_mut(),
@@ -830,7 +864,7 @@ impl CronTargetExecutor for CliCronExecutor<'_> {
 }
 
 struct CliStoreCronNotifier<'a> {
-    store: &'a AglStore,
+    matrix_outbox: &'a dyn agl_matrix::MatrixOutboxRepository,
 }
 
 impl CronNotifier for CliStoreCronNotifier<'_> {
@@ -840,14 +874,14 @@ impl CronNotifier for CliStoreCronNotifier<'_> {
         }
         let body = render_cron_notification_body(&notification);
         let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
-        self.store
-            .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+        self.matrix_outbox
+            .enqueue(MatrixOutboxDraft::new(
                 notification.notify_ref,
                 "cron",
                 notification.run_id,
                 dedupe_key,
                 body,
-            ))
+            )?)
             .context("failed to enqueue Matrix notification")?;
         Ok(())
     }
@@ -1339,13 +1373,20 @@ enum CliCronInference {
 }
 
 impl CliCronInference {
-    fn run_skill(&self, job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
+    fn run_skill(
+        &self,
+        job: &CronJob,
+        runtime: &AgentLibreRuntimeConfig,
+        repositories: &StoreRepositories,
+    ) -> Result<String> {
         match self {
             Self::Daemon {
                 runtime: async_runtime,
                 client,
             } => async_runtime.block_on(run_skill_cron_target_via_daemon(client, job, runtime)),
-            Self::Standalone { client, .. } => run_skill_cron_target(job, runtime, client),
+            Self::Standalone { client, .. } => {
+                run_skill_cron_target(job, runtime, repositories, client)
+            }
         }
     }
 }
@@ -1774,7 +1815,8 @@ fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfi
     let tool_mode = chat_options.inference.tool_mode;
     let inference_host = process_local_inference_host(runtime)?;
     let inference_client = InferenceClientHandle::from(inference_host);
-    let chat = OneShotSession::open(chat_options, runtime, inference_client)?;
+    let repositories = open_store_repositories(runtime)?;
+    let chat = OneShotSession::open(chat_options, runtime, repositories, inference_client)?;
     let summary = chat.summary()?;
     tracing::info!(
         target: "agentlibre::app",
@@ -2485,8 +2527,10 @@ mod tests {
                 let mut runtime_identity = agl_runtime::current_runtime_identity()?;
                 runtime_identity.terminal_generation =
                     Some(terminal_service.identity.installed_generation().clone());
+                let repositories = StoreRuntime::open(&runtime.paths)?.into_repositories();
                 let state = agl_daemon::SharedDaemonState::open_with_runtime_identity(
                     runtime,
+                    repositories,
                     InferenceOptions::default(),
                     InferenceClientHandle::new(DaemonTestInference { calls }),
                     EngineRuntimeStatusHandle::default(),
@@ -2745,7 +2789,7 @@ subagents:
         ));
         let runtime = daemon_test_runtime(&root);
         install_daemon_test_model(&runtime);
-        let store = AglStore::open_at(runtime.paths.store_root()).unwrap();
+        let repositories = open_store_repositories(&runtime).unwrap();
         let mut draft = CronJobDraft::new(
             "Daemon cron test",
             CronTargetKind::Skill,
@@ -2753,20 +2797,20 @@ subagents:
             "hourly",
         );
         draft.prompt = Some("Report repository status.".to_owned());
-        let job = CronRepository::new(&store).add_job(draft).unwrap();
+        let job = repositories.cron.add_job(draft).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let (server, ready) = spawn_test_daemon(runtime.clone(), Arc::clone(&calls));
         ready.recv_timeout(Duration::from_secs(5)).unwrap();
 
         let inference = daemon_first_cron_inference(&runtime).unwrap();
-        let result = inference.run_skill(&job, &runtime).unwrap();
+        let result = inference.run_skill(&job, &runtime, &repositories).unwrap();
 
         assert!(result.starts_with("skill:process:session:"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(!runtime.paths.inference_worker_temp_root().exists());
         drop(inference);
         server.join().unwrap().unwrap();
-        drop(store);
+        drop(repositories);
         std::fs::remove_dir_all(root).unwrap();
     }
 

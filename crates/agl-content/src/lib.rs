@@ -1,5 +1,6 @@
 use std::fmt::{self, Display, Formatter, Write as _};
 
+use agl_ids::RunId;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -265,6 +266,90 @@ impl<'de> Deserialize<'de> for ContentAttachmentRef {
         .map_err(serde::de::Error::custom)
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredContentAttachment {
+    pub run_id: RunId,
+    pub reference: ContentAttachmentRef,
+    pub retention: ArtifactRetention,
+    pub tombstoned: bool,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedContentAttachment {
+    pub reference: ContentAttachmentRef,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ContentAttachmentGcReport {
+    pub content_attachment_records_deleted: usize,
+    pub blob_records_deleted: usize,
+    pub blob_files_deleted: usize,
+    pub orphan_files_deleted: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentAttachmentWrite {
+    pub run_id: RunId,
+    pub media_type: MediaType,
+    pub bytes: Vec<u8>,
+    pub image: Option<ImageDimensions>,
+    pub sensitivity: ArtifactSensitivity,
+    pub source: ArtifactSource,
+    pub retention: ArtifactRetention,
+}
+
+pub trait ContentRepository: Send + Sync {
+    fn write(
+        &self,
+        command: ContentAttachmentWrite,
+    ) -> Result<StoredContentAttachment, ContentRepositoryError>;
+    fn get(
+        &self,
+        id: &ContentAttachmentId,
+    ) -> Result<Option<StoredContentAttachment>, ContentRepositoryError>;
+    fn resolve(
+        &self,
+        owner_run_id: &RunId,
+        reference: &ContentAttachmentRef,
+    ) -> Result<ResolvedContentAttachment, ContentRepositoryError>;
+    fn tombstone_run(&self, run_id: &RunId) -> Result<usize, ContentRepositoryError>;
+    fn garbage_collect(&self) -> Result<ContentAttachmentGcReport, ContentRepositoryError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContentRepositoryError {
+    InvalidValue { field: &'static str, reason: String },
+    Unavailable { id: String },
+    AccessDenied,
+    Integrity { id: String, reason: String },
+    Repository { reason: String },
+}
+
+impl Display for ContentRepositoryError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidValue { field, reason } => {
+                write!(formatter, "invalid content {field}: {reason}")
+            }
+            Self::Unavailable { id } => write!(formatter, "content attachment unavailable: {id}"),
+            Self::AccessDenied => formatter.write_str("content attachment access denied"),
+            Self::Integrity { id, reason } => {
+                write!(
+                    formatter,
+                    "content attachment {id} integrity failure: {reason}"
+                )
+            }
+            Self::Repository { reason } => {
+                write!(formatter, "content repository failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ContentRepositoryError {}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

@@ -1,7 +1,7 @@
 use agl_artifact::{ArtifactCommitError, ArtifactCommitRecord, ArtifactCommitRepository};
 use rusqlite::{OptionalExtension, params};
 
-use crate::AglStore;
+use crate::{AglStore, StoreHandle};
 
 impl ArtifactCommitRepository for AglStore {
     fn save(&self, record: ArtifactCommitRecord) -> Result<(), ArtifactCommitError> {
@@ -122,6 +122,26 @@ impl ArtifactCommitRepository for AglStore {
                 .map_err(|error| ArtifactCommitError::Repository(error.to_string()))
         })
         .collect()
+    }
+}
+
+impl ArtifactCommitRepository for StoreHandle {
+    fn save(&self, record: ArtifactCommitRecord) -> Result<(), ArtifactCommitError> {
+        self.lock()
+            .map_err(|error| ArtifactCommitError::Repository(error.to_string()))?
+            .save(record)
+    }
+
+    fn load(&self, operation_id: &str) -> Result<ArtifactCommitRecord, ArtifactCommitError> {
+        self.lock()
+            .map_err(|error| ArtifactCommitError::Repository(error.to_string()))?
+            .load(operation_id)
+    }
+
+    fn incomplete(&self) -> Result<Vec<ArtifactCommitRecord>, ArtifactCommitError> {
+        self.lock()
+            .map_err(|error| ArtifactCommitError::Repository(error.to_string()))?
+            .incomplete()
     }
 }
 

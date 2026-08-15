@@ -9,6 +9,7 @@ mod outcome;
 mod policy;
 mod registry;
 mod run;
+mod run_repository;
 mod schema;
 mod session;
 mod tool_contract;
@@ -68,6 +69,11 @@ pub use run::{
     RunStepMachineError, RunStepOperationId, RunStepRevision, RunStepState, RunStepTransitionInput,
     RunStepTransitionRecord, RunTerminalOutcome, RunTransitionInput, RunTransitionRecord, RunUsage,
     RunUsageAccepted,
+};
+pub use run_repository::{
+    ChildRunAdmission, ChildRunDraft, DurableRunAdmission, DurableRunDraft, DurableRunRecord,
+    IdempotentRunRecord, RecoveryReport, RunConcurrencyKey, RunEventRecord, RunLease,
+    RunRepository, RunRepositoryError, RunStepDraft, RunStepRecord, SafeRunStatus, StepLease,
 };
 pub use session::{
     AgentLibreSessionFinishReason, ChatSessionMachine, ChatSessionPhase, ChatSessionTransition,
