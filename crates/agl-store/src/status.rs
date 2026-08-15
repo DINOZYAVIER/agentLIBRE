@@ -85,17 +85,16 @@ impl AglStore {
                     + self.query_count("SELECT COUNT(*) FROM matrix_notification_outbox")?,
                 self.query_count("SELECT COUNT(*) FROM cron_jobs WHERE deleted_at IS NULL")?
                     + self.query_count(
-                        "SELECT COUNT(*) FROM matrix_notification_outbox WHERE status = 'queued'",
+                        "SELECT COUNT(*) FROM matrix_notification_outbox WHERE state = 'queued'",
                     )?,
             )),
             StoreDomain::Permissions => Ok((
                 self.query_count("SELECT COUNT(*) FROM permission_requests")?
                     + self.query_count("SELECT COUNT(*) FROM permission_grants")?,
                 self.query_count(
-                    "SELECT COUNT(*) FROM permission_requests WHERE status = 'pending'",
-                )? + self.query_count(
-                    "SELECT COUNT(*) FROM permission_grants WHERE status = 'active'",
-                )?,
+                    "SELECT COUNT(*) FROM permission_requests WHERE state = 'pending'",
+                )? + self
+                    .query_count("SELECT COUNT(*) FROM permission_grants WHERE state = 'active'")?,
             )),
         }
     }

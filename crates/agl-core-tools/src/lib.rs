@@ -62,7 +62,11 @@ pub use skills::{
     SKILL_INSPECT_TOOL_ID, SKILL_LIST_TOOL_ID, SKILL_REVOKE_TOOL_ID, SKILL_STATUS_TOOL_ID,
     SKILL_TRUST_TOOL_ID, SKILL_VERIFY_TOOL_ID,
 };
-pub use store::{STORE_EXPORT_TOOL_ID, STORE_MIGRATE_TOOL_ID, STORE_STATUS_TOOL_ID, StoreTools};
+pub use store::{
+    STORE_EXPORT_TOOL_ID, STORE_MIGRATE_TOOL_ID, STORE_STATUS_TOOL_ID, StoreAdminDomain,
+    StoreAdminPort, StoreAppliedMigrationSnapshot, StoreDomainSnapshot, StoreExportSnapshot,
+    StoreMigrationSnapshot, StoreSchemaSnapshot, StoreStatusSnapshot, StoreTools,
+};
 pub(crate) fn parse_tool_args<T>(tool: &str, arguments: Value) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,

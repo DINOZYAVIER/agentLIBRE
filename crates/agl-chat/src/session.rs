@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use agl_content::Content;
+use agl_content::{Content, ContentRepository};
 use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
     RuntimeSubagentSpec,
@@ -25,22 +25,25 @@ use agl_kernel::{
     EffectiveToolSet, FunctionToolPolicy, SkillToolPolicy, ToolGrant, ToolPolicyInput,
 };
 use agl_kernel::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
-use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
+use agl_memory::{MemoryEntry, MemoryScope, MemorySearchQuery};
 use agl_model::{
     ModelArtifactRole, ModelExecutionPlan, ModelPlanRejection, ResolvedFunctionPlanInput,
     ResolvedModelPlanInput,
 };
 use agl_oven::render_engine_request;
 use agl_package::PackageSourceTier;
+use agl_permission::{
+    PermissionDuration, PermissionGrantRecord, PermissionOperationId, PermissionRepository,
+};
 use agl_runtime::{
     AgentLibrePaths, AgentLibreRuntimeConfig, PackageComposition, RenderedRuntimeFeatureContext,
-    ResolvedRuntimeBundle, RuntimeFeatureRenderOptions, render_runtime_feature_context,
+    ResolvedRuntimeBundle, RuntimeFeatureRenderOptions, StoreRepositories,
+    render_runtime_feature_context,
 };
 use agl_skill::{
     RegisteredSkill, SkillContextEvidence, SkillRegistry, SkillToolRouting, SkillToolRoutingView,
     SkillTrustState, build_verified_context_bundle,
 };
-use agl_store::{AglStore, PermissionGrantRecord};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
@@ -81,7 +84,7 @@ pub struct InferenceSession {
     effective_capabilities: EffectiveToolSet,
     permission_grants: RuntimePermissionGrantSnapshot,
     tool_mode: ToolAccessMode,
-    store_root: PathBuf,
+    repositories: StoreRepositories,
     runtime_paths: AgentLibrePaths,
     workspace_root: PathBuf,
     trust_store_path: PathBuf,
@@ -240,6 +243,7 @@ impl InferenceSession {
     pub fn new(
         options: InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         artifact_root_override: Option<PathBuf>,
         session_id: SessionId,
         inference_client: InferenceClientHandle,
@@ -250,7 +254,6 @@ impl InferenceSession {
                 .clone()
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
-        let store_root = runtime.paths.store_root();
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let function_profile_required = true;
         let (artifact_composition, mut runtime_bundle) = resolve_session_bundle(
@@ -330,7 +333,7 @@ impl InferenceSession {
             workspace_root: &workspace_root,
             runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
-            store_root: &store_root,
+            permissions: repositories.permissions.as_ref(),
             authority_ceiling: None,
             delegation_enabled: !delegation_children.is_empty(),
             allow_dynamic_grants: true,
@@ -366,7 +369,7 @@ impl InferenceSession {
             trust_store_path: &trust_store_path,
             artifact_root: &artifact_root,
             run_id: None,
-            store_root: &store_root,
+            memory: repositories.memory.as_ref(),
             runtime_bundle: runtime_bundle.as_ref(),
         })?;
         let visible_tools_value = serde_json::to_value(&skill_context.visible_tools)?;
@@ -411,7 +414,7 @@ impl InferenceSession {
             effective_capabilities: skill_context.effective_capabilities,
             permission_grants: skill_context.permission_grants,
             tool_mode,
-            store_root,
+            repositories,
             runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
@@ -434,6 +437,7 @@ impl InferenceSession {
     pub(crate) fn new_subagent(
         config: SubagentSessionConfig,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         let SubagentSessionConfig {
@@ -446,7 +450,6 @@ impl InferenceSession {
             workspace_root,
             execution_session_id,
         } = config;
-        let store_root = runtime.paths.store_root();
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
         let function_skills = spec.skills.clone();
         let function_extensions = extensions_for_tools(&authority_ceiling)?;
@@ -468,7 +471,7 @@ impl InferenceSession {
             workspace_root: &workspace_root,
             runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
-            store_root: &store_root,
+            permissions: repositories.permissions.as_ref(),
             authority_ceiling: Some(&authority_ceiling),
             delegation_enabled: !delegation_children.is_empty(),
             allow_dynamic_grants: false,
@@ -488,7 +491,7 @@ impl InferenceSession {
             trust_store_path: &trust_store_path,
             artifact_root: &artifact_root,
             run_id: None,
-            store_root: &store_root,
+            memory: repositories.memory.as_ref(),
             runtime_bundle: None,
         })?;
         let runtime_features = build_runtime_feature_context(
@@ -534,7 +537,7 @@ impl InferenceSession {
             effective_capabilities: skill_context.effective_capabilities,
             permission_grants: skill_context.permission_grants,
             tool_mode,
-            store_root,
+            repositories,
             runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
@@ -668,8 +671,8 @@ impl InferenceSession {
         self.tool_mode
     }
 
-    pub fn store_root(&self) -> &std::path::Path {
-        &self.store_root
+    pub(crate) fn repositories(&self) -> &StoreRepositories {
+        &self.repositories
     }
 
     pub(crate) fn trust_store_path(&self) -> &std::path::Path {
@@ -755,7 +758,7 @@ impl InferenceSession {
                 return Err(rejection.clone().into());
             }
         };
-        let media = resolve_request_media(&request, &self.store_root)?;
+        let media = resolve_request_media(&request, self.repositories.content.as_ref())?;
         let result = self.inference_client.generate(ChatInferenceJob {
             plan,
             artifacts: self.inference_artifacts.clone(),
@@ -945,7 +948,7 @@ impl InferenceSession {
             workspace_root: &self.workspace_root,
             runtime_paths: &self.runtime_paths,
             trust_store_path: &self.trust_store_path,
-            store_root: &self.store_root,
+            permissions: self.repositories.permissions.as_ref(),
             authority_ceiling: self.authority_ceiling.as_ref(),
             delegation_enabled,
             allow_dynamic_grants: self.allow_dynamic_grants,
@@ -980,7 +983,7 @@ impl InferenceSession {
             trust_store_path: &self.trust_store_path,
             artifact_root: &self.artifact_root,
             run_id,
-            store_root: &self.store_root,
+            memory: self.repositories.memory.as_ref(),
             runtime_bundle: self.runtime_bundle.as_ref(),
         })?;
         let visible_tools_value = serde_json::to_value(&self.visible_tools)?;
@@ -1190,12 +1193,14 @@ impl InferenceSession {
             .delegation_plan
             .as_ref()
             .context("delegation children require a persisted plan")?;
-        let store = AglStore::open_current_at(&self.store_root)
-            .context("failed to inspect delegation budget")?;
-        let run = store
+        let run = self
+            .repositories
+            .runs
             .run(run_id)?
             .with_context(|| format!("run {run_id} disappeared during context refresh"))?;
-        let root = store
+        let root = self
+            .repositories
+            .runs
             .run(&run.root_run_id)?
             .context("delegation root run disappeared")?;
         let now_ms = i64::try_from(
@@ -1209,7 +1214,7 @@ impl InferenceSession {
         let deadline_ms = root
             .created_at_ms
             .saturating_add(i64::try_from(timeout_ms).unwrap_or(i64::MAX));
-        let child_count = store.run_children(run_id)?.len();
+        let child_count = self.repositories.runs.run_children(run_id)?.len();
         let tree_output_remaining = plan
             .budget
             .max_total_output_tokens
@@ -1615,7 +1620,7 @@ struct MemoryContextRequest<'a> {
     trust_store_path: &'a std::path::Path,
     artifact_root: &'a std::path::Path,
     run_id: Option<&'a RunId>,
-    store_root: &'a std::path::Path,
+    memory: &'a dyn agl_memory::MemoryRepository,
     runtime_bundle: Option<&'a ResolvedRuntimeBundle>,
 }
 
@@ -1632,7 +1637,7 @@ struct SkillContextRequest<'a> {
     workspace_root: &'a std::path::Path,
     runtime_paths: &'a AgentLibrePaths,
     trust_store_path: &'a std::path::Path,
-    store_root: &'a std::path::Path,
+    permissions: &'a dyn PermissionRepository,
     authority_ceiling: Option<&'a BTreeSet<ToolId>>,
     delegation_enabled: bool,
     allow_dynamic_grants: bool,
@@ -1652,11 +1657,10 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.trust_store_path,
         request.runtime_bundle,
     )?;
-    let store = AglStore::open_at(request.store_root).context("failed to open memory store")?;
-    let memory = MemoryRepository::new(&store);
     let mut query = MemorySearchQuery::scoped(MemoryScope::user());
     query.limit = MEMORY_CONTEXT_ENTRY_LIMIT;
-    let entries = memory
+    let entries = request
+        .memory
         .list(&query)
         .context("failed to load memory context")?;
     if entries.is_empty() {
@@ -1785,7 +1789,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
             &skill_registry,
             &tool_catalog,
             &selected_skills,
-            request.store_root,
+            request.permissions,
             request.workspace_root,
             run_id,
             request.session_id,
@@ -1809,7 +1813,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     if let Some(run_id) = request.run_id {
         if request.allow_dynamic_grants {
             finalize_permission_grants(
-                request.store_root,
+                request.permissions,
                 run_id,
                 &effective_capabilities,
                 &mut permission_grants,
@@ -2014,7 +2018,7 @@ fn selected_skill_visible_tools_with_dynamic_grants(
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
-    store_root: &std::path::Path,
+    permissions: &dyn PermissionRepository,
     workspace_root: &std::path::Path,
     run_id: &RunId,
 ) -> Result<(Vec<VisibleTool>, RuntimePermissionGrantSnapshot)> {
@@ -2022,7 +2026,7 @@ fn selected_skill_visible_tools_with_dynamic_grants(
         skill_registry,
         tool_catalog,
         selected_skills,
-        store_root,
+        permissions,
         workspace_root,
         run_id,
         None,
@@ -2036,7 +2040,7 @@ fn selected_skill_visible_tools_with_dynamic_grants(
         None,
         RuntimeToolBoundary::default(),
     )?;
-    finalize_permission_grants(store_root, run_id, &effective, &mut grant_snapshot)?;
+    finalize_permission_grants(permissions, run_id, &effective, &mut grant_snapshot)?;
     Ok((visible_tools_from_effective(&effective), grant_snapshot))
 }
 
@@ -2217,14 +2221,12 @@ fn admit_dynamic_permission_grants(
     skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
-    store_root: &std::path::Path,
+    permissions: &dyn PermissionRepository,
     workspace_root: &std::path::Path,
     run_id: &RunId,
     session_id: Option<&SessionId>,
 ) -> Result<RuntimePermissionGrantSnapshot> {
-    let store = AglStore::open_at(store_root)
-        .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
-    let grants = store.active_permission_grants()?;
+    let grants = permissions.active_grants()?;
     let policy = selected_skill_grant_policy(skill_registry, selected_skills)?;
     let mut snapshot = RuntimePermissionGrantSnapshot::default();
 
@@ -2247,14 +2249,14 @@ fn admit_dynamic_permission_grants(
                     state_effects: tool_grant.state_effects,
                     sensitive_inputs: tool_grant.sensitive_inputs,
                     run_id: run_id.clone(),
-                    duration: grant.duration,
+                    duration: grant.duration.as_str().to_owned(),
                     admitted_scope,
                     scope_digest,
                 });
             }
             Err(reason) => snapshot.ignored.push(IgnoredPermissionGrant {
                 grant_id: grant.id,
-                tool_id: grant.tool_id,
+                tool_id: grant.tool_id.to_string(),
                 reason,
             }),
         }
@@ -2264,17 +2266,20 @@ fn admit_dynamic_permission_grants(
 }
 
 fn finalize_permission_grants(
-    store_root: &std::path::Path,
+    permissions: &dyn PermissionRepository,
     run_id: &RunId,
     effective: &EffectiveToolSet,
     snapshot: &mut RuntimePermissionGrantSnapshot,
 ) -> Result<()> {
-    let store = AglStore::open_at(store_root)
-        .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
     let mut admitted = Vec::new();
     for grant in std::mem::take(&mut snapshot.admitted) {
         if effective.contains(&grant.tool_id) {
-            store.admit_permission_grant(&grant.grant_id, run_id.as_str())?;
+            let operation_id = PermissionOperationId::new(format!(
+                "chat-admit:{}:{}",
+                run_id.as_str(),
+                grant.grant_id
+            ))?;
+            permissions.admit_grant(&grant.grant_id, run_id, operation_id)?;
             admitted.push(grant);
         } else {
             let reason = effective
@@ -2329,7 +2334,7 @@ fn evaluate_permission_grant(
     run_id: &RunId,
     session_id: Option<&SessionId>,
 ) -> std::result::Result<ToolGrant, String> {
-    let tool_id = ToolId::new(grant.tool_id.clone()).map_err(|_| "invalid_tool_id".to_string())?;
+    let tool_id = grant.tool_id.clone();
     if let Some(workspace) = grant
         .scope
         .get("workspace_root")
@@ -2343,8 +2348,8 @@ fn evaluate_permission_grant(
     {
         return Err("run_scope_mismatch".to_string());
     }
-    match grant.duration.as_str() {
-        "one_turn" => {
+    match grant.duration {
+        PermissionDuration::OneTurn => {
             if let Some(scoped_session_id) = grant
                 .scope
                 .get("session_id")
@@ -2354,7 +2359,7 @@ fn evaluate_permission_grant(
                 return Err("session_scope_mismatch".to_string());
             }
         }
-        "session" => {
+        PermissionDuration::Session => {
             let current_session = session_id.ok_or_else(|| "session_scope_required".to_string())?;
             let scoped_session = grant
                 .scope
@@ -2368,7 +2373,6 @@ fn evaluate_permission_grant(
                 return Err("session_grant_cannot_have_run_scope".to_string());
             }
         }
-        duration => return Err(format!("unsupported_duration_{duration}")),
     }
     if policy.denied_tools.contains(&tool_id) {
         return Err("denied_by_selected_skill".to_string());
@@ -2398,11 +2402,11 @@ fn evaluate_permission_grant(
     let declaration = tool_catalog
         .executable_tool(&tool_id)
         .map_err(|_| "tool_unavailable".to_string())?;
-    let max_operation_kind = parse_operation_kind(&grant.max_operation_kind)?;
+    let max_operation_kind = grant.max_operation_kind;
     if !max_operation_kind.permits(declaration.operation_kind) {
         return Err("operation_ceiling_denied".to_string());
     }
-    let granted_sensitive_inputs = parse_sensitive_inputs(&grant.sensitive_inputs)?;
+    let granted_sensitive_inputs = grant.sensitive_inputs.clone();
     for input in &declaration.sensitive_inputs {
         if !granted_sensitive_inputs.contains(input) {
             return Err("sensitive_input_denied".to_string());
@@ -2411,7 +2415,7 @@ fn evaluate_permission_grant(
     let tool_grant =
         ToolGrant::new(tool_id, max_operation_kind).with_sensitive_inputs(granted_sensitive_inputs);
     if !grant.state_effects.is_empty() || !declaration.sensitive_inputs.is_empty() {
-        let granted_effects = parse_state_effects(&grant.state_effects)?;
+        let granted_effects = grant.state_effects.clone();
         for effect in &declaration.state_effects {
             if !granted_effects.contains(effect) {
                 return Err("state_effect_denied".to_string());
@@ -2420,60 +2424,6 @@ fn evaluate_permission_grant(
         return Ok(tool_grant.with_state_effects(granted_effects));
     }
     Ok(tool_grant)
-}
-
-fn parse_operation_kind(value: &str) -> std::result::Result<OperationKind, String> {
-    match value {
-        "read" => Ok(OperationKind::Read),
-        "request" => Ok(OperationKind::Request),
-        "write" => Ok(OperationKind::Write),
-        "execute" => Ok(OperationKind::Execute),
-        "approve" => Ok(OperationKind::Approve),
-        "admin" => Ok(OperationKind::Admin),
-        _ => Err("invalid_operation_kind".to_string()),
-    }
-}
-
-fn parse_state_effects(values: &[String]) -> std::result::Result<BTreeSet<EffectId>, String> {
-    values
-        .iter()
-        .map(|value| match value.as_str() {
-            "host_screen_capture" => Ok(EffectId::host_screen_capture()),
-            "spawn_subagent" => Ok(EffectId::spawn_subagent()),
-            "session_working_directory" => Ok(EffectId::session_working_directory()),
-            "spawn_process" => Ok(EffectId::spawn_process()),
-            "control_process" => Ok(EffectId::control_process()),
-            "host_process_execution" => Ok(EffectId::host_process_execution()),
-            "shell_login_startup" => Ok(EffectId::shell_login_startup()),
-            "repo_files" => Ok(EffectId::repo_files()),
-            "repo_workspace" => Ok(EffectId::repo_workspace()),
-            "repo_hooks" => Ok(EffectId::repo_hooks()),
-            "store_memory_entries" => Ok(EffectId::store_memory_entries()),
-            "store_memory_suggestions" => Ok(EffectId::store_memory_suggestions()),
-            "store_notes" => Ok(EffectId::store_notes()),
-            "store_note_links" => Ok(EffectId::store_note_links()),
-            "store_cron" => Ok(EffectId::store_cron()),
-            "store_schema" => Ok(EffectId::store_schema()),
-            "matrix_outbox" => Ok(EffectId::matrix_outbox()),
-            "store_idempotency" => Ok(EffectId::store_idempotency()),
-            "store_permission_requests" => Ok(EffectId::store_permission_requests()),
-            "store_permission_grants" => Ok(EffectId::store_permission_grants()),
-            "skill_trust" => Ok(EffectId::skill_trust()),
-            _ => Err("invalid_state_effect".to_string()),
-        })
-        .collect()
-}
-
-fn parse_sensitive_inputs(
-    values: &[String],
-) -> std::result::Result<BTreeSet<SensitiveInput>, String> {
-    values
-        .iter()
-        .map(|value| match value.as_str() {
-            "screen_capture" => Ok(SensitiveInput::ScreenCapture),
-            _ => Err("invalid_sensitive_input".to_string()),
-        })
-        .collect()
 }
 
 fn sha256_text(value: &str) -> String {
@@ -2525,7 +2475,7 @@ fn resolve_plan_artifact_handles(
 
 fn resolve_request_media(
     request: &InferenceRequest,
-    store_root: &Path,
+    content: &dyn ContentRepository,
 ) -> Result<Vec<ResolvedMediaAttachment>> {
     let references = request
         .rendered
@@ -2538,13 +2488,11 @@ fn resolve_request_media(
     if references.is_empty() {
         return Ok(Vec::new());
     }
-    let store = AglStore::open_current_at(store_root)
-        .context("failed to open content attachment repository for inference")?;
     references
         .into_iter()
         .map(|reference| {
-            let resolved = store
-                .resolve_content_attachment(&request.run_id, &reference)
+            let resolved = content
+                .resolve(&request.run_id, &reference)
                 .context("failed to resolve inference content attachment")?;
             ResolvedMediaAttachment::new(resolved.reference, resolved.bytes)
                 .map_err(anyhow::Error::from)

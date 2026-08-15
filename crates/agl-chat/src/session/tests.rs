@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agl_config::{ModelDialect, ToolCallFormat};
 use agl_content::{Content, ContentPart};
 use agl_ids::{RequestId, RunId, SessionId, TurnId};
+use agl_permission::{PermissionGrantDraft, PermissionGrantState};
 
 use super::*;
 
@@ -29,6 +30,80 @@ fn request_id() -> RequestId {
 
 fn text(value: impl Into<String>) -> Content {
     Content::text(value).unwrap()
+}
+
+fn store_repositories(runtime: &AgentLibreRuntimeConfig) -> StoreRepositories {
+    agl_runtime::StoreRuntime::open(&runtime.paths)
+        .unwrap()
+        .into_repositories()
+}
+
+fn permission_repositories(root: &std::path::Path) -> StoreRepositories {
+    let repositories = agl_runtime::StoreRuntime::open_root(root)
+        .unwrap()
+        .into_repositories();
+    if repositories.runs.run(&run_id()).unwrap().is_none() {
+        let workspace = std::env::temp_dir().canonicalize().unwrap();
+        repositories
+            .runs
+            .admit_run_at(
+                &agl_kernel::DurableRunDraft {
+                    run_id: run_id(),
+                    session_id: None,
+                    turn_id: None,
+                    kind: agl_kernel::RunKind::Cron,
+                    priority: 0,
+                    concurrency_key: None,
+                    input: serde_json::json!({"test": "permission"}),
+                    checkpoint: None,
+                    effective_policy_hash: None,
+                    execution_context: agl_exec::ExecutionContextSnapshot {
+                        workspace_root: workspace.clone(),
+                        working_directory: workspace,
+                        private_execution_roots: Vec::new(),
+                        shell: agl_exec::ShellProfileSnapshot {
+                            program: PathBuf::from("/bin/sh"),
+                            command_args: vec!["-c".to_owned()],
+                            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+                            environment_names: vec!["PATH".to_owned()],
+                            executable_digest: "sha256:test-shell".to_owned(),
+                            config_digest: "sha256:test-config".to_owned(),
+                        },
+                        revision: 1,
+                        profile_metadata: "workspace".to_owned(),
+                    },
+                    budget: agl_kernel::RunBudget::default(),
+                    not_before_ms: None,
+                },
+                1,
+            )
+            .unwrap();
+    }
+    repositories
+}
+
+fn create_permission_grant(
+    repositories: &StoreRepositories,
+    tool_id: &str,
+    max_operation_kind: OperationKind,
+    state_effects: BTreeSet<EffectId>,
+    sensitive_inputs: BTreeSet<SensitiveInput>,
+    scope: serde_json::Value,
+    duration: PermissionDuration,
+) -> PermissionGrantRecord {
+    repositories
+        .permissions
+        .create_grant(PermissionGrantDraft {
+            request_id: None,
+            tool_id: ToolId::new(tool_id).unwrap(),
+            max_operation_kind,
+            state_effects,
+            sensitive_inputs,
+            scope,
+            duration,
+            granted_by_ref: "test".to_owned(),
+        })
+        .unwrap()
 }
 
 fn declare_workspace_source(workspace: &std::path::Path) {
@@ -318,6 +393,7 @@ doctor:
             ..Default::default()
         },
         &runtime,
+        store_repositories(&runtime),
         None,
         session_id.clone(),
         crate::inference_client::test_inference_client(),
@@ -1270,6 +1346,7 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
                 ..Default::default()
             },
             &runtime,
+            store_repositories(&runtime),
             None,
             session_id(),
             crate::inference_client::test_inference_client(),
@@ -1412,6 +1489,7 @@ title: Locked Function
             ..Default::default()
         },
         &runtime,
+        store_repositories(&runtime),
         None,
         session_id(),
         crate::inference_client::test_inference_client(),
@@ -1548,19 +1626,16 @@ fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
 #[test]
 fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
     let root = temp_store_root("grant-cron");
-    let store = AglStore::open_at(&root).unwrap();
-    let grant = store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: "core.cron:add".to_string(),
-            max_operation_kind: "write".to_string(),
-            state_effects: vec!["store_cron".to_string()],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    let grant = create_permission_grant(
+        &repositories,
+        "core.cron:add",
+        OperationKind::Write,
+        BTreeSet::from([EffectId::store_cron()]),
+        BTreeSet::new(),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = run_id();
@@ -1570,7 +1645,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
         &catalog,
         &[],
         ToolAccessMode::Write,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
     )
@@ -1584,10 +1659,15 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
     assert!(!tool_names.contains(&"core.cron:delete"));
     assert_eq!(snapshot.granted_visible_tools(), vec!["core.cron:add"]);
     assert!(snapshot.ignored_grants().is_empty());
-    assert!(store.active_permission_grants().unwrap().is_empty());
-    let consumed = store.permission_grant(&grant.id).unwrap().unwrap();
-    assert_eq!(consumed.status, agl_store::PermissionGrantStatus::Expired);
-    assert_eq!(consumed.last_admitted_run_id.as_deref(), Some(TEST_RUN_ID));
+    assert!(repositories.permissions.active_grants().unwrap().is_empty());
+    let consumed = repositories.permissions.grant(&grant.id).unwrap().unwrap();
+    assert_eq!(
+        consumed.state,
+        PermissionGrantState::Consumed {
+            run_id: run_id.clone()
+        }
+    );
+    assert_eq!(consumed.last_admitted_run_id.as_ref(), Some(&run_id));
     assert!(consumed.consumed_at.is_some());
 
     let _ = std::fs::remove_dir_all(root);
@@ -1596,26 +1676,23 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
 #[test]
 fn session_host_grant_retains_scope_provenance_and_remains_active() {
     let root = temp_store_root("grant-host-session");
-    let store = AglStore::open_at(&root).unwrap();
+    let repositories = permission_repositories(&root);
     let session_id = session_id();
-    let grant = store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: agl_core_tools::SHELL_EXEC_TOOL_ID.to_string(),
-            max_operation_kind: "execute".to_string(),
-            state_effects: vec![
-                "spawn_process".to_string(),
-                "host_process_execution".to_string(),
-            ],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({
+    let grant = create_permission_grant(
+        &repositories,
+        agl_core_tools::SHELL_EXEC_TOOL_ID,
+        OperationKind::Execute,
+        BTreeSet::from([
+            EffectId::spawn_process(),
+            EffectId::host_process_execution(),
+        ]),
+        BTreeSet::new(),
+        serde_json::json!({
                 "workspace_root": "/repo",
                 "session_id": session_id.clone(),
-            }),
-            duration: "session".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+        }),
+        PermissionDuration::Session,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let selected = [SkillId::new("process").unwrap()];
@@ -1624,7 +1701,7 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
         &skill_registry,
         &catalog,
         &selected,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
         Some(&session_id),
@@ -1640,7 +1717,13 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
         RuntimeToolBoundary::default(),
     )
     .unwrap();
-    finalize_permission_grants(&root, &run_id, &effective, &mut snapshot).unwrap();
+    finalize_permission_grants(
+        repositories.permissions.as_ref(),
+        &run_id,
+        &effective,
+        &mut snapshot,
+    )
+    .unwrap();
 
     let tool = effective
         .tool(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
@@ -1655,9 +1738,9 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
     assert!(provenance.admitted_scope.contains(TEST_SESSION_ID));
     assert!(provenance.scope_digest.starts_with("sha256:"));
 
-    let retained = store.permission_grant(&grant.id).unwrap().unwrap();
-    assert_eq!(retained.status, agl_store::PermissionGrantStatus::Active);
-    assert_eq!(retained.last_admitted_run_id.as_deref(), Some(TEST_RUN_ID));
+    let retained = repositories.permissions.grant(&grant.id).unwrap().unwrap();
+    assert_eq!(retained.state, PermissionGrantState::Active);
+    assert_eq!(retained.last_admitted_run_id.as_ref(), Some(&run_id));
     assert!(retained.consumed_at.is_none());
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1665,31 +1748,25 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
 #[test]
 fn screen_grant_requires_sensitive_input_and_host_effect_together() {
     let root = temp_store_root("grant-screen-exact");
-    let store = AglStore::open_at(&root).unwrap();
-    let missing_effect = store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: agl_host_tools::SCREEN_CAPTURE_TOOL_ID.to_string(),
-            max_operation_kind: "read".to_string(),
-            state_effects: Vec::new(),
-            sensitive_inputs: vec!["screen_capture".to_string()],
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
-    let exact = store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: agl_host_tools::SCREEN_CAPTURE_TOOL_ID.to_string(),
-            max_operation_kind: "read".to_string(),
-            state_effects: vec!["host_screen_capture".to_string()],
-            sensitive_inputs: vec!["screen_capture".to_string()],
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    let missing_effect = create_permission_grant(
+        &repositories,
+        agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
+        OperationKind::Read,
+        BTreeSet::new(),
+        BTreeSet::from([SensitiveInput::ScreenCapture]),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
+    let exact = create_permission_grant(
+        &repositories,
+        agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
+        OperationKind::Read,
+        BTreeSet::from([EffectId::host_screen_capture()]),
+        BTreeSet::from([SensitiveInput::ScreenCapture]),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let mut catalog = full_tool_catalog();
     catalog
         .register(agl_host_tools::screen::declaration())
@@ -1732,19 +1809,16 @@ fn screen_grant_requires_sensitive_input_and_host_effect_together() {
 #[test]
 fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
     let root = temp_store_root("grant-mode-blocked");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: "core.cron:add".to_string(),
-            max_operation_kind: "write".to_string(),
-            state_effects: vec!["store_cron".to_string()],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    create_permission_grant(
+        &repositories,
+        "core.cron:add",
+        OperationKind::Write,
+        BTreeSet::from([EffectId::store_cron()]),
+        BTreeSet::new(),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = run_id();
@@ -1754,7 +1828,7 @@ fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
         &catalog,
         &[],
         ToolAccessMode::ReadOnly,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
     )
@@ -1768,26 +1842,23 @@ fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
             .iter()
             .any(|grant| grant.contains("core.cron:add:tool_mode_denied"))
     );
-    assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+    assert_eq!(repositories.permissions.active_grants().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn dynamic_grant_denied_by_selected_skill_is_ignored() {
     let root = temp_store_root("grant-denied");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: "core.note:delete".to_string(),
-            max_operation_kind: "write".to_string(),
-            state_effects: vec!["store_notes".to_string()],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    create_permission_grant(
+        &repositories,
+        "core.note:delete",
+        OperationKind::Write,
+        BTreeSet::from([EffectId::store_notes()]),
+        BTreeSet::new(),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = run_id();
@@ -1797,7 +1868,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
         &catalog,
         &[SkillId::new("notes-capture").unwrap()],
         ToolAccessMode::ReadOnly,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
     )
@@ -1814,7 +1885,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
         "{:?}",
         snapshot.ignored_grants()
     );
-    assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+    assert_eq!(repositories.permissions.active_grants().unwrap().len(), 1);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1822,19 +1893,16 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
 #[test]
 fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
     let root = temp_store_root("grant-not-routed");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: "core.cron:add".to_string(),
-            max_operation_kind: "write".to_string(),
-            state_effects: vec!["store_cron".to_string()],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    create_permission_grant(
+        &repositories,
+        "core.cron:add",
+        OperationKind::Write,
+        BTreeSet::from([EffectId::store_cron()]),
+        BTreeSet::new(),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = run_id();
@@ -1844,7 +1912,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
         &catalog,
         &[SkillId::new("tool-smoke").unwrap()],
         ToolAccessMode::ReadOnly,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
     )
@@ -1870,7 +1938,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
         "{:?}",
         snapshot.ignored_grants()
     );
-    assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+    assert_eq!(repositories.permissions.active_grants().unwrap().len(), 1);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2237,19 +2305,16 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
 #[test]
 fn selected_cron_planner_admits_requestable_tool_after_grant() {
     let root = temp_store_root("grant-cron-selected");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-        .create_permission_grant(agl_store::PermissionGrantDraft {
-            request_id: None,
-            tool_id: "core.cron:add".to_string(),
-            max_operation_kind: "write".to_string(),
-            state_effects: vec!["store_cron".to_string()],
-            sensitive_inputs: Vec::new(),
-            scope: serde_json::json!({}),
-            duration: "one_turn".to_string(),
-            granted_by_ref: "test".to_string(),
-        })
-        .unwrap();
+    let repositories = permission_repositories(&root);
+    create_permission_grant(
+        &repositories,
+        "core.cron:add",
+        OperationKind::Write,
+        BTreeSet::from([EffectId::store_cron()]),
+        BTreeSet::new(),
+        serde_json::json!({}),
+        PermissionDuration::OneTurn,
+    );
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = run_id();
@@ -2259,7 +2324,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
         &catalog,
         &[SkillId::new("cron-planner").unwrap()],
         ToolAccessMode::Write,
-        &root,
+        repositories.permissions.as_ref(),
         std::path::Path::new("/repo"),
         &run_id,
     )
@@ -2267,7 +2332,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
 
     assert!(tools.iter().any(|tool| tool.id.as_str() == "core.cron:add"));
     assert_eq!(snapshot.granted_visible_tools(), vec!["core.cron:add"]);
-    assert!(store.active_permission_grants().unwrap().is_empty());
+    assert!(repositories.permissions.active_grants().unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(root);
 }

@@ -1,9 +1,9 @@
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ContentAttachmentRef, ImageDimensions,
-    MediaType,
+    MediaType, ResolvedContentAttachment, StoredContentAttachment,
 };
 use agl_ids::RunId;
-use agl_store::{AglStore, ResolvedContentAttachment, StoredContentAttachment};
+use agl_store::AglStore;
 
 // AGL172-032. Blob bytes and BlobDigest stay unchanged; only the run-scoped
 // reference/table/method vocabulary is replaced.
@@ -60,18 +60,17 @@ fn store_persists_content_attachments_without_an_artifact_table_or_api() {
         std::env::temp_dir().join(format!("agl172-content-attachment-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let store = AglStore::open_at(&root).unwrap();
-    let mut statement = store
-        .connection()
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-        .unwrap();
-    let tables = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert!(tables.contains(&"content_attachments".to_owned()));
-    assert!(!tables.contains(&"artifacts".to_owned()));
-    drop(statement);
+    let migration = store.health().unwrap();
+    assert_eq!(
+        migration.migration_version,
+        agl_store::CURRENT_SCHEMA_VERSION
+    );
+    let migrations = agl_store::STORE_MIGRATIONS
+        .iter()
+        .map(|migration| migration.sql)
+        .collect::<String>();
+    assert!(migrations.contains("CREATE TABLE content_attachments"));
+    assert!(!migrations.contains("CREATE TABLE artifacts"));
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -79,8 +78,9 @@ fn store_persists_content_attachments_without_an_artifact_table_or_api() {
 // AGL172-037, AGL172-043 and AGL172-065.
 #[test]
 fn artifact_commit_repository_is_narrow_durable_and_correlation_checked() {
-    fn selected_api(store: &AglStore) -> &dyn agl_artifact::ArtifactCommitRepository {
-        store.artifact_commit_repository()
+    fn selected_api(store: &agl_store::StoreHandle) -> &dyn agl_artifact::ArtifactCommitRepository {
+        store
     }
-    let _: fn(&AglStore) -> &dyn agl_artifact::ArtifactCommitRepository = selected_api;
+    let _: fn(&agl_store::StoreHandle) -> &dyn agl_artifact::ArtifactCommitRepository =
+        selected_api;
 }

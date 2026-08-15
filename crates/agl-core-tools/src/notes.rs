@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agl_kernel::{
     EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
-use agl_notes::{NoteRepository, NoteSearchQuery, NoteUpdate};
-use agl_store::AglStore;
+use agl_note::{NoteRepository, NoteSearchQuery, NoteUpdate};
 use anyhow::{Context, Result, ensure};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -31,16 +30,14 @@ pub const NOTES_REMEMBER_TOOL_ID: &str = "core.note:remember";
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NotesTools {
-    store_root: PathBuf,
+    repository: Arc<dyn NoteRepository>,
 }
 
 impl NotesTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
-        Self {
-            store_root: store_root.as_ref().to_path_buf(),
-        }
+    pub fn new(repository: Arc<dyn NoteRepository>) -> Self {
+        Self { repository }
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
@@ -58,9 +55,9 @@ impl NotesTools {
 
     fn add(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<AddArgs>(NOTES_ADD_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let notes = NoteRepository::new(&store);
-        let note = notes.add(agl_notes::NoteDraft::new(args.title, args.body))?;
+        let note = self
+            .repository
+            .add(agl_note::NoteDraft::new(args.title, args.body))?;
         Ok(json!({
             "tool": NOTES_ADD_TOOL_ID,
             "note_id": note.id,
@@ -79,9 +76,7 @@ impl NotesTools {
             .limit
             .unwrap_or(DEFAULT_SEARCH_LIMIT)
             .min(MAX_SEARCH_LIMIT);
-        let store = self.open_store_read_only()?;
-        let notes = NoteRepository::new(&store);
-        let results = notes.search(&NoteSearchQuery {
+        let results = self.repository.search(&NoteSearchQuery {
             text: Some(args.query),
             include_deleted: args.include_deleted.unwrap_or(false),
             limit,
@@ -108,12 +103,11 @@ impl NotesTools {
 
     fn show(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(NOTES_SHOW_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let notes = NoteRepository::new(&store);
-        let note = notes
+        let note = self
+            .repository
             .get(&args.id)?
             .with_context(|| format!("note not found: {}", args.id))?;
-        let links = notes.links(&note.id)?;
+        let links = self.repository.links(&note.id)?;
         let links = links
             .into_iter()
             .map(|link| {
@@ -138,9 +132,7 @@ impl NotesTools {
 
     fn update(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<UpdateArgs>(NOTES_UPDATE_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let notes = NoteRepository::new(&store);
-        let note = notes.update(
+        let note = self.repository.update(
             &args.id,
             NoteUpdate {
                 title: args.title,
@@ -157,9 +149,9 @@ impl NotesTools {
 
     fn link(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<LinkArgs>(NOTES_LINK_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let notes = NoteRepository::new(&store);
-        let link = notes.link(&args.id, &args.target_ref, args.label)?;
+        let link = self
+            .repository
+            .link(&args.id, &args.target_ref, args.label)?;
         Ok(json!({
             "tool": NOTES_LINK_TOOL_ID,
             "link_id": link.id,
@@ -171,9 +163,7 @@ impl NotesTools {
 
     fn delete(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(NOTES_DELETE_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let notes = NoteRepository::new(&store);
-        let note = notes.delete(&args.id)?;
+        let note = self.repository.delete(&args.id)?;
         Ok(json!({
             "tool": NOTES_DELETE_TOOL_ID,
             "note_id": note.id,
@@ -184,14 +174,12 @@ impl NotesTools {
 
     fn remember(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RememberArgs>(NOTES_REMEMBER_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let notes = NoteRepository::new(&store);
         let scope = agl_memory::MemoryScope::new(
             parse_memory_scope_kind(args.scope.as_str())?,
             args.scope_key.unwrap_or_else(|| "default".to_string()),
         )?;
         let kind = parse_memory_kind(args.kind.as_str())?;
-        let promotion = notes.remember(&args.id, scope, kind)?;
+        let promotion = self.repository.remember(&args.id, scope, kind)?;
         Ok(json!({
             "tool": NOTES_REMEMBER_TOOL_ID,
             "note_id": promotion.note.id,
@@ -199,16 +187,6 @@ impl NotesTools {
             "link_id": promotion.link.id,
             "status": "remembered",
         }))
-    }
-
-    fn open_store_read_only(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root)
-            .with_context(|| format!("failed to open notes store {}", self.store_root.display()))
-    }
-
-    fn open_store_writable(&self) -> Result<AglStore> {
-        AglStore::open_current_at(&self.store_root)
-            .with_context(|| format!("failed to open notes store {}", self.store_root.display()))
     }
 }
 
@@ -348,14 +326,14 @@ struct RememberArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::migrated_temp_root;
+    use crate::test_support::migrated_temp_store;
 
     use super::*;
 
     #[test]
     fn notes_tools_add_search_show_and_link() {
-        let root = migrated_temp_root("basic");
-        let tools = NotesTools::new(&root);
+        let (_root, store) = migrated_temp_store("basic");
+        let tools = NotesTools::new(store);
 
         let add = tools
             .dispatch(
@@ -379,8 +357,8 @@ mod tests {
 
     #[test]
     fn notes_tools_delete_and_remember_notes() {
-        let root = migrated_temp_root("remember");
-        let tools = NotesTools::new(&root);
+        let (_root, store) = migrated_temp_store("remember");
+        let tools = NotesTools::new(store);
 
         let add = tools
             .dispatch(

@@ -1,6 +1,4 @@
-use agl_notes::{Note, NoteDraft, NoteLink, NoteRepository, NoteSearchQuery, NoteUpdate};
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::AglStore;
+use agl_note::{Note, NoteDraft, NoteLink, NoteRepository, NoteSearchQuery, NoteUpdate};
 use anyhow::{Context, Result};
 
 use crate::args::{
@@ -9,31 +7,27 @@ use crate::args::{
 };
 use crate::memory::{memory_kind, memory_scope, print_memory_entry_summary};
 
-pub(crate) fn run_notes(command: NotesCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+pub(crate) fn run_notes(command: NotesCommand, notes: &dyn NoteRepository) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "notes", "starting command");
-    let store =
-        AglStore::open_at(runtime.paths.store_root()).context("failed to open notes store")?;
-    let notes = NoteRepository::new(&store);
-
     match command {
-        NotesCommand::Add(options) => run_notes_add(options, &notes),
-        NotesCommand::List(options) => run_notes_list(options, &notes),
-        NotesCommand::Search(options) => run_notes_search(options, &notes),
-        NotesCommand::Show(options) => run_notes_show(options, &notes),
-        NotesCommand::Update(options) => run_notes_update(options, &notes),
-        NotesCommand::Delete(options) => run_notes_delete(options, &notes),
-        NotesCommand::Link(options) => run_notes_link(options, &notes),
-        NotesCommand::Remember(options) => run_notes_remember(options, &notes),
+        NotesCommand::Add(options) => run_notes_add(options, notes),
+        NotesCommand::List(options) => run_notes_list(options, notes),
+        NotesCommand::Search(options) => run_notes_search(options, notes),
+        NotesCommand::Show(options) => run_notes_show(options, notes),
+        NotesCommand::Update(options) => run_notes_update(options, notes),
+        NotesCommand::Delete(options) => run_notes_delete(options, notes),
+        NotesCommand::Link(options) => run_notes_link(options, notes),
+        NotesCommand::Remember(options) => run_notes_remember(options, notes),
     }
 }
-fn run_notes_add(options: NotesAddOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_add(options: NotesAddOptions, notes: &dyn NoteRepository) -> Result<()> {
     let note = notes
         .add(NoteDraft::new(options.title, options.body))
         .context("failed to add note")?;
     crate::print_json_or(options.json, &note, || print_note_summary(&note))
 }
 
-fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_list(options: NotesListOptions, notes: &dyn NoteRepository) -> Result<()> {
     let query = NoteSearchQuery {
         include_deleted: options.include_deleted,
         limit: options.limit,
@@ -43,7 +37,7 @@ fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Resu
     crate::print_json_or(options.json, &entries, || print_notes(&entries))
 }
 
-fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_search(options: NotesSearchOptions, notes: &dyn NoteRepository) -> Result<()> {
     let query = NoteSearchQuery {
         text: Some(options.query),
         include_deleted: options.include_deleted,
@@ -53,7 +47,7 @@ fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> 
     crate::print_json_or(options.json, &entries, || print_notes(&entries))
 }
 
-fn run_notes_show(options: NotesShowOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_show(options: NotesShowOptions, notes: &dyn NoteRepository) -> Result<()> {
     let note = notes
         .get(&options.id)
         .context("failed to read note")?
@@ -72,7 +66,7 @@ fn run_notes_show(options: NotesShowOptions, notes: &NoteRepository<'_>) -> Resu
     Ok(())
 }
 
-fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_update(options: NotesUpdateOptions, notes: &dyn NoteRepository) -> Result<()> {
     let note = notes
         .update(
             &options.id,
@@ -85,7 +79,7 @@ fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> 
     crate::print_json_or(options.json, &note, || print_note_summary(&note))
 }
 
-fn run_notes_delete(options: NotesDeleteOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_delete(options: NotesDeleteOptions, notes: &dyn NoteRepository) -> Result<()> {
     let note = notes.delete(&options.id).context("failed to delete note")?;
     crate::print_json_or(options.json, &note, || {
         println!("note.deleted=true");
@@ -93,14 +87,14 @@ fn run_notes_delete(options: NotesDeleteOptions, notes: &NoteRepository<'_>) -> 
     })
 }
 
-fn run_notes_link(options: NotesLinkOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_link(options: NotesLinkOptions, notes: &dyn NoteRepository) -> Result<()> {
     let link = notes
         .link(&options.id, &options.target_ref, options.label)
         .context("failed to link note")?;
     crate::print_json_or(options.json, &link, || print_note_link(&link))
 }
 
-fn run_notes_remember(options: NotesRememberOptions, notes: &NoteRepository<'_>) -> Result<()> {
+fn run_notes_remember(options: NotesRememberOptions, notes: &dyn NoteRepository) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
     let promotion = notes
         .remember(&options.id, scope, memory_kind(options.kind))

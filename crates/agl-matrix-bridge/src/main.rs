@@ -292,7 +292,13 @@ async fn sync(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
 #[cfg(unix)]
 async fn deliver_outbox(path: PathBuf, store_root: PathBuf, limit: usize) -> Result<()> {
     let config = BridgeConfig::load(&path)?;
-    let report = MatrixRuntime::deliver_outbox(config, store_root, limit).await?;
+    let store_runtime = agl_runtime::StoreRuntime::open_root(store_root)?;
+    let report = MatrixRuntime::deliver_outbox(
+        config,
+        store_runtime.repositories().matrix_outbox.clone(),
+        limit,
+    )
+    .await?;
     print_outbox_delivery_report(&report);
     Ok(())
 }
@@ -310,6 +316,7 @@ fn print_outbox_delivery_report(report: &MatrixOutboxDeliveryReport) {
     println!("queued={}", report.queued);
     println!("sent={}", report.sent);
     println!("failed={}", report.failed);
+    println!("retried={}", report.retried);
     println!("truncated={}", report.truncated);
     println!("---");
     for item in &report.items {

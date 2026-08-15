@@ -40,6 +40,10 @@ use agl_inference::{
     ModelReleaseOutcome as ManagerReleaseOutcome, ModelReleaseReason as ManagerReleaseReason,
     ModelUnloadOutcome as ManagerUnloadOutcome, ModelUnloadTarget as ManagerUnloadTarget,
 };
+use agl_kernel::{
+    DurableRunDraft, RunBudget, RunConcurrencyKey, RunKind, RunRepositoryError, RunState,
+    SafeRunStatus,
+};
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, DaemonTool, HelloEvent,
     HelloRequest, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
@@ -53,12 +57,12 @@ use agl_protocol::{
     SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::{
-    AgentLibreRuntimeConfig, CurrentRuntimeIdentity, RuntimeIdentityKind, current_runtime_identity,
+    AgentLibreRuntimeConfig, CurrentRuntimeIdentity, RuntimeIdentityKind, StoreRepositories,
+    current_runtime_identity,
 };
 use agl_session::{
     ChatSessionReverseRead, ChatSessionReverseReader, ChatSessionStore, SessionCatalogStatus,
 };
-use agl_store::{AglStore, RunBudget, RunKind, RunState, SafeRunStatus};
 use agl_supervisor::{
     IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
     SupervisorHandle, SupervisorOptions,
@@ -101,6 +105,7 @@ pub struct DaemonState {
     daemon_instance_id: DaemonInstanceId,
     runtime_identity: CurrentRuntimeIdentity,
     runtime: AgentLibreRuntimeConfig,
+    repositories: StoreRepositories,
     inference_defaults: InferenceOptions,
     inference_client: InferenceClientHandle,
     inference_status: EngineRuntimeStatusHandle,
@@ -331,8 +336,12 @@ impl DaemonState {
                 .expected_generation()
                 .clone(),
         );
+        let repositories = agl_runtime::StoreRuntime::open(&runtime.paths)
+            .expect("test daemon store runtime should initialize")
+            .into_repositories();
         Self::open_with_runtime_identity(
             runtime,
+            repositories,
             inference_defaults,
             inference_client,
             inference_status,
@@ -343,6 +352,7 @@ impl DaemonState {
 
     pub fn open(
         runtime: AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
         inference_status: EngineRuntimeStatusHandle,
@@ -351,6 +361,7 @@ impl DaemonState {
             current_runtime_identity().context("failed to verify daemon runtime identity")?;
         Self::open_with_runtime_identity(
             runtime,
+            repositories,
             inference_defaults,
             inference_client,
             inference_status,
@@ -361,6 +372,7 @@ impl DaemonState {
     #[doc(hidden)]
     pub fn open_with_runtime_identity(
         runtime: AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
         inference_status: EngineRuntimeStatusHandle,
@@ -372,7 +384,6 @@ impl DaemonState {
                 "sealed daemon runtime manifest engine protocol ID does not match this daemon"
             );
         }
-        let store_root = runtime.paths.store_root();
         let terminal_endpoint = runtime
             .execution
             .terminal_endpoint_for_identity(&runtime.paths, &runtime_identity)?;
@@ -380,14 +391,14 @@ impl DaemonState {
             .context("failed to configure terminal service adapter")?;
         let presentation_proxy = agl_app::TurnPresentationProxy::new();
         let chat_factory = ChatSupervisorFactory::with_runtime(
-            &store_root,
+            repositories.clone(),
             runtime.clone(),
             inference_client.clone(),
         )
         .with_presentation_sink(Arc::new(presentation_proxy.clone()))
         .with_terminal_endpoint(terminal_endpoint);
         let supervisor = Supervisor::spawn(
-            &store_root,
+            repositories.runs.clone(),
             Arc::new(DaemonRunFactory::new(chat_factory.clone())),
             SupervisorOptions::default(),
         )
@@ -397,6 +408,7 @@ impl DaemonState {
             daemon_instance_id: DaemonInstanceId::generate(),
             runtime_identity,
             runtime,
+            repositories,
             inference_defaults,
             inference_client,
             inference_status,
@@ -525,6 +537,7 @@ impl DaemonState {
                     let service = ChatService::open_with_terminal_endpoint(
                         options.clone(),
                         &self.runtime,
+                        self.repositories.clone(),
                         self.inference_client.clone(),
                         self.terminal_bridge.endpoint(),
                     )
@@ -558,11 +571,11 @@ impl DaemonState {
         let accepted = self
             .supervisor_handle
             .submit(RunSpec {
-                run: agl_store::DurableRunDraft {
+                run: DurableRunDraft {
                     run_id,
                     session_id,
                     turn_id,
-                    kind: agl_store::RunKind::Turn,
+                    kind: RunKind::Turn,
                     priority: 0,
                     concurrency_key: None,
                     input,
@@ -832,6 +845,7 @@ impl DaemonState {
         let mut service = ChatService::open_with_terminal_endpoint(
             options.clone(),
             &self.runtime,
+            self.repositories.clone(),
             self.inference_client.clone(),
             self.terminal_bridge.endpoint(),
         )
@@ -1023,19 +1037,21 @@ impl DaemonState {
             return Err(invalid("cannot submit a run to a terminal session"));
         }
         let concurrency_key =
-            agl_store::RunConcurrencyKey::session(&request.session_id).map_err(runtime_error)?;
+            RunConcurrencyKey::session(&request.session_id).map_err(runtime_error)?;
         let fingerprint = run_fingerprint(&request.session_id, &request.content);
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(runtime_error)?;
-        let replay = store
-            .idempotency_record(
+        let replay = self
+            .repositories
+            .runs
+            .idempotent_run(
                 RUN_SUBMIT_IDEMPOTENCY_NAMESPACE,
                 &request.client_submission_id,
             )
             .map_err(runtime_error)?;
         if replay.is_none() {
             validate_root_activity_capacity_protocol(session.delegation_plan.as_ref())?;
-            let queued = store
+            let queued = self
+                .repositories
+                .runs
                 .safe_runs_for_concurrency_key(&concurrency_key, false)
                 .map_err(runtime_error)?
                 .into_iter()
@@ -1066,11 +1082,11 @@ impl DaemonState {
         let accepted = self
             .supervisor_handle
             .submit(RunSpec {
-                run: agl_store::DurableRunDraft {
+                run: DurableRunDraft {
                     run_id,
                     session_id: Some(request.session_id.clone()),
                     turn_id: Some(turn_id),
-                    kind: agl_store::RunKind::Turn,
+                    kind: RunKind::Turn,
                     priority: 0,
                     concurrency_key: Some(concurrency_key),
                     input,
@@ -1773,11 +1789,9 @@ impl DaemonState {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<SafeRunStatus>, ApplicationError> {
-        let key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        store
+        let key = RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        self.repositories
+            .runs
             .safe_runs_for_concurrency_key(&key, false)
             .map_err(application_runtime_error)
             .map(|runs| {
@@ -2124,10 +2138,10 @@ impl DaemonState {
         );
         let active_execution_count = bounded_count(active_execution_ids.len());
         let concurrency_key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        let turn_runs = store
+            RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        let turn_runs = self
+            .repositories
+            .runs
             .safe_runs_for_concurrency_key(&concurrency_key, false)
             .map_err(application_runtime_error)?;
         let active_run = turn_runs
@@ -2345,12 +2359,12 @@ impl DaemonState {
         }
 
         let concurrency_key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+            RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
         let fingerprint = incomplete_continuation_fingerprint(session_id, &source);
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        let idempotency = store
-            .idempotency_record(
+        let idempotency = self
+            .repositories
+            .runs
+            .idempotent_run(
                 INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE,
                 client_submission_id,
             )
@@ -2370,7 +2384,9 @@ impl DaemonState {
                 "continuation idempotency record exists without its durable session claim",
             ));
         }
-        let queued = store
+        let queued = self
+            .repositories
+            .runs
             .safe_runs_for_concurrency_key(&concurrency_key, false)
             .map_err(application_runtime_error)?
             .into_iter()
@@ -2458,10 +2474,10 @@ impl DaemonState {
         replayed: bool,
     ) -> Result<PromptAdmission, ApplicationError> {
         let fingerprint = incomplete_continuation_fingerprint(session_id, source);
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        let idempotency = store
-            .idempotency_record(
+        let idempotency = self
+            .repositories
+            .runs
+            .idempotent_run(
                 INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE,
                 &claim.client_submission_id,
             )
@@ -2475,7 +2491,9 @@ impl DaemonState {
                 "durable continuation claim conflicts with its idempotency record",
             ));
         }
-        if let Some(status) = store
+        if let Some(status) = self
+            .repositories
+            .runs
             .safe_run_status(&claim.continuation_run_id)
             .map_err(application_runtime_error)?
         {
@@ -2526,7 +2544,7 @@ impl DaemonState {
             )
         })?;
         let concurrency_key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+            RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
         let input = serde_json::to_value(ChatRunInput::Continuation {
             source_message_id: source.message_id.clone(),
             continuation_index,
@@ -2536,7 +2554,7 @@ impl DaemonState {
         })
         .map_err(application_runtime_error)?;
         Ok(RunSpec {
-            run: agl_store::DurableRunDraft {
+            run: DurableRunDraft {
                 run_id: claim.continuation_run_id.clone(),
                 session_id: Some(session_id.clone()),
                 turn_id: Some(claim.continuation_turn_id.clone()),
@@ -2612,11 +2630,10 @@ impl DaemonState {
         session_id: &SessionId,
         run_id: &RunId,
     ) -> Result<u32, ApplicationError> {
-        let key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        let runs = store
+        let key = RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        let runs = self
+            .repositories
+            .runs
             .safe_runs_for_concurrency_key(&key, false)
             .map_err(application_runtime_error)?;
         if runs
@@ -2633,7 +2650,8 @@ impl DaemonState {
         {
             return Ok(u32::try_from(active_offset + index + 1).unwrap_or(u32::MAX));
         }
-        store
+        self.repositories
+            .runs
             .safe_run_status(run_id)
             .map_err(application_runtime_error)?
             .map(|_| 1)
@@ -3227,11 +3245,10 @@ impl DaemonState {
     }
 
     fn ensure_turn_boundary_idle(&self, session_id: &SessionId) -> Result<(), ApplicationError> {
-        let key =
-            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
-        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
-            .map_err(application_runtime_error)?;
-        if !store
+        let key = RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        if !self
+            .repositories
+            .runs
             .safe_runs_for_concurrency_key(&key, false)
             .map_err(application_runtime_error)?
             .is_empty()
@@ -4794,12 +4811,14 @@ impl SharedDaemonState {
 
     pub fn open(
         runtime: AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
         inference_status: EngineRuntimeStatusHandle,
     ) -> Result<Self> {
         Self::from_state(DaemonState::open(
             runtime,
+            repositories,
             inference_defaults,
             inference_client,
             inference_status,
@@ -4809,6 +4828,7 @@ impl SharedDaemonState {
     #[doc(hidden)]
     pub fn open_with_runtime_identity(
         runtime: AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
         inference_status: EngineRuntimeStatusHandle,
@@ -4816,6 +4836,7 @@ impl SharedDaemonState {
     ) -> Result<Self> {
         Self::from_state(DaemonState::open_with_runtime_identity(
             runtime,
+            repositories,
             inference_defaults,
             inference_client,
             inference_status,
@@ -5440,10 +5461,10 @@ fn protocol_release_outcome(outcome: ManagerReleaseOutcome) -> ModelReleaseOutco
 fn supervisor_error(error: agl_supervisor::SupervisorError) -> ProtocolError {
     let (code, retryable) = match error {
         agl_supervisor::SupervisorError::CommandQueueFull => (ProtocolErrorCode::Busy, true),
-        agl_supervisor::SupervisorError::Store(agl_store::StoreError::NotFound { .. }) => {
+        agl_supervisor::SupervisorError::Repository(RunRepositoryError::NotFound { .. }) => {
             (ProtocolErrorCode::NotFound, false)
         }
-        agl_supervisor::SupervisorError::Store(agl_store::StoreError::IdempotencyConflict {
+        agl_supervisor::SupervisorError::Repository(RunRepositoryError::IdempotencyConflict {
             ..
         }) => (ProtocolErrorCode::InvalidRequest, false),
         _ => (ProtocolErrorCode::RuntimeFailure, false),

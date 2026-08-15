@@ -11,14 +11,15 @@ agl-extension.workspace = true
 agl-artifact.workspace = true
 agl-cron.workspace = true
 agl-memory.workspace = true
-agl-notes.workspace = true
+agl-matrix.workspace = true
+agl-note.workspace = true
+agl-permission.workspace = true
 agl-process.workspace = true
 agl-pty.workspace = true
 agl-terminal.workspace = true
 agl-terminal-client.workspace = true
 agl-terminal-protocol.workspace = true
 agl-repo.workspace = true
-agl-store.workspace = true
 agl-ids.workspace = true
 agl-kernel.workspace = true
 anyhow.workspace = true
@@ -30,3 +31,4 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+agl-store.workspace = true

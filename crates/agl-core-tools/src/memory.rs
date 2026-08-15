@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agl_kernel::{
     EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
@@ -8,8 +8,7 @@ use agl_memory::{
     MemoryDraft, MemoryKind, MemoryRepository, MemoryScope, MemoryScopeKind, MemorySearchQuery,
     MemorySuggestionDraft,
 };
-use agl_store::AglStore;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,16 +26,14 @@ pub const MEMORY_REJECT_TOOL_ID: &str = "core.memory:reject";
 const DEFAULT_LIST_LIMIT: usize = 10;
 const MAX_LIST_LIMIT: usize = 50;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MemoryTools {
-    store_root: PathBuf,
+    repository: Arc<dyn MemoryRepository>,
 }
 
 impl MemoryTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
-        Self {
-            store_root: store_root.as_ref().to_path_buf(),
-        }
+    pub fn new(repository: Arc<dyn MemoryRepository>) -> Self {
+        Self { repository }
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
@@ -53,9 +50,7 @@ impl MemoryTools {
 
     fn search(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SearchArgs>(MEMORY_SEARCH_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let repository = MemoryRepository::new(&store);
-        let entries = repository.search(&MemorySearchQuery {
+        let entries = self.repository.search(&MemorySearchQuery {
             scope: parse_optional_scope(
                 args.scope.as_ref().map(MemoryScopeArg::as_str),
                 args.scope_key,
@@ -69,9 +64,7 @@ impl MemoryTools {
 
     fn list(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(MEMORY_LIST_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
-        let memory = MemoryRepository::new(&store);
-        let entries = memory.list(&MemorySearchQuery {
+        let entries = self.repository.list(&MemorySearchQuery {
             scope: parse_optional_scope(
                 args.scope.as_ref().map(MemoryScopeArg::as_str),
                 args.scope_key,
@@ -92,9 +85,7 @@ impl MemoryTools {
         if let Some(confidence) = args.confidence {
             draft.confidence = confidence;
         }
-        let store = self.open_store_writable()?;
-        let memory = MemoryRepository::new(&store);
-        let suggestion = memory.suggest(draft)?;
+        let suggestion = self.repository.suggest(draft)?;
         Ok(json!({
             "tool": MEMORY_SUGGEST_TOOL_ID,
             "suggestion_id": suggestion.id,
@@ -112,9 +103,7 @@ impl MemoryTools {
         if let Some(confidence) = args.confidence {
             draft.confidence = confidence;
         }
-        let store = self.open_store_writable()?;
-        let memory = MemoryRepository::new(&store);
-        let entry = memory.add(draft)?;
+        let entry = self.repository.add(draft)?;
         Ok(json!({
             "tool": MEMORY_ADD_TOOL_ID,
             "memory_id": entry.id,
@@ -130,9 +119,7 @@ impl MemoryTools {
 
     fn approve(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SuggestionIdArgs>(MEMORY_APPROVE_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let memory = MemoryRepository::new(&store);
-        let (suggestion, entry) = memory.approve_suggestion(&args.suggestion_id)?;
+        let (suggestion, entry) = self.repository.approve_suggestion(&args.suggestion_id)?;
         Ok(json!({
             "tool": MEMORY_APPROVE_TOOL_ID,
             "suggestion_id": suggestion.id,
@@ -143,25 +130,14 @@ impl MemoryTools {
 
     fn reject(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RejectArgs>(MEMORY_REJECT_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let memory = MemoryRepository::new(&store);
-        let suggestion =
-            memory.reject_suggestion(&args.suggestion_id, args.resolution_note.as_deref())?;
+        let suggestion = self
+            .repository
+            .reject_suggestion(&args.suggestion_id, args.resolution_note.as_deref())?;
         Ok(json!({
             "tool": MEMORY_REJECT_TOOL_ID,
             "suggestion_id": suggestion.id,
             "status": suggestion.status.as_str(),
         }))
-    }
-
-    fn open_store_read_only(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root)
-            .with_context(|| format!("failed to open memory store {}", self.store_root.display()))
-    }
-
-    fn open_store_writable(&self) -> Result<AglStore> {
-        AglStore::open_current_at(&self.store_root)
-            .with_context(|| format!("failed to open memory store {}", self.store_root.display()))
     }
 }
 
@@ -413,14 +389,14 @@ struct RejectArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::migrated_temp_root;
+    use crate::test_support::migrated_temp_store;
 
     use super::*;
 
     #[test]
     fn memory_suggest_tool_creates_pending_suggestion() {
-        let root = migrated_temp_root("suggest");
-        let tools = MemoryTools::new(&root);
+        let (_root, store) = migrated_temp_store("suggest");
+        let tools = MemoryTools::new(store);
 
         let output = tools
             .dispatch(
@@ -442,8 +418,8 @@ mod tests {
 
     #[test]
     fn memory_tools_add_search_approve_and_reject() {
-        let root = migrated_temp_root("lifecycle");
-        let tools = MemoryTools::new(&root);
+        let (_root, store) = migrated_temp_store("lifecycle");
+        let tools = MemoryTools::new(store);
 
         let add = tools
             .dispatch(

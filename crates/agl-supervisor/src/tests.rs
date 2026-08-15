@@ -18,6 +18,10 @@ use serde_json::json;
 
 use crate::*;
 
+fn test_repository(root: &std::path::Path) -> Arc<agl_store::StoreHandle> {
+    Arc::new(agl_store::StoreHandle::open_at(root).unwrap())
+}
+
 #[derive(Default)]
 struct TestClock {
     now_ms: AtomicI64,
@@ -277,7 +281,7 @@ fn admission_is_immediate_and_active_cancel_is_durable() {
     let behavior = Arc::new(FakeBehavior::new(1, RunDelivery::ReplaySafe));
     behavior.blocked.store(true, Ordering::Release);
     let supervisor = Supervisor::spawn(
-        &root.path,
+        test_repository(&root.path),
         Arc::new(FakeFactory {
             behavior: behavior.clone(),
         }),
@@ -330,7 +334,7 @@ fn heartbeat_advances_while_request_is_blocked() {
         ..fast_options()
     };
     let supervisor = Supervisor::spawn(
-        &root.path,
+        test_repository(&root.path),
         Arc::new(FakeFactory {
             behavior: behavior.clone(),
         }),
@@ -379,7 +383,7 @@ fn idempotent_retry_reuses_the_stable_step_key() {
     configured.fail_until_attempt = 2;
     let behavior = Arc::new(configured);
     let supervisor = Supervisor::spawn(
-        &root.path,
+        test_repository(&root.path),
         Arc::new(FakeFactory {
             behavior: behavior.clone(),
         }),
@@ -419,7 +423,7 @@ fn subscriber_replays_without_gap_and_overflow_does_not_block_run() {
         ..fast_options()
     };
     let supervisor = Supervisor::spawn(
-        &root.path,
+        test_repository(&root.path),
         Arc::new(FakeFactory {
             behavior: behavior.clone(),
         }),

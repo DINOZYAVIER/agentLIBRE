@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::io::Write as _;
 
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::{
-    AglStore, StoreDomain, StoreExportOptions as AglStoreExportOptions, StoreSchemaStatus,
-    StoreStatus,
-};
-use anyhow::{Context, Result};
+use agl_core_tools::{StoreAdminDomain, StoreSchemaSnapshot, StoreStatusSnapshot};
+use agl_runtime::{AgentLibreRuntimeConfig, StoreRuntime};
+use anyhow::{Context, Result, bail};
 
 use crate::args::{
     StoreCommand, StoreDomainArg, StoreExportCliOptions, StoreMigrateOptions, StoreStatusOptions,
@@ -14,27 +12,40 @@ use crate::args::{
 
 pub(crate) fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "store", "starting command");
-    let store_root = runtime.paths.store_root();
-
     match command {
-        StoreCommand::Status(options) => run_store_status(options, &store_root),
-        StoreCommand::Migrate(options) => run_store_migrate(options, &store_root),
-        StoreCommand::Export(options) => run_store_export(options, &store_root),
+        StoreCommand::Status(options) => run_store_status(options, runtime),
+        StoreCommand::Migrate(options) => run_store_migrate(options, runtime),
+        StoreCommand::Export(options) => run_store_export(options, runtime),
     }
 }
 
-fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -> Result<()> {
-    let schema = AglStore::schema_status_at(store_root).context("failed to read store schema")?;
+fn run_store_status(options: StoreStatusOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    let schema = StoreRuntime::inspect(&runtime.paths).context("failed to read store schema")?;
     if schema.migration_required {
         return crate::print_json_or(options.json, &schema, || print_store_schema_status(&schema));
     }
-    let store = AglStore::open_current_read_only_at(store_root).context("failed to open store")?;
-    let status = store.status().context("failed to read store status")?;
-    crate::print_json_or(options.json, &status, || print_store_status(&status))
+    let store = StoreRuntime::open(&runtime.paths).context("failed to open store runtime")?;
+    let status = store
+        .repositories()
+        .administration
+        .status()
+        .context("failed to read store status")?;
+    if options.json {
+        crate::print_json(&serde_json::json!({
+            "schema": schema,
+            "status": status,
+        }))
+    } else {
+        print_store_status(&schema, &status);
+        Ok(())
+    }
 }
 
-fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
-    let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
+fn run_store_migrate(
+    options: StoreMigrateOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    let report = StoreRuntime::migrate(&runtime.paths).context("failed to migrate store")?;
     crate::print_json_or(options.json, &report, || {
         println!("core.store:migrated=true");
         println!("store.path={}", report.database_path.display());
@@ -56,10 +67,16 @@ fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path)
     })
 }
 
-fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path) -> Result<()> {
+fn run_store_export(
+    options: StoreExportCliOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
     let domain = store_domain(options.domain);
-    let store =
-        AglStore::open_current_read_only_at(store_root).context("failed to open current store")?;
+    let schema = StoreRuntime::inspect(&runtime.paths).context("failed to read store schema")?;
+    if schema.migration_required {
+        bail!("store migration required; run core.store:migrate first");
+    }
+    let store = StoreRuntime::open(&runtime.paths).context("failed to open current store")?;
     if let Some(parent) = options
         .out
         .parent()
@@ -72,7 +89,7 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
             )
         })?;
     }
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .create_new(!options.force)
@@ -88,15 +105,14 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
                 )
             }
         })?;
-    let records = store
-        .export_domain_jsonl(
-            &AglStoreExportOptions {
-                domain,
-                include_deleted: options.include_deleted,
-            },
-            file,
-        )
+    let export = store
+        .repositories()
+        .administration
+        .export_jsonl(domain, options.include_deleted)
         .context("failed to export store domain")?;
+    file.write_all(&export.bytes)
+        .context("failed to write store export")?;
+    let records = export.record_count;
     let record_types = record_type_counts(&options.out)?;
 
     if options.json {
@@ -123,12 +139,12 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
     Ok(())
 }
 
-fn store_domain(domain: StoreDomainArg) -> StoreDomain {
+fn store_domain(domain: StoreDomainArg) -> StoreAdminDomain {
     match domain {
-        StoreDomainArg::Memory => StoreDomain::Memory,
-        StoreDomainArg::Notes => StoreDomain::Notes,
-        StoreDomainArg::Cron => StoreDomain::Cron,
-        StoreDomainArg::Permissions => StoreDomain::Permissions,
+        StoreDomainArg::Memory => StoreAdminDomain::Memory,
+        StoreDomainArg::Notes => StoreAdminDomain::Notes,
+        StoreDomainArg::Cron => StoreAdminDomain::Cron,
+        StoreDomainArg::Permissions => StoreAdminDomain::Permissions,
     }
 }
 
@@ -148,47 +164,25 @@ fn record_type_counts(path: &std::path::Path) -> Result<BTreeMap<String, usize>>
     Ok(counts)
 }
 
-fn print_store_status(status: &StoreStatus) {
-    println!("store.path={}", status.database_path.display());
-    println!("store.schema_version={}", status.schema_version);
-    println!("store.current_schema_version={}", status.schema_version);
-    println!("store.database_exists=true");
-    println!("store.migration_required=false");
+fn print_store_status(schema: &StoreSchemaSnapshot, status: &StoreStatusSnapshot) {
+    print_store_schema_status(schema);
     for domain in &status.domains {
         println!(
             "store.domain.{}={} total_rows={} active_rows={}",
-            domain.domain.as_str(),
-            domain.status.as_str(),
-            domain.total_rows,
-            domain.active_rows
+            domain.name, domain.status, domain.total_rows, domain.active_rows
         );
     }
     println!(
         "store.idempotency.in_progress={}",
-        status.idempotency.in_progress
+        status.idempotency_in_progress
     );
     println!(
         "store.idempotency.stale_in_progress={}",
-        status.idempotency.stale_in_progress.len()
+        status.stale_idempotency_count
     );
-    for (index, record) in status.idempotency.stale_in_progress.iter().enumerate() {
-        println!(
-            "store.idempotency.stale.{index}.namespace={}",
-            record.namespace
-        );
-        println!("store.idempotency.stale.{index}.key={}", record.key);
-        println!(
-            "store.idempotency.stale.{index}.created_at={}",
-            record.created_at
-        );
-        println!(
-            "store.idempotency.stale.{index}.updated_at={}",
-            record.updated_at
-        );
-    }
 }
 
-fn print_store_schema_status(status: &StoreSchemaStatus) {
+fn print_store_schema_status(status: &StoreSchemaSnapshot) {
     println!("store.path={}", status.database_path.display());
     println!(
         "store.schema_version={}",

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use agl_content::Content;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, RunId, SessionId, TurnId};
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::{DurableRunDraft, RunBudget, RunKind, RunState};
+use agl_kernel::{DurableRunDraft, RunBudget, RunConcurrencyKey, RunKind, RunState};
+use agl_runtime::{AgentLibreRuntimeConfig, StoreRepositories};
 use agl_supervisor::{RunSpec, Supervisor, SupervisorHandle, SupervisorOptions};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -28,11 +28,13 @@ impl SupervisedChat {
     pub fn open(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         Self::open_with_presentation_sink(
             options,
             runtime,
+            repositories,
             inference_client,
             Arc::new(crate::NoopTurnPresentationSink),
         )
@@ -41,12 +43,14 @@ impl SupervisedChat {
     fn open_with_presentation_sink(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
         presentation_sink: Arc<dyn crate::TurnPresentationSink>,
     ) -> Result<Self> {
         Self::open_with_presentation_sink_and_terminal_endpoint(
             options,
             runtime,
+            repositories,
             inference_client,
             presentation_sink,
             None,
@@ -56,6 +60,7 @@ impl SupervisedChat {
     fn open_with_presentation_sink_and_terminal_endpoint(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
         presentation_sink: Arc<dyn crate::TurnPresentationSink>,
         terminal_endpoint: Option<agl_process::TerminalEndpoint>,
@@ -64,10 +69,16 @@ impl SupervisedChat {
             Some(terminal_endpoint) => ChatService::open_with_terminal_endpoint(
                 options.clone(),
                 runtime,
+                repositories.clone(),
                 inference_client.clone(),
                 terminal_endpoint,
             )?,
-            None => ChatService::open(options.clone(), runtime, inference_client.clone())?,
+            None => ChatService::open(
+                options.clone(),
+                runtime,
+                repositories.clone(),
+                inference_client.clone(),
+            )?,
         };
         let session_id = service.session_id().clone();
         let execution_context = service.execution_context().clone();
@@ -77,16 +88,18 @@ impl SupervisedChat {
             new_session: false,
             ..options
         };
-        let store_root = runtime.paths.store_root();
-        let mut factory =
-            ChatSupervisorFactory::with_runtime(&store_root, runtime.clone(), inference_client)
-                .with_presentation_sink(presentation_sink);
+        let mut factory = ChatSupervisorFactory::with_runtime(
+            repositories.clone(),
+            runtime.clone(),
+            inference_client,
+        )
+        .with_presentation_sink(presentation_sink);
         if let Some(terminal_endpoint) = terminal_endpoint {
             factory = factory.with_terminal_endpoint(terminal_endpoint);
         }
         factory.register(service)?;
         let supervisor = Supervisor::spawn(
-            &store_root,
+            repositories.runs.clone(),
             Arc::new(factory.clone()),
             SupervisorOptions::default(),
         )?;
@@ -193,7 +206,7 @@ impl SupervisedChat {
                 turn_id: Some(turn_id.clone()),
                 kind: RunKind::Turn,
                 priority: 0,
-                concurrency_key: Some(agl_store::RunConcurrencyKey::session(&self.session_id)?),
+                concurrency_key: Some(RunConcurrencyKey::session(&self.session_id)?),
                 input: serde_json::to_value(ChatRunInput::Root {
                     content: Content::text(input)?,
                     request_id: None,
@@ -294,11 +307,14 @@ impl SupervisedChat {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
+    };
+    use agl_permission::{
+        PermissionDuration, PermissionGrantDraft, PermissionGrantState, PermissionOperationId,
     };
 
     use super::*;
@@ -309,7 +325,7 @@ mod tests {
         responses: Arc<Mutex<VecDeque<String>>>,
         jobs: Arc<Mutex<Vec<JobEvidence>>>,
         released_contexts: Arc<Mutex<Vec<String>>>,
-        grant_store_root: Option<PathBuf>,
+        repositories: Option<StoreRepositories>,
         late_grant_id: Arc<Mutex<Option<String>>>,
     }
 
@@ -359,15 +375,20 @@ mod tests {
                 });
                 jobs.len()
             };
-            if let Some(store_root) = &self.state.grant_store_root {
+            if let Some(repositories) = &self.state.repositories {
                 if job_count == 1 {
-                    *self.state.late_grant_id.lock().unwrap() = Some(grant_cron_add(store_root));
+                    *self.state.late_grant_id.lock().unwrap() = Some(grant_cron_add(repositories));
                 } else if job_count == 2
                     && let Some(grant_id) = self.state.late_grant_id.lock().unwrap().as_deref()
                 {
-                    agl_store::AglStore::open_current_at(store_root)
-                        .unwrap()
-                        .revoke_permission_grant(grant_id, Some("delegation-e2e-cleanup"))
+                    repositories
+                        .permissions
+                        .revoke_grant(
+                            grant_id,
+                            PermissionOperationId::new(format!("delegation-e2e-revoke:{grant_id}"))
+                                .unwrap(),
+                            Some("delegation-e2e-cleanup"),
+                        )
                         .unwrap();
                 }
             }
@@ -413,17 +434,17 @@ mod tests {
         }
     }
 
-    fn grant_cron_add(store_root: &Path) -> String {
-        agl_store::AglStore::open_current_at(store_root)
-            .unwrap()
-            .create_permission_grant(agl_store::PermissionGrantDraft {
+    fn grant_cron_add(repositories: &StoreRepositories) -> String {
+        repositories
+            .permissions
+            .create_grant(PermissionGrantDraft {
                 request_id: None,
-                tool_id: "core.cron:add".to_string(),
-                max_operation_kind: "write".to_string(),
-                state_effects: vec!["store_cron".to_string()],
-                sensitive_inputs: Vec::new(),
+                tool_id: agl_kernel::ToolId::new("core.cron:add").unwrap(),
+                max_operation_kind: agl_kernel::OperationKind::Write,
+                state_effects: BTreeSet::from([agl_kernel::EffectId::store_cron()]),
+                sensitive_inputs: BTreeSet::new(),
                 scope: serde_json::json!({}),
-                duration: "one_turn".to_string(),
+                duration: PermissionDuration::OneTurn,
                 granted_by_ref: "delegation-e2e".to_string(),
             })
             .unwrap()
@@ -545,6 +566,9 @@ Only return the child verdict.
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         crate::test_support::install_package_bound_test_model(&root, &runtime);
+        let repositories = agl_runtime::StoreRuntime::open(&runtime.paths)
+            .unwrap()
+            .into_repositories();
         let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
                 r#"<tool_call>{"name":"agent.supervisor:delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
@@ -553,7 +577,7 @@ Only return the child verdict.
             ]))),
             jobs: Arc::new(Mutex::new(Vec::new())),
             released_contexts: Arc::new(Mutex::new(Vec::new())),
-            grant_store_root: Some(runtime.paths.store_root()),
+            repositories: Some(repositories.clone()),
             late_grant_id: Arc::new(Mutex::new(None)),
         };
         let options = ChatOptions {
@@ -575,6 +599,7 @@ Only return the child verdict.
         let chat = SupervisedChat::open_with_presentation_sink_and_terminal_endpoint(
             options,
             &runtime,
+            repositories.clone(),
             InferenceClientHandle::new(DelegationInferenceClient {
                 state: state.clone(),
             }),
@@ -592,8 +617,7 @@ Only return the child verdict.
                 answer: "Final parent answer".to_string()
             }
         );
-        let store = agl_store::AglStore::open_current_at(runtime.paths.store_root()).unwrap();
-        let tree = store.run_tree(&output.run_id).unwrap();
+        let tree = repositories.runs.run_tree(&output.run_id).unwrap();
         assert_eq!(tree.len(), 2);
         assert_eq!(tree[1].parent_run_id.as_ref(), Some(&output.run_id));
         assert_eq!(tree[1].root_run_id, output.run_id);
@@ -601,13 +625,13 @@ Only return the child verdict.
         assert_eq!(tree[1].state, RunState::Succeeded);
         assert!(tree[1].session_id.is_none());
         assert!(tree[1].result_delivered);
-        let root_record = store.run(&output.run_id).unwrap().unwrap();
+        let root_record = repositories.runs.run(&output.run_id).unwrap().unwrap();
         let frozen_authority =
             root_record.checkpoint.as_ref().unwrap()["delegation_authority_ceiling"]
                 .as_array()
                 .unwrap();
         assert!(!frozen_authority.iter().any(|id| id == "core.cron:add"));
-        let child_record = store.run(&tree[1].run_id).unwrap().unwrap();
+        let child_record = repositories.runs.run(&tree[1].run_id).unwrap().unwrap();
         let presentation_events = presentation.events.lock().unwrap().clone();
         let child_started = presentation_events
             .iter()
@@ -706,12 +730,13 @@ Only return the child verdict.
         assert_eq!(state.released_contexts.lock().unwrap().len(), 1);
         let late_grant_id = state.late_grant_id.lock().unwrap().clone().unwrap();
         assert_eq!(
-            store
-                .permission_grant(&late_grant_id)
+            repositories
+                .permissions
+                .grant(&late_grant_id)
                 .unwrap()
                 .unwrap()
-                .status,
-            agl_store::PermissionGrantStatus::Revoked
+                .state,
+            PermissionGrantState::Revoked
         );
 
         chat.shutdown().unwrap();

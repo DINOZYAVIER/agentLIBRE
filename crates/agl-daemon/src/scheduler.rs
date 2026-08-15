@@ -1,6 +1,5 @@
 use agl_cron::{CronJob, CronRepository, CronRun, CronRunAdmission, CronRunStatus};
 use agl_ids::RunId;
-use agl_store::AglStore;
 use anyhow::{Context, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,13 +105,12 @@ impl CronNotifier for NoopCronNotifier {
 }
 
 pub fn run_cron_tick(
-    store: &AglStore,
+    repository: &dyn CronRepository,
     unix_seconds: u64,
     executor: &mut impl CronTargetExecutor,
     notifier: &mut impl CronNotifier,
 ) -> Result<CronSchedulerReport> {
-    let repo = CronRepository::new(store);
-    let due_jobs = repo
+    let due_jobs = repository
         .due_jobs(unix_seconds)
         .context("failed to compute due cron jobs")?;
     let mut report = CronSchedulerReport {
@@ -121,7 +119,7 @@ pub fn run_cron_tick(
     };
 
     for due in due_jobs {
-        let admission = repo
+        let admission = repository
             .begin_run_for(&due.job, &due.scheduled_for)
             .context("failed to admit cron scheduler run")?;
         match admission {
@@ -137,9 +135,13 @@ pub fn run_cron_tick(
                 .supervisor_run_id
                 .as_ref()
                 .context("queued cron execution is missing supervisor run ID")?;
-            repo.record_admitted_supervisor_run(&due.job.id, &due.scheduled_for, supervisor_run_id)
+            repository.record_admitted_supervisor_run(
+                &due.job.id,
+                &due.scheduled_for,
+                supervisor_run_id,
+            )
         } else {
-            repo.record_admitted_run(
+            repository.record_admitted_run(
                 &due.job.id,
                 &due.scheduled_for,
                 execution.status,

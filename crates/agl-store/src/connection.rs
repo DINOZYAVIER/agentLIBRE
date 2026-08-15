@@ -56,11 +56,11 @@ impl AglStore {
         &self.database_path
     }
 
-    pub fn connection(&self) -> &Connection {
+    pub(crate) fn connection(&self) -> &Connection {
         &self.conn
     }
 
-    pub fn transaction<T>(
+    pub(crate) fn transaction<T>(
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
     ) -> Result<T> {

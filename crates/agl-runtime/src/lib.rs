@@ -4,6 +4,7 @@ mod extension;
 mod features;
 mod paths;
 mod runtime_manifest;
+mod store;
 #[doc(hidden)]
 pub mod test_support;
 mod tracing_setup;
@@ -25,6 +26,7 @@ pub use features::{
 };
 pub use paths::AgentLibrePaths;
 pub use runtime_manifest::*;
+pub use store::*;
 pub use tracing_setup::{
     AgentLibreProcessMode, TracingGuards, init_tracing, logged_message_fields,
 };

@@ -8,13 +8,13 @@ use agl_chat::{
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
 use agl_function::{FunctionStatusReport, function_status_from_loaded};
 use agl_inference::{InferenceHost, InferenceHostConfig};
+use agl_kernel::RunBudget;
 use agl_protocol::{
     AssistantItemState, DaemonTool, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
     RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,
     SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
 };
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::RunBudget;
+use agl_runtime::{AgentLibreRuntimeConfig, StoreRuntime};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Serialize;
 
@@ -157,7 +157,10 @@ pub(crate) fn run_function_smoke(
     )
     .context("failed to start inference host for function smoke")?;
     let inference_client = InferenceClientHandle::from(inference_host);
-    let chat = SupervisedChat::open(options, runtime, inference_client)
+    let repositories = StoreRuntime::open(&runtime.paths)
+        .context("failed to open agent store runtime for function smoke")?
+        .into_repositories();
+    let chat = SupervisedChat::open(options, runtime, repositories, inference_client)
         .context("failed to open normal chat path for function smoke")?;
     let timeout_ms = u64::try_from(request.timeout.as_millis()).unwrap_or(u64::MAX);
     let budget = RunBudget {

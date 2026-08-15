@@ -1,5 +1,5 @@
 use agl_chat::ChatSupervisorFactory;
-use agl_store::DurableRunRecord;
+use agl_kernel::DurableRunRecord;
 use agl_supervisor::{DurableRunDriver, DurableRunDriverFactory, Result, RunCancellation};
 
 #[derive(Clone)]

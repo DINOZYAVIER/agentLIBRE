@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agl_kernel::{
     EffectDeclaration, EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
-use agl_store::{AglStore, MatrixNotificationOutboxDraft};
-use anyhow::{Context, Result};
+use agl_matrix::{MatrixOutboxDraft, MatrixOutboxRepository};
+use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,16 +19,14 @@ pub const MATRIX_OUTBOX_ENQUEUE_TOOL_ID: &str = "matrix.outbox:enqueue";
 const DEFAULT_OUTBOX_LIMIT: usize = 10;
 const MAX_OUTBOX_LIMIT: usize = 100;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MatrixTools {
-    store_root: PathBuf,
+    repository: Arc<dyn MatrixOutboxRepository>,
 }
 
 impl MatrixTools {
-    pub fn new(store_root: impl AsRef<Path>) -> Self {
-        Self {
-            store_root: store_root.as_ref().to_path_buf(),
-        }
+    pub fn new(repository: Arc<dyn MatrixOutboxRepository>) -> Self {
+        Self { repository }
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
@@ -41,21 +39,22 @@ impl MatrixTools {
 
     fn status(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<StatusArgs>(MATRIX_OUTBOX_STATUS_TOOL_ID, arguments)?;
-        let store = self.open_store_read_only()?;
         let limit = args
             .limit
             .unwrap_or(DEFAULT_OUTBOX_LIMIT)
             .clamp(1, MAX_OUTBOX_LIMIT);
-        let (queued, truncated) = store.queued_matrix_notifications_page(limit)?;
+        let mut queued = self.repository.queued_page(limit.saturating_add(1))?;
+        let truncated = queued.len() > limit;
+        queued.truncate(limit);
         let notifications = queued
             .into_iter()
             .map(|item| {
                 json!({
                     "id": item.id,
-                    "notify_ref": item.notify_ref,
-                    "source_kind": item.source_kind,
-                    "source_id": item.source_id,
-                    "status": item.status.as_str(),
+                    "notify_ref": item.draft.notify_ref,
+                    "source_kind": item.draft.source_kind,
+                    "source_id": item.draft.source_id,
+                    "status": item.state.as_str(),
                     "delivered": item.delivered_at.is_some(),
                 })
             })
@@ -71,38 +70,20 @@ impl MatrixTools {
 
     fn enqueue(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<EnqueueArgs>(MATRIX_OUTBOX_ENQUEUE_TOOL_ID, arguments)?;
-        let store = self.open_store_writable()?;
-        let item = store.enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+        let draft = MatrixOutboxDraft::new(
             args.notify_ref,
             args.source_kind,
             args.source_id,
             args.dedupe_key,
             args.body,
-        ))?;
+        )?;
+        let item = self.repository.enqueue(draft)?;
         Ok(json!({
             "tool": MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
-            "status": item.status.as_str(),
+            "status": item.state.as_str(),
             "notification_id": item.id,
-            "dedupe_key": item.dedupe_key,
+            "dedupe_key": item.draft.dedupe_key,
         }))
-    }
-
-    fn open_store_read_only(&self) -> Result<AglStore> {
-        AglStore::open_current_read_only_at(&self.store_root).with_context(|| {
-            format!(
-                "failed to open Matrix outbox store {}",
-                self.store_root.display()
-            )
-        })
-    }
-
-    fn open_store_writable(&self) -> Result<AglStore> {
-        AglStore::open_current_at(&self.store_root).with_context(|| {
-            format!(
-                "failed to open Matrix outbox store {}",
-                self.store_root.display()
-            )
-        })
     }
 }
 
@@ -164,14 +145,14 @@ struct EnqueueArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::migrated_temp_root;
+    use crate::test_support::migrated_temp_store;
 
     use super::*;
 
     #[test]
     fn matrix_tools_enqueue_and_report_outbox_status() {
-        let root = migrated_temp_root("outbox");
-        let tools = MatrixTools::new(&root);
+        let (_root, store) = migrated_temp_store("outbox");
+        let tools = MatrixTools::new(store);
 
         let enqueue = tools
             .dispatch(
@@ -199,8 +180,8 @@ mod tests {
 
     #[test]
     fn matrix_tools_status_truncates_only_when_extra_rows_exist() {
-        let root = migrated_temp_root("outbox-limit");
-        let tools = MatrixTools::new(&root);
+        let (_root, store) = migrated_temp_store("outbox-limit");
+        let tools = MatrixTools::new(store);
 
         for index in 0..2 {
             tools

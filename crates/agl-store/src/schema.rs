@@ -128,7 +128,7 @@ impl AglStore {
         Ok(())
     }
 
-    fn applied_migration_versions(&self) -> Result<Vec<u32>> {
+    pub(crate) fn applied_migration_versions(&self) -> Result<Vec<u32>> {
         let mut stmt = self
             .conn
             .prepare("SELECT version FROM schema_migrations ORDER BY version")?;
@@ -178,10 +178,10 @@ impl AglStore {
             self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
         }
         self.conn.execute_batch("BEGIN;")?;
-        let preparation = if migration.version == 19 {
-            prepare_kernel_run_authority_migration(&self.conn)
-        } else {
-            Ok(())
+        let preparation = match migration.version {
+            19 => prepare_kernel_run_authority_migration(&self.conn),
+            20 => prepare_domain_persistence_authority_migration(&self.conn),
+            _ => Ok(()),
         };
         if let Err(error) = preparation {
             let _ = self.conn.execute_batch("ROLLBACK;");
@@ -228,6 +228,204 @@ impl AglStore {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
         Ok(version)
+    }
+}
+
+fn prepare_domain_persistence_authority_migration(connection: &Connection) -> Result<()> {
+    validate_permission_requests_for_v20(connection)?;
+    validate_permission_grants_for_v20(connection)?;
+
+    connection.execute_batch(
+        "CREATE TABLE agl175_matrix_migration (
+            id TEXT PRIMARY KEY,
+            payload_fingerprint TEXT NOT NULL,
+            transaction_id TEXT NOT NULL
+        );",
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body
+         FROM matrix_notification_outbox ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, notify_ref, source_kind, source_id, dedupe_key, body) = row?;
+        let outbox_id =
+            agl_matrix::MatrixOutboxId::new(id.clone()).map_err(|_| StoreError::InvalidValue {
+                field: "matrix_notification_outbox.id",
+                value: id.clone(),
+                reason: "cannot migrate invalid Matrix outbox identity",
+            })?;
+        let draft = agl_matrix::MatrixOutboxDraft::new(
+            notify_ref,
+            source_kind,
+            source_id,
+            dedupe_key,
+            body,
+        )
+        .map_err(|_| StoreError::InvalidValue {
+            field: "matrix_notification_outbox",
+            value: id.clone(),
+            reason: "cannot migrate invalid Matrix outbox payload",
+        })?;
+        connection.execute(
+            "INSERT INTO agl175_matrix_migration (id, payload_fingerprint, transaction_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                id,
+                draft.payload_fingerprint(),
+                agl_matrix::stable_matrix_transaction_id(&outbox_id),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_permission_requests_for_v20(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT id, requested_tools_json, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, status
+         FROM permission_requests ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, tools, operation, effects, sensitive, scope, duration, state) = row?;
+        parse_permission_json::<Vec<agl_kernel::ToolId>>(&id, "requested_tools_json", &tools)?;
+        parse_permission_enum::<agl_kernel::OperationKind>(&id, "max_operation_kind", &operation)?;
+        parse_permission_json::<std::collections::BTreeSet<agl_kernel::EffectId>>(
+            &id,
+            "state_effects_json",
+            &effects,
+        )?;
+        parse_permission_json::<std::collections::BTreeSet<agl_kernel::SensitiveInput>>(
+            &id,
+            "sensitive_inputs_json",
+            &sensitive,
+        )?;
+        parse_permission_json::<serde_json::Value>(&id, "scope_json", &scope)?;
+        agl_permission::PermissionDuration::parse(&duration).map_err(|_| {
+            invalid_permission_migration(&id, "duration", "invalid permission duration")
+        })?;
+        agl_permission::PermissionRequestState::parse(&state).map_err(|_| {
+            invalid_permission_migration(&id, "status", "invalid permission request state")
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_permission_grants_for_v20(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT id, tool_id, max_operation_kind, state_effects_json,
+                sensitive_inputs_json, scope_json, duration, status,
+                last_admitted_run_id
+         FROM permission_grants ORDER BY id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, tool, operation, effects, sensitive, scope, duration, status, run_id) = row?;
+        parse_permission_enum::<agl_kernel::ToolId>(&id, "tool_id", &tool)?;
+        parse_permission_enum::<agl_kernel::OperationKind>(&id, "max_operation_kind", &operation)?;
+        parse_permission_json::<std::collections::BTreeSet<agl_kernel::EffectId>>(
+            &id,
+            "state_effects_json",
+            &effects,
+        )?;
+        parse_permission_json::<std::collections::BTreeSet<agl_kernel::SensitiveInput>>(
+            &id,
+            "sensitive_inputs_json",
+            &sensitive,
+        )?;
+        parse_permission_json::<serde_json::Value>(&id, "scope_json", &scope)?;
+        let duration = agl_permission::PermissionDuration::parse(&duration).map_err(|_| {
+            invalid_permission_migration(&id, "duration", "invalid permission duration")
+        })?;
+        if let Some(run_id) = &run_id {
+            agl_ids::RunId::parse(run_id).map_err(|_| {
+                invalid_permission_migration(
+                    &id,
+                    "last_admitted_run_id",
+                    "invalid typed Run identity",
+                )
+            })?;
+        }
+        let compatible = matches!(
+            (duration, status.as_str(), run_id.is_some()),
+            (
+                agl_permission::PermissionDuration::OneTurn,
+                "active" | "revoked",
+                false
+            ) | (agl_permission::PermissionDuration::OneTurn, "expired", true)
+                | (
+                    agl_permission::PermissionDuration::Session,
+                    "active" | "expired" | "revoked",
+                    _
+                )
+        );
+        if !compatible {
+            return Err(invalid_permission_migration(
+                &id,
+                "duration/status/admission",
+                "incompatible permission grant lifecycle metadata",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_permission_json<T: serde::de::DeserializeOwned>(
+    id: &str,
+    field: &'static str,
+    value: &str,
+) -> Result<T> {
+    serde_json::from_str(value)
+        .map_err(|_| invalid_permission_migration(id, field, "invalid typed permission JSON"))
+}
+
+fn parse_permission_enum<T: serde::de::DeserializeOwned>(
+    id: &str,
+    field: &'static str,
+    value: &str,
+) -> Result<T> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|_| invalid_permission_migration(id, field, "invalid typed permission value"))
+}
+
+fn invalid_permission_migration(id: &str, field: &'static str, reason: &'static str) -> StoreError {
+    StoreError::InvalidValue {
+        field,
+        value: id.to_owned(),
+        reason,
     }
 }
 

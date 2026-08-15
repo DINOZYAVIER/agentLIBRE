@@ -3,8 +3,6 @@ use agl_memory::{
     MemorySearchQuery, MemorySuggestion, MemorySuggestionDraft, MemorySuggestionQuery,
     MemorySuggestionStatus,
 };
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::AglStore;
 use anyhow::{Context, Result, bail};
 
 use crate::args::{
@@ -13,26 +11,22 @@ use crate::args::{
     MemorySearchOptions, MemoryShowOptions, MemorySuggestOptions, MemorySuggestionStatusArg,
 };
 
-pub(crate) fn run_memory(command: MemoryCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+pub(crate) fn run_memory(command: MemoryCommand, memory: &dyn MemoryRepository) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "memory", "starting command");
-    let store =
-        AglStore::open_at(runtime.paths.store_root()).context("failed to open memory store")?;
-    let memory = MemoryRepository::new(&store);
-
     match command {
-        MemoryCommand::Add(options) => run_memory_add(options, &memory),
-        MemoryCommand::List(options) => run_memory_list(options, &memory),
-        MemoryCommand::Search(options) => run_memory_search(options, &memory),
-        MemoryCommand::Show(options) => run_memory_show(options, &memory),
-        MemoryCommand::Delete(options) => run_memory_delete(options, &memory),
-        MemoryCommand::Suggest(options) => run_memory_suggest(options, &memory),
-        MemoryCommand::ListSuggestions(options) => run_memory_list_suggestions(options, &memory),
-        MemoryCommand::Approve(options) => run_memory_approve(options, &memory),
-        MemoryCommand::Reject(options) => run_memory_reject(options, &memory),
+        MemoryCommand::Add(options) => run_memory_add(options, memory),
+        MemoryCommand::List(options) => run_memory_list(options, memory),
+        MemoryCommand::Search(options) => run_memory_search(options, memory),
+        MemoryCommand::Show(options) => run_memory_show(options, memory),
+        MemoryCommand::Delete(options) => run_memory_delete(options, memory),
+        MemoryCommand::Suggest(options) => run_memory_suggest(options, memory),
+        MemoryCommand::ListSuggestions(options) => run_memory_list_suggestions(options, memory),
+        MemoryCommand::Approve(options) => run_memory_approve(options, memory),
+        MemoryCommand::Reject(options) => run_memory_reject(options, memory),
     }
 }
 
-fn run_memory_add(options: MemoryAddOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_add(options: MemoryAddOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
     let mut draft = MemoryDraft::new(
         scope,
@@ -47,7 +41,7 @@ fn run_memory_add(options: MemoryAddOptions, memory: &MemoryRepository<'_>) -> R
     crate::print_json_or(options.json, &entry, || print_memory_entry_summary(&entry))
 }
 
-fn run_memory_list(options: MemoryListOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_list(options: MemoryListOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
     let mut query = MemorySearchQuery::scoped(scope);
     query.include_deleted = options.include_deleted;
@@ -59,7 +53,7 @@ fn run_memory_list(options: MemoryListOptions, memory: &MemoryRepository<'_>) ->
     crate::print_json_or(options.json, &entries, || print_memory_entries(&entries))
 }
 
-fn run_memory_search(options: MemorySearchOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_search(options: MemorySearchOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
     let mut query = MemorySearchQuery::text(Some(scope), options.query);
     query.include_deleted = options.include_deleted;
@@ -71,7 +65,7 @@ fn run_memory_search(options: MemorySearchOptions, memory: &MemoryRepository<'_>
     crate::print_json_or(options.json, &entries, || print_memory_entries(&entries))
 }
 
-fn run_memory_show(options: MemoryShowOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_show(options: MemoryShowOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let entry = memory
         .get(&options.id)
         .context("failed to read memory entry")?
@@ -80,7 +74,7 @@ fn run_memory_show(options: MemoryShowOptions, memory: &MemoryRepository<'_>) ->
     crate::print_json_or(options.json, &entry, || print_memory_entry_detail(&entry))
 }
 
-fn run_memory_delete(options: MemoryDeleteOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_delete(options: MemoryDeleteOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let entry = memory
         .delete(&options.id)
         .context("failed to delete memory entry")?;
@@ -91,7 +85,7 @@ fn run_memory_delete(options: MemoryDeleteOptions, memory: &MemoryRepository<'_>
     })
 }
 
-fn run_memory_suggest(options: MemorySuggestOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_suggest(options: MemorySuggestOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
     let mut draft = MemorySuggestionDraft::new(
         scope,
@@ -112,7 +106,7 @@ fn run_memory_suggest(options: MemorySuggestOptions, memory: &MemoryRepository<'
 
 fn run_memory_list_suggestions(
     options: MemoryListSuggestionsOptions,
-    memory: &MemoryRepository<'_>,
+    memory: &dyn MemoryRepository,
 ) -> Result<()> {
     let scope = if options.all_scopes {
         None
@@ -136,7 +130,7 @@ fn run_memory_list_suggestions(
     })
 }
 
-fn run_memory_approve(options: MemoryApproveOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_approve(options: MemoryApproveOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let (suggestion, entry) = memory
         .approve_suggestion(&options.id)
         .context("failed to approve memory suggestion")?;
@@ -154,7 +148,7 @@ fn run_memory_approve(options: MemoryApproveOptions, memory: &MemoryRepository<'
     Ok(())
 }
 
-fn run_memory_reject(options: MemoryRejectOptions, memory: &MemoryRepository<'_>) -> Result<()> {
+fn run_memory_reject(options: MemoryRejectOptions, memory: &dyn MemoryRepository) -> Result<()> {
     let suggestion = memory
         .reject_suggestion(&options.id, options.reason.as_deref())
         .context("failed to reject memory suggestion")?;

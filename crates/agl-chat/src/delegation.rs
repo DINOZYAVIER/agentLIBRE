@@ -7,11 +7,9 @@ use agl_content::Content;
 use agl_function::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
 use agl_kernel::{
-    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
-};
-use agl_store::{
-    AglStore, ChildRunAdmission, ChildRunDraft, DelegationTreeBudget, DurableRunRecord, RunBudget,
-    StoreError,
+    ChildRunAdmission, ChildRunDraft, DelegationTreeBudget, DurableRunRecord, RunBudget, RunKind,
+    RunRepository, RunRepositoryError, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId,
+    ToolInvocation, ToolResult,
 };
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -26,7 +24,7 @@ pub(crate) struct DelegationHandler {
 
 #[derive(Clone)]
 struct DelegationContext {
-    store_root: PathBuf,
+    runs: Arc<dyn RunRepository>,
     runtime_paths: agl_runtime::AgentLibrePaths,
     workspace_root: PathBuf,
     artifact_root: PathBuf,
@@ -63,7 +61,7 @@ impl DelegationHandler {
             session.model_plan_inputs().ok()?;
         Some(Self {
             context: Some(DelegationContext {
-                store_root: session.store_root().to_path_buf(),
+                runs: session.repositories().runs.clone(),
                 runtime_paths: session.runtime_paths().clone(),
                 workspace_root: session.workspace_root().to_path_buf(),
                 artifact_root: session.artifact_root().to_path_buf(),
@@ -98,8 +96,6 @@ impl DelegationHandler {
             .cloned()
             .context("agent.supervisor:delegate requires a durable run step")?;
         let parent_run_id = invocation.scope.run_id().clone();
-        let store = AglStore::open_current_at(&context.store_root)
-            .context("failed to open delegation store")?;
         let spec = context
             .plan
             .subagent_specs
@@ -111,12 +107,13 @@ impl DelegationHandler {
                 )
             })?;
 
-        if let Some(existing) = store.child_run_by_spawn_step(&step_id)? {
+        if let Some(existing) = context.runs.child_run_by_spawn_step(&step_id)? {
             validate_existing_child(&existing, &parent_run_id, &args, context, spec)?;
             return delegation_result(&existing);
         }
 
-        let parent = store
+        let parent = context
+            .runs
             .run(&parent_run_id)?
             .with_context(|| format!("parent run {parent_run_id} disappeared"))?;
         let effective = crate::session::resolve_subagent_effective_capabilities(
@@ -188,12 +185,13 @@ impl DelegationHandler {
                 })?
                 .clone(),
         };
-        let admission = match store.admit_child_run(&draft) {
+        let admission = match context.runs.admit_child_run(&draft) {
             Ok(admission) => admission,
-            Err(StoreError::DelegationDenied {
+            Err(RunRepositoryError::DelegationDenied {
                 code: "spawn_replay_mismatch",
             }) => {
-                let existing = store
+                let existing = context
+                    .runs
                     .child_run_by_spawn_step(&step_id)?
                     .context("spawn replay conflict has no durable child")?;
                 validate_existing_child(&existing, &parent_run_id, &args, context, spec)?;
@@ -262,7 +260,7 @@ fn validate_existing_child(
     spec: &RuntimeSubagentSpec,
 ) -> Result<()> {
     ensure!(
-        child.kind == agl_store::RunKind::Subagent
+        child.kind == RunKind::Subagent
             && child.session_id.is_none()
             && child.turn_id.is_none()
             && child.parent_run_id.as_ref() == Some(parent_run_id)
@@ -367,7 +365,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use agl_ids::StepId;
-    use agl_store::{RunKind, RunState, RunUsage};
+    use agl_kernel::{RunKind, RunState, RunUsage};
 
     use super::*;
 

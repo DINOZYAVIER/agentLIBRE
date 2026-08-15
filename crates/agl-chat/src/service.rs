@@ -15,7 +15,7 @@ use agl_kernel::{
     TurnRequestOutcome, TurnRequestResult, TurnTerminal,
 };
 use agl_kernel::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
-use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
+use agl_runtime::{AgentLibreRuntimeConfig, StoreRepositories, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -175,20 +175,29 @@ impl ChatService {
     pub fn open(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
-        Self::open_with_optional_terminal_endpoint(options, runtime, inference_client, None)
+        Self::open_with_optional_terminal_endpoint(
+            options,
+            runtime,
+            repositories,
+            inference_client,
+            None,
+        )
     }
 
     pub fn open_with_terminal_endpoint(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
         terminal_endpoint: agl_process::TerminalEndpoint,
     ) -> Result<Self> {
         Self::open_with_optional_terminal_endpoint(
             options,
             runtime,
+            repositories,
             inference_client,
             Some(terminal_endpoint),
         )
@@ -197,6 +206,7 @@ impl ChatService {
     fn open_with_optional_terminal_endpoint(
         options: ChatOptions,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
         terminal_endpoint: Option<agl_process::TerminalEndpoint>,
     ) -> Result<Self> {
@@ -230,6 +240,7 @@ impl ChatService {
         let session = InferenceSession::new(
             options.inference,
             runtime,
+            repositories,
             artifact_root_override,
             session_id.clone(),
             inference_client,
@@ -318,6 +329,7 @@ impl ChatService {
     pub(crate) fn open_subagent_with_optional_terminal_endpoint(
         config: SubagentSessionConfig,
         runtime: &AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
         inference_client: InferenceClientHandle,
         terminal_endpoint: Option<agl_process::TerminalEndpoint>,
     ) -> Result<Self> {
@@ -325,7 +337,8 @@ impl ChatService {
         let execution_session_id = config.execution_session_id.clone();
         let max_tool_calls =
             usize::try_from(config.spec.limits.max_tool_calls).unwrap_or(usize::MAX);
-        let session = InferenceSession::new_subagent(config, runtime, inference_client)?;
+        let session =
+            InferenceSession::new_subagent(config, runtime, repositories, inference_client)?;
         let tool_mode = session.tool_mode();
         let execution_context = runtime.execution.context_snapshot(&workspace_root)?;
         let turn_runtime = match terminal_endpoint {
@@ -708,8 +721,12 @@ impl ChatService {
         if !self.is_session_scoped() {
             return Ok(0);
         }
-        let store = agl_store::AglStore::open_current_at(self.turn_runtime.session().store_root())?;
-        Ok(store.expire_session_permission_grants(&self.session_id)?)
+        Ok(self
+            .turn_runtime
+            .session()
+            .repositories()
+            .permissions
+            .expire_session_grants(&self.session_id)?)
     }
 
     #[cfg(test)]
@@ -1880,7 +1897,7 @@ mod tests {
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         crate::test_support::install_package_bound_test_model(&root, &runtime);
-        agl_store::AglStore::migrate_at(runtime.paths.store_root()).unwrap();
+        let store_runtime = agl_runtime::StoreRuntime::open(&runtime.paths).unwrap();
         let options = ChatOptions {
             inference: crate::InferenceOptions {
                 function_ref: Some("service-test".to_owned()),
@@ -1898,6 +1915,7 @@ mod tests {
         let service = ChatService::open_with_terminal_endpoint(
             options,
             &runtime,
+            store_runtime.into_repositories(),
             inference_client,
             terminal_endpoint,
         )

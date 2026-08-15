@@ -6,6 +6,4 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-store.workspace = true
-rusqlite.workspace = true
 serde.workspace = true

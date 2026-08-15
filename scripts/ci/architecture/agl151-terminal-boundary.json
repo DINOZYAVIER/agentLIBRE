@@ -31,7 +31,7 @@
       {"name": "agl-matrix-bridge", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-memory", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-model", "owner": "agentLIBRE", "category": "inference"},
-      {"name": "agl-notes", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-note", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-oven", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-package", "owner": "agentLIBRE", "category": "core"},
       {"name": "agl-process", "owner": "agentLIBRE", "category": "core"},

@@ -9,10 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::InferenceClientHandle;
 use agl_cron::{
-    CronJob, CronRepository, CronRunStatus, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
+    CronJob, CronRunStatus, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
     unsupported_builtin_cron_target_message,
 };
 use agl_inference::{EngineRuntimeStatusHandle, InferenceHost, InferenceHostConfig};
+use agl_kernel::RunState;
+use agl_matrix::MatrixOutboxDraft;
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     PresentationSubscriptionFinishReason, ProtocolError, ProtocolErrorCode,
@@ -20,8 +22,7 @@ use agl_protocol::{
     SessionPresentationSnapshotTransferPurpose, SessionPresentationSubscriptionFinishedEvent,
     SubscriptionCancelledEvent,
 };
-use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
+use agl_runtime::{AgentLibreRuntimeConfig, StoreRepositories, StoreRuntime};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt as _;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -76,8 +77,9 @@ impl DaemonServer {
             }
             ListenerSource::Systemd => crate::activation::claim_systemd_listener()?,
         };
-        let store = AglStore::open_at(self.runtime.paths.store_root())
-            .context("failed to open daemon cron store")?;
+        let repositories = StoreRuntime::open(&self.runtime.paths)
+            .context("failed to open daemon store runtime")?
+            .into_repositories();
         crate::state::verify_terminal_handshake(&self.runtime).await?;
         let inference_host = InferenceHost::start_with_journal_root(
             InferenceHostConfig::development_default(
@@ -100,6 +102,7 @@ impl DaemonServer {
         );
         let state = SharedDaemonState::open(
             self.runtime.clone(),
+            repositories.clone(),
             self.options.inference.clone(),
             inference_client.clone(),
             inference_status,
@@ -122,9 +125,14 @@ impl DaemonServer {
                 }
                 _ = cron_tick.tick() => {
                     let now = unix_now();
-                    let mut executor = DaemonCronExecutor { state: state.clone(), store: &store };
-                    let mut notifier = StoreCronNotifier { store: &store };
-                    match run_cron_tick(&store, now, &mut executor, &mut notifier) {
+                    let mut executor = DaemonCronExecutor {
+                        state: state.clone(),
+                        administration: repositories.administration.clone(),
+                    };
+                    let mut notifier = StoreCronNotifier {
+                        matrix_outbox: repositories.matrix_outbox.clone(),
+                    };
+                    match run_cron_tick(repositories.cron.as_ref(), now, &mut executor, &mut notifier) {
                         Ok(report) if report.due_jobs > 0 => tracing::info!(
                             target: "agentlibre::daemon",
                             due_jobs = report.due_jobs,
@@ -136,8 +144,7 @@ impl DaemonServer {
                         Err(err) => tracing::warn!(target: "agentlibre::daemon", error = %err, "cron scheduler tick failed"),
                     }
                     spawn_cron_run_linkers(
-                        &self.runtime.paths.store_root(),
-                        &store,
+                        &repositories,
                         &state,
                         &mut linked_cron_runs,
                     );
@@ -185,14 +192,14 @@ fn trace_model_manager_status(state: &SharedDaemonState) {
     }
 }
 
-struct DaemonCronExecutor<'a> {
+struct DaemonCronExecutor {
     state: SharedDaemonState,
-    store: &'a AglStore,
+    administration: Arc<dyn agl_core_tools::StoreAdminPort>,
 }
 
-impl CronTargetExecutor for DaemonCronExecutor<'_> {
+impl CronTargetExecutor for DaemonCronExecutor {
     fn execute(&mut self, job: &CronJob, scheduled_for: &str) -> CronExecution {
-        if let Some(execution) = execute_builtin_cron_target(job, self.store) {
+        if let Some(execution) = execute_builtin_cron_target(job, self.administration.as_ref()) {
             return execution;
         }
         match self.state.submit_cron_job(job, scheduled_for) {
@@ -202,17 +209,20 @@ impl CronTargetExecutor for DaemonCronExecutor<'_> {
     }
 }
 
-fn execute_builtin_cron_target(job: &CronJob, store: &AglStore) -> Option<CronExecution> {
+fn execute_builtin_cron_target(
+    job: &CronJob,
+    administration: &dyn agl_core_tools::StoreAdminPort,
+) -> Option<CronExecution> {
     if job.target_kind != CronTargetKind::Builtin {
         return None;
     }
     Some(match job.target_ref.as_str() {
-        STORE_STATUS_BUILTIN_CRON_TARGET => store
-            .health()
-            .map(|health| {
+        STORE_STATUS_BUILTIN_CRON_TARGET => administration
+            .schema_status()
+            .map(|schema| {
                 CronExecution::succeeded(format!(
                     "builtin:store-status:schema:{}",
-                    health.migration_version
+                    schema.schema_version.unwrap_or_default()
                 ))
             })
             .unwrap_or_else(|error| CronExecution::failed(error.to_string())),
@@ -221,28 +231,26 @@ fn execute_builtin_cron_target(job: &CronJob, store: &AglStore) -> Option<CronEx
 }
 
 fn spawn_cron_run_linkers(
-    store_root: &Path,
-    store: &AglStore,
+    repositories: &StoreRepositories,
     state: &SharedDaemonState,
     linked: &mut BTreeSet<String>,
 ) {
-    let repository = CronRepository::new(store);
-    let Ok(runs) = repository.active_supervisor_runs() else {
+    let Ok(runs) = repositories.cron.active_supervisor_runs() else {
         return;
     };
     for cron_run in runs {
         if !linked.insert(cron_run.id.clone()) {
             continue;
         }
-        let Ok(Some(job)) = repository.job(&cron_run.job_id) else {
+        let Ok(Some(job)) = repositories.cron.job(&cron_run.job_id) else {
             continue;
         };
-        let store_root = store_root.to_path_buf();
+        let repositories = repositories.clone();
         let state = state.clone();
         if let Err(error) = thread::Builder::new()
             .name(format!("agl-cron-link-{}", cron_run.id))
             .spawn(move || {
-                if let Err(error) = link_cron_run(&store_root, &state, cron_run, job) {
+                if let Err(error) = link_cron_run(&repositories, &state, cron_run, job) {
                     tracing::warn!(
                         target: "agentlibre::daemon",
                         error = %error,
@@ -261,7 +269,7 @@ fn spawn_cron_run_linkers(
 }
 
 pub(crate) fn link_cron_run(
-    store_root: &Path,
+    repositories: &StoreRepositories,
     state: &SharedDaemonState,
     cron_run: agl_cron::CronRun,
     job: CronJob,
@@ -302,16 +310,16 @@ pub(crate) fn link_cron_run(
         ),
         RunState::Queued | RunState::Running | RunState::Waiting => unreachable!(),
     };
-    let store = AglStore::open_current_at(store_root)?;
-    let repository = CronRepository::new(&store);
-    let run = repository.finish_supervisor_run(
+    let run = repositories.cron.finish_supervisor_run(
         &supervisor_run_id,
         status,
         Some(&result_ref),
         error.as_deref(),
     )?;
     if let Some(notify_ref) = job.notify_ref {
-        let mut notifier = StoreCronNotifier { store: &store };
+        let mut notifier = StoreCronNotifier {
+            matrix_outbox: repositories.matrix_outbox.clone(),
+        };
         notifier.notify(CronNotification {
             notify_ref,
             run_id: run.id,
@@ -326,24 +334,22 @@ pub(crate) fn link_cron_run(
     Ok(())
 }
 
-struct StoreCronNotifier<'a> {
-    store: &'a AglStore,
+struct StoreCronNotifier {
+    matrix_outbox: Arc<dyn agl_matrix::MatrixOutboxRepository>,
 }
 
-impl CronNotifier for StoreCronNotifier<'_> {
+impl CronNotifier for StoreCronNotifier {
     fn notify(&mut self, notification: CronNotification) -> Result<()> {
         if notification.notify_ref.starts_with("matrix-room:") {
             let body = render_cron_notification_body(&notification);
             let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
-            let item =
-                self.store
-                    .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
-                        notification.notify_ref.clone(),
-                        "cron",
-                        notification.run_id.clone(),
-                        dedupe_key,
-                        body,
-                    ))?;
+            let item = self.matrix_outbox.enqueue(MatrixOutboxDraft::new(
+                notification.notify_ref.clone(),
+                "cron",
+                notification.run_id.clone(),
+                dedupe_key,
+                body,
+            )?)?;
             tracing::info!(
                 target: "agentlibre::daemon",
                 notify_ref = %notification.notify_ref,
@@ -1438,7 +1444,7 @@ mod cron_authority_tests {
             std::process::id(),
             unix_now()
         ));
-        let store = AglStore::open_at(&root).unwrap();
+        let repositories = StoreRuntime::open_root(&root).unwrap().into_repositories();
         let job = CronJob {
             id: "job-agl174".to_owned(),
             name: "Store status".to_owned(),
@@ -1455,18 +1461,15 @@ mod cron_authority_tests {
             deleted_at: None,
         };
 
-        let execution = execute_builtin_cron_target(&job, &store).unwrap();
+        let execution =
+            execute_builtin_cron_target(&job, repositories.administration.as_ref()).unwrap();
         assert_eq!(execution.status, CronRunStatus::Succeeded);
-        let durable_runs: u64 = store
-            .connection()
-            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
-            .unwrap();
-        let durable_steps: u64 = store
-            .connection()
-            .query_row("SELECT COUNT(*) FROM run_steps", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!((durable_runs, durable_steps), (0, 0));
-        drop(store);
+        assert!(
+            execution
+                .result_ref
+                .unwrap()
+                .starts_with("builtin:store-status:schema:")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

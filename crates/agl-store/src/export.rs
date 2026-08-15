@@ -195,7 +195,9 @@ impl AglStore {
 
         count += self.write_query_jsonl(
             &mut writer,
-            "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at
+            "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body,
+                    payload_fingerprint, transaction_id, state, revision, attempts,
+                    last_error, created_at, updated_at, delivered_at
              FROM matrix_notification_outbox
              ORDER BY created_at ASC, id ASC",
             |row| {
@@ -208,11 +210,15 @@ impl AglStore {
                     "source_id": row.get::<_, String>(3)?,
                     "dedupe_key": row.get::<_, String>(4)?,
                     "body": row.get::<_, String>(5)?,
-                    "status": row.get::<_, String>(6)?,
-                    "error": row.get::<_, Option<String>>(7)?,
-                    "created_at": row.get::<_, String>(8)?,
-                    "updated_at": row.get::<_, String>(9)?,
-                    "delivered_at": row.get::<_, Option<String>>(10)?,
+                    "payload_fingerprint": row.get::<_, String>(6)?,
+                    "transaction_id": row.get::<_, String>(7)?,
+                    "state": row.get::<_, String>(8)?,
+                    "revision": row.get::<_, u64>(9)?,
+                    "attempts": row.get::<_, u32>(10)?,
+                    "last_error": row.get::<_, Option<String>>(11)?,
+                    "created_at": row.get::<_, String>(12)?,
+                    "updated_at": row.get::<_, String>(13)?,
+                    "delivered_at": row.get::<_, Option<String>>(14)?,
                 }))
             },
         )?;
@@ -225,13 +231,19 @@ impl AglStore {
         mut writer: W,
     ) -> Result<usize> {
         let request_sql = if include_deleted {
-            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json,
+                    sensitive_inputs_json, scope_json, duration, reason, requester_ref,
+                    state, revision, created_at, updated_at, resolved_at, resolution_ref,
+                    resolution_note, transition_operation_id
              FROM permission_requests
              ORDER BY updated_at ASC, id ASC"
         } else {
-            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json,
+                    sensitive_inputs_json, scope_json, duration, reason, requester_ref,
+                    state, revision, created_at, updated_at, resolved_at, resolution_ref,
+                    resolution_note, transition_operation_id
              FROM permission_requests
-             WHERE status = 'pending'
+             WHERE state = 'pending'
              ORDER BY updated_at ASC, id ASC"
         };
         let mut count = self.write_query_jsonl(&mut writer, request_sql, |row| {
@@ -242,27 +254,36 @@ impl AglStore {
                 "requested_tools": parse_json_cell::<Vec<String>>(row.get::<_, String>(1)?)?,
                 "max_operation_kind": row.get::<_, String>(2)?,
                 "state_effects": parse_json_cell::<Vec<String>>(row.get::<_, String>(3)?)?,
-                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(4)?)?,
-                "duration": row.get::<_, String>(5)?,
-                "reason": row.get::<_, String>(6)?,
-                "requester_ref": row.get::<_, String>(7)?,
-                "status": row.get::<_, String>(8)?,
-                "created_at": row.get::<_, String>(9)?,
-                "updated_at": row.get::<_, String>(10)?,
-                "resolved_at": row.get::<_, Option<String>>(11)?,
-                "resolution_ref": row.get::<_, Option<String>>(12)?,
-                "resolution_note": row.get::<_, Option<String>>(13)?,
+                "sensitive_inputs": parse_json_cell::<Vec<String>>(row.get::<_, String>(4)?)?,
+                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(5)?)?,
+                "duration": row.get::<_, String>(6)?,
+                "reason": row.get::<_, String>(7)?,
+                "requester_ref": row.get::<_, String>(8)?,
+                "state": row.get::<_, String>(9)?,
+                "revision": row.get::<_, u64>(10)?,
+                "created_at": row.get::<_, String>(11)?,
+                "updated_at": row.get::<_, String>(12)?,
+                "resolved_at": row.get::<_, Option<String>>(13)?,
+                "resolution_ref": row.get::<_, Option<String>>(14)?,
+                "resolution_note": row.get::<_, Option<String>>(15)?,
+                "transition_operation_id": row.get::<_, Option<String>>(16)?,
             }))
         })?;
 
         let grant_sql = if include_deleted {
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json,
+                    sensitive_inputs_json, scope_json, duration, granted_by_ref, state,
+                    revision, created_at, updated_at, revoked_at, revoke_ref, admitted_at,
+                    last_admitted_run_id, consumed_at, transition_operation_id
              FROM permission_grants
              ORDER BY updated_at ASC, id ASC"
         } else {
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json,
+                    sensitive_inputs_json, scope_json, duration, granted_by_ref, state,
+                    revision, created_at, updated_at, revoked_at, revoke_ref, admitted_at,
+                    last_admitted_run_id, consumed_at, transition_operation_id
              FROM permission_grants
-             WHERE status = 'active'
+             WHERE state = 'active'
              ORDER BY updated_at ASC, id ASC"
         };
         count += self.write_query_jsonl(&mut writer, grant_sql, |row| {
@@ -274,17 +295,20 @@ impl AglStore {
                 "tool_id": row.get::<_, String>(2)?,
                 "max_operation_kind": row.get::<_, String>(3)?,
                 "state_effects": parse_json_cell::<Vec<String>>(row.get::<_, String>(4)?)?,
-                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(5)?)?,
-                "duration": row.get::<_, String>(6)?,
-                "granted_by_ref": row.get::<_, String>(7)?,
-                "status": row.get::<_, String>(8)?,
-                "created_at": row.get::<_, String>(9)?,
-                "updated_at": row.get::<_, String>(10)?,
-                "revoked_at": row.get::<_, Option<String>>(11)?,
-                "revoke_ref": row.get::<_, Option<String>>(12)?,
-                "admitted_at": row.get::<_, Option<String>>(13)?,
-                "last_admitted_run_id": row.get::<_, Option<String>>(14)?,
-                "consumed_at": row.get::<_, Option<String>>(15)?,
+                "sensitive_inputs": parse_json_cell::<Vec<String>>(row.get::<_, String>(5)?)?,
+                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(6)?)?,
+                "duration": row.get::<_, String>(7)?,
+                "granted_by_ref": row.get::<_, String>(8)?,
+                "state": row.get::<_, String>(9)?,
+                "revision": row.get::<_, u64>(10)?,
+                "created_at": row.get::<_, String>(11)?,
+                "updated_at": row.get::<_, String>(12)?,
+                "revoked_at": row.get::<_, Option<String>>(13)?,
+                "revoke_ref": row.get::<_, Option<String>>(14)?,
+                "admitted_at": row.get::<_, Option<String>>(15)?,
+                "last_admitted_run_id": row.get::<_, Option<String>>(16)?,
+                "consumed_at": row.get::<_, Option<String>>(17)?,
+                "transition_operation_id": row.get::<_, Option<String>>(18)?,
             }))
         })?;
         Ok(count)

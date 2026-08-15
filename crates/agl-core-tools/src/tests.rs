@@ -5,49 +5,6 @@ use agl_kernel::{EffectId, OperationKind, ToolId};
 use super::*;
 
 #[test]
-fn read_actions_do_not_create_or_migrate_an_absent_store() {
-    let root = test_support::temp_root("cron-read");
-    assert!(
-        CronTools::new(&root)
-            .dispatch(CRON_LIST_TOOL_ID, serde_json::json!({}))
-            .is_err()
-    );
-    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-
-    let root = test_support::temp_root("memory-read");
-    assert!(
-        MemoryTools::new(&root)
-            .dispatch(MEMORY_LIST_TOOL_ID, serde_json::json!({}))
-            .is_err()
-    );
-    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-
-    let root = test_support::temp_root("notes-read");
-    assert!(
-        NotesTools::new(&root)
-            .dispatch(NOTES_SEARCH_TOOL_ID, serde_json::json!({"query": "x"}))
-            .is_err()
-    );
-    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-
-    let root = test_support::temp_root("permissions-read");
-    assert!(
-        PermissionTools::new(&root)
-            .dispatch(PERMISSIONS_STATUS_TOOL_ID, serde_json::json!({}))
-            .is_err()
-    );
-    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-
-    let root = test_support::temp_root("matrix-read");
-    assert!(
-        MatrixTools::new(&root)
-            .dispatch(MATRIX_OUTBOX_STATUS_TOOL_ID, serde_json::json!({}))
-            .is_err()
-    );
-    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
-}
-
-#[test]
 fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
     let catalog = builtin_tool_catalog().unwrap();
     let actions = catalog

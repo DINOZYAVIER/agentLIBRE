@@ -1,13 +1,13 @@
 use serde_json::json;
 
-use crate::test_support::migrated_temp_root;
+use crate::test_support::migrated_temp_store;
 
 use super::*;
 
 #[test]
 fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
-    let root = migrated_temp_root("lifecycle");
-    let tools = CronTools::new(&root);
+    let (_root, store) = migrated_temp_store("lifecycle");
+    let tools = CronTools::new(store.clone(), store);
 
     let preflight = tools
         .dispatch(

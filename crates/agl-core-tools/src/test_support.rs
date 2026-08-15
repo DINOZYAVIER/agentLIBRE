@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -44,8 +45,8 @@ pub(crate) fn temp_root(label: &str) -> TempRoot {
     TempRoot::new(label)
 }
 
-pub(crate) fn migrated_temp_root(label: &str) -> TempRoot {
+pub(crate) fn migrated_temp_store(label: &str) -> (TempRoot, Arc<agl_store::StoreHandle>) {
     let root = temp_root(label);
-    agl_store::AglStore::migrate_at(&root).unwrap();
-    root
+    let store = Arc::new(agl_store::StoreHandle::open_at(&root).unwrap());
+    (root, store)
 }

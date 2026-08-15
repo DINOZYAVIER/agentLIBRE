@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_content::{
-    ArtifactRetention, ArtifactSensitivity, ArtifactSource, BlobDigest, ContentAttachmentId,
-    ContentAttachmentRef, ImageDimensions, MediaType,
+    ArtifactRetention, ArtifactSensitivity, ArtifactSource, BlobDigest, ContentAttachmentGcReport,
+    ContentAttachmentId, ContentAttachmentRef, ContentAttachmentWrite, ContentRepository,
+    ContentRepositoryError, ImageDimensions, MediaType, ResolvedContentAttachment,
+    StoredContentAttachment,
 };
 use agl_ids::RunId;
 use rusqlite::{OptionalExtension, params};
 
 use crate::path::{ensure_private_dir, set_private_file_permissions};
-use crate::{AglStore, Result, StoreError};
+use crate::{AglStore, Result, StoreError, StoreHandle};
 
 const BLOBS_DIR: &str = "blobs";
 const TEMP_DIR: &str = ".tmp";
@@ -22,29 +24,6 @@ pub(crate) enum ContentAttachmentWriteFailpoint {
     AfterBlobWrite,
     BeforeMetadataCommit,
     AfterMetadataCommit,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoredContentAttachment {
-    pub run_id: RunId,
-    pub reference: ContentAttachmentRef,
-    pub retention: ArtifactRetention,
-    pub tombstoned: bool,
-    pub created_at_ms: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedContentAttachment {
-    pub reference: ContentAttachmentRef,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ContentAttachmentGcReport {
-    pub content_attachment_records_deleted: usize,
-    pub blob_records_deleted: usize,
-    pub blob_files_deleted: usize,
-    pub orphan_files_deleted: usize,
 }
 
 impl AglStore {
@@ -422,6 +401,88 @@ impl AglStore {
             .join("sha256")
             .join(prefix)
             .join(hex))
+    }
+}
+
+impl ContentRepository for StoreHandle {
+    fn write(
+        &self,
+        command: ContentAttachmentWrite,
+    ) -> std::result::Result<StoredContentAttachment, ContentRepositoryError> {
+        self.lock()
+            .map_err(content_repository_error)?
+            .write_content_attachment(
+                &command.run_id,
+                command.media_type,
+                &command.bytes,
+                command.image,
+                command.sensitivity,
+                command.source,
+                command.retention,
+            )
+            .map_err(content_repository_error)
+    }
+
+    fn get(
+        &self,
+        id: &ContentAttachmentId,
+    ) -> std::result::Result<Option<StoredContentAttachment>, ContentRepositoryError> {
+        self.lock()
+            .map_err(content_repository_error)?
+            .content_attachment(id)
+            .map_err(content_repository_error)
+    }
+
+    fn resolve(
+        &self,
+        owner_run_id: &RunId,
+        reference: &ContentAttachmentRef,
+    ) -> std::result::Result<ResolvedContentAttachment, ContentRepositoryError> {
+        self.lock()
+            .map_err(content_repository_error)?
+            .resolve_content_attachment(owner_run_id, reference)
+            .map_err(content_repository_error)
+    }
+
+    fn tombstone_run(&self, run_id: &RunId) -> std::result::Result<usize, ContentRepositoryError> {
+        self.lock()
+            .map_err(content_repository_error)?
+            .tombstone_run_content_attachments(run_id)
+            .map_err(content_repository_error)
+    }
+
+    fn garbage_collect(
+        &self,
+    ) -> std::result::Result<ContentAttachmentGcReport, ContentRepositoryError> {
+        self.lock()
+            .map_err(content_repository_error)?
+            .garbage_collect_content_attachments()
+            .map_err(content_repository_error)
+    }
+}
+
+fn content_repository_error(error: StoreError) -> ContentRepositoryError {
+    match error {
+        StoreError::InvalidValue { field, reason, .. } => ContentRepositoryError::InvalidValue {
+            field,
+            reason: reason.to_owned(),
+        },
+        StoreError::ContentAttachmentUnavailable {
+            content_attachment_id,
+        } => ContentRepositoryError::Unavailable {
+            id: content_attachment_id,
+        },
+        StoreError::ContentAttachmentAccessDenied => ContentRepositoryError::AccessDenied,
+        StoreError::ContentAttachmentIntegrityFailed {
+            content_attachment_id,
+            reason,
+        } => ContentRepositoryError::Integrity {
+            id: content_attachment_id,
+            reason,
+        },
+        other => ContentRepositoryError::Repository {
+            reason: other.to_string(),
+        },
     }
 }
 

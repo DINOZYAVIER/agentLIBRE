@@ -7,11 +7,12 @@ repository.workspace = true
 
 [dependencies]
 agl-kernel.workspace = true
+agl-matrix.workspace = true
 agl-client.workspace = true
 agl-content.workspace = true
 agl-ids.workspace = true
 agl-protocol.workspace = true
-agl-store.workspace = true
+agl-runtime.workspace = true
 agl-core-tools.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
@@ -23,3 +24,6 @@ serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+agl-store.workspace = true

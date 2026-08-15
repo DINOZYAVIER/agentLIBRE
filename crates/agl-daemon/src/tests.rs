@@ -10,7 +10,7 @@ use agl_app::{
 use agl_chat::{
     ChatInferenceJob, ChatRunInput, InferenceClient, InferenceClientHandle, InferenceOptions,
 };
-use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
+use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
 use agl_ids::{MessageId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::{
     EngineRuntimeStatusHandle, InferenceFinishReason, InferenceOutputEvent, InferenceProductStage,
@@ -786,6 +786,12 @@ fn daemon(test: &TestRuntime, control: Arc<InferenceControl>) -> DaemonState {
     )
 }
 
+fn store_repositories(test: &TestRuntime) -> agl_runtime::StoreRepositories {
+    agl_runtime::StoreRuntime::open(&test.runtime.paths)
+        .unwrap()
+        .into_repositories()
+}
+
 fn request(kind: DaemonRequestKind) -> DaemonRequest {
     DaemonRequest::new(RequestId::generate(), kind)
 }
@@ -810,8 +816,10 @@ fn open_session(state: &mut DaemonState) -> SessionId {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
     let test = TestRuntime::new();
+    let repositories = store_repositories(&test);
     let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
+        repositories,
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::new(InferenceControl::default()),
@@ -2203,8 +2211,10 @@ async fn server_run_submit_uses_the_shared_prompt_projection() {
     let test = TestRuntime::new();
     let control = Arc::new(InferenceControl::default());
     control.blocked.store(true, Ordering::Release);
+    let repositories = store_repositories(&test);
     let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
+        repositories,
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
@@ -2314,8 +2324,10 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
     let test = TestRuntime::new();
     let control = Arc::new(InferenceControl::default());
     control.blocked.store(true, Ordering::Release);
+    let repositories = store_repositories(&test);
     let state = SharedDaemonState::open_with_runtime_identity(
         test.runtime.clone(),
+        repositories.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
@@ -2324,8 +2336,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
         test.runtime_identity(),
     )
     .unwrap();
-    let store = agl_store::AglStore::open_current_at(test.runtime.paths.store_root()).unwrap();
-    let repository = CronRepository::new(&store);
+    let repository = repositories.cron.clone();
     let mut draft = CronJobDraft::new(
         "supervised cron",
         CronTargetKind::Skill,
@@ -2340,27 +2351,28 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
     };
     let mut notifier = NoopCronNotifier;
 
-    let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
+    let first = run_cron_tick(repository.as_ref(), 0, &mut executor, &mut notifier).unwrap();
     assert_eq!(first.recorded_runs[0].status, CronRunStatus::Queued);
     assert_eq!(first.notifications, 0);
     wait_for_calls(&control, 1);
 
-    let second = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
+    let second = run_cron_tick(repository.as_ref(), 0, &mut executor, &mut notifier).unwrap();
     assert_eq!(second.recorded_runs[0].id, first.recorded_runs[0].id);
     assert_eq!(control.calls.load(Ordering::Acquire), 1);
-    assert!(store.queued_matrix_notifications(10).unwrap().is_empty());
+    assert!(
+        repositories
+            .matrix_outbox
+            .queued_page(10)
+            .unwrap()
+            .is_empty()
+    );
 
     control.blocked.store(false, Ordering::Release);
-    crate::server::link_cron_run(
-        &test.runtime.paths.store_root(),
-        &state,
-        first.recorded_runs[0].clone(),
-        job,
-    )
-    .unwrap();
+    crate::server::link_cron_run(&repositories, &state, first.recorded_runs[0].clone(), job)
+        .unwrap();
     let history = repository.history(&first.recorded_runs[0].job_id).unwrap();
     assert_eq!(history[0].status, CronRunStatus::Succeeded);
-    assert_eq!(store.queued_matrix_notifications(10).unwrap().len(), 1);
+    assert_eq!(repositories.matrix_outbox.queued_page(10).unwrap().len(), 1);
 }
 
 struct SharedCronExecutor {
