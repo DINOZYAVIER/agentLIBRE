@@ -2,7 +2,7 @@
 
 Process execution is a first-party, capability-checked service owned by the
 independently deployed `agl-terminald` runtime. agentLIBRE admits policy and
-calls its typed client contract; it does not own a second process runtime. It
+calls its typed client API; it does not own a second process runtime. It
 supports exact argv programs, admitted shell commands with a real PTY, logical
 working directories, background ownership, bounded private output, and daemon
 operator controls.

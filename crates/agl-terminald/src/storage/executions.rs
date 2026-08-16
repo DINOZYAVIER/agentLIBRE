@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, OpaqueOwnerId,
-    WriterLeaseId,
+    CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, ExecutionId,
+    LifecycleScopeId, WriterLeaseId,
 };
 use agl_exec::{
     CommittedOutputFrame, ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionKind,
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::{Result as StoreResult, StoreError, TerminalStore};
 
 const EXECUTION_COLUMNS: &str = "id, owner_namespace, owner_namespace_version, owner_id,
-    owner_kind, owner_role, authority_scope, state, profile, io, cwd, terminal_columns, terminal_rows, exit_kind,
+    owner_kind, owner_role, lifecycle_scope_id, state, profile, io, cwd, terminal_columns, terminal_rows, exit_kind,
     exit_code, exit_signal, exit_error_code, error_code, started_at_ms, finished_at_ms,
     first_retained_sequence, last_sequence, retained_bytes, discarded_output_bytes,
     output_truncated, output_expired";
@@ -102,7 +102,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
                 tx.execute(
                     "INSERT INTO executions
                      (id, owner_namespace, owner_namespace_version, owner_id, owner_kind,
-                      owner_role, authority_scope, correlation_namespace,
+                      owner_role, lifecycle_scope_id, correlation_namespace,
                       correlation_namespace_version, correlation_group_id,
                       correlation_operation_id, execution_kind, state, profile, io, cwd,
                       terminal_columns, terminal_rows, supervisor_id, created_at_ms, updated_at_ms,
@@ -116,7 +116,7 @@ impl ExecutionRepository for SqliteExecutionRepository {
                         request.owner.caller().owner_id().as_str(),
                         owner_kind(request.owner.caller().owner_kind()),
                         owner_role(request.owner.caller().role()),
-                        request.owner.authority_scope().as_str(),
+                        request.owner.lifecycle_scope_id().as_str(),
                         request.correlation.namespace().name(),
                         request.correlation.namespace().version(),
                         request.correlation.group_id().as_str(),
@@ -582,9 +582,9 @@ impl ExecutionRepository for SqliteExecutionRepository {
                 })
                 .filter(|status| {
                     filter
-                        .authority_scope
+                        .lifecycle_scope_id
                         .as_ref()
-                        .is_none_or(|expected| status.owner.authority_scope() == expected)
+                        .is_none_or(|expected| status.owner.lifecycle_scope_id() == expected)
                 })
                 .collect())
         })
@@ -850,7 +850,7 @@ struct RawExecutionRow {
     owner_id: String,
     owner_kind: String,
     owner_role: String,
-    authority_scope: String,
+    lifecycle_scope_id: String,
     state: String,
     profile: String,
     io: String,
@@ -880,7 +880,7 @@ fn read_execution_row(row: &Row<'_>) -> rusqlite::Result<RawExecutionRow> {
         owner_id: row.get(3)?,
         owner_kind: row.get(4)?,
         owner_role: row.get(5)?,
-        authority_scope: row.get(6)?,
+        lifecycle_scope_id: row.get(6)?,
         state: row.get(7)?,
         profile: row.get(8)?,
         io: row.get(9)?,
@@ -912,13 +912,13 @@ fn decode_execution_row(raw: RawExecutionRow) -> StoreResult<ExecutionStatus> {
                 "invalid caller namespace",
             )
         })?;
-    let owner_id = OpaqueOwnerId::new(raw.owner_id)
+    let owner_id = CallerOwnerId::new(raw.owner_id)
         .map_err(|_| invalid_store_value("executions.owner_id", "invalid", "invalid owner ID"))?;
-    let authority_scope = OpaqueOwnerId::new(raw.authority_scope).map_err(|_| {
+    let lifecycle_scope_id = LifecycleScopeId::new(raw.lifecycle_scope_id).map_err(|_| {
         invalid_store_value(
-            "executions.authority_scope",
+            "executions.lifecycle_scope_id",
             "invalid",
-            "invalid authority scope",
+            "invalid lifecycle scope ID",
         )
     })?;
     let owner = ExecutionOwner::new(
@@ -928,7 +928,7 @@ fn decode_execution_row(raw: RawExecutionRow) -> StoreResult<ExecutionStatus> {
             parse_owner_kind(&raw.owner_kind)?,
             parse_owner_role(&raw.owner_role)?,
         ),
-        authority_scope,
+        lifecycle_scope_id,
     );
     let terminal_size = match (raw.terminal_columns, raw.terminal_rows) {
         (Some(columns), Some(rows)) => Some(TerminalSize { columns, rows }),

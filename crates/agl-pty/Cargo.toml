@@ -11,6 +11,7 @@ native-test-fixtures = []
 [dependencies]
 agl-exec.workspace = true
 libc.workspace = true
+rustix-openpty.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

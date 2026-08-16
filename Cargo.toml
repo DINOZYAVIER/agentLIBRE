@@ -107,6 +107,7 @@ futures-util = { version = "0.3.32", features = ["sink"] }
 hf-hub = "=1.0.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2.186"
+rustix-openpty = "0.2.0"
 matrix-sdk = { version = "=0.18.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption"] }
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }

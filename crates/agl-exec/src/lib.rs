@@ -15,9 +15,9 @@ mod status;
 
 pub use bytes::{ProcessBytes, ProcessBytesEncoding};
 pub use caller::{
-    AuthorityFingerprint, CallerContractError, CallerNamespace, CallerOwner, CallerOwnerKind,
-    CallerRole, ExecutionCorrelation, ExecutionOwner, MAX_CALLER_NAMESPACE_BYTES,
-    MAX_OPAQUE_OWNER_ID_BYTES, OpaqueOwnerId,
+    AuthorityFingerprint, CallerIdentityError, CallerNamespace, CallerOwner, CallerOwnerId,
+    CallerOwnerKind, CallerRole, CorrelationGroupId, CorrelationOperationId, ExecutionCorrelation,
+    ExecutionOwner, LifecycleScopeId, MAX_CALLER_ID_BYTES, MAX_CALLER_NAMESPACE_BYTES,
 };
 pub use config::{
     ProcessSupervisorOptions, WRITABLE_INPUT_LEASE_HEARTBEAT, WRITABLE_INPUT_LEASE_TTL,

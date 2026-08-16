@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn adapters_return_exact_non_login_launch_contracts() {
+    fn adapters_return_exact_non_login_launch_arguments() {
         let token = ShellIntegrationToken::generate().unwrap();
         let seed = TerminalHistorySeed::empty();
         let bash = snapshot(AdmittedShellKind::Bash)

@@ -948,7 +948,7 @@ impl ChatTurnRuntime {
         );
         let outcome = match &result {
             Ok(response)
-                if tool_id.as_str() == crate::delegation_contract::AGENT_DELEGATE_TOOL_ID
+                if tool_id.as_str() == crate::delegation_extension::AGENT_DELEGATE_TOOL_ID
                     && response
                         .result
                         .data

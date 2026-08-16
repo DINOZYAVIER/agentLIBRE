@@ -45,7 +45,7 @@ impl StoredTerminalRecord {
             ));
         }
         self.record.shell_profile.validate().map_err(|_| {
-            invalid_record("stored terminal shell profile violates its admitted contract")
+            invalid_record("stored terminal shell profile violates its admitted invariants")
         })?;
         if self.record.owner.is_persistent()
             && self.record.owner.caller().owner_id().as_str() != self.record.topology_id.as_str()
@@ -323,7 +323,7 @@ pub fn validate_terminal_replacement(
     if previous.record.terminal_id != replacement.record.terminal_id
         || previous.record.execution_id != replacement.record.execution_id
         || previous.record.topology_id != replacement.record.topology_id
-        || previous.record.authority_scope != replacement.record.authority_scope
+        || previous.record.lifecycle_scope_id != replacement.record.lifecycle_scope_id
         || previous.record.profile != replacement.record.profile
         || previous.record.workspace_root != replacement.record.workspace_root
         || previous.record.shell_profile != replacement.record.shell_profile
@@ -517,8 +517,8 @@ mod tests {
     use std::path::PathBuf;
 
     use agl_exec::{
-        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionProfile,
-        ExecutionRequestId, OpaqueOwnerId, ShellProfileSnapshot,
+        CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, ExecutionProfile,
+        ExecutionRequestId, LifecycleScopeId, ShellProfileSnapshot,
     };
 
     use super::*;
@@ -529,14 +529,14 @@ mod tests {
     type RunId = ExecutionRequestId;
     type SessionId = ExecutionRequestId;
 
-    fn opaque(value: &str) -> OpaqueOwnerId {
-        OpaqueOwnerId::new(value).unwrap()
+    fn caller_id(value: &str) -> CallerOwnerId {
+        CallerOwnerId::new(value).unwrap()
     }
 
     fn owner(value: &str, kind: CallerOwnerKind, role: CallerRole) -> CallerOwner {
         CallerOwner::new(
             CallerNamespace::new("agentlibre", 1).unwrap(),
-            opaque(value),
+            caller_id(value),
             kind,
             role,
         )
@@ -548,13 +548,13 @@ mod tests {
             record: TerminalRecord {
                 terminal_id: TerminalId::generate(),
                 execution_id: ExecutionId::generate(),
-                topology_id: TerminalTopologyId::new(opaque(session_id.as_str())),
+                topology_id: TerminalTopologyId::new(caller_id(session_id.as_str())),
                 owner: TerminalOwner::new(owner(
                     session_id.as_str(),
                     CallerOwnerKind::Persistent,
                     CallerRole::Human,
                 )),
-                authority_scope: opaque(RunId::generate().as_str()),
+                lifecycle_scope_id: LifecycleScopeId::new(RunId::generate().as_str()).unwrap(),
                 profile: ExecutionProfile::Workspace,
                 workspace_root: PathBuf::from("/workspace"),
                 shell_profile: AdmittedShellProfile {
@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_contract_rejects_noncanonical_scope_digest_and_prompt_metadata() {
+    fn stored_record_rejects_noncanonical_scope_digest_and_prompt_metadata() {
         let mut outside_workspace = stored_terminal();
         outside_workspace.record.cwd = PathBuf::from("/outside");
         assert_eq!(

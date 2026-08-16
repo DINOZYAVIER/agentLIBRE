@@ -36,7 +36,7 @@ impl TerminalGenerationFileRole {
     }
 }
 
-const FILE_ROLES: [TerminalGenerationFileRole; 3] = [
+const REQUIRED_TERMINAL_GENERATION_FILE_ROLES: [TerminalGenerationFileRole; 3] = [
     TerminalGenerationFileRole::Service,
     TerminalGenerationFileRole::Launcher,
     TerminalGenerationFileRole::Ui,
@@ -93,7 +93,7 @@ impl TerminalGenerationManifest {
             return Err(TerminalGenerationError::ManifestExists(manifest_path));
         }
 
-        let files = FILE_ROLES
+        let files = REQUIRED_TERMINAL_GENERATION_FILE_ROLES
             .into_iter()
             .map(|role| inspect_component(directory, role))
             .collect::<Result<Vec<_>, _>>()?;
@@ -124,7 +124,7 @@ impl TerminalGenerationManifest {
         {
             fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o444))
                 .map_err(|error| io_error(&manifest_path, error))?;
-            for role in FILE_ROLES {
+            for role in REQUIRED_TERMINAL_GENERATION_FILE_ROLES {
                 let path = directory.join(role.path());
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o555))
                     .map_err(|error| io_error(&path, error))?;
@@ -174,11 +174,15 @@ impl TerminalGenerationManifest {
         if self.protocol_version != TERMINAL_PROTOCOL_VERSION {
             return Err(TerminalGenerationError::ProtocolVersion);
         }
-        if self.files.len() != FILE_ROLES.len() {
+        if self.files.len() != REQUIRED_TERMINAL_GENERATION_FILE_ROLES.len() {
             return Err(TerminalGenerationError::FileInventory);
         }
         let mut paths = BTreeSet::new();
-        for (file, role) in self.files.iter().zip(FILE_ROLES) {
+        for (file, role) in self
+            .files
+            .iter()
+            .zip(REQUIRED_TERMINAL_GENERATION_FILE_ROLES)
+        {
             if file.role != role || file.path != role.path() || !paths.insert(file.path.as_str()) {
                 return Err(TerminalGenerationError::FileInventory);
             }
@@ -216,7 +220,7 @@ impl VerifiedTerminalGeneration {
         let manifest: TerminalGenerationManifest = serde_json::from_slice(&bytes)
             .map_err(|error| TerminalGenerationError::Json(error.to_string()))?;
         manifest.validate_shape()?;
-        for role in FILE_ROLES {
+        for role in REQUIRED_TERMINAL_GENERATION_FILE_ROLES {
             let actual = inspect_component(directory, role)?;
             if &actual != manifest.file(role) {
                 return Err(TerminalGenerationError::ComponentDrift(
@@ -513,7 +517,7 @@ fn validate_generation_inventory(
         })
         .collect::<Result<Vec<_>, _>>()?;
     actual.sort();
-    let mut expected = FILE_ROLES
+    let mut expected = REQUIRED_TERMINAL_GENERATION_FILE_ROLES
         .into_iter()
         .map(|role| role.path().into())
         .collect::<Vec<std::ffi::OsString>>();

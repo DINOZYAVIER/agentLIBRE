@@ -3123,14 +3123,31 @@ memory:
     }
 
     #[test]
-    fn cli_manifest_does_not_depend_on_matrix_sdk() {
-        let manifest = include_str!("../Cargo.toml");
-
+    fn cli_package_does_not_depend_on_matrix_sdk() {
+        let output = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .current_dir(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let package = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "agl-cli")
+            .unwrap();
         assert!(
-            !manifest.lines().any(|line| {
-                let line = line.trim_start();
-                line.starts_with("matrix-sdk.") || line.starts_with("matrix-sdk =")
-            }),
+            !package["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|dependency| dependency["name"] == "matrix-sdk"),
             "agl-cli must not depend on matrix-sdk; Matrix SDK stays in agl-matrix-bridge"
         );
     }

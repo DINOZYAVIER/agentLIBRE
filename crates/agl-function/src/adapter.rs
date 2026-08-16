@@ -107,7 +107,7 @@ pub fn parse_function_envelope(content: &str) -> Result<AgentFunctionFrontMatter
     Ok(front_matter)
 }
 
-pub fn validate_resolved_function_model_contract(
+pub fn validate_resolved_function_model(
     front_matter: &AgentFunctionFrontMatter,
     _inference_config: Option<&str>,
     graph: &agl_package::ResolvedPackageGraph,

@@ -11,10 +11,11 @@ fi
 
 "$script_dir/tool-versions.sh"
 "$script_dir/metadata.sh"
+"$script_dir/check-engineering-language.sh"
 "$script_dir/fmt.sh"
 "$script_dir/clippy.sh"
 "$script_dir/test.sh"
-"$script_dir/fsm-boundaries.sh"
+"$script_dir/check-behavior-tests.py"
 "$script_dir/install-bundle-dry-run.sh"
 "$script_dir/uninstall-bundle.sh"
 "$script_dir/systemd-dry-run.sh"

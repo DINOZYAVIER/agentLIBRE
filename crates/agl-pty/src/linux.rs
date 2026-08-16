@@ -674,32 +674,42 @@ mod tests {
     }
 
     #[test]
-    fn private_transport_is_seqpacket_close_on_exec_and_rejects_fifo_replacement() {
+    fn private_transport_preserves_packets_is_close_on_exec_and_rejects_fifo_replacement() {
         let root = root();
         let event = root.join("events.fifo");
         let control = root.join("controls.fifo");
         let pair = create_shell_integration_transport(&event, &control).unwrap();
         for descriptor in [&pair.supervisor, &pair.relay] {
-            let kind = unsafe {
-                let mut value = 0_i32;
-                let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
-                assert_eq!(
-                    libc::getsockopt(
-                        descriptor.as_raw_fd(),
-                        libc::SOL_SOCKET,
-                        libc::SO_TYPE,
-                        (&mut value as *mut i32).cast(),
-                        &mut length,
-                    ),
-                    0
-                );
-                value
-            };
-            assert_eq!(kind, libc::SOCK_SEQPACKET);
             assert_ne!(
                 unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
                 0
             );
+        }
+        for packet in [b"first".as_slice(), b"second-packet".as_slice()] {
+            assert_eq!(
+                unsafe {
+                    libc::send(
+                        pair.supervisor.as_raw_fd(),
+                        packet.as_ptr().cast(),
+                        packet.len(),
+                        libc::MSG_NOSIGNAL,
+                    )
+                },
+                packet.len() as isize,
+            );
+        }
+        for expected in [b"first".as_slice(), b"second-packet".as_slice()] {
+            let mut received = [0_u8; 32];
+            let length = unsafe {
+                libc::recv(
+                    pair.relay.as_raw_fd(),
+                    received.as_mut_ptr().cast(),
+                    received.len(),
+                    0,
+                )
+            };
+            assert_eq!(length, expected.len() as isize);
+            assert_eq!(&received[..length as usize], expected);
         }
         let opened = open_private_fifo(&event, "event").unwrap();
         assert!(fifo_path_matches(&event, &opened));

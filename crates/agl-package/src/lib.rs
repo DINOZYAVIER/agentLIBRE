@@ -1,4 +1,4 @@
-//! Format-neutral contracts shared by versioned agentLIBRE packages.
+//! Format-neutral APIs shared by versioned agentLIBRE packages.
 //!
 //! This crate intentionally contains no package discovery or payload-specific
 //! code. It is the dependency leaf for package composition.
@@ -33,7 +33,7 @@ const CORE_TYPES: [&str; 4] = [FUNCTION_TYPE, EXTENSION_TYPE, SKILL_TYPE, MODEL_
 
 const RESERVED_ROOTS: [&str; 4] = [FUNCTION_ROOT, EXTENSION_ROOT, SKILL_ROOT, MODEL_ROOT];
 
-/// Errors returned by the public package contract.
+/// Errors returned by the public package API.
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum PackageError {
     #[error("invalid package type ID `{value}`")]

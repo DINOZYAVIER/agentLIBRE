@@ -6,12 +6,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_exec::{
-    AuthorityFingerprint, CallerNamespace, CallerOwnerKind, EnvironmentOverride,
-    ExecutionAuthorization, ExecutionContextSnapshot, ExecutionCorrelation, ExecutionCursor,
-    ExecutionExit, ExecutionGrantLease, ExecutionId, ExecutionIo, ExecutionKind,
-    ExecutionLeaseOrigin, ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest,
-    ExecutionStatus, KillMode, OpaqueOwnerId, ProcessBytes, ProcessBytesEncoding, TerminalSize,
-    resolve_execution_directory,
+    AuthorityFingerprint, CallerNamespace, CallerOwnerId, CallerOwnerKind, CorrelationGroupId,
+    CorrelationOperationId, EnvironmentOverride, ExecutionAuthorization, ExecutionContextSnapshot,
+    ExecutionCorrelation, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionId,
+    ExecutionIo, ExecutionKind, ExecutionLeaseOrigin, ExecutionLimits, ExecutionOwner,
+    ExecutionProfile, ExecutionRequest, ExecutionStatus, KillMode, LifecycleScopeId, ProcessBytes,
+    ProcessBytesEncoding, TerminalSize, resolve_execution_directory,
 };
 #[cfg(test)]
 use agl_exec::{CallerOwner, CallerRole};
@@ -265,7 +265,7 @@ impl ProcessTools {
     async fn shell(&self, context: ToolDispatchContext) -> Result<Value> {
         let args =
             parse_args::<ShellArgs>(SHELL_EXEC_TOOL_ID, context.invocation().arguments.clone())?;
-        validate_shell_contract(&args).map_err(|error| {
+        validate_shell_request(&args).map_err(|error| {
             anyhow::Error::new(ToolHandlerError::new(
                 "invalid_effect_envelope",
                 format!("{error:#}"),
@@ -321,11 +321,11 @@ impl ProcessTools {
         let environment = self.agent_terminal_environment(&admission.snapshot, &shell)?;
         let timeout_ms = self.timeout_ms(args.timeout_ms, true, context.control().remaining())?;
         let mut terminal_admission = TerminalAdmission {
-            topology_id: TerminalTopologyId::new(OpaqueOwnerId::new(
+            topology_id: TerminalTopologyId::new(CallerOwnerId::new(
                 admission.durable_session_id.as_str(),
             )?),
             owner,
-            authority_scope: OpaqueOwnerId::new(root_run_id.as_str())?,
+            lifecycle_scope_id: LifecycleScopeId::new(root_run_id.as_str())?,
             correlation: execution_correlation(&invocation.scope)?,
             context: admission.snapshot,
             profile: ExecutionProfile::Workspace,
@@ -1383,8 +1383,8 @@ fn terminal_owner(
     admission: &ProcessExecutionAdmission,
 ) -> Result<(TerminalOwner, agl_ids::RunId)> {
     let caller = admission.owner.caller();
-    let root_run_id = RunId::parse(admission.owner.authority_scope().as_str())
-        .context("execution authority scope is not an agent run ID")?;
+    let root_run_id = RunId::parse(admission.owner.lifecycle_scope_id().as_str())
+        .context("execution lifecycle scope is not an agent run ID")?;
     match caller.owner_kind() {
         CallerOwnerKind::Persistent => {
             let session_id = SessionId::parse(caller.owner_id().as_str())
@@ -1408,8 +1408,8 @@ fn terminal_owner(
 fn execution_correlation(scope: &ExecutionScope) -> Result<ExecutionCorrelation> {
     Ok(ExecutionCorrelation::new(
         CallerNamespace::new("agentlibre", 1)?,
-        OpaqueOwnerId::new(scope.run_id().as_str())?,
-        OpaqueOwnerId::new(creating_step_id(scope)?.as_str())?,
+        CorrelationGroupId::new(scope.run_id().as_str())?,
+        CorrelationOperationId::new(creating_step_id(scope)?.as_str())?,
     ))
 }
 
@@ -1418,11 +1418,11 @@ fn agent_run_owner(run_id: &RunId, root_run_id: &RunId) -> Result<ExecutionOwner
     Ok(ExecutionOwner::new(
         CallerOwner::new(
             CallerNamespace::new("agentlibre", 1)?,
-            OpaqueOwnerId::new(run_id.as_str())?,
+            CallerOwnerId::new(run_id.as_str())?,
             CallerOwnerKind::Ephemeral,
             CallerRole::Agent,
         ),
-        OpaqueOwnerId::new(root_run_id.as_str())?,
+        LifecycleScopeId::new(root_run_id.as_str())?,
     ))
 }
 
@@ -1997,7 +1997,7 @@ fn validate_text(value: &str, label: &str, allow_empty: bool, maximum_bytes: usi
     Ok(())
 }
 
-fn validate_shell_contract(args: &ShellArgs) -> Result<()> {
+fn validate_shell_request(args: &ShellArgs) -> Result<()> {
     validate_text(&args.semantic_intent, "shell semantic_intent", false, 4_096)?;
     validate_text(&args.fallback_reason, "shell fallback_reason", false, 4_096)?;
     ensure!(
@@ -2756,7 +2756,7 @@ mod tests {
             agl_kernel::PolicyHash::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
             json!({
                 "command": "true",
-                "semantic_intent": "verify the host shell contract",
+                "semantic_intent": "verify the host shell request",
                 "workspace_access": "read_only",
                 "expected_effects": {
                     "process": true,

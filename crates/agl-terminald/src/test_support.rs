@@ -1,7 +1,8 @@
 #[cfg(test)]
 use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
-    ExecutionOwner, ExecutionRequestId, OpaqueOwnerId,
+    CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, CorrelationGroupId,
+    CorrelationOperationId, ExecutionCorrelation, ExecutionOwner, ExecutionRequestId,
+    LifecycleScopeId,
 };
 
 #[cfg(test)]
@@ -17,11 +18,6 @@ fn namespace() -> CallerNamespace {
 }
 
 #[cfg(test)]
-fn opaque(value: &str) -> OpaqueOwnerId {
-    OpaqueOwnerId::new(value).expect("generated test IDs fit the opaque owner contract")
-}
-
-#[cfg(test)]
 pub(crate) fn session_owner(
     session_id: &SessionId,
     root_run_id: &RunId,
@@ -30,11 +26,11 @@ pub(crate) fn session_owner(
     ExecutionOwner::new(
         CallerOwner::new(
             namespace(),
-            opaque(session_id.as_str()),
+            CallerOwnerId::new(session_id.as_str()).unwrap(),
             CallerOwnerKind::Persistent,
             role,
         ),
-        opaque(root_run_id.as_str()),
+        LifecycleScopeId::new(root_run_id.as_str()).unwrap(),
     )
 }
 
@@ -43,11 +39,11 @@ pub(crate) fn run_owner(run_id: &RunId, root_run_id: &RunId) -> ExecutionOwner {
     ExecutionOwner::new(
         CallerOwner::new(
             namespace(),
-            opaque(run_id.as_str()),
+            CallerOwnerId::new(run_id.as_str()).unwrap(),
             CallerOwnerKind::Ephemeral,
             CallerRole::Agent,
         ),
-        opaque(root_run_id.as_str()),
+        LifecycleScopeId::new(root_run_id.as_str()).unwrap(),
     )
 }
 
@@ -55,8 +51,8 @@ pub(crate) fn run_owner(run_id: &RunId, root_run_id: &RunId) -> ExecutionOwner {
 pub(crate) fn correlation(run_id: &RunId, step_id: &StepId) -> ExecutionCorrelation {
     ExecutionCorrelation::new(
         namespace(),
-        opaque(run_id.as_str()),
-        opaque(step_id.as_str()),
+        CorrelationGroupId::new(run_id.as_str()).unwrap(),
+        CorrelationOperationId::new(step_id.as_str()).unwrap(),
     )
 }
 

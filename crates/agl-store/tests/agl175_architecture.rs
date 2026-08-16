@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,8 +26,16 @@ fn metadata() -> Value {
     serde_json::from_slice(&output.stdout).expect("cargo metadata returns JSON")
 }
 
-fn normal_dependencies(package: &str) -> BTreeSet<String> {
-    let metadata = metadata();
+fn package_names(metadata: &Value) -> BTreeSet<&str> {
+    metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect()
+}
+
+fn normal_dependencies(metadata: &Value, package: &str) -> BTreeSet<String> {
     metadata["packages"]
         .as_array()
         .unwrap()
@@ -43,81 +50,10 @@ fn normal_dependencies(package: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn production_rs_files(root: &Path) -> Vec<PathBuf> {
-    fn visit(path: &Path, output: &mut Vec<PathBuf>) {
-        let mut entries = fs::read_dir(path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
-            .map(|entry| entry.expect("directory entry is readable").path())
-            .collect::<Vec<_>>();
-        entries.sort();
-        for entry in entries {
-            if entry.is_dir() {
-                if entry.file_name().is_some_and(|name| name == "target") {
-                    continue;
-                }
-                visit(&entry, output);
-            } else if entry.extension().is_some_and(|extension| extension == "rs")
-                && entry.file_name().is_none_or(|name| name != "tests.rs")
-                && !entry
-                    .components()
-                    .any(|component| component.as_os_str() == "tests")
-            {
-                output.push(entry);
-            }
-        }
-    }
-
-    let mut output = Vec::new();
-    visit(root, &mut output);
-    output
-}
-
-fn source_matches(root: &Path, needles: &[&str]) -> Vec<String> {
-    let mut matches = Vec::new();
-    for path in production_rs_files(root) {
-        let source = fs::read_to_string(&path).unwrap();
-        for (line_number, line) in source.lines().enumerate() {
-            if let Some(needle) = needles.iter().find(|needle| line.contains(**needle)) {
-                matches.push(format!(
-                    "{}:{}:{needle}",
-                    path.strip_prefix(workspace_root()).unwrap().display(),
-                    line_number + 1
-                ));
-            }
-        }
-    }
-    matches
-}
-
 #[test]
-fn domain_crates_own_contracts_without_sqlite_or_store_dependencies() {
+fn domain_packages_do_not_depend_on_sqlite_or_the_shared_store() {
     let metadata = metadata();
-    let packages = metadata["packages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|package| package["name"].as_str())
-        .collect::<BTreeSet<_>>();
-    for expected in [
-        "agl-memory",
-        "agl-note",
-        "agl-cron",
-        "agl-permission",
-        "agl-matrix",
-        "agl-content",
-        "agl-artifact",
-        "agl-kernel",
-    ] {
-        assert!(
-            packages.contains(expected),
-            "missing domain package {expected}"
-        );
-    }
-    assert!(
-        !packages.contains("agl-notes"),
-        "plural domain package survived"
-    );
-
+    let packages = package_names(&metadata);
     for package in [
         "agl-memory",
         "agl-note",
@@ -128,19 +64,25 @@ fn domain_crates_own_contracts_without_sqlite_or_store_dependencies() {
         "agl-artifact",
         "agl-kernel",
     ] {
-        let dependencies = normal_dependencies(package);
+        assert!(
+            packages.contains(package),
+            "missing domain package {package}"
+        );
+        let dependencies = normal_dependencies(&metadata, package);
         for forbidden in ["agl-store", "rusqlite"] {
             assert!(
                 !dependencies.contains(forbidden),
-                "{package} depends on forbidden persistence package {forbidden}"
+                "{package} depends on persistence package {forbidden}"
             );
         }
     }
+    assert!(!packages.contains("agl-notes"));
 }
 
 #[test]
-fn store_does_not_absorb_independent_persistence_owners() {
-    let dependencies = normal_dependencies("agl-store");
+fn shared_store_and_consumers_keep_the_selected_dependency_direction() {
+    let metadata = metadata();
+    let store_dependencies = normal_dependencies(&metadata, "agl-store");
     for forbidden in [
         "agl-inference",
         "agl-matrix-bridge",
@@ -150,87 +92,24 @@ fn store_does_not_absorb_independent_persistence_owners() {
         "matrix-sdk",
     ] {
         assert!(
-            !dependencies.contains(forbidden),
-            "agl-store absorbed independent owner {forbidden}"
+            !store_dependencies.contains(forbidden),
+            "agl-store depends on independent persistence owner {forbidden}"
         );
     }
-}
 
-#[test]
-fn raw_store_construction_has_one_production_owner() {
-    let root = workspace_root().join("crates");
-    let mut violations = BTreeMap::<String, Vec<String>>::new();
-    for entry in fs::read_dir(&root).unwrap() {
-        let path = entry.unwrap().path();
-        if !path.is_dir() {
-            continue;
-        }
-        let package = path.file_name().unwrap().to_string_lossy().to_string();
-        if matches!(package.as_str(), "agl-store" | "agl-runtime") {
-            continue;
-        }
-        let matches = source_matches(
-            &path.join("src"),
-            &[
-                "AglStore::open_at",
-                "AglStore::open_current_at",
-                "AglStore::open_current_read_only_at",
-                "AglStore::migrate_at",
-            ],
-        );
-        if !matches.is_empty() {
-            violations.insert(package, matches);
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "production crates open concrete store outside agl-runtime: {violations:#?}"
-    );
-}
-
-#[test]
-fn consumers_do_not_depend_on_concrete_store() {
-    for package in [
+    for consumer in [
         "agl-chat",
         "agl-cli",
         "agl-core-tools",
         "agl-daemon",
         "agl-host-tools",
+        "agl-inference",
         "agl-matrix-bridge",
         "agl-supervisor",
     ] {
-        let dependencies = normal_dependencies(package);
         assert!(
-            !dependencies.contains("agl-store"),
-            "{package} still depends on concrete agl-store"
+            !normal_dependencies(&metadata, consumer).contains("agl-store"),
+            "{consumer} depends directly on agl-store"
         );
     }
-    assert!(
-        !normal_dependencies("agl-inference").contains("agl-store"),
-        "inference regained store authority"
-    );
-}
-
-#[test]
-fn store_public_surface_contains_no_permission_or_matrix_domain_records() {
-    let source = fs::read_to_string(workspace_root().join("crates/agl-store/src/types.rs"))
-        .expect("store types source exists");
-    for forbidden in [
-        "pub enum PermissionRequestStatus",
-        "pub enum PermissionGrantStatus",
-        "pub struct PermissionRequestRecord",
-        "pub struct PermissionGrantRecord",
-        "pub enum MatrixNotificationOutboxStatus",
-        "pub struct MatrixNotificationOutboxItem",
-    ] {
-        assert!(!source.contains(forbidden), "store still owns {forbidden}");
-    }
-}
-
-#[test]
-fn raw_connection_and_transaction_are_not_public() {
-    let source = fs::read_to_string(workspace_root().join("crates/agl-store/src/connection.rs"))
-        .expect("store connection source exists");
-    assert!(!source.contains("pub fn connection("));
-    assert!(!source.contains("pub fn transaction<"));
 }

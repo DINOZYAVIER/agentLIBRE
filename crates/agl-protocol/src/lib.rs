@@ -8,7 +8,8 @@ pub use surface::*;
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
 pub use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, OpaqueOwnerId,
+    CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, CorrelationGroupId,
+    CorrelationOperationId, ExecutionId, LifecycleScopeId,
 };
 pub use agl_exec::{
     ExecutionCursor, ExecutionExit, ExecutionIo, ExecutionOwner, ExecutionProfile, ExecutionState,

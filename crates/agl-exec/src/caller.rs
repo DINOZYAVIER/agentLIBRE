@@ -5,10 +5,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 pub const MAX_CALLER_NAMESPACE_BYTES: usize = 64;
-pub const MAX_OPAQUE_OWNER_ID_BYTES: usize = 256;
+pub const MAX_CALLER_ID_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CallerContractError {
+pub enum CallerIdentityError {
     Empty {
         field: &'static str,
     },
@@ -23,7 +23,7 @@ pub enum CallerContractError {
     InvalidAuthorityFingerprint,
 }
 
-impl Display for CallerContractError {
+impl Display for CallerIdentityError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty { field } => write!(formatter, "{field} must not be empty"),
@@ -43,21 +43,21 @@ impl Display for CallerContractError {
     }
 }
 
-impl Error for CallerContractError {}
+impl Error for CallerIdentityError {}
 
 fn validate_bounded_text(
     value: &str,
     field: &'static str,
     max_bytes: usize,
-) -> Result<(), CallerContractError> {
+) -> Result<(), CallerIdentityError> {
     if value.trim().is_empty() {
-        return Err(CallerContractError::Empty { field });
+        return Err(CallerIdentityError::Empty { field });
     }
     if value.len() > max_bytes {
-        return Err(CallerContractError::TooLong { field, max_bytes });
+        return Err(CallerIdentityError::TooLong { field, max_bytes });
     }
     if value.chars().any(char::is_control) {
-        return Err(CallerContractError::ControlCharacter { field });
+        return Err(CallerIdentityError::ControlCharacter { field });
     }
     Ok(())
 }
@@ -70,11 +70,11 @@ pub struct CallerNamespace {
 }
 
 impl CallerNamespace {
-    pub fn new(name: impl Into<String>, version: u32) -> Result<Self, CallerContractError> {
+    pub fn new(name: impl Into<String>, version: u32) -> Result<Self, CallerIdentityError> {
         let name = name.into();
         validate_bounded_text(&name, "caller namespace", MAX_CALLER_NAMESPACE_BYTES)?;
         if version == 0 {
-            return Err(CallerContractError::ZeroNamespaceVersion);
+            return Err(CallerIdentityError::ZeroNamespaceVersion);
         }
         Ok(Self { name, version })
     }
@@ -105,45 +105,69 @@ impl<'de> Deserialize<'de> for CallerNamespace {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct OpaqueOwnerId(String);
+macro_rules! define_caller_text_id {
+    ($(#[$attribute:meta])* $name:ident, $field:literal) => {
+        $(#[$attribute])*
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(String);
 
-impl OpaqueOwnerId {
-    pub fn new(value: impl Into<String>) -> Result<Self, CallerContractError> {
-        let value = value.into();
-        validate_bounded_text(&value, "opaque owner ID", MAX_OPAQUE_OWNER_ID_BYTES)?;
-        Ok(Self(value))
-    }
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, CallerIdentityError> {
+                let value = value.into();
+                validate_bounded_text(&value, $field, MAX_CALLER_ID_BYTES)?;
+                Ok(Self(value))
+            }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl Display for $name {
+            fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(D::Error::custom)
+            }
+        }
+    };
 }
 
-impl Display for OpaqueOwnerId {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for OpaqueOwnerId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for OpaqueOwnerId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(D::Error::custom)
-    }
-}
+define_caller_text_id!(CallerOwnerId, "caller owner ID");
+define_caller_text_id!(
+    /// Identity used only to fence lifecycle ownership.
+    ///
+    /// The semantic ID types are intentionally not interchangeable:
+    ///
+    /// ```compile_fail
+    /// use agl_exec::{CallerOwnerId, LifecycleScopeId};
+    ///
+    /// fn accepts_lifecycle_scope(_: LifecycleScopeId) {}
+    /// let owner = CallerOwnerId::new("owner").unwrap();
+    /// accepts_lifecycle_scope(owner);
+    /// ```
+    LifecycleScopeId,
+    "lifecycle scope ID"
+);
+define_caller_text_id!(CorrelationGroupId, "correlation group ID");
+define_caller_text_id!(CorrelationOperationId, "correlation operation ID");
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -165,26 +189,26 @@ pub enum CallerRole {
 #[serde(deny_unknown_fields)]
 pub struct CallerOwner {
     namespace: CallerNamespace,
-    owner_id: OpaqueOwnerId,
+    owner_id: CallerOwnerId,
     owner_kind: CallerOwnerKind,
     role: CallerRole,
 }
 
-/// Runtime ownership admitted by a caller. `authority_scope` is opaque to the
+/// Runtime ownership admitted by a caller. `lifecycle_scope_id` is opaque to the
 /// execution service and exists only to fence lifecycle-owner handoff; no
 /// authority is inferred from its text.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionOwner {
     caller: CallerOwner,
-    authority_scope: OpaqueOwnerId,
+    lifecycle_scope_id: LifecycleScopeId,
 }
 
 impl ExecutionOwner {
-    pub fn new(caller: CallerOwner, authority_scope: OpaqueOwnerId) -> Self {
+    pub fn new(caller: CallerOwner, lifecycle_scope_id: LifecycleScopeId) -> Self {
         Self {
             caller,
-            authority_scope,
+            lifecycle_scope_id,
         }
     }
 
@@ -192,8 +216,8 @@ impl ExecutionOwner {
         &self.caller
     }
 
-    pub fn authority_scope(&self) -> &OpaqueOwnerId {
-        &self.authority_scope
+    pub fn lifecycle_scope_id(&self) -> &LifecycleScopeId {
+        &self.lifecycle_scope_id
     }
 
     pub fn may_access(&self, requester: &Self) -> bool {
@@ -209,15 +233,15 @@ impl ExecutionOwner {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionCorrelation {
     namespace: CallerNamespace,
-    group_id: OpaqueOwnerId,
-    operation_id: OpaqueOwnerId,
+    group_id: CorrelationGroupId,
+    operation_id: CorrelationOperationId,
 }
 
 impl ExecutionCorrelation {
     pub fn new(
         namespace: CallerNamespace,
-        group_id: OpaqueOwnerId,
-        operation_id: OpaqueOwnerId,
+        group_id: CorrelationGroupId,
+        operation_id: CorrelationOperationId,
     ) -> Self {
         Self {
             namespace,
@@ -230,11 +254,11 @@ impl ExecutionCorrelation {
         &self.namespace
     }
 
-    pub fn group_id(&self) -> &OpaqueOwnerId {
+    pub fn group_id(&self) -> &CorrelationGroupId {
         &self.group_id
     }
 
-    pub fn operation_id(&self) -> &OpaqueOwnerId {
+    pub fn operation_id(&self) -> &CorrelationOperationId {
         &self.operation_id
     }
 }
@@ -242,7 +266,7 @@ impl ExecutionCorrelation {
 impl CallerOwner {
     pub fn new(
         namespace: CallerNamespace,
-        owner_id: OpaqueOwnerId,
+        owner_id: CallerOwnerId,
         owner_kind: CallerOwnerKind,
         role: CallerRole,
     ) -> Self {
@@ -258,7 +282,7 @@ impl CallerOwner {
         &self.namespace
     }
 
-    pub fn owner_id(&self) -> &OpaqueOwnerId {
+    pub fn owner_id(&self) -> &CallerOwnerId {
         &self.owner_id
     }
 
@@ -275,22 +299,22 @@ impl CallerOwner {
 pub struct AuthorityFingerprint(String);
 
 impl AuthorityFingerprint {
-    pub fn new(value: impl Into<String>) -> Result<Self, CallerContractError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, CallerIdentityError> {
         let value = value.into();
         let digest = value
             .strip_prefix("sha256:")
-            .ok_or(CallerContractError::InvalidAuthorityFingerprint)?;
+            .ok_or(CallerIdentityError::InvalidAuthorityFingerprint)?;
         if digest.len() != 64
             || !digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(CallerContractError::InvalidAuthorityFingerprint);
+            return Err(CallerIdentityError::InvalidAuthorityFingerprint);
         }
         Ok(Self(value))
     }
 
-    pub fn parse(value: &str) -> Result<Self, CallerContractError> {
+    pub fn parse(value: &str) -> Result<Self, CallerIdentityError> {
         Self::new(value)
     }
 
@@ -306,7 +330,7 @@ impl Display for AuthorityFingerprint {
 }
 
 impl FromStr for AuthorityFingerprint {
-    type Err = CallerContractError;
+    type Err = CallerIdentityError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
@@ -346,33 +370,33 @@ mod tests {
         assert!(CallerNamespace::new("é".repeat(32), 1).is_ok());
         assert!(matches!(
             CallerNamespace::new("n".repeat(65), 1),
-            Err(CallerContractError::TooLong { .. })
+            Err(CallerIdentityError::TooLong { .. })
         ));
         assert!(matches!(
             CallerNamespace::new("é".repeat(33), 1),
-            Err(CallerContractError::TooLong { .. })
+            Err(CallerIdentityError::TooLong { .. })
         ));
         assert!(matches!(
             CallerNamespace::new("agent\nlibre", 1),
-            Err(CallerContractError::ControlCharacter { .. })
+            Err(CallerIdentityError::ControlCharacter { .. })
         ));
         assert_eq!(
             CallerNamespace::new("agentlibre", 0),
-            Err(CallerContractError::ZeroNamespaceVersion)
+            Err(CallerIdentityError::ZeroNamespaceVersion)
         );
     }
 
     #[test]
-    fn opaque_owner_is_bounded_but_does_not_parse_agent_ids() {
-        let opaque = OpaqueOwnerId::new("run_01890f17-4a00-7000-8000-000000000001").unwrap();
-        assert_eq!(opaque.as_str(), "run_01890f17-4a00-7000-8000-000000000001");
+    fn caller_text_ids_are_bounded_without_parsing_caller_values() {
+        let owner = CallerOwnerId::new("run_01890f17-4a00-7000-8000-000000000001").unwrap();
+        assert_eq!(owner.as_str(), "run_01890f17-4a00-7000-8000-000000000001");
         assert!(matches!(
-            OpaqueOwnerId::new("x".repeat(257)),
-            Err(CallerContractError::TooLong { .. })
+            LifecycleScopeId::new("x".repeat(257)),
+            Err(CallerIdentityError::TooLong { .. })
         ));
         assert!(matches!(
-            OpaqueOwnerId::new("owner\0id"),
-            Err(CallerContractError::ControlCharacter { .. })
+            CorrelationOperationId::new("owner\0id"),
+            Err(CallerIdentityError::ControlCharacter { .. })
         ));
     }
 
@@ -380,7 +404,7 @@ mod tests {
     fn caller_owner_round_trips_and_denies_unknown_fields() {
         let owner = CallerOwner::new(
             CallerNamespace::new("agentlibre", 1).unwrap(),
-            OpaqueOwnerId::new("opaque-owner").unwrap(),
+            CallerOwnerId::new("opaque-owner").unwrap(),
             CallerOwnerKind::Ephemeral,
             CallerRole::Agent,
         );
@@ -407,25 +431,38 @@ mod tests {
         let namespace = CallerNamespace::new("agentlibre", 1).unwrap();
         let caller = CallerOwner::new(
             namespace.clone(),
-            OpaqueOwnerId::new("opaque-run").unwrap(),
+            CallerOwnerId::new("opaque-run").unwrap(),
             CallerOwnerKind::Ephemeral,
             CallerRole::Agent,
         );
         let owner = ExecutionOwner::new(
             caller.clone(),
-            OpaqueOwnerId::new("opaque-authority-scope").unwrap(),
+            LifecycleScopeId::new("opaque-lifecycle-scope").unwrap(),
         );
         let peer = ExecutionOwner::new(
             caller,
-            OpaqueOwnerId::new("another-authority-scope").unwrap(),
+            LifecycleScopeId::new("another-lifecycle-scope").unwrap(),
         );
         assert!(owner.may_access(&peer));
-        assert_ne!(owner.authority_scope(), peer.authority_scope());
+        assert_ne!(owner.lifecycle_scope_id(), peer.lifecycle_scope_id());
+        let encoded_owner = serde_json::to_value(&owner).unwrap();
+        assert_eq!(
+            encoded_owner["lifecycle_scope_id"],
+            "opaque-lifecycle-scope"
+        );
+        assert_eq!(
+            serde_json::from_value::<ExecutionOwner>(encoded_owner.clone()).unwrap(),
+            owner
+        );
+        let mut obsolete_owner = encoded_owner.as_object().unwrap().clone();
+        let lifecycle_scope = obsolete_owner.remove("lifecycle_scope_id").unwrap();
+        obsolete_owner.insert("authority_scope".to_owned(), lifecycle_scope);
+        assert!(serde_json::from_value::<ExecutionOwner>(obsolete_owner.into()).is_err());
 
         let correlation = ExecutionCorrelation::new(
             namespace,
-            OpaqueOwnerId::new("opaque-group").unwrap(),
-            OpaqueOwnerId::new("opaque-operation").unwrap(),
+            CorrelationGroupId::new("opaque-group").unwrap(),
+            CorrelationOperationId::new("opaque-operation").unwrap(),
         );
         let encoded = serde_json::to_value(&correlation).unwrap();
         assert_eq!(
@@ -455,7 +492,7 @@ mod tests {
         ] {
             assert_eq!(
                 AuthorityFingerprint::new(invalid),
-                Err(CallerContractError::InvalidAuthorityFingerprint)
+                Err(CallerIdentityError::InvalidAuthorityFingerprint)
             );
         }
     }

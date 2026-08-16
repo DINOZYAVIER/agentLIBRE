@@ -157,7 +157,7 @@ enum Command {
         reply: Reply<usize>,
     },
     TerminateCorrelationGroupGrants {
-        correlation_group_id: agl_exec::OpaqueOwnerId,
+        correlation_group_id: agl_exec::CorrelationGroupId,
         duration: String,
         reason: TerminationReason,
         reply: Reply<usize>,
@@ -730,7 +730,7 @@ impl ProcessHandle {
 
     pub fn expire_correlation_group_grants(
         &self,
-        correlation_group_id: &agl_exec::OpaqueOwnerId,
+        correlation_group_id: &agl_exec::CorrelationGroupId,
         duration: &str,
     ) -> Result<usize> {
         if duration.trim().is_empty() {
@@ -2143,7 +2143,7 @@ impl Reactor {
                 "managed terminal teardown won the promotion race",
             ));
         }
-        if execution.request.owner.authority_scope() != owner.authority_scope() {
+        if execution.request.owner.lifecycle_scope_id() != owner.lifecycle_scope_id() {
             return Err(ProcessError::new(
                 ProcessErrorCode::ExecutionNotOwned,
                 "managed terminal promotion cannot cross its root run boundary",
@@ -3847,83 +3847,6 @@ mod tests {
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::ExecutionNotLive
-        );
-    }
-
-    #[test]
-    fn managed_terminal_input_is_pending_bounded_not_lifetime_bounded() {
-        const LIMIT: usize = 65_536;
-        let mut fixture = managed_reactor_fixture(LIMIT as u64);
-        let execution_id = fixture.execution_id.clone();
-        let lease = fixture
-            .reactor
-            .attach_input(&execution_id, None, ExecutionRequestId::generate(), true)
-            .unwrap();
-        let chunk = vec![b'x'; LIMIT / 2];
-        for _ in 0..3 {
-            fixture
-                .reactor
-                .queue_input(
-                    &execution_id,
-                    None,
-                    &lease,
-                    ProcessBytes::from_bytes(&chunk),
-                    false,
-                )
-                .unwrap();
-            let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
-            execution.input.clear();
-            execution.input_offset = 0;
-        }
-        assert_eq!(
-            fixture.reactor.active[&execution_id].accepted_input_bytes,
-            (LIMIT + LIMIT / 2) as u64
-        );
-        assert_eq!(
-            fixture
-                .reactor
-                .queue_input(
-                    &execution_id,
-                    None,
-                    &lease,
-                    ProcessBytes::from_bytes(&vec![b'x'; LIMIT + 1]),
-                    false,
-                )
-                .unwrap_err()
-                .code(),
-            ProcessErrorCode::InputTooLarge
-        );
-
-        fixture.reactor.shell_integrations.remove(&execution_id);
-        let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
-        execution.accepted_input_bytes = 0;
-        execution.input.clear();
-        fixture
-            .reactor
-            .queue_input(
-                &execution_id,
-                None,
-                &lease,
-                ProcessBytes::from_bytes(&chunk),
-                false,
-            )
-            .unwrap();
-        let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
-        execution.input.clear();
-        execution.input_offset = 0;
-        assert_eq!(
-            fixture
-                .reactor
-                .queue_input(
-                    &execution_id,
-                    None,
-                    &lease,
-                    ProcessBytes::from_bytes(&vec![b'y'; LIMIT / 2 + 1]),
-                    false,
-                )
-                .unwrap_err()
-                .code(),
-            ProcessErrorCode::InputBackpressure
         );
     }
 

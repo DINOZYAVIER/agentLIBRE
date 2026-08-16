@@ -595,7 +595,7 @@ impl fmt::Display for DurableHealthStoreError {
             ),
             Self::SecurityViolation { object } => write!(
                 formatter,
-                "{object} does not satisfy the same-owner, no-symlink, private-mode contract",
+                "{object} does not satisfy the same-owner, no-symlink, private-mode requirements",
             ),
             Self::RecordLimitExceeded => {
                 formatter.write_str("durable health record count exceeds its bound")

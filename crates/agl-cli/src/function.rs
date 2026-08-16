@@ -25,12 +25,12 @@ use crate::args::{
 };
 use crate::doctor::{FunctionSmokeRequest, run_function_smoke};
 
-const DEVELOPMENT_ASSETS_NOTE: &str = "repository development assets/functions is not a runtime source; materialize packages through the artifact source contract";
+const DEVELOPMENT_ASSETS_NOTE: &str = "repository development assets/functions is not a runtime source; materialize packages through the artifact source policy";
 
 #[derive(Debug, Serialize)]
 struct FunctionResolutionDiagnostics {
     target_workspace: PathBuf,
-    runtime_source_contract: &'static str,
+    runtime_source_policy: &'static str,
     client_runtime: agl_runtime::CurrentRuntimeIdentity,
     daemon_runtime: DaemonRuntimeDiagnostics,
     artifacts: RuntimeBundleIdentity,
@@ -251,7 +251,7 @@ fn resolve_function_diagnostics(
     let inference = function_inference_diagnostics(runtime, &bundle)?;
     let resolution = FunctionResolutionDiagnostics {
         target_workspace: workspace_root.to_path_buf(),
-        runtime_source_contract: DEVELOPMENT_ASSETS_NOTE,
+        runtime_source_policy: DEVELOPMENT_ASSETS_NOTE,
         client_runtime: bundle.runtime.clone(),
         daemon_runtime: daemon_runtime_diagnostics(runtime),
         artifacts: bundle.identity(),
@@ -606,7 +606,7 @@ fn print_function_resolution(report: &FunctionResolutionDiagnostics) {
         "runtime.workspace_root={}",
         report.target_workspace.display()
     );
-    println!("runtime.source_contract={}", report.runtime_source_contract);
+    println!("runtime.source_policy={}", report.runtime_source_policy);
     println!("runtime.client.kind={:?}", report.client_runtime.kind);
     println!(
         "runtime.client.generation_id={}",

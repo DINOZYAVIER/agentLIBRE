@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use agl_exec::CorrelationGroupId;
 use agl_exec::ExecutionRequestId;
-use agl_exec::OpaqueOwnerId;
 use agl_exec::{ExecutionId, WriterLeaseId};
 
 use crate::terminal::shell::ManagedShellStartup;
@@ -289,7 +289,7 @@ impl ProcessHandle {
 
     pub fn expire_correlation_group_grants(
         &self,
-        _correlation_group_id: &OpaqueOwnerId,
+        _correlation_group_id: &CorrelationGroupId,
         _duration: &str,
     ) -> Result<usize> {
         unsupported()

@@ -26,10 +26,11 @@ use agl_chat::{
 };
 use agl_cron::{CronJob, CronTargetKind};
 use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionAuthorization,
-    ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
-    ExecutionOwner, ExecutionProfile, ExecutionState, KillMode,
-    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OpaqueOwnerId, ProcessError, ProcessErrorCode,
+    CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, CorrelationGroupId,
+    CorrelationOperationId, ExecutionAuthorization, ExecutionGrantLease, ExecutionId,
+    ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter, ExecutionOwner, ExecutionProfile,
+    ExecutionState, KillMode, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, LifecycleScopeId,
+    ProcessError, ProcessErrorCode,
 };
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
@@ -1436,11 +1437,11 @@ impl DaemonState {
                     CallerOwnerKind::Persistent,
                     CallerRole::Human,
                 )),
-                authority_scope: opaque_agent_id(root_run_id.as_str()),
+                lifecycle_scope_id: LifecycleScopeId::new(root_run_id.as_str()).unwrap(),
                 correlation: agl_exec::ExecutionCorrelation::new(
                     agent_caller_namespace(),
-                    opaque_agent_id(root_run_id.as_str()),
-                    opaque_agent_id(StepId::generate().as_str()),
+                    CorrelationGroupId::new(root_run_id.as_str()).unwrap(),
+                    CorrelationOperationId::new(StepId::generate().as_str()).unwrap(),
                 ),
                 context: session.execution_context,
                 profile: request.profile,
@@ -1606,7 +1607,7 @@ impl DaemonState {
             }
         } else {
             TerminalOwnerView::Subagent {
-                root_run_id: RunId::parse(record.authority_scope.as_str()).map_err(|_| {
+                root_run_id: RunId::parse(record.lifecycle_scope_id.as_str()).map_err(|_| {
                     ApplicationError::new(
                         ApplicationErrorCode::Internal,
                         "invalid terminal authority mapping",
@@ -5384,32 +5385,28 @@ fn agent_execution_filter(
         ExecutionOwner::new(
             CallerOwner::new(
                 CallerNamespace::new("agentlibre", 1).expect("static caller namespace is valid"),
-                OpaqueOwnerId::new(session_id.as_str())
-                    .expect("canonical session ID fits opaque owner contract"),
+                CallerOwnerId::new(session_id.as_str())
+                    .expect("canonical session ID passes caller owner validation"),
                 CallerOwnerKind::Persistent,
                 CallerRole::Human,
             ),
-            OpaqueOwnerId::new(session_id.as_str())
-                .expect("canonical session ID fits opaque authority contract"),
+            LifecycleScopeId::new(session_id.as_str())
+                .expect("canonical session ID passes opaque authority validation"),
         )
     });
-    let authority_scope = root_run_id.map(|run_id| {
-        OpaqueOwnerId::new(run_id.as_str())
-            .expect("canonical run ID fits opaque authority contract")
+    let lifecycle_scope_id = root_run_id.map(|run_id| {
+        LifecycleScopeId::new(run_id.as_str())
+            .expect("canonical run ID passes opaque authority validation")
     });
     ExecutionListFilter {
         owner,
-        authority_scope,
+        lifecycle_scope_id,
         include_finished,
     }
 }
 
 fn agent_caller_namespace() -> CallerNamespace {
     CallerNamespace::new("agentlibre", 1).expect("static caller namespace is valid")
-}
-
-fn opaque_agent_id(value: &str) -> OpaqueOwnerId {
-    OpaqueOwnerId::new(value).expect("canonical agent ID fits opaque terminal contract")
 }
 
 fn agent_caller_owner(
@@ -5419,14 +5416,16 @@ fn agent_caller_owner(
 ) -> CallerOwner {
     CallerOwner::new(
         agent_caller_namespace(),
-        opaque_agent_id(owner_id),
+        CallerOwnerId::new(owner_id).expect("canonical agent ID passes caller owner validation"),
         owner_kind,
         role,
     )
 }
 
 fn terminal_topology_id(session_id: &SessionId) -> TerminalTopologyId {
-    TerminalTopologyId::new(opaque_agent_id(session_id.as_str()))
+    TerminalTopologyId::new(
+        CallerOwnerId::new(session_id.as_str()).expect("canonical session ID is a caller owner ID"),
+    )
 }
 
 fn session_id_from_topology(

@@ -1116,7 +1116,7 @@ mod tests {
                 observed_at_unix_ms: NOW,
             },
             // A producer accidentally supplied MiB scalar values to the byte
-            // contract. The envelope catches the unit mismatch; it is never
+            // resource envelope. The envelope catches the unit mismatch; it is never
             // normalized or multiplied heuristically.
             DeviceMemorySnapshot {
                 physical_device_id: envelope.physical_device_id.clone(),

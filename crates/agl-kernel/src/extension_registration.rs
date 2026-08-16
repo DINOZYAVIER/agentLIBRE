@@ -100,7 +100,7 @@ impl HookBinding {
         if self.hook_id != declaration.id {
             return Err(HookInvocationError::BindingMismatch);
         }
-        crate::hook_contract::invoke_bound_hook(declaration, self.handler.as_ref(), payload)
+        crate::hook::invoke_bound_hook(declaration, self.handler.as_ref(), payload)
     }
 
     pub fn into_parts(self) -> (HookId, Arc<dyn HookHandler>) {

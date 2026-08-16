@@ -22,7 +22,7 @@ The independently installed `agl-terminald` service owns terminal supervision,
 persistence, spool, and process lifecycle; `agl-pty` owns the OS process/PTY
 implementation in that repository. Agent consumers reach it only through the
 thin `agl-process` endpoint adapter and exact pinned
-`agl-terminal-protocol`/`agl-terminal-client` contracts. The adapter contains
+`agl-terminal-protocol`/`agl-terminal-client` APIs. The adapter contains
 no second runtime implementation.
 
 Semantic prompt submission also crosses `agl-app`: `RunSubmit` is admitted

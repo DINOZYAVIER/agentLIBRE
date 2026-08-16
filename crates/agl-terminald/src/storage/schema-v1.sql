@@ -2,7 +2,7 @@ BEGIN;
 CREATE TABLE executions (
     id TEXT PRIMARY KEY, owner_namespace TEXT NOT NULL, owner_namespace_version INTEGER NOT NULL,
     owner_id TEXT NOT NULL, owner_kind TEXT NOT NULL, owner_role TEXT NOT NULL,
-    authority_scope TEXT NOT NULL, correlation_namespace TEXT NOT NULL,
+    lifecycle_scope_id TEXT NOT NULL, correlation_namespace TEXT NOT NULL,
     correlation_namespace_version INTEGER NOT NULL, correlation_group_id TEXT NOT NULL,
     correlation_operation_id TEXT NOT NULL, execution_kind TEXT NOT NULL, state TEXT NOT NULL,
     profile TEXT NOT NULL, io TEXT NOT NULL, cwd TEXT NOT NULL, terminal_columns INTEGER,
@@ -29,7 +29,7 @@ CREATE TABLE execution_events (
 CREATE INDEX execution_events_replay_idx ON execution_events(execution_id, sequence);
 CREATE TABLE terminal_sessions (
     terminal_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL UNIQUE, topology_id TEXT NOT NULL,
-    owner_json TEXT NOT NULL, authority_scope TEXT NOT NULL, profile TEXT NOT NULL,
+    owner_json TEXT NOT NULL, lifecycle_scope_id TEXT NOT NULL, profile TEXT NOT NULL,
     workspace_root BLOB NOT NULL, shell_kind TEXT NOT NULL, shell_program BLOB NOT NULL,
     shell_argv_json TEXT NOT NULL, shell_login_argv_json TEXT, shell_environment_names_json TEXT NOT NULL,
     shell_executable_digest TEXT NOT NULL, shell_config_digest TEXT NOT NULL,

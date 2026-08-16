@@ -1,5 +1,5 @@
 mod delegation;
-mod delegation_contract;
+mod delegation_extension;
 mod execution_owner;
 mod inference_client;
 mod options;

@@ -52,8 +52,8 @@ output="$(
   ci_fail "daemon unit omitted the sealed manifest: $output"
 [[ "$output" == *"ListenStream=$socket"* && "$output" == *"Accept=no"* ]] ||
   ci_fail "daemon socket unit is not an exact private non-accepting socket: $output"
-[[ "$output" == *"ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation"* ]] ||
-  ci_fail "daemon service does not execute through the stable managed agl link: $output"
+[[ "$output" == *"ExecStart=\"$generation/agl\" serve --systemd-activation"* ]] ||
+  ci_fail "daemon service does not execute the validated sealed generation: $output"
 [[ "$output" == *'--function "service-test"'* && "$output" != *"ExecStart="*" --config "* ]] ||
   ci_fail "package-bound function did not suppress raw inference config: $output"
 

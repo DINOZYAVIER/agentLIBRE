@@ -664,7 +664,7 @@ Only return the child verdict.
                 tool_id,
                 outcome: crate::ToolActionOutcome::Waiting,
                 ..
-            } if tool_id.as_str() == crate::delegation_contract::AGENT_DELEGATE_TOOL_ID
+            } if tool_id.as_str() == crate::delegation_extension::AGENT_DELEGATE_TOOL_ID
         )));
         assert!(presentation_events.iter().any(|event| matches!(
             event,

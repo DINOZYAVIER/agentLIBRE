@@ -514,6 +514,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -547,6 +548,19 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.parent);
+        }
+    }
+
+    fn acquire_after_concurrent_execs(root: &Path, identity: &str) -> DeviceAuthorityLease {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match DeviceAuthorityLease::acquire(root, identity) {
+                Ok(lease) => return lease,
+                Err(DeviceAuthorityLeaseError::Busy) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("lease did not release after owner drop: {error}"),
+            }
         }
     }
 
@@ -619,7 +633,7 @@ mod tests {
         drop(other);
         drop(first);
 
-        DeviceAuthorityLease::acquire(&fixture.root, "pci:0000:03:00.0").unwrap();
+        acquire_after_concurrent_execs(&fixture.root, "pci:0000:03:00.0");
     }
 
     #[test]

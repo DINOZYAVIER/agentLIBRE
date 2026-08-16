@@ -1195,7 +1195,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
 fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let delegate = ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID).unwrap();
+    let delegate = ToolId::new(crate::delegation_extension::AGENT_DELEGATE_TOOL_ID).unwrap();
 
     let disabled = resolve_effective_capabilities(
         &registry,
@@ -2178,7 +2178,7 @@ fn untrusted_extension_tools_are_unavailable_and_skill_instructions_remain() {
     let skill_registry = test_skill_registry();
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(crate::delegation_contract::delegation_extension())
+        .register(crate::delegation_extension::delegation_extension())
         .unwrap();
     catalog
         .register(agl_core_tools::guards::declaration())
@@ -2340,7 +2340,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
 fn full_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(crate::delegation_contract::delegation_extension())
+        .register(crate::delegation_extension::delegation_extension())
         .unwrap();
     catalog
         .register(agl_core_tools::guards::declaration())

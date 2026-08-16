@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn error_contract_round_trips_and_rejects_unknown_fields() {
+    fn error_schema_round_trips_and_rejects_unknown_fields() {
         let error = ProcessError::new(ProcessErrorCode::TimedOut, "execution timed out");
         let encoded = serde_json::to_value(&error).unwrap();
         assert_eq!(

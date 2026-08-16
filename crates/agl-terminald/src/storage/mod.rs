@@ -253,6 +253,25 @@ mod tests {
                 .unwrap(),
             SCHEMA_VERSION
         );
+        for table in ["executions", "terminal_sessions"] {
+            let mut columns = store
+                .connection()
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = columns
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                columns.iter().any(|column| column == "lifecycle_scope_id"),
+                "{table} must persist the lifecycle scope with its semantic name"
+            );
+            assert!(
+                columns.iter().all(|column| column != "authority_scope"),
+                "{table} must not expose the removed overloaded column name"
+            );
+        }
         drop(statement);
         drop(store);
         let _ = std::fs::remove_dir_all(root);

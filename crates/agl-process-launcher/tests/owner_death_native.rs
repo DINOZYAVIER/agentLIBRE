@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "linux", feature = "native-test-fixtures"))]
 
-// End-to-end parent-death contract for the private launcher package.
+// End-to-end parent-death behavior for the private launcher package.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;

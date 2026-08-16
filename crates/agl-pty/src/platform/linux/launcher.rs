@@ -616,44 +616,22 @@ impl PreparedIo {
 }
 
 fn pty_pair(size: TerminalSize) -> Result<(OwnedFd, OwnedFd)> {
-    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-    if master < 0 {
-        return Err(last_os_error(
-            ProcessErrorCode::SpawnFailed,
-            "failed to open PTY master",
-        ));
-    }
-    let master = unsafe { OwnedFd::from_raw_fd(master) };
-    if unsafe { libc::grantpt(master.as_raw_fd()) } != 0
-        || unsafe { libc::unlockpt(master.as_raw_fd()) } != 0
-    {
-        return Err(last_os_error(
-            ProcessErrorCode::SpawnFailed,
-            "failed to unlock PTY slave",
-        ));
-    }
-    let mut name = vec![0i8; 4096];
-    if unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) } != 0 {
-        return Err(last_os_error(
-            ProcessErrorCode::SpawnFailed,
-            "failed to resolve PTY slave",
-        ));
-    }
-    let slave = unsafe {
-        libc::open(
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
-        )
+    let size = size.validate()?;
+    let dimensions = rustix_openpty::rustix::termios::Winsize {
+        ws_row: size.rows,
+        ws_col: size.columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
     };
-    if slave < 0 {
-        return Err(last_os_error(
+    let pair = rustix_openpty::openpty(None, Some(&dimensions)).map_err(|error| {
+        ProcessError::new(
             ProcessErrorCode::SpawnFailed,
-            "failed to open PTY slave",
-        ));
-    }
-    let slave = unsafe { OwnedFd::from_raw_fd(slave) };
-    set_terminal_size(slave.as_raw_fd(), size)?;
-    Ok((master, slave))
+            format!("failed to allocate PTY pair: {error}"),
+        )
+    })?;
+    let controller = rustix_openpty::rustix::fd::IntoRawFd::into_raw_fd(pair.controller);
+    let user = rustix_openpty::rustix::fd::IntoRawFd::into_raw_fd(pair.user);
+    Ok(unsafe { (OwnedFd::from_raw_fd(controller), OwnedFd::from_raw_fd(user)) })
 }
 
 fn pipe_pair() -> Result<(OwnedFd, OwnedFd)> {
