@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`agl-inference` owns the host-safe inference contracts, queue, admission ledger,
+`agl-inference` owns the host-safe inference APIs, queue, admission ledger,
 attempt journal, engine adapter, and process supervisor. Native llama.cpp,
 ggml, and accelerator state belong only to the constrained subordinate
 `llama-server` process; do not add an in-process production runtime or native

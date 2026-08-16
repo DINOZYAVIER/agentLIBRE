@@ -6,15 +6,14 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 cd "${repo_root}"
 
 model_tests=(
-  agl173_model_contract
+  agl173_model_api
   agl173_install_transaction
 )
 
 inference_tests=(
   agl173_architecture
   agl173_attempt_journal
-  agl173_host_contract
-  agl173_engine_contract
+  agl173_host_api
 )
 
 for test_name in "${model_tests[@]}"; do

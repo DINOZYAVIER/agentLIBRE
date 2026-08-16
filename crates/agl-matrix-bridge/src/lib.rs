@@ -119,24 +119,38 @@ mod tests {
     }
 
     #[test]
-    fn bridge_manifest_uses_client_boundary_only() {
-        let manifest = include_str!("../Cargo.toml");
+    fn bridge_package_uses_client_boundary_only() {
+        let output = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .current_dir(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let dependencies = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "agl-matrix-bridge")
+            .unwrap()["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|dependency| dependency["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
 
-        assert!(manifest.contains("agl-client.workspace = true"));
-        assert!(manifest.contains("matrix-sdk.workspace = true"));
+        assert!(dependencies.contains("agl-client"));
+        assert!(dependencies.contains("matrix-sdk"));
         for forbidden in ["agl-chat", "agl-loop", "agl-inference", "agl-cli"] {
             assert!(
-                !has_dependency(manifest, forbidden),
+                !dependencies.contains(forbidden),
                 "agl-matrix-bridge must not depend on {forbidden}"
             );
         }
-    }
-
-    fn has_dependency(manifest: &str, crate_name: &str) -> bool {
-        manifest.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with(&format!("{crate_name}."))
-                || line.starts_with(&format!("{crate_name} ="))
-        })
     }
 }

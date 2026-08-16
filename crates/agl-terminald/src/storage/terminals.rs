@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agl_exec::{ExecutionId, OpaqueOwnerId};
+use agl_exec::{CallerOwnerId, ExecutionId, LifecycleScopeId};
 use agl_exec::{ExecutionProfile, ProcessError, ProcessErrorCode, ShellProfileSnapshot};
 use agl_terminal::{
     AdmittedShellKind, AdmittedShellProfile, ShellIntegrationHealth, StoredTerminalRecord,
@@ -15,7 +15,7 @@ use rusqlite::{ErrorCode, OptionalExtension, Row, params};
 use super::{Result as StoreResult, StoreError, TerminalStore};
 
 const TERMINAL_COLUMNS: &str = "terminal_id, execution_id, topology_id, owner_json,
-    authority_scope, profile,
+    lifecycle_scope_id, profile,
     workspace_root, shell_kind, shell_program, shell_argv_json, shell_login_argv_json,
     shell_environment_names_json, shell_executable_digest, shell_config_digest,
     environment_digest, command_sequence, prompt_kind, prompt_sequence, prompt_last_exit,
@@ -142,7 +142,7 @@ struct EncodedTerminal {
     execution_id: String,
     topology_id: String,
     owner_json: String,
-    authority_scope: String,
+    lifecycle_scope_id: String,
     profile: &'static str,
     workspace_root: Vec<u8>,
     shell_kind: &'static str,
@@ -174,7 +174,7 @@ fn encode_terminal(record: &StoredTerminalRecord) -> StoreResult<EncodedTerminal
         execution_id: record.record.execution_id.as_str().to_owned(),
         topology_id: record.record.topology_id.as_str().to_owned(),
         owner_json: serde_json::to_string(&record.record.owner)?,
-        authority_scope: record.record.authority_scope.as_str().to_owned(),
+        lifecycle_scope_id: record.record.lifecycle_scope_id.as_str().to_owned(),
         profile: execution_profile(record.record.profile),
         workspace_root: path_bytes(&record.record.workspace_root)?,
         shell_kind: shell_kind(record.record.shell_profile.kind),
@@ -219,7 +219,7 @@ fn encode_terminal(record: &StoredTerminalRecord) -> StoreResult<EncodedTerminal
 fn insert_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> StoreResult<()> {
     tx.execute(
         "INSERT INTO terminal_sessions
-         (terminal_id, execution_id, topology_id, owner_json, authority_scope, profile, workspace_root,
+         (terminal_id, execution_id, topology_id, owner_json, lifecycle_scope_id, profile, workspace_root,
           shell_kind, shell_program, shell_argv_json, shell_login_argv_json,
           shell_environment_names_json, shell_executable_digest, shell_config_digest,
           environment_digest, command_sequence, prompt_kind, prompt_sequence,
@@ -235,7 +235,7 @@ fn insert_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> 
 fn update_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> StoreResult<usize> {
     Ok(tx.execute(
         "UPDATE terminal_sessions
-         SET execution_id = ?2, topology_id = ?3, owner_json = ?4, authority_scope = ?5,
+         SET execution_id = ?2, topology_id = ?3, owner_json = ?4, lifecycle_scope_id = ?5,
              profile = ?6, workspace_root = ?7, shell_kind = ?8, shell_program = ?9,
              shell_argv_json = ?10, shell_login_argv_json = ?11,
              shell_environment_names_json = ?12, shell_executable_digest = ?13,
@@ -254,7 +254,7 @@ fn terminal_params(record: &EncodedTerminal) -> [&dyn rusqlite::ToSql; 26] {
         &record.execution_id,
         &record.topology_id,
         &record.owner_json,
-        &record.authority_scope,
+        &record.lifecycle_scope_id,
         &record.profile,
         &record.workspace_root,
         &record.shell_kind,
@@ -284,7 +284,7 @@ struct RawTerminal {
     execution_id: String,
     topology_id: String,
     owner_json: String,
-    authority_scope: String,
+    lifecycle_scope_id: String,
     profile: String,
     workspace_root: Vec<u8>,
     shell_kind: String,
@@ -314,7 +314,7 @@ fn read_terminal(row: &Row<'_>) -> rusqlite::Result<RawTerminal> {
         execution_id: row.get(1)?,
         topology_id: row.get(2)?,
         owner_json: row.get(3)?,
-        authority_scope: row.get(4)?,
+        lifecycle_scope_id: row.get(4)?,
         profile: row.get(5)?,
         workspace_root: row.get(6)?,
         shell_kind: row.get(7)?,
@@ -377,7 +377,7 @@ fn select_all_terminals(
 fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
     let terminal_id = parse_terminal_id(&raw.terminal_id, "terminal_sessions.terminal_id")?;
     let topology_id =
-        TerminalTopologyId::new(OpaqueOwnerId::new(raw.topology_id.clone()).map_err(|_| {
+        TerminalTopologyId::new(CallerOwnerId::new(raw.topology_id.clone()).map_err(|_| {
             invalid_store_value(
                 "terminal_sessions.topology_id",
                 &raw.topology_id,
@@ -385,13 +385,14 @@ fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
             )
         })?);
     let owner: TerminalOwner = serde_json::from_str(&raw.owner_json)?;
-    let authority_scope = OpaqueOwnerId::new(raw.authority_scope.clone()).map_err(|_| {
-        invalid_store_value(
-            "terminal_sessions.authority_scope",
-            &raw.authority_scope,
-            "invalid opaque authority scope",
-        )
-    })?;
+    let lifecycle_scope_id =
+        LifecycleScopeId::new(raw.lifecycle_scope_id.clone()).map_err(|_| {
+            invalid_store_value(
+                "terminal_sessions.lifecycle_scope_id",
+                &raw.lifecycle_scope_id,
+                "invalid lifecycle scope ID",
+            )
+        })?;
     let prompt_state = decode_prompt(&raw)?;
     let shell_profile = AdmittedShellProfile {
         kind: parse_shell_kind(&raw.shell_kind)?,
@@ -416,7 +417,7 @@ fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
             execution_id: parse_execution_id(&raw.execution_id, "terminal_sessions.execution_id")?,
             topology_id,
             owner,
-            authority_scope,
+            lifecycle_scope_id,
             profile: parse_execution_profile(&raw.profile)?,
             workspace_root: path_from_bytes(raw.workspace_root)?,
             shell_profile,
@@ -437,7 +438,7 @@ fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
     stored.validate().map_err(|_| StoreError::InvalidValue {
         field: "terminal_sessions",
         value: stored.record.terminal_id.as_str().to_owned(),
-        reason: "stored terminal violates the persistence-neutral terminal contract",
+        reason: "stored terminal violates persistence-neutral terminal invariants",
     })?;
     Ok(stored)
 }

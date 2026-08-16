@@ -48,7 +48,7 @@ fn parse_id(value: &str, prefix: &'static str) -> Result<String, ParseTerminalId
     Ok(value.to_owned())
 }
 
-macro_rules! define_id {
+macro_rules! define_uuid_v7_id {
     ($name:ident, $prefix:literal) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(String);
@@ -102,10 +102,10 @@ macro_rules! define_id {
     };
 }
 
-define_id!(ExecutionId, "exec_");
-define_id!(ExecutionRequestId, "exec_req_");
-define_id!(WriterLeaseId, "writer_lease_");
-define_id!(ServiceGenerationId, "term_gen_");
+define_uuid_v7_id!(ExecutionId, "exec_");
+define_uuid_v7_id!(ExecutionRequestId, "exec_req_");
+define_uuid_v7_id!(WriterLeaseId, "writer_lease_");
+define_uuid_v7_id!(ServiceGenerationId, "term_gen_");
 
 #[cfg(test)]
 mod tests {
@@ -114,7 +114,7 @@ mod tests {
     const UUID_V7: &str = "01890f17-4a00-7000-8000-000000000001";
     const UUID_V4: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-    macro_rules! assert_id_contract {
+    macro_rules! assert_id_validation {
         ($type:ty, $prefix:literal) => {{
             let generated = <$type>::generate();
             assert!(generated.as_str().starts_with($prefix));
@@ -144,10 +144,10 @@ mod tests {
     }
 
     #[test]
-    fn all_terminal_ids_enforce_the_canonical_contract() {
-        assert_id_contract!(ExecutionId, "exec_");
-        assert_id_contract!(ExecutionRequestId, "exec_req_");
-        assert_id_contract!(WriterLeaseId, "writer_lease_");
-        assert_id_contract!(ServiceGenerationId, "term_gen_");
+    fn all_terminal_ids_enforce_the_canonical_format() {
+        assert_id_validation!(ExecutionId, "exec_");
+        assert_id_validation!(ExecutionRequestId, "exec_req_");
+        assert_id_validation!(WriterLeaseId, "writer_lease_");
+        assert_id_validation!(ServiceGenerationId, "term_gen_");
     }
 }

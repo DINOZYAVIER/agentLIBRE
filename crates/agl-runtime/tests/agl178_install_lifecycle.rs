@@ -9,7 +9,7 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn run_contract(script: &str) {
+fn run_verification_script(script: &str) {
     let root = repository_root();
     let output = Command::new(root.join(script))
         .current_dir(&root)
@@ -28,15 +28,15 @@ fn run_contract(script: &str) {
 // the real operation lock while a competing installation is attempted.
 #[test]
 fn terminal_publication_faults_and_concurrency_use_the_real_installer() {
-    run_contract("scripts/terminal/ci/agl178-packaging-contract.sh");
+    run_verification_script("scripts/terminal/ci/agl178-packaging-verification.sh");
 }
 
 // AGL178-AGENT-TXN-003. These checks execute the actual agent installer and
 // unit renderers against exact generation and hostile systemd surfaces.
 #[test]
 fn agent_pairing_and_unit_conflicts_use_the_real_scripts() {
-    run_contract("scripts/ci/agl178-install-contract.sh");
-    run_contract("scripts/ci/agl178-systemd-contract.sh");
+    run_verification_script("scripts/ci/agl178-install-verification.sh");
+    run_verification_script("scripts/ci/agl178-systemd-verification.sh");
 }
 
 // AGL178-AGENT-UNINSTALL-001. The established manifest-aware uninstaller
@@ -45,5 +45,5 @@ fn agent_pairing_and_unit_conflicts_use_the_real_scripts() {
 // operations rather than a modeled return value.
 #[test]
 fn agent_uninstall_ownership_uses_the_real_uninstaller() {
-    run_contract("scripts/ci/uninstall-bundle.sh");
+    run_verification_script("scripts/ci/uninstall-bundle.sh");
 }

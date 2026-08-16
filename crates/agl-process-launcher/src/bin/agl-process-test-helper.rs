@@ -37,6 +37,9 @@ mod linux {
                 io::stdin().read_to_end(&mut input)?;
                 io::stdout().write_all(&input)?;
             }
+            "drain-input-chunks" => {
+                drain_input_chunks(parse_usize(&arguments, 0, "chunk byte count")?)?
+            }
             "interactive-lines" => interactive_lines()?,
             "tty-info" => print_tty_info()?,
             "resize-wait" => resize_wait()?,
@@ -213,6 +216,28 @@ mod linux {
             remaining -= count;
         }
         io::stdout().flush()
+    }
+
+    fn drain_input_chunks(chunk_bytes: usize) -> io::Result<()> {
+        if chunk_bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "chunk byte count must be nonzero",
+            ));
+        }
+        let mut chunk = vec![0_u8; chunk_bytes];
+        let mut drained = 0_u64;
+        loop {
+            match io::stdin().read_exact(&mut chunk) {
+                Ok(()) => {
+                    drained += 1;
+                    writeln!(io::stdout(), "drained={drained}")?;
+                    io::stdout().flush()?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn tcp_connect(port: u16) -> io::Result<()> {

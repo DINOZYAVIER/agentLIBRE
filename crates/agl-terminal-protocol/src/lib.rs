@@ -5,7 +5,7 @@ use agl_exec::{
     AuthorityFingerprint, ExecutionAuthorization, ExecutionContextSnapshot, ExecutionCorrelation,
     ExecutionCursor, ExecutionGrantLease, ExecutionId, ExecutionLimits, ExecutionListFilter,
     ExecutionProfile, ExecutionReadResult, ExecutionRequest, ExecutionStatus, InputLease, KillMode,
-    OpaqueOwnerId, ProcessBytes, ServiceGenerationId, TerminalSize,
+    LifecycleScopeId, ProcessBytes, ServiceGenerationId, TerminalSize,
 };
 use agl_terminal::environment::TerminalEnvironmentRequest;
 use agl_terminal::{
@@ -139,7 +139,7 @@ impl ServiceIdentity {
 pub struct TerminalAdmission {
     pub topology_id: TerminalTopologyId,
     pub owner: TerminalOwner,
-    pub authority_scope: OpaqueOwnerId,
+    pub lifecycle_scope_id: LifecycleScopeId,
     pub correlation: ExecutionCorrelation,
     pub authority_fingerprint: AuthorityFingerprint,
     pub request_fingerprint: String,
@@ -749,9 +749,9 @@ pub enum ProtocolValidationError {
 #[cfg(test)]
 mod tests {
     use agl_exec::{
-        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, EnvironmentOverride,
-        ExecutionIo, ExecutionKind, ExecutionOwner, OpaqueOwnerId, ProcessBytes,
-        ShellProfileSnapshot,
+        CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole,
+        CorrelationGroupId, CorrelationOperationId, EnvironmentOverride, ExecutionIo,
+        ExecutionKind, ExecutionOwner, LifecycleScopeId, ProcessBytes, ShellProfileSnapshot,
     };
     use agl_terminal::AdmittedShellKind;
     use std::collections::BTreeMap;
@@ -778,10 +778,10 @@ mod tests {
 
     fn admission() -> TerminalAdmission {
         let namespace = CallerNamespace::new("agentlibre", 1).unwrap();
-        let owner_id = OpaqueOwnerId::new("opaque-owner").unwrap();
-        let authority_scope = OpaqueOwnerId::new("authority-scope").unwrap();
-        let correlation_group = OpaqueOwnerId::new("correlation-group").unwrap();
-        let correlation_request = OpaqueOwnerId::new("correlation-request").unwrap();
+        let owner_id = CallerOwnerId::new("opaque-owner").unwrap();
+        let lifecycle_scope_id = LifecycleScopeId::new("lifecycle-scope").unwrap();
+        let correlation_group = CorrelationGroupId::new("correlation-group").unwrap();
+        let correlation_request = CorrelationOperationId::new("correlation-request").unwrap();
         let workspace = std::env::temp_dir().canonicalize().unwrap();
         let shell_snapshot = ShellProfileSnapshot {
             program: PathBuf::from("/bin/bash"),
@@ -799,7 +799,7 @@ mod tests {
                 CallerOwnerKind::Persistent,
                 CallerRole::Human,
             )),
-            authority_scope,
+            lifecycle_scope_id,
             correlation: ExecutionCorrelation::new(
                 namespace,
                 correlation_group,
@@ -844,7 +844,7 @@ mod tests {
 
     fn execution_admission() -> ExecutionAdmission {
         let namespace = CallerNamespace::new("agentlibre", 1).unwrap();
-        let authority_scope = OpaqueOwnerId::new("execution-authority").unwrap();
+        let lifecycle_scope_id = LifecycleScopeId::new("execution-lifecycle").unwrap();
         let workspace = std::env::temp_dir().canonicalize().unwrap();
         let mut admission = ExecutionAdmission {
             authority_fingerprint: AuthorityFingerprint::new(format!("sha256:{}", "9".repeat(64)))
@@ -854,16 +854,16 @@ mod tests {
                 owner: ExecutionOwner::new(
                     CallerOwner::new(
                         namespace.clone(),
-                        OpaqueOwnerId::new("execution-owner").unwrap(),
+                        CallerOwnerId::new("execution-owner").unwrap(),
                         CallerOwnerKind::Ephemeral,
                         CallerRole::Agent,
                     ),
-                    authority_scope,
+                    lifecycle_scope_id,
                 ),
                 correlation: ExecutionCorrelation::new(
                     namespace,
-                    OpaqueOwnerId::new("execution-group").unwrap(),
-                    OpaqueOwnerId::new("execution-request").unwrap(),
+                    CorrelationGroupId::new("execution-group").unwrap(),
+                    CorrelationOperationId::new("execution-request").unwrap(),
                 ),
                 kind: ExecutionKind::Argv,
                 program: PathBuf::from("/bin/true"),

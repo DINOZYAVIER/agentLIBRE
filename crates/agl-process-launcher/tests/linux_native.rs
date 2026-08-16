@@ -1,6 +1,6 @@
 #![cfg(all(target_os = "linux", feature = "native-test-fixtures"))]
 
-// End-to-end contract for the separately packaged private launcher.
+// End-to-end behavior for the separately packaged private launcher.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -10,14 +10,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation, OpaqueOwnerId,
+    CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, CorrelationGroupId,
+    CorrelationOperationId, ExecutionCorrelation, LifecycleScopeId,
 };
 use agl_terminald::{
-    EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionCursor,
-    ExecutionGrantLease, ExecutionId, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
-    ExecutionProfile, ExecutionRequest, ExecutionRequestId, ExecutionState, FileOutputSpool,
-    InMemoryExecutionRepository, InputLease, ProcessBytes, ProcessErrorCode, ProcessHandle,
-    ProcessSupervisor, ProcessSupervisorOptions, TerminalSize, process_platform_diagnostics,
+    AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
+    ExecutionChannel, ExecutionContextSnapshot, ExecutionCursor, ExecutionGrantLease, ExecutionId,
+    ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile,
+    ExecutionRequest, ExecutionRequestId, ExecutionState, FileOutputSpool, HostStartupPolicy,
+    InMemoryExecutionRepository, InMemoryTerminalRepository, InputLease, ProcessBytes,
+    ProcessErrorCode, ProcessHandle, ProcessSupervisor, ProcessSupervisorOptions,
+    RejectTerminalSecrets, ShellProfileSnapshot, TerminalEnsureRequest, TerminalEnvironmentRequest,
+    TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize, TerminalTopologyId,
+    process_platform_diagnostics,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -42,15 +47,16 @@ fn native_linux_sandbox_process_and_pty_smoke() {
         diagnostics.error_code
     );
 
-    let harness = Harness::new();
-    sandbox_contract(&harness);
-    argv_pipe_and_pty_contract(&harness);
-    supervisor_concurrency_and_backpressure_contract(&harness);
-    executable_and_host_contract(&harness);
-    termination_and_quota_contract(&harness);
+    let harness = NativeProcessFixture::new();
+    sandbox_isolation_behavior(&harness);
+    argv_pipe_and_pty_behavior(&harness);
+    supervision_concurrency_and_backpressure_behavior(&harness);
+    drained_input_limit_behavior(&harness);
+    executable_and_host_validation(&harness);
+    termination_and_quota_behavior(&harness);
 }
 
-fn sandbox_contract(harness: &Harness) {
+fn sandbox_isolation_behavior(harness: &NativeProcessFixture) {
     let sibling = harness.root.join("sibling-private");
     fs::create_dir_all(&sibling).unwrap();
     let sibling_file = sibling.join("secret");
@@ -110,7 +116,7 @@ fn sandbox_contract(harness: &Harness) {
     assert_eq!(fs::read(workspace_file).unwrap(), b"workspace-ok");
 }
 
-fn argv_pipe_and_pty_contract(harness: &Harness) {
+fn argv_pipe_and_pty_behavior(harness: &NativeProcessFixture) {
     let side_effect = harness.workspace.join("argv-side-effect");
     let exact = vec![
         "space value".to_owned(),
@@ -342,7 +348,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
     );
 }
 
-fn supervisor_concurrency_and_backpressure_contract(harness: &Harness) {
+fn supervision_concurrency_and_backpressure_behavior(harness: &NativeProcessFixture) {
     let mut concurrent = Vec::new();
     for _ in 0..4 {
         let request = harness.request(
@@ -408,7 +414,190 @@ fn supervisor_concurrency_and_backpressure_contract(harness: &Harness) {
     );
 }
 
-fn executable_and_host_contract(harness: &Harness) {
+fn drained_input_limit_behavior(harness: &NativeProcessFixture) {
+    const CHUNK_BYTES: usize = 16 * 1024;
+    const INPUT_LIMIT: u64 = (CHUNK_BYTES * 2) as u64;
+
+    let mut ordinary = harness.request(
+        vec!["drain-input-chunks".to_owned(), CHUNK_BYTES.to_string()],
+        ExecutionIo::Pipes,
+    );
+    ordinary.close_stdin_after_initial = false;
+    ordinary.limits.max_input_bytes = INPUT_LIMIT;
+    let started = harness.handle.start(ordinary).unwrap();
+    let lease = harness
+        .handle
+        .attach(
+            &started.execution_id,
+            &harness.owner,
+            ExecutionRequestId::generate(),
+            true,
+        )
+        .unwrap();
+    for acknowledgement in [b"drained=1".as_slice(), b"drained=2".as_slice()] {
+        harness
+            .handle
+            .write(
+                &started.execution_id,
+                &harness.owner,
+                lease.clone(),
+                ProcessBytes::from_bytes(&vec![b'x'; CHUNK_BYTES]),
+                false,
+            )
+            .unwrap();
+        wait_for_channel_output(
+            harness,
+            &started.execution_id,
+            Some(&harness.owner),
+            ExecutionChannel::Stdout,
+            acknowledgement,
+        );
+    }
+    assert_eq!(
+        harness
+            .handle
+            .write(
+                &started.execution_id,
+                &harness.owner,
+                lease,
+                ProcessBytes::from_bytes(b"x"),
+                false,
+            )
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::InputBackpressure,
+        "ordinary execution must retain its admitted lifetime byte limit after the child drains input",
+    );
+    harness
+        .handle
+        .kill(
+            &started.execution_id,
+            &harness.owner,
+            agl_terminald::KillMode::Immediate,
+        )
+        .unwrap();
+    harness.wait(&started.execution_id);
+
+    let shell_program = harness.shell_program.clone();
+    let shell_digest = sha256_file(&shell_program);
+    let shell_snapshot = ShellProfileSnapshot {
+        program: shell_program.clone(),
+        command_args: vec!["-c".to_owned()],
+        login_command_args: None,
+        environment_names: vec!["PATH".to_owned()],
+        executable_digest: shell_digest,
+        config_digest: "sha256:native-managed-input".to_owned(),
+    };
+    let shell = AdmittedShellProfile {
+        kind: AdmittedShellKind::Bash,
+        snapshot: shell_snapshot.clone(),
+    };
+    let terminal_owner_id = CallerOwnerId::new(ExecutionRequestId::generate().as_str()).unwrap();
+    let terminal_owner = TerminalOwner::new(CallerOwner::new(
+        CallerNamespace::new("agentlibre", 1).unwrap(),
+        terminal_owner_id.clone(),
+        CallerOwnerKind::Persistent,
+        CallerRole::Human,
+    ));
+    let lifecycle_scope_id =
+        LifecycleScopeId::new(ExecutionRequestId::generate().as_str()).unwrap();
+    let runtime_root = shell_program.parent().unwrap().to_path_buf();
+    let mut environment = TerminalEnvironmentRequest {
+        admitted_path_roots: vec![runtime_root.clone()],
+        ..TerminalEnvironmentRequest::default()
+    };
+    environment.admitted_base.insert(
+        "PATH".to_owned(),
+        runtime_root.to_string_lossy().into_owned(),
+    );
+    let registry = TerminalRegistry::new(
+        harness.handle.clone(),
+        Arc::new(RejectTerminalSecrets),
+        Arc::new(InMemoryTerminalRepository::new()),
+    )
+    .unwrap();
+    let record = registry
+        .ensure_terminal(TerminalEnsureRequest {
+            topology_id: TerminalTopologyId::new(terminal_owner_id),
+            owner: terminal_owner,
+            lifecycle_scope_id,
+            correlation: ExecutionCorrelation::new(
+                CallerNamespace::new("agentlibre", 1).unwrap(),
+                CorrelationGroupId::new(ExecutionRequestId::generate().as_str()).unwrap(),
+                CorrelationOperationId::new(ExecutionRequestId::generate().as_str()).unwrap(),
+            ),
+            context: ExecutionContextSnapshot {
+                workspace_root: harness.workspace.clone(),
+                working_directory: harness.workspace.clone(),
+                private_execution_roots: Vec::new(),
+                shell: shell_snapshot,
+                revision: 1,
+                profile_metadata: "workspace".to_owned(),
+            },
+            profile: ExecutionProfile::Workspace,
+            shell,
+            environment,
+            runtime_read_only_roots: vec![runtime_root],
+            host_startup: HostStartupPolicy::ManagedOnly,
+            authorization: ExecutionAuthorization::default(),
+            grant_lease: None,
+            terminal_size: TerminalSize::default(),
+            limits: ExecutionLimits {
+                timeout_ms: None,
+                max_input_bytes: INPUT_LIMIT,
+                max_output_bytes: 1024 * 1024,
+            },
+            history_seed: TerminalHistorySeed::empty(),
+        })
+        .unwrap();
+    let lease = harness
+        .handle
+        .operator_attach(&record.execution_id, ExecutionRequestId::generate(), true)
+        .unwrap();
+    for index in 1..=3 {
+        let acknowledgement = format!("managed-drained-{index}");
+        let mut input = format!("printf '{acknowledgement}\\n'\n#").into_bytes();
+        input.resize(CHUNK_BYTES - 1, b'x');
+        input.push(b'\n');
+        assert_eq!(input.len(), CHUNK_BYTES);
+        assert!(
+            registry
+                .write_raw_human_input_if_managed(
+                    &record.execution_id,
+                    lease.clone(),
+                    ProcessBytes::from_bytes(&input),
+                    false,
+                )
+                .unwrap()
+        );
+        wait_for_channel_output(
+            harness,
+            &record.execution_id,
+            None,
+            ExecutionChannel::Terminal,
+            acknowledgement.as_bytes(),
+        );
+    }
+    assert_eq!(
+        registry
+            .write_raw_human_input_if_managed(
+                &record.execution_id,
+                lease,
+                ProcessBytes::from_bytes(&vec![b'x'; INPUT_LIMIT as usize + 1]),
+                false,
+            )
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::InputTooLarge,
+        "managed terminal must reject one write larger than its pending byte limit",
+    );
+    registry
+        .terminate_terminal(&record.terminal_id, agl_terminald::KillMode::Immediate)
+        .unwrap();
+    wait_for_operator_terminal_state(harness, &record.execution_id);
+}
+
+fn executable_and_host_validation(harness: &NativeProcessFixture) {
     let frozen_marker = harness.workspace.join("frozen-shell-target-ran");
     let mut frozen = harness.request(
         vec!["touch".to_owned(), frozen_marker.display().to_string()],
@@ -475,7 +664,7 @@ fn executable_and_host_contract(harness: &Harness) {
     );
 }
 
-fn termination_and_quota_contract(harness: &Harness) {
+fn termination_and_quota_behavior(harness: &NativeProcessFixture) {
     let mut timeout = harness.request(
         vec!["sleep-ms".to_owned(), "5000".to_owned()],
         ExecutionIo::Pipes,
@@ -518,17 +707,18 @@ fn termination_and_quota_contract(harness: &Harness) {
     ));
 }
 
-struct Harness {
+struct NativeProcessFixture {
     root: PathBuf,
     workspace: PathBuf,
     runtime_root: PathBuf,
     helper: PathBuf,
+    shell_program: PathBuf,
     owner: ExecutionOwner,
     handle: ProcessHandle,
     supervisor: ProcessSupervisor,
 }
 
-impl Harness {
+impl NativeProcessFixture {
     fn new() -> Self {
         let root =
             std::env::temp_dir().join(format!("agl-process-linux-native-{}", std::process::id()));
@@ -541,6 +731,9 @@ impl Harness {
         let runtime_root = root.join("runtime-root");
         fs::create_dir_all(&runtime_root).unwrap();
         let runtime_root = runtime_root.canonicalize().unwrap();
+        let shell_program = runtime_root.join("bash");
+        fs::copy(admitted_bash(), &shell_program).unwrap();
+        let shell_program = shell_program.canonicalize().unwrap();
         let helper = Path::new(HELPER).canonicalize().unwrap();
         let launcher = Path::new(LAUNCHER).canonicalize().unwrap();
         let options = ProcessSupervisorOptions {
@@ -572,14 +765,15 @@ impl Harness {
             workspace,
             runtime_root,
             helper,
+            shell_program,
             owner: ExecutionOwner::new(
                 CallerOwner::new(
                     CallerNamespace::new("agentlibre", 1).unwrap(),
-                    OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+                    CallerOwnerId::new(root_run_id.as_str()).unwrap(),
                     CallerOwnerKind::Ephemeral,
                     CallerRole::Agent,
                 ),
-                OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+                LifecycleScopeId::new(root_run_id.as_str()).unwrap(),
             ),
             handle,
             supervisor,
@@ -593,8 +787,8 @@ impl Harness {
             owner: self.owner.clone(),
             correlation: ExecutionCorrelation::new(
                 CallerNamespace::new("agentlibre", 1).unwrap(),
-                OpaqueOwnerId::new(creating_run_id).unwrap(),
-                OpaqueOwnerId::new(creating_step_id.as_str()).unwrap(),
+                CorrelationGroupId::new(creating_run_id).unwrap(),
+                CorrelationOperationId::new(creating_step_id.as_str()).unwrap(),
             ),
             kind: ExecutionKind::Argv,
             program: self.helper.clone(),
@@ -677,7 +871,7 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
+impl Drop for NativeProcessFixture {
     fn drop(&mut self) {
         let _ = self.supervisor.shutdown();
         let _ = fs::remove_dir_all(&self.root);
@@ -692,7 +886,7 @@ struct CapturedOutput {
 }
 
 fn wait_for_output(
-    harness: &Harness,
+    harness: &NativeProcessFixture,
     execution_id: &ExecutionId,
     needle: &[u8],
     writable: Option<bool>,
@@ -736,6 +930,74 @@ fn wait_for_output(
         assert!(
             Instant::now() < deadline,
             "timed out waiting for PTY output"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_channel_output(
+    harness: &NativeProcessFixture,
+    execution_id: &ExecutionId,
+    owner: Option<&ExecutionOwner>,
+    channel: ExecutionChannel,
+    needle: &[u8],
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut cursor = 0;
+    let mut output = Vec::new();
+    loop {
+        let cursor_request = ExecutionCursor {
+            after_sequence: cursor,
+        };
+        let read = match owner {
+            Some(owner) => harness
+                .handle
+                .read(execution_id, owner, cursor_request, 65_536),
+            None => harness
+                .handle
+                .operator_read(execution_id, cursor_request, 65_536),
+        }
+        .unwrap();
+        for chunk in read.chunks {
+            if chunk.channel == channel {
+                output.extend(chunk.bytes.decode(65_536).unwrap());
+            }
+            cursor = cursor.max(chunk.sequence);
+        }
+        cursor = cursor.max(read.next_sequence);
+        if contains(&output, needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for child input acknowledgement"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn admitted_bash() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("bash"))
+        .find(|candidate| candidate.is_file())
+        .expect("native managed-terminal test requires Bash")
+        .canonicalize()
+        .unwrap()
+}
+
+fn wait_for_operator_terminal_state(
+    harness: &NativeProcessFixture,
+    execution_id: &ExecutionId,
+) -> agl_terminald::ExecutionStatus {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = harness.handle.operator_status(execution_id).unwrap();
+        if status.state.is_terminal() {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for managed terminal termination"
         );
         std::thread::sleep(Duration::from_millis(5));
     }

@@ -112,7 +112,7 @@ scripts/install-agl-cargo.sh --dry-run --root "$temporary_root/agent-prefix" \
 check "prefix selector is not a compatibility path" test "$prefix_status" -ne 0
 
 if ((failures > 0)); then
-  printf 'agl178-install: %s contract checks failed\n' "$failures" >&2
+  printf 'agl178-install: %s verification checks failed\n' "$failures" >&2
   exit 1
 fi
 printf 'agl178-install: passed\n'

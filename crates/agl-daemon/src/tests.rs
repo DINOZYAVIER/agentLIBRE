@@ -429,7 +429,7 @@ fn terminal_fixture_response(
                     execution_id: agl_exec::ExecutionId::generate(),
                     topology_id: admission.topology_id.clone(),
                     owner: admission.owner.clone(),
-                    authority_scope: admission.authority_scope.clone(),
+                    lifecycle_scope_id: admission.lifecycle_scope_id.clone(),
                     profile: admission.profile,
                     workspace_root: admission.context.workspace_root.clone(),
                     shell_profile: admission.shell.clone(),

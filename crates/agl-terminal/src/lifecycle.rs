@@ -1,6 +1,6 @@
 use agl_exec::{
-    AuthorityFingerprint, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, ExecutionProfile,
-    OpaqueOwnerId, ServiceGenerationId,
+    AuthorityFingerprint, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole, ExecutionId,
+    ExecutionProfile, LifecycleScopeId, ServiceGenerationId,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::TerminalId;
 
 /// Policy-neutral terminal lifecycle owner. Promotion replaces the active
-/// caller while retaining the immediately previous opaque owner for fencing;
+/// caller while retaining the immediately previous caller-local owner for fencing;
 /// neither value is parsed by the terminal domain.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -64,14 +64,14 @@ impl TerminalOwner {
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub struct TerminalTopologyId(OpaqueOwnerId);
+pub struct TerminalTopologyId(CallerOwnerId);
 
 impl TerminalTopologyId {
-    pub fn new(value: OpaqueOwnerId) -> Self {
+    pub fn new(value: CallerOwnerId) -> Self {
         Self(value)
     }
 
-    pub fn as_opaque(&self) -> &OpaqueOwnerId {
+    pub fn as_caller_owner_id(&self) -> &CallerOwnerId {
         &self.0
     }
 
@@ -115,7 +115,7 @@ pub struct TerminalRecord {
     pub execution_id: ExecutionId,
     pub topology_id: TerminalTopologyId,
     pub owner: TerminalOwner,
-    pub authority_scope: OpaqueOwnerId,
+    pub lifecycle_scope_id: LifecycleScopeId,
     pub profile: ExecutionProfile,
     pub workspace_root: PathBuf,
     pub shell_profile: crate::AdmittedShellProfile,
@@ -220,7 +220,7 @@ pub fn validate_terminal_transition(
 #[cfg(test)]
 mod tests {
     use agl_exec::{
-        CallerNamespace, CallerOwnerKind, CallerRole, OpaqueOwnerId, ServiceGenerationId,
+        CallerNamespace, CallerOwnerId, CallerOwnerKind, CallerRole, ServiceGenerationId,
     };
 
     use super::*;
@@ -231,7 +231,7 @@ mod tests {
             execution_id: ExecutionId::generate(),
             owner: CallerOwner::new(
                 CallerNamespace::new("agentlibre", 1).unwrap(),
-                OpaqueOwnerId::new("opaque-owner").unwrap(),
+                CallerOwnerId::new("opaque-owner").unwrap(),
                 CallerOwnerKind::Persistent,
                 CallerRole::Human,
             ),

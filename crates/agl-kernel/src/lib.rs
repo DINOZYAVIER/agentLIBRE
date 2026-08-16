@@ -1,10 +1,10 @@
-mod artifact_contract;
+mod artifact;
 mod effect;
 mod extension_declaration;
 mod extension_digest;
 mod extension_ids;
 mod extension_registration;
-mod hook_contract;
+mod hook;
 mod outcome;
 mod policy;
 mod registry;
@@ -12,7 +12,7 @@ mod run;
 mod run_repository;
 mod schema;
 mod session;
-mod tool_contract;
+mod tool;
 mod turn_event;
 mod turn_executor;
 mod turn_fsm;
@@ -38,7 +38,7 @@ pub use extension_ids::{
     WorkflowEventId,
 };
 pub use extension_registration::{ExtensionRegistration, HookBinding, ToolBinding};
-pub use hook_contract::{
+pub use hook::{
     HookBatchRequest, HookBatchResult, HookEvent, HookHandler, HookHandlerError, HookInput,
     HookInvocationError, HookMessage, HookResult, HookStatus,
 };
@@ -46,7 +46,7 @@ pub use schema::{
     ArgumentValidationError, ArgumentViolation, SchemaValidationError, ToolSchema,
     draft202012_schema_for,
 };
-pub use tool_contract::{
+pub use tool::{
     CancellationSignal, ObservedEffect, ToolDispatchContext, ToolDispatchControl,
     ToolGrantProvenance, ToolHandler, ToolHandlerError, ToolHandlerFuture, ToolInvocation,
     ToolResult, render_canonical_json,
@@ -96,7 +96,7 @@ pub use turn_state::TurnState;
 pub use turn_tool::{ToolDispatchRequest, ToolDispatchResponse};
 pub use turn_transcript::{ModelRequest, ModelResponse, ModelResponseOutcome, TurnMessage};
 
-pub use artifact_contract::{
+pub use artifact::{
     ArtifactAccess, ArtifactDeclaration, ArtifactEffectLink, ArtifactId, ArtifactIdError,
     ArtifactKindId, ArtifactKindIdError, ArtifactTargetSelector, ExtensionRequirement,
     ResolvedArtifactTarget,

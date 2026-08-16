@@ -8,7 +8,7 @@ mod supervisor;
 #[cfg(all(test, target_os = "linux"))]
 #[allow(dead_code)]
 #[path = "supervisor_unsupported.rs"]
-mod supervisor_unsupported_contract;
+mod supervisor_unsupported_tests;
 pub mod terminal;
 #[doc(hidden)]
 pub mod test_support;

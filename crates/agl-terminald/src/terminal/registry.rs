@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agl_exec::{ExecutionCorrelation, ExecutionId, ExecutionRequestId, OpaqueOwnerId};
+use agl_exec::{
+    CallerOwnerId, ExecutionCorrelation, ExecutionId, ExecutionRequestId, LifecycleScopeId,
+};
 pub use agl_terminal::TerminalOwner;
 use agl_terminal::{
     AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult, TerminalId,
@@ -43,7 +45,7 @@ const AGENT_TERMINAL_INTEGRATION_READ_BYTES: usize = MAX_SHELL_INTEGRATION_FRAME
 pub struct TerminalEnsureRequest {
     pub topology_id: TerminalTopologyId,
     pub owner: TerminalOwner,
-    pub authority_scope: OpaqueOwnerId,
+    pub lifecycle_scope_id: LifecycleScopeId,
     pub correlation: ExecutionCorrelation,
     pub context: ExecutionContextSnapshot,
     pub profile: ExecutionProfile,
@@ -64,7 +66,7 @@ impl Debug for TerminalEnsureRequest {
             .debug_struct("TerminalEnsureRequest")
             .field("topology_id", &self.topology_id)
             .field("owner", &self.owner)
-            .field("authority_scope", &self.authority_scope)
+            .field("lifecycle_scope_id", &self.lifecycle_scope_id)
             .field("correlation", &self.correlation)
             .field("context_revision", &self.context.revision)
             .field("profile", &self.profile)
@@ -93,7 +95,7 @@ pub struct TerminalRegistry {
 struct RegistryState {
     slots: BTreeMap<TerminalSlot, TerminalId>,
     terminals: BTreeMap<TerminalId, TerminalEntry>,
-    retired_owners: BTreeSet<OpaqueOwnerId>,
+    retired_owners: BTreeSet<CallerOwnerId>,
 }
 
 struct TerminalEntry {
@@ -179,7 +181,7 @@ enum TerminalSlot {
     HumanWorkspace(TerminalTopologyId),
     HumanHost(TerminalTopologyId),
     PersistentAgent(TerminalTopologyId),
-    EphemeralAgent(OpaqueOwnerId),
+    EphemeralAgent(CallerOwnerId),
     Promoted(TerminalId),
 }
 
@@ -401,7 +403,7 @@ impl TerminalRegistry {
             execution_id: execution_id.clone(),
             topology_id: request.topology_id.clone(),
             owner: request.owner.clone(),
-            authority_scope: request.authority_scope.clone(),
+            lifecycle_scope_id: request.lifecycle_scope_id.clone(),
             profile: request.profile,
             workspace_root: request.context.workspace_root.clone(),
             shell_profile: request.shell.clone(),
@@ -2043,7 +2045,13 @@ impl TerminalRegistry {
         let quiesce_deadline = Instant::now() + AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT;
         loop {
             let mut state = self.lock()?;
-            let (previous_owner, authority_scope, execution_id, interrupt_foreground, driver_busy) = {
+            let (
+                previous_owner,
+                lifecycle_scope_id,
+                execution_id,
+                interrupt_foreground,
+                driver_busy,
+            ) = {
                 let entry = state
                     .terminals
                     .get(terminal_id)
@@ -2068,7 +2076,7 @@ impl TerminalRegistry {
                 }
                 (
                     entry.record.owner.caller().clone(),
-                    entry.record.authority_scope.clone(),
+                    entry.record.lifecycle_scope_id.clone(),
                     entry.record.execution_id.clone(),
                     entry.commands.active_is_submitted(),
                     entry.command_driver_busy,
@@ -2088,7 +2096,7 @@ impl TerminalRegistry {
 
             self.starter.handoff_managed_terminal(
                 &execution_id,
-                ExecutionOwner::new(promoted_caller.clone(), authority_scope),
+                ExecutionOwner::new(promoted_caller.clone(), lifecycle_scope_id),
                 interrupt_foreground,
             )?;
 
@@ -2192,7 +2200,7 @@ impl TerminalRegistry {
         Ok(())
     }
 
-    pub fn terminate_ephemeral_owner(&self, owner_id: &OpaqueOwnerId) -> Result<usize> {
+    pub fn terminate_ephemeral_owner(&self, owner_id: &CallerOwnerId) -> Result<usize> {
         let ids = {
             let mut state = self.lock()?;
             state.retired_owners.insert(owner_id.clone());
@@ -2642,7 +2650,7 @@ fn terminal_slot(request: &TerminalEnsureRequest) -> Result<TerminalSlot> {
 fn execution_owner(request: &TerminalEnsureRequest) -> ExecutionOwner {
     ExecutionOwner::new(
         request.owner.caller().clone(),
-        request.authority_scope.clone(),
+        request.lifecycle_scope_id.clone(),
     )
 }
 
@@ -2951,18 +2959,18 @@ mod tests {
     use crate::terminal::environment::TerminalSecretValue;
     use agl_terminal::MAX_AGENT_TERMINAL_COMMAND_BYTES;
 
-    fn opaque(value: &str) -> OpaqueOwnerId {
-        OpaqueOwnerId::new(value).unwrap()
+    fn caller_id(value: &str) -> CallerOwnerId {
+        CallerOwnerId::new(value).unwrap()
     }
 
     fn topology(session_id: &SessionId) -> TerminalTopologyId {
-        TerminalTopologyId::new(opaque(session_id.as_str()))
+        TerminalTopologyId::new(caller_id(session_id.as_str()))
     }
 
     fn caller(value: &str, kind: CallerOwnerKind, role: CallerRole) -> CallerOwner {
         CallerOwner::new(
             CallerNamespace::new("agentlibre", 1).unwrap(),
-            opaque(value),
+            caller_id(value),
             kind,
             role,
         )
@@ -3637,11 +3645,11 @@ mod tests {
         TerminalEnsureRequest {
             topology_id: topology(&session_id),
             owner: human_owner(&session_id),
-            authority_scope: opaque(RunId::generate().as_str()),
+            lifecycle_scope_id: LifecycleScopeId::new(RunId::generate().as_str()).unwrap(),
             correlation: ExecutionCorrelation::new(
                 CallerNamespace::new("agentlibre", 1).unwrap(),
-                opaque(RunId::generate().as_str()),
-                opaque(StepId::generate().as_str()),
+                agl_exec::CorrelationGroupId::new(RunId::generate().as_str()).unwrap(),
+                agl_exec::CorrelationOperationId::new(StepId::generate().as_str()).unwrap(),
             ),
             context,
             profile: ExecutionProfile::Workspace,
@@ -3679,7 +3687,7 @@ mod tests {
             execution_id: ExecutionId::generate(),
             topology_id: request.topology_id.clone(),
             owner: request.owner.clone(),
-            authority_scope: request.authority_scope.clone(),
+            lifecycle_scope_id: request.lifecycle_scope_id.clone(),
             profile: request.profile,
             workspace_root: request.context.workspace_root.clone(),
             shell_profile: request.shell.clone(),
@@ -4125,7 +4133,7 @@ mod tests {
         let error = registry
             .promote_ephemeral_owner(
                 &terminal.terminal_id,
-                &TerminalTopologyId::new(opaque(session_id.as_str())),
+                &TerminalTopologyId::new(caller_id(session_id.as_str())),
                 persistent_agent_owner(&session_id).caller().clone(),
             )
             .unwrap_err();
@@ -4446,7 +4454,7 @@ mod tests {
         let subagent = registry.ensure_terminal(subagent).unwrap();
         assert_ne!(human.terminal_id, main.terminal_id);
         assert_ne!(main.terminal_id, subagent.terminal_id);
-        let topology_id = TerminalTopologyId::new(opaque(session_id.as_str()));
+        let topology_id = TerminalTopologyId::new(caller_id(session_id.as_str()));
         assert_eq!(registry.list_topology(&topology_id).unwrap().len(), 3);
 
         registry
@@ -4530,7 +4538,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .terminate_ephemeral_owner(&opaque(owner_run_id.as_str()))
+                .terminate_ephemeral_owner(&caller_id(owner_run_id.as_str()))
                 .unwrap(),
             0
         );
@@ -4723,7 +4731,7 @@ mod tests {
         assert_ne!(first.terminal_id, second.terminal_id);
         assert_ne!(first.execution_id, second.execution_id);
         let records = registry
-            .list_topology(&TerminalTopologyId::new(opaque(session_id.as_str())))
+            .list_topology(&TerminalTopologyId::new(caller_id(session_id.as_str())))
             .unwrap();
         assert_eq!(records.len(), 2);
         assert!(records.iter().any(|record| {
@@ -4936,7 +4944,7 @@ mod tests {
         assert_eq!(
             registry
                 .admit_human_command(
-                    &TerminalTopologyId::new(opaque(SessionId::generate().as_str())),
+                    &TerminalTopologyId::new(caller_id(SessionId::generate().as_str())),
                     &terminal.terminal_id,
                     0,
                     1,

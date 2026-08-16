@@ -23,12 +23,14 @@
 | agl-ids | Identity |
 | agl-inference | AI/ML |
 | agl-kernel | Runtime |
+| agl-matrix | Communication |
 | agl-matrix-bridge | Communication |
 | agl-memory | Storage |
 | agl-model | AI/ML |
 | agl-note | Storage |
 | agl-oven | Tooling |
 | agl-package | Extensibility |
+| agl-permission | Authorization |
 | agl-process | Runtime (agent-side typed terminal client adapter) |
 | agl-protocol | Communication |
 | agl-repo | Storage |
@@ -42,7 +44,7 @@
 
 ### Selected Targets
 
-**Independent engine and contract packages:**
+**Independent engine and protocol packages:**
 - `agl-exec`
 - `agl-pty`
 - `agl-terminal`
@@ -50,7 +52,7 @@
 - `agl-terminal-client`
 
 These packages are built and released from the independent `agl-terminal`
-repository. agentLIBRE consumes the selected contract crates at one exact Git
+repository. agentLIBRE consumes the selected protocol crates at one exact Git
 revision.
 
 **Independent binary packages:**

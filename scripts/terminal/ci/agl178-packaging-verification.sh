@@ -164,7 +164,7 @@ check "concurrent terminal operation leaves current unchanged" \
   equals "$(readlink -f -- "$prefix/libexec/agl-terminal/current")" "$second_generation"
 
 if ((failures > 0)); then
-  printf 'agl178-packaging: %s contract checks failed\n' "$failures" >&2
+  printf 'agl178-packaging: %s verification checks failed\n' "$failures" >&2
   exit 1
 fi
 printf 'agl178-packaging: passed\n'

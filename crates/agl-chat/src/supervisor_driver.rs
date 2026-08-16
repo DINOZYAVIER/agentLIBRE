@@ -643,7 +643,7 @@ impl DurableRunDriver for ChatSupervisorDriver {
             self.execution.pending_request(),
             Some(TurnRequest::ToolDispatch { request, .. })
                 if request.tool_id.as_str()
-                    == crate::delegation_contract::AGENT_DELEGATE_TOOL_ID
+                    == crate::delegation_extension::AGENT_DELEGATE_TOOL_ID
         );
         let tokens_before = service.model_token_usage();
         if !self.cancellation.is_cancelled() {

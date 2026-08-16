@@ -1,7 +1,7 @@
 # agl-app boundary
 
 `agl-app` owns presentation-neutral application commands, session projection,
-prompt admission, terminal orchestration contracts, and private Human shell
+prompt admission, terminal orchestration APIs, and private Human shell
 history brokerage.
 
 It must not depend on CLI, protocol, daemon, socket, HTTP, Ratatui, or

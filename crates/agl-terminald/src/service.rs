@@ -983,7 +983,7 @@ fn terminal_ensure_request(
     Ok(TerminalEnsureRequest {
         topology_id: admission.topology_id,
         owner: admission.owner,
-        authority_scope: admission.authority_scope,
+        lifecycle_scope_id: admission.lifecycle_scope_id,
         correlation: admission.correlation,
         context: admission.context,
         profile: admission.profile,

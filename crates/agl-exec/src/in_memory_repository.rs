@@ -457,9 +457,9 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             })
             .filter(|status| {
                 filter
-                    .authority_scope
+                    .lifecycle_scope_id
                     .as_ref()
-                    .is_none_or(|expected| status.owner.authority_scope() == expected)
+                    .is_none_or(|expected| status.owner.lifecycle_scope_id() == expected)
             })
             .cloned()
             .collect())

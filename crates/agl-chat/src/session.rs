@@ -2098,7 +2098,7 @@ fn resolve_effective_capabilities(
     } = boundary;
     let mut baseline = core_tool_ids(&selected_extensions)?;
     if delegation_enabled {
-        let delegation_id = ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID)?;
+        let delegation_id = ToolId::new(crate::delegation_extension::AGENT_DELEGATE_TOOL_ID)?;
         baseline.insert(delegation_id);
     }
     let mut skill_policies = Vec::with_capacity(selected_skills.len());
@@ -2132,7 +2132,7 @@ fn resolve_effective_capabilities(
     let mut unavailable = BTreeSet::new();
     if !delegation_enabled {
         unavailable.insert(ToolId::new(
-            crate::delegation_contract::AGENT_DELEGATE_TOOL_ID,
+            crate::delegation_extension::AGENT_DELEGATE_TOOL_ID,
         )?);
     }
     if !agl_host_tools::screen::extension_available() {

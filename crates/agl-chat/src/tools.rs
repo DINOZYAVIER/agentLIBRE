@@ -89,7 +89,7 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
             shared.clone(),
         )
         .shared_tool_handler(
-            host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+            host_binding_id(crate::delegation_extension::AGENT_DELEGATE_EXTENSION_ID),
             1,
             shared,
         )
@@ -221,7 +221,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
             )),
         )
         .shared_tool_handler(
-            host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+            host_binding_id(crate::delegation_extension::AGENT_DELEGATE_EXTENSION_ID),
             1,
             Arc::new(
                 config
@@ -315,9 +315,9 @@ impl Extension for DelegationExtension {
     fn definition() -> ExtensionDefinition {
         ExtensionDefinition::from_descriptor(
             1,
-            crate::delegation_contract::delegation_extension().with_host_binding(
+            crate::delegation_extension::delegation_extension().with_host_binding(
                 HostBindingRequirement::new(
-                    host_binding_id(crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID),
+                    host_binding_id(crate::delegation_extension::AGENT_DELEGATE_EXTENSION_ID),
                     1,
                 ),
             ),
@@ -328,12 +328,12 @@ impl Extension for DelegationExtension {
     fn bind(host: &ExtensionHost) -> Result<ExtensionBindings, Self::BindError> {
         let handler = host
             .shared_tool_handler(&host_binding_id(
-                crate::delegation_contract::AGENT_DELEGATE_EXTENSION_ID,
+                crate::delegation_extension::AGENT_DELEGATE_EXTENSION_ID,
             ))
             .ok_or(DelegationBindError)?;
         Ok(ExtensionBindings::new(
             [ToolBinding::from_shared(
-                ToolId::new(crate::delegation_contract::AGENT_DELEGATE_TOOL_ID)
+                ToolId::new(crate::delegation_extension::AGENT_DELEGATE_TOOL_ID)
                     .expect("delegation Tool ID is valid"),
                 handler.clone(),
             )],

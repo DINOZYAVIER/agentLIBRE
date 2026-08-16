@@ -193,9 +193,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId,
-        ExecutionLeaseOrigin, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OpaqueOwnerId,
-        ShellProfileSnapshot,
+        CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole,
+        CorrelationGroupId, CorrelationOperationId, ExecutionId, ExecutionLeaseOrigin,
+        LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, LifecycleScopeId, ShellProfileSnapshot,
     };
 
     use super::*;
@@ -208,19 +208,19 @@ mod tests {
         ExecutionOwner::new(
             CallerOwner::new(
                 CallerNamespace::new("test", 1).unwrap(),
-                OpaqueOwnerId::new(owner_id).unwrap(),
+                CallerOwnerId::new(owner_id).unwrap(),
                 CallerOwnerKind::Ephemeral,
                 CallerRole::Agent,
             ),
-            OpaqueOwnerId::new("authority").unwrap(),
+            LifecycleScopeId::new("lifecycle-scope").unwrap(),
         )
     }
 
     fn correlation() -> ExecutionCorrelation {
         ExecutionCorrelation::new(
             CallerNamespace::new("test", 1).unwrap(),
-            OpaqueOwnerId::new("group").unwrap(),
-            OpaqueOwnerId::new("operation").unwrap(),
+            CorrelationGroupId::new("group").unwrap(),
+            CorrelationOperationId::new("operation").unwrap(),
         )
     }
 

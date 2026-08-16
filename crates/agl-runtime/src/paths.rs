@@ -90,7 +90,7 @@ impl AgentLibrePaths {
 
     /// State owned by the independently installed `agl-terminal` product.
     ///
-    /// agentLIBRE may address this root through the terminal client contract,
+    /// agentLIBRE may address this root through the terminal client API,
     /// but it must never place terminal state beneath its own application root.
     pub fn terminal_state_root(&self) -> PathBuf {
         self.state_dir

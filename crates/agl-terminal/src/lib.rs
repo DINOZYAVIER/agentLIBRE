@@ -10,7 +10,8 @@ mod shell_materialization;
 mod shell_profile;
 
 pub use agl_exec::{
-    AuthorityFingerprint, CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, OpaqueOwnerId,
+    AuthorityFingerprint, CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole,
+    CorrelationGroupId, CorrelationOperationId, LifecycleScopeId,
 };
 pub use identity::{ParseTerminalIdentityError, TerminalId, TerminalRequestId, TerminalStreamId};
 pub use lifecycle::{

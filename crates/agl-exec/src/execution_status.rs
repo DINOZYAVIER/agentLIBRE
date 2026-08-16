@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     ExecutionExit, ExecutionId, ExecutionIo, ExecutionOwner, ExecutionProfile, ExecutionState,
-    OpaqueOwnerId, TerminalSize,
+    LifecycleScopeId, TerminalSize,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,6 @@ pub struct ExecutionStatus {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionListFilter {
     pub owner: Option<ExecutionOwner>,
-    pub authority_scope: Option<OpaqueOwnerId>,
+    pub lifecycle_scope_id: Option<LifecycleScopeId>,
     pub include_finished: bool,
 }

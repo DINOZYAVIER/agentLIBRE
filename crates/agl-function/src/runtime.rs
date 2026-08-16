@@ -123,7 +123,7 @@ pub fn runtime_function_from_resolved_graph(
         .get(&graph.root)
         .ok_or_else(|| anyhow::anyhow!("resolved Function graph has no root candidate"))?;
     let loaded = load_function_candidate(&root.candidate)?;
-    crate::validate_resolved_function_model_contract(&loaded.front_matter, None, graph, registry)?;
+    crate::validate_resolved_function_model(&loaded.front_matter, None, graph, registry)?;
     runtime_function_from_loaded_with_profile_policy(
         loaded,
         workspace_root,

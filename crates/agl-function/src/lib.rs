@@ -9,7 +9,7 @@ mod subagent;
 mod validation;
 
 pub use adapter::{
-    FunctionPackageAdapter, parse_function_envelope, validate_resolved_function_model_contract,
+    FunctionPackageAdapter, parse_function_envelope, validate_resolved_function_model,
 };
 #[cfg(test)]
 pub(crate) use loader::load_function;

@@ -14,7 +14,7 @@ use agl_kernel::{
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
-use crate::delegation_contract::DelegateActionArgs;
+use crate::delegation_extension::DelegateActionArgs;
 use crate::supervisor_driver::ChatRunInput;
 
 #[derive(Clone)]

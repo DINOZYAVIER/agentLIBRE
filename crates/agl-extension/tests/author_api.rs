@@ -54,7 +54,7 @@ fn author_factory_is_stateless_binding_only_and_keyed_from_definition() {
     assert_eq!(BINDS.load(Ordering::SeqCst), 1);
 }
 
-// AGL171-001 and AGL171-011. This compile contract intentionally has no
+// AGL171-001 and AGL171-011. This compile fixture intentionally has no
 // mutable ToolCatalog and no Session/Run/Turn/deadline/cancellation inputs.
 #[test]
 fn factory_cannot_publish_or_mutate_the_admitted_catalog() {
@@ -71,7 +71,7 @@ fn factory_cannot_publish_or_mutate_the_admitted_catalog() {
     ) -> Result<ExtensionBindings, agl_extension::ErasedBindError> = selected_api;
 }
 
-// AGL171-009. Hook invocation receives only the kernel invocation contract;
+// AGL171-009. Hook invocation receives only the kernel invocation input;
 // resource mutation handles are not an invocation parameter.
 #[test]
 fn hook_binding_has_no_resource_mutation_context() {

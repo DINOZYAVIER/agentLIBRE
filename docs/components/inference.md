@@ -10,7 +10,7 @@ plan but cannot select another profile or device.
 
 Top-level runtime commands (`agl run`, bare `agl`, and `agl serve`) all reach
 inference through a resolved Function and the same `InferenceHost`. Backend
-smoke coverage invokes the private host/server contract directly; it is not a
+smoke coverage invokes the private host/server API directly; it is not a
 second product runtime surface.
 
 ## Model-manager admission

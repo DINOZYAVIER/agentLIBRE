@@ -11,8 +11,9 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use agl_exec::{
-        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
-        ExecutionOwner, OpaqueOwnerId,
+        CallerNamespace, CallerOwner, CallerOwnerId, CallerOwnerKind, CallerRole,
+        CorrelationGroupId, CorrelationOperationId, ExecutionCorrelation, ExecutionOwner,
+        LifecycleScopeId,
     };
     use agl_terminald::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
@@ -78,22 +79,22 @@ mod linux {
         let handle = supervisor.handle();
         let run_id = RunId::generate();
         let namespace = CallerNamespace::new("agentlibre", 1)?;
-        let opaque_run = OpaqueOwnerId::new(run_id.as_str())?;
+        let owner_id = CallerOwnerId::new(run_id.as_str())?;
         let owner = ExecutionOwner::new(
             CallerOwner::new(
                 namespace.clone(),
-                opaque_run.clone(),
+                owner_id.clone(),
                 CallerOwnerKind::Ephemeral,
                 CallerRole::Agent,
             ),
-            opaque_run.clone(),
+            LifecycleScopeId::new(run_id.as_str())?,
         );
         let request = ExecutionRequest {
             owner: owner.clone(),
             correlation: ExecutionCorrelation::new(
                 namespace,
-                opaque_run,
-                OpaqueOwnerId::new(StepId::generate().as_str())?,
+                CorrelationGroupId::new(run_id.as_str())?,
+                CorrelationOperationId::new(StepId::generate().as_str())?,
             ),
             kind: ExecutionKind::Argv,
             program: helper.clone(),
