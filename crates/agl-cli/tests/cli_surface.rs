@@ -1708,10 +1708,11 @@ fn function_commands_manage_workspace_function_artifact() {
 
 #[test]
 fn builtin_function_commands_expose_packaged_gemma4_functions() {
+    let repo = TempRepo::new("builtin-functions");
     let home = TempHome::new("builtin-functions");
     let home_arg = home.path_string();
 
-    let list = run_agl(&["--home", &home_arg, "function", "list"]);
+    let list = run_agl_in(repo.path(), &["--home", &home_arg, "function", "list"]);
     assert_success_no_stderr(&list);
     let list_stdout = stdout(&list);
     assert_contains(&list_stdout, "function id=gemma4-e4b source=builtin");
@@ -1727,7 +1728,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&list_stdout, "function id=gemma4-31b-32k source=builtin");
     assert_contains(&list_stdout, "function id=gemma4-31b-64k source=builtin");
 
-    let status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-12b"]);
+    let status = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "status", "gemma4-12b"],
+    );
     assert_success_no_stderr(&status);
     let status_stdout = stdout(&status);
     assert_contains(&status_stdout, "state=");
@@ -1740,7 +1744,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&status_stdout, "inference.profile_id=gpu-rx7900xtx-65536");
     assert_contains(&status_stdout, "models.toml");
 
-    let show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-12b"]);
+    let show = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "show", "gemma4-12b"],
+    );
     assert_success_no_stderr(&show);
     let show_stdout = stdout(&show);
     assert_contains(&show_stdout, "function.source=builtin");
@@ -1751,7 +1758,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&show_stdout, "function.model.profile=gpu-rx7900xtx-65536");
     assert!(!show_stdout.contains("inference.toml"));
 
-    let e2b_status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-e2b"]);
+    let e2b_status = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "status", "gemma4-e2b"],
+    );
     assert_success_no_stderr(&e2b_status);
     let e2b_status_stdout = stdout(&e2b_status);
     assert_contains(&e2b_status_stdout, "function.source=builtin");
@@ -1761,7 +1771,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         "Gemma 4 E2B must not require a projector"
     );
 
-    let e2b_show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-e2b"]);
+    let e2b_show = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "show", "gemma4-e2b"],
+    );
     assert_success_no_stderr(&e2b_show);
     let e2b_show_stdout = stdout(&e2b_show);
     assert_contains(
@@ -1773,7 +1786,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert!(!e2b_show_stdout.contains("[runtime.mtp]"));
 
     for (function_id, context_tokens) in [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)] {
-        let show = run_agl(&["--home", &home_arg, "function", "show", function_id]);
+        let show = run_agl_in(
+            repo.path(),
+            &["--home", &home_arg, "function", "show", function_id],
+        );
         assert_success_no_stderr(&show);
         let stdout = stdout(&show);
         assert_contains(&stdout, "function.runtime.max_tool_calls=32");
@@ -1784,7 +1800,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         );
         assert_contains(&stdout, "inference.pci_device_id=1002:744c");
     }
-    let ambiguous = run_agl(&["--home", &home_arg, "function", "show", "gemma4-31b"]);
+    let ambiguous = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "show", "gemma4-31b"],
+    );
     assert!(!ambiguous.status.success());
 }
 
