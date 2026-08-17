@@ -11,8 +11,8 @@ impl InferenceHostConfig {
         context_idle_duration: Duration,
         model_idle_duration: Duration,
     ) -> Result<Self, InferenceHostStartError> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/llama-cpp/build/bin/llama-server");
+        let path =
+            development_engine_path(std::env::var_os("AGL_LLAMA_CPP_BUILD_DIR").map(PathBuf::from));
         let path = std::fs::canonicalize(&path).map_err(|error| {
             InferenceHostStartError::EngineStart {
                 reason: format!(
@@ -32,6 +32,14 @@ impl InferenceHostConfig {
             evidence_root: evidence_root.into(),
         })
     }
+}
+
+fn development_engine_path(build_dir: Option<PathBuf>) -> PathBuf {
+    build_dir
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/llama-cpp/build")
+        })
+        .join("bin/llama-server")
 }
 
 pub(super) fn validate_idle_duration(
@@ -149,4 +157,21 @@ pub(super) fn validate_inventory(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::development_engine_path;
+
+    #[test]
+    fn selected_llama_cpp_build_directory_resolves_the_development_engine() {
+        let build_dir = PathBuf::from("/tmp/agl-llama-cpp-ci-build");
+
+        assert_eq!(
+            development_engine_path(Some(build_dir)),
+            Path::new("/tmp/agl-llama-cpp-ci-build/bin/llama-server")
+        );
+    }
 }
