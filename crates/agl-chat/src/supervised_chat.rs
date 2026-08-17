@@ -308,14 +308,13 @@ impl SupervisedChat {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
     };
-    use agl_permission::{
-        PermissionDuration, PermissionGrantDraft, PermissionGrantState, PermissionOperationId,
-    };
+    use agl_permission::{PermissionDuration, PermissionGrantDraft, PermissionGrantState};
 
     use super::*;
     use crate::{ChatInferenceJob, InferenceClient, ToolAccessMode};
@@ -375,22 +374,11 @@ mod tests {
                 });
                 jobs.len()
             };
-            if let Some(repositories) = &self.state.repositories {
-                if job_count == 1 {
-                    *self.state.late_grant_id.lock().unwrap() = Some(grant_cron_add(repositories));
-                } else if job_count == 2
-                    && let Some(grant_id) = self.state.late_grant_id.lock().unwrap().as_deref()
-                {
-                    repositories
-                        .permissions
-                        .revoke_grant(
-                            grant_id,
-                            PermissionOperationId::new(format!("delegation-e2e-revoke:{grant_id}"))
-                                .unwrap(),
-                            Some("delegation-e2e-cleanup"),
-                        )
-                        .unwrap();
-                }
+            if let Some(repositories) = &self.state.repositories
+                && job_count == 1
+                && self.state.late_grant_id.lock().unwrap().is_none()
+            {
+                *self.state.late_grant_id.lock().unwrap() = Some(grant_cron_add(repositories));
             }
             let content = self
                 .state
@@ -451,21 +439,35 @@ mod tests {
             .id
     }
 
-    #[test]
-    fn supervised_delegation_isolated_child_resumes_parent_once() {
-        let root =
-            std::env::temp_dir().join(format!("agl-chat-delegation-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let function_root = root.join(".agl/functions/coordinator");
-        std::fs::create_dir_all(function_root.join("subagents")).unwrap();
-        std::fs::write(
+    struct DelegationFixture {
+        root: PathBuf,
+        runtime: AgentLibreRuntimeConfig,
+        repositories: StoreRepositories,
+        state: ScriptState,
+        options: ChatOptions,
+        presentation: Arc<RecordingPresentationSink>,
+    }
+
+    static DELEGATION_FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    impl DelegationFixture {
+        fn new(inject_late_grant: bool) -> Self {
+            let fixture_id = DELEGATION_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "agl-chat-delegation-e2e-{}-{fixture_id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let function_root = root.join(".agl/functions/coordinator");
+            std::fs::create_dir_all(function_root.join("subagents")).unwrap();
+            std::fs::write(
             root.join(".agl/workspace.toml"),
             "version = 3\ndefault_function = \"function:coordinator@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n\n[policy]\n[config]\n",
         )
         .unwrap();
-        std::fs::write(
-            function_root.join("FUNCTION.md"),
-            r#"---
+            std::fs::write(
+                function_root.join("FUNCTION.md"),
+                r#"---
 package:
   schema: agentlibre.package/v1
   type: function
@@ -498,13 +500,13 @@ delegation:
   timeout_seconds: 30
 ---
 "#,
-        )
-        .unwrap();
-        let reviewer_function_root = root.join(".agl/functions/reviewer");
-        std::fs::create_dir_all(&reviewer_function_root).unwrap();
-        std::fs::write(
-            reviewer_function_root.join("FUNCTION.md"),
-            r#"---
+            )
+            .unwrap();
+            let reviewer_function_root = root.join(".agl/functions/reviewer");
+            std::fs::create_dir_all(&reviewer_function_root).unwrap();
+            std::fs::write(
+                reviewer_function_root.join("FUNCTION.md"),
+                r#"---
 package:
   schema: agentlibre.package/v1
   type: function
@@ -519,21 +521,21 @@ title: Reviewer
 description: Reviews one bounded task.
 ---
 "#,
-        )
-        .unwrap();
-        std::fs::write(
-            reviewer_function_root.join("SYSTEM.md"),
-            "Review one bounded task.\n",
-        )
-        .unwrap();
-        std::fs::write(
-            function_root.join("SYSTEM.md"),
-            "Delegate review work and use the returned verdict.\n",
-        )
-        .unwrap();
-        std::fs::write(
-            function_root.join("subagents/reviewer.md"),
-            r#"---
+            )
+            .unwrap();
+            std::fs::write(
+                reviewer_function_root.join("SYSTEM.md"),
+                "Review one bounded task.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                function_root.join("SYSTEM.md"),
+                "Delegate review work and use the returned verdict.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                function_root.join("subagents/reviewer.md"),
+                r#"---
 schema: agentlibre/subagent/v1
 id: reviewer
 title: Reviewer
@@ -555,21 +557,21 @@ limits:
 
 Only return the child verdict.
 "#,
-        )
-        .unwrap();
-        let runtime = AgentLibreRuntimeConfig {
-            paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
-            logging: agl_runtime::AgentLibreLoggingConfig::default(),
-            history: agl_runtime::AgentLibreHistoryConfig::default(),
-            workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
-            inference: agl_runtime::AgentLibreInferenceConfig::default(),
-            execution: agl_runtime::AgentLibreExecutionConfig::default(),
-        };
-        crate::test_support::install_package_bound_test_model(&root, &runtime);
-        let repositories = agl_runtime::StoreRuntime::open(&runtime.paths)
-            .unwrap()
-            .into_repositories();
-        let state = ScriptState {
+            )
+            .unwrap();
+            let runtime = AgentLibreRuntimeConfig {
+                paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
+                logging: agl_runtime::AgentLibreLoggingConfig::default(),
+                history: agl_runtime::AgentLibreHistoryConfig::default(),
+                workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+                inference: agl_runtime::AgentLibreInferenceConfig::default(),
+                execution: agl_runtime::AgentLibreExecutionConfig::default(),
+            };
+            crate::test_support::install_package_bound_test_model(&root, &runtime);
+            let repositories = agl_runtime::StoreRuntime::open(&runtime.paths)
+                .unwrap()
+                .into_repositories();
+            let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
                 r#"<tool_call>{"name":"agent.supervisor:delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
                 "Child verdict CHILD_VERDICT_PRIVATE_SENTINEL".to_string(),
@@ -577,36 +579,58 @@ Only return the child verdict.
             ]))),
             jobs: Arc::new(Mutex::new(Vec::new())),
             released_contexts: Arc::new(Mutex::new(Vec::new())),
-            repositories: Some(repositories.clone()),
+            repositories: inject_late_grant.then(|| repositories.clone()),
             late_grant_id: Arc::new(Mutex::new(None)),
         };
-        let options = ChatOptions {
-            inference: crate::InferenceOptions {
-                function_ref: Some("coordinator".to_string()),
-                artifact_root: Some(root.join("artifacts")),
+            let options = ChatOptions {
+                inference: crate::InferenceOptions {
+                    function_ref: Some("coordinator".to_string()),
+                    artifact_root: Some(root.join("artifacts")),
+                    workspace_root: Some(root.clone()),
+                    max_output_tokens: 128,
+                    tool_mode: ToolAccessMode::Execute,
+                    skills: Vec::new(),
+                    memory: false,
+                },
                 workspace_root: Some(root.clone()),
-                max_output_tokens: 128,
-                tool_mode: ToolAccessMode::Execute,
-                skills: Vec::new(),
-                memory: false,
-            },
-            workspace_root: Some(root.clone()),
-            session_id: None,
-            no_history: true,
-            new_session: true,
-        };
-        let presentation = Arc::new(RecordingPresentationSink::default());
-        let chat = SupervisedChat::open_with_presentation_sink_and_terminal_endpoint(
-            options,
-            &runtime,
-            repositories.clone(),
-            InferenceClientHandle::new(DelegationInferenceClient {
-                state: state.clone(),
-            }),
-            presentation.clone(),
-            Some(crate::test_support::terminal_endpoint(&root)),
-        )
-        .unwrap();
+                session_id: None,
+                no_history: true,
+                new_session: true,
+            };
+            let presentation = Arc::new(RecordingPresentationSink::default());
+            Self {
+                root,
+                runtime,
+                repositories,
+                state,
+                options,
+                presentation,
+            }
+        }
+
+        fn open(&self) -> SupervisedChat {
+            SupervisedChat::open_with_presentation_sink_and_terminal_endpoint(
+                self.options.clone(),
+                &self.runtime,
+                self.repositories.clone(),
+                InferenceClientHandle::new(DelegationInferenceClient {
+                    state: self.state.clone(),
+                }),
+                self.presentation.clone(),
+                Some(crate::test_support::terminal_endpoint(&self.root)),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn supervised_delegation_isolated_child_resumes_parent_once() {
+        let fixture = DelegationFixture::new(false);
+        let chat = fixture.open();
+        let root = &fixture.root;
+        let repositories = &fixture.repositories;
+        let state = &fixture.state;
+        let presentation = &fixture.presentation;
 
         let output = chat
             .run_user_turn("Parent secret phrase; obtain a review.")
@@ -728,18 +752,70 @@ Only return the child verdict.
                 .contains("Child verdict CHILD_VERDICT_PRIVATE_SENTINEL")
         );
         assert_eq!(state.released_contexts.lock().unwrap().len(), 1);
-        let late_grant_id = state.late_grant_id.lock().unwrap().clone().unwrap();
+        assert!(state.late_grant_id.lock().unwrap().is_none());
+
+        chat.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_resume_rejects_a_policy_change_after_checkpoint() {
+        let fixture = DelegationFixture::new(true);
+        let chat = fixture.open();
+
+        let output = chat
+            .run_user_turn("Parent secret phrase; obtain a review.")
+            .unwrap();
+        let ChatTurnStatus::Failed { message } = &output.status else {
+            panic!("policy drift must fail the resumed parent turn");
+        };
+        assert!(message.contains("effective tool policy differs"));
+        assert!(message.contains("durable checkpoint snapshot"));
+
+        let tree = fixture.repositories.runs.run_tree(&output.run_id).unwrap();
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[1].state, RunState::Succeeded);
+        let child_record = fixture
+            .repositories
+            .runs
+            .run(&tree[1].run_id)
+            .unwrap()
+            .unwrap();
+        let child_input: ChatRunInput = serde_json::from_value(child_record.input).unwrap();
+        let ChatRunInput::Subagent {
+            authority_ceiling, ..
+        } = child_input
+        else {
+            panic!("durable child has root input");
+        };
+        assert!(!authority_ceiling.contains(&agl_kernel::ToolId::new("core.cron:add").unwrap()));
+
+        let jobs = fixture.state.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(
+            jobs[0]
+                .tools
+                .iter()
+                .any(|tool| tool == "agent.supervisor:delegate")
+        );
+        assert!(jobs[1].tools.is_empty());
+        drop(jobs);
+
+        let late_grant_id = fixture.state.late_grant_id.lock().unwrap().clone().unwrap();
         assert_eq!(
-            repositories
+            fixture
+                .repositories
                 .permissions
                 .grant(&late_grant_id)
                 .unwrap()
                 .unwrap()
                 .state,
-            PermissionGrantState::Revoked
+            PermissionGrantState::Consumed {
+                run_id: output.run_id.clone()
+            }
         );
 
         chat.shutdown().unwrap();
-        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(&fixture.root);
     }
 }
