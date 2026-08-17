@@ -1811,6 +1811,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
 fn function_run_requires_the_package_bound_model_before_live_admission() {
     let repo = TempRepo::new("missing-function-model-binding");
     let home = TempHome::new("missing-function-model-binding");
+    let function_ref = write_missing_model_fixture(&repo);
     let home_arg = home.path_string();
     let output = run_agl_in(
         repo.path(),
@@ -1819,7 +1820,7 @@ fn function_run_requires_the_package_bound_model_before_live_admission() {
             &home_arg,
             "run",
             "--function",
-            "gemma4-12b",
+            &function_ref,
             "--prompt",
             "This prompt must not reach model admission.",
         ],
@@ -1828,7 +1829,114 @@ fn function_run_requires_the_package_bound_model_before_live_admission() {
     assert_failure(&output);
     assert_empty_stdout(&output);
     let stderr = stderr(&output);
-    assert_contains(&stderr, "Model artifact `gemma4-12b` is not installed");
+    assert_contains(
+        &stderr,
+        "Model artifact `test-missing-model` is not installed",
+    );
+}
+
+fn write_missing_model_fixture(repo: &TempRepo) -> String {
+    let agl_root = repo.path().join(".agl");
+    let function_root = agl_root.join("functions/missing-model");
+    let model_root = agl_root.join("models/test-missing-model");
+    fs::create_dir_all(&function_root).unwrap();
+    fs::create_dir_all(model_root.join("evidence")).unwrap();
+    fs::write(
+        agl_root.join("workspace.toml"),
+        r#"version = 3
+default_function = "function:missing-model@^1.0"
+
+[[sources]]
+id = "workspace"
+tier = "workspace"
+kind = "directory"
+path = ".agl"
+
+[policy]
+[config]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+package:
+  schema: agentlibre.package/v1
+  type: function
+  id: missing-model
+  version: 1.0.0
+  payload_schema: agentlibre.function/v3
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - model:test-missing-model@^1.0
+title: Missing model fixture
+model:
+  profile: local
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 1
+  stop_rules: []
+  structured_generation: lazy_tool
+  repair_malformed_tool_calls: true
+skills:
+  use: []
+subagents:
+  use: []
+---
+"#,
+    )
+    .unwrap();
+    fs::write(
+        function_root.join("SYSTEM.md"),
+        "This fixture must fail before inference.\n",
+    )
+    .unwrap();
+    fs::write(
+        model_root.join("MODEL.toml"),
+        r#"package = { schema = "agentlibre.package/v1", type = "model", id = "test-missing-model", version = "1.0.0", payload_schema = "agentlibre.model/v3", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+
+display_name = "Missing model fixture"
+capabilities = ["text", "tools"]
+license = "test-only"
+license_url = "https://example.invalid/license"
+repository = "agentlibre/test-missing-model"
+upstream_revision = "1111111111111111111111111111111111111111"
+
+[[weights]]
+role = "main"
+model_id = "test-missing-model"
+files = [{ filename = "test-missing-model.gguf", byte_size = 17, sha256 = "2222222222222222222222222222222222222222222222222222222222222222" }]
+required = true
+
+[[profiles]]
+id = "local"
+device = "cpu"
+benchmark_evidence = "evidence/local.md"
+required_total_ram_bytes = 1
+host_private_bytes = 1
+device_private_bytes = 0
+shared_bytes = 0
+decoder_scratch_bytes = 0
+gpu_layers = 0
+context_tokens = 256
+batch_size = 32
+ubatch_size = 32
+threads = 1
+flash_attention = false
+cache_type_k = "f16"
+cache_type_v = "f16"
+mmap = true
+unified_kv = false
+slot_count = 1
+smoke_timeout_seconds = 30
+expected_speed = "fixture"
+"#,
+    )
+    .unwrap();
+    fs::write(model_root.join("evidence/local.md"), "Test evidence.\n").unwrap();
+    "missing-model".to_owned()
 }
 
 #[test]
