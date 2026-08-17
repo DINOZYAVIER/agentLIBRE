@@ -26,8 +26,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+
+      - name: Checkout build submodules
+        run: git submodule update --init --recursive -- assets/core-skills vendor/llama.cpp
 
       - name: Install native dependencies
         run: scripts/ci/install-native.sh --target ubuntu-apt
