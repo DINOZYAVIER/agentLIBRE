@@ -112,6 +112,7 @@ struct TerminalEntry {
     command_timeout: Option<AgentCommandTimeout>,
     pending_prompt_result: Option<PendingAgentCommandResult>,
     command_driver_busy: bool,
+    integration_poll_busy: bool,
     pending_human_command: Option<PendingHumanCommand>,
     pending_agent_transaction: Option<PendingAgentTransaction>,
     active_typed_command: Option<ActiveTypedCommand>,
@@ -1611,10 +1612,10 @@ impl TerminalRegistry {
             ));
         }
         let execution_id = {
-            let state = self.lock()?;
+            let mut state = self.lock()?;
             let entry = state
                 .terminals
-                .get(terminal_id)
+                .get_mut(terminal_id)
                 .ok_or_else(|| terminal_not_found(terminal_id))?;
             if !entry.record.state.is_live() {
                 return Err(ProcessError::new(
@@ -1628,52 +1629,73 @@ impl TerminalRegistry {
                     "recovered terminal has no private shell integration driver",
                 ));
             }
+            if entry.integration_poll_busy {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::InputBackpressure,
+                    "private shell integration poll is already active",
+                ));
+            }
+            entry.integration_poll_busy = true;
             entry.record.execution_id.clone()
         };
-        let read = self
-            .starter
-            .read_shell_integration(&execution_id, maximum_bytes)?;
-        let bytes = read.bytes.decode(maximum_bytes)?;
-        let status = self.starter.status(&execution_id)?;
-        let (batch, transaction_must_terminate) = self.accept_acknowledged_private_packet(
-            terminal_id,
-            &bytes,
-            read.foreground_process_group,
-            read.degraded,
-            read.channel_closed,
-        )?;
-        self.persist_execution_status(terminal_id, status)?;
-        let mut detach = None;
-        let mut terminate = transaction_must_terminate;
-        {
-            let mut state = self.lock()?;
+        let result = (|| {
+            let read = self
+                .starter
+                .read_shell_integration(&execution_id, maximum_bytes)?;
+            let bytes = read.bytes.decode(maximum_bytes)?;
+            let status = self.starter.status(&execution_id)?;
+            let (batch, transaction_must_terminate) = self.accept_acknowledged_private_packet(
+                terminal_id,
+                &bytes,
+                read.foreground_process_group,
+                read.degraded,
+                read.channel_closed,
+            )?;
+            self.persist_execution_status(terminal_id, status)?;
+            let mut detach = None;
+            let mut terminate = transaction_must_terminate;
+            {
+                let mut state = self.lock()?;
+                let entry = state
+                    .terminals
+                    .get_mut(terminal_id)
+                    .ok_or_else(|| terminal_not_found(terminal_id))?;
+                if batch.notice.is_some() {
+                    fail_all_agent_commands(
+                        entry,
+                        ProcessError::new(
+                            ProcessErrorCode::StateConflict,
+                            "agent terminal shell integration is degraded",
+                        ),
+                    );
+                    detach = entry.agent_input_lease.take();
+                    entry.renew_input_lease_at = None;
+                    terminate |= entry.record.owner.is_agent() && entry.record.state.is_live();
+                } else if entry.commands.active_sequence().is_none() {
+                    detach = entry.agent_input_lease.take();
+                    entry.renew_input_lease_at = None;
+                }
+            }
+            if let Some(lease) = detach {
+                let _ = self.starter.detach(&execution_id, lease);
+            }
+            if terminate {
+                self.terminate_terminal(terminal_id, KillMode::Immediate)?;
+            }
+            Ok(batch)
+        })();
+        let released = self.lock().and_then(|mut state| {
             let entry = state
                 .terminals
                 .get_mut(terminal_id)
                 .ok_or_else(|| terminal_not_found(terminal_id))?;
-            if batch.notice.is_some() {
-                fail_all_agent_commands(
-                    entry,
-                    ProcessError::new(
-                        ProcessErrorCode::StateConflict,
-                        "agent terminal shell integration is degraded",
-                    ),
-                );
-                detach = entry.agent_input_lease.take();
-                entry.renew_input_lease_at = None;
-                terminate |= entry.record.owner.is_agent() && entry.record.state.is_live();
-            } else if entry.commands.active_sequence().is_none() {
-                detach = entry.agent_input_lease.take();
-                entry.renew_input_lease_at = None;
-            }
+            entry.integration_poll_busy = false;
+            Ok(())
+        });
+        match (result, released) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(batch), Ok(())) => Ok(batch),
         }
-        if let Some(lease) = detach {
-            let _ = self.starter.detach(&execution_id, lease);
-        }
-        if terminate {
-            self.terminate_terminal(terminal_id, KillMode::Immediate)?;
-        }
-        Ok(batch)
     }
 
     fn accept_acknowledged_private_packet(
@@ -2314,6 +2336,7 @@ fn insert_stored_terminal(state: &mut RegistryState, stored: StoredTerminalRecor
             command_timeout: None,
             pending_prompt_result: None,
             command_driver_busy: false,
+            integration_poll_busy: false,
             pending_human_command: None,
             pending_agent_transaction: None,
             active_typed_command: None,
