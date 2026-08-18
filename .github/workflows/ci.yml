@@ -47,21 +47,7 @@ jobs:
         run: scripts/ci/prepare.sh
 
       - name: Workspace checks
-        run: |
-          set +e
-          log="$RUNNER_TEMP/workspace-check.log"
-          AGL_CI_SKIP_PREPARE=1 scripts/ci/check.sh 2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          set -e
-
-          if ((status != 0)); then
-            detail="$(tail -n 30 "$log")"
-            detail="${detail//'%'/'%25'}"
-            detail="${detail//$'\r'/'%0D'}"
-            detail="${detail//$'\n'/'%0A'}"
-            printf '::error title=Workspace checks failed::%s\n' "$detail"
-            exit "$status"
-          fi
+        run: AGL_CI_SKIP_PREPARE=1 scripts/ci/check.sh
 
       - name: Release CLI smoke
         run: AGL_CI_SKIP_PREPARE=1 scripts/ci/release-smoke.sh
