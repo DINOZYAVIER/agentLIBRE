@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use agl_app::{
@@ -534,7 +534,8 @@ fn fixture_descriptor(
 
 #[derive(Default)]
 struct InferenceControl {
-    calls: AtomicUsize,
+    calls: Mutex<usize>,
+    calls_changed: Condvar,
     blocked: AtomicBool,
     finish_with_length: AtomicBool,
     emit_scripted_progress: AtomicBool,
@@ -542,6 +543,25 @@ struct InferenceControl {
     manager_status: Mutex<Option<ModelManagerStatus>>,
     unload_result: Mutex<Option<Result<ModelUnloadResult, ModelManagerError>>>,
     unload_targets: Mutex<Vec<ManagerUnloadTarget>>,
+}
+
+impl InferenceControl {
+    fn record_call(&self) {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        self.calls_changed.notify_all();
+    }
+
+    fn wait_for_calls(&self, expected: usize) {
+        let mut calls = self.calls.lock().unwrap();
+        while *calls < expected {
+            calls = self.calls_changed.wait(calls).unwrap();
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
 }
 
 struct InferenceUnblockGuard(Arc<InferenceControl>);
@@ -618,7 +638,7 @@ impl InferenceClient for ControlledInferenceClient {
             .lock()
             .unwrap()
             .push(job.request.clone());
-        self.control.calls.fetch_add(1, Ordering::SeqCst);
+        self.control.record_call();
         while self.control.blocked.load(Ordering::Acquire) && !job.cancellation.is_cancelled() {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -945,36 +965,15 @@ fn submit(
 }
 
 fn wait_for_calls(control: &InferenceControl, expected: usize) {
-    // The workspace CI runs several native-heavy test binaries concurrently;
-    // keep this functional assertion independent from scheduler latency.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while control.calls.load(Ordering::Acquire) < expected {
-        assert!(Instant::now() < deadline, "inference did not start");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    control.wait_for_calls(expected);
 }
 
 fn wait_for_terminal(state: &DaemonState, run_id: &RunId) -> agl_supervisor::RunOutcome {
-    wait_for_terminal_with_timeout(state, run_id, Duration::from_secs(5))
-}
-
-fn wait_for_terminal_with_timeout(
-    state: &DaemonState,
-    run_id: &RunId,
-    timeout: Duration,
-) -> agl_supervisor::RunOutcome {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let outcome = state.run_outcome(run_id.clone()).unwrap();
-        if outcome.status.state.is_terminal() {
-            return outcome;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "run did not reach terminal state"
-        );
-        std::thread::sleep(Duration::from_millis(5));
+    let subscription = state.subscribe_run(run_id.clone(), 0).unwrap();
+    while subscription.recv().unwrap().is_some() {
+        // Completion is delivered only after the terminal state is durable.
     }
+    state.run_outcome(run_id.clone()).unwrap()
 }
 
 fn incomplete_item_identity(state: &DaemonState, session_id: &SessionId) -> (MessageId, u64) {
@@ -1300,7 +1299,7 @@ fn incomplete_continue_joins_fifo_behind_prompts_already_queued() {
     let active = submit(&mut state, &session_id, "active prompt", None);
     wait_for_calls(&control, 2);
     let queued_before_continue = submit(&mut state, &session_id, "already queued prompt", None);
-    std::thread::sleep(Duration::from_millis(2));
+    assert_eq!(queued_before_continue.state, ProtocolRunState::Queued);
     let continuation = continue_incomplete(
         &mut state,
         &session_id,
@@ -1696,7 +1695,7 @@ Return the daemon child verdict.
         other => panic!("unexpected session event: {other:?}"),
     };
     let accepted = submit(&mut state, &session_id, "Coordinate daemon review", None);
-    let outcome = wait_for_terminal_with_timeout(&state, &accepted.run_id, Duration::from_secs(30));
+    let outcome = wait_for_terminal(&state, &accepted.run_id);
     assert_eq!(outcome.status.state, RunState::Succeeded);
 
     let tree = state.handle_request(request(DaemonRequestKind::RunTree(RunTreeRequest {
@@ -2003,13 +2002,19 @@ fn turns_for_one_session_execute_in_submission_order() {
     let first = submit(&mut state, &session_id, "first", None);
     let second = submit(&mut state, &session_id, "second", None);
     wait_for_calls(&control, 1);
-    std::thread::sleep(Duration::from_millis(75));
-    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        state
+            .run_outcome(second.run_id.clone())
+            .unwrap()
+            .status
+            .state,
+        RunState::Queued
+    );
 
     control.blocked.store(false, Ordering::Release);
     let first_outcome = wait_for_terminal(&state, &first.run_id);
     let second_outcome = wait_for_terminal(&state, &second.run_id);
-    assert_eq!(control.calls.load(Ordering::Acquire), 2);
+    assert_eq!(control.call_count(), 2);
     let first_finished = first_outcome.status.finished_at_ms.unwrap();
     let second_started = second_outcome.status.started_at_ms.unwrap();
     assert!(
@@ -2090,7 +2095,7 @@ fn confirmed_session_exit_cancels_active_and_queued_roots_before_finish() {
         wait_for_terminal(&state, &second.run_id).status.state,
         RunState::Cancelled
     );
-    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+    assert_eq!(control.call_count(), 1);
     let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
         SessionStatusRequest { session_id },
     )));
@@ -2129,7 +2134,7 @@ fn generic_session_finish_uses_the_same_cancel_and_wait_boundary() {
         wait_for_terminal(&state, &second.run_id).status.state,
         RunState::Cancelled
     );
-    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+    assert_eq!(control.call_count(), 1);
 }
 
 #[test]
@@ -2366,7 +2371,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
 
     let second = run_cron_tick(repository.as_ref(), 0, &mut executor, &mut notifier).unwrap();
     assert_eq!(second.recorded_runs[0].id, first.recorded_runs[0].id);
-    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+    assert_eq!(control.call_count(), 1);
     assert!(
         repositories
             .matrix_outbox
