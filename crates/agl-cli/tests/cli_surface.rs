@@ -1206,6 +1206,7 @@ fn init_dry_run_reports_conservative_catalog_without_writes() {
     let home = TempHome::new("init-dry-run-plan");
     let hf_home = home.path().join("hf-home");
     let home_arg = home.path_string();
+    let workspace_manifest = write_setup_model_fixture(&repo);
     let init = run_agl_in_with_hf_home_and_fake_inventory(
         &home,
         repo.path(),
@@ -1246,9 +1247,14 @@ fn init_dry_run_reports_conservative_catalog_without_writes() {
             "missing package {expected}:\n{stdout}"
         );
     }
+    assert_eq!(
+        fs::read(repo.path().join(".agl/workspace.toml")).unwrap(),
+        workspace_manifest,
+        "guided dry-run must not modify the workspace manifest"
+    );
     assert!(
-        !repo.path().join(".agl/workspace.toml").exists(),
-        "guided dry-run must not initialize the workspace"
+        !repo.path().join(".agl/package-lock.toml").exists(),
+        "guided dry-run must not write the package lock"
     );
     assert!(
         !home.path().join("state/setup").exists(),
@@ -1269,6 +1275,7 @@ fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
     let home = TempHome::new("init-resume-offline");
     let hf_home = home.path().join("hf-home");
     let home_arg = home.path_string();
+    let workspace_manifest = write_setup_model_fixture(&repo);
     let args = [
         "--home",
         &home_arg,
@@ -1289,9 +1296,14 @@ fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
         failure["error"].as_str().expect("failure error"),
         "offline cache miss",
     );
+    assert_eq!(
+        fs::read(repo.path().join(".agl/workspace.toml")).unwrap(),
+        workspace_manifest,
+        "failed acquisition must not modify the workspace manifest"
+    );
     assert!(
-        !repo.path().join(".agl/workspace.toml").exists(),
-        "failed acquisition must not publish workspace state"
+        !repo.path().join(".agl/package-lock.toml").exists(),
+        "failed acquisition must not write the package lock"
     );
 
     let setup_root = home.path().join("state/setup");
@@ -2112,6 +2124,33 @@ fn run_agl_in(cwd: &std::path::Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
+}
+
+fn write_setup_model_fixture(repo: &TempRepo) -> Vec<u8> {
+    let agl_root = repo.path().join(".agl");
+    let model_root = agl_root.join("models/gemma4-e4b");
+    let evidence_root = model_root.join("evidence");
+    fs::create_dir_all(&evidence_root).unwrap();
+
+    let workspace_manifest = b"version = 3\ndefault_function = \"function:gemma4-e4b@^1\"\n\n[[sources]]\nid = \"workspace\"\ntier = \"workspace\"\nkind = \"directory\"\npath = \".agl\"\n".to_vec();
+    fs::write(agl_root.join("workspace.toml"), &workspace_manifest).unwrap();
+
+    let model = include_str!("../../../assets/models/gemma4-e4b/MODEL.toml")
+        .replacen("version = \"1.2.0\"", "version = \"1.2.1\"", 1)
+        .replace("threads = 8", "threads = 1");
+    assert_eq!(
+        model.matches("threads = 1").count(),
+        2,
+        "setup fixture must lower both built-in profile thread counts"
+    );
+    fs::write(model_root.join("MODEL.toml"), model).unwrap();
+    for evidence in [
+        "20260716-gemma4-e4b-32k-cpu.md",
+        "20260723-five-gemma4-rx7900xtx.md",
+    ] {
+        fs::write(evidence_root.join(evidence), "Setup test evidence.\n").unwrap();
+    }
+    workspace_manifest
 }
 
 #[cfg(unix)]
