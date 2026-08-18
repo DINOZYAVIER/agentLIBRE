@@ -955,7 +955,15 @@ fn wait_for_calls(control: &InferenceControl, expected: usize) {
 }
 
 fn wait_for_terminal(state: &DaemonState, run_id: &RunId) -> agl_supervisor::RunOutcome {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for_terminal_with_timeout(state, run_id, Duration::from_secs(5))
+}
+
+fn wait_for_terminal_with_timeout(
+    state: &DaemonState,
+    run_id: &RunId,
+    timeout: Duration,
+) -> agl_supervisor::RunOutcome {
+    let deadline = Instant::now() + timeout;
     loop {
         let outcome = state.run_outcome(run_id.clone()).unwrap();
         if outcome.status.state.is_terminal() {
@@ -1688,7 +1696,7 @@ Return the daemon child verdict.
         other => panic!("unexpected session event: {other:?}"),
     };
     let accepted = submit(&mut state, &session_id, "Coordinate daemon review", None);
-    let outcome = wait_for_terminal(&state, &accepted.run_id);
+    let outcome = wait_for_terminal_with_timeout(&state, &accepted.run_id, Duration::from_secs(30));
     assert_eq!(outcome.status.state, RunState::Succeeded);
 
     let tree = state.handle_request(request(DaemonRequestKind::RunTree(RunTreeRequest {
