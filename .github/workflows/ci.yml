@@ -33,7 +33,12 @@ jobs:
         run: git submodule update --init --recursive -- assets/core-skills vendor/llama.cpp
 
       - name: Install native dependencies
-        run: scripts/ci/install-native.sh --target ubuntu-apt
+        run: |
+          sudo sed -i \
+            -e 's#mirror+file:/etc/apt/apt-mirrors.txt#https://archive.ubuntu.com/ubuntu#g' \
+            -e 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          scripts/ci/install-native.sh --target ubuntu-apt
 
       - name: Install Rust
         run: scripts/ci/install-rustup.sh
