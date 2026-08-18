@@ -6,6 +6,7 @@ fi
 AGL_CI_LIB_SOURCED=1
 
 set -euo pipefail
+umask 022
 
 agl_ci_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AGL_CI_REPO_ROOT="$(cd -- "$agl_ci_script_dir/../.." && pwd)"

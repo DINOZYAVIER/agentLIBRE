@@ -228,7 +228,7 @@ fn inventory_fixture(malformed: bool) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' '{}' >&$AGL_LLAMA_SERVER_INVENTORY_FD\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' '{}' >&$AGL_LLAMA_SERVER_INVENTORY_FD\n",
             payload
         ),
     )

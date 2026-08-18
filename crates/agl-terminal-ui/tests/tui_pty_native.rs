@@ -203,7 +203,8 @@ impl NativeTuiEnvironment {
 }
 
 fn install_terminal_generation(root: &Path) -> (PathBuf, TerminalGenerationIdentity) {
-    let generations = root.join("agl-terminal/generations");
+    let terminal_root = root.join("agl-terminal");
+    let generations = terminal_root.join("generations");
     std::fs::create_dir_all(&generations).unwrap();
     let generation = generations.join("terminal-generation");
     std::fs::create_dir_all(&generation).unwrap();
@@ -217,6 +218,9 @@ fn install_terminal_generation(root: &Path) -> (PathBuf, TerminalGenerationIdent
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&terminal_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o755)).unwrap();
         for name in ["agl-terminald", "agl-process-launcher", "agl-terminal"] {
             std::fs::set_permissions(
                 generation.join(name),

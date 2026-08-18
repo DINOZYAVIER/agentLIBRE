@@ -32,6 +32,7 @@ impl Fixture {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
             for name in ["agl-terminald", "agl-process-launcher", "agl-terminal"] {
                 fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o555)).unwrap();
             }

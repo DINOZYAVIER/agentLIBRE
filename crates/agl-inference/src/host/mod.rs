@@ -1517,7 +1517,7 @@ mod tests {
         let path = root.join("llama-server");
         fs::write(
             &path,
-            "#!/bin/sh\nprintf '%s\\n' '{\"schema\":\"agentlibre.llama-inventory/v1\",\"llama_cpp_commit\":\"0123456\",\"devices\":[{\"identity\":\"CPU\",\"description\":\"fixture\",\"native_device_id\":\"\",\"kind\":\"cpu\",\"available_pool_bytes\":1073741824,\"physical_pool_bytes\":1073741824}]}' >&$AGL_LLAMA_SERVER_INVENTORY_FD\n",
+            "#!/usr/bin/env bash\nprintf '%s\\n' '{\"schema\":\"agentlibre.llama-inventory/v1\",\"llama_cpp_commit\":\"0123456\",\"devices\":[{\"identity\":\"CPU\",\"description\":\"fixture\",\"native_device_id\":\"\",\"kind\":\"cpu\",\"available_pool_bytes\":1073741824,\"physical_pool_bytes\":1073741824}]}' >&$AGL_LLAMA_SERVER_INVENTORY_FD\n",
         )
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();

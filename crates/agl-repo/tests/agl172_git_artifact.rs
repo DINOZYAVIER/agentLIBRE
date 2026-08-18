@@ -84,6 +84,7 @@ fn fixture() -> GitFixture {
             ".agl/tasks",
         ],
     );
+    configure(&parent.join(".agl/tasks"));
     git(&parent, &["commit", "-am", "register tasks artifact"]);
     let child = parent.join(".agl/tasks");
     GitFixture {
