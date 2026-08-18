@@ -1567,13 +1567,13 @@ fn daemon_status_reports_connected_invalid_protocol_as_unhealthy() {
     }
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let (mut stream, _) = loop {
             match listener.accept() {
                 Ok(accepted) => break accepted,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
+                    if stop_rx.try_recv().is_ok() {
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1582,7 +1582,7 @@ fn daemon_status_reports_connected_invalid_protocol_as_unhealthy() {
             }
         };
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let request = read_fake_daemon_request(&mut reader);
@@ -1595,6 +1595,7 @@ fn daemon_status_reports_connected_invalid_protocol_as_unhealthy() {
     });
 
     let output = run_agl(&["--home", &home.path_string(), "daemon", "status"]);
+    let _ = stop_tx.send(());
     server.join().unwrap();
 
     assert_success_no_stderr(&output);
@@ -2133,13 +2134,13 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
     }
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let (mut stream, _) = loop {
             match listener.accept() {
                 Ok(accepted) => break accepted,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
+                    if stop_rx.try_recv().is_ok() {
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -2148,7 +2149,7 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
             }
         };
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
 
@@ -2220,8 +2221,10 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
         .env("HF_HOME", hf_home)
         .env("HF_HUB_OFFLINE", "YES")
         .args(args)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"));
+        .output();
+    let _ = stop_tx.send(());
+    let output =
+        output.unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"));
     server.join().expect("fake inventory daemon panicked");
     output
 }
