@@ -50,7 +50,7 @@ jobs:
           set -e
 
           if ((status != 0)); then
-            detail="$(tail -n 120 "$log")"
+            detail="$(tail -n 30 "$log")"
             detail="${detail//'%'/'%25'}"
             detail="${detail//$'\r'/'%0D'}"
             detail="${detail//$'\n'/'%0A'}"
