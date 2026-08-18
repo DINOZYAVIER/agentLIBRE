@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "agl-actions"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "agl-app"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-assets",
  "agl-chat",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "agl-artifact"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-kernel",
  "serde",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "agl-assets"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-config",
  "agl-package",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "agl-chat"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-assets",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "agl-cli"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-app",
  "agl-artifact",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "agl-client"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-config",
  "agl-content",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "agl-config"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "anyhow",
  "serde",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "agl-content"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-ids",
  "serde",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "agl-core-tools"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-cron",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "agl-cron"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-ids",
  "serde",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "agl-daemon"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-app",
  "agl-chat",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "agl-events"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-content",
  "agl-ids",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "agl-extension"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-kernel",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "agl-function"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-assets",
  "agl-config",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "agl-host-tools"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-content",
  "agl-core-tools",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "agl-ids"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "agl-inference"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-actions",
  "agl-config",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "agl-kernel"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-actions",
  "agl-content",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "agl-matrix"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "serde",
  "sha2 0.11.0",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "agl-matrix-bridge"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-client",
  "agl-content",
@@ -457,14 +457,14 @@ dependencies = [
 
 [[package]]
 name = "agl-memory"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "agl-model"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-assets",
  "agl-config",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "agl-note"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-memory",
  "serde",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "agl-oven"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-config",
  "agl-content",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "agl-package"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "semver",
  "serde",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "agl-permission"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-ids",
  "agl-kernel",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "agl-process"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-exec",
  "agl-terminal-client",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "agl-protocol"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-config",
  "agl-content",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "agl-repo"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-kernel",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "agl-runtime"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-assets",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "agl-session"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-content",
  "agl-events",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "agl-skill"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-assets",
  "agl-core-tools",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "agl-store"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-artifact",
  "agl-content",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "agl-supervisor"
-version = "1.0.0-alpha.14"
+version = "1.0.0-alpha.15"
 dependencies = [
  "agl-events",
  "agl-exec",
