@@ -179,12 +179,28 @@ update_smoke_extension_versions() {
   local tmp
   tmp="$(mktemp "$path.tmp.XXXXXX")"
 
-  if ! awk -v new_version="$version" '
-    /agentlibre\.builtins\\", version = \\"/ ||
-      /agentlibre\.execution\\", version = \\"/ {
-      sub(/version = \\"[^\\"]+\\"/, "version = \\"" new_version "\\"")
+  if ! awk -v new_version="$version" \
+    -v marker='version = \\"' \
+    -v quote='\\"' '
+    /agentlibre\.builtins/ || /agentlibre\.execution/ {
+      start = index($0, marker)
+      if (start > 0) {
+        prefix = substr($0, 1, start + length(marker) - 1)
+        rest = substr($0, start + length(marker))
+        closing = index(rest, quote)
+        if (closing > 0) {
+          print prefix new_version quote substr(rest, closing + length(quote))
+          changed++
+          next
+        }
+      }
     }
     { print }
+    END {
+      if (changed != 2) {
+        exit 42
+      }
+    }
   ' "$path" > "$tmp"; then
     rm -f "$tmp"
     die "failed to update smoke Extension references in $path"
