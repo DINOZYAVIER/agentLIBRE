@@ -7,6 +7,15 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 source_dir="${AGL_LLAMA_CPP_SOURCE_DIR:-$repo_root/vendor/llama.cpp}"
 build_dir="${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}"
 jobs="${AGL_LLAMA_CPP_BUILD_JOBS:-$(nproc)}"
+vulkan_mode="${AGL_LLAMA_CPP_VULKAN:-on}"
+
+case "$vulkan_mode" in
+  on|off|auto) ;;
+  *)
+    echo "AGL_LLAMA_CPP_VULKAN must be one of: on, off, auto" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -f "$source_dir/CMakeLists.txt" ]]; then
   echo "missing llama.cpp source tree at $source_dir" >&2
@@ -127,8 +136,18 @@ if [[ -n "${NIX_LDFLAGS:-}" ]]; then
 fi
 
 vulkan_enabled=OFF
-if [[ -n "$vulkan_include_dir" && -n "$vulkan_library" && \
-      ( -n "$vulkan_glslc" || -n "$vulkan_glslang_validator" ) ]]; then
+if [[ "$vulkan_mode" == on || ( "$vulkan_mode" == auto && \
+      -n "$vulkan_include_dir" && -n "$vulkan_library" && \
+      ( -n "$vulkan_glslc" || -n "$vulkan_glslang_validator" ) ) ]]; then
+  if [[ -z "$vulkan_include_dir" || -z "$vulkan_library" || \
+        ( -z "$vulkan_glslc" && -z "$vulkan_glslang_validator" ) ]]; then
+    cat >&2 <<'EOF'
+Vulkan build is the default, but Vulkan development dependencies were not found.
+Run scripts/build-release.sh (it enters nix/agl-local-vulkan.nix automatically),
+or set AGL_LLAMA_CPP_VULKAN=off explicitly for a CPU-only build.
+EOF
+    exit 1
+  fi
   vulkan_enabled=ON
 fi
 

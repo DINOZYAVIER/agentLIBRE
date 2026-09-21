@@ -1,0 +1,42 @@
+{
+  "schema": "ayeque.agent-search-fixtures/v1",
+  "requests": [
+    {"query": "Rust async cancellation", "source": "web", "language": "en", "limit": 8},
+    {"query": "Київ", "source": "wikipedia", "language": "uk", "limit": 3}
+  ],
+  "successes": [
+    {"schema": "ayeque.agent-search-result/v1", "source": "web", "language": "en", "results": [], "suggestions": [], "truncated": false},
+    {
+      "schema": "ayeque.agent-search-result/v1",
+      "source": "web",
+      "language": "en",
+      "results": [
+        {"title": "Rust cancellation", "url": "https://example.org/rust", "snippet": "Bounded cancellation", "engine": "bing", "published_at": "2026-09-02T00:00:00Z"},
+        {"title": "Async task", "url": "https://example.net/async", "snippet": "", "engine": "brave", "published_at": null}
+      ],
+      "suggestions": ["rust cancellation token"],
+      "truncated": false
+    },
+    {"schema": "ayeque.agent-search-result/v1", "source": "wikipedia", "language": "uk", "results": [], "suggestions": [], "truncated": true}
+  ],
+  "errors": [
+    {"status": 400, "body": {"schema": "ayeque.agent-search-error/v1", "code": "invalid_request"}, "agl_kind": "invalid_result"},
+    {"status": 401, "body": {"schema": "ayeque.agent-search-error/v1", "code": "authentication_failed"}, "agl_kind": "unauthorized"},
+    {"status": 403, "body": {"schema": "ayeque.agent-search-error/v1", "code": "authentication_failed"}, "agl_kind": "unauthorized"},
+    {"status": 429, "body": {"schema": "ayeque.agent-search-error/v1", "code": "rate_limited"}, "agl_kind": "unavailable"},
+    {"status": 502, "body": {"schema": "ayeque.agent-search-error/v1", "code": "invalid_upstream_response"}, "agl_kind": "invalid_result"},
+    {"status": 503, "body": {"schema": "ayeque.agent-search-error/v1", "code": "upstream_unavailable"}, "agl_kind": "unavailable"},
+    {"status": 504, "body": {"schema": "ayeque.agent-search-error/v1", "code": "timeout"}, "agl_kind": "deadline"}
+  ],
+  "invalid_successes": [
+    {"schema": "ayeque.agent-search-result/v1", "source": "web", "language": "en", "query": "must not be echoed", "results": [], "suggestions": [], "truncated": false},
+    {
+      "schema": "ayeque.agent-search-result/v1",
+      "source": "web",
+      "language": "en",
+      "results": [{"title": "Private", "url": "http://127.0.0.1/private", "snippet": "not visible", "engine": "internal", "published_at": null}],
+      "suggestions": [],
+      "truncated": false
+    }
+  ]
+}

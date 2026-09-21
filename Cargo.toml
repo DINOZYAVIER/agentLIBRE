@@ -1,48 +1,13 @@
 [workspace]
 members = [
-    "crates/agl-artifact",
-    "crates/agl-package",
-    "crates/agl-assets",
-    "crates/agl-chat",
-    "crates/agl-client",
-    "crates/agl-cli",
-    "crates/agl-cron",
-    "crates/agl-daemon",
-    "crates/agl-exec",
-    "crates/agl-function",
-    "crates/agl-core-tools",
-    "crates/agl-host-tools",
-    "crates/agl-ids",
-    "crates/agl-inference",
-    "crates/agl-kernel",
-    "crates/agl-memory",
-    "crates/agl-model",
-    "crates/agl-note",
-    "crates/agl-permission",
-    "crates/agl-matrix",
-    "crates/agl-oven",
-    "crates/agl-process",
-    "crates/agl-process-launcher",
-    "crates/agl-protocol",
-    "crates/agl-repo",
-    "crates/agl-session",
-    "crates/agl-skill",
-    "crates/agl-config",
-    "crates/agl-content",
-    "crates/agl-events",
-    "crates/agl-extension",
-    "crates/agl-actions",
-    "crates/agl-app",
+    "crates/agl-daemon-api",
+    "crates/agl-execution-api",
+    "products/agl-cli",
+    "products/services/agl-daemon",
+    "products/services/agl-execd",
     "crates/agl-runtime",
-    "crates/agl-store",
-    "crates/agl-supervisor",
-    "crates/agl-pty",
-    "crates/agl-terminal",
-    "crates/agl-terminal-client",
-    "crates/agl-terminal-protocol",
-    "crates/agl-terminal-ui",
-    "crates/agl-terminald",
-    "crates/agl-matrix-bridge",
+    "crates/agl-core",
+    "products/agl-matrix-bridge",
 ]
 resolver = "3"
 
@@ -53,80 +18,46 @@ license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
 
 [workspace.dependencies]
-agl-artifact = { path = "crates/agl-artifact" }
-agl-package = { path = "crates/agl-package" }
-agl-events = { path = "crates/agl-events" }
-agl-extension = { path = "crates/agl-extension" }
-agl-actions = { path = "crates/agl-actions" }
-agl-app = { path = "crates/agl-app" }
-agl-assets = { path = "crates/agl-assets" }
-agl-chat = { path = "crates/agl-chat" }
-agl-client = { path = "crates/agl-client" }
-agl-cron = { path = "crates/agl-cron" }
-agl-daemon = { path = "crates/agl-daemon" }
-agl-exec = { path = "crates/agl-exec" }
-agl-function = { path = "crates/agl-function" }
-agl-config = { path = "crates/agl-config" }
-agl-content = { path = "crates/agl-content" }
-agl-core-tools = { path = "crates/agl-core-tools" }
-agl-host-tools = { path = "crates/agl-host-tools" }
-agl-ids = { path = "crates/agl-ids" }
-agl-inference = { path = "crates/agl-inference" }
-agl-kernel = { path = "crates/agl-kernel" }
-agl-memory = { path = "crates/agl-memory" }
-agl-model = { path = "crates/agl-model" }
-agl-note = { path = "crates/agl-note" }
-agl-permission = { path = "crates/agl-permission" }
-agl-matrix = { path = "crates/agl-matrix" }
-agl-oven = { path = "crates/agl-oven" }
-agl-process = { path = "crates/agl-process" }
-agl-process-launcher = { path = "crates/agl-process-launcher" }
-agl-pty = { path = "crates/agl-pty" }
-agl-terminal = { path = "crates/agl-terminal" }
-agl-terminal-client = { path = "crates/agl-terminal-client" }
-agl-terminal-protocol = { path = "crates/agl-terminal-protocol" }
-agl-terminal-ui = { path = "crates/agl-terminal-ui" }
-agl-terminald = { path = "crates/agl-terminald" }
-agl-protocol = { path = "crates/agl-protocol" }
-agl-repo = { path = "crates/agl-repo" }
+agl-daemon-api = { path = "crates/agl-daemon-api" }
+agl-execution-api = { path = "crates/agl-execution-api" }
+agl-daemon = { path = "products/services/agl-daemon" }
+agl-execd = { path = "products/services/agl-execd" }
 agl-runtime = { path = "crates/agl-runtime" }
-agl-session = { path = "crates/agl-session" }
-agl-skill = { path = "crates/agl-skill" }
-agl-store = { path = "crates/agl-store" }
-agl-supervisor = { path = "crates/agl-supervisor" }
+agl-core = { path = "crates/agl-core" }
+ayeque-forge-core = { git = "https://github.com/DINOZYAVIER/ayeque-forge.git", rev = "509e7df" }
 anyhow = "1.0.103"
-base64 = "0.22.1"
-ashpd = { version = "0.13.12", default-features = false, features = ["documents", "screenshot", "tokio"] }
-cc = "1.2.67"
+bytes = "1.12.1"
+chrono = "0.4.45"
 clap = { version = "4.6.2", features = ["derive"] }
-clap_complete = "4.6.7"
 crossterm = "0.28.1"
-directories = "6.0.0"
-fs2 = "0.4.3"
 futures-util = { version = "0.3.32", features = ["sink"] }
-hf-hub = "=1.0.0"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+garde = { version = "0.23.0", features = ["derive"] }
+hf-hub = { version = "1.0.0", default-features = false, features = ["rustls-tls"] }
+http-body-util = "0.1.5"
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
+rustls = "0.23.43"
 libc = "0.2.186"
-rustix-openpty = "0.2.0"
 matrix-sdk = { version = "=0.18.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption"] }
-ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+stemmer = "0.3.2"
+rustyline = "18.0.1"
+reedline = { version = "0.43.0", features = ["external_printer"] }
+nu-ansi-term = "0.50.0"
+pulldown-cmark = "0.13.4"
 serde = { version = "1.0.228", features = ["derive"] }
 semver = { version = "1.0.28", features = ["serde"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
-schemars = "1.2.1"
 jsonschema = { version = "0.47.0", default-features = false }
 sha2 = "0.11.0"
 sysinfo = "=0.39.6"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = { version = "0.7.18", features = ["codec"] }
+tokio = { version = "1.52.3", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1.1.3"
 tracing = "0.1.44"
-tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.24.0", features = ["serde", "v7"] }
-url = "2.5.8"
-unicode-segmentation = "1.12.0"
 unicode-width = "0.2.0"
+url = "2.5.8"

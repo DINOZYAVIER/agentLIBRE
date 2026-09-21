@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "cursor", "limit_lines"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "pattern": "^forge:[a-z0-9][a-z0-9.-]*/.+$",
+      "description": "Verified Forge path, for example forge:agentlibre.memory/INDEX.md"
+    },
+    "cursor": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "First line to return; use the exact next_cursor for continuation."
+    },
+    "limit_lines": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "description": "Maximum lines in this page."
+    }
+  }
+}

@@ -2,21 +2,27 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib.sh
-source "$script_dir/lib.sh"
+repo_root="$(cd -- "$script_dir/../.." && pwd)"
+cd "$repo_root"
 
 if [[ "${AGL_CI_SKIP_PREPARE:-0}" != "1" ]]; then
   "$script_dir/prepare.sh"
 fi
 
-"$script_dir/tool-versions.sh"
-"$script_dir/metadata.sh"
-"$script_dir/check-engineering-language.sh"
-"$script_dir/fmt.sh"
-"$script_dir/clippy.sh"
-"$script_dir/test.sh"
-"$script_dir/check-behavior-tests.py"
-"$script_dir/install-bundle-dry-run.sh"
-"$script_dir/uninstall-bundle.sh"
-"$script_dir/systemd-dry-run.sh"
-"$script_dir/diff-check.sh"
+echo '==> cargo fmt'
+cargo fmt --all -- --check
+
+echo '==> cargo check'
+cargo check --locked --workspace
+
+echo '==> cargo clippy'
+cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+
+echo '==> cargo test'
+cargo test --locked --workspace
+
+echo '==> behavior checks'
+python3 "$script_dir/check-behavior-tests.py"
+
+echo '==> whitespace'
+git diff --check

@@ -1,0 +1,37 @@
+[package]
+name = "agl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+autobins = false
+
+[[bin]]
+name = "agl"
+path = "src/main.rs"
+
+[dependencies]
+agl-core.workspace = true
+agl-daemon-api.workspace = true
+agl-execution-api.workspace = true
+agl-daemon.workspace = true
+agl-runtime.workspace = true
+ayeque-forge-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+garde.workspace = true
+reedline.workspace = true
+nu-ansi-term.workspace = true
+pulldown-cmark.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+semver.workspace = true
+sha2.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"

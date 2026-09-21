@@ -15,10 +15,6 @@ It's free (libre) and open-source.
 This repository is currently in alpha state, not a
 polished end-user release. I hope to provide a roadmap as soon as possible.
 
-## Start
-
-See [docs/guides/quickstart.md](docs/guides/quickstart.md).
-
 ## Documentation
 
 See [docs/index.md](docs/index.md).

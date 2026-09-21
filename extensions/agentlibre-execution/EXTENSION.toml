@@ -1,0 +1,28 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.execution"
+version = "1.0.0-alpha.15"
+description = "Neutral exact-argv and managed Terminal contracts"
+
+[[effects]]
+id = "agentlibre.execution:process.execute"
+description = "Run an explicitly admitted logical executable in the workspace"
+scope_schema = "schemas/execution-scope.json"
+
+[[effects]]
+id = "agentlibre.execution:terminal.control"
+description = "Open and control a Conversation-owned Terminal in the workspace"
+scope_schema = "schemas/execution-scope.json"
+
+[[tools]]
+id = "agentlibre.execution:command.exec"
+description = "Run one bounded foreground argument vector without shell interpretation"
+input_schema = "schemas/command-exec.json"
+required_effects = ["agentlibre.execution:process.execute"]
+delivery = "at_most_once"
+
+[[tools]]
+id = "agentlibre.execution:terminal.session"
+description = "Open or control one Conversation-owned managed Terminal session"
+input_schema = "schemas/terminal-session.json"
+required_effects = ["agentlibre.execution:terminal.control"]
+delivery = "at_most_once"

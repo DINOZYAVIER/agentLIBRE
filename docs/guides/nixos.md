@@ -7,5 +7,5 @@ Useful commands:
 ```sh
 scripts/agl-nix-vulkan.sh --build
 scripts/agl-nix-vulkan.sh --diagnose
-scripts/agl-nix-vulkan.sh -- ./target/debug/agl config paths
+scripts/agl-nix-vulkan.sh -- cargo test --workspace
 ```

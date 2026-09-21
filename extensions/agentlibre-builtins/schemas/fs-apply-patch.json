@@ -1,0 +1,73 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operations"],
+  "properties": {
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["op", "path", "content", "expected_absent"],
+            "properties": {
+              "op": { "const": "create" },
+              "path": { "type": "string", "minLength": 1 },
+              "content": { "type": "string" },
+              "expected_absent": { "const": true }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["op", "path", "expected_digest", "edits"],
+            "properties": {
+              "op": { "const": "update" },
+              "path": { "type": "string", "minLength": 1 },
+              "expected_digest": { "type": "string" },
+              "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["old_text", "new_text"],
+                  "properties": {
+                    "old_text": { "type": "string", "minLength": 1 },
+                    "new_text": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["op", "path", "expected_digest"],
+            "properties": {
+              "op": { "const": "delete" },
+              "path": { "type": "string", "minLength": 1 },
+              "expected_digest": { "type": "string" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["op", "from", "to", "expected_digest", "expected_absent"],
+            "properties": {
+              "op": { "const": "move" },
+              "from": { "type": "string", "minLength": 1 },
+              "to": { "type": "string", "minLength": 1 },
+              "expected_digest": { "type": "string" },
+              "expected_absent": { "const": true }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -11,9 +11,7 @@ Usage:
   scripts/agl-nix-vulkan.sh
   scripts/agl-nix-vulkan.sh --diagnose
   scripts/agl-nix-vulkan.sh --build
-  scripts/agl-nix-vulkan.sh --smoke-tools FUNCTION
-  scripts/agl-nix-vulkan.sh --smoke-tools-pack FUNCTION
-  scripts/agl-nix-vulkan.sh --smoke-llama FUNCTION
+  scripts/agl-nix-vulkan.sh --smoke-llama
   scripts/agl-nix-vulkan.sh -- <command> [args...]
 
 Runs agentLIBRE local llama.cpp development commands inside a Nix shell with
@@ -83,17 +81,7 @@ diagnose() {
 
 build_local() {
   "$repo_root/scripts/build-llama-cpp.sh"
-  cargo build -p agl-cli --bin agl
-}
-
-smoke_tools() {
-  local function_ref="${1:-gemma4-12b}"
-  AGL_SMOKE_FUNCTION="$function_ref" "$repo_root/scripts/smoke-agentlibre-skill-tools.sh"
-}
-
-smoke_tools_pack() {
-  local function_ref="${1:-gemma4-12b}"
-  AGL_SMOKE_FUNCTION="$function_ref" "$repo_root/scripts/smoke-agentlibre-tools-pack.sh"
+  cargo build --locked --release -p agl-cli --bin agl
 }
 
 smoke_llama() {
@@ -123,14 +111,6 @@ case "${1:-}" in
     ;;
   --build)
     build_local
-    ;;
-  --smoke-tools)
-    shift
-    smoke_tools "$@"
-    ;;
-  --smoke-tools-pack)
-    shift
-    smoke_tools_pack "$@"
     ;;
   --smoke-llama)
     shift

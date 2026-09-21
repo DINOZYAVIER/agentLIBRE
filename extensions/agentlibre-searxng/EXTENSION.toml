@@ -1,0 +1,16 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.searxng"
+version = "1.0.0-alpha.1"
+description = "Bounded search through the AYEQUE agent-search service"
+
+[[effects]]
+id = "agentlibre.searxng:query"
+description = "Send a query to admitted AYEQUE search source classes"
+scope_schema = "schemas/query-scope.json"
+
+[[tools]]
+id = "agentlibre.searxng:search"
+description = "Search an admitted web or Wikipedia source and return bounded normalized results"
+input_schema = "schemas/search.json"
+required_effects = ["agentlibre.searxng:query"]
+delivery = "retryable"

@@ -16,6 +16,9 @@ export AGL_CI_REPO_ROOT
 # CPU-only llama.cpp build isolated so it cannot remove a local runtime's
 # dynamically loaded GPU backend from target/llama-cpp/build.
 export AGL_LLAMA_CPP_BUILD_DIR="${AGL_LLAMA_CPP_BUILD_DIR:-$AGL_CI_REPO_ROOT/target/llama-cpp/ci-build}"
+# CI intentionally exercises the CPU-only fallback when Vulkan dependencies
+# are unavailable on the runner. Production release builds default to Vulkan.
+export AGL_LLAMA_CPP_VULKAN="${AGL_LLAMA_CPP_VULKAN:-off}"
 
 if [[ -d "$HOME/.cargo/bin" ]]; then
   export PATH="$HOME/.cargo/bin:$PATH"
@@ -70,7 +73,7 @@ ci_ensure_submodule() {
   ci_cd_repo
   if [[ ! -f vendor/llama.cpp/CMakeLists.txt ]]; then
     ci_section "Initializing git submodules"
-    ci_run git submodule update --init --recursive vendor/llama.cpp
+    ci_run git submodule update --init --recursive --checkout vendor/llama.cpp
   fi
   [[ -f vendor/llama.cpp/CMakeLists.txt ]] || ci_fail "missing vendor/llama.cpp; run git submodule update --init --recursive"
 }

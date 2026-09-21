@@ -21,24 +21,23 @@ Options:
 
 Defaults:
   --unit        agl-matrix-bridge.service
-  --cwd         current git repo root, or current directory outside git
-  --binary      ./target/release/agl-matrix-bridge under the repo root
+  --cwd         home directory
+  --binary      installed agl-matrix-bridge from PATH, or AGL_MATRIX_BRIDGE_BINARY
   --config      ~/.config/agentLIBRE/matrix-bridge/agl.toml
-  --log-filter  agl_matrix_bridge=info,matrix_sdk=warn,warn
+  --log-filter  agl_matrix_bridge=info,matrix_sdk=warn,matrix_sdk::http_client=off,matrix_sdk_crypto::backups=error,warn
 EOF
 }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/.." && pwd)"
 # shellcheck source=systemd-lib.sh
 source "$script_dir/systemd-lib.sh"
 config_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
 
 unit="agl-matrix-bridge.service"
-cwd="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo_root")"
-binary="${AGL_MATRIX_BRIDGE_BINARY:-$repo_root/target/release/agl-matrix-bridge}"
+cwd="${HOME:?HOME is required}"
+binary="${AGL_MATRIX_BRIDGE_BINARY:-$(command -v agl-matrix-bridge || true)}"
 config="${AGL_MATRIX_BRIDGE_CONFIG:-$config_home/agentLIBRE/matrix-bridge/agl.toml}"
-log_filter="${AGL_MATRIX_LOG:-agl_matrix_bridge=info,matrix_sdk=warn,warn}"
+log_filter="${AGL_MATRIX_LOG:-agl_matrix_bridge=info,matrix_sdk=warn,matrix_sdk::http_client=off,matrix_sdk_crypto::backups=error,warn}"
 enable=0
 restart=0
 dry_run=0
@@ -89,12 +88,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+[[ -n "$binary" ]] || { echo "agl-matrix-bridge is not installed; pass --binary" >&2; exit 1; }
+binary="$(realpath -m -s -- "$binary")"
 agl_systemd_validate_unit_name "$unit"
 agl_systemd_validate_absolute_vars cwd binary config
 
 agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
 agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_executable "$dry_run" "$binary"
+if [[ "$enable" == 1 || "$restart" == 1 ]]; then
+  resolved_binary="$(realpath -e -- "$binary")"
+  if git -C "$(dirname -- "$resolved_binary")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Matrix service binary is inside a Git worktree; install it outside the worktree before enabling: $resolved_binary" >&2
+    exit 1
+  fi
+fi
 agl_systemd_require_file "$dry_run" "$config" "config file"
 
 unit_dir="$config_home/systemd/user"
@@ -106,11 +114,15 @@ After=agentlibre-daemon.socket
 
 [Service]
 Type=simple
-WorkingDirectory=$cwd
+WorkingDirectory=$(agl_systemd_escape_scalar "$cwd")
 UMask=0077
-Environment=AGL_MATRIX_LOG=$log_filter
+Environment=$(agl_systemd_quote "AGL_MATRIX_LOG=$log_filter")
 ExecStart=$(agl_systemd_quote "$binary") sync --config $(agl_systemd_quote "$config")
-Restart=always
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agl-matrix-bridge
+Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=5
 
 [Install]
