@@ -1,6 +1,6 @@
 schema = "agentlibre.extension/v1"
 id = "agentlibre.builtins"
-version = "1.0.0-alpha.16"
+version = "1.0.0-alpha.17"
 description = "First-party bounded workspace filesystem tools"
 
 [[effects]]
