@@ -1,4 +1,3 @@
-
 use std::sync::{Arc, Barrier};
 
 use agl_core::Content;
