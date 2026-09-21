@@ -16,7 +16,7 @@ if [[ ! -x "$engine" ]]; then
 fi
 
 cd "$repo_root"
-AGL_LLAMA_SERVER="$engine" AGL_TEST_MODEL_GGUF="$model" \
-  cargo test -p agl-inference --test agl173_live_server -- --ignored --nocapture
+AGL_LLAMA_SERVER_BIN="$engine" AGL_TEST_MODEL_GGUF="$model" \
+  scripts/agl-daemon-live-smoke.sh
 
-echo "AGL-173 private llama-server smoke passed"
+echo "private llama-server and Agent flow smoke passed"

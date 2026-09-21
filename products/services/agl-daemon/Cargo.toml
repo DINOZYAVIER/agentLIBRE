@@ -1,0 +1,32 @@
+[package]
+name = "agl-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-core.workspace = true
+agl-daemon-api.workspace = true
+agl-execution-api.workspace = true
+agl-runtime.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+jsonschema.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rusqlite = { workspace = true, features = ["bundled-full"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+stemmer.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rcgen = "0.14.10"
+tokio-rustls = "0.26.4"

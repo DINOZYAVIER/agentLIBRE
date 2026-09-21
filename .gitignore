@@ -1,14 +1,11 @@
 /target/
-/.agl/decision-docs/
-/.agl/extracted/
-/.agl/functions/
-/.agl/handoffs/
-/.agl/research/
-/.agl/reviews/
-/.agl/skills/
-/.agl/smoke/
-/.agl/state/
-/.agl/cache/
-/.agl/run/
-/.agl/sockets/
-/.agl/tmp/
+# Local Ayeque Forge overlay while the format evolves.
+/FORGE.toml
+/FORGE.lock
+# Local model/runtime evidence is not shared source.
+evidence/
+evidence-*
+/assets/core-skills/
+
+# Design/spec documents are local working notes, not shared source.
+/docs/specs/

@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout build submodules
-        run: git submodule update --init --recursive -- assets/core-skills vendor/llama.cpp
+        run: git submodule update --init --recursive --checkout -- vendor/llama.cpp
 
       - name: Install native dependencies
         run: |

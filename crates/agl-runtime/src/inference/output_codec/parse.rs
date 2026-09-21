@@ -1,0 +1,406 @@
+use super::{
+    MalformedToolCall, MalformedToolJsonKind, ParsedModelOutput, ToolCall, repair::repair_tool_json,
+};
+use serde_json::{Map, Value};
+
+const TOOL_CALL_OPEN: &str = "<tool_call>";
+const TOOL_CALL_CLOSE: &str = "</tool_call>";
+const GEMMA_TOOL_CALL_OPEN: &str = "<|tool_call>";
+const GEMMA_TOOL_CALL_CLOSE: &str = "<tool_call|>";
+const GEMMA_CALL_PREFIX: &str = "call:";
+const GEMMA_STRING_DELIMITER: &str = "<|\"|>";
+const GEMMA_CHANNEL_OPEN: &str = "<|channel>";
+const GEMMA_CHANNEL_CLOSE: &str = "<channel|>";
+const MAX_GEMMA_VALUE_DEPTH: usize = 32;
+
+pub fn parse_model_output(content: &str) -> ParsedModelOutput {
+    match first_tool_call_format(content) {
+        Some((ToolCallParser::Hermes, open_at)) => parse_hermes_model_output(content, open_at),
+        Some((ToolCallParser::Gemma, open_at)) => parse_gemma_model_output(content, open_at),
+        None => ParsedModelOutput::Answer(gemma_visible_content(content)),
+    }
+}
+
+fn gemma_visible_content(content: &str) -> String {
+    if !content.contains(GEMMA_CHANNEL_OPEN) && !content.contains(GEMMA_CHANNEL_CLOSE) {
+        return content.to_owned();
+    }
+    let mut visible = String::new();
+    let mut remaining = content;
+    loop {
+        match (
+            remaining.find(GEMMA_CHANNEL_OPEN),
+            remaining.find(GEMMA_CHANNEL_CLOSE),
+        ) {
+            (Some(open), Some(close)) if close < open => {
+                visible.push_str(&remaining[..close]);
+                break;
+            }
+            (Some(open), _) => {
+                visible.push_str(&remaining[..open]);
+                let hidden = &remaining[open + GEMMA_CHANNEL_OPEN.len()..];
+                let Some(close) = hidden.find(GEMMA_CHANNEL_CLOSE) else {
+                    break;
+                };
+                remaining = &hidden[close + GEMMA_CHANNEL_CLOSE.len()..];
+            }
+            (None, Some(close)) => {
+                visible.push_str(&remaining[..close]);
+                break;
+            }
+            (None, None) => {
+                visible.push_str(remaining);
+                break;
+            }
+        }
+    }
+    visible.trim().to_owned()
+}
+
+#[derive(Clone, Copy)]
+enum ToolCallParser {
+    Hermes,
+    Gemma,
+}
+
+fn first_tool_call_format(content: &str) -> Option<(ToolCallParser, usize)> {
+    match (
+        content.find(TOOL_CALL_OPEN),
+        content.find(GEMMA_TOOL_CALL_OPEN),
+    ) {
+        (Some(hermes), Some(gemma)) if hermes <= gemma => Some((ToolCallParser::Hermes, hermes)),
+        (Some(_), Some(gemma)) => Some((ToolCallParser::Gemma, gemma)),
+        (Some(hermes), None) => Some((ToolCallParser::Hermes, hermes)),
+        (None, Some(gemma)) => Some((ToolCallParser::Gemma, gemma)),
+        (None, None) => None,
+    }
+}
+
+fn parse_hermes_model_output(content: &str, open_at: usize) -> ParsedModelOutput {
+    let json_start = open_at + TOOL_CALL_OPEN.len();
+    let Some(close_rel) = content[json_start..].find(TOOL_CALL_CLOSE) else {
+        let raw_json = content[json_start..].trim().to_string();
+        let repair = repair_tool_json(&raw_json, MalformedToolJsonKind::MissingTerminator);
+        return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+            raw_json,
+            classification: MalformedToolJsonKind::MissingTerminator,
+            repair: Some(repair),
+        });
+    };
+
+    let raw_json = content[json_start..json_start + close_rel]
+        .trim()
+        .to_string();
+    let first = match parse_tool_json(&raw_json) {
+        Ok(call) => call,
+        Err(classification) => {
+            let repair = repair_tool_json(&raw_json, classification.clone());
+            return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+                raw_json,
+                classification,
+                repair: Some(repair),
+            });
+        }
+    };
+    let mut calls = vec![first];
+    let mut remaining = &content[json_start + close_rel + TOOL_CALL_CLOSE.len()..];
+    while let Some(next_open) = remaining.find(TOOL_CALL_OPEN) {
+        let next_start = next_open + TOOL_CALL_OPEN.len();
+        let Some(next_close) = remaining[next_start..].find(TOOL_CALL_CLOSE) else {
+            let raw_json = remaining[next_start..].trim().to_owned();
+            let repair = repair_tool_json(&raw_json, MalformedToolJsonKind::MissingTerminator);
+            return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+                raw_json,
+                classification: MalformedToolJsonKind::MissingTerminator,
+                repair: Some(repair),
+            });
+        };
+        let next_json = remaining[next_start..next_start + next_close].trim();
+        match parse_tool_json(next_json) {
+            Ok(call) => calls.push(call),
+            Err(classification) => {
+                let raw_json = next_json.to_owned();
+                let repair = repair_tool_json(&raw_json, classification.clone());
+                return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+                    raw_json,
+                    classification,
+                    repair: Some(repair),
+                });
+            }
+        }
+        remaining = &remaining[next_start + next_close + TOOL_CALL_CLOSE.len()..];
+    }
+    if calls.len() == 1 {
+        ParsedModelOutput::ToolCall(calls.remove(0))
+    } else {
+        ParsedModelOutput::ToolCalls(calls)
+    }
+}
+
+fn parse_gemma_model_output(content: &str, open_at: usize) -> ParsedModelOutput {
+    let call_start = open_at + GEMMA_TOOL_CALL_OPEN.len();
+    let Some(close_rel) = content[call_start..].find(GEMMA_TOOL_CALL_CLOSE) else {
+        return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+            raw_json: content[call_start..].trim().to_string(),
+            classification: MalformedToolJsonKind::MissingTerminator,
+            repair: None,
+        });
+    };
+
+    let raw_call = content[call_start..call_start + close_rel]
+        .trim()
+        .to_string();
+    parse_gemma_tool_call(&raw_call).map_or_else(
+        |classification| {
+            ParsedModelOutput::MalformedToolCall(MalformedToolCall {
+                raw_json: raw_call,
+                classification,
+                repair: None,
+            })
+        },
+        ParsedModelOutput::ToolCall,
+    )
+}
+
+pub(crate) fn parse_tool_json(raw_json: &str) -> Result<ToolCall, MalformedToolJsonKind> {
+    let value: Value = serde_json::from_str(raw_json).map_err(|_| MalformedToolJsonKind::Syntax)?;
+    tool_call_from_value(value)
+}
+
+fn tool_call_from_value(value: Value) -> Result<ToolCall, MalformedToolJsonKind> {
+    let Value::Object(mut object) = value else {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    };
+
+    let Some(Value::String(name)) = object.remove("name") else {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    };
+
+    if name.trim().is_empty() {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let Some(arguments) = object.remove("arguments") else {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    };
+
+    if !arguments.is_object() {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    Ok(ToolCall { name, arguments })
+}
+
+fn parse_gemma_tool_call(raw_call: &str) -> Result<ToolCall, MalformedToolJsonKind> {
+    let Some(call) = raw_call.strip_prefix(GEMMA_CALL_PREFIX) else {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    };
+    let Some(arguments_start) = call.find('{') else {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    };
+    let name = call[..arguments_start].trim();
+    if !is_gemma_tool_name(name) {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let arguments = parse_gemma_arguments(&call[arguments_start..])?;
+    Ok(ToolCall {
+        name: name.to_string(),
+        arguments,
+    })
+}
+
+fn parse_gemma_arguments(raw_arguments: &str) -> Result<Value, MalformedToolJsonKind> {
+    let raw_arguments = raw_arguments.trim();
+    let (arguments, offset) = parse_gemma_object(raw_arguments, 0, 0)?;
+    if skip_ascii_whitespace(raw_arguments, offset) != raw_arguments.len() {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+    Ok(arguments)
+}
+
+fn parse_gemma_object(
+    input: &str,
+    offset: usize,
+    depth: usize,
+) -> Result<(Value, usize), MalformedToolJsonKind> {
+    if depth > MAX_GEMMA_VALUE_DEPTH || offset >= input.len() || input.as_bytes()[offset] != b'{' {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let mut arguments = Map::new();
+    let mut offset = skip_ascii_whitespace(input, offset + 1);
+    if offset < input.len() && input.as_bytes()[offset] == b'}' {
+        return Ok((Value::Object(arguments), offset + 1));
+    }
+
+    loop {
+        let key_end = input[offset..]
+            .find(':')
+            .map(|index| offset + index)
+            .ok_or(MalformedToolJsonKind::InvalidShape)?;
+        let key = input[offset..key_end].trim();
+        if !is_gemma_argument_name(key) {
+            return Err(MalformedToolJsonKind::InvalidShape);
+        }
+
+        offset = skip_ascii_whitespace(input, key_end + 1);
+        let (value, next_offset) = parse_gemma_value(input, offset, depth + 1)?;
+        if arguments.insert(key.to_string(), value).is_some() {
+            return Err(MalformedToolJsonKind::InvalidShape);
+        }
+
+        offset = skip_ascii_whitespace(input, next_offset);
+        if offset >= input.len() {
+            return Err(MalformedToolJsonKind::InvalidShape);
+        }
+        match input.as_bytes()[offset] {
+            b'}' => return Ok((Value::Object(arguments), offset + 1)),
+            b',' => {
+                offset = skip_ascii_whitespace(input, offset + 1);
+                if offset >= input.len() || input.as_bytes()[offset] == b'}' {
+                    return Err(MalformedToolJsonKind::InvalidShape);
+                }
+            }
+            _ => {
+                return Err(MalformedToolJsonKind::InvalidShape);
+            }
+        }
+    }
+}
+
+fn parse_gemma_array(
+    input: &str,
+    offset: usize,
+    depth: usize,
+) -> Result<(Value, usize), MalformedToolJsonKind> {
+    if depth > MAX_GEMMA_VALUE_DEPTH || offset >= input.len() || input.as_bytes()[offset] != b'[' {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let mut values = Vec::new();
+    let mut offset = skip_ascii_whitespace(input, offset + 1);
+    if offset < input.len() && input.as_bytes()[offset] == b']' {
+        return Ok((Value::Array(values), offset + 1));
+    }
+
+    loop {
+        let (value, next_offset) = parse_gemma_value(input, offset, depth + 1)?;
+        values.push(value);
+        offset = skip_ascii_whitespace(input, next_offset);
+        if offset >= input.len() {
+            return Err(MalformedToolJsonKind::InvalidShape);
+        }
+        match input.as_bytes()[offset] {
+            b']' => return Ok((Value::Array(values), offset + 1)),
+            b',' => {
+                offset = skip_ascii_whitespace(input, offset + 1);
+                if offset >= input.len() || input.as_bytes()[offset] == b']' {
+                    return Err(MalformedToolJsonKind::InvalidShape);
+                }
+            }
+            _ => return Err(MalformedToolJsonKind::InvalidShape),
+        }
+    }
+}
+
+fn parse_gemma_value(
+    input: &str,
+    offset: usize,
+    depth: usize,
+) -> Result<(Value, usize), MalformedToolJsonKind> {
+    if depth > MAX_GEMMA_VALUE_DEPTH || offset >= input.len() {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+    if input[offset..].starts_with(GEMMA_STRING_DELIMITER) {
+        let value_start = offset + GEMMA_STRING_DELIMITER.len();
+        let value_end_rel = input[value_start..]
+            .find(GEMMA_STRING_DELIMITER)
+            .ok_or(MalformedToolJsonKind::InvalidShape)?;
+        let value_end = value_start + value_end_rel;
+        return Ok((
+            Value::String(input[value_start..value_end].to_string()),
+            value_end + GEMMA_STRING_DELIMITER.len(),
+        ));
+    }
+
+    if input.as_bytes()[offset] == b'"' {
+        let value_end = scan_json_string_end(input, offset)?;
+        let value = serde_json::from_str(&input[offset..value_end])
+            .map_err(|_| MalformedToolJsonKind::Syntax)?;
+        return Ok((value, value_end));
+    }
+
+    match input.as_bytes()[offset] {
+        b'{' => return parse_gemma_object(input, offset, depth),
+        b'[' => return parse_gemma_array(input, offset, depth),
+        _ => {}
+    }
+
+    let value_end = input[offset..]
+        .find([',', ']', '}'])
+        .map_or(input.len(), |index| offset + index);
+    let raw_value = input[offset..value_end].trim();
+    if raw_value.is_empty() {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+    let value = match raw_value {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ => serde_json::from_str(raw_value).map_err(|_| MalformedToolJsonKind::Syntax)?,
+    };
+    match value {
+        Value::Number(_) | Value::Bool(_) | Value::Null => Ok((value, value_end)),
+        _ => Err(MalformedToolJsonKind::InvalidShape),
+    }
+}
+
+fn scan_json_string_end(input: &str, offset: usize) -> Result<usize, MalformedToolJsonKind> {
+    let bytes = input.as_bytes();
+    if offset >= bytes.len() || bytes[offset] != b'"' {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let mut index = offset + 1;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return Ok(index + 1);
+        }
+        index += 1;
+    }
+
+    Err(MalformedToolJsonKind::Syntax)
+}
+
+fn skip_ascii_whitespace(input: &str, mut offset: usize) -> usize {
+    while offset < input.len() && input.as_bytes()[offset].is_ascii_whitespace() {
+        offset += 1;
+    }
+    offset
+}
+
+fn is_gemma_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        })
+        && name.matches(':').count() <= 1
+        && !name.starts_with(':')
+        && !name.ends_with(':')
+}
+
+fn is_gemma_argument_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}

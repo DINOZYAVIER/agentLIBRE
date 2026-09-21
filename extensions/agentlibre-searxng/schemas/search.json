@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query", "source"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "source": { "enum": ["web", "wikipedia"] },
+    "language": {
+      "enum": ["en", "fr", "ru", "uk"],
+      "default": "en"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 8
+    }
+  }
+}

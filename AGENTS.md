@@ -7,6 +7,43 @@ fallbacks, migration shims, or compatibility-preserving behavior unless the user
 explicitly asks for them in the current task. Prefer one clear breaking format
 over extra code that keeps obsolete formats alive.
 
+## Default agentLIBRE filesystem layout (XDG)
+
+The paths below are the current defaults. They apply when `AGL_HOME` is unset
+and the corresponding XDG variable is unset; an XDG variable replaces only
+its own base directory. These locations may become configurable later.
+
+The application directory is `agentLIBRE` below each XDG base:
+
+| Root | Default base | Current contents |
+| --- | --- | --- |
+| Config | `${XDG_CONFIG_HOME:-$HOME/.config}/agentLIBRE` | Human config: `agentLIBRE.toml`; generated systemd user units are in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`. The Matrix service script defaults to `matrix-bridge/agl.toml`. |
+| Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution store: `execd/executions.sqlite3`. |
+| State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; execution socket: `execd/execd.sock`. |
+| Cache | `XDG_CACHE_HOME` | Not currently used by the production agentLIBRE code. Do not assume an agentLIBRE cache directory here. |
+
+Function resolution uses `source/functions/` from the installed source tree by
+default, plus any directories listed in `[packages].directories` in
+`agentLIBRE.toml`. `FUNCTION.toml` and `FUNCTION.lock` remain next to each
+Function source directory. The Matrix bridge's session, encrypted-room store,
+and binding state are explicit paths in its TOML config; they are not inferred
+from XDG at runtime. The repository example places them below
+`$XDG_DATA_HOME/agentLIBRE/matrix-bridge/`.
+
+Service logs are not written to an agentLIBRE file by the systemd units. Both
+stdout and stderr go to the per-user systemd journal:
+
+```text
+journalctl --user -u agentlibre-execd.service
+journalctl --user -u agentlibre-daemon.service
+journalctl --user -u agl-matrix-bridge.service
+```
+
+For an isolated CLI or `agl-execd` invocation, `AGL_HOME=/absolute/path`
+replaces the three application roots with `$AGL_HOME/config`,
+`$AGL_HOME/data`, and `$AGL_HOME/state`; this is an explicit override, not the
+default layout above.
+
 ## LLM-assisted commits
 
 LLM agents may prepare patches and draft commit messages, but they are tools,
@@ -47,9 +84,9 @@ before submission.
 
 ## Human decision gate
 
-For task planning and implementation, follow the decision-document workflow in
-`.agl/tasks/AGENTS.md`. A recommendation, an inferred preference, or an LLM's
-engineering judgment is not a human decision.
+For task planning and implementation, use the human decision gate below. A
+recommendation, an inferred preference, or an LLM's engineering judgment is
+not a human decision.
 
 Do not implement a material product, architecture, naming, API, workflow,
 scope, security, data-ownership, or compatibility choice while it remains open.

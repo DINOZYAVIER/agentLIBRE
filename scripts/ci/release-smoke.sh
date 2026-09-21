@@ -19,7 +19,7 @@ llama_bin="${AGL_LLAMA_CPP_BUILD_DIR:-$AGL_CI_REPO_ROOT/target/llama-cpp/build}/
 engine="$llama_bin/llama-server"
 
 ci_section "Building release host and selected engine"
-ci_run cargo build --locked --release -p agl-cli --bin agl
+ci_run cargo build --locked --release -p agl-cli --bin agl -p agl-execd
 ci_run "$AGL_CI_REPO_ROOT/scripts/build-llama-cpp.sh"
 [[ -x "$agl_bin" ]] || ci_fail "missing release host: $agl_bin"
 [[ -x "$engine" ]] || ci_fail "missing private engine: $engine"
@@ -53,12 +53,31 @@ inventory="$(exec 3>&1; env -i AGL_LLAMA_SERVER_INVENTORY_FD=3 "$engine")"
   ci_fail "private engine inventory omitted build/device identity: $inventory"
 
 ci_section "Checking public CLI surface"
-smoke_home="$(mktemp -d "${TMPDIR:-/tmp}/agl-ci-smoke.XXXXXX")"
-trap 'rm -rf -- "$smoke_home"' EXIT
 ci_run "$agl_bin" --version
 ci_run "$agl_bin" --help
-ci_run "$agl_bin" config paths --home "$smoke_home"
-ci_run "$agl_bin" model --help
-ci_run "$agl_bin" --home "$smoke_home" model list --json
+ci_run "$agl_bin" serve --help
+ci_run "$agl_bin" resume --help
+ci_run "$agl_bin" chat --help
+ci_run "$agl_bin" conversation rename --help
+ci_run "$agl_bin" function lock --help
+ci_run "$agl_bin" run --help
+ci_run "$agl_bin" view --help
+ci_run "$agl_bin" cancel --help
+if "$agl_bin" events --help >/dev/null 2>&1; then
+  ci_fail "removed events command is still public"
+fi
+if "$agl_bin" messages --help >/dev/null 2>&1; then
+  ci_fail "removed messages command is still public"
+fi
+
+if [[ -n "${AGL_TEST_MODEL_GGUF:-}" ]]; then
+  ci_section "Running installed-shape Function and Tool smoke"
+  AGL_SMOKE_AGL_BIN="$agl_bin" \
+    AGL_SMOKE_EXECD_BIN="$AGL_CI_REPO_ROOT/target/release/agl-execd" \
+    AGL_LLAMA_SERVER_BIN="$engine" \
+    "$AGL_CI_REPO_ROOT/scripts/agl-daemon-live-smoke.sh"
+else
+  echo "hardware Function smoke skipped: set AGL_TEST_MODEL_GGUF to require it"
+fi
 
 echo "release smoke passed"

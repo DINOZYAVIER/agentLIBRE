@@ -1,0 +1,34 @@
+[package]
+name = "agl-execd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+autobins = false
+
+[lib]
+name = "agl_execd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agl-execd"
+path = "src/main.rs"
+
+[[bin]]
+name = "agl-execd-launcher"
+path = "src/bin/agl-execd-launcher.rs"
+
+[dependencies]
+agl-execution-api.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+agl-runtime.workspace = true
+uuid.workspace = true

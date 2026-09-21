@@ -1,0 +1,23 @@
+format = 1
+
+[artifacts]
+memory = "agentlibre.memory"
+documents = [
+  "agentlibre.doc.compaction-json-schema",
+  "agentlibre.doc.compaction-reproduction-analysis",
+  "agentlibre.doc.compaction-work-context",
+  "agentlibre.doc.m0-memory-seeding",
+  "agentlibre.doc.m1-implementation-tasks",
+  "agentlibre.doc.m1-memory-extraction",
+  "agentlibre.doc.m1-semantic-memory",
+  "agentlibre.doc.m2-implementation-tasks",
+  "agentlibre.doc.m2-open-questions",
+  "agentlibre.doc.planning-implementation-e2e",
+  "agentlibre.doc.planning-implementation-flow",
+  "agentlibre.doc.repl-architecture",
+  "agentlibre.doc.repl-daemon-protocol",
+  "agentlibre.doc.repl-flow-renderer",
+  "agentlibre.doc.repl-terminal-ui",
+  "agentlibre.doc.semantic-memory",
+  "agentlibre.doc.terminal-restart-recovery",
+]

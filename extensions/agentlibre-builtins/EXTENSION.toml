@@ -1,0 +1,28 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.builtins"
+version = "1.0.0-alpha.15"
+description = "First-party bounded workspace filesystem tools"
+
+[[effects]]
+id = "agentlibre.builtins:filesystem_write"
+description = "Mutate files below the admitted workspace root"
+scope_schema = "schemas/filesystem-write-scope.json"
+
+[[tools]]
+id = "agentlibre.builtins:fs_read"
+description = "Read a UTF-8 workspace file with line bounds and a content digest"
+input_schema = "schemas/fs-read.json"
+delivery = "retryable"
+
+[[tools]]
+id = "agentlibre.builtins:fs_apply_patch"
+description = "Atomically create, update, delete, or move workspace files using digest preconditions"
+input_schema = "schemas/fs-apply-patch.json"
+required_effects = ["agentlibre.builtins:filesystem_write"]
+delivery = "at_most_once"
+
+[[tools]]
+id = "agentlibre.builtins:forge_read"
+description = "Read a verified Forge artifact with line bounds and a content digest"
+input_schema = "schemas/forge-read.json"
+delivery = "retryable"

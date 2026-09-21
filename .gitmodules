@@ -1,9 +1,4 @@
 [submodule "vendor/llama.cpp"]
 	path = vendor/llama.cpp
 	url = https://github.com/DINOZYAVIER/llama.cpp.git
-[submodule "assets/core-skills"]
-	path = assets/core-skills
-	url = https://github.com/DINOZYAVIER/agl-core-skills.git
-[submodule "core.repo:tasks"]
-	path = .agl/tasks
-	url = rpi:/home/dinozyavier/git/agl-specs.git
+	update = none
