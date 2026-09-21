@@ -1,6 +1,6 @@
 schema = "agentlibre.extension/v1"
 id = "agentlibre.execution"
-version = "1.0.0-alpha.15"
+version = "1.0.0-alpha.16"
 description = "Neutral exact-argv and managed Terminal contracts"
 
 [[effects]]
