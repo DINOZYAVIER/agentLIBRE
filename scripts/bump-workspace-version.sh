@@ -9,9 +9,10 @@ Usage:
 Bumps [workspace.package].version to the next vX.Y.Z-alpha.N checkpoint based
 on the latest local signed/annotated alpha tag, then:
 
-  1. updates Cargo.lock with cargo generate-lockfile
-  2. commits Cargo.toml and Cargo.lock with Signed-off-by
-  3. creates a signed tag, or an annotated tag when signing is not configured
+  1. updates the first-party Extension manifests and smoke fixture references
+  2. updates Cargo.lock with cargo generate-lockfile
+  3. commits the versioned files with Signed-off-by
+  4. creates a signed tag, or an annotated tag when signing is not configured
 
 The script does not fetch tags. Run git fetch --tags first if local tags may be
 stale.
@@ -143,6 +144,55 @@ update_workspace_version() {
   mv "$tmp" "$cargo_toml"
 }
 
+update_extension_version() {
+  local path="$1"
+  local version="$2"
+  local tmp
+  tmp="$(mktemp "$path.tmp.XXXXXX")"
+
+  if ! awk -v new_version="$version" '
+    BEGIN { changed = 0 }
+    !changed && /^[[:space:]]*version[[:space:]]*=/ {
+      match($0, /^[[:space:]]*/)
+      indent = substr($0, RSTART, RLENGTH)
+      print indent "version = \"" new_version "\""
+      changed = 1
+      next
+    }
+    { print }
+    END {
+      if (!changed) {
+        exit 42
+      }
+    }
+  ' "$path" > "$tmp"; then
+    rm -f "$tmp"
+    die "failed to update Extension version in $path"
+  fi
+
+  mv "$tmp" "$path"
+}
+
+update_smoke_extension_versions() {
+  local version="$1"
+  local path="$repo_root/scripts/agl-daemon-live-smoke.sh"
+  local tmp
+  tmp="$(mktemp "$path.tmp.XXXXXX")"
+
+  if ! awk -v new_version="$version" '
+    /agentlibre\.builtins\\", version = \\"/ ||
+      /agentlibre\.execution\\", version = \\"/ {
+      sub(/version = \\"[^\\"]+\\"/, "version = \\"" new_version "\\"")
+    }
+    { print }
+  ' "$path" > "$tmp"; then
+    rm -f "$tmp"
+    die "failed to update smoke Extension references in $path"
+  fi
+
+  mv "$tmp" "$path"
+}
+
 git_signing_configured() {
   [[ -n "$(git config --get user.signingkey || true)" ]] ||
     [[ "$(git config --bool tag.gpgSign || true)" == "true" ]] ||
@@ -218,8 +268,11 @@ if ((dry_run)); then
 dry_run=true
 planned:
   update Cargo.toml workspace version to $next_version
+  update extensions/agentlibre-builtins/EXTENSION.toml to $next_version
+  update extensions/agentlibre-execution/EXTENSION.toml to $next_version
+  update scripts/agl-daemon-live-smoke.sh Extension references to $next_version
   cargo generate-lockfile
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml Cargo.lock extensions/agentlibre-builtins/EXTENSION.toml extensions/agentlibre-execution/EXTENSION.toml scripts/agl-daemon-live-smoke.sh
   git commit --signoff -m "$commit_message"
   git tag $checkpoint_tag_flag $next_tag -m "$next_tag"
 EOF
@@ -236,9 +289,15 @@ if [[ "$current_workspace_version" == "$next_version" ]]; then
 fi
 
 update_workspace_version "$next_version"
+update_extension_version "$repo_root/extensions/agentlibre-builtins/EXTENSION.toml" "$next_version"
+update_extension_version "$repo_root/extensions/agentlibre-execution/EXTENSION.toml" "$next_version"
+update_smoke_extension_versions "$next_version"
 cargo generate-lockfile
 
-git add Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock \
+  extensions/agentlibre-builtins/EXTENSION.toml \
+  extensions/agentlibre-execution/EXTENSION.toml \
+  scripts/agl-daemon-live-smoke.sh
 
 if git diff --cached --quiet; then
   die "version bump produced no staged changes"
