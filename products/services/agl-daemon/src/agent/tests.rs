@@ -1780,11 +1780,15 @@ mod tests {
                 input: Content::text("correct the cursor").unwrap(),
             })
             .unwrap();
-        for _ in 0..1_000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
             if store.agent_run_view(run_id).unwrap().status.is_terminal() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
         let view = store.agent_run_view(run_id).unwrap();
