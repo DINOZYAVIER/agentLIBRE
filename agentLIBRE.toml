@@ -3,6 +3,7 @@ format = 1
 [artifacts]
 memory = "agentlibre.memory"
 documents = [
+  "agentlibre.doc.agl-owned-artifact-config",
   "agentlibre.doc.compaction-json-schema",
   "agentlibre.doc.compaction-reproduction-analysis",
   "agentlibre.doc.compaction-work-context",
