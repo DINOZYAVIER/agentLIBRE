@@ -487,7 +487,7 @@ dependencies = [
 [[package]]
 name = "ayeque-forge-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/DINOZYAVIER/ayeque-forge.git?rev=509e7df#509e7df9ea40f645acf5e17e4408ffe091f955c3"
+source = "git+https://github.com/DINOZYAVIER/ayeque-forge.git?rev=a466846#a4668465f98faf7e4c5bf99a17ddaadc2fcf56ae"
 dependencies = [
  "anyhow",
  "fs2",

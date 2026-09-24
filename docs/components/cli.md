@@ -11,7 +11,13 @@ agl serve
 agl config check [--function FUNCTION]
 agl config apply [--function FUNCTION]
 agl doctor
-agl [--entity-root /path/to/agents/coder] function lock /path/to/functions/coder
+agl artifact add --id ID --kind KIND --schema SCHEMA --git SOURCE --revision FULL_SHA --path PATH
+agl artifact update --id ID [--revision FULL_SHA] [--git SOURCE] [--path PATH]
+agl artifact remove ID
+agl artifact sync
+agl artifact list
+agl artifact migrate
+agl function lock /path/to/functions/coder
 agl [--entity-root /path/to/agents/coder] run /path/to/functions/coder "prompt"
 agl view run_...
 agl cancel run_...
@@ -61,6 +67,19 @@ and owns one same-UID Unix socket below the state root. Obsolete `agl.toml` and
 `daemon.json` files are not read.
 Events and message queries remain internal protocol operations; they are not
 public CLI commands.
+
+Artifact operations use the repository-root `agentLIBRE.toml`. It declares the
+complete workspace catalog, including Git source and full commit SHA for every
+entity. `agl artifact add`, `update`, and `remove` edit that declaration and
+reconcile Forge's generated catalog and materializations. `agl artifact sync`
+rebuilds Forge state from the root declaration; `list` shows verified state.
+`migrate` imports the current verified Forge catalog into the root declaration
+once. Routine artifact work does not require direct Forge CLI commands or
+editing `FORGE.toml` / `FORGE.lock`.
+
+The repository-root manifest is separate from the XDG application settings
+file: the former selects and pins workspace entities, while the latter
+configures chat and inference behavior.
 ## Interactive REPL presentation
 
 The TTY REPL uses reedline with a slash command menu. Typing `/` at the start

@@ -24,7 +24,7 @@ agl-daemon = { path = "products/services/agl-daemon" }
 agl-execd = { path = "products/services/agl-execd" }
 agl-runtime = { path = "crates/agl-runtime" }
 agl-core = { path = "crates/agl-core" }
-ayeque-forge-core = { git = "https://github.com/DINOZYAVIER/ayeque-forge.git", rev = "509e7df" }
+ayeque-forge-core = { git = "https://github.com/DINOZYAVIER/ayeque-forge.git", rev = "a466846" }
 anyhow = "1.0.103"
 bytes = "1.12.1"
 chrono = "0.4.45"

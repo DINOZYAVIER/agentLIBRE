@@ -106,6 +106,7 @@ pub(crate) struct MemoryWorkspace {
     root: PathBuf,
     workspace_root: PathBuf,
     forge_owned: bool,
+    memory_enabled: bool,
 }
 
 impl MemoryWorkspace {
@@ -127,13 +128,22 @@ impl MemoryWorkspace {
                 root: workspace_root.clone(),
                 workspace_root,
                 forge_owned: false,
+                memory_enabled: true,
             })
         }
         #[cfg(not(test))]
         {
             let artifacts = agl_runtime::resolve_workspace_artifacts(&workspace_root)
                 .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
-            let materialized = artifacts.memory.materialized_path;
+            let Some(memory) = artifacts.memory else {
+                return Ok(Self {
+                    root: workspace_root.clone(),
+                    workspace_root,
+                    forge_owned: true,
+                    memory_enabled: false,
+                });
+            };
+            let materialized = memory.materialized_path;
             let metadata = fs::symlink_metadata(&materialized).map_err(|_| {
                 CorpusLoadError::Unreadable("Forge memory materialization".to_owned())
             })?;
@@ -147,6 +157,7 @@ impl MemoryWorkspace {
                 root: materialized,
                 workspace_root,
                 forge_owned: true,
+                memory_enabled: true,
             })
         }
     }
@@ -209,6 +220,9 @@ impl MemoryWorkspace {
     /// load error (`CorpusLoadError::NotADirectory`); one invalid entry file
     /// fails the whole load (`CorpusLoadError::Parse`).
     pub(crate) fn load_corpus(&self) -> Result<Option<MemoryCorpus>, CorpusLoadError> {
+        if !self.memory_enabled {
+            return Ok(None);
+        }
         let memory = self.memory_root();
         if self.contained_dir(&memory, "memory")?.is_none() {
             return Ok(None);
@@ -1883,6 +1897,7 @@ mod tests {
             root: root.join("materialized"),
             workspace_root: root.clone(),
             forge_owned: true,
+            memory_enabled: true,
         };
         let plan = WritePlan {
             entries: [("entries/topic.md".to_owned(), "new\n".to_owned())]

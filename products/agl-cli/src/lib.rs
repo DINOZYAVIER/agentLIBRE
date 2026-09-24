@@ -24,7 +24,10 @@ use agl_daemon::{DaemonConfig, DaemonServer, IntegrationConfig, ListenerSource, 
 use agl_daemon_api::{AgentClient, AgentProgress, AgentProgressStatus, AgentSubscriptionFrame};
 use agl_runtime::inference::{InferenceConfig, LlamaServerConfig};
 use anyhow::{Context, Result, bail, ensure};
-use artifacts::add_artifact;
+use artifacts::{
+    add_artifact, list_artifacts, migrate_artifacts, remove_artifact, sync_artifacts,
+    update_artifact,
+};
 use clap::Parser;
 use cli::{
     APPLICATION_DESCRIPTION, ArtifactCommand, Cli, Command, ConfigCommand, ConversationCommand,
@@ -681,6 +684,43 @@ fn run() -> Result<()> {
                     let entity = add_artifact(&storage, &workspace, registration)?;
                     println!("{}\t{}", entity.id(), entity.materialized_path().display());
                     Ok(())
+                }
+                ArtifactCommand::Remove { id } => {
+                    let workspace = std::env::current_dir()?;
+                    let storage = ayeque_forge_core::data_root()?;
+                    remove_artifact(&storage, &workspace, &id)?;
+                    println!("removed {id}");
+                    Ok(())
+                }
+                ArtifactCommand::Update {
+                    id,
+                    kind,
+                    schema,
+                    git_source,
+                    revision,
+                    source_dir,
+                } => {
+                    let workspace = std::env::current_dir()?;
+                    let storage = ayeque_forge_core::data_root()?;
+                    update_artifact(
+                        &storage, &workspace, &id, kind, schema, git_source, revision, source_dir,
+                    )?;
+                    println!("updated {id}");
+                    Ok(())
+                }
+                ArtifactCommand::Sync => {
+                    let workspace = std::env::current_dir()?;
+                    let storage = ayeque_forge_core::data_root()?;
+                    sync_artifacts(&storage, &workspace)
+                }
+                ArtifactCommand::Migrate => {
+                    let workspace = std::env::current_dir()?;
+                    let storage = ayeque_forge_core::data_root()?;
+                    migrate_artifacts(&storage, &workspace)
+                }
+                ArtifactCommand::List => {
+                    let workspace = std::env::current_dir()?;
+                    list_artifacts(&workspace)
                 }
             },
             Some(Command::Run {

@@ -47,7 +47,9 @@ pub(crate) fn resolve_function(
     function_directory: impl AsRef<Path>,
     workspace: impl AsRef<Path>,
 ) -> Result<ResolvedFunctionSource> {
-    let project = resolve_project(workspace.as_ref())?;
+    let workspace = workspace.as_ref();
+    crate::resolve_workspace_artifacts(workspace)?;
+    let project = resolve_project(workspace)?;
     resolve_function_from_project(&project, function_directory.as_ref())
 }
 
@@ -80,7 +82,9 @@ pub fn resolve_function_requirement(
     requirement: &VersionReq,
     workspace: impl AsRef<Path>,
 ) -> Result<FunctionIdentity> {
-    let project = resolve_project(workspace.as_ref())?;
+    let workspace = workspace.as_ref();
+    crate::resolve_workspace_artifacts(workspace)?;
+    let project = resolve_project(workspace)?;
     let mut candidates = Vec::new();
     for declared in project
         .manifest()

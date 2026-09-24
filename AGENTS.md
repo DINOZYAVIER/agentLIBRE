@@ -17,7 +17,7 @@ The application directory is `agentLIBRE` below each XDG base:
 
 | Root | Default base | Current contents |
 | --- | --- | --- |
-| Config | `${XDG_CONFIG_HOME:-$HOME/.config}/agentLIBRE` | Human config: `agentLIBRE.toml`; generated systemd user units are in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`. The Matrix service script defaults to `matrix-bridge/agl.toml`. |
+| Config | `${XDG_CONFIG_HOME:-$HOME/.config}/agentLIBRE` | Application settings: `agentLIBRE.toml`; generated systemd user units are in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`. The Matrix service script defaults to `matrix-bridge/agl.toml`. |
 | Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution store: `execd/executions.sqlite3`. |
 | State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; execution socket: `execd/execd.sock`. |
 | Cache | `XDG_CACHE_HOME` | Not currently used by the production agentLIBRE code. Do not assume an agentLIBRE cache directory here. |
@@ -29,6 +29,11 @@ Function source directory. The Matrix bridge's session, encrypted-room store,
 and binding state are explicit paths in its TOML config; they are not inferred
 from XDG at runtime. The repository example places them below
 `$XDG_DATA_HOME/agentLIBRE/matrix-bridge/`.
+
+The repository-root `agentLIBRE.toml` is a separate AGL workspace manifest. It
+is the source of truth for all Forge entities and is edited through `agl
+artifact` commands; Forge catalogs, locks and materializations are generated
+backend state.
 
 Service logs are not written to an agentLIBRE file by the systemd units. Both
 stdout and stderr go to the per-user systemd journal:

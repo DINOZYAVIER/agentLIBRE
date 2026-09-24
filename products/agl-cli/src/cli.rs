@@ -58,7 +58,7 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: FunctionCommand,
     },
-    /// Manage Forge-owned workspace artifacts.
+    /// Manage workspace artifacts through AGL.
     Artifact {
         #[command(subcommand)]
         command: ArtifactCommand,
@@ -149,7 +149,7 @@ pub(super) enum FunctionCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum ArtifactCommand {
-    /// Register an entity in the workspace Forge catalog and refresh its lock.
+    /// Declare and materialize a workspace artifact.
     Add {
         #[arg(long)]
         id: String,
@@ -164,6 +164,29 @@ pub(super) enum ArtifactCommand {
         #[arg(long = "path")]
         source_dir: String,
     },
+    /// Change declared metadata and rematerialize an artifact.
+    Update {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        schema: Option<String>,
+        #[arg(long = "git")]
+        git_source: Option<String>,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long = "path")]
+        source_dir: Option<String>,
+    },
+    /// Remove an artifact declaration and its materialization.
+    Remove { id: String },
+    /// Reconcile internal artifact state from agentLIBRE.toml.
+    Sync,
+    /// Import the current verified artifact catalog into agentLIBRE.toml.
+    Migrate,
+    /// List declared artifacts and their verified materializations.
+    List,
 }
 
 #[derive(Debug, Subcommand)]

@@ -24,16 +24,13 @@ pub(crate) fn execute(context: &ToolContext, input: Value) -> Result<Value, Tool
     let (entity_id, relative) = parse_virtual_path(&args.path).ok_or_else(invalid_input)?;
     let artifacts = agl_runtime::resolve_workspace_artifacts(context.workspace.root.as_path())
         .map_err(|_| unavailable())?;
-    let root = if artifacts.memory.id == entity_id {
-        artifacts.memory.materialized_path
-    } else {
-        artifacts
-            .documents
-            .iter()
-            .find(|artifact| artifact.id == entity_id)
-            .map(|artifact| artifact.materialized_path.clone())
-            .ok_or_else(|| not_found(&args.path))?
-    };
+    let root = artifacts
+        .memory
+        .iter()
+        .chain(artifacts.documents.iter())
+        .find(|artifact| artifact.id == entity_id)
+        .map(|artifact| artifact.materialized_path.clone())
+        .ok_or_else(|| not_found(&args.path))?;
     let path = contained_file(&root, &relative).ok_or_else(|| not_found(&args.path))?;
     let bytes = fs::read(&path).map_err(|_| unavailable())?;
     if bytes.len() > MAX_FILE_BYTES {

@@ -19,6 +19,7 @@ pub use activation::{
 pub use forge::{FunctionIdentity, function_identity, resolve_function_requirement};
 pub use planner::PlannerWorkspaceBoundary;
 pub use workspace_artifacts::{
-    ResolvedWorkspaceArtifact, WORKSPACE_CONFIG_FILE_NAME, WorkspaceArtifacts,
-    resolve_workspace_artifacts,
+    ArtifactDeclaration, ResolvedWorkspaceArtifact, WORKSPACE_CONFIG_FILE_NAME, WorkspaceArtifacts,
+    read_workspace_artifact_declarations, resolve_workspace_artifacts,
+    serialize_workspace_artifact_declarations,
 };
