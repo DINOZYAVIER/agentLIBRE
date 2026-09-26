@@ -22,10 +22,12 @@ The application directory is `agentLIBRE` below each XDG base:
 | State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; execution socket: `execd/execd.sock`. |
 | Cache | `XDG_CACHE_HOME` | Not currently used by the production agentLIBRE code. Do not assume an agentLIBRE cache directory here. |
 
-Function resolution uses `source/functions/` from the installed source tree by
-default, plus any directories listed in `[packages].directories` in
-`agentLIBRE.toml`. `FUNCTION.toml` and `FUNCTION.lock` remain next to each
-Function source directory. The Matrix bridge's session, encrypted-room store,
+For `agl config check/apply`, the default Function and typed Function
+requirements resolve against the AGL repository-root `agentLIBRE.toml`,
+independent of the caller's current directory. Direct Function directory
+locators remain relative to the caller's current directory and are checked
+against that workspace. `FUNCTION.toml` and `FUNCTION.lock` remain next to
+each Function source directory. The Matrix bridge's session, encrypted-room store,
 and binding state are explicit paths in its TOML config; they are not inferred
 from XDG at runtime. The repository example places them below
 `$XDG_DATA_HOME/agentLIBRE/matrix-bridge/`.

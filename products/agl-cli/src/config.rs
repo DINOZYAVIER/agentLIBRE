@@ -217,25 +217,33 @@ pub(crate) struct ActiveSearch {
 
 pub(crate) fn plan(config_root: &Path, extra_functions: &[String]) -> Result<ConfigPlan> {
     let (human, bytes) = load_document(config_root)?;
-    let workspace = std::env::current_dir()?.canonicalize()?;
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("failed to locate the AGL workspace manifest")?;
     let default = resolve_requirement(&human.chat.default_function, &workspace)?;
-    let mut directories = vec![default.directory];
+    let mut directories = vec![(default.directory, workspace.clone())];
     for locator in extra_functions {
-        let parsed = parse_locator(locator, &std::env::current_dir()?)?;
-        let directory = match parsed {
-            FunctionLocator::Directory(directory) => directory,
-            FunctionLocator::Requirement(requirement) => {
-                resolve_requirement(&requirement, &workspace)?.directory
-            }
+        let parsed = parse_locator(locator, &cwd)?;
+        let (directory, function_workspace) = match parsed {
+            FunctionLocator::Directory(directory) => (directory, cwd.clone()),
+            FunctionLocator::Requirement(requirement) => (
+                resolve_requirement(&requirement, &workspace)?.directory,
+                workspace.clone(),
+            ),
         };
-        if !directories.contains(&directory) {
-            directories.push(directory);
+        if !directories
+            .iter()
+            .any(|(existing, _)| existing == &directory)
+        {
+            directories.push((directory, function_workspace));
         }
     }
     let functions = directories
         .into_iter()
-        .map(|directory| {
-            let identity = agl_runtime::function_identity(&directory, &workspace)?;
+        .map(|(directory, function_workspace)| {
+            let identity = agl_runtime::function_identity(&directory, &function_workspace)?;
             Ok(PreparedFunction {
                 directory: identity.directory,
                 id: identity.id.to_string(),

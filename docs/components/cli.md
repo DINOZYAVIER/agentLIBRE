@@ -61,7 +61,11 @@ aliases; surrounding whitespace is ignored.
 
 `agl config check` is read-only. `agl config apply` resolves the requested
 Function graphs, writes source-adjacent locks and atomically activates generated
-state; unfinished Runs make it return busy. `agl doctor` reports active state
+state; unfinished Runs make it return busy. The configured default and typed
+Function requirements resolve against the AGL repository-root
+`agentLIBRE.toml`, regardless of the caller's current directory. Direct
+Function directory locators remain relative to the caller's current directory
+and are checked against that workspace. `agl doctor` reports active state
 and unfinished Runs without credential bytes. `agl serve` reads generated state
 and owns one same-UID Unix socket below the state root. Obsolete `agl.toml` and
 `daemon.json` files are not read.
