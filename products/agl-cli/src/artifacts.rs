@@ -42,6 +42,8 @@ pub(super) fn remove_artifact(storage: &Path, workspace: &Path, id: &str) -> Res
     write_and_sync_declarations(storage, workspace, declarations)
 }
 
+// Keep the individual CLI overrides explicit at this composition boundary.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_artifact(
     storage: &Path,
     workspace: &Path,
@@ -147,41 +149,22 @@ fn write_and_sync_declarations(
 ) -> Result<()> {
     let root = ayeque_forge_core::discover_workspace(workspace)?;
     let path = root.join(agl_runtime::WORKSPACE_CONFIG_FILE_NAME);
-    let previous_bytes = match std::fs::symlink_metadata(&path) {
+    match std::fs::symlink_metadata(&path) {
         Ok(metadata) => {
             ensure!(
                 metadata.is_file() && !metadata.file_type().is_symlink(),
                 "agentLIBRE.toml must be a regular file"
             );
-            Some(std::fs::read(&path)?)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-    };
-    let previous_declarations = load_declarations(&root).ok();
-    let bytes = agl_runtime::serialize_workspace_artifact_declarations(declarations.clone())?;
-    write_root_declaration(&path, &bytes)?;
-    if let Err(sync_error) = sync_declarations(storage, &root, &declarations) {
-        let root_rollback = match previous_bytes {
-            Some(previous) => write_root_declaration(&path, &previous),
-            None => std::fs::remove_file(&path).map_err(Into::into),
-        };
-        let backend_rollback = previous_declarations
-            .as_ref()
-            .map(|previous| sync_declarations(storage, &root, previous));
-        if let Err(root_error) = root_rollback {
-            return Err(sync_error).context(format!(
-                "artifact sync failed and agentLIBRE.toml rollback failed: {root_error}"
-            ));
-        }
-        if let Some(Err(backend_error)) = backend_rollback {
-            return Err(sync_error).context(format!(
-                "artifact sync failed and previous artifact state could not be restored: {backend_error}; retry with `agl artifact sync`"
-            ));
-        }
-        return Err(sync_error).context("artifact sync failed after updating agentLIBRE.toml");
     }
-    Ok(())
+    let bytes =
+        agl_runtime::serialize_workspace_artifact_declarations(&root, declarations.clone())?;
+    write_root_declaration(&path, &bytes)?;
+    sync_declarations(storage, &root, &declarations).context(
+        "artifact sync failed; agentLIBRE.toml retains the requested declarations; retry with `agl artifact sync`",
+    )
 }
 
 fn sync_declarations(
@@ -316,7 +299,16 @@ mod artifact_tests {
             )
             .unwrap()
         };
+        std::fs::write(
+            workspace.join("agentLIBRE.toml"),
+            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+        )
+        .unwrap();
         let entity = add_artifact(&storage, &workspace, registration()).unwrap();
+        assert_eq!(
+            agl_runtime::read_workspace_output_directories(&workspace).unwrap(),
+            ["target"]
+        );
         assert_eq!(entity.id(), "test.document");
         assert_eq!(
             std::fs::read_to_string(entity.materialized_path().join("README.md")).unwrap(),
@@ -330,6 +322,100 @@ mod artifact_tests {
                 .entities()
                 .len(),
             1
+        );
+
+        let failed = update_artifact(
+            &storage,
+            &workspace,
+            "test.document",
+            None,
+            None,
+            None,
+            None,
+            Some("missing-document".into()),
+        )
+        .unwrap_err();
+        assert!(failed.to_string().contains("agl artifact sync"));
+        assert_eq!(
+            agl_runtime::read_workspace_output_directories(&workspace).unwrap(),
+            ["target"]
+        );
+        assert_eq!(
+            load_declarations(&workspace).unwrap()[0].path,
+            "missing-document"
+        );
+        let requested = std::fs::read(workspace.join("agentLIBRE.toml")).unwrap();
+        assert!(sync_artifacts(&storage, &workspace).is_err());
+        assert_eq!(
+            std::fs::read(workspace.join("agentLIBRE.toml")).unwrap(),
+            requested
+        );
+        let project = ayeque_forge_core::resolve_project_at(&storage, &workspace).unwrap();
+        assert_eq!(
+            project.manifest_entity("test.document").unwrap().path(),
+            "document"
+        );
+        assert_eq!(
+            std::fs::read_to_string(entity.materialized_path().join("README.md")).unwrap(),
+            "# Verified document\n"
+        );
+
+        std::fs::create_dir_all(source.join("missing-document")).unwrap();
+        std::fs::write(
+            source.join("missing-document/README.md"),
+            "# Retried document\n",
+        )
+        .unwrap();
+        assert!(
+            ProcessCommand::new("git")
+                .args(["add", "missing-document/README.md"])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            ProcessCommand::new("git")
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "retry fixture"
+                ])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let next_revision = ProcessCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(next_revision.status.success());
+        let mut declarations = load_declarations(&workspace).unwrap();
+        declarations[0].revision = String::from_utf8(next_revision.stdout)
+            .unwrap()
+            .trim()
+            .into();
+        let bytes =
+            agl_runtime::serialize_workspace_artifact_declarations(&workspace, declarations)
+                .unwrap();
+        write_root_declaration(&workspace.join("agentLIBRE.toml"), &bytes).unwrap();
+        sync_artifacts(&storage, &workspace).unwrap();
+        assert_eq!(
+            agl_runtime::read_workspace_output_directories(&workspace).unwrap(),
+            ["target"]
+        );
+        let project = ayeque_forge_core::resolve_project_at(&storage, &workspace).unwrap();
+        let retried = ayeque_forge_core::resolve_entity(&project, "test.document").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(retried.materialized_path().join("README.md")).unwrap(),
+            "# Retried document\n"
         );
     }
 }

@@ -16,6 +16,21 @@ const WORKSPACE_CONFIG_FORMAT: u32 = 2;
 struct WorkspaceConfig {
     format: u32,
     artifacts: ArtifactDeclarations,
+    #[serde(default, skip_serializing_if = "WorkspaceSettings::is_empty")]
+    workspace: WorkspaceSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceSettings {
+    #[serde(default)]
+    output_directories: Vec<String>,
+}
+
+impl WorkspaceSettings {
+    fn is_empty(&self) -> bool {
+        self.output_directories.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -67,6 +82,7 @@ pub fn read_workspace_artifact_declarations(
 }
 
 pub fn serialize_workspace_artifact_declarations(
+    workspace: &Path,
     entities: Vec<ArtifactDeclaration>,
 ) -> Result<Vec<u8>> {
     let mut ids = BTreeSet::new();
@@ -90,13 +106,32 @@ pub fn serialize_workspace_artifact_declarations(
             entity.path.clone(),
         )?;
     }
-    let config = WorkspaceConfig {
-        format: WORKSPACE_CONFIG_FORMAT,
-        artifacts: ArtifactDeclarations { entity: entities },
+    let mut config = if workspace.join(WORKSPACE_CONFIG_FILE_NAME).try_exists()? {
+        read_workspace_config(workspace)?
+    } else {
+        WorkspaceConfig {
+            format: WORKSPACE_CONFIG_FORMAT,
+            artifacts: ArtifactDeclarations { entity: Vec::new() },
+            workspace: WorkspaceSettings::default(),
+        }
     };
+    config.artifacts.entity = entities;
     Ok(toml::to_string_pretty(&config)
         .context("failed to serialize agentLIBRE.toml")?
         .into_bytes())
+}
+
+/// Read explicit build-output trees from the caller's workspace root.
+pub fn read_workspace_output_directories(workspace: &Path) -> Result<Vec<String>> {
+    let path = workspace.join(WORKSPACE_CONFIG_FILE_NAME);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => ensure!(metadata.is_file(), "agentLIBRE.toml must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(read_workspace_config(workspace)?
+        .workspace
+        .output_directories)
 }
 
 #[cfg(test)]
@@ -187,6 +222,19 @@ fn read_workspace_config(workspace: &Path) -> Result<WorkspaceConfig> {
         "unsupported workspace declaration format {}",
         config.format
     );
+    for directory in &config.workspace.output_directories {
+        ensure!(
+            !directory.contains('\0'),
+            "output directory must contain no NUL"
+        );
+        let path = agl_core::implementation_plan::WorkspacePath::new(directory.clone())
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            Path::new(path.as_str()) != Path::new(".")
+                && Path::new(path.as_str()) != Path::new(WORKSPACE_CONFIG_FILE_NAME),
+            "output directory cannot exclude the workspace root or agentLIBRE.toml"
+        );
+    }
     Ok(config)
 }
 
@@ -213,7 +261,46 @@ mod tests {
     use ayeque_forge_core::{LockEntry, serialize_lock, workspace_identity};
     use std::process::Command;
 
+    const MEMORY_KIND: &str = "memory";
+    const MEMORY_SCHEMA: &str = "agentlibre.memory/v1";
+    const DOCUMENT_KIND: &str = "document";
+    const DOCUMENT_SCHEMA: &str = "agentlibre.document/v1";
+
     const OBJECT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn output_scope_rejects_traversal_and_root_manifest_exclusion() {
+        let root = std::env::temp_dir().join(format!("agl-output-scope-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        assert!(read_workspace_output_directories(&root).unwrap().is_empty());
+        for directory in [
+            ".",
+            "../target",
+            "/target",
+            "agentLIBRE.toml",
+            "agentLIBRE.toml/.",
+            "",
+        ] {
+            fs::write(
+                root.join(WORKSPACE_CONFIG_FILE_NAME),
+                format!(
+                    "format = 2\n[artifacts]\n[workspace]\noutput_directories = [{directory:?}]\n"
+                ),
+            )
+            .unwrap();
+            assert!(
+                read_workspace_output_directories(&root).is_err(),
+                "accepted output path {directory}"
+            );
+        }
+        fs::write(
+            root.join(WORKSPACE_CONFIG_FILE_NAME),
+            "format = 2\n[artifacts]\n",
+        )
+        .unwrap();
+        assert!(read_workspace_output_directories(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn resolves_memory_and_documents_to_verified_materialized_paths() {

@@ -37,6 +37,13 @@ is the source of truth for all Forge entities and is edited through `agl
 artifact` commands; Forge catalogs, locks and materializations are generated
 backend state.
 
+The workspace manifest may also declare `[workspace] output_directories` as
+literal paths relative to its root; the repository declares `["target"]`.
+Those trees are omitted from plan workspace snapshots and planner execution
+views. No `.gitignore` rules or glob expansion are inferred. With no field,
+the list is empty. The root manifest remains part of the snapshot; artifact
+commands preserve the workspace section while editing entity declarations.
+
 Service logs are not written to an agentLIBRE file by the systemd units. Both
 stdout and stderr go to the per-user systemd journal:
 

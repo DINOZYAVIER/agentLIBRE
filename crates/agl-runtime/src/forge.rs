@@ -49,8 +49,21 @@ pub(crate) fn resolve_function(
 ) -> Result<ResolvedFunctionSource> {
     let workspace = workspace.as_ref();
     crate::resolve_workspace_artifacts(workspace)?;
-    let project = resolve_project(workspace)?;
+    let project = resolve_agl_project()?;
     resolve_function_from_project(&project, function_directory.as_ref())
+}
+
+fn agl_workspace_root() -> Result<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .context("failed to locate the AGL workspace manifest")
+}
+
+fn resolve_agl_project() -> Result<VerifiedProject> {
+    let root = agl_workspace_root()?;
+    crate::resolve_workspace_artifacts(&root)?;
+    resolve_project(&root)
 }
 
 #[cfg(test)]
@@ -80,11 +93,9 @@ pub fn function_identity(
 pub fn resolve_function_requirement(
     id: &PackageId,
     requirement: &VersionReq,
-    workspace: impl AsRef<Path>,
+    _workspace: impl AsRef<Path>,
 ) -> Result<FunctionIdentity> {
-    let workspace = workspace.as_ref();
-    crate::resolve_workspace_artifacts(workspace)?;
-    let project = resolve_project(workspace)?;
+    let project = resolve_agl_project()?;
     let mut candidates = Vec::new();
     for declared in project
         .manifest()
@@ -105,16 +116,16 @@ pub fn resolve_function_requirement(
         }
     }
     candidates.sort_by(|left, right| right.0.cmp(&left.0));
-    let best = candidates
-        .first()
-        .with_context(|| format!("no Forge Function {id} matching {requirement} exists"))?;
+    let best = candidates.first().with_context(|| {
+        format!("no Function {id} matching {requirement} is declared in the AGL workspace")
+    })?;
     ensure!(
         candidates
             .iter()
             .filter(|candidate| candidate.0 == best.0)
             .count()
             == 1,
-        "Forge Function {id}@{requirement} resolves ambiguously"
+        "Function {id}@{requirement} resolves ambiguously in the AGL workspace"
     );
     Ok(best.1.clone())
 }
@@ -144,11 +155,11 @@ fn resolve_function_from_project(
                 .canonicalize()
                 .is_ok_and(|path| path == function_directory)
         })
-        .context("Function is not a Forge-materialized Function entity")?;
+        .context("Function is not materialized from the AGL workspace artifact catalog")?;
     let manifest = read_function(&function_directory)?;
     ensure!(
         manifest.id.as_str() == function.id(),
-        "Forge Function identity differs from FUNCTION.toml"
+        "Function artifact identity differs from FUNCTION.toml"
     );
     let function_digest =
         compute_package_digest(&DirectoryPackageView::new(function_directory.clone())?)?;
@@ -166,7 +177,7 @@ fn resolve_function_from_project(
         let version = PackageVersion::new(package_version(&root, kind)?)?;
         ensure!(
             id == reference.id && version == reference.version,
-            "Forge entity {} identity differs from Function reference",
+            "AGL artifact {} identity differs from Function reference",
             reference.id
         );
         let content_digest = compute_package_digest(&DirectoryPackageView::new(root.clone())?)?;
@@ -215,7 +226,7 @@ fn read_function(directory: &Path) -> Result<FunctionManifest> {
     let bytes = package.read_file(&crate::package::PackageRelativePath::new(
         FUNCTION_FILE_NAME,
     )?)?;
-    FunctionManifest::parse(std::str::from_utf8(&bytes)?).context("invalid Forge Function")
+    FunctionManifest::parse(std::str::from_utf8(&bytes)?).context("invalid Function artifact")
 }
 
 fn manifest_references(manifest: &FunctionManifest) -> Result<Vec<(&'static str, EntityRef)>> {
