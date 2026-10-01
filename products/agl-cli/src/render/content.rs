@@ -333,29 +333,35 @@ pub(crate) fn show_full_text(text: &str, theme: &TerminalTheme) {
         return;
     }
     use crossterm::{event, execute, terminal};
+    use std::io::Write as _;
     let lines: Vec<_> = text.lines().collect();
     let page = terminal::size()
         .map(|(_, height)| height.saturating_sub(2) as usize)
         .unwrap_or(20)
         .max(1);
     let _ = terminal::enable_raw_mode();
+    // This pager owns the terminal synchronously, so write directly instead
+    // of queueing output through the REPL renderer. Raw mode disables the
+    // terminal's LF-to-CRLF conversion; emit CRLF explicitly for every row.
+    let mut output = std::io::stdout().lock();
     let mut offset = 0;
     while offset < lines.len() {
-        print!("\x1b[2J\x1b[H");
+        let _ = output.write_all(b"\x1b[2J\x1b[H");
         for line in lines.iter().skip(offset).take(page) {
-            println!("{line}");
+            let _ = output.write_all(line.as_bytes());
+            let _ = output.write_all(b"\r\n");
         }
-        println!(
-            "{}",
-            theme.paint(
-                "muted",
-                &format!(
-                    "-- {}/{} lines; Space/PageDown next, PageUp previous, q/Esc exit --",
-                    (offset + page).min(lines.len()),
-                    lines.len()
-                )
-            )
+        let hint = theme.paint(
+            "muted",
+            &format!(
+                "-- {}/{} lines; Space/PageDown next, PageUp previous, q/Esc exit --",
+                (offset + page).min(lines.len()),
+                lines.len()
+            ),
         );
+        let _ = output.write_all(hint.as_bytes());
+        let _ = output.write_all(b"\r\n");
+        let _ = output.flush();
         let Ok(event::Event::Key(key)) = event::read() else {
             break;
         };
@@ -368,6 +374,7 @@ pub(crate) fn show_full_text(text: &str, theme: &TerminalTheme) {
             _ => {}
         }
     }
+    drop(output);
     let _ = terminal::disable_raw_mode();
     let _ = execute!(
         std::io::stdout(),
