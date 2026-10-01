@@ -15,11 +15,11 @@ mod tests {
         RelativePath, WorkspaceScope,
     };
     use agl_core::{ConversationId, MessageId};
-    use agl_runtime::extension::ToolHandler;
     use agl_runtime::inference::{
         InferenceConfig, InferenceGenerator, InferenceService, RestoredInferenceHealth,
     };
     use agl_runtime::package::{PackageId, PackageVersion};
+    use agl_tool_api::ToolHandler;
     use serde_json::json;
 
     use super::*;
@@ -217,6 +217,13 @@ mod tests {
 
     struct OutputCorrectingGenerator(AtomicUsize);
 
+    fn string_response_format() -> serde_json::Value {
+        json!({
+            "type":"json_schema",
+            "json_schema":{"name":"test_string", "schema":{"type":"string"}}
+        })
+    }
+
     impl InferenceGenerator for OutputCorrectingGenerator {
         fn measure(
             &self,
@@ -236,6 +243,7 @@ mod tests {
         ) -> Result<agl_runtime::inference::InferenceGenerateResult, InferenceServiceError>
         {
             self.0.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.response_format, Some(string_response_format()));
             if request.model.id.as_str() == "model" {
                 return Err(InferenceServiceError::InvalidModelOutput(Box::new(
                     agl_runtime::inference::InvalidModelOutput {
@@ -278,7 +286,7 @@ mod tests {
                 delivery_attempt: request.delivery_attempt,
                 result: ModelGenerationResult {
                     private_reasoning: None,
-                    output: ModelGenerationOutput::Assistant(Content::text("corrected").unwrap()),
+                    output: ModelGenerationOutput::Assistant(Content::text("\"corrected\"").unwrap()),
                     finish_reason: ModelFinishReason::Stop,
                     usage: ModelUsage {
                         input_tokens: 5,
@@ -501,6 +509,33 @@ mod tests {
     }
 
     struct RepeatingReadGenerator(AtomicUsize);
+
+    struct StructuredToolGenerator(ToolCallingGenerator);
+
+    impl InferenceGenerator for StructuredToolGenerator {
+        fn measure(
+            &self,
+            request: InferenceGenerateRequest,
+        ) -> Result<agl_core::agent::ContextCapacity, InferenceServiceError> {
+            self.0.measure(request)
+        }
+
+        fn generate(
+            &self,
+            request: InferenceGenerateRequest,
+        ) -> Result<agl_runtime::inference::InferenceGenerateResult, InferenceServiceError> {
+            assert_eq!(
+                request.response_format.as_ref(),
+                Some(&string_response_format())
+            );
+            assert_eq!(request.tools.len(), 1);
+            let mut result = self.0.generate(request)?;
+            if let ModelGenerationOutput::Assistant(content) = &mut result.result.output {
+                *content = Content::text(serde_json::to_string(content.as_text()).unwrap()).unwrap();
+            }
+            Ok(result)
+        }
+    }
 
     struct CorrectedToolGenerator {
         calls: AtomicUsize,
@@ -884,8 +919,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let effect_validator =
-            Arc::new(jsonschema::validator_for(schema.as_value()).unwrap());
+        let effect_validator = Arc::new(jsonschema::validator_for(schema.as_value()).unwrap());
         let input_validator = Arc::new(
             jsonschema::validator_for(admitted.definition.input_schema.as_value()).unwrap(),
         );
@@ -1434,6 +1468,7 @@ mod tests {
         let store = StoreHandle::open_at(&root).unwrap();
         let conversation_id = ConversationId::generate();
         let mut configured = snapshot(&root);
+        configured.response_format = Some(string_response_format());
         let mut correction_runtime = model_runtime();
         correction_runtime.service.key = PackageDigest::from_bytes([14; 32]);
         configured.invalid_model_output_recovery =
@@ -1856,6 +1891,45 @@ mod tests {
         service.shutdown();
         inference_service.shutdown();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn response_schema_stays_with_tools_through_a_non_planner_tool_loop() {
+        let root = std::env::temp_dir()
+            .join(format!("agl-daemon-schema-tools-{}", uuid::Uuid::now_v7()));
+        let store = StoreHandle::open_at(&root).unwrap();
+        let conversation_id = ConversationId::generate();
+        let (bindings, admitted) = test_extension("structured response");
+        let mut configured = snapshot(&root);
+        assert!(!configured.planner_read_only);
+        configured.tools.push(admitted);
+        configured.response_format = Some(string_response_format());
+        bind_conversation(&store, conversation_id, &configured);
+        let generator = Arc::new(StructuredToolGenerator(ToolCallingGenerator(AtomicUsize::new(0))));
+        let (inference_service, inference) = InferenceService::start(
+            InferenceConfig::custom(generator.clone()),
+            RestoredInferenceHealth::default(),
+        ).unwrap();
+        let (service, handle) = AgentService::start(
+            AgentDependencies { store: store.clone(), inference: Arc::new(inference) },
+            vec![bindings],
+        ).unwrap();
+        let run_id = handle.start_run(AgentRunSpec {
+            reasoning: None,
+            origin: AgentRunOrigin::User { conversation_id, message_id: MessageId::generate() },
+            input: Content::text("use the Tool, then return JSON").unwrap(),
+        }).unwrap();
+        for _ in 0..1_000 {
+            if store.agent_run_view(run_id).unwrap().status.is_terminal() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(store.agent_run_view(run_id).unwrap().status, AgentRunStatus::Completed);
+        assert_eq!(generator.0.0.load(Ordering::SeqCst), 2);
+        assert!(store.conversation_messages(conversation_id, None, 100).unwrap().messages
+            .iter().any(|message| message.content.as_text() == "\"still alive\""));
+        service.shutdown();
+        inference_service.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

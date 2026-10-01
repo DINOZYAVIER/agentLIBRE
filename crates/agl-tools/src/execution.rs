@@ -4,14 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_core::ToolId;
 use agl_core::agent::{EffectReceipt, ToolFailure, ToolFailureKind, ToolResult};
+use agl_core::package::{InMemoryPackageView, PackageRelativePath};
 use agl_execution_api::{
     ExecutionClient, ExecutionIo, ExecutionOutputStream, ExecutionOwner, ExecutionSignal,
     ExecutionStartRequest, ExecutionState, ExecutionStatus, TerminalId, TerminalSize,
 };
-use agl_runtime::extension::{
-    ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler, parse_package_view,
-};
-use agl_runtime::package::{InMemoryPackageView, PackageRelativePath, compute_package_digest};
+use agl_tool_api::{ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -22,11 +20,21 @@ const COMMAND_TOOL: &str = "agentlibre.execution:command.exec";
 const TERMINAL_TOOL: &str = "agentlibre.execution:terminal.session";
 const MAX_EXECUTION_TIMEOUT_MS: u64 = 3_600_000;
 
-pub(crate) fn bindings(client: ExecutionClient) -> ExtensionBindings {
-    let declaration = declaration_view();
-    let package = parse_package_view(&declaration).expect("embedded execution Extension");
-    let tools = package
-        .definition
+pub fn bindings(
+    version: agl_core::package::PackageVersion,
+    content_digest: agl_core::package::PackageTreeDigest,
+    definition: agl_core::ExtensionDefinition,
+    client: ExecutionClient,
+) -> anyhow::Result<ExtensionBindings> {
+    crate::validate_declaration(
+        &declaration(),
+        &version,
+        &content_digest,
+        &definition,
+        "agentlibre.execution",
+        &[COMMAND_TOOL, TERMINAL_TOOL],
+    )?;
+    let tools = definition
         .tools
         .iter()
         .cloned()
@@ -39,14 +47,13 @@ pub(crate) fn bindings(client: ExecutionClient) -> ExtensionBindings {
             }),
         })
         .collect();
-    ExtensionBindings {
-        version: package.manifest.version,
-        content_digest: compute_package_digest(&declaration)
-            .expect("embedded execution Extension digest"),
-        definition: package.definition,
+    Ok(ExtensionBindings {
+        version,
+        content_digest,
+        definition,
         tools,
         allows_authority: Arc::new(valid_execution_scope),
-    }
+    })
 }
 
 fn valid_execution_scope(grant: &agl_core::AuthorityGrant) -> bool {
@@ -111,12 +118,6 @@ async fn command_exec(
 ) -> Result<ToolResult, ToolFailure> {
     let input: CommandExecInput = serde_json::from_value(input)
         .map_err(|_| rejection(ToolFailureKind::InvalidInput, "input"))?;
-    if context.read_only_workspace && !planner_command_is_read_only(&input.argv) {
-        return Err(rejection(
-            ToolFailureKind::Unauthorized,
-            "planner_workspace",
-        ));
-    }
     let executable = admitted_executable(&context, EXEC_EFFECT, &input.argv)?;
     let cwd = contained_cwd(&context, input.cwd.as_deref())?;
     let owner = owner(&context)?;
@@ -144,7 +145,19 @@ async fn command_exec(
             timeout_ms,
             max_output_bytes,
             terminal_size: None,
-            isolation: agl_execution_api::ExecutionIsolation::Standard,
+            isolation: if context.read_only_workspace {
+                agl_execution_api::ExecutionIsolation::ReadOnlyWorkspace {
+                    workspace_root: context
+                        .workspace
+                        .root
+                        .as_path()
+                        .to_string_lossy()
+                        .into_owned(),
+                    output_directories: context.output_directories.clone(),
+                }
+            } else {
+                agl_execution_api::ExecutionIsolation::Standard
+            },
         })
         .await
         .map_err(client_failure)?;
@@ -162,39 +175,6 @@ async fn command_exec(
         receipt(&context, EXEC_EFFECT)?,
         context.result_bytes,
     )
-}
-
-fn planner_command_is_read_only(argv: &[String]) -> bool {
-    let Some(command) = argv.first().and_then(|value| Path::new(value).file_name()) else {
-        return false;
-    };
-    let command = command.to_string_lossy();
-    let forbidden_argument = argv.iter().skip(1).any(|argument| {
-        matches!(
-            argument.as_str(),
-            "-i" | "--in-place" | "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
-        ) || argument.starts_with("--git-dir")
-            || argument.starts_with("--work-tree")
-            || argument == "-C"
-    });
-    if forbidden_argument {
-        return false;
-    }
-    match command.as_ref() {
-        "cat" | "head" | "tail" | "sed" | "rg" | "grep" | "find" | "ls" | "pwd" | "stat"
-        | "file" | "sort" | "wc" => true,
-        "git" => matches!(
-            argv.get(1).map(String::as_str),
-            Some("status")
-                | Some("diff")
-                | Some("log")
-                | Some("show")
-                | Some("ls-files")
-                | Some("rev-parse")
-                | Some("cat-file")
-        ),
-        _ => false,
-    }
 }
 
 async fn read_command_output(
@@ -670,28 +650,24 @@ fn definition_digest(
     agl_core::agent::ToolDefinitionDigest::from_bytes(Sha256::digest(bytes).into())
 }
 
-fn declaration_view() -> InMemoryPackageView {
+pub fn declaration() -> InMemoryPackageView {
     InMemoryPackageView::new([
         embedded(
             "EXTENSION.toml",
-            include_bytes!("../../../../../extensions/agentlibre-execution/EXTENSION.toml"),
+            include_bytes!("../../../extensions/agentlibre-execution/EXTENSION.toml"),
         ),
         embedded(
             "schemas/execution-scope.json",
-            include_bytes!(
-                "../../../../../extensions/agentlibre-execution/schemas/execution-scope.json"
-            ),
+            include_bytes!("../../../extensions/agentlibre-execution/schemas/execution-scope.json"),
         ),
         embedded(
             "schemas/command-exec.json",
-            include_bytes!(
-                "../../../../../extensions/agentlibre-execution/schemas/command-exec.json"
-            ),
+            include_bytes!("../../../extensions/agentlibre-execution/schemas/command-exec.json"),
         ),
         embedded(
             "schemas/terminal-session.json",
             include_bytes!(
-                "../../../../../extensions/agentlibre-execution/schemas/terminal-session.json"
+                "../../../extensions/agentlibre-execution/schemas/terminal-session.json"
             ),
         ),
     ])
@@ -718,32 +694,10 @@ mod tests {
         ExecutionCommand, ExecutionOutcome, ExecutionOutput, ExecutionOutputChunk,
         ExecutionProtocolRequest, ExecutionProtocolResponse, ExecutionResponse,
     };
-    use agl_runtime::extension::ToolCancellation;
+    use agl_tool_api::ToolCancellation;
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
     use super::*;
-
-    #[test]
-    fn stock_execution_bindings_match_the_declarative_package() {
-        let bindings = bindings(ExecutionClient::new("/unreachable-test-execd"));
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../extensions/agentlibre-execution");
-        let declaration = agl_runtime::package::DirectoryPackageView::new(root).unwrap();
-        let package = parse_package_view(&declaration).unwrap();
-        assert_eq!(bindings.version, package.manifest.version);
-        assert_eq!(bindings.definition, package.definition);
-        assert_eq!(
-            bindings.content_digest,
-            compute_package_digest(&declaration).unwrap()
-        );
-        assert_eq!(bindings.tools.len(), 2);
-        assert!(bindings.definition.tools.iter().all(|definition| {
-            bindings.tools.iter().any(|binding| {
-                binding.tool_id == definition.id
-                    && binding.definition_digest == definition_digest(definition)
-            })
-        }));
-    }
 
     #[test]
     fn execution_authority_requires_realized_workspace_and_explicit_executables() {
@@ -768,7 +722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_write_attempt_is_rejected_by_the_daemon_tool_handler() {
+    async fn planner_command_requests_read_only_execution_from_execd() {
         let root = std::env::temp_dir().join(format!(
             "agl-planner-write-{}-{}",
             std::process::id(),
@@ -778,7 +732,37 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let target = root.join("planner-must-not-write");
+        let socket = root.join("execd.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let expected_root = root.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut line = Vec::new();
+            BufReader::new(reader)
+                .read_until(b'\n', &mut line)
+                .await
+                .unwrap();
+            let request: ExecutionProtocolRequest = serde_json::from_slice(&line).unwrap();
+            let ExecutionCommand::Start { request: start } = request.command else {
+                panic!("expected Start");
+            };
+            assert_eq!(
+                start.isolation,
+                agl_execution_api::ExecutionIsolation::ReadOnlyWorkspace {
+                    workspace_root: expected_root.to_string_lossy().into_owned(),
+                    output_directories: vec!["target".into()],
+                }
+            );
+            assert_eq!(start.argv[1..], ["-c", "printf planner"]);
+            let response = ExecutionProtocolResponse::error(
+                request.request_id,
+                agl_execution_api::ExecutionProtocolError::invalid("test sandbox unavailable"),
+            );
+            let mut response = serde_json::to_vec(&response).unwrap();
+            response.push(b'\n');
+            writer.write_all(&response).await.unwrap();
+        });
         let mut context = tool_context(
             &root,
             EXEC_EFFECT,
@@ -786,18 +770,17 @@ mod tests {
             AgentRunId::generate(),
         );
         context.read_only_workspace = true;
-        let binding = bindings(ExecutionClient::new(root.join("unreachable-execd")))
-            .tools
-            .into_iter()
-            .find(|binding| binding.tool_id.as_str() == COMMAND_TOOL)
-            .unwrap();
-        let failure = binding
-            .handler
-            .call(context, json!({"argv":["touch", target.to_string_lossy()]}))
+        context.output_directories = vec!["target".into()];
+        let handler = ExecutionTool {
+            tool_id: ToolId::new(COMMAND_TOOL).unwrap(),
+            client: ExecutionClient::new(socket),
+        };
+        let failure = handler
+            .call(context, json!({"argv":["sh", "-c", "printf planner"]}))
             .await
             .unwrap_err();
-        assert_eq!(failure.kind, ToolFailureKind::Unauthorized);
-        assert!(!target.exists());
+        assert_eq!(failure.kind, ToolFailureKind::Execution);
+        server.await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

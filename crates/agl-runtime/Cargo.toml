@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 agl-core.workspace = true
+agl-tool-api.workspace = true
 agl-execution-api.workspace = true
 ayeque-forge-core.workspace = true
 anyhow.workspace = true

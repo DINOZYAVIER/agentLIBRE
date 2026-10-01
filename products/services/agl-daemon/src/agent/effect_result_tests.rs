@@ -28,11 +28,10 @@ mod effect_result_tests {
                     },
                 };
                 if bound_handler_output {
-                    crate::tools::committed_result(
-                        "x".repeat(agl_core::MAX_TEXT_BYTES + 1),
-                        receipt,
-                        context.result_bytes,
-                    )
+                    Ok(ToolResult {
+                        content: Content::text(crate::tools::COMMITTED_RESULT_LIMIT).unwrap(),
+                        effect_receipts: vec![receipt],
+                    })
                 } else {
                     Ok(ToolResult {
                         content: Content::text("x".repeat(4096)).unwrap(),

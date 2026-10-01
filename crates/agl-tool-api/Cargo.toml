@@ -1,0 +1,10 @@
+[package]
+name = "agl-tool-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-core.workspace = true
+serde_json.workspace = true

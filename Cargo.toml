@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/agl-tools",
+    "crates/agl-tool-api",
     "crates/agl-daemon-api",
     "crates/agl-execution-api",
     "products/agl-cli",
@@ -18,6 +20,8 @@ license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
 
 [workspace.dependencies]
+agl-tools = { path = "crates/agl-tools" }
+agl-tool-api = { path = "crates/agl-tool-api" }
 agl-daemon-api = { path = "crates/agl-daemon-api" }
 agl-execution-api = { path = "crates/agl-execution-api" }
 agl-daemon = { path = "products/services/agl-daemon" }

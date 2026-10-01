@@ -50,6 +50,7 @@ dependencies = [
  "agl-daemon-api",
  "agl-execution-api",
  "agl-runtime",
+ "agl-tools",
  "anyhow",
  "ayeque-forge-core",
  "clap",
@@ -90,23 +91,20 @@ dependencies = [
  "agl-daemon-api",
  "agl-execution-api",
  "agl-runtime",
+ "agl-tool-api",
+ "agl-tools",
  "anyhow",
  "chrono",
  "futures-util",
  "jsonschema",
  "libc",
- "rcgen",
- "reqwest",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "stemmer",
  "tokio",
- "tokio-rustls",
  "tracing",
- "url",
  "uuid",
 ]
 
@@ -125,6 +123,7 @@ dependencies = [
 name = "agl-execd"
 version = "1.0.0-alpha.19"
 dependencies = [
+ "agl-core",
  "agl-execution-api",
  "agl-runtime",
  "anyhow",
@@ -175,6 +174,7 @@ version = "1.0.0-alpha.19"
 dependencies = [
  "agl-core",
  "agl-execution-api",
+ "agl-tool-api",
  "anyhow",
  "ayeque-forge-core",
  "bytes",
@@ -192,6 +192,38 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "agl-tool-api"
+version = "1.0.0-alpha.19"
+dependencies = [
+ "agl-core",
+ "serde_json",
+]
+
+[[package]]
+name = "agl-tools"
+version = "1.0.0-alpha.19"
+dependencies = [
+ "agl-core",
+ "agl-execution-api",
+ "agl-tool-api",
+ "anyhow",
+ "chrono",
+ "futures-util",
+ "libc",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
  "uuid",

@@ -8,10 +8,8 @@ use std::{fs::OpenOptions, io::Read as _};
 use agl_core::agent::{
     EffectReceipt, ToolDefinition, ToolDefinitionDigest, ToolFailure, ToolFailureKind, ToolResult,
 };
-use agl_runtime::extension::{
-    ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler, parse_package_view,
-};
-use agl_runtime::package::{InMemoryPackageView, PackageRelativePath, compute_package_digest};
+use agl_core::package::{InMemoryPackageView, PackageRelativePath};
+use agl_tool_api::{ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler};
 use anyhow::{Context as _, Result, ensure};
 use chrono::DateTime;
 use futures_util::StreamExt as _;
@@ -41,34 +39,42 @@ pub struct SearxngConfig {
     pub private_ca: PathBuf,
 }
 
-pub(crate) fn bindings(config: SearxngConfig) -> Result<ExtensionBindings> {
+pub fn bindings(
+    version: agl_core::package::PackageVersion,
+    content_digest: agl_core::package::PackageTreeDigest,
+    definition: agl_core::ExtensionDefinition,
+    config: SearxngConfig,
+) -> Result<ExtensionBindings> {
+    crate::validate_declaration(
+        &declaration(),
+        &version,
+        &content_digest,
+        &definition,
+        "agentlibre.searxng",
+        &[SEARCH_TOOL],
+    )?;
     let client = build_client(&config)?;
-    Ok(bindings_with_client(client, SEARCH_ENDPOINT.to_owned()))
-}
-
-fn bindings_with_client(client: reqwest::Client, endpoint: String) -> ExtensionBindings {
-    let declaration = declaration_view();
-    let package = parse_package_view(&declaration).expect("embedded SearXNG Extension");
-    let definition = package
-        .definition
+    let tool_definition = definition
         .tools
         .iter()
         .find(|definition| definition.id.as_str() == SEARCH_TOOL)
         .expect("embedded search Tool")
         .clone();
     let binding = ToolBinding {
-        tool_id: definition.id.clone(),
-        definition_digest: definition_digest(&definition),
-        handler: Arc::new(SearchTool { client, endpoint }),
+        tool_id: tool_definition.id.clone(),
+        definition_digest: definition_digest(&tool_definition),
+        handler: Arc::new(SearchTool {
+            client,
+            endpoint: SEARCH_ENDPOINT.to_owned(),
+        }),
     };
-    ExtensionBindings {
-        version: package.manifest.version,
-        content_digest: compute_package_digest(&declaration)
-            .expect("embedded SearXNG Extension digest"),
-        definition: package.definition,
+    Ok(ExtensionBindings {
+        version,
+        content_digest,
+        definition,
         tools: vec![binding],
         allows_authority: Arc::new(valid_search_scope),
-    }
+    })
 }
 
 fn build_client(config: &SearxngConfig) -> Result<reqwest::Client> {
@@ -170,23 +176,23 @@ fn valid_search_scope(grant: &agl_core::AuthorityGrant) -> bool {
             .all(|source| matches!(source.as_str(), Some("web" | "wikipedia")))
 }
 
-fn declaration_view() -> InMemoryPackageView {
+pub fn declaration() -> InMemoryPackageView {
     InMemoryPackageView::new([
         embedded(
             "EXTENSION.toml",
-            include_bytes!("../../../../../extensions/agentlibre-searxng/EXTENSION.toml"),
+            include_bytes!("../../../extensions/agentlibre-searxng/EXTENSION.toml"),
         ),
         embedded(
             "schemas/query-scope.json",
-            include_bytes!("../../../../../extensions/agentlibre-searxng/schemas/query-scope.json"),
+            include_bytes!("../../../extensions/agentlibre-searxng/schemas/query-scope.json"),
         ),
         embedded(
             "schemas/search.json",
-            include_bytes!("../../../../../extensions/agentlibre-searxng/schemas/search.json"),
+            include_bytes!("../../../extensions/agentlibre-searxng/schemas/search.json"),
         ),
         embedded(
             "fixtures/v1.json",
-            include_bytes!("../../../../../extensions/agentlibre-searxng/fixtures/v1.json"),
+            include_bytes!("../../../extensions/agentlibre-searxng/fixtures/v1.json"),
         ),
     ])
     .expect("embedded SearXNG package")
@@ -643,7 +649,7 @@ mod tests {
         AbsolutePath, AgentOperationKey, AuthorityGrantSet, RelativePath, WorkspaceScope,
     };
     use agl_core::{AgentRunId, AuthorityGrant, CanonicalJson, EffectId};
-    use agl_runtime::extension::{ToolCancellation, ToolContext};
+    use agl_tool_api::{ToolCancellation, ToolContext};
     use rcgen::{
         BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
         KeyUsagePurpose,
@@ -820,29 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_declaration_and_authority_are_exact() {
-        let declaration = declaration_view();
-        let package = parse_package_view(&declaration).unwrap();
-        let root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../extensions/agentlibre-searxng");
-        let source = agl_runtime::package::DirectoryPackageView::new(root).unwrap();
-        let bindings = bindings_with_client(
-            reqwest::Client::builder().no_proxy().build().unwrap(),
-            SEARCH_ENDPOINT.to_owned(),
-        );
-        assert_eq!(package.definition.id.as_str(), "agentlibre.searxng");
-        assert_eq!(package.definition.tools.len(), 1);
-        assert_eq!(bindings.version, package.manifest.version);
-        assert_eq!(bindings.definition, package.definition);
-        assert_eq!(
-            bindings.content_digest,
-            compute_package_digest(&source).unwrap()
-        );
-        assert_eq!(bindings.tools.len(), 1);
-        assert_eq!(
-            bindings.tools[0].definition_digest,
-            definition_digest(&package.definition.tools[0])
-        );
+    fn search_authority_is_exact() {
         assert!(valid_search_scope(&AuthorityGrant {
             effect: EffectId::new(SEARCH_EFFECT).unwrap(),
             scope: CanonicalJson::new(json!({
@@ -864,7 +848,7 @@ mod tests {
     #[test]
     fn synchronized_fixture_corpus_matches_the_closed_contract() {
         let corpus: Value = serde_json::from_slice(include_bytes!(
-            "../../../../../extensions/agentlibre-searxng/fixtures/v1.json"
+            "../../../extensions/agentlibre-searxng/fixtures/v1.json"
         ))
         .unwrap();
         assert_eq!(corpus["schema"], "ayeque.agent-search-fixtures/v1");

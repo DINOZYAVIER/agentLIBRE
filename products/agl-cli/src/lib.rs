@@ -1,10 +1,3 @@
-mod artifacts;
-mod cli;
-mod config;
-mod render;
-mod repl;
-mod workspace;
-
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -20,9 +13,10 @@ use agl_core::agent::{
     ConversationView, MessageRole,
 };
 use agl_core::{AgentRunId, ConversationId, MessageId};
-use agl_daemon::{DaemonConfig, DaemonServer, IntegrationConfig, ListenerSource, SearxngConfig};
+use agl_daemon::{DaemonConfig, DaemonServer, IntegrationConfig, ListenerSource};
 use agl_daemon_api::{AgentClient, AgentProgress, AgentProgressStatus, AgentSubscriptionFrame};
 use agl_runtime::inference::{InferenceConfig, LlamaServerConfig};
+use agl_tools::searxng::SearxngConfig;
 use anyhow::{Context, Result, bail, ensure};
 use artifacts::{
     add_artifact, list_artifacts, migrate_artifacts, remove_artifact, sync_artifacts,
@@ -220,6 +214,15 @@ macro_rules! eprintln {
     () => { $crate::emit_terminal("\n".to_owned(), true) };
     ($($arg:tt)*) => { $crate::emit_terminal(format!("{}\n", format_args!($($arg)*)), true) };
 }
+
+// Declare child modules after the output macros so their `println!` and
+// `eprintln!` calls use the REPL renderer while raw terminal mode is active.
+mod artifacts;
+mod cli;
+mod config;
+mod render;
+mod repl;
+mod workspace;
 
 const FALLBACK_ANSWER_WIDTH: usize = 64;
 const INPUT_HINT: &str = "Type a message or / for commands";
@@ -1206,6 +1209,11 @@ mod tests {
             wrap_external_text(styled, 4),
             "\x1b[1;38;2;100;120;140mhell\no\x1b[0m"
         );
+    }
+
+    #[test]
+    fn terminal_output_uses_crlf_without_duplicating_existing_carriage_returns() {
+        assert_eq!(terminal_crlf("one\ntwo\r\nthree"), "one\r\ntwo\r\nthree");
     }
 
     #[test]

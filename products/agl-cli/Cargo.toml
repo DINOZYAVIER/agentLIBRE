@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 agl-core.workspace = true
+agl-tools.workspace = true
 agl-daemon-api.workspace = true
 agl-execution-api.workspace = true
 agl-daemon.workspace = true

@@ -573,31 +573,32 @@ mod tests {
     };
     use agl_core::implementation_plan::*;
     use agl_core::{Content, ToolId};
-    use agl_runtime::extension::{
-        ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler,
-    };
     use agl_runtime::inference::{
         InferenceConfig, InferenceGenerateRequest, InferenceGenerator, InferenceService,
         InferenceServiceError, RestoredInferenceHealth,
     };
     use agl_runtime::package::{PackageTreeDigest, PackageVersion};
     use agl_runtime::{RuntimeConfig, RuntimeService};
+    use agl_tool_api::{ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler};
     use serde_json::{Value, json};
 
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!("agl-plan-store-{}", Uuid::now_v7()))
     }
 
+    type InspectCalls = Arc<Mutex<Vec<(Value, bool, Vec<String>)>>>;
+
     struct InspectTool {
-        calls: Arc<Mutex<Vec<(Value, bool)>>>,
+        calls: InspectCalls,
     }
 
     impl ToolHandler for InspectTool {
         fn call(&self, context: ToolContext, input: Value) -> ToolFuture {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((input, context.read_only_workspace));
+            self.calls.lock().unwrap().push((
+                input,
+                context.read_only_workspace,
+                context.output_directories,
+            ));
             Box::pin(async {
                 Ok(agl_core::agent::ToolResult {
                     content: Content::text("repository evidence").unwrap(),
@@ -639,8 +640,11 @@ mod tests {
             request: InferenceGenerateRequest,
         ) -> Result<agl_runtime::inference::InferenceGenerateResult, InferenceServiceError>
         {
-            if request.response_format.is_some() {
-                assert!(request.tools.is_empty());
+            assert_eq!(
+                request.response_format,
+                Some(agl_runtime::planner::response_format())
+            );
+            if request.tools.is_empty() {
                 assert!(request.context.iter().any(|entry| {
                     entry
                         .message
@@ -707,9 +711,7 @@ mod tests {
         }
     }
 
-    fn inspect_extension(
-        calls: Arc<Mutex<Vec<(Value, bool)>>>,
-    ) -> (ExtensionBindings, AdmittedTool) {
+    fn inspect_extension(calls: InspectCalls) -> (ExtensionBindings, AdmittedTool) {
         let tool = agl_core::ToolDefinition {
             id: ToolId::new("test.planner:inspect").unwrap(),
             description: "inspect a repository file".into(),
@@ -863,7 +865,7 @@ mod tests {
         agent: crate::agent::AgentHandle,
         function: ExactPackageRef,
         activated: agl_runtime::ActivatedFunction,
-        inspect_calls: Arc<Mutex<Vec<(Value, bool)>>>,
+        inspect_calls: InspectCalls,
         model_calls: Arc<AtomicUsize>,
     }
 
@@ -1021,12 +1023,18 @@ mod tests {
     #[test]
     fn planner_uses_real_agent_tool_path_and_read_only_context() {
         let harness = Harness::new(GenerationMode::FirstPass);
+        std::fs::write(
+            harness.workspace.join("agentLIBRE.toml"),
+            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+        )
+        .unwrap();
         let (stored, _) = create(&harness).unwrap();
         assert_eq!(stored.plan.schema, PlanSchema::V1);
         let calls = harness.inspect_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0["path"], "src/lib.rs");
         assert!(calls[0].1);
+        assert_eq!(calls[0].2, ["target"]);
     }
 
     #[test]

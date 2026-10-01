@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::agent::AgentPackage;
-use crate::extension::{ExtensionBindings, ExtensionPackage};
+use crate::extension::ExtensionPackage;
 use crate::function::{
     AcceleratorPreference, DeviceSelector, FunctionInference, GpuLayers, KvCacheType, SplitMode,
 };
@@ -30,6 +30,7 @@ use agl_core::agent::{
     WorkspaceScope,
 };
 use agl_core::{AuthorityGrant, AuthorityGrantSet, CanonicalJson, ToolId};
+use agl_tool_api::ExtensionBindings;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

@@ -234,7 +234,6 @@ impl OperationExecution<'_> {
                             store.put_inference_health_updates(&updates).map_err(|_| ())
                         })
                     };
-                    let planner_correction = is_planner_correction(snapshot, &context);
                     let inference_request = InferenceGenerateRequest {
                         operation: operation.key.clone(),
                         delivery_attempt: operation.delivery_attempt,
@@ -243,14 +242,8 @@ impl OperationExecution<'_> {
                         generation: generation.clone(),
                         instructions: snapshot.instructions.clone(),
                         context: context.clone(),
-                        tools: if planner_correction {
-                            Vec::new()
-                        } else {
-                            snapshot.tools.clone()
-                        },
-                        response_format: planner_correction
-                            .then(|| snapshot.response_format.clone())
-                            .flatten(),
+                        tools: snapshot.tools.clone(),
+                        response_format: snapshot.response_format.clone(),
                         deadline_at_ms,
                         cancellation: cancellation.inference.clone(),
                         progress: Some(progress_sink),
@@ -304,108 +297,118 @@ impl OperationExecution<'_> {
                     .ok_or(AgentOperationFailure {
                         kind: AgentOperationFailureKind::Unavailable,
                     });
-                let result =
-                    binding.and_then(|prepared| {
-                        let admitted = snapshot
-                            .tools
-                            .iter()
-                            .find(|tool| {
-                                tool.definition.id == request.tool_id
-                                    && tool.definition_digest == prepared.binding.definition_digest
-                            })
-                            .ok_or(AgentOperationFailure {
-                                kind: AgentOperationFailureKind::Unauthorized,
-                            })?;
-                        if admitted.definition != prepared.definition {
-                            return Err(AgentOperationFailure {
-                                kind: AgentOperationFailureKind::Unauthorized,
-                            });
-                        }
-                        if snapshot.planner_read_only
-                            && prepared.definition.required_effects.iter().any(|effect| {
-                                matches!(
-                                    effect.as_str(),
-                                    "agentlibre.builtins:filesystem_write"
-                                        | "agentlibre.execution:terminal.control"
-                                )
-                            })
-                        {
-                            return Err(AgentOperationFailure {
-                                kind: AgentOperationFailureKind::Unauthorized,
-                            });
-                        }
-                        let input = CanonicalJson::new(request.input.clone()).map_err(|_| {
-                            AgentOperationFailure {
-                                kind: AgentOperationFailureKind::InvalidInput,
-                            }
+                let result = binding.and_then(|prepared| {
+                    let admitted = snapshot
+                        .tools
+                        .iter()
+                        .find(|tool| {
+                            tool.definition.id == request.tool_id
+                                && tool.definition_digest == prepared.binding.definition_digest
+                        })
+                        .ok_or(AgentOperationFailure {
+                            kind: AgentOperationFailureKind::Unauthorized,
                         })?;
-                        prepared
-                            .input_validator
-                            .validate(input.as_value())
+                    if admitted.definition != prepared.definition {
+                        return Err(AgentOperationFailure {
+                            kind: AgentOperationFailureKind::Unauthorized,
+                        });
+                    }
+                    if snapshot.planner_read_only
+                        && prepared.definition.required_effects.iter().any(|effect| {
+                            matches!(
+                                effect.as_str(),
+                                "agentlibre.builtins:filesystem_write"
+                                    | "agentlibre.execution:terminal.control"
+                            )
+                        })
+                    {
+                        return Err(AgentOperationFailure {
+                            kind: AgentOperationFailureKind::Unauthorized,
+                        });
+                    }
+                    let input = CanonicalJson::new(request.input.clone()).map_err(|_| {
+                        AgentOperationFailure {
+                            kind: AgentOperationFailureKind::InvalidInput,
+                        }
+                    })?;
+                    prepared
+                        .input_validator
+                        .validate(input.as_value())
+                        .map_err(|_| AgentOperationFailure {
+                            kind: AgentOperationFailureKind::InvalidInput,
+                        })?;
+                    if prepared.definition.required_effects.iter().any(|effect| {
+                        !snapshot
+                            .authority
+                            .0
+                            .iter()
+                            .any(|grant| &grant.effect == effect)
+                    }) {
+                        return Err(AgentOperationFailure {
+                            kind: AgentOperationFailureKind::Unauthorized,
+                        });
+                    }
+                    if let Some(result) = guarded_duplicate_result(dependencies, operation)? {
+                        validate_tool_result(prepared, snapshot, &result)?;
+                        return Ok(AgentOperationResult::Tool(result));
+                    }
+                    reserve_effect_receipt_result(prepared, snapshot)?;
+                    let runtime = runtime.ok_or(AgentOperationFailure {
+                        kind: AgentOperationFailureKind::Unavailable,
+                    })?;
+                    let mut tool_context = ToolContext::new(
+                        operation.key.clone(),
+                        self.conversation_id,
+                        snapshot.workspace.clone(),
+                        snapshot.authority.clone(),
+                        deadline_at_ms,
+                        snapshot.limits.tool_result_bytes,
+                        cancellation.tool.clone(),
+                    );
+                    tool_context.read_only_workspace = snapshot.planner_read_only;
+                    if snapshot.planner_read_only {
+                        tool_context.output_directories =
+                            agl_runtime::read_workspace_output_directories(
+                                snapshot.workspace.root.as_path(),
+                            )
                             .map_err(|_| AgentOperationFailure {
                                 kind: AgentOperationFailureKind::InvalidInput,
                             })?;
-                        if prepared.definition.required_effects.iter().any(|effect| {
-                            !snapshot
-                                .authority
-                                .0
-                                .iter()
-                                .any(|grant| &grant.effect == effect)
-                        }) {
-                            return Err(AgentOperationFailure {
-                                kind: AgentOperationFailureKind::Unauthorized,
-                            });
-                        }
-                        if let Some(result) = guarded_duplicate_result(dependencies, operation)? {
-                            validate_tool_result(prepared, snapshot, &result)?;
-                            return Ok(AgentOperationResult::Tool(result));
-                        }
-                        reserve_effect_receipt_result(prepared, snapshot)?;
-                        let runtime = runtime.ok_or(AgentOperationFailure {
-                            kind: AgentOperationFailureKind::Unavailable,
-                        })?;
-                        let mut tool_context = ToolContext::new(
-                            operation.key.clone(),
-                            self.conversation_id,
-                            snapshot.workspace.clone(),
-                            snapshot.authority.clone(),
-                            deadline_at_ms,
-                            snapshot.limits.tool_result_bytes,
-                            cancellation.tool.clone(),
-                        );
-                        tool_context.read_only_workspace = snapshot.planner_read_only;
-                        let delivered = execute_tool_future(
-                            runtime,
-                            prepared
-                                .binding
-                                .handler
-                                .call(tool_context, request.input.clone()),
-                            deadline_at_ms,
-                            cancellation,
-                        );
-                        match delivered {
-                            Ok(result) => {
-                                // A receipt is checked after the handler ran. Invalid
-                                // output cannot establish that its effect was absent.
-                                let result = accept_tool_result(prepared, snapshot, result)
-                                    .map_err(|_| AgentOperationFailure {
+                    }
+                    let delivered = execute_tool_future(
+                        runtime,
+                        prepared
+                            .binding
+                            .handler
+                            .call(tool_context, request.input.clone()),
+                        deadline_at_ms,
+                        cancellation,
+                    );
+                    match delivered {
+                        Ok(result) => {
+                            // A receipt is checked after the handler ran. Invalid
+                            // output cannot establish that its effect was absent.
+                            let result =
+                                accept_tool_result(prepared, snapshot, result).map_err(|_| {
+                                    AgentOperationFailure {
                                         kind: AgentOperationFailureKind::OutcomeUnknown,
-                                    })?;
-                                Ok(AgentOperationResult::Tool(result))
-                            }
-                            Err(failure) => {
-                                let correction = recoverable_tool_failure_result(
-                                    dependencies,
-                                    operation,
-                                    &failure,
-                                    snapshot.limits.tool_result_bytes,
-                                )?;
-                                correction
-                                    .map(AgentOperationResult::Tool)
-                                    .ok_or_else(|| failure.into())
-                            }
+                                    }
+                                })?;
+                            Ok(AgentOperationResult::Tool(result))
                         }
-                    });
+                        Err(failure) => {
+                            let correction = recoverable_tool_failure_result(
+                                dependencies,
+                                operation,
+                                &failure,
+                                snapshot.limits.tool_result_bytes,
+                            )?;
+                            correction
+                                .map(AgentOperationResult::Tool)
+                                .ok_or_else(|| failure.into())
+                        }
+                    }
+                });
                 match result {
                     Ok(result) => Ok(result),
                     Err(failure) => {
@@ -448,21 +451,6 @@ impl OperationExecution<'_> {
             }
         }
     }
-}
-
-fn is_planner_correction(
-    snapshot: &agl_core::agent::AgentRunSnapshot,
-    context: &[agl_core::agent::AgentContextEntry],
-) -> bool {
-    snapshot.planner_read_only
-        && context.iter().rev().any(|entry| {
-            entry.message.role == agl_core::agent::MessageRole::User
-                && entry
-                    .message
-                    .content
-                    .as_text()
-                    .starts_with(agl_runtime::planner::PLANNER_CORRECTION_PREFIX)
-        })
 }
 
 pub(super) fn record_model_output_rejection(
@@ -602,7 +590,7 @@ fn correct_invalid_model_output(
             instructions: instructions.clone(),
             context: context.clone(),
             tools: snapshot.tools.clone(),
-            response_format: None,
+            response_format: snapshot.response_format.clone(),
             deadline_at_ms,
             cancellation: cancellation.inference.clone(),
             progress: None,

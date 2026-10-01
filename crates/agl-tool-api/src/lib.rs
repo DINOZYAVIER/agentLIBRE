@@ -1,13 +1,17 @@
+//! Native Tool handler and binding interfaces, independent of inference.
+
+#![forbid(unsafe_code)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::package::{PackageTreeDigest, PackageVersion};
 use agl_core::agent::{
     AgentOperationKey, AuthorityGrantSet, ToolDefinitionDigest, ToolFailure, ToolResult,
     WorkspaceScope,
 };
+use agl_core::package::{PackageTreeDigest, PackageVersion};
 use agl_core::{AuthorityGrant, ConversationId, ExtensionDefinition, ToolId};
 
 pub type ToolFuture =
@@ -52,6 +56,8 @@ pub struct ToolContext {
     /// True only for the planner operation. First-party handlers use this to
     /// enforce the read-only workspace boundary at execution time.
     pub read_only_workspace: bool,
+    /// Host-declared build-output trees omitted from planner execution views.
+    pub output_directories: Vec<String>,
     cancellation: ToolCancellation,
 }
 
@@ -73,6 +79,7 @@ impl ToolContext {
             deadline_at_ms,
             result_bytes,
             read_only_workspace: false,
+            output_directories: Vec::new(),
             cancellation,
         }
     }

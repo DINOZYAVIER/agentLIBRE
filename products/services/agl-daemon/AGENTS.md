@@ -2,7 +2,8 @@
 
 `agl-daemon` is the Agent service implementation and composition root. Keep
 Agent scheduling under `agent`, durable repositories under `store`, and
-concrete first-party handlers under `tools`.
+native Tool composition under `tools`. Concrete first-party handlers belong
+to `agl-tools`; the native SDK belongs to `agl-tool-api`.
 
 Tool handlers must validate their own host safety boundary. Registering a
 handler does not admit it to an AgentRun; admission remains tied to the exact

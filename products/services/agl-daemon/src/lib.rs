@@ -19,9 +19,10 @@ use agl_daemon_api::{
     PlanArtifactView, ProtocolError, ProtocolErrorCode,
 };
 use agl_execution_api::ExecutionClient;
-use agl_runtime::extension::ExtensionBindings;
 use agl_runtime::inference::InferenceConfig;
 use agl_runtime::{RuntimeConfig, RuntimeHandle, RuntimeService};
+use agl_tool_api::ExtensionBindings;
+use agl_tools::searxng::SearxngConfig;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -30,7 +31,6 @@ pub use activation::ListenerSource;
 pub use plans::{PlanArtifactStore, StoredPlan};
 pub use protocol::serve_connection;
 pub use store::rotation::StoreRotation;
-pub use tools::searxng::SearxngConfig;
 
 pub fn rotate_store(data_root: &Path) -> Result<StoreRotation> {
     store::rotation::rotate(&data_root.join("store"))
@@ -123,10 +123,10 @@ impl DaemonServer {
             .context("failed to restore inference health")?;
         let execution = ExecutionClient::new(config.execution_socket);
         let mut extensions = config.extensions;
-        extensions.push(crate::tools::filesystem_bindings());
-        extensions.push(crate::tools::execution::bindings(execution.clone()));
+        extensions.push(crate::tools::filesystem_bindings()?);
+        extensions.push(crate::tools::execution_bindings(execution.clone())?);
         if let Some(search) = config.searxng {
-            match crate::tools::searxng::bindings(search.binding) {
+            match crate::tools::search_bindings(search.binding) {
                 Ok(binding) => extensions.push(binding),
                 Err(error) if search.required => {
                     return Err(PermanentStartupError {

@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 use agl_core::EffectId;
 use agl_core::agent::{EffectReceipt, ToolFailure, ToolFailureKind};
-use agl_runtime::extension::ToolContext;
+use agl_tool_api::ToolContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::tools::{execution, invalid_result};
+use crate::{WorkspaceMutation, execution_failure as execution, invalid_result};
 
 pub const READ: &str = "agentlibre.builtins:fs_read";
 pub const APPLY_PATCH: &str = "agentlibre.builtins:fs_apply_patch";
@@ -72,7 +73,7 @@ pub(crate) fn execute(
     id: &str,
     context: &ToolContext,
     input: Value,
-    _mutation: &Arc<Mutex<()>>,
+    mutations: &WorkspaceMutation,
 ) -> Result<(Value, Vec<EffectReceipt>), ToolFailure> {
     let workspace = Workspace::new(context)?;
     let write_receipt = if id == APPLY_PATCH {
@@ -83,7 +84,7 @@ pub(crate) fn execute(
     let value = match id {
         READ => workspace.read(input, context.result_bytes)?,
         APPLY_PATCH => {
-            let workspace_mutation = crate::tools::workspace_mutation(&workspace.root);
+            let workspace_mutation = mutations(&workspace.root);
             let _guard = workspace_mutation.lock().map_err(|_| execution())?;
             workspace.apply_patch(input, context)?
         }
@@ -864,7 +865,7 @@ mod tests {
         AbsolutePath, AgentOperationKey, AuthorityGrant, AuthorityGrantSet, RelativePath,
         WorkspaceScope,
     };
-    use agl_runtime::extension::{ToolCancellation, ToolContext};
+    use agl_tool_api::{ToolCancellation, ToolContext};
     use std::num::NonZeroU32;
 
     #[derive(Clone)]
@@ -1109,7 +1110,7 @@ mod tests {
                 "op":"update", "path":"a.txt", "expected_digest":digest(b"before\n"),
                 "edits":[{"old_text":"before", "new_text":"after"}]
             }]}),
-            &Arc::new(Mutex::new(())),
+            &(Arc::new(|_: &Path| Arc::new(Mutex::new(()))) as WorkspaceMutation),
         )
         .unwrap();
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "after\n");
@@ -1129,7 +1130,7 @@ mod tests {
             json!({"operations":[{
                 "op":"delete", "path":"a.txt", "expected_digest":digest(b"after\n")
             }]}),
-            &Arc::new(Mutex::new(())),
+            &(Arc::new(|_: &Path| Arc::new(Mutex::new(()))) as WorkspaceMutation),
         )
         .unwrap_err();
         assert_eq!(failure.kind, ToolFailureKind::Unauthorized);

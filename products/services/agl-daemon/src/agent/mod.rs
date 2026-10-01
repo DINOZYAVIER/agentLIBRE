@@ -18,13 +18,11 @@ use agl_core::{
     ToolId,
 };
 use agl_daemon_api::{AgentProgress, AgentProgressStatus};
-use agl_runtime::extension::{
-    ExtensionBindings, ToolBinding, ToolCancellation, ToolContext, ToolFuture,
-};
 use agl_runtime::inference::{
     InferenceCancellation, InferenceGenerateRequest, InferenceHealthSink, InferenceProgressSink,
     InferenceRoute, InferenceServiceError,
 };
+use agl_tool_api::{ExtensionBindings, ToolBinding, ToolCancellation, ToolContext, ToolFuture};
 use sha2::{Digest as _, Sha256};
 
 use crate::store::{AgentRunAdmission, StoreHandle};

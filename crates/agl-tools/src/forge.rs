@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use agl_core::agent::{ToolFailure, ToolFailureKind};
-use agl_runtime::extension::ToolContext;
+use agl_tool_api::ToolContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -19,18 +19,14 @@ struct Args {
     limit_lines: usize,
 }
 
-pub(crate) fn execute(context: &ToolContext, input: Value) -> Result<Value, ToolFailure> {
+pub(crate) fn execute(
+    context: &ToolContext,
+    input: Value,
+    artifacts: &crate::ArtifactResolver,
+) -> Result<Value, ToolFailure> {
     let args: Args = serde_json::from_value(input).map_err(|_| invalid_input())?;
     let (entity_id, relative) = parse_virtual_path(&args.path).ok_or_else(invalid_input)?;
-    let artifacts = agl_runtime::resolve_workspace_artifacts(context.workspace.root.as_path())
-        .map_err(|_| unavailable())?;
-    let root = artifacts
-        .memory
-        .iter()
-        .chain(artifacts.documents.iter())
-        .find(|artifact| artifact.id == entity_id)
-        .map(|artifact| artifact.materialized_path.clone())
-        .ok_or_else(|| not_found(&args.path))?;
+    let root = artifacts(context.workspace.root.as_path(), &entity_id)?;
     let path = contained_file(&root, &relative).ok_or_else(|| not_found(&args.path))?;
     let bytes = fs::read(&path).map_err(|_| unavailable())?;
     if bytes.len() > MAX_FILE_BYTES {
