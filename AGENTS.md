@@ -98,6 +98,11 @@ before submission.
 
 ## Human decision gate
 
+Keep task decision documents in
+`${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE/forge/agentLIBRE/decision-docs/`,
+outside this repository. Do not create decision documents in this repository
+or commit them.
+
 For task planning and implementation, use the human decision gate below. A
 recommendation, an inferred preference, or an LLM's engineering judgment is
 not a human decision.
