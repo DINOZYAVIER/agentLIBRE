@@ -100,6 +100,11 @@ pub enum ExecutionIo {
 pub enum ExecutionIsolation {
     #[default]
     Standard,
+    /// Linux/Nix planner execution using an independent read-only reflink view.
+    ReadOnlyWorkspace {
+        workspace_root: String,
+        output_directories: Vec<String>,
+    },
     PrivateInference {
         artifacts: Vec<String>,
         listen_socket: String,
@@ -200,6 +205,26 @@ impl ExecutionStartRequest {
                     "terminal_size must be present only for PTY execution",
                 ));
             }
+        }
+        if let ExecutionIsolation::ReadOnlyWorkspace {
+            workspace_root,
+            output_directories,
+        } = &self.isolation
+            && (!matches!(self.owner, ExecutionOwner::Agent { .. })
+                || self.io != ExecutionIo::Pipes
+                || !valid_absolute_path(workspace_root)
+                || output_directories.iter().any(|directory| {
+                    directory.contains('\0')
+                        || agl_core::implementation_plan::WorkspacePath::new(directory.clone())
+                            .is_err()
+                        || std::path::Path::new(directory) == std::path::Path::new(".")
+                        || std::path::Path::new(directory)
+                            == std::path::Path::new("agentLIBRE.toml")
+                }))
+        {
+            return Err(ExecutionProtocolError::invalid(
+                "read-only workspace isolation requires an Agent owner, pipes, an absolute workspace root, and contained output directory paths",
+            ));
         }
         if let ExecutionIsolation::PrivateInference {
             artifacts,
@@ -504,5 +529,49 @@ mod tests {
             isolation: ExecutionIsolation::Standard,
         };
         request.validate().unwrap();
+        let mut readonly = request;
+        readonly.isolation = ExecutionIsolation::ReadOnlyWorkspace {
+            workspace_root: "/tmp".to_owned(),
+            output_directories: Vec::new(),
+        };
+        assert!(readonly.validate().is_err());
+        readonly.owner = ExecutionOwner::Agent {
+            conversation_id: agl_core::ConversationId::generate(),
+            run_id: agl_core::AgentRunId::generate(),
+        };
+        readonly.validate().unwrap();
+        for directory in [
+            ".",
+            "../target",
+            "/target",
+            "agentLIBRE.toml",
+            "agentLIBRE.toml/.",
+            "target\0",
+            "",
+        ] {
+            readonly.isolation = ExecutionIsolation::ReadOnlyWorkspace {
+                workspace_root: "/tmp".into(),
+                output_directories: vec![directory.into()],
+            };
+            assert!(
+                readonly.validate().is_err(),
+                "accepted output path {directory}"
+            );
+        }
+        readonly.isolation = ExecutionIsolation::ReadOnlyWorkspace {
+            workspace_root: "/tmp".into(),
+            output_directories: vec!["target".into(), "build/cache".into()],
+        };
+        readonly.validate().unwrap();
+        readonly.io = ExecutionIo::Pty;
+        readonly.terminal_size = Some(TerminalSize::default());
+        assert!(readonly.validate().is_err());
+        readonly.io = ExecutionIo::Pipes;
+        readonly.terminal_size = None;
+        readonly.isolation = ExecutionIsolation::ReadOnlyWorkspace {
+            workspace_root: "relative".to_owned(),
+            output_directories: Vec::new(),
+        };
+        assert!(readonly.validate().is_err());
     }
 }

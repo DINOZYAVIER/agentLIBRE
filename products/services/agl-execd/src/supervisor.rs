@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agl_execution_api::{
     ExecutionId, ExecutionIo, ExecutionIsolation, ExecutionOutcome, ExecutionOutputStream,
@@ -49,6 +49,7 @@ pub struct ExecutionService {
     store: ExecutionStore,
     active: Arc<Mutex<BTreeMap<ExecutionId, ActiveExecution>>>,
     launcher: PathBuf,
+    data_root: PathBuf,
     accepting: Arc<AtomicBool>,
     owns_lifetime: bool,
 }
@@ -59,6 +60,7 @@ impl Clone for ExecutionService {
             store: self.store.clone(),
             active: Arc::clone(&self.active),
             launcher: self.launcher.clone(),
+            data_root: self.data_root.clone(),
             accepting: Arc::clone(&self.accepting),
             owns_lifetime: false,
         }
@@ -68,10 +70,13 @@ impl Clone for ExecutionService {
 impl ExecutionService {
     pub fn start(data_root: &Path, launcher: PathBuf) -> Result<Self> {
         validate_launcher(&launcher)?;
+        let store = ExecutionStore::open(data_root)?;
+        crate::readonly::Scratch::recover(data_root)?;
         Ok(Self {
-            store: ExecutionStore::open(data_root)?,
+            store,
             active: Arc::new(Mutex::new(BTreeMap::new())),
             launcher,
+            data_root: data_root.to_owned(),
             accepting: Arc::new(AtomicBool::new(true)),
             owns_lifetime: true,
         })
@@ -82,9 +87,23 @@ impl ExecutionService {
             return Err(ExecutionControlError::Unavailable.into());
         }
         request.validate().map_err(anyhow::Error::msg)?;
+        let preparation_started = Instant::now();
         let execution_id = ExecutionId::generate();
         let terminal_id = (request.io == ExecutionIo::Pty).then(TerminalId::generate);
-        let mut spawned = spawn_launcher(&self.launcher, &request)?;
+        let mut spawned = spawn_launcher(&self.launcher, &request, &self.data_root, execution_id)?;
+        let timeout_ms = if matches!(
+            request.isolation,
+            ExecutionIsolation::ReadOnlyWorkspace { .. }
+        ) {
+            request
+                .timeout_ms
+                .saturating_sub(
+                    u64::try_from(preparation_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                )
+                .max(1)
+        } else {
+            request.timeout_ms
+        };
         let pid = i32::try_from(spawned.child.id()).context("child PID exceeds i32")?;
         if let Err(error) = self.store.insert(
             execution_id,
@@ -145,13 +164,14 @@ impl ExecutionService {
             spawned.child,
             readers,
             Arc::clone(&termination_reason),
+            spawned.scratch,
         );
         if let Some(timeout_receiver) = timeout_receiver {
             self.spawn_timeout(
                 execution_id,
                 pid,
                 spawned.signal_process_group,
-                request.timeout_ms,
+                timeout_ms,
                 termination_reason,
                 timeout_receiver,
             );
@@ -165,6 +185,7 @@ impl ExecutionService {
         mut child: Child,
         readers: Vec<thread::JoinHandle<()>>,
         termination_reason: Arc<AtomicU8>,
+        scratch: Option<crate::readonly::Scratch>,
     ) {
         let store = self.store.clone();
         let active = Arc::clone(&self.active);
@@ -184,6 +205,7 @@ impl ExecutionService {
                 },
                 (_, Err(_)) => ExecutionOutcome::UnknownAfterServiceRestart,
             };
+            drop(scratch);
             let _ = store.finish(execution_id, &outcome);
             if let Ok(mut active) = active.lock() {
                 active.remove(&execution_id);
@@ -358,9 +380,15 @@ struct SpawnedExecution {
     signal_process_group: bool,
     input: Option<File>,
     readers: Vec<(ExecutionOutputStream, Box<dyn Read + Send>)>,
+    scratch: Option<crate::readonly::Scratch>,
 }
 
-fn spawn_launcher(launcher: &Path, request: &ExecutionStartRequest) -> Result<SpawnedExecution> {
+fn spawn_launcher(
+    launcher: &Path,
+    request: &ExecutionStartRequest,
+    data_root: &Path,
+    id: ExecutionId,
+) -> Result<SpawnedExecution> {
     if let ExecutionIsolation::PrivateInference {
         artifacts,
         listen_socket,
@@ -376,18 +404,45 @@ fn spawn_launcher(launcher: &Path, request: &ExecutionStartRequest) -> Result<Sp
             *address_space_limit_bytes,
         );
     }
+    let readonly =
+        if let ExecutionIsolation::ReadOnlyWorkspace { workspace_root, .. } = &request.isolation {
+            let workspace = Path::new(workspace_root).canonicalize()?;
+            ensure!(workspace.is_dir(), "planner workspace is not a directory");
+            let scratch = crate::readonly::Scratch::create(data_root, &workspace, id)?;
+            let argv = scratch.command(request, &workspace)?;
+            Some((scratch, argv, crate::readonly::socket_filter()?))
+        } else {
+            None
+        };
     let mut command = Command::new(launcher);
     command.current_dir(&request.cwd);
-    if request.clear_environment {
-        command.env_clear();
+    if readonly.is_none() {
+        if request.clear_environment {
+            command.env_clear();
+        }
+        command.envs(&request.environment);
     }
-    command.envs(&request.environment);
     command.arg(match request.io {
         ExecutionIo::Pipes => "--pipes",
         ExecutionIo::Pty => "--pty",
     });
     command.arg("--");
-    command.args(&request.argv);
+    let scratch = if let Some((scratch, argv, filter)) = readonly {
+        command.args(argv);
+        let source = filter.as_raw_fd();
+        // SAFETY: pre-exec only duplicates a prepared descriptor; bwrap installs the filter after namespace setup.
+        unsafe {
+            command.pre_exec(move || {
+                duplicate(source, 188)?;
+                let _ = &filter;
+                Ok(())
+            });
+        }
+        Some(scratch)
+    } else {
+        command.args(&request.argv);
+        None
+    };
 
     match request.io {
         ExecutionIo::Pipes => {
@@ -412,6 +467,7 @@ fn spawn_launcher(launcher: &Path, request: &ExecutionStartRequest) -> Result<Sp
                     (ExecutionOutputStream::Stdout, Box::new(stdout)),
                     (ExecutionOutputStream::Stderr, Box::new(stderr)),
                 ],
+                scratch,
             })
         }
         ExecutionIo::Pty => {
@@ -428,6 +484,7 @@ fn spawn_launcher(launcher: &Path, request: &ExecutionStartRequest) -> Result<Sp
                 signal_process_group: false,
                 input: Some(master.try_clone()?),
                 readers: vec![(ExecutionOutputStream::Pty, Box::new(master))],
+                scratch,
             })
         }
     }
@@ -529,6 +586,7 @@ fn spawn_private_inference(
             (ExecutionOutputStream::Stdout, Box::new(stdout)),
             (ExecutionOutputStream::Stderr, Box::new(stderr)),
         ],
+        scratch: None,
     })
 }
 

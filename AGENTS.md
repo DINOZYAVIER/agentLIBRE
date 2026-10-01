@@ -18,7 +18,7 @@ The application directory is `agentLIBRE` below each XDG base:
 | Root | Default base | Current contents |
 | --- | --- | --- |
 | Config | `${XDG_CONFIG_HOME:-$HOME/.config}/agentLIBRE` | Application settings: `agentLIBRE.toml`; generated systemd user units are in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`. The Matrix service script defaults to `matrix-bridge/agl.toml`. |
-| Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution store: `execd/executions.sqlite3`. |
+| Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution store: `execd/executions.sqlite3`; per-Execution planner views and scratch: `execd/planner-scratch/<ExecutionId>/` (removed on completion/recovery). |
 | State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; execution socket: `execd/execd.sock`. |
 | Cache | `XDG_CACHE_HOME` | Not currently used by the production agentLIBRE code. Do not assume an agentLIBRE cache directory here. |
 

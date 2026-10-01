@@ -30,5 +30,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+agl-core.workspace = true
 agl-runtime.workspace = true
 uuid.workspace = true

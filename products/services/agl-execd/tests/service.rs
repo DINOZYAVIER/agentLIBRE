@@ -19,6 +19,16 @@ fn program(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("missing test executable: {name}"))
 }
 
+fn nix_program(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join(name))
+        .find(|path| {
+            path.canonicalize()
+                .is_ok_and(|real| real.starts_with("/nix/store") && real.is_file())
+        })
+        .unwrap_or_else(|| panic!("missing Nix test executable: {name}"))
+}
+
 async fn start_server(root: &Path) -> (ExecutionClient, tokio::task::JoinHandle<()>) {
     let socket = root.join("execd.sock");
     let launcher = PathBuf::from(env!("CARGO_BIN_EXE_agl-execd-launcher"));
@@ -114,6 +124,538 @@ async fn exact_argv_output_survives_client_connections() {
     assert!(output.eof);
     server.abort();
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn readonly_request(workspace: &Path, argv: Vec<String>) -> ExecutionStartRequest {
+    let mut request = request(argv, ExecutionIo::Pipes);
+    request.owner = ExecutionOwner::Agent {
+        conversation_id: agl_core::ConversationId::generate(),
+        run_id: agl_core::AgentRunId::generate(),
+    };
+    request.cwd = workspace.to_string_lossy().into_owned();
+    request.isolation = ExecutionIsolation::ReadOnlyWorkspace {
+        workspace_root: request.cwd.clone(),
+        output_directories: Vec::new(),
+    };
+    request
+}
+
+#[tokio::test]
+async fn explicit_output_trees_are_absent_from_the_planner_view() {
+    use std::os::unix::fs::symlink;
+    let root = root("excluded-outputs");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join("target")).unwrap();
+    std::fs::create_dir_all(workspace.join("target-source")).unwrap();
+    std::fs::write(workspace.join("source"), "source").unwrap();
+    std::fs::write(workspace.join("target-source/input"), "source").unwrap();
+    std::fs::write(
+        workspace.join("agentLIBRE.toml"),
+        "the daemon already parsed this declaration",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("target/cache"), "host build cache").unwrap();
+    let fifo = std::ffi::CString::new(workspace.join("target/fifo").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    symlink(workspace.join("target/cache"), workspace.join("cache-link")).unwrap();
+    let (client, server) = start_server(&root).await;
+    let script = r#"
+import os, pathlib
+root = pathlib.Path.cwd()
+assert (root / 'source').read_text() == 'source'
+assert (root / 'target-source/input').read_text() == 'source'
+assert (root / 'agentLIBRE.toml').read_text() == 'the daemon already parsed this declaration'
+assert not (root / 'target').exists()
+assert not (root / 'cache-link').exists()
+scratch = pathlib.Path(os.environ['TMPDIR'])
+(scratch / 'build-output').write_text('allowed')
+"#;
+    let mut request = readonly_request(
+        &workspace,
+        vec![
+            nix_program("python3").to_string_lossy().into_owned(),
+            "-c".into(),
+            script.into(),
+        ],
+    );
+    let ExecutionIsolation::ReadOnlyWorkspace {
+        output_directories, ..
+    } = &mut request.isolation
+    else {
+        unreachable!()
+    };
+    *output_directories = vec!["target".into()];
+    let status = client.start(request).await.unwrap();
+    wait(&client, status.execution_id).await;
+    assert_eq!(
+        client.inspect(status.execution_id).await.unwrap().outcome,
+        Some(ExecutionOutcome::Exit { code: 0 }),
+        "{:?}",
+        client.read(status.execution_id, 0, 65536).await.unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("target/cache")).unwrap(),
+        "host build cache"
+    );
+    assert!(
+        std::fs::read_dir(root.join("data/planner-scratch"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_workspace_blocks_data_and_metadata_writes_and_cleans_scratch() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = root("readonly");
+    let workspace = root.join("workspace");
+    let git = root.join("external-git");
+    let common = root.join("git-common");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&git).unwrap();
+    std::fs::create_dir_all(&common).unwrap();
+    std::fs::write(workspace.join("input"), "b\na\n").unwrap();
+    std::fs::write(
+        workspace.join(".git"),
+        format!("gitdir: {}\n", git.display()),
+    )
+    .unwrap();
+    std::fs::write(git.join("index"), "unchanged").unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(git.join("commondir"), "../git-common\n").unwrap();
+    std::fs::write(common.join("config"), "common-config").unwrap();
+    symlink(git.join("index"), workspace.join("escape")).unwrap();
+    let mode = std::fs::metadata(workspace.join("input"))
+        .unwrap()
+        .permissions()
+        .mode();
+    let (client, server) = start_server(&root).await;
+    let script = r#"
+import os, pathlib, subprocess, sys
+workspace, git = map(pathlib.Path, sys.argv[1:3])
+assert (workspace / 'input').read_text() == 'b\na\n'
+assert (git / 'index').read_text() == 'unchanged'
+common = (git / (git / 'commondir').read_text().strip()).resolve()
+assert (common / 'config').read_text() == 'common-config'
+actions = [
+    lambda: (workspace / 'created').write_text('bad'),
+    lambda: (workspace / 'input').write_text('bad'),
+    lambda: (workspace / 'input').unlink(),
+    lambda: (workspace / 'input').rename(workspace / 'renamed'),
+    lambda: os.chmod(workspace / 'input', 0o777),
+    lambda: os.utime(workspace / 'input', None),
+    lambda: (git / 'index').write_text('bad'),
+    lambda: (common / 'config').write_text('bad'),
+    lambda: (workspace / 'escape').write_text('bad'),
+    lambda: os.link(workspace / 'input', pathlib.Path(os.environ['TMPDIR']) / 'linked'),
+]
+for action in actions:
+    try: action()
+    except OSError: pass
+    else: raise AssertionError('workspace write escaped sandbox')
+assert subprocess.run([sys.argv[3], '-o', str(workspace / 'sorted'), str(workspace / 'input')]).returncode != 0
+assert subprocess.run([sys.argv[4], '-n', 'w ' + str(workspace / 'sed-output'), str(workspace / 'input')]).returncode != 0
+scratch = pathlib.Path(os.environ['TMPDIR'])
+(scratch / 'output').write_text('allowed')
+(scratch / 'locked').mkdir()
+os.chmod(scratch / 'locked', 0)
+print(scratch)
+"#;
+    let status = client
+        .start(readonly_request(
+            &workspace,
+            vec![
+                nix_program("python3").to_string_lossy().into_owned(),
+                "-B".into(),
+                "-c".into(),
+                script.into(),
+                workspace.to_string_lossy().into_owned(),
+                git.to_string_lossy().into_owned(),
+                program("sort").to_string_lossy().into_owned(),
+                program("sed").to_string_lossy().into_owned(),
+            ],
+        ))
+        .await
+        .unwrap();
+    wait(&client, status.execution_id).await;
+    let outcome = client.inspect(status.execution_id).await.unwrap().outcome;
+    let output = client
+        .read(status.execution_id, 0, 64 * 1024)
+        .await
+        .unwrap();
+    let stdout = output
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.stream == ExecutionOutputStream::Stdout)
+        .flat_map(|chunk| chunk.data.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcome,
+        Some(ExecutionOutcome::Exit { code: 0 }),
+        "{output:?}"
+    );
+    let scratch = PathBuf::from(String::from_utf8(stdout).unwrap().trim());
+    assert!(scratch.starts_with(root.join("data/planner-scratch")));
+    assert!(!scratch.exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("input")).unwrap(),
+        "b\na\n"
+    );
+    assert_eq!(
+        std::fs::metadata(workspace.join("input"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        mode
+    );
+    assert_eq!(
+        std::fs::read_to_string(git.join("index")).unwrap(),
+        "unchanged"
+    );
+    assert!(!workspace.join("created").exists());
+    assert!(!workspace.join("sorted").exists());
+    assert!(!workspace.join("sed-output").exists());
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_execution_denies_network_and_host_unix_socket_access() {
+    let root = root("readonly-sockets");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(root.join("host.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (client, server) = start_server(&root).await;
+    let script = r#"
+import ctypes, errno, os, socket
+assert os.environ['TEST_SANDBOX_ENV'] == 'fixture'
+assert 'PATH' not in os.environ
+for family in [socket.AF_INET, socket.AF_INET6, socket.AF_UNIX]:
+    try: socket.socket(family)
+    except PermissionError: pass
+    else: raise AssertionError('socket creation was allowed')
+libc = ctypes.CDLL(None, use_errno=True)
+params = ctypes.create_string_buffer(256)
+assert libc.syscall(425, 8, ctypes.byref(params)) == -1
+assert ctypes.get_errno() == errno.EPERM, 'io_uring setup was allowed'
+print('isolated')
+"#;
+    let mut request = readonly_request(
+        &workspace,
+        vec![
+            nix_program("python3").to_string_lossy().into_owned(),
+            "-B".into(),
+            "-c".into(),
+            script.into(),
+        ],
+    );
+    request.clear_environment = true;
+    request
+        .environment
+        .insert("TEST_SANDBOX_ENV".into(), "fixture".into());
+    let status = client.start(request).await.unwrap();
+    wait(&client, status.execution_id).await;
+    assert_eq!(
+        client.inspect(status.execution_id).await.unwrap().outcome,
+        Some(ExecutionOutcome::Exit { code: 0 }),
+        "{:?}",
+        client.read(status.execution_id, 0, 65536).await.unwrap()
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_view_hides_host_fifos_and_other_host_files() {
+    use std::os::unix::fs::{OpenOptionsExt, symlink};
+    let root = root("readonly-fifo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let fifo = root.join("host.fifo");
+    let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let _host = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    symlink(&fifo, workspace.join("fifo-alias")).unwrap();
+    std::fs::write(root.join("host-secret"), "hidden").unwrap();
+    let (client, server) = start_server(&root).await;
+    let script = r#"
+import errno, os, pathlib, sys
+for path in sys.argv[1:3]:
+    for flags in [os.O_RDONLY, os.O_WRONLY, os.O_RDWR]:
+        try: os.open(path, flags | os.O_NONBLOCK)
+        except OSError as error: assert error.errno == errno.ENOENT
+        else: raise AssertionError('host FIFO was accessible')
+assert not pathlib.Path(sys.argv[3]).exists()
+assert not pathlib.Path('/run/user').exists()
+print('fifo-isolated')
+"#;
+    let status = client
+        .start(readonly_request(
+            &workspace,
+            vec![
+                nix_program("python3").to_string_lossy().into_owned(),
+                "-B".into(),
+                "-c".into(),
+                script.into(),
+                fifo.to_string_lossy().into_owned(),
+                workspace.join("fifo-alias").to_string_lossy().into_owned(),
+                root.join("host-secret").to_string_lossy().into_owned(),
+            ],
+        ))
+        .await
+        .unwrap();
+    wait(&client, status.execution_id).await;
+    assert_eq!(
+        client.inspect(status.execution_id).await.unwrap().outcome,
+        Some(ExecutionOutcome::Exit { code: 0 }),
+        "{:?}",
+        client.read(status.execution_id, 0, 65536).await.unwrap()
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_view_rejects_special_files_and_executables_outside_nix() {
+    let root = root("readonly-special");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let fifo = workspace.join("fifo");
+    let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let (client, server) = start_server(&root).await;
+    let error = client
+        .start(readonly_request(
+            &workspace,
+            vec![nix_program("true").to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported special file"));
+    std::fs::remove_file(fifo).unwrap();
+    let outside = root.join("outside-true");
+    std::fs::copy(nix_program("true"), &outside).unwrap();
+    let error = client
+        .start(readonly_request(
+            &workspace,
+            vec![outside.to_string_lossy().into_owned()],
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Nix store executable"));
+    assert_eq!(
+        std::fs::read_dir(root.join("data/planner-scratch"))
+            .unwrap()
+            .count(),
+        0
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn reflink_view_retains_original_data_and_excludes_later_host_fifos() {
+    let root = root("readonly-reflink");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("input"), "original-data").unwrap();
+    let (client, server) = start_server(&root).await;
+    let script = r#"
+import errno, os, pathlib, time
+print('READY', flush=True)
+time.sleep(0.3)
+assert pathlib.Path('input').read_text() == 'original-data'
+try: os.open('late-fifo', os.O_RDONLY | os.O_NONBLOCK)
+except OSError as error: assert error.errno == errno.ENOENT
+else: raise AssertionError('late host FIFO entered the view')
+print('stable-copy')
+"#;
+    let status = client
+        .start(readonly_request(
+            &workspace,
+            vec![
+                nix_program("python3").to_string_lossy().into_owned(),
+                "-B".into(),
+                "-c".into(),
+                script.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let mut ready = false;
+    for _ in 0..200 {
+        let output = client.read(status.execution_id, 0, 65536).await.unwrap();
+        if output
+            .chunks
+            .iter()
+            .any(|chunk| String::from_utf8_lossy(&chunk.data).contains("READY"))
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(ready);
+    std::fs::write(workspace.join("input"), "new-host-data").unwrap();
+    let fifo = workspace.join("late-fifo");
+    let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    wait(&client, status.execution_id).await;
+    assert_eq!(
+        client.inspect(status.execution_id).await.unwrap().outcome,
+        Some(ExecutionOutcome::Exit { code: 0 }),
+        "{:?}",
+        client.read(status.execution_id, 0, 65536).await.unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("input")).unwrap(),
+        "new-host-data"
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn missing_bubblewrap_fails_without_starting_the_command() {
+    let root = root("missing-bwrap");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let socket = root.join("state/execd/execd.sock");
+    let mut execd = std::process::Command::new(env!("CARGO_BIN_EXE_agl-execd"))
+        .env("AGL_HOME", &root)
+        .env("PATH", root.join("missing-bin"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let result = ExecutionClient::new(&socket)
+        .start(readonly_request(
+            &workspace,
+            vec![
+                program("sh").to_string_lossy().into_owned(),
+                "-c".into(),
+                "touch escaped".into(),
+            ],
+        ))
+        .await;
+    execd.kill().unwrap();
+    execd.wait().unwrap();
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("bubblewrap is required")
+    );
+    assert!(!workspace.join("escaped").exists());
+    assert_eq!(
+        std::fs::read_dir(root.join("data/execd/planner-scratch"))
+            .unwrap()
+            .count(),
+        0
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_execution_rejects_cwd_escape_and_scratch_inside_workspace() {
+    let root = root("readonly-paths");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, server) = start_server(&root).await;
+    let mut escaped = readonly_request(
+        &workspace,
+        vec![program("true").to_string_lossy().into_owned()],
+    );
+    escaped.cwd = root.to_string_lossy().into_owned();
+    assert!(client.start(escaped).await.is_err());
+    let overlapping = readonly_request(&root, vec![program("true").to_string_lossy().into_owned()]);
+    assert!(client.start(overlapping).await.is_err());
+    assert!(
+        !root.join("data/planner-scratch").exists()
+            || std::fs::read_dir(root.join("data/planner-scratch"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn readonly_timeout_terminates_descendants_and_removes_execution_scratch() {
+    let root = root("readonly-timeout");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, server) = start_server(&root).await;
+    let mut request = readonly_request(
+        &workspace,
+        vec![
+            program("sh").to_string_lossy().into_owned(),
+            "-c".into(),
+            "printf '%s\\n' \"$TMPDIR\"; sleep 30 & wait".into(),
+        ],
+    );
+    request.timeout_ms = 300;
+    let status = client.start(request).await.unwrap();
+    wait(&client, status.execution_id).await;
+    assert_eq!(
+        client.inspect(status.execution_id).await.unwrap().outcome,
+        Some(ExecutionOutcome::TimedOut)
+    );
+    let output = client.read(status.execution_id, 0, 65536).await.unwrap();
+    assert!(output.eof);
+    assert!(
+        output
+            .chunks
+            .iter()
+            .any(|chunk| chunk.stream == ExecutionOutputStream::Stdout && !chunk.data.is_empty()),
+        "{output:?}"
+    );
+    assert!(
+        std::fs::read_dir(root.join("data/planner-scratch"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    server.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn service_recovery_removes_orphaned_planner_scratch() {
+    let root = root("readonly-recovery");
+    let orphan = root
+        .join("planner-scratch")
+        .join(agl_execution_api::ExecutionId::generate().to_string());
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("output"), "orphaned").unwrap();
+    let service = ExecutionService::start(
+        &root,
+        PathBuf::from(env!("CARGO_BIN_EXE_agl-execd-launcher")),
+    )
+    .unwrap();
+    assert!(!orphan.exists());
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

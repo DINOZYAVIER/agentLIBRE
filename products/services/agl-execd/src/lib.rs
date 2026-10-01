@@ -1,5 +1,6 @@
 //! Durable process and PTY service for agentLIBRE.
 
+mod readonly;
 #[cfg(target_os = "linux")]
 mod sandbox;
 mod server;

@@ -21,6 +21,7 @@ pkgs.mkShell {
   packages = with pkgs; [
     bashInteractive
     binutils
+    bubblewrap
     cmake
     curl
     gcc
