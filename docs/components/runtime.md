@@ -11,13 +11,15 @@ StoreHandle::open_at
   -> AgentService::start(runtime-backed inference route)
 ```
 
-`RuntimeHandle::activate` verifies `FUNCTION.lock`, resolves or acquires its
-exact entities and Model artifacts, realizes a host load plan, ensures a ready
-model service, and returns an immutable `AgentRunSnapshot`. Activation failure
-creates no Conversation or Run.
+`RuntimeHandle::activate` verifies workspace artifact declarations against
+Forge's catalog and lock, resolves the Function and its exact entity references,
+acquires Model artifacts, realizes a host load plan, ensures a ready model
+service, and returns an immutable `AgentRunSnapshot`. Activation failure creates
+no Conversation or Run.
 
-Package-resolution commands and inference services use `agl-execution-api`;
-`agl-execd` owns the corresponding child-process lifecycle.
+Inference services use `agl-execution-api`; `agl-execd` owns their child-process
+lifecycle. Git package resolution and materialization belong to
+`ayeque-forge-core`, called through the runtime and CLI artifact adapters.
 
 The composition root supplies typed `ExtensionBindings`. A locked declarative
 Extension must match a trusted binding's exact version, full content digest,

@@ -24,7 +24,6 @@ Public source uses fixed visible roots and filenames:
 
 ```text
 functions/<ui-name>/FUNCTION.toml
-functions/<ui-name>/FUNCTION.lock
 agents/<ui-name>/AGENT.md
 skills/<ui-name>/SKILL.md
 models/<ui-name>/MODEL.toml
@@ -35,20 +34,20 @@ The directory name is the local UI name and may differ from the manifest
 `id`. Manifests expose their entity schema directly; there is no public
 Package wrapper.
 
-A Function may consume dependencies from separate visible source trees. The
-caller passes each additional dependency directory explicitly as an entity
-root. An entity root points directly to one `agents/<ui-name>`,
-`skills/<ui-name>`, `models/<ui-name>`, or `extensions/<ui-name>` directory;
-agentLIBRE does not recursively scan its parent or any external cache. Local
-entities beside the Function remain candidates. One exact `kind`, `id`, and
-`version` must resolve to exactly one candidate, otherwise locking and
-activation fail.
+The AGL repository-root `agentLIBRE.toml` declares the Function and its Agent,
+Model, Skill and Extension artifacts, including Git source, full commit SHA
+and path within that source. `agl artifact sync` reconciles these declarations
+with Forge's generated catalog, lock and materialized directories.
 
-`FUNCTION.lock` is mandatory. `agl function lock <function-directory>` resolves
-every exact local or Git dependency and atomically writes its content digest
-and immutable source identity. Activation verifies the lock and may acquire
-already-locked Git content or Model bytes into private caches, but never edits
-the Function or its lock.
+Activation resolves the Function directory and every referenced entity through
+this verified Forge catalog. It checks each dependency's kind, schema, manifest
+ID and exact version, and computes its content digest for the Run snapshot.
+The calling workspace's artifact declaration is checked separately. An explicit
+Function directory must be a materialized Function from the AGL catalog.
+
+Forge owns Git package materialization and its generated lock. The runtime
+acquires Model bytes and constructs the inference service from the verified
+entity contents.
 
 Compatible Functions using the same GGUF and realized load plan share one
 resident model service. Generation settings remain per Run. A Function's
@@ -59,10 +58,11 @@ Run limits include time, cumulative model tokens/calls, Tool calls, and a Tool
 result byte ceiling. `limits.tool_result_bytes` defaults to and cannot exceed
 the runtime hard maximum of 65,536 serialized bytes.
 
-Every field is set directly in the Function's `[limits]` table. After editing
-`FUNCTION.toml`, run `agl function lock <function-directory>` with the same
-entity roots used for activation. The new limits apply to new Conversations;
-an existing Conversation retains its immutable Function snapshot.
+Every field is set directly in the Function's `[limits]` table. After changing
+the Function source, commit it in its source repository and update the
+Function artifact's pinned revision through `agl artifact update` in the AGL
+workspace. The new limits apply to new Conversations; an existing Conversation
+retains its immutable Function snapshot.
 
 `model_input_tokens` is cumulative accounting, not the model's per-call
 context window: the complete retained prompt is counted again for every model

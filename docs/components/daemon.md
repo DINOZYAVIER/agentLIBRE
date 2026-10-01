@@ -30,9 +30,16 @@ The private daemon store opens the current alpha SQLite baseline. There is no st
 that deletes legacy runtime directories or migrates older schemas.
 
 The public transport and async client live in `agl-daemon-api`. The daemon
-serves a same-UID Unix socket with JSONL frames bounded to 1 MiB. Admitted
+serves a same-UID Unix socket with JSONL frames bounded to 8 MiB. Admitted
 execution Tools are translated to `agl-execution-api` requests; the daemon
 does not create their processes or PTYs.
+
+Planning/implementation workspace snapshots hash file contents, entry types,
+and symlink targets outside explicitly declared `output_directories` in the
+root workspace manifest. Build-output changes alone do not invalidate a plan;
+new or changed project files outside the current slice still do. The manifest
+and parsed output scope participate in the snapshot digest. Permission bits
+and timestamps are not currently part of this fingerprint.
 
 Configured integrations carry an explicit `required` value. An invalid optional
 search binding starts the daemon in degraded health with search disabled. An

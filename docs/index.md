@@ -24,5 +24,5 @@ This directory is the human-facing documentation map for agentLIBRE.
 
 ## Authoring specifications
 
-Design and decision documents are maintained in the agentLIBRE authoring
-repository under Ayeque Forge.
+Design and decision documents are maintained in the agentLIBRE authoring area
+under Ayeque Forge, outside this repository. Decision documents are not committed.

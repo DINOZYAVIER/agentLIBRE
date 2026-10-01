@@ -15,9 +15,10 @@ serve bounded observation queries outside the writer mutex. Callers receive a
 cloneable typed `StoreHandle`; raw connections, repository traits, a public
 pool, and a Store actor are not exposed.
 
-The alpha cutover uses one current schema baseline. An incompatible managed
-database and its WAL sidecars are deleted and recreated; there is no row
-migration or legacy reader. Indexed identities, status, revisions, counters,
+The alpha cutover uses one current schema baseline. Startup rejects an
+incompatible database without modifying it. The explicit `agl store rotate`
+command preserves the previous store and creates an empty current store;
+there is no row migration or legacy reader. Indexed identities, status, revisions, counters,
 timestamps, roles, visibility, and digests use constrained scalar/BLOB
 columns. Bounded canonical JSON stores composite values with unknown fields
 rejected by their Rust types.

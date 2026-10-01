@@ -38,3 +38,11 @@ device loss and allocation failures require their own observed backend or
 allocation evidence.
 
 The current native request and `agl-core::Content` value are text-only.
+
+The Agent driver passes the Run's `response_format` with admitted Tools on
+every generation, including invalid-output correction. The bundled
+Qwen3-Coder/Qwen3.5 parser permits either Tool calls or final JSON constrained
+by that schema in the same generation. With a schema, grammar starts immediately;
+`tool_choice=required` permits only Tool calls, and `tool_choice=none` permits
+only the structured response. This parser change requires rebuilding the
+bundled engine; it does not establish support for other model parsers.

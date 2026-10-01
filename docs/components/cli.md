@@ -61,11 +61,12 @@ aliases; surrounding whitespace is ignored.
 
 `agl config check` is read-only. `agl config apply` resolves the requested
 Function graphs, writes source-adjacent locks and atomically activates generated
-state; unfinished Runs make it return busy. The configured default and typed
-Function requirements resolve against the AGL repository-root
-`agentLIBRE.toml`, regardless of the caller's current directory. Direct
-Function directory locators remain relative to the caller's current directory
-and are checked against that workspace. `agl doctor` reports active state
+state; unfinished Runs make it return busy. The configured default, typed
+Function requirements, and their dependency graphs resolve from the AGL
+repository-root `agentLIBRE.toml`, regardless of the caller's current directory.
+The current directory remains the Conversation workspace and controls the
+filesystem boundary for each Run. Direct Function directory locators must name
+a Function materialized from the AGL repository-root catalog. `agl doctor` reports active state
 and unfinished Runs without credential bytes. `agl serve` reads generated state
 and owns one same-UID Unix socket below the state root. Obsolete `agl.toml` and
 `daemon.json` files are not read.
@@ -75,7 +76,9 @@ public CLI commands.
 Artifact operations use the repository-root `agentLIBRE.toml`. It declares the
 complete workspace catalog, including Git source and full commit SHA for every
 entity. `agl artifact add`, `update`, and `remove` edit that declaration and
-reconcile Forge's generated catalog and materializations. `agl artifact sync`
+reconcile Forge's generated catalog and materializations. If reconciliation
+fails, the new declaration remains in `agentLIBRE.toml` and the command reports
+the failure. `agl artifact sync`
 rebuilds Forge state from the root declaration; `list` shows verified state.
 `migrate` imports the current verified Forge catalog into the root declaration
 once. Routine artifact work does not require direct Forge CLI commands or
@@ -84,6 +87,20 @@ editing `FORGE.toml` / `FORGE.lock`.
 The repository-root manifest is separate from the XDG application settings
 file: the former selects and pins workspace entities, while the latter
 configures chat and inference behavior.
+
+The root manifest can also declare literal build-output directories:
+
+```toml
+[workspace]
+output_directories = ["target"]
+```
+
+These trees are omitted from plan workspace snapshots and planner execution
+views. With no field, the list is empty; `.gitignore` and globs are not applied.
+Source changes outside the current slice still invalidate the approved execution.
+The manifest is included in the snapshot, so changing the output scope also
+invalidates it. Artifact edits and sync preserve this workspace section.
+
 ## Interactive REPL presentation
 
 The TTY REPL uses reedline with a slash command menu. Typing `/` at the start
