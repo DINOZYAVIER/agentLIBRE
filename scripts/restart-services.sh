@@ -2,19 +2,14 @@
 set -euo pipefail
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage: scripts/restart-services.sh [--stop|--restart] [--dry-run]
 
-Controls the user-systemd services used by the local agentLIBRE deployment:
-  agentlibre-execd.service/socket
-  agentlibre-daemon.service/socket
-  agl-matrix-bridge.service
-
-Default action is --restart. --stop also stops both socket units so a later
-client cannot activate a service that was meant to be offline.
-EOF
+Stop/restart the user-systemd daemon and execution service including sockets.
+Include the Matrix bridge only when its unit is installed. Restart reloads
+unit files and clears failed/start-limit state before starting the services.
+USAGE
 }
-
 action=restart
 dry_run=0
 while [[ $# -gt 0 ]]; do
@@ -26,31 +21,37 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-
 run() {
   printf '+'
   printf ' %q' "$@"
   printf '\n'
-  if [[ "$dry_run" -eq 0 ]]; then
-    "$@"
-  fi
+  if [[ "$dry_run" -eq 0 ]]; then "$@"; fi
 }
-
-execd_service=agentlibre-execd.service
-execd_socket=agentlibre-execd.socket
-daemon_service=agentlibre-daemon.service
-daemon_socket=agentlibre-daemon.socket
-matrix_service=agl-matrix-bridge.service
-
-run systemctl --user stop "$matrix_service" "$daemon_service" "$execd_service" \
-  "$daemon_socket" "$execd_socket"
-
-if [[ "$action" == restart ]]; then
-  run systemctl --user start "$execd_socket" "$daemon_socket"
-  run systemctl --user start "$execd_service" "$daemon_service" "$matrix_service"
+services=(agentlibre-daemon.service agentlibre-execd.service)
+sockets=(agentlibre-daemon.socket agentlibre-execd.socket)
+matrix=()
+if [[ "$dry_run" -eq 1 ]] || [[ "$(systemctl --user show agl-matrix-bridge.service -p LoadState --value)" == loaded ]]; then
+  matrix=(agl-matrix-bridge.service)
 fi
-
-if [[ "$dry_run" -eq 0 ]]; then
-  systemctl --user --no-pager --full status \
-    "$execd_service" "$daemon_service" "$matrix_service"
+installed=()
+for unit in "${matrix[@]}" "${services[@]}" "${sockets[@]}"; do
+  if [[ "$dry_run" -eq 1 ]] || [[ "$(systemctl --user show "$unit" -p LoadState --value)" == loaded ]]; then
+    installed+=("$unit")
+  fi
+done
+if [[ ${#installed[@]} -gt 0 ]]; then run systemctl --user stop "${installed[@]}"; fi
+if [[ "$action" == restart ]]; then
+  run systemctl --user daemon-reload
+  run systemctl --user reset-failed "${services[@]}" "${sockets[@]}" "${matrix[@]}"
+  run systemctl --user start agentlibre-execd.socket agentlibre-daemon.socket
+  run systemctl --user start agentlibre-execd.service agentlibre-daemon.service
+  if [[ ${#matrix[@]} -gt 0 ]]; then run systemctl --user start "${matrix[@]}"; fi
+  if [[ "$dry_run" -eq 0 ]]; then
+    systemctl --user is-active "${services[@]}" "${sockets[@]}" "${matrix[@]}"
+  fi
+elif [[ "$dry_run" -eq 0 ]]; then
+  # Inactive is the successful result of --stop, not an is-active/status error.
+  if [[ ${#installed[@]} -gt 0 ]]; then
+    systemctl --user show "${installed[@]}" -p Id -p ActiveState
+  fi
 fi

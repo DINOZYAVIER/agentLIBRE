@@ -21,6 +21,9 @@ cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 echo '==> cargo test'
 cargo test --locked --workspace
 
+echo '==> release deployment checks'
+python3 "$script_dir/test-release-deployment.py"
+
 echo '==> behavior checks'
 python3 "$script_dir/check-behavior-tests.py"
 

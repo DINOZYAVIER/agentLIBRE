@@ -5,23 +5,25 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage: scripts/install-agl-cargo.sh [options]
 
-Builds and installs `agl`, `agl-execd`, its private launcher, and the private
-llama.cpp runtime directly under one prefix. Existing files are replaced only
-with --force (the default).
+Build and install agl, execd, its private launcher, Matrix bridge and private
+llama.cpp runtime under one prefix. Stage the complete runtime before replacing
+installed files. With --services, also replace and restart user-systemd units.
 
 Options:
   --root PATH          installation prefix (default: Cargo install root)
-  --debug              use Cargo's debug install profile
-  --no-force           refuse to replace an installed `agl`
+  --debug              build/install the Rust debug profile
+  --no-force           refuse to replace installed runtime files
   --no-locked          do not pass --locked to Cargo
   --skip-submodules    do not initialize vendor/llama.cpp
   --skip-llama-build   require an existing llama.cpp build
+  --services           replace user units and restart services after installation
+  --no-services        install binaries only (default)
   --dry-run            print commands without executing them
   -h, --help           show this help
-EOF
+USAGE
 }
 
 run() {
@@ -34,87 +36,143 @@ run() {
 }
 
 root=""
-debug=0
+profile=release
 force=1
 locked=1
 skip_submodules=0
 skip_llama_build=0
+services=0
 dry_run=0
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) root="${2:?missing value for --root}"; shift 2 ;;
-    --debug) debug=1; shift ;;
+    --debug) profile=debug; shift ;;
     --no-force) force=0; shift ;;
     --no-locked) locked=0; shift ;;
     --skip-submodules) skip_submodules=1; shift ;;
     --skip-llama-build) skip_llama_build=1; shift ;;
+    --services) services=1; shift ;;
+    --no-services) services=0; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-
-if [[ -z "$root" ]]; then
-  root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-${HOME:?HOME is required}/.cargo}}"
-fi
+root="${root:-${CARGO_INSTALL_ROOT:-${CARGO_HOME:-${HOME:?HOME is required}/.cargo}}}"
 [[ "$root" == /* ]] || root="$PWD/$root"
 root="$(realpath -m -s -- "$root")"
 [[ "$(realpath -m -- "$root")" == "$root" ]] || {
   echo "installation prefix traverses a symlink: $root" >&2
   exit 1
 }
-
 engine_source="${AGL_LLAMA_CPP_BUILD_DIR:-$repo_root/target/llama-cpp/build}/bin"
 engine_target="$root/libexec/agentlibre"
+rust_target="${CARGO_TARGET_DIR:-$repo_root/target}"
+[[ "$rust_target" == /* ]] || rust_target="$repo_root/$rust_target"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+matrix_config="${AGL_MATRIX_BRIDGE_CONFIG:-$config_home/agentLIBRE/matrix-bridge/agl.toml}"
+
+if [[ "$force" -eq 0 ]]; then
+  for installed in "$root/bin/agl" "$root/bin/agl-execd" "$root/bin/agl-matrix-bridge" "$root/bin/agl-execd-launcher" "$engine_target"; do
+    [[ ! -e "$installed" && ! -L "$installed" ]] || {
+      echo "refusing to replace installed runtime: $installed" >&2
+      exit 1
+    }
+  done
+fi
 
 if [[ "$dry_run" -eq 0 ]]; then
-  command -v cargo >/dev/null || { echo "missing required tool: cargo" >&2; exit 1; }
-  command -v git >/dev/null || { echo "missing required tool: git" >&2; exit 1; }
-  if [[ "$skip_submodules" -eq 0 && ! -f "$repo_root/vendor/llama.cpp/CMakeLists.txt" ]]; then
-    run git -C "$repo_root" submodule update --init --recursive --checkout vendor/llama.cpp
-  fi
-  if [[ ! -x "$engine_source/llama-server" ]]; then
-    if [[ "$skip_llama_build" -eq 1 ]]; then
-      echo "missing private llama-server: $engine_source/llama-server" >&2
+  for tool in cargo git install mv mktemp; do
+    command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
+  done
+  if [[ "$services" -eq 1 ]]; then
+    command -v systemctl >/dev/null || { echo "missing required tool: systemctl" >&2; exit 1; }
+    [[ -f "$config_home/agentLIBRE/agentLIBRE.toml" ]] || {
+      echo "missing daemon config: $config_home/agentLIBRE/agentLIBRE.toml" >&2
       exit 1
-    fi
-    run "$repo_root/scripts/build-llama-cpp.sh"
+    }
+    systemctl --user show-environment >/dev/null
   fi
 fi
-
-cargo_args=(install --path "$repo_root/products/agl-cli" --bin agl --root "$root")
-[[ "$locked" -eq 1 ]] && cargo_args+=(--locked)
-[[ "$debug" -eq 1 ]] && cargo_args+=(--debug)
-[[ "$force" -eq 1 ]] && cargo_args+=(--force)
-
-run cargo "${cargo_args[@]}"
-execd_profile=release
-[[ "$debug" -eq 1 ]] && execd_profile=debug
-execd_args=(build --package agl-execd)
-[[ "$locked" -eq 1 ]] && execd_args+=(--locked)
-[[ "$debug" -eq 0 ]] && execd_args+=(--release)
-run cargo "${execd_args[@]}"
-run install -d -m 0755 "$root/bin" "$engine_target"
-run install -m 0755 "$repo_root/target/$execd_profile/agl-execd" "$root/bin/agl-execd"
-run install -m 0755 "$repo_root/target/$execd_profile/agl-execd-launcher" \
-  "$engine_target/agl-execd-launcher"
-run install -m 0755 "$engine_source/llama-server" "$engine_target/llama-server"
-
-if [[ "$dry_run" -eq 1 ]]; then
-  printf '+ install -m 0644 %q/lib\*.so\* %q/\n' "$engine_source" "$engine_target"
-else
-  shopt -s nullglob
-  libraries=("$engine_source"/lib*.so*)
-  shopt -u nullglob
-  [[ ${#libraries[@]} -gt 0 ]] || {
-    echo "private llama.cpp build has no shared libraries: $engine_source" >&2
-    exit 1
-  }
-  run install -m 0644 "${libraries[@]}" "$engine_target/"
+if [[ "$skip_submodules" -eq 0 && ! -f "$repo_root/vendor/llama.cpp/CMakeLists.txt" ]]; then
+  run git -C "$repo_root" submodule update --init --recursive --checkout vendor/llama.cpp
 fi
 
-echo "installed agl: $root/bin/agl"
-echo "installed execd: $root/bin/agl-execd"
-echo "installed private launcher: $engine_target/agl-execd-launcher"
-echo "installed private engine: $engine_target/llama-server"
+# Resolve the workspace independently of the caller's directory.
+cd "$repo_root"
+cargo_args=(build --workspace)
+[[ "$locked" -eq 1 ]] && cargo_args+=(--locked)
+[[ "$profile" == release ]] && cargo_args+=(--release)
+run cargo "${cargo_args[@]}"
+if [[ "$skip_llama_build" -eq 0 ]]; then
+  # An existing binary is not evidence that it matches the pinned source.
+  run "$script_dir/build-llama-cpp.sh"
+fi
+
+shopt -s nullglob
+libraries=("$engine_source"/lib*.so*)
+shopt -u nullglob
+if [[ "$dry_run" -eq 0 ]]; then
+  for binary in agl agl-execd agl-execd-launcher agl-matrix-bridge; do
+    [[ -x "$rust_target/$profile/$binary" ]] || { echo "missing built binary: $rust_target/$profile/$binary" >&2; exit 1; }
+  done
+  [[ -x "$engine_source/llama-server" ]] || { echo "missing private llama-server: $engine_source/llama-server" >&2; exit 1; }
+  [[ ${#libraries[@]} -gt 0 ]] || { echo "private llama.cpp build has no shared libraries: $engine_source" >&2; exit 1; }
+fi
+
+run install -d -m 0755 "$root" "$root/bin" "$root/libexec"
+stage="$root/.agentlibre-install.PREVIEW"
+if [[ "$dry_run" -eq 0 ]]; then
+  stage="$(mktemp -d "$root/.agentlibre-install.XXXXXX")"
+  trap 'rm -rf -- "$stage"' EXIT
+fi
+run install -d -m 0755 "$stage/bin" "$stage/engine"
+for binary in agl agl-execd agl-execd-launcher agl-matrix-bridge; do
+  run install -m 0755 "$rust_target/$profile/$binary" "$stage/bin/$binary"
+done
+run install -m 0755 "$engine_source/llama-server" "$stage/engine/llama-server"
+if [[ "$dry_run" -eq 1 ]]; then
+  printf '+ install -m 0644 %q/lib\*.so\* %q/\n' "$engine_source" "$stage/engine"
+else
+  run install -m 0644 "${libraries[@]}" "$stage/engine/"
+  "$stage/bin/agl" --version
+  # Validate the relocated engine closure before interrupting active services.
+  (exec 3>/dev/null; env -i AGL_LLAMA_SERVER_INVENTORY_FD=3 "$stage/engine/llama-server")
+fi
+
+if [[ "$services" -eq 1 ]]; then
+  run "$script_dir/restart-services.sh" --stop
+fi
+# Same-filesystem rename replaces running ELF files without truncating them.
+for binary in agl agl-execd agl-matrix-bridge; do
+  run mv -fT -- "$stage/bin/$binary" "$root/bin/$binary"
+done
+run mv -- "$stage/bin/agl-execd-launcher" "$stage/engine/agl-execd-launcher"
+run install -d -m 0755 "$engine_target"
+# Replace managed flat files only. Runtime generations and their read-only
+# dependency/GC-root directories are state, not stale engine libraries.
+shopt -s nullglob
+previous_libraries=("$engine_target"/lib*.so*)
+shopt -u nullglob
+for library in "${previous_libraries[@]}"; do
+  if [[ ( -f "$library" || -L "$library" ) && ! -e "$stage/engine/${library##*/}" ]]; then
+    run rm -- "$library"
+  fi
+done
+if [[ "$dry_run" -eq 1 ]]; then
+  printf '+ mv -f -- %q/* %q/\n' "$stage/engine" "$engine_target"
+else
+  for source in "$stage/engine/"*; do
+    run mv -fT -- "$source" "$engine_target/${source##*/}"
+  done
+fi
+
+if [[ "$services" -eq 1 ]]; then
+  run "$script_dir/agentlibre-execd-systemd-service.sh" --binary "$root/bin/agl-execd" --enable
+  run "$script_dir/agentlibre-daemon-systemd-service.sh" --binary "$root/bin/agl" --enable
+  if [[ -f "$matrix_config" ]]; then
+    run "$script_dir/agentlibre-matrix-bridge-systemd-service.sh" --binary "$root/bin/agl-matrix-bridge" --config "$matrix_config" --enable
+  fi
+  run "$script_dir/restart-services.sh" --restart
+fi
+printf 'installed %s runtime: %s\n' "$profile" "$root"
