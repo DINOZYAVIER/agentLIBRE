@@ -9,8 +9,8 @@ use agl_core::agent::{
 };
 use agl_core::implementation_plan::{
     AdditionalRead, GitCommit, ImplementationPlan, ImplementationSlice, PlanDigest, PlanId,
-    PlanState, PlanText, SliceResult, SliceResultSchema, SliceState, VerificationExpected,
-    VerificationResult, WorkspacePath, WorkspaceSnapshot,
+    PlanState, PlanText, SliceChangedPath, SliceResult, SliceResultSchema, SliceState,
+    VerificationExpected, VerificationResult, WorkspacePath, WorkspaceSnapshot,
 };
 use agl_core::{Content, ConversationId, MessageId};
 use agl_daemon_api::PlanArtifactView;
@@ -337,62 +337,42 @@ fn execute_slice(
         reasoning: None,
     })?;
     let run = wait_for_run(store, agent, run_id)?;
-    let after = workspace::capture(&root)?;
-    let changed_paths = after.changed_paths(before);
     let output =
         latest_assistant(store, conversation_id).and_then(|value| decode_coder_output(&value));
-    let (coder_state, additional_reads, coder_failure, outside_write_set) =
-        match (run.status, output) {
-            (AgentRunStatus::Completed, Some(output)) if output.schema == SliceResultSchema::V1 => {
-                let outside = changed_paths
-                    .iter()
-                    .any(|path| !slice.files.iter().any(|file| file.path == path.path));
-                if outside {
-                    (
-                        SliceState::Failed,
-                        output.additional_reads,
-                        Some(
-                            PlanText::new(
-                                "coder changed a path outside the declared slice write set",
-                            )
-                            .unwrap(),
-                        ),
-                        true,
-                    )
-                } else {
-                    (output.state, output.additional_reads, output.failure, false)
-                }
-            }
-            (_, Some(output)) => (
-                SliceState::Failed,
-                output.additional_reads,
-                output
-                    .failure
-                    .or_else(|| PlanText::new("coder returned an invalid slice result").ok()),
-                false,
-            ),
-            (_, None) => (
-                SliceState::Failed,
-                Vec::new(),
-                PlanText::new("coder produced no valid structured slice result").ok(),
-                false,
-            ),
-        };
+    let (coder_state, additional_reads, coder_failure) = match (run.status, output) {
+        (AgentRunStatus::Completed, Some(output)) if output.schema == SliceResultSchema::V1 => {
+            (output.state, output.additional_reads, output.failure)
+        }
+        (_, Some(output)) => (
+            SliceState::Failed,
+            output.additional_reads,
+            output
+                .failure
+                .or_else(|| PlanText::new("coder returned an invalid slice result").ok()),
+        ),
+        (_, None) => (
+            SliceState::Failed,
+            Vec::new(),
+            PlanText::new("coder produced no valid structured slice result").ok(),
+        ),
+    };
     let verification = run_approved_verifications(execution, slice, &root);
+    // The final capture is taken after verification: verification commands may write too.
+    let after = workspace::capture(&root)?;
+    let changed_paths = after.changed_paths(before);
+    let undeclared = undeclared_changed_paths(slice, &changed_paths);
     let all_verifications_passed = verification.iter().all(|result| result.passed)
         && verification.len() == slice.verification.len();
-    let state =
-        if coder_state == SliceState::Completed && !outside_write_set && all_verifications_passed {
-            SliceState::Completed
-        } else {
-            SliceState::Failed
-        };
+    let state = if coder_state == SliceState::Completed
+        && undeclared.is_empty()
+        && all_verifications_passed
+    {
+        SliceState::Completed
+    } else {
+        SliceState::Failed
+    };
     let failure = (state == SliceState::Failed)
-        .then(|| {
-            coder_failure.or_else(|| {
-                PlanText::new("runtime verification failed; slice was not completed").ok()
-            })
-        })
+        .then(|| slice_failure_text(&undeclared, coder_failure))
         .flatten();
     Ok(SliceResult {
         schema: SliceResultSchema::V1,
@@ -408,6 +388,35 @@ fn execute_slice(
         workspace: after.snapshot,
         failure,
     })
+}
+
+/// Changed paths that are neither declared in `slice.files` nor inside an excluded output directory.
+fn undeclared_changed_paths(
+    slice: &ImplementationSlice,
+    changed: &[SliceChangedPath],
+) -> Vec<String> {
+    changed
+        .iter()
+        .filter(|path| !slice.files.iter().any(|file| file.path == path.path))
+        .map(|path| path.path.as_str().to_owned())
+        .collect()
+}
+
+fn slice_failure_text(undeclared: &[String], coder_failure: Option<PlanText>) -> Option<PlanText> {
+    if undeclared.is_empty() {
+        return coder_failure.or_else(|| {
+            PlanText::new("runtime verification failed; slice was not completed").ok()
+        });
+    }
+    let mut message = format!(
+        "paths changed outside the declared slice write set: {}",
+        undeclared.join(", ")
+    );
+    if let Some(failure) = coder_failure {
+        message.push_str("; ");
+        message.push_str(failure.as_str());
+    }
+    bounded_failure_text(anyhow::anyhow!(message)).ok()
 }
 
 fn coder_input<'a>(
@@ -796,9 +805,7 @@ fn ensure_result_chain(result: &SliceResult, before: &WorkspaceSnapshot) -> Resu
     Ok(())
 }
 
-fn canonical_changed_paths(
-    paths: &[agl_core::implementation_plan::SliceChangedPath],
-) -> Vec<agl_core::implementation_plan::SliceChangedPath> {
+fn canonical_changed_paths(paths: &[SliceChangedPath]) -> Vec<SliceChangedPath> {
     let mut paths = paths.to_vec();
     paths.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
     paths
@@ -1598,6 +1605,103 @@ mod tests {
             reopened.slice_records(&plan_id).unwrap()[1].result.as_ref(),
             Some(&failed)
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn post_verification_writes_outside_the_write_set_fail_the_slice_but_outputs_are_allowed() {
+        let root =
+            std::env::temp_dir().join(format!("agl-implementation-final-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(
+            root.join("agentLIBRE.toml"),
+            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("one.rs"), "old").unwrap();
+        let before = workspace::capture(&root).unwrap();
+        let declared = slice("one", vec![]);
+        // Coder edits the declared file; verification writes into the output directory only.
+        fs::write(root.join("one.rs"), "new").unwrap();
+        fs::write(root.join("target/build"), "artifact").unwrap();
+        let ok = workspace::capture(&root).unwrap().changed_paths(&before);
+        assert!(undeclared_changed_paths(&declared, &ok).is_empty());
+        assert_eq!(ok.len(), 1);
+        // Verification writes an undeclared file after the coder was clean.
+        fs::write(root.join("cache.tmp"), "x").unwrap();
+        let after = workspace::capture(&root).unwrap();
+        let changed = after.changed_paths(&before);
+        let undeclared = undeclared_changed_paths(&declared, &changed);
+        assert_eq!(undeclared, ["cache.tmp"]);
+        let failure = slice_failure_text(&undeclared, None).unwrap();
+        assert!(failure.as_str().contains("cache.tmp"));
+        let coder = slice_failure_text(&undeclared, Some(text("coder said no"))).unwrap();
+        assert!(coder.as_str().contains("cache.tmp") && coder.as_str().contains("coder said no"));
+        assert_eq!(
+            slice_failure_text(&[], None).unwrap().as_str(),
+            "runtime verification failed; slice was not completed"
+        );
+        // The stored result chain is consistent with the final snapshot.
+        let mut stored = result(
+            PlanId::generate(),
+            PlanDigest::from_bytes([1; 32]),
+            declared.id.clone(),
+            after.snapshot.clone(),
+            SliceState::Failed,
+        );
+        stored.changed_paths = changed;
+        ensure_result_chain(&stored, &before.snapshot).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_slice_result_fails_the_plan_without_marking_it_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-implementation-nostale-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let store = StoreHandle::open_at(root.join("store")).unwrap();
+        let conversation = ConversationId::generate();
+        {
+            let database = store.lock().unwrap();
+            database.transaction(|tx| {
+                tx.execute("INSERT INTO agent_conversations (conversation_id, display_name, function_json, workspace_root, snapshot_json, created_at_ms, last_active_at_ms) VALUES (?1, NULL, '{}', '/workspace', '{}', 1, 1)", rusqlite::params![conversation.as_bytes().as_slice()])?;
+                Ok(())
+            }).unwrap();
+        }
+        let plan_id = PlanId::generate();
+        let digest = PlanDigest::from_bytes([9; 32]);
+        let initial = WorkspaceSnapshot {
+            digest: PlanDigest::from_bytes([3; 32]),
+            files: vec![],
+        };
+        store
+            .register_plan_draft(
+                plan_id.clone(),
+                digest.clone(),
+                Path::new("/workspace"),
+                conversation,
+                PlanState::ReadyForApproval,
+            )
+            .unwrap();
+        store.approve_plan(plan_id.clone(), &digest).unwrap();
+        store
+            .begin_plan_implementation(plan_id.clone(), &digest, &["first".into()], &initial)
+            .unwrap();
+        assert!(store.claim_slice(&plan_id, "first").unwrap());
+        let first = slice("first", vec![]);
+        let mut failed = result(
+            plan_id.clone(),
+            digest,
+            first.id.clone(),
+            initial,
+            SliceState::Failed,
+        );
+        failed.failure = slice_failure_text(&["stray.tmp".to_owned()], None);
+        let stored = finish_claimed_slice(&store, &plan_id, &first, failed).unwrap();
+        assert_eq!(stored.state, SliceState::Failed);
+        assert!(stored.failure.unwrap().as_str().contains("stray.tmp"));
+        assert_eq!(store.plan_record(plan_id).unwrap().state, PlanState::Failed);
         fs::remove_dir_all(root).unwrap();
     }
 }
