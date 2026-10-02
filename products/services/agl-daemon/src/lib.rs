@@ -1,6 +1,7 @@
 mod activation;
 mod agent;
 mod implementation;
+mod planner;
 mod plans;
 mod protocol;
 mod store;

@@ -13,7 +13,6 @@ use agl_core::implementation_plan::{
 };
 use agl_core::{Content, ConversationId, MessageId};
 use agl_daemon_api::{PlanArtifactView, SliceStatusView};
-use agl_runtime::PlannerWorkspaceBoundary;
 use anyhow::{Context, Result, bail, ensure};
 use uuid::Uuid;
 
@@ -73,21 +72,12 @@ impl PlanArtifactStore {
     ) -> Result<(StoredPlan, agl_core::agent::ConversationView)> {
         let conversation_id = ConversationId::generate();
         let mut snapshot = activated.snapshot.clone();
-        snapshot.instructions = agl_runtime::planner::instructions(&snapshot.instructions)
+        snapshot.instructions = crate::planner::instructions(&snapshot.instructions)
             .context("failed to build planner instructions")?;
-        snapshot.response_format = Some(agl_runtime::planner::response_format());
+        snapshot.response_format = Some(crate::planner::response_format());
         snapshot.planner_read_only = true;
         snapshot.invalid_model_output_recovery = None;
-        let boundary = PlannerWorkspaceBoundary {
-            workspace_root: workspace.to_owned(),
-            scratch_root: self
-                .root
-                .parent()
-                .context("plan artifact root has no daemon data parent")?
-                .join("planner-scratch"),
-        };
-        boundary
-            .validate_capabilities(&snapshot.tools)
+        crate::planner::validate_capabilities(workspace, &snapshot.tools)
             .context("planner Function is not read-only")?;
         ensure!(
             snapshot.authority.0.iter().all(|grant| !matches!(
@@ -438,10 +428,10 @@ fn bind_workspace_identity(plan: &mut ImplementationPlan, workspace: &Path) -> R
 fn correction_input(original_prompt: &str, diagnostic: &str) -> Result<Content> {
     let prefix = format!(
         "{} Do not reuse the previous object's shape. The top-level schema field must be exactly \"agentlibre.implementation-plan/v1\". The top-level id must be a lowercase UUIDv7 with form xxxxxxxx-xxxx-7xxx-[89ab]xxx-xxxxxxxxxxxx. {}\nRequired JSON Schema:\n",
-        agl_runtime::planner::PLANNER_CORRECTION_PREFIX,
-        agl_runtime::planner::PLANNER_DOMAIN_RULES
+        crate::planner::PLANNER_CORRECTION_PREFIX,
+        crate::planner::PLANNER_DOMAIN_RULES
     );
-    let schema = serde_json::to_string(&agl_runtime::planner::implementation_plan_schema())?;
+    let schema = serde_json::to_string(&crate::planner::implementation_plan_schema())?;
     let task_prefix = "\nOriginal planning task:\n";
     let diagnostic_prefix = "\nValidation diagnostics:\n";
     let fixed_bytes = prefix.len() + schema.len() + task_prefix.len() + diagnostic_prefix.len();
@@ -642,7 +632,7 @@ mod tests {
         {
             assert_eq!(
                 request.response_format,
-                Some(agl_runtime::planner::response_format())
+                Some(crate::planner::response_format())
             );
             if request.tools.is_empty() {
                 assert!(request.context.iter().any(|entry| {
@@ -650,7 +640,7 @@ mod tests {
                         .message
                         .content
                         .as_text()
-                        .starts_with(agl_runtime::planner::PLANNER_CORRECTION_PREFIX)
+                        .starts_with(crate::planner::PLANNER_CORRECTION_PREFIX)
                 }));
             } else {
                 assert_eq!(request.tools.len(), 1);

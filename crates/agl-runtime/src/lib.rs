@@ -8,7 +8,6 @@ pub mod function;
 pub mod inference;
 pub mod model;
 pub mod package;
-pub mod planner;
 pub mod skill;
 mod workspace_artifacts;
 
@@ -17,7 +16,6 @@ pub use activation::{
     RuntimeService, host_memory_budget,
 };
 pub use forge::{FunctionIdentity, function_identity, resolve_function_requirement};
-pub use planner::PlannerWorkspaceBoundary;
 pub use workspace_artifacts::{
     ArtifactDeclaration, ResolvedWorkspaceArtifact, WORKSPACE_CONFIG_FILE_NAME, WorkspaceArtifacts,
     read_workspace_artifact_declarations, read_workspace_output_directories,
