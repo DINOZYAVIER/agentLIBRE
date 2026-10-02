@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agl_runtime::package::PackageId;
+pub(crate) use agl_runtime::function::{FunctionRequirement, parse_function_requirement};
 use anyhow::{Context, Result, bail, ensure};
-use semver::VersionReq;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
@@ -127,22 +126,6 @@ pub(crate) struct CredentialConfig {
     pub client_private_key: PathBuf,
     #[garde(skip)]
     pub private_ca: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FunctionRequirement {
-    pub id: PackageId,
-    pub version: VersionReq,
-}
-
-impl<'de> Deserialize<'de> for FunctionRequirement {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        parse_function_requirement(&String::deserialize(deserializer)?)
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -443,22 +426,45 @@ pub(crate) fn resolve_requirement(
     })
 }
 
-fn parse_function_requirement(value: &str) -> Result<FunctionRequirement> {
-    let body = value
-        .strip_prefix("function:")
-        .context("Function requirement must begin with function:")?;
-    let (id, version) = body
-        .split_once('@')
-        .context("Function requirement must contain @VERSION")?;
-    ensure!(!version.is_empty(), "Function version requirement is empty");
+/// Set `chat.default_function` in the human config, keeping every other byte
+/// of the document (comments, ordering, formatting) unchanged.
+pub(crate) fn set_default_function(config_root: &Path, function: &str) -> Result<()> {
+    let path = config_root.join(CONFIG_FILE_NAME);
     ensure!(
-        !version.contains('@'),
-        "Function requirement contains multiple @ separators"
+        path.try_exists()?,
+        "{} does not exist; create it with a [chat] section that sets default_function \
+         = \"function:ID@VERSION\", then run this command again",
+        path.display()
     );
-    Ok(FunctionRequirement {
-        id: PackageId::new(id)?,
-        version: VersionReq::parse(version)?,
-    })
+    let bytes = super::read_regular_file(&path, MAX_CONFIG_BYTES)?;
+    let updated = edit_default_function(std::str::from_utf8(&bytes)?, function)
+        .with_context(|| format!("failed to update {}", path.display()))?;
+    let staged = config_root.join(format!(".{CONFIG_FILE_NAME}.{}.tmp", std::process::id()));
+    std::fs::write(&staged, updated)?;
+    std::fs::rename(&staged, &path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staged);
+    })?;
+    Ok(())
+}
+
+fn edit_default_function(document: &str, function: &str) -> Result<String> {
+    parse_function_requirement(function)?;
+    let mut edited: toml_edit::DocumentMut = document.parse().context("invalid TOML")?;
+    let chat = edited
+        .get_mut("chat")
+        .context("config has no [chat] section")?
+        .as_table_like_mut()
+        .context("chat must be a table")?;
+    let slot = chat
+        .get_mut("default_function")
+        .context("[chat] has no default_function")?;
+    let decor = slot.as_value().map(|value| value.decor().clone());
+    let mut value = toml_edit::Value::from(function);
+    if let Some(decor) = decor {
+        *value.decor_mut() = decor;
+    }
+    *slot = toml_edit::Item::Value(value);
+    Ok(edited.to_string())
 }
 
 fn parse_binary_size(value: &str) -> Result<u64> {
@@ -536,6 +542,37 @@ private_ca = "/run/credentials/ca.crt"
         );
         assert!(
             toml::from_str::<HumanConfig>("[chat]\ndefault_function='/tmp/function'\n").is_err()
+        );
+    }
+
+    #[test]
+    fn default_function_edit_preserves_all_other_content() {
+        let document = "# top comment\n[chat]\n# pick one\ndefault_function = \"function:a.b@^1\" # trailing\n\n[repl]\ndecorations_default   =  'full'\n";
+        let edited = edit_default_function(document, "function:c.d@^2.0").unwrap();
+        assert_eq!(
+            edited,
+            "# top comment\n[chat]\n# pick one\ndefault_function = \"function:c.d@^2.0\" # trailing\n\n[repl]\ndecorations_default   =  'full'\n"
+        );
+        toml::from_str::<HumanConfig>(&edited).unwrap();
+        assert!(edit_default_function(document, "c.d@^2").is_err());
+        assert!(edit_default_function("[repl]\n", "function:c.d@^2").is_err());
+    }
+
+    #[test]
+    fn set_default_function_requires_an_existing_config() {
+        let root = tempfile::tempdir().unwrap();
+        let error = set_default_function(root.path(), "function:c.d@^2").unwrap_err();
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        assert!(!root.path().join(CONFIG_FILE_NAME).exists());
+        std::fs::write(
+            root.path().join(CONFIG_FILE_NAME),
+            "[chat]\ndefault_function = \"function:a.b@1\"\n",
+        )
+        .unwrap();
+        set_default_function(root.path(), "function:c.d@^2").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(CONFIG_FILE_NAME)).unwrap(),
+            "[chat]\ndefault_function = \"function:c.d@^2\"\n"
         );
     }
 

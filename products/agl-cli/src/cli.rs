@@ -58,6 +58,17 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: FunctionCommand,
     },
+    /// Choose a ready profile of a Function Family.
+    ///
+    /// A Function Family works like game graphics settings: a list of ready
+    /// profiles (for example CPU Small or GPU High), each an ordinary
+    /// Function. Selecting a profile sets chat.default_function in the human
+    /// config.
+    #[command(name = "function-family")]
+    FunctionFamily {
+        #[command(subcommand)]
+        command: FunctionFamilyCommand,
+    },
     /// Manage workspace artifacts through AGL.
     Artifact {
         #[command(subcommand)]
@@ -145,6 +156,16 @@ pub(super) enum ConversationCommand {
 pub(super) enum FunctionCommand {
     /// Verify the Forge lock and resolve a Function identity.
     Lock { function_directory: PathBuf },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum FunctionFamilyCommand {
+    /// List every family with its profiles, default and selected profile.
+    List,
+    /// Show one family with detected RAM/VRAM and per-profile fit.
+    Show { family: String },
+    /// Write a profile's Function to chat.default_function.
+    Select { family: String, profile: String },
 }
 
 #[derive(Debug, Subcommand)]

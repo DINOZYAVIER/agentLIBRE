@@ -24,7 +24,7 @@ use artifacts::{
 use clap::Parser;
 use cli::{
     APPLICATION_DESCRIPTION, ArtifactCommand, Cli, Command, ConfigCommand, ConversationCommand,
-    FunctionCommand, PlanCommand, ResumeArgs, StoreCommand, parse_reasoning,
+    FunctionCommand, FunctionFamilyCommand, PlanCommand, ResumeArgs, StoreCommand, parse_reasoning,
 };
 use config::Decorations;
 use crossterm::{
@@ -199,6 +199,7 @@ macro_rules! eprintln {
 mod artifacts;
 mod cli;
 mod config;
+mod function_family;
 mod render;
 mod repl;
 mod workspace;
@@ -481,6 +482,13 @@ fn run() -> Result<()> {
                         identity.digest,
                     );
                     Ok(())
+                }
+            },
+            Some(Command::FunctionFamily { command }) => match command {
+                FunctionFamilyCommand::List => function_family::list(&roots),
+                FunctionFamilyCommand::Show { family } => function_family::show(&roots, &family),
+                FunctionFamilyCommand::Select { family, profile } => {
+                    function_family::select(&roots, &family, &profile).await
                 }
             },
             Some(Command::Artifact { command }) => match command {
@@ -1359,6 +1367,7 @@ mod tests {
                 "config",
                 "doctor",
                 "function",
+                "function-family",
                 "artifact",
                 "run",
                 "view",

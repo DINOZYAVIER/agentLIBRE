@@ -15,7 +15,9 @@ pub use activation::{
     ActivatedFunction, ActivationProgress, ModelServiceDisposition, RuntimeConfig, RuntimeHandle,
     RuntimeService, host_memory_budget,
 };
-pub use forge::{FunctionIdentity, function_identity, resolve_function_requirement};
+pub use forge::{
+    FunctionIdentity, function_identity, resolve_function_model, resolve_function_requirement,
+};
 pub use workspace_artifacts::{
     ArtifactDeclaration, ResolvedWorkspaceArtifact, WORKSPACE_CONFIG_FILE_NAME, WorkspaceArtifacts,
     read_workspace_artifact_declarations, read_workspace_output_directories,

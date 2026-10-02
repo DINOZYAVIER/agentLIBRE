@@ -53,7 +53,7 @@ pub(crate) fn resolve_function(
     resolve_function_from_project(&project, function_directory.as_ref())
 }
 
-fn agl_workspace_root() -> Result<PathBuf> {
+pub(crate) fn agl_workspace_root() -> Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -128,6 +128,20 @@ pub fn resolve_function_requirement(
         "Function {id}@{requirement} resolves ambiguously in the AGL workspace"
     );
     Ok(best.1.clone())
+}
+
+/// Resolve the model manifest of the best Function matching a requirement.
+pub fn resolve_function_model(
+    id: &PackageId,
+    requirement: &VersionReq,
+) -> Result<crate::model::ModelManifest> {
+    let identity = resolve_function_requirement(id, requirement, agl_workspace_root()?)?;
+    let project = resolve_agl_project()?;
+    let manifest = read_function(&identity.directory)?;
+    let model = verified_entity(&project, manifest.model.id.as_str(), "model", MODEL_SCHEMA)?;
+    crate::model::parse_package_view(&DirectoryPackageView::new(
+        model.materialized_path().canonicalize()?,
+    )?)
 }
 
 fn resolve_function_from_project(
