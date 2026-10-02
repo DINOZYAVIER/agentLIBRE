@@ -38,17 +38,28 @@ struct Machine {
 }
 
 impl Machine {
-    /// RAM comes from `MemTotal` in `/proc/meminfo`. No VRAM detection exists in
-    /// the runtime that works without starting an inference engine, so VRAM is
-    /// reported as unknown.
+    /// RAM comes from `MemTotal` in `/proc/meminfo`. VRAM is the largest
+    /// `mem_info_vram_total` that a DRM device reports in sysfs (amdgpu exposes
+    /// it); devices without that file leave VRAM unknown.
     fn detect() -> Self {
         Self {
             ram_bytes: std::fs::read_to_string("/proc/meminfo")
                 .ok()
                 .and_then(|meminfo| parse_mem_total(&meminfo)),
-            vram_bytes: None,
+            vram_bytes: largest_vram(std::path::Path::new("/sys/class/drm")),
         }
     }
+}
+
+fn largest_vram(drm: &std::path::Path) -> Option<u64> {
+    std::fs::read_dir(drm)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|card| {
+            std::fs::read_to_string(card.path().join("device/mem_info_vram_total")).ok()
+        })
+        .filter_map(|bytes| bytes.trim().parse::<u64>().ok())
+        .max()
 }
 
 fn parse_mem_total(meminfo: &str) -> Option<u64> {
@@ -368,5 +379,23 @@ mod tests {
             fit(Some(16), Some(16 * BYTES_PER_GB - 1)),
             Some(Fit::BelowMinimum)
         );
+    }
+
+    #[test]
+    fn largest_vram_takes_the_biggest_reporting_device() {
+        let root = std::env::temp_dir().join(format!("agl-drm-{}", std::process::id()));
+        for (card, vram) in [
+            ("card0", Some("536870912\n")),
+            ("card1", Some("25753026560\n")),
+            ("card2", None),
+        ] {
+            std::fs::create_dir_all(root.join(card).join("device")).unwrap();
+            if let Some(vram) = vram {
+                std::fs::write(root.join(card).join("device/mem_info_vram_total"), vram).unwrap();
+            }
+        }
+        assert_eq!(largest_vram(&root), Some(25_753_026_560));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(largest_vram(&root), None);
     }
 }
