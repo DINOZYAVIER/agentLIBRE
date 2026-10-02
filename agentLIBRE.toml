@@ -13,7 +13,7 @@ id = "agentlibre.qwen38-27b"
 kind = "model"
 schema = "agentlibre.model/v1"
 git = "/home/dinozyavier/repos/agentlibre-models"
-revision = "96e2a5457c8d62fccd71e56295b5e06ff21f021e"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
 path = "models/qwen38-27b"
 
 [[artifacts.entity]]
@@ -223,6 +223,46 @@ schema = "agentlibre.document/v1"
 git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
 revision = "7d9da4124110d9b2f2eabbe153291da8a087c62b"
 path = "documents/agl-owned-artifact-config"
+
+[[artifacts.entity]]
+id = "agentlibre.gemma4-12b"
+kind = "model"
+schema = "agentlibre.model/v1"
+git = "/home/dinozyavier/repos/agentlibre-models"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
+path = "models/gemma4-12b"
+
+[[artifacts.entity]]
+id = "agentlibre.gemma4-e4b"
+kind = "model"
+schema = "agentlibre.model/v1"
+git = "/home/dinozyavier/repos/agentlibre-models"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
+path = "models/gemma4-e4b"
+
+[[artifacts.entity]]
+id = "agentlibre.cpu-small"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "/home/dinozyavier/repos/agentlibre-functions"
+revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+path = "functions/cpu-small"
+
+[[artifacts.entity]]
+id = "agentlibre.gpu-small"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "/home/dinozyavier/repos/agentlibre-functions"
+revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+path = "functions/gpu-small"
+
+[[artifacts.entity]]
+id = "agentlibre.gpu-high"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "/home/dinozyavier/repos/agentlibre-functions"
+revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+path = "functions/gpu-high"
 
 [workspace]
 output_directories = ["target"]
