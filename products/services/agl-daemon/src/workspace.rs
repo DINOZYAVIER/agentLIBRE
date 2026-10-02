@@ -94,6 +94,10 @@ fn walk(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
+        // Git metadata of the workspace root (a directory, or a gitlink file) is not workspace content.
+        if directory == root && entry.file_name() == ".git" {
+            continue;
+        }
         if excluded.iter().any(|root| path.starts_with(root)) {
             continue;
         }
@@ -112,7 +116,7 @@ fn walk(
         } else if metadata.is_dir() {
             hash_bytes(b"directory\0", &[])
         } else if metadata.is_file() {
-            hash_file(&path)
+            hash_file(&path, is_executable(&metadata))
                 .map_err(|e| PlanValidationError(format!("cannot read {relative}: {e}")))?
         } else {
             return Err(PlanValidationError(format!(
@@ -127,10 +131,21 @@ fn walk(
     Ok(())
 }
 
-fn hash_file(path: &Path) -> std::io::Result<PlanDigest> {
+/// A regular file is executable when any of the 0o111 permission bits is set.
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+fn hash_file(path: &Path, executable: bool) -> std::io::Result<PlanDigest> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
-    hash.update(b"file\0");
+    // The executable bit selects the domain prefix; content bytes follow unchanged.
+    hash.update(if executable {
+        &b"executable-file\0"[..]
+    } else {
+        &b"file\0"[..]
+    });
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = match file.read(&mut buffer) {
@@ -247,6 +262,70 @@ mod tests {
         let changes = after.changed_paths(&before);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path.as_str(), "large");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_git_metadata_is_excluded_but_nested_git_is_not() {
+        let root = std::env::temp_dir().join(format!("agl-workspace-git-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::create_dir_all(root.join("sub/.git")).unwrap();
+        fs::write(root.join("src"), "source").unwrap();
+        fs::write(root.join(".git/index"), "i1").unwrap();
+        fs::write(root.join(".git/HEAD"), "ref: refs/heads/a").unwrap();
+        fs::write(root.join("sub/.git/config"), "c").unwrap();
+        let before = capture(&root).unwrap();
+        assert!(
+            !before
+                .files
+                .keys()
+                .any(|p| p == ".git" || p.starts_with(".git/"))
+        );
+        assert!(before.files.contains_key("sub/.git/config"));
+        fs::write(root.join(".git/index"), "i2").unwrap();
+        fs::write(root.join(".git/objects/ab"), "obj").unwrap();
+        fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+        fs::write(root.join(".git/refs/heads/a"), "sha").unwrap();
+        let after = capture(&root).unwrap();
+        assert_eq!(after, before);
+        assert!(after.changed_paths(&before).is_empty());
+        // A gitlink file is excluded as well.
+        fs::remove_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git"), "gitdir: ../elsewhere").unwrap();
+        assert_eq!(capture(&root).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executable_bit_is_tracked_but_mtime_and_other_modes_are_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("agl-workspace-exec-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("tool.sh");
+        fs::write(&file, "echo").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = capture(&root).unwrap();
+        // Other permission bits do not matter.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(capture(&root).unwrap(), before);
+        // mtime-only change (rewrite identical bytes later) does not matter.
+        let handle = fs::File::options().write(true).open(&file).unwrap();
+        handle
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        drop(handle);
+        assert_eq!(capture(&root).unwrap(), before);
+        // chmod +x changes the fingerprint and is reported as a changed path.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        let exec = capture(&root).unwrap();
+        assert_ne!(exec.snapshot, before.snapshot);
+        let changes = exec.changed_paths(&before);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path.as_str(), "tool.sh");
+        // Any one of the 0o111 bits counts as executable.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o601)).unwrap();
+        assert_eq!(capture(&root).unwrap(), exec);
         fs::remove_dir_all(root).unwrap();
     }
 }
