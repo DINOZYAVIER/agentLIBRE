@@ -956,6 +956,10 @@ impl FunctionManifest {
                 });
             }
         }
+        // Declared-artifact reads need no permission: the Extension itself is the opt-in.
+        if extension_ids.contains("agentlibre.forge") {
+            tools.push(ToolId::new("agentlibre.forge:artifact.read")?);
+        }
         if self.permissions.search {
             ensure!(
                 extension_ids.contains("agentlibre.searxng"),
@@ -1394,5 +1398,28 @@ terminal = true
             FunctionManifest::parse(&(minimal() + "\ntools = [\"agentlibre.files:file.read\"]\n"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn forge_extension_admits_artifact_read_without_permissions() {
+        let document = minimal().replace(
+            "[presentation.tool_output]",
+            r#"extensions = [{ id = "agentlibre.forge", version = "1.0.0" }]
+
+[presentation.tool_output]"#,
+        );
+        let requirements = FunctionManifest::parse(&document)
+            .unwrap()
+            .requirements()
+            .unwrap();
+        assert_eq!(
+            requirements
+                .tools
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["agentlibre.forge:artifact.read"]
+        );
+        assert!(requirements.authority.0.is_empty());
     }
 }
