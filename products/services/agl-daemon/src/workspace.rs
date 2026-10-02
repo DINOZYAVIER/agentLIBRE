@@ -94,8 +94,8 @@ fn walk(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        // Git metadata of the workspace root (a directory, or a gitlink file) is not workspace content.
-        if directory == root && entry.file_name() == ".git" {
+        // Git metadata (a directory, or a gitlink file), at any depth, is not workspace content.
+        if entry.file_name() == ".git" {
             continue;
         }
         if excluded.iter().any(|root| path.starts_with(root)) {
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn root_git_metadata_is_excluded_but_nested_git_is_not() {
+    fn git_metadata_is_excluded_at_any_depth() {
         let root = std::env::temp_dir().join(format!("agl-workspace-git-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(root.join(".git/objects")).unwrap();
         fs::create_dir_all(root.join("sub/.git")).unwrap();
@@ -281,7 +281,8 @@ mod tests {
                 .keys()
                 .any(|p| p == ".git" || p.starts_with(".git/"))
         );
-        assert!(before.files.contains_key("sub/.git/config"));
+        assert!(!before.files.keys().any(|p| p.starts_with("sub/.git")));
+        fs::write(root.join("sub/.git/config"), "c2").unwrap();
         fs::write(root.join(".git/index"), "i2").unwrap();
         fs::write(root.join(".git/objects/ab"), "obj").unwrap();
         fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
