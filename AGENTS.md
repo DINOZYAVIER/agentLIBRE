@@ -26,7 +26,7 @@ For `agl config check/apply`, the default Function and typed Function
 requirements resolve against the AGL repository-root `agentLIBRE.toml`,
 independent of the caller's current directory. Direct Function directory
 locators remain relative to the caller's current directory and are checked
-against that workspace. `FUNCTION.toml` and `FUNCTION.lock` remain next to
+against that workspace. `FUNCTION.toml` remains in
 each Function source directory. The Matrix bridge's session, encrypted-room store,
 and binding state are explicit paths in its TOML config; they are not inferred
 from XDG at runtime. The repository example places them below

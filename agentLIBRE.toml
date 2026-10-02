@@ -53,7 +53,7 @@ id = "agentlibre.search-qwen38-27b-reasoning-128k-q8"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "f19c5eae9828cf9b9690e46e500f2cf68044c6de"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/search-qwen38-27b-reasoning-128k-q8"
 
 [[artifacts.entity]]
@@ -213,7 +213,7 @@ id = "agentlibre.search-qwen38-27b-reasoning-32k-q8"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "f19c5eae9828cf9b9690e46e500f2cf68044c6de"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/search-qwen38-27b-reasoning-32k-q8"
 
 [[artifacts.entity]]
@@ -245,7 +245,7 @@ id = "agentlibre.cpu-small"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/cpu-small"
 
 [[artifacts.entity]]
@@ -253,7 +253,7 @@ id = "agentlibre.gpu-small"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/gpu-small"
 
 [[artifacts.entity]]
@@ -261,7 +261,7 @@ id = "agentlibre.gpu-high"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/gpu-high"
 
 [[artifacts.entity]]
@@ -269,7 +269,7 @@ id = "agentlibre.general"
 kind = "function-family"
 schema = "agentlibre.function-family/v1"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "b2a4d4cc03dc7c69a170fc76a79634aa660fbc41"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "families/general"
 
 [workspace]
