@@ -1,5 +1,36 @@
 # AGENTS.md
 
+## Repository map
+
+| Path | Current responsibility |
+| --- | --- |
+| `Cargo.toml`, `Cargo.lock` | Rust workspace members, shared dependencies and locked builds. |
+| `agentLIBRE.toml` | Forge artifact declarations and workspace output directories; distinct from the user's application settings. |
+| `crates/` | Domain types, service clients, package/inference runtime and native Tool interfaces/handlers. See `crates/AGENTS.md`. |
+| `products/agl-cli/` | `agl` entrypoint, daemon command, configuration, artifact commands and terminal chat. |
+| `products/services/agl-daemon/` | Agent scheduling, activation, Store, planner and implementation coordination. |
+| `products/services/agl-execd/` | Execution service and private launcher: child processes, PTYs and planner isolation. |
+| `products/agl-matrix-bridge/` | Matrix transport, access policy, encryption/device verification and conversation bindings. |
+| `extensions/` | First-party Extension manifests and Tool/Effect JSON schemas; Rust handlers are in `crates/agl-tools/`. |
+| `scripts/` | Build/install, systemd deployment, CI and live inference/plan checks. |
+| `nix/agl-local-vulkan.nix` | Development/build environment for Rust, Vulkan, llama.cpp and bubblewrap. |
+| `docs/` | Component descriptions and build/NixOS guides, indexed by `docs/index.md`. |
+| `tests/` | System-test documentation; executable acceptance checks live under `scripts/`. |
+| `vendor/llama.cpp/` | Pinned git submodule containing the private inference engine; its instructions are upstream-owned. |
+| `LICENSES/`, top-level legal files | License texts, contribution, commercial and trademark terms. |
+| `splash`, `assets/` | CLI splash text and asset directories; `splash` is embedded by the CLI. |
+| `memory/` | Repository-local memory INDEX and entries; distinct from the Forge-declared memory source. |
+| `.github/workflows/ci.yml` | CI entrypoint. |
+| `target/` | Generated Rust/native build output; excluded from planner workspace snapshots by the manifest. |
+
+Agent, Function, Model and Function Family sources declared by the current
+manifest live in separate repositories. There is no repository-root
+`functions/` tree. Forge materializations are generated state, not sources.
+
+The production request path is CLI/Matrix -> `agl-daemon-api` -> daemon Agent
+service -> runtime inference or native Tools -> `agl-execution-api` -> execd.
+Daemon state is persisted by Store; execution state is persisted by execd.
+
 ## Alpha compatibility policy
 
 agentLIBRE is in alpha. Do not add backward-compatibility paths, legacy
