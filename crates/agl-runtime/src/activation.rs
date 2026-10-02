@@ -14,9 +14,7 @@ use crate::inference::{
     InferenceConfig, InferenceGenerateRequest, InferenceRoute, InferenceService,
     InferenceServiceError, RestoredInferenceHealth,
 };
-use crate::model::{
-    ImportedModel, ModelArtifactDigest, ModelManifest, fetch_model, open_managed_model,
-};
+use crate::model::{ImportedModel, ModelArtifactDigest, ModelManifest, open_managed_model};
 use crate::package::{DirectoryPackageView, PackageId, PackageTreeDigest, PackageVersion};
 use crate::skill::SkillPackage;
 use agl_core::agent::{
@@ -508,11 +506,13 @@ impl RuntimeHandle {
                 model.manifest.artifact.bytes,
             );
         }
-        let request = model.manifest.fetch_request(destination)?;
-        let cancelled = AtomicBool::new(false);
-        let imported = fetch_model(&request, &cancelled, |_| {}).await?;
-        self.remember_verified_model(artifact_key, imported.clone())?;
-        Ok(imported)
+        // Downloads need the user's consent (spec F5.6); the CLI asks before a chat starts.
+        anyhow::bail!(
+            "model {} ({} bytes) is not downloaded; run `agl chat` in an interactive terminal \
+             to download it with consent",
+            model.manifest.id,
+            model.manifest.artifact.bytes
+        )
     }
 
     fn verified_runtime_artifact(&self, artifact: &ModelArtifactRef) -> Result<ImportedModel> {

@@ -402,9 +402,13 @@ fn run() -> Result<()> {
                     "specify the chat Function only once"
                 );
                 let function = args.function.or(args.function_directory).or(cli.function);
+                function_family::ensure_chat_model(&roots, function.as_deref()).await?;
                 interactive_chat(&client, &roots, function, cli.reasoning).await
             }
-            None => interactive_chat(&client, &roots, cli.function, cli.reasoning).await,
+            None => {
+                function_family::ensure_chat_model(&roots, cli.function.as_deref()).await?;
+                interactive_chat(&client, &roots, cli.function, cli.reasoning).await
+            }
             Some(Command::Resume(args)) => {
                 let conversation = select_resume_conversation(&client, args).await?;
                 let workspace = std::env::current_dir()?.canonicalize()?;

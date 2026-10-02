@@ -281,6 +281,33 @@ pub(crate) async fn select(
     );
     println!("run `agl config apply` to activate the selection");
 
+    let command = format!("agl function-family select {family_id} {profile_id}");
+    match ensure_model(roots, &requirement).await? {
+        ModelStatus::Present | ModelStatus::Downloaded => {}
+        ModelStatus::Declined => {
+            println!("download skipped; selection kept. Run `{command}` later to download it.")
+        }
+        ModelStatus::NonInteractive => println!(
+            "download skipped (not an interactive terminal); selection kept. \
+             Run `{command}` in a terminal to download it."
+        ),
+    }
+    Ok(())
+}
+
+enum ModelStatus {
+    Present,
+    Downloaded,
+    Declined,
+    NonInteractive,
+}
+
+/// Shows the pinned model size and asks before downloading it (spec F5.6).
+/// Nothing is fetched without an interactive yes.
+async fn ensure_model(
+    roots: &ApplicationRoots,
+    requirement: &agl_runtime::function::FunctionRequirement,
+) -> Result<ModelStatus> {
     let model = agl_runtime::resolve_function_model(&requirement.id, &requirement.version)?;
     let digest = model
         .artifact
@@ -294,12 +321,7 @@ pub(crate) async fn select(
         .join("runtime/models")
         .join(format!("{digest}.gguf"));
     if model_present(&destination, model.artifact.bytes)? {
-        println!(
-            "model {} is already present at {}",
-            model.id,
-            destination.display()
-        );
-        return Ok(());
+        return Ok(ModelStatus::Present);
     }
     println!(
         "model {} is not downloaded ({}, {})",
@@ -307,19 +329,40 @@ pub(crate) async fn select(
         gb(model.artifact.bytes),
         model.artifact.url
     );
-    let command = format!("agl function-family select {family_id} {profile_id}");
     if !interactive() {
-        println!(
-            "download skipped (not an interactive terminal); selection kept. \
-             Run `{command}` in a terminal to download it, or it is downloaded when the Function is first activated."
-        );
-        return Ok(());
+        return Ok(ModelStatus::NonInteractive);
     }
     if !confirm("Download the model now?")? {
-        println!("download skipped; selection kept. Run `{command}` later to download it.");
+        return Ok(ModelStatus::Declined);
+    }
+    download(&model, &destination).await?;
+    Ok(ModelStatus::Downloaded)
+}
+
+/// Before a chat starts, make sure the chat Function's model is present, asking
+/// for consent to download it. Directory locators are activated as they are.
+pub(crate) async fn ensure_chat_model(
+    roots: &ApplicationRoots,
+    function: Option<&str>,
+) -> Result<()> {
+    let locator = match function {
+        Some(locator) => locator.to_owned(),
+        None => match selected_function(roots)? {
+            Some(locator) => locator,
+            None => return Ok(()),
+        },
+    };
+    if !locator.starts_with("function:") {
         return Ok(());
     }
-    download(&model, &destination).await
+    let requirement = agl_runtime::function::parse_function_requirement(&locator)?;
+    match ensure_model(roots, &requirement).await? {
+        ModelStatus::Present | ModelStatus::Downloaded => Ok(()),
+        ModelStatus::Declined => bail!("the chat model is not downloaded; chat was not started"),
+        ModelStatus::NonInteractive => bail!(
+            "the chat model is not downloaded; run `agl chat` in an interactive terminal to download it"
+        ),
+    }
 }
 
 fn model_present(path: &Path, expected_bytes: u64) -> Result<bool> {
