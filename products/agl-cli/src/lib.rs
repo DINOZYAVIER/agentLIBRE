@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{IsTerminal as _, Write as _};
@@ -38,16 +37,10 @@ use crossterm::{
     style::Print,
     terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
 };
-use nu_ansi_term::{Color as AnsiColor, Style as AnsiStyle};
 use pulldown_cmark::{Event, Options, Parser as MarkdownParser, Tag, TagEnd};
-use reedline::{
-    Completer, Emacs, FileBackedHistory, Highlighter, Hinter, KeyCode, KeyModifiers, MenuBuilder,
-    Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, Reedline,
-    ReedlineEvent, Signal, Span, StyledText, Suggestion, default_emacs_keybindings,
-};
+use reedline::{Completer, Span, Suggestion};
 use render::{
-    TerminalStyle, TerminalTheme, ansi_escape_end, foreground_turn, terminal_summary,
-    terminal_visible_width,
+    TerminalTheme, ansi_escape_end, foreground_turn, terminal_summary, terminal_visible_width,
 };
 use repl::chat_loop;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -58,8 +51,6 @@ use workspace::{
     read_regular_file, resolve_function_locator, utf8_path,
 };
 
-static TTY_OUTPUT: std::sync::OnceLock<Mutex<Option<reedline::ExternalPrinter<String>>>> =
-    std::sync::OnceLock::new();
 static TTY_RENDERER: std::sync::OnceLock<Mutex<Option<mpsc::UnboundedSender<TtyMessage>>>> =
     std::sync::OnceLock::new();
 
@@ -82,10 +73,6 @@ fn send_tty(message: TtyMessage) -> bool {
         .cloned();
     sender.is_some_and(|sender| sender.send(message).is_ok())
 }
-/// Output is handed to Reedline's external printer. Reedline already owns the
-/// cursor and repaint lifecycle while the editor is active; adding cursor
-/// movement here races its painter and makes adjacent blocks overwrite each
-/// other.
 fn begin_external_block() {}
 
 struct InputDockGuard {
@@ -122,15 +109,7 @@ fn emit_terminal(text: String, stderr: bool) {
         let _ = renderer.send(TtyMessage::Text(text));
         return;
     }
-    let sink = TTY_OUTPUT.get_or_init(|| Mutex::new(None));
-    if let Some(printer) = sink.lock().expect("TTY output lock poisoned").as_ref() {
-        let width = terminal::size()
-            .map(|(columns, _)| usize::from(columns))
-            .ok()
-            .filter(|columns| *columns > 0)
-            .unwrap_or(80);
-        let _ = printer.print(wrap_external_text(&text, width));
-    } else if stderr {
+    if stderr {
         let mut output = std::io::stderr().lock();
         let _ = output.write_all(text.as_bytes());
         let _ = output.flush();
@@ -247,155 +226,6 @@ fn short_splash() -> String {
         .join("\n")
 }
 
-/// Keep the dock geometry in one place. Reedline owns the editable buffer;
-/// this prompt only supplies the stable separator and indicator around it.
-#[derive(Clone, Debug)]
-struct DockPrompt {
-    left: String,
-    indicator: String,
-    multiline_indicator: String,
-}
-
-impl DockPrompt {
-    fn new(activity: impl Into<String>, continuation: bool, theme: &TerminalTheme) -> Self {
-        let terminal_width = terminal::size().map(|(width, _)| width).unwrap_or(80);
-        let width = usize::from(terminal_width).max(1);
-        let activity = format!("{} ", activity.into());
-        let lead = truncate_chars("─ ", width);
-        let activity = truncate_chars(&activity, width.saturating_sub(lead.chars().count()));
-        let used = lead.chars().count() + activity.chars().count();
-        let separator = format!(
-            "{}{}{}",
-            paint_on_background(theme, "input_rule", &lead),
-            paint_on_background(theme, "input_activity", &activity),
-            paint_on_background(theme, "input_rule", &"─".repeat(width.saturating_sub(used)))
-        );
-        let input_fill = fill_background_row(theme, width);
-        let indicator_text = if continuation { "… " } else { "› " };
-        let indicator = theme.paint("input_prompt", indicator_text);
-        Self {
-            // Reedline's painter is the sole owner of cursor movement. Keep
-            // the prompt as ordinary multiline text so its external printer
-            // can move transcript messages above it atomically.
-            left: format!("{separator}\n{input_fill}\n"),
-            indicator,
-            multiline_indicator: theme.paint("input_prompt", "… "),
-        }
-    }
-}
-
-fn fill_background_row(theme: &TerminalTheme, width: usize) -> String {
-    let width = width.max(1);
-    let repeat = width.saturating_sub(1);
-    format!(
-        "{} \x1b[{repeat}b\r{}",
-        theme.start("input_background"),
-        theme.reset()
-    )
-}
-
-fn paint_on_background(theme: &TerminalTheme, role: &'static str, text: &str) -> String {
-    format!(
-        "{}{}{}",
-        theme.start("input_background"),
-        theme.paint(role, text),
-        theme.start("input_background")
-    )
-}
-
-impl Prompt for DockPrompt {
-    fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.left)
-    }
-    fn render_prompt_right(&self) -> Cow<'_, str> {
-        Cow::Borrowed("")
-    }
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed(&self.indicator)
-    }
-    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.multiline_indicator)
-    }
-    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
-        Cow::Owned(format!(
-            "(history {}) ",
-            match search.status {
-                PromptHistorySearchStatus::Passing => "",
-                PromptHistorySearchStatus::Failing => "failing",
-            }
-        ))
-    }
-}
-
-struct DockHinter {
-    style: TerminalStyle,
-    background: TerminalStyle,
-}
-
-impl DockHinter {
-    fn new(theme: &TerminalTheme) -> Self {
-        Self {
-            style: theme
-                .styles
-                .get("input_hint")
-                .cloned()
-                .expect("known input hint style"),
-            background: theme
-                .styles
-                .get("input_background")
-                .cloned()
-                .expect("known input background style"),
-        }
-    }
-}
-
-impl Hinter for DockHinter {
-    fn handle(
-        &mut self,
-        line: &str,
-        _pos: usize,
-        _history: &dyn reedline::History,
-        _ansi: bool,
-        _cwd: &str,
-    ) -> String {
-        if line.is_empty() {
-            if _ansi {
-                format!(
-                    "{}{}",
-                    self.background.start(true),
-                    self.style.paint(true, INPUT_HINT)
-                )
-            } else {
-                INPUT_HINT.to_owned()
-            }
-        } else {
-            String::new()
-        }
-    }
-    fn complete_hint(&self) -> String {
-        INPUT_HINT.to_owned()
-    }
-    fn next_hint_token(&self) -> String {
-        INPUT_HINT.to_owned()
-    }
-}
-
-struct InputHighlighter {
-    style: AnsiStyle,
-}
-
-impl Highlighter for InputHighlighter {
-    fn highlight(&self, line: &str, _cursor: usize) -> StyledText {
-        let mut text = StyledText::new();
-        text.push((self.style, line.to_owned()));
-        text
-    }
-}
-
-fn truncate_chars(value: &str, width: usize) -> String {
-    value.chars().take(width).collect()
-}
-
 #[derive(Debug, Default)]
 struct RunQueue {
     messages: VecDeque<String>,
@@ -413,23 +243,6 @@ impl RunQueue {
     }
     fn clear(&mut self) {
         self.messages.clear();
-    }
-}
-
-fn activity_text(active: bool, tool: Option<&str>, retrying: bool, queued: usize) -> String {
-    let state = if retrying {
-        "Retrying".to_owned()
-    } else if let Some(tool) = tool {
-        format!("Running {tool}")
-    } else if active {
-        "Generating".to_owned()
-    } else {
-        "Ready".to_owned()
-    };
-    if queued == 0 {
-        state
-    } else {
-        format!("{state} · queued {queued}")
     }
 }
 
@@ -948,10 +761,10 @@ mod tests {
     use tokio::io::{AsyncWriteExt as _, BufReader};
 
     use crate::render::{
-        decorations_command, elapsed_between_ms, event_ends_run, format_tool_content_for,
-        format_worked_for, markdown_to_terminal, model_generation_command, preview_tool_output,
-        reasoning_command, reasoning_label, render_progress, stream_until_terminal,
-        tool_frame_command, tool_output_command,
+        TerminalStyle, decorations_command, elapsed_between_ms, event_ends_run,
+        format_tool_content_for, format_worked_for, markdown_to_terminal, model_generation_command,
+        preview_tool_output, reasoning_command, reasoning_label, render_progress,
+        stream_until_terminal, tool_frame_command, tool_output_command,
     };
     use crate::repl::{
         SlashCompleter, TtyEditor, TtyRenderer, is_quit_command, submitted_message_frame,

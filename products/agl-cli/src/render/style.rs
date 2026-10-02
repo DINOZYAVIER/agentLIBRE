@@ -110,9 +110,6 @@ impl TerminalStyle {
 pub(crate) struct TerminalTheme {
     pub(crate) enabled: bool,
     pub(crate) styles: BTreeMap<&'static str, TerminalStyle>,
-    input_text_spec: String,
-    input_background_spec: String,
-    input_selected_spec: String,
 }
 
 impl TerminalTheme {
@@ -162,9 +159,6 @@ impl TerminalTheme {
         Ok(Self {
             enabled: truecolor_enabled(),
             styles,
-            input_text_spec: colors.input_text.clone(),
-            input_background_spec: colors.input_background.clone(),
-            input_selected_spec: colors.input_selected.clone(),
         })
     }
 
@@ -185,80 +179,6 @@ impl TerminalTheme {
     pub(crate) fn reset(&self) -> &'static str {
         if self.enabled { "\x1b[0m" } else { "" }
     }
-}
-
-pub(crate) fn input_highlighter(theme: &TerminalTheme) -> Result<Box<dyn Highlighter>> {
-    let style = parse_ansi_style(&theme.input_text_spec, Some(&theme.input_background_spec))?;
-    Ok(Box::new(InputHighlighter { style }))
-}
-
-pub(crate) fn input_selection_style(theme: &TerminalTheme) -> Result<AnsiStyle> {
-    parse_ansi_style(
-        &theme.input_selected_spec,
-        Some(&theme.input_background_spec),
-    )
-}
-
-pub(crate) fn parse_ansi_style(foreground: &str, background: Option<&str>) -> Result<AnsiStyle> {
-    type ParsedAnsiStyle = (AnsiStyle, Option<(u8, u8, u8)>);
-
-    fn parse_component(spec: &str) -> Result<ParsedAnsiStyle> {
-        let mut rest = spec.trim();
-        let mut style = AnsiStyle::new();
-        if rest == "none" {
-            return Ok((style, None));
-        }
-        loop {
-            let mut consumed = false;
-            for name in ["bold", "dim", "italic", "underline"] {
-                if rest == name {
-                    style = match name {
-                        "bold" => style.bold(),
-                        "dim" => style.dimmed(),
-                        "italic" => style.italic(),
-                        _ => style.underline(),
-                    };
-                    rest = "";
-                    consumed = true;
-                    break;
-                }
-                if let Some(next) = rest
-                    .strip_prefix(name)
-                    .and_then(|next| next.strip_prefix(char::is_whitespace))
-                {
-                    style = match name {
-                        "bold" => style.bold(),
-                        "dim" => style.dimmed(),
-                        "italic" => style.italic(),
-                        _ => style.underline(),
-                    };
-                    rest = next.trim_start();
-                    consumed = true;
-                    break;
-                }
-            }
-            if !consumed {
-                break;
-            }
-        }
-        if rest.is_empty() {
-            ensure!(spec.trim() != "", "style cannot be empty");
-            return Ok((style, None));
-        }
-        Ok((style, Some(parse_terminal_color(rest)?)))
-    }
-
-    let (mut style, foreground) = parse_component(foreground)?;
-    if let Some(color) = foreground {
-        style = style.fg(AnsiColor::Rgb(color.0, color.1, color.2));
-    }
-    if let Some(background) = background {
-        let (_, color) = parse_component(background)?;
-        if let Some(color) = color {
-            style = style.on(AnsiColor::Rgb(color.0, color.1, color.2));
-        }
-    }
-    Ok(style)
 }
 
 pub(crate) fn parse_terminal_color(value: &str) -> Result<(u8, u8, u8)> {

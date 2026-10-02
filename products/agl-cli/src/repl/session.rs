@@ -276,71 +276,18 @@ async fn chat_loop_linear(
     let mut active_run: Option<AgentRunId> = None;
     let mut run_queue = RunQueue::default();
     let mut input = BufReader::new(tokio::io::stdin());
-    let rendered = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let history_path = application_roots()?.state.join("repl/history.reedline");
-    let mut editor = if rendered {
-        let parent = history_path
-            .parent()
-            .context("REPL history path has no parent")?;
-        std::fs::create_dir_all(parent)?;
-        let history = FileBackedHistory::with_file(1000, history_path.clone())
-            .context("failed to initialize REPL history")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-            if history_path.is_file() {
-                std::fs::set_permissions(&history_path, std::fs::Permissions::from_mode(0o600))?;
-            }
-        }
-        let mut keybindings = default_emacs_keybindings();
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Tab,
-            ReedlineEvent::Menu("search_menu".into()),
-        );
-        keybindings.add_binding(
-            KeyModifiers::NONE,
-            KeyCode::Char('/'),
-            ReedlineEvent::Multiple(vec![
-                ReedlineEvent::Edit(vec![reedline::EditCommand::InsertChar('/')]),
-                ReedlineEvent::Menu("search_menu".into()),
-            ]),
-        );
-        Some(
-            Reedline::create()
-                .with_completer(Box::new(SlashCompleter))
-                .with_menu(reedline::ReedlineMenu::EngineCompleter(Box::new(
-                    reedline::ListMenu::default()
-                        .with_name("search_menu")
-                        .with_only_buffer_difference(false),
-                )))
-                .with_edit_mode(Box::new(Emacs::new(keybindings)))
-                .with_quick_completions(true)
-                .with_ansi_colors(theme.enabled)
-                .with_highlighter(input_highlighter(theme)?)
-                .with_visual_selection_style(input_selection_style(theme)?)
-                .with_hinter(Box::new(DockHinter::new(theme)))
-                .with_history(Box::new(history)),
-        )
-    } else {
-        None
-    };
     loop {
-        let mut prompt = match read_repl_line(&mut editor, &mut input, "> ", theme).await? {
+        let mut prompt = match read_repl_line(&mut input).await? {
             ReplRead::Line(line) => line,
             ReplRead::Eof | ReplRead::Interrupted => {
                 run_queue.clear();
-                if rendered {
-                    println!();
-                }
                 return Ok(());
             }
         };
         while prompt.ends_with('\\') && !prompt.ends_with("\\\\") {
             prompt.pop();
             prompt.push('\n');
-            match read_repl_line(&mut editor, &mut input, "... ", theme).await? {
+            match read_repl_line(&mut input).await? {
                 ReplRead::Line(line) => prompt.push_str(&line),
                 ReplRead::Eof | ReplRead::Interrupted => return Ok(()),
             }
@@ -471,7 +418,7 @@ async fn chat_loop_linear(
             client,
             conversation.id,
             prompt.to_owned(),
-            rendered,
+            false,
             reasoning,
             decorations_override.unwrap_or(decorations_default),
             tool_output,
@@ -496,7 +443,7 @@ async fn chat_loop_linear(
                             client,
                             conversation.id,
                             next,
-                            rendered,
+                            false,
                             reasoning,
                             decorations_override.unwrap_or(decorations_default),
                             tool_output,
@@ -524,35 +471,7 @@ enum ReplRead {
     Interrupted,
 }
 
-async fn read_repl_line(
-    editor: &mut Option<Reedline>,
-    input: &mut BufReader<tokio::io::Stdin>,
-    prompt: &'static str,
-    theme: &TerminalTheme,
-) -> Result<ReplRead> {
-    if let Some(current) = editor.take() {
-        let theme = theme.clone();
-        let (returned, result) = tokio::task::spawn_blocking(move || {
-            let mut editor = current;
-            let prompt = DockPrompt::new(
-                activity_text(false, None, false, 0),
-                prompt == "... ",
-                &theme,
-            );
-            let result = editor.read_line(&prompt);
-            (editor, result)
-        })
-        .await
-        .context("line editor task failed")?;
-        *editor = Some(returned);
-        return match result {
-            Ok(Signal::Success(line)) => Ok(ReplRead::Line(line)),
-            Ok(Signal::CtrlD) => Ok(ReplRead::Eof),
-            Ok(Signal::CtrlC) => Ok(ReplRead::Interrupted),
-            Err(error) => Err(anyhow::anyhow!(error)).context("line editor failed"),
-        };
-    }
-
+async fn read_repl_line(input: &mut BufReader<tokio::io::Stdin>) -> Result<ReplRead> {
     let mut line = String::new();
     let read = input.read_line(&mut line);
     tokio::pin!(read);
