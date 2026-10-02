@@ -18,16 +18,6 @@ pub const APPLY_PATCH: &str = "agentlibre.builtins:fs_apply_patch";
 pub const WRITE_EFFECT: &str = "agentlibre.builtins:filesystem_write";
 
 const MAX_READ_LINES: usize = 500;
-#[allow(dead_code)]
-const MAX_LIST_ENTRIES: usize = 1_000;
-#[allow(dead_code)]
-const MAX_SEARCH_MATCHES: usize = 500;
-#[allow(dead_code)]
-const MAX_SEARCH_FILES: usize = 10_000;
-#[allow(dead_code)]
-const MAX_SEARCH_BYTES: usize = 64 * 1024 * 1024;
-#[allow(dead_code)]
-const MAX_MATCH_CHARS: usize = 1_000;
 const MAX_PATCH_OPERATIONS: usize = 64;
 const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
 
@@ -194,198 +184,6 @@ impl Workspace {
                 return Err(result_too_large());
             }
         }
-    }
-
-    #[allow(dead_code)]
-    fn list(&self, input: Value, result_bytes: u64) -> Result<Value, ToolFailure> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            path: String,
-            recursive: bool,
-            max_entries: usize,
-            cursor: usize,
-        }
-        let args: Args = decode(input)?;
-        let Some(path) = self.existing_path(&args.path)? else {
-            return Ok(not_found(&args.path));
-        };
-        if !path.is_dir() {
-            return Err(invalid_input());
-        }
-        let limit = args.max_entries.clamp(1, MAX_LIST_ENTRIES);
-        let cursor = args.cursor;
-        let walk_limit = cursor
-            .checked_add(limit)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(invalid_input)?;
-        let (paths, walk_truncated) = self.walk(&path, args.recursive, walk_limit)?;
-        let observed_entries = paths.len();
-        let mut entries = paths
-            .into_iter()
-            .skip(cursor)
-            .take(limit)
-            .map(|path| {
-                let kind = if path.is_dir() { "directory" } else { "file" };
-                json!({"path":self.display(&path),"kind":kind})
-            })
-            .collect::<Vec<_>>();
-        loop {
-            let truncated =
-                walk_truncated || cursor.saturating_add(entries.len()) < observed_entries;
-            let next = truncated.then(|| cursor.saturating_add(entries.len()));
-            let value = json!({
-                "status":"ok", "path":self.display(&path), "entry_count":entries.len(),
-                "truncated":truncated, "next_cursor":next, "entries":entries
-            });
-            if value_fits(&value, result_bytes)? {
-                if truncated && entries.is_empty() {
-                    return Err(result_too_large());
-                }
-                return Ok(value);
-            }
-            if entries.pop().is_none() {
-                return Err(result_too_large());
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn search(&self, input: Value, result_bytes: u64) -> Result<Value, ToolFailure> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            pattern: String,
-            path: String,
-            case_sensitive: bool,
-            max_matches: usize,
-            cursor: usize,
-        }
-        let args: Args = decode(input)?;
-        if args.pattern.is_empty() || args.pattern.chars().count() > 4_096 {
-            return Err(invalid_input());
-        }
-        let raw_path = args.path.as_str();
-        let Some(path) = self.existing_path(raw_path)? else {
-            return Ok(not_found(raw_path));
-        };
-        let limit = args.max_matches.clamp(1, MAX_SEARCH_MATCHES);
-        let cursor = args.cursor;
-        let files = if path.is_file() {
-            vec![path.clone()]
-        } else if path.is_dir() {
-            self.walk(&path, true, MAX_SEARCH_FILES)?.0
-        } else {
-            return Err(invalid_input());
-        };
-        let case_sensitive = args.case_sensitive;
-        let needle = (!case_sensitive).then(|| args.pattern.to_lowercase());
-        let mut searched_bytes = 0usize;
-        let mut matches = Vec::new();
-        let mut seen_matches = 0usize;
-        let mut truncated = false;
-        for file in files.into_iter().filter(|path| path.is_file()) {
-            let metadata = fs::metadata(&file).map_err(|_| execution())?;
-            let Ok(size) = usize::try_from(metadata.len()) else {
-                truncated = true;
-                break;
-            };
-            if size > MAX_PATCH_BYTES || searched_bytes.saturating_add(size) > MAX_SEARCH_BYTES {
-                truncated = true;
-                continue;
-            }
-            searched_bytes += size;
-            let bytes = fs::read(&file).map_err(|_| execution())?;
-            let Ok(content) = std::str::from_utf8(&bytes) else {
-                continue;
-            };
-            for (index, line) in content.lines().enumerate() {
-                let found = if case_sensitive {
-                    line.contains(&args.pattern)
-                } else {
-                    line.to_lowercase()
-                        .contains(needle.as_deref().expect("case-folded needle"))
-                };
-                if found {
-                    if seen_matches < cursor {
-                        seen_matches += 1;
-                        continue;
-                    }
-                    matches.push(json!({
-                        "path":self.display(&file), "line":index + 1,
-                        "text":line.chars().take(MAX_MATCH_CHARS).collect::<String>()
-                    }));
-                    if matches.len() > limit {
-                        truncated = true;
-                        break;
-                    }
-                }
-            }
-            if matches.len() > limit {
-                break;
-            }
-        }
-        if matches.len() > limit {
-            matches.pop();
-        }
-        loop {
-            let next = truncated.then(|| cursor.saturating_add(matches.len()));
-            let value = json!({
-                "status":"ok", "path":self.display(&path), "pattern":args.pattern,
-                "match_count":matches.len(), "truncated":truncated,
-                "next_cursor":next, "matches":matches
-            });
-            if value_fits(&value, result_bytes)? {
-                if truncated && matches.is_empty() {
-                    return Err(result_too_large());
-                }
-                return Ok(value);
-            }
-            if matches.pop().is_none() {
-                return Err(result_too_large());
-            }
-            truncated = true;
-        }
-    }
-
-    #[allow(dead_code)]
-    fn walk(
-        &self,
-        directory: &Path,
-        recursive: bool,
-        limit: usize,
-    ) -> Result<(Vec<PathBuf>, bool), ToolFailure> {
-        let mut pending = vec![directory.to_path_buf()];
-        let mut output = Vec::new();
-        while let Some(current) = pending.pop() {
-            let mut entries = fs::read_dir(&current)
-                .map_err(|_| execution())?
-                .map(|entry| entry.map_err(|_| execution()))
-                .collect::<Result<Vec<_>, _>>()?;
-            entries.sort_by_key(|entry| entry.file_name());
-            let mut directories = Vec::new();
-            for entry in entries {
-                let file_type = entry.file_type().map_err(|_| execution())?;
-                if file_type.is_symlink() {
-                    continue;
-                }
-                let path = entry.path();
-                if !file_type.is_file() && !file_type.is_dir() {
-                    continue;
-                }
-                if output.len() == limit {
-                    return Ok((output, true));
-                }
-                output.push(path.clone());
-                if recursive && file_type.is_dir() {
-                    directories.push(path);
-                }
-            }
-            for path in directories.into_iter().rev() {
-                pending.push(path);
-            }
-        }
-        Ok((output, false))
     }
 
     fn apply_patch(&self, input: Value, context: &ToolContext) -> Result<Value, ToolFailure> {
@@ -958,13 +756,10 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_bounded_deterministic_and_missing_paths_are_observations() {
-        let root =
-            std::env::temp_dir().join(format!("agl-fs-discovery-{}", AgentRunId::generate()));
-        fs::create_dir_all(root.join("src/nested")).unwrap();
+    fn read_requires_cursor_and_missing_paths_are_observations() {
+        let root = std::env::temp_dir().join(format!("agl-fs-read-{}", AgentRunId::generate()));
+        fs::create_dir_all(&root).unwrap();
         fs::write(root.join("Cargo.toml"), "[workspace]\nresolver = \"3\"\n").unwrap();
-        fs::write(root.join("src/lib.rs"), "pub struct Kernel;\n").unwrap();
-        fs::write(root.join("src/nested/fsm.rs"), "pub enum KernelState {}\n").unwrap();
         let workspace = Workspace::new(&context(&root, AuthorityGrantSet::default())).unwrap();
 
         assert!(
@@ -972,122 +767,15 @@ mod tests {
                 .read(json!({"path":"Cargo.toml"}), 65_536)
                 .is_err()
         );
-        assert!(
-            workspace
-                .list(
-                    json!({"path":".","recursive":false,"max_entries":10}),
-                    65_536,
-                )
-                .is_err()
-        );
-        assert!(
-            workspace
-                .search(
-                    json!({"path":"src","pattern":"kernel","case_sensitive":false,"max_matches":10}),
-                    65_536,
-                )
-                .is_err()
-        );
-
-        let listed = workspace
-            .list(
-                json!({"path":".","recursive":false,"max_entries":10,"cursor":0}),
-                65_536,
-            )
-            .unwrap();
         assert_eq!(
-            listed["entries"],
-            json!([
-                {"path":"Cargo.toml","kind":"file"},
-                {"path":"src","kind":"directory"}
-            ])
-        );
-        let bounded = workspace
-            .list(
-                json!({"path":".","recursive":true,"max_entries":2,"cursor":0}),
-                65_536,
-            )
-            .unwrap();
-        assert_eq!(bounded["entry_count"], 2);
-        assert_eq!(bounded["truncated"], true);
-        assert_eq!(bounded["next_cursor"], 2);
-        let remaining = workspace
-            .list(
-                json!({"path":".","recursive":true,"max_entries":10,"cursor":2}),
-                65_536,
-            )
-            .unwrap();
-        assert_eq!(remaining["truncated"], false);
-        assert_eq!(remaining["next_cursor"], Value::Null);
-        let byte_bounded = workspace
-            .list(
-                json!({"path":".","recursive":true,"max_entries":100,"cursor":0}),
-                256,
-            )
-            .unwrap();
-        assert!(value_fits(&byte_bounded, 256).unwrap());
-        assert_eq!(byte_bounded["truncated"], true);
-
-        let searched = workspace
-            .search(
-                json!({
-                    "path":"src", "pattern":"kernel", "case_sensitive":false,
-                    "max_matches":10, "cursor":0
-                }),
-                65_536,
-            )
-            .unwrap();
-        assert_eq!(searched["match_count"], 2);
-        assert_eq!(searched["matches"][0]["path"], "src/lib.rs");
-        assert_eq!(searched["matches"][1]["path"], "src/nested/fsm.rs");
-        let first_match = workspace
-            .search(
-                json!({
-                    "path":"src", "pattern":"kernel", "case_sensitive":false,
-                    "max_matches":1, "cursor":0
-                }),
-                65_536,
-            )
-            .unwrap();
-        assert_eq!(first_match["truncated"], true);
-        assert_eq!(first_match["next_cursor"], 1);
-        let second_match = workspace
-            .search(
-                json!({
-                    "path":"src", "pattern":"kernel", "case_sensitive":false,
-                    "max_matches":1, "cursor":1
-                }),
-                65_536,
-            )
-            .unwrap();
-        assert_eq!(second_match["match_count"], 1);
-        assert_eq!(second_match["truncated"], false);
-
-        for result in [
             workspace
                 .read(
                     json!({"path":"absent","cursor":1,"limit_lines":200}),
                     65_536,
                 )
                 .unwrap(),
-            workspace
-                .list(
-                    json!({"path":"absent","recursive":false,"max_entries":200,"cursor":0}),
-                    65_536,
-                )
-                .unwrap(),
-            workspace
-                .search(
-                    json!({"path":"absent","pattern":"x","case_sensitive":true,"max_matches":100,"cursor":0}),
-                    65_536,
-                )
-                .unwrap(),
-        ] {
-            assert_eq!(
-                result,
-                json!({"status":"error","error":{"kind":"not_found","path":"absent"}})
-            );
-        }
+            json!({"status":"error","error":{"kind":"not_found","path":"absent"}})
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
