@@ -264,5 +264,13 @@ git = "/home/dinozyavier/repos/agentlibre-functions"
 revision = "194a565aeea409d77654e8dc9e455e1d60c7fc10"
 path = "functions/gpu-high"
 
+[[artifacts.entity]]
+id = "agentlibre.general"
+kind = "function-family"
+schema = "agentlibre.function-family/v1"
+git = "/home/dinozyavier/repos/agentlibre-functions"
+revision = "b2a4d4cc03dc7c69a170fc76a79634aa660fbc41"
+path = "families/general"
+
 [workspace]
 output_directories = ["target"]
