@@ -5,7 +5,7 @@ id = "agentlibre.chat-agent"
 kind = "agent"
 schema = "agentlibre.agent/v1"
 git = "/home/dinozyavier/repos/agentlibre-agents"
-revision = "6212d0bed56e7cf6948bedf0c1f724d81037b2c3"
+revision = "46ba3556c9141bbed5913156a97bdd9caa11b9c9"
 path = "agents/chat"
 
 [[artifacts.entity]]
@@ -21,7 +21,7 @@ id = "agentlibre.files"
 kind = "extension"
 schema = "agentlibre.extension/v1"
 git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "b15df0ad5da84937764a0417af98a272cce1d465"
+revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
 path = "extensions/agentlibre-files"
 
 [[artifacts.entity]]
@@ -29,7 +29,7 @@ id = "agentlibre.forge"
 kind = "extension"
 schema = "agentlibre.extension/v1"
 git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "b15df0ad5da84937764a0417af98a272cce1d465"
+revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
 path = "extensions/agentlibre-forge"
 
 [[artifacts.entity]]
@@ -37,7 +37,7 @@ id = "agentlibre.execution"
 kind = "extension"
 schema = "agentlibre.extension/v1"
 git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "b15df0ad5da84937764a0417af98a272cce1d465"
+revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
 path = "extensions/agentlibre-execution"
 
 [[artifacts.entity]]
@@ -53,7 +53,7 @@ id = "agentlibre.search-qwen38-27b-reasoning-128k-q8"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "c048f73ceecb123be1f5494e787ed3408fec0458"
+revision = "f19c5eae9828cf9b9690e46e500f2cf68044c6de"
 path = "functions/search-qwen38-27b-reasoning-128k-q8"
 
 [[artifacts.entity]]
@@ -205,7 +205,7 @@ id = "agentlibre.chat-agent-windows-opinion"
 kind = "agent"
 schema = "agentlibre.agent/v1"
 git = "/home/dinozyavier/repos/agentlibre-agents"
-revision = "5e30c0a8e77a8227b8226e48f36f8b5ee372daa5"
+revision = "46ba3556c9141bbed5913156a97bdd9caa11b9c9"
 path = "agents/windows-opinion"
 
 [[artifacts.entity]]
@@ -213,7 +213,7 @@ id = "agentlibre.search-qwen38-27b-reasoning-32k-q8"
 kind = "function"
 schema = "agentlibre.function/v2"
 git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "c048f73ceecb123be1f5494e787ed3408fec0458"
+revision = "f19c5eae9828cf9b9690e46e500f2cf68044c6de"
 path = "functions/search-qwen38-27b-reasoning-32k-q8"
 
 [[artifacts.entity]]
