@@ -16,7 +16,9 @@ use agl_core::ToolId;
 use agl_core::agent::{
     EffectReceipt, ToolDefinition, ToolDefinitionDigest, ToolFailure, ToolFailureKind, ToolResult,
 };
-use agl_core::package::{InMemoryPackageView, PackageRelativePath, compute_package_digest};
+use agl_core::package::{
+    InMemoryPackageView, PackageRelativePath, PackageView, compute_package_digest,
+};
 use agl_tool_api::{ExtensionBindings, ToolBinding, ToolContext, ToolFuture, ToolHandler};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -251,8 +253,14 @@ fn validate_declaration(
     tools: &[&str],
 ) -> anyhow::Result<()> {
     definition.validate().map_err(anyhow::Error::msg)?;
+    #[derive(serde::Deserialize)]
+    struct DeclarationVersion {
+        version: agl_core::package::PackageVersion,
+    }
+    let document = declaration.read_file(&PackageRelativePath::new("EXTENSION.toml")?)?;
+    let declared: DeclarationVersion = toml::from_str(std::str::from_utf8(&document)?)?;
     anyhow::ensure!(
-        version.to_string() == env!("CARGO_PKG_VERSION"),
+        version == &declared.version,
         "native Extension version mismatch"
     );
     anyhow::ensure!(
@@ -271,4 +279,64 @@ fn validate_declaration(
         "native Extension Tool IDs mismatch"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agl_core::package::{PackageTreeDigest, PackageVersion};
+
+    #[test]
+    fn native_extension_uses_its_declared_version_and_exact_digest() {
+        let declaration = searxng::declaration();
+        let document = declaration
+            .read_file(&PackageRelativePath::new("EXTENSION.toml").unwrap())
+            .unwrap();
+        let manifest: toml::Value =
+            toml::from_str(std::str::from_utf8(&document).unwrap()).unwrap();
+        let version = PackageVersion::new(manifest["version"].as_str().unwrap()).unwrap();
+        assert_ne!(version.to_string(), env!("CARGO_PKG_VERSION"));
+        let digest = compute_package_digest(&declaration).unwrap();
+        let definition = agl_core::ExtensionDefinition {
+            id: agl_core::ExtensionId::new("agentlibre.searxng").unwrap(),
+            effects: vec![],
+            tools: vec![],
+        };
+        validate_declaration(
+            &declaration,
+            &version,
+            &digest,
+            &definition,
+            "agentlibre.searxng",
+            &[],
+        )
+        .unwrap();
+        let wrong_version = PackageVersion::new("99.0.0").unwrap();
+        assert!(
+            validate_declaration(
+                &declaration,
+                &wrong_version,
+                &digest,
+                &definition,
+                "agentlibre.searxng",
+                &[],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("version mismatch")
+        );
+        assert!(
+            validate_declaration(
+                &declaration,
+                &version,
+                &PackageTreeDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap(),
+                &definition,
+                "agentlibre.searxng",
+                &[],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("digest mismatch")
+        );
+    }
 }
