@@ -792,13 +792,13 @@ mod tests {
             failure: Some(AgentRunFailureView::Operation {
                 operation,
                 kind: AgentOperationFailureKind::InvalidInput,
-                tool_id: Some(ToolId::new("agentlibre.builtins:fs_read").unwrap()),
+                tool_id: Some(ToolId::new("agentlibre.files:file.read").unwrap()),
             }),
             last_event_id: AgentEventId(4),
         };
         assert_eq!(
             terminal_summary(&view),
-            "AgentRun ended with Failed: Tool agentlibre.builtins:fs_read failed with invalid_input"
+            "AgentRun ended with Failed: Tool agentlibre.files:file.read failed with invalid_input"
         );
         view.failure = Some(AgentRunFailureView::Operation {
             operation: view.current_operation.clone().unwrap(),

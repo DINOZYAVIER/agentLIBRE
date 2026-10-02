@@ -175,7 +175,8 @@ for _, function in functions:
     add(function["model"]["id"], "model", "agentlibre.model/v1",
         os.environ["AGL_E2E_MODELS_REPO"], model_paths[function["model"]["id"]])
 extension_paths = {
-    "agentlibre.builtins": (os.environ["AGL_E2E_EXTENSIONS_REPO"], "extensions/builtins"),
+    "agentlibre.files": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-files"),
+    "agentlibre.forge": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-forge"),
     "agentlibre.searxng": (os.environ["AGL_E2E_EXTENSIONS_REPO"], "extensions/searxng"),
     "agentlibre.execution": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-execution"),
 }

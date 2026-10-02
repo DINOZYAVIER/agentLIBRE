@@ -92,7 +92,7 @@ impl PlanArtifactStore {
         ensure!(
             snapshot.authority.0.iter().all(|grant| !matches!(
                 grant.effect.as_str(),
-                "agentlibre.builtins:filesystem_write" | "agentlibre.execution:terminal.control"
+                "agentlibre.files:file.write" | "agentlibre.execution:terminal.control"
             )),
             "planner Function carries write or terminal authority"
         );

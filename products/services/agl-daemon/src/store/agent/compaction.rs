@@ -148,7 +148,7 @@ impl StoreHandle {
                    AND m.source_operation_ordinal=o.ordinal
                    AND m.role='tool'
                  WHERE r.origin_conversation_id=?1
-                   AND o.tool_id='agentlibre.builtins:fs_read'
+                   AND o.tool_id='agentlibre.files:file.read'
                    AND o.state='succeeded'
                    AND (o.agent_run_id<>?2 OR o.ordinal<?3)
                  ORDER BY r.admitted_at_ms, r.agent_run_id, o.ordinal",

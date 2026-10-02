@@ -1,4 +1,4 @@
-//! First-party filesystem Tool bindings.
+//! First-party file and Forge Tool bindings.
 //!
 //! Registering these handlers does not admit them to an AgentRun. The admitted
 //! snapshot must carry the exact Tool and Extension definition digests.
@@ -56,36 +56,29 @@ pub(crate) fn committed_result(
     Ok(result)
 }
 
-pub fn filesystem_bindings(
+pub fn files_bindings(
     version: agl_core::package::PackageVersion,
     content_digest: agl_core::package::PackageTreeDigest,
     definition: agl_core::ExtensionDefinition,
-    artifacts: ArtifactResolver,
     mutations: WorkspaceMutation,
 ) -> anyhow::Result<ExtensionBindings> {
     validate_declaration(
-        &filesystem_declaration(),
+        &files_declaration(),
         &version,
         &content_digest,
         &definition,
-        "agentlibre.builtins",
-        &[filesystem::READ, filesystem::APPLY_PATCH, forge::READ],
+        "agentlibre.files",
+        &[filesystem::READ, filesystem::APPLY_PATCH],
     )?;
     let tools = definition
         .tools
         .iter()
         .map(|definition| {
             let tool_id = definition.id.clone();
-            let handler: Arc<dyn ToolHandler> = if tool_id.as_str() == forge::READ {
-                Arc::new(ForgeHandler {
-                    artifacts: Arc::clone(&artifacts),
-                })
-            } else {
-                Arc::new(FilesystemHandler {
-                    tool: tool_id.clone(),
-                    mutations: Arc::clone(&mutations),
-                })
-            };
+            let handler: Arc<dyn ToolHandler> = Arc::new(FilesystemHandler {
+                tool: tool_id.clone(),
+                mutations: Arc::clone(&mutations),
+            });
             ToolBinding {
                 tool_id,
                 definition_digest: definition_digest(definition),
@@ -110,29 +103,71 @@ pub fn filesystem_bindings(
     })
 }
 
-pub fn filesystem_declaration() -> InMemoryPackageView {
+pub fn forge_bindings(
+    version: agl_core::package::PackageVersion,
+    content_digest: agl_core::package::PackageTreeDigest,
+    definition: agl_core::ExtensionDefinition,
+    artifacts: ArtifactResolver,
+) -> anyhow::Result<ExtensionBindings> {
+    validate_declaration(
+        &forge_declaration(),
+        &version,
+        &content_digest,
+        &definition,
+        "agentlibre.forge",
+        &[forge::READ],
+    )?;
+    let tools = definition
+        .tools
+        .iter()
+        .map(|definition| ToolBinding {
+            tool_id: definition.id.clone(),
+            definition_digest: definition_digest(definition),
+            handler: Arc::new(ForgeHandler {
+                artifacts: Arc::clone(&artifacts),
+            }),
+        })
+        .collect();
+    Ok(ExtensionBindings {
+        version,
+        content_digest,
+        definition,
+        tools,
+        allows_authority: Arc::new(|_| false),
+    })
+}
+
+pub fn files_declaration() -> InMemoryPackageView {
     InMemoryPackageView::new([
         embedded(
             "EXTENSION.toml",
-            include_bytes!("../../../extensions/agentlibre-builtins/EXTENSION.toml"),
+            include_bytes!("../../../extensions/agentlibre-files/EXTENSION.toml"),
         ),
         embedded(
-            "schemas/filesystem-write-scope.json",
-            include_bytes!(
-                "../../../extensions/agentlibre-builtins/schemas/filesystem-write-scope.json"
-            ),
+            "schemas/file-write-scope.json",
+            include_bytes!("../../../extensions/agentlibre-files/schemas/file-write-scope.json"),
         ),
         embedded(
-            "schemas/fs-read.json",
-            include_bytes!("../../../extensions/agentlibre-builtins/schemas/fs-read.json"),
+            "schemas/file-read.json",
+            include_bytes!("../../../extensions/agentlibre-files/schemas/file-read.json"),
         ),
         embedded(
-            "schemas/fs-apply-patch.json",
-            include_bytes!("../../../extensions/agentlibre-builtins/schemas/fs-apply-patch.json"),
+            "schemas/file-patch.json",
+            include_bytes!("../../../extensions/agentlibre-files/schemas/file-patch.json"),
+        ),
+    ])
+    .expect("embedded Extension package")
+}
+
+pub fn forge_declaration() -> InMemoryPackageView {
+    InMemoryPackageView::new([
+        embedded(
+            "EXTENSION.toml",
+            include_bytes!("../../../extensions/agentlibre-forge/EXTENSION.toml"),
         ),
         embedded(
-            "schemas/forge-read.json",
-            include_bytes!("../../../extensions/agentlibre-builtins/schemas/forge-read.json"),
+            "schemas/artifact-read.json",
+            include_bytes!("../../../extensions/agentlibre-forge/schemas/artifact-read.json"),
         ),
     ])
     .expect("embedded Extension package")

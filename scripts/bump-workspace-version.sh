@@ -182,7 +182,7 @@ update_smoke_extension_versions() {
   if ! awk -v new_version="$version" \
     -v marker='version = \\"' \
     -v quote='\\"' '
-    /agentlibre\.builtins/ || /agentlibre\.execution/ {
+    /agentlibre\.files/ || /agentlibre\.execution/ {
       start = index($0, marker)
       if (start > 0) {
         prefix = substr($0, 1, start + length(marker) - 1)
@@ -284,11 +284,12 @@ if ((dry_run)); then
 dry_run=true
 planned:
   update Cargo.toml workspace version to $next_version
-  update extensions/agentlibre-builtins/EXTENSION.toml to $next_version
+  update extensions/agentlibre-files/EXTENSION.toml to $next_version
+  update extensions/agentlibre-forge/EXTENSION.toml to $next_version
   update extensions/agentlibre-execution/EXTENSION.toml to $next_version
   update scripts/agl-daemon-live-smoke.sh Extension references to $next_version
   cargo generate-lockfile
-  git add Cargo.toml Cargo.lock extensions/agentlibre-builtins/EXTENSION.toml extensions/agentlibre-execution/EXTENSION.toml scripts/agl-daemon-live-smoke.sh
+  git add Cargo.toml Cargo.lock extensions/agentlibre-files/EXTENSION.toml extensions/agentlibre-forge/EXTENSION.toml extensions/agentlibre-execution/EXTENSION.toml scripts/agl-daemon-live-smoke.sh
   git commit --signoff -m "$commit_message"
   git tag $checkpoint_tag_flag $next_tag -m "$next_tag"
 EOF
@@ -305,13 +306,15 @@ if [[ "$current_workspace_version" == "$next_version" ]]; then
 fi
 
 update_workspace_version "$next_version"
-update_extension_version "$repo_root/extensions/agentlibre-builtins/EXTENSION.toml" "$next_version"
+update_extension_version "$repo_root/extensions/agentlibre-files/EXTENSION.toml" "$next_version"
+update_extension_version "$repo_root/extensions/agentlibre-forge/EXTENSION.toml" "$next_version"
 update_extension_version "$repo_root/extensions/agentlibre-execution/EXTENSION.toml" "$next_version"
 update_smoke_extension_versions "$next_version"
 cargo generate-lockfile
 
 git add Cargo.toml Cargo.lock \
-  extensions/agentlibre-builtins/EXTENSION.toml \
+  extensions/agentlibre-files/EXTENSION.toml \
+  extensions/agentlibre-forge/EXTENSION.toml \
   extensions/agentlibre-execution/EXTENSION.toml \
   scripts/agl-daemon-live-smoke.sh
 

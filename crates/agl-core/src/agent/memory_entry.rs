@@ -62,7 +62,7 @@ pub struct StoredClaim {
 }
 
 /// A `file:` source: workspace-relative path plus optional `sha256-12` digest
-/// prefix (first 12 hex characters of the file's `fs_read` digest).
+/// prefix (first 12 hex characters of the file's `agentlibre.files:file.read` digest).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileSource {
     pub path: String,

@@ -123,7 +123,8 @@ impl DaemonServer {
             .context("failed to restore inference health")?;
         let execution = ExecutionClient::new(config.execution_socket);
         let mut extensions = config.extensions;
-        extensions.push(crate::tools::filesystem_bindings()?);
+        extensions.push(crate::tools::files_bindings()?);
+        extensions.push(crate::tools::forge_bindings()?);
         extensions.push(crate::tools::execution_bindings(execution.clone())?);
         if let Some(search) = config.searxng {
             match crate::tools::search_bindings(search.binding) {

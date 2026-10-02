@@ -617,7 +617,7 @@ mod tests {
                 result: ModelGenerationResult {
                     private_reasoning: None,
                     output: ModelGenerationOutput::ToolCall(agl_core::agent::ToolCall {
-                        tool_id: ToolId::new("agentlibre.builtins:fs_read").unwrap(),
+                        tool_id: ToolId::new("agentlibre.files:file.read").unwrap(),
                         input: json!({"path":"src/lib.rs","cursor":1,"limit_lines":200}),
                     }),
                     finish_reason: ModelFinishReason::ToolCall,
@@ -699,7 +699,7 @@ mod tests {
                 let cursor = if call == 2 { 201 } else { 1 };
                 (
                     ModelGenerationOutput::ToolCall(agl_core::agent::ToolCall {
-                        tool_id: ToolId::new("agentlibre.builtins:fs_read").unwrap(),
+                        tool_id: ToolId::new("agentlibre.files:file.read").unwrap(),
                         input: json!({"path":"src/lib.rs","cursor":cursor,"limit_lines":200}),
                     }),
                     ModelFinishReason::ToolCall,
@@ -1011,7 +1011,7 @@ mod tests {
 
     fn guarded_read_extension(handler: Arc<dyn ToolHandler>) -> (ExtensionBindings, AdmittedTool) {
         let definition = ToolDefinition {
-            id: ToolId::new("agentlibre.builtins:fs_read").unwrap(),
+            id: ToolId::new("agentlibre.files:file.read").unwrap(),
             description: "read one explicit page".into(),
             input_schema: JsonSchema::new(json!({
                 "type":"object",
@@ -1028,7 +1028,7 @@ mod tests {
             delivery: agl_core::agent::DeliveryClass::Retryable,
         };
         let extension = ExtensionDefinition {
-            id: ExtensionId::new("agentlibre.builtins").unwrap(),
+            id: ExtensionId::new("agentlibre.files").unwrap(),
             effects: vec![],
             tools: vec![definition.clone()],
         };
@@ -1057,7 +1057,7 @@ mod tests {
                 extension: ExtensionDefinitionRef {
                     id: extension.id,
                     package: ExactPackageRef {
-                        id: PackageId::new("agentlibre.builtins").unwrap(),
+                        id: PackageId::new("agentlibre.files").unwrap(),
                         version: PackageVersion::new("1.0.0").unwrap(),
                         digest: PackageDigest::from_bytes([10; 32]),
                     },

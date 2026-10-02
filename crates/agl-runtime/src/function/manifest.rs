@@ -917,20 +917,20 @@ impl FunctionManifest {
             FilePermission::None => {}
             FilePermission::Read => {
                 ensure!(
-                    extension_ids.contains("agentlibre.builtins"),
-                    "permissions.files requires the agentlibre.builtins Extension"
+                    extension_ids.contains("agentlibre.files"),
+                    "permissions.files requires the agentlibre.files Extension"
                 );
-                tools.push(ToolId::new("agentlibre.builtins:fs_read")?);
+                tools.push(ToolId::new("agentlibre.files:file.read")?);
             }
             FilePermission::Write => {
                 ensure!(
-                    extension_ids.contains("agentlibre.builtins"),
-                    "permissions.files requires the agentlibre.builtins Extension"
+                    extension_ids.contains("agentlibre.files"),
+                    "permissions.files requires the agentlibre.files Extension"
                 );
-                tools.push(ToolId::new("agentlibre.builtins:fs_read")?);
-                tools.push(ToolId::new("agentlibre.builtins:fs_apply_patch")?);
+                tools.push(ToolId::new("agentlibre.files:file.read")?);
+                tools.push(ToolId::new("agentlibre.files:file.patch")?);
                 authority.push(AuthorityGrant {
-                    effect: agl_core::EffectId::new("agentlibre.builtins:filesystem_write")?,
+                    effect: agl_core::EffectId::new("agentlibre.files:file.write")?,
                     scope: CanonicalJson::new(serde_json::json!({"root":"workspace"}))
                         .map_err(anyhow::Error::msg)?,
                 });
@@ -1352,7 +1352,7 @@ threads = 8
         let document = minimal().replace(
             "[presentation.tool_output]",
             r#"extensions = [
-    { id = "agentlibre.builtins", version = "1.0.0" },
+    { id = "agentlibre.files", version = "1.0.0" },
     { id = "agentlibre.execution", version = "1.0.0" },
 ]
 
@@ -1374,10 +1374,10 @@ terminal = true
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             vec![
-                "agentlibre.builtins:fs_apply_patch",
-                "agentlibre.builtins:fs_read",
                 "agentlibre.execution:command.exec",
                 "agentlibre.execution:terminal.session",
+                "agentlibre.files:file.patch",
+                "agentlibre.files:file.read",
             ]
         );
         assert_eq!(requirements.authority.0.len(), 3);
@@ -1391,7 +1391,7 @@ terminal = true
             .is_err()
         );
         assert!(
-            FunctionManifest::parse(&(minimal() + "\ntools = [\"agentlibre.builtins:fs_read\"]\n"))
+            FunctionManifest::parse(&(minimal() + "\ntools = [\"agentlibre.files:file.read\"]\n"))
                 .is_err()
         );
     }

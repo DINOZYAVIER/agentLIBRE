@@ -16,7 +16,7 @@ pub const PLANNER_SCHEMA_NAME: &str = "agentlibre_implementation_plan_v1";
 pub const PLANNER_CORRECTION_PREFIX: &str = "Return only the corrected canonical JSON object. The previous assistant output was invalid and is retained in this Conversation.";
 pub const PLANNER_DOMAIN_RULES: &str = "Cross-reference rules: each slice start_condition may contain only IDs from top-level evidence or that same slice's required_reads; never put a decision ID, invariant ID, acceptance ID, or done_when ID in start_condition; decisions are cited as sources and must not be used as start-condition references; slice depends_on names existing earlier slice IDs; step depends_on names steps in that slice; step satisfies and verification covers name existing invariant or objective.acceptance IDs; every declared invariant must appear in at least one step.satisfies or verification.covers entry, every objective acceptance ID must be covered too, and if no invariant is needed do not invent one; every step file must be declared in that slice's files; every ReadRequirement and ConditionalRead read ID must be globally unique across the entire plan, so suffix repeated concepts with the slice ID (for example read.decisions.implementation and read.decisions.test). Every slice that changes workspace files must include at least one executable behavior verification (for example a focused test, test suite, type check, linter, build, or runtime check) covering the changed behavior. A command that only reports repository state or differences, such as git diff, git status, or git diff --name-only, is not sufficient by itself.";
 
-const FILESYSTEM_WRITE_EFFECT: &str = "agentlibre.builtins:filesystem_write";
+const FILESYSTEM_WRITE_EFFECT: &str = "agentlibre.files:file.write";
 const TERMINAL_CONTROL_EFFECT: &str = "agentlibre.execution:terminal.control";
 
 #[derive(Clone, Debug)]
@@ -278,16 +278,16 @@ mod tests {
         assert!(result.is_ok());
         let tool = AdmittedTool {
             definition: agl_core::ToolDefinition {
-                id: agl_core::ToolId::new("agentlibre.builtins:fs_apply_patch").unwrap(),
+                id: agl_core::ToolId::new("agentlibre.files:file.patch").unwrap(),
                 description: "write".into(),
                 input_schema: agl_core::JsonSchema::new(json!({"type":"object"})).unwrap(),
                 required_effects: vec![agl_core::EffectId::new(FILESYSTEM_WRITE_EFFECT).unwrap()],
                 delivery: agl_core::agent::DeliveryClass::AtMostOnce,
             },
             extension: agl_core::agent::ExtensionDefinitionRef {
-                id: agl_core::ExtensionId::new("agentlibre.builtins").unwrap(),
+                id: agl_core::ExtensionId::new("agentlibre.files").unwrap(),
                 package: agl_core::agent::ExactPackageRef {
-                    id: crate::package::PackageId::new("agentlibre.builtins").unwrap(),
+                    id: crate::package::PackageId::new("agentlibre.files").unwrap(),
                     version: crate::package::PackageVersion::new("1.0.0").unwrap(),
                     digest: agl_core::agent::PackageDigest::from_bytes([0; 32]),
                 },
@@ -441,16 +441,16 @@ mod contract_tests {
     fn boundary_rejects_workspace_mutating_capability() {
         let tool = AdmittedTool {
             definition: agl_core::ToolDefinition {
-                id: agl_core::ToolId::new("agentlibre.builtins:fs_apply_patch").unwrap(),
+                id: agl_core::ToolId::new("agentlibre.files:file.patch").unwrap(),
                 description: "write".into(),
                 input_schema: agl_core::JsonSchema::new(json!({"type":"object"})).unwrap(),
                 required_effects: vec![agl_core::EffectId::new(FILESYSTEM_WRITE_EFFECT).unwrap()],
                 delivery: DeliveryClass::AtMostOnce,
             },
             extension: ExtensionDefinitionRef {
-                id: agl_core::ExtensionId::new("agentlibre.builtins").unwrap(),
+                id: agl_core::ExtensionId::new("agentlibre.files").unwrap(),
                 package: ExactPackageRef {
-                    id: PackageId::new("agentlibre.builtins").unwrap(),
+                    id: PackageId::new("agentlibre.files").unwrap(),
                     version: crate::package::PackageVersion::new("1.0.0").unwrap(),
                     digest: PackageDigest::from_bytes([0; 32]),
                 },

@@ -9,7 +9,7 @@ fn effective_generation_max_output(configured: u64, context_tokens: u32) -> u64 
     configured.min(u64::from(context_tokens) / 2)
 }
 
-const MEMORY_POINTER_INSTRUCTION: &str = "Durable workspace memory is opt-in. If the task touches memory, use forge_read with forge:agentlibre.memory/INDEX.md and then the relevant forge:agentlibre.memory/entries/<slug>.md before re-investigating. Do not treat memory as authoritative without checking its cited sources.";
+const MEMORY_POINTER_INSTRUCTION: &str = "Durable workspace memory is opt-in. If the task touches memory, use agentlibre.forge:artifact.read with forge:agentlibre.memory/INDEX.md and then the relevant forge:agentlibre.memory/entries/<slug>.md before re-investigating. Do not treat memory as authoritative without checking its cited sources.";
 
 fn memory_opted_in(root: &Path) -> bool {
     super::memory_io::MemoryWorkspace::new(root)

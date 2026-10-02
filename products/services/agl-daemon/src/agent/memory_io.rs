@@ -10,7 +10,7 @@
 //!   directory is a load error;
 //! - cited workspace files are read only inside the workspace root — relative
 //!   path, no parent components, no symlink component, canonicalized
-//!   containment (mirroring the daemon `fs_read` rules) — and stamped with
+//!   containment (mirroring the daemon `agentlibre.files:file.read` rules) — and stamped with
 //!   `sha256-12`, the first 12 hex characters of the file's SHA-256 (M1 D3);
 //! - unreadable or escaping file paths are dropped, not errors (D3); under
 //!   the accepted S1=A source rule a claim survives when it keeps a valid
@@ -371,7 +371,7 @@ impl MemoryWorkspace {
 
 /// Walk each path component between `root` and `target` (which must sit
 /// lexically inside `root`) and reject any symlink component, mirroring the
-/// daemon `fs_read` containment rules.
+/// daemon `agentlibre.files:file.read` containment rules.
 fn reject_symlinks(root: &Path, target: &Path) -> bool {
     let Ok(relative) = target.strip_prefix(root) else {
         return false;
@@ -1245,7 +1245,7 @@ mod tests {
         let root = temp_root();
         write(&root, "notes/a.md", "hello\n");
         // A symlink inside the root pointing at a readable contained file is
-        // still rejected, mirroring the daemon fs_read rules.
+        // still rejected, mirroring the daemon agentlibre.files:file.read rules.
         std::os::unix::fs::symlink(root.join("notes/a.md"), root.join("link-inside.md")).unwrap();
         // A symlink escaping the root is dropped as an escape.
         let outside_file =

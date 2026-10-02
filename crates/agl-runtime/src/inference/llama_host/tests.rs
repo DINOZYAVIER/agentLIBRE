@@ -1084,14 +1084,14 @@ fn reasoning_projection_preserves_text_next_to_a_tool_call() {
         "role": "assistant",
         "reasoning_content": "private scratch",
         "content": "answer",
-        "tool_calls": [{"function": {"name": "agentlibre.builtins:fs_read", "arguments": "{}"}}]
+        "tool_calls": [{"function": {"name": "agentlibre.files:file.read", "arguments": "{}"}}]
     });
     let (output, reasoning) = projected_reasoning_output(Some(&message)).unwrap();
     let ModelGenerationOutput::AssistantToolCall(mixed) = output else {
         panic!("expected mixed assistant and tool output")
     };
     assert_eq!(mixed.content.as_text(), "answer");
-    assert_eq!(mixed.call.tool_id.as_str(), "agentlibre.builtins:fs_read");
+    assert_eq!(mixed.call.tool_id.as_str(), "agentlibre.files:file.read");
     assert_eq!(reasoning.unwrap().as_text(), "private scratch");
     assert_eq!(
         projected_reasoning_output(Some(&json!({
@@ -1166,7 +1166,7 @@ fn private_stream_rejects_sequence_and_raw_output_mismatches() {
 
 #[test]
 fn private_stream_accepts_multiple_structured_tool_calls() {
-    let raw = r#"{"tool":"agentlibre.builtins:fs_read","arguments":{"path":"a"}}"#;
+    let raw = r#"{"tool":"agentlibre.files:file.read","arguments":{"path":"a"}}"#;
     let bytes = frame_lines(&[
         json!({
             "schema": "agentlibre.llama-stream/v1",
@@ -1182,8 +1182,8 @@ fn private_stream_accepts_multiple_structured_tool_calls() {
                 "role": "assistant",
                 "content": null,
                 "tool_calls": [
-                    {"function": {"name": "agentlibre.builtins:fs_read", "arguments": "{\"path\":\"a\"}"}},
-                    {"function": {"name": "agentlibre.builtins:fs_read", "arguments": "{\"path\":\"b\"}"}}
+                    {"function": {"name": "agentlibre.files:file.read", "arguments": "{\"path\":\"a\"}"}},
+                    {"function": {"name": "agentlibre.files:file.read", "arguments": "{\"path\":\"b\"}"}}
                 ]
             }),
         ),
@@ -1194,7 +1194,7 @@ fn private_stream_accepts_multiple_structured_tool_calls() {
         panic!("expected a structured tool call batch")
     };
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].tool_id.as_str(), "agentlibre.builtins:fs_read");
+    assert_eq!(calls[0].tool_id.as_str(), "agentlibre.files:file.read");
     assert_eq!(calls[1].input["path"], "b");
 }
 

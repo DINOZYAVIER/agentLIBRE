@@ -1,0 +1,10 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.forge"
+version = "1.0.0-alpha.19"
+description = "First-party verified Forge artifact tools"
+
+[[tools]]
+id = "agentlibre.forge:artifact.read"
+description = "Read a verified Forge artifact with line bounds and a content digest"
+input_schema = "schemas/artifact-read.json"
+delivery = "retryable"

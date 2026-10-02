@@ -317,7 +317,7 @@ impl OperationExecution<'_> {
                         && prepared.definition.required_effects.iter().any(|effect| {
                             matches!(
                                 effect.as_str(),
-                                "agentlibre.builtins:filesystem_write"
+                                "agentlibre.files:file.write"
                                     | "agentlibre.execution:terminal.control"
                             )
                         })
@@ -680,8 +680,8 @@ fn correct_invalid_model_output(
 }
 
 const GUARDED_OBSERVATION_TOOLS: [&str; 2] = [
-    "agentlibre.builtins:fs_read",
-    "agentlibre.builtins:forge_read",
+    "agentlibre.files:file.read",
+    "agentlibre.forge:artifact.read",
 ];
 const DUPLICATE_TOOL_CALL_KIND: &str = "duplicate_tool_call";
 const TOOL_REQUEST_FAILURE_KIND: &str = "tool_request_failure";
@@ -734,9 +734,9 @@ fn recoverable_tool_failure_result(
     }
     let instruction = match (&operation.request, failure.kind) {
         (AgentOperationRequest::Tool(request), ToolFailureKind::InvalidInput)
-            if request.tool_id.as_str() == "agentlibre.builtins:fs_apply_patch" =>
+            if request.tool_id.as_str() == "agentlibre.files:file.patch" =>
         {
-            "The patch made no change. Do not repeat it. To create a new file, use op=create with a workspace-relative path, content and expected_absent=true; no digest is required. For update/delete, call fs_read for the existing target and copy its digest exactly. For move, read the existing source and copy its digest; do not move /dev/null to create a file."
+            "The patch made no change. Do not repeat it. To create a new file, use op=create with a workspace-relative path, content and expected_absent=true; no digest is required. For update/delete, call agentlibre.files:file.read for the existing target and copy its digest exactly. For move, read the existing source and copy its digest; do not move /dev/null to create a file."
         }
         _ => {
             "The Tool made no change. Do not repeat the same request. Inspect the admitted inputs and authority, then issue a corrected Tool call."

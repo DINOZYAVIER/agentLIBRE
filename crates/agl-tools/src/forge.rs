@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-pub const READ: &str = "agentlibre.builtins:forge_read";
+pub const READ: &str = "agentlibre.forge:artifact.read";
 const MAX_READ_LINES: usize = 500;
 const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 

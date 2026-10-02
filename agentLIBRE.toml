@@ -17,12 +17,20 @@ revision = "96e2a5457c8d62fccd71e56295b5e06ff21f021e"
 path = "models/qwen38-27b"
 
 [[artifacts.entity]]
-id = "agentlibre.builtins"
+id = "agentlibre.files"
 kind = "extension"
 schema = "agentlibre.extension/v1"
 git = "/home/dinozyavier/repos/agentLIBRE"
 revision = "b15df0ad5da84937764a0417af98a272cce1d465"
-path = "extensions/agentlibre-builtins"
+path = "extensions/agentlibre-files"
+
+[[artifacts.entity]]
+id = "agentlibre.forge"
+kind = "extension"
+schema = "agentlibre.extension/v1"
+git = "/home/dinozyavier/repos/agentLIBRE"
+revision = "b15df0ad5da84937764a0417af98a272cce1d465"
+path = "extensions/agentlibre-forge"
 
 [[artifacts.entity]]
 id = "agentlibre.execution"

@@ -194,7 +194,7 @@ def function_document(identifier: str, maximum: int) -> str:
         "agent = { id = \"agentlibre.smoke-agent\", version = \"1.0.0\" }\n"
         "model = { id = \"agentlibre.smoke-model\", version = \"1.0.0\" }\n"
         "extensions = [\n"
-        "    { id = \"agentlibre.builtins\", version = \"1.0.0-alpha.19\" },\n"
+        "    { id = \"agentlibre.files\", version = \"1.0.0-alpha.19\" },\n"
         "    { id = \"agentlibre.execution\", version = \"1.0.0-alpha.19\" },\n"
         "]\n"
         "working_directory = \".\"\n\n"
@@ -314,12 +314,12 @@ manifest.write_text(
     f"revision = \"{source_revision}\"\n"
     "path = \"models/smoke\"\n\n"
     "[[entity]]\n"
-    "id = \"agentlibre.builtins\"\n"
+    "id = \"agentlibre.files\"\n"
     "kind = \"extension\"\n"
     "schema = \"agentlibre.extension/v1\"\n"
     f"git = \"{repo}\"\n"
     f"revision = \"{repo_revision}\"\n"
-    "path = \"extensions/agentlibre-builtins\"\n\n"
+    "path = \"extensions/agentlibre-files\"\n\n"
     "[[entity]]\n"
     "id = \"agentlibre.execution\"\n"
     "kind = \"extension\"\n"
@@ -405,7 +405,7 @@ run_output_file_one="$agl_home/function-one.out"
 run_output_file_two="$agl_home/function-two.out"
 foreground_pids=()
 (cd "$workspace" && AGL_HOME="$agl_home" timeout "$timeout_seconds" \
-  "$agl_bin" run "$function_one" "Use fs_apply_patch to create tool-proof.txt containing exactly TOOL_EDITED. Then use fs_read to read that file, and command.exec with rg to verify the exact text. Complete all three tool calls before replying with exactly TOOL_DONE.") \
+  "$agl_bin" run "$function_one" "Use agentlibre.files:file.patch to create tool-proof.txt containing exactly TOOL_EDITED. Then use agentlibre.files:file.read to read that file, and command.exec with rg to verify the exact text. Complete all three tool calls before replying with exactly TOOL_DONE.") \
   >"$run_output_file_one" 2>&1 &
 run_pid_one=$!
 foreground_pids+=("$run_pid_one")
@@ -427,7 +427,7 @@ if (( run_status_one != 0 || run_status_two != 0 )); then
   exit 1
 fi
 [[ "$(<"$workspace/tool-proof.txt")" == "TOOL_EDITED" ]] || {
-  printf 'Function did not create the expected tool-proof.txt through fs_apply_patch/fs_read\n' >&2
+  printf 'Function did not create the expected tool-proof.txt through agentlibre.files:file.patch/agentlibre.files:file.read\n' >&2
   exit 1
 }
 [[ "$run_output_one" == *"TOOL_DONE"* ]] || {

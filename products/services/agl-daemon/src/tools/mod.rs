@@ -16,7 +16,7 @@ pub(crate) const COMMITTED_RESULT_LIMIT: &str = r#"{"kind":"tool_result_limit","
 static WORKSPACE_MUTATIONS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 /// Return the process-local mutation lock for one canonical workspace root.
-/// Memory commits and `fs_apply_patch` deliberately share this registry so a
+/// Memory commits and `agentlibre.files:file.patch` deliberately share this registry so a
 /// digest check and its following rename sequence cannot interleave.
 pub(crate) fn workspace_mutation(root: &Path) -> Arc<Mutex<()>> {
     let locks = WORKSPACE_MUTATIONS.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -28,15 +28,25 @@ pub(crate) fn workspace_mutation(root: &Path) -> Arc<Mutex<()>> {
     )
 }
 
-pub(crate) fn filesystem_bindings() -> Result<ExtensionBindings> {
-    let view = agl_tools::filesystem_declaration();
+pub(crate) fn files_bindings() -> Result<ExtensionBindings> {
+    let view = agl_tools::files_declaration();
     let package = parse_package_view(&view)?;
-    agl_tools::filesystem_bindings(
+    agl_tools::files_bindings(
+        package.manifest.version,
+        agl_core::package::compute_package_digest(&view)?,
+        package.definition,
+        Arc::new(workspace_mutation),
+    )
+}
+
+pub(crate) fn forge_bindings() -> Result<ExtensionBindings> {
+    let view = agl_tools::forge_declaration();
+    let package = parse_package_view(&view)?;
+    agl_tools::forge_bindings(
         package.manifest.version,
         agl_core::package::compute_package_digest(&view)?,
         package.definition,
         Arc::new(resolve_artifact),
-        Arc::new(workspace_mutation),
     )
 }
 
@@ -131,18 +141,27 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_declarations_and_bindings_are_exact() {
-        let view = agl_tools::filesystem_declaration();
-        assert_source_matches(&view, "agentlibre-builtins");
-        let bindings = filesystem_bindings().unwrap();
+    fn files_declarations_and_bindings_are_exact() {
+        let view = agl_tools::files_declaration();
+        assert_source_matches(&view, "agentlibre-files");
+        let bindings = files_bindings().unwrap();
         assert_bindings_exact(&bindings, &view);
-        assert_eq!(bindings.tools.len(), 3);
+        assert_eq!(bindings.tools.len(), 2);
         let grant = |root| agl_core::AuthorityGrant {
-            effect: agl_core::EffectId::new("agentlibre.builtins:filesystem_write").unwrap(),
+            effect: agl_core::EffectId::new("agentlibre.files:file.write").unwrap(),
             scope: agl_core::CanonicalJson::new(serde_json::json!({"root":root})).unwrap(),
         };
         assert!((bindings.allows_authority)(&grant("/workspace")));
         assert!(!(bindings.allows_authority)(&grant("workspace")));
+    }
+
+    #[test]
+    fn forge_declarations_and_bindings_are_exact() {
+        let view = agl_tools::forge_declaration();
+        assert_source_matches(&view, "agentlibre-forge");
+        let bindings = forge_bindings().unwrap();
+        assert_bindings_exact(&bindings, &view);
+        assert_eq!(bindings.tools.len(), 1);
     }
 
     #[test]
@@ -178,23 +197,31 @@ mod tests {
         let expected_root = root.clone();
         let expected_shared = Arc::clone(&shared);
         let resolver_root = root.clone();
-        let view = agl_tools::filesystem_declaration();
-        let package = parse_package_view(&view).unwrap();
-        let bindings = agl_tools::filesystem_bindings(
-            package.manifest.version,
-            compute_package_digest(&view).unwrap(),
-            package.definition,
-            Arc::new(move |workspace, id| {
-                assert_eq!(workspace, resolver_root);
-                assert_eq!(id, "test.document");
-                Ok(artifact.clone())
-            }),
+        let files_view = agl_tools::files_declaration();
+        let files_package = parse_package_view(&files_view).unwrap();
+        let files = agl_tools::files_bindings(
+            files_package.manifest.version,
+            compute_package_digest(&files_view).unwrap(),
+            files_package.definition,
             Arc::new(move |workspace| {
                 assert_eq!(workspace, expected_root);
                 let lock = workspace_mutation(workspace);
                 assert!(Arc::ptr_eq(&lock, &expected_shared));
                 observed.store(true, Ordering::SeqCst);
                 lock
+            }),
+        )
+        .unwrap();
+        let forge_view = agl_tools::forge_declaration();
+        let forge_package = parse_package_view(&forge_view).unwrap();
+        let forge = agl_tools::forge_bindings(
+            forge_package.manifest.version,
+            compute_package_digest(&forge_view).unwrap(),
+            forge_package.definition,
+            Arc::new(move |workspace, id| {
+                assert_eq!(workspace, resolver_root);
+                assert_eq!(id, "test.document");
+                Ok(artifact.clone())
             }),
         )
         .unwrap();
@@ -209,17 +236,17 @@ mod tests {
                 working_directory: RelativePath::try_from(".".to_owned()).unwrap(),
             },
             AuthorityGrantSet(vec![agl_core::AuthorityGrant {
-                effect: agl_core::EffectId::new("agentlibre.builtins:filesystem_write").unwrap(),
+                effect: agl_core::EffectId::new("agentlibre.files:file.write").unwrap(),
                 scope: agl_core::CanonicalJson::new(serde_json::json!({"root":root})).unwrap(),
             }]),
             i64::MAX,
             65_536,
             ToolCancellation::new(),
         );
-        let read = bindings
+        let read = forge
             .tools
             .iter()
-            .find(|tool| tool.tool_id.as_str() == "agentlibre.builtins:forge_read")
+            .find(|tool| tool.tool_id.as_str() == "agentlibre.forge:artifact.read")
             .unwrap();
         let result = read.handler.call(context.clone(), serde_json::json!({"path":"forge:test.document/README.md","cursor":1,"limit_lines":10})).await.unwrap();
         assert!(
@@ -227,10 +254,10 @@ mod tests {
                 .unwrap()
                 .contains("Host artifact")
         );
-        let patch = bindings
+        let patch = files
             .tools
             .iter()
-            .find(|tool| tool.tool_id.as_str() == "agentlibre.builtins:fs_apply_patch")
+            .find(|tool| tool.tool_id.as_str() == "agentlibre.files:file.patch")
             .unwrap();
         patch.handler.call(context, serde_json::json!({"operations":[{"op":"create","path":"created.txt","content":"Created\n","expected_absent":true}]})).await.unwrap();
         assert!(requested_lock.load(Ordering::SeqCst));
@@ -245,7 +272,7 @@ mod tests {
     fn providers_reject_mismatched_package_and_tool_identity() {
         let view = agl_tools::execution::declaration();
         let package = parse_package_view(&view).unwrap();
-        let wrong_digest = compute_package_digest(&agl_tools::filesystem_declaration()).unwrap();
+        let wrong_digest = compute_package_digest(&agl_tools::files_declaration()).unwrap();
         assert!(
             agl_tools::execution::bindings(
                 package.manifest.version.clone(),

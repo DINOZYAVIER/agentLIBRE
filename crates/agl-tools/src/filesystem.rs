@@ -13,9 +13,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{WorkspaceMutation, execution_failure as execution, invalid_result};
 
-pub const READ: &str = "agentlibre.builtins:fs_read";
-pub const APPLY_PATCH: &str = "agentlibre.builtins:fs_apply_patch";
-pub const WRITE_EFFECT: &str = "agentlibre.builtins:filesystem_write";
+pub const READ: &str = "agentlibre.files:file.read";
+pub const APPLY_PATCH: &str = "agentlibre.files:file.patch";
+pub const WRITE_EFFECT: &str = "agentlibre.files:file.write";
 
 const MAX_READ_LINES: usize = 500;
 const MAX_PATCH_OPERATIONS: usize = 64;
@@ -436,7 +436,7 @@ fn invalid_input() -> ToolFailure {
         ToolFailureKind::InvalidInput,
         Some("input"),
         &[
-            "Inspect the input schema and use workspace-relative paths. To create a new file, use op=create with path, content and expected_absent=true; no digest is required. For update/delete, read the existing target with fs_read and copy its digest into expected_digest. For move, read the existing source and copy its digest; do not move /dev/null to create a file.",
+            "Inspect the input schema and use workspace-relative paths. To create a new file, use op=create with path, content and expected_absent=true; no digest is required. For update/delete, read the existing target with agentlibre.files:file.read and copy its digest into expected_digest. For move, read the existing source and copy its digest; do not move /dev/null to create a file.",
         ],
     )
 }

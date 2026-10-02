@@ -12,9 +12,11 @@ generic host object or downcasting. The daemon composition root supplies exact
 bindings to `AgentService::start`; `agl-daemon` validates their definition
 digests and invokes only Tools present in the immutable Run snapshot.
 
-`agl-tools` supplies bounded UTF-8 filesystem read,
-digest-preconditioned atomic patch, and `forge_read` for declared document and
-memory artifacts. `fs_read` requires `cursor`
+`agl-tools` supplies the `agentlibre.files` Extension (bounded UTF-8
+`agentlibre.files:file.read` and digest-preconditioned atomic
+`agentlibre.files:file.patch`) and the `agentlibre.forge` Extension
+(`agentlibre.forge:artifact.read` for declared document and memory
+artifacts). `agentlibre.files:file.read` requires `cursor`
 (initially `1`) and `limit_lines`; the schema does not supply hidden defaults.
 Directory discovery and text search use `command.exec`, which checks the
 admitted executable and contains its working directory within the workspace.
@@ -26,8 +28,9 @@ allowlist applies in both modes; planner commands have no separate command
 whitelist. Filesystem and Forge reads paginate within the result budget;
 the driver measures every complete Tool result after serialization. For a
 committed effect, stock execution/search bindings preserve the receipt and
-can replace oversized content with a bounded notice. The builtin declaration is
-`extensions/agentlibre-builtins/EXTENSION.toml`; the compiled binding embeds
+can replace oversized content with a bounded notice. The declarations are
+`extensions/agentlibre-files/EXTENSION.toml` and
+`extensions/agentlibre-forge/EXTENSION.toml`; each compiled binding embeds
 those exact bytes and content digest. Registering handlers does not admit them
 to a Run: the Function must explicitly select the Extension and Tool IDs, and
 patch requires the exact workspace-write Effect grant.

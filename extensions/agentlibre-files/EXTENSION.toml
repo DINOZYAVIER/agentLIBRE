@@ -1,0 +1,22 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.files"
+version = "1.0.0-alpha.19"
+description = "First-party bounded workspace file tools"
+
+[[effects]]
+id = "agentlibre.files:file.write"
+description = "Mutate files below the admitted workspace root"
+scope_schema = "schemas/file-write-scope.json"
+
+[[tools]]
+id = "agentlibre.files:file.read"
+description = "Read a UTF-8 workspace file with line bounds and a content digest"
+input_schema = "schemas/file-read.json"
+delivery = "retryable"
+
+[[tools]]
+id = "agentlibre.files:file.patch"
+description = "Atomically create, update, delete, or move workspace files using digest preconditions"
+input_schema = "schemas/file-patch.json"
+required_effects = ["agentlibre.files:file.write"]
+delivery = "at_most_once"

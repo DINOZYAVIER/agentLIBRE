@@ -189,7 +189,7 @@ pub(crate) fn format_tool_content_for(
                 }
                 return result;
             }
-            "agentlibre.builtins:fs_read" => {
+            "agentlibre.files:file.read" => {
                 let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("-");
                 let mut result = format!("path: {path}\n");
                 if let Some(lines) = value.get("lines").and_then(|v| v.as_array()) {
@@ -201,7 +201,7 @@ pub(crate) fn format_tool_content_for(
                 }
                 return result.trim_end().to_owned();
             }
-            "agentlibre.builtins:fs_apply_patch" => {
+            "agentlibre.files:file.patch" => {
                 let status = value
                     .get("status")
                     .and_then(|v| v.as_str())
