@@ -108,19 +108,14 @@ case "$profile_action" in
 import json
 import sys
 
-expected_attr, expected_repo = sys.argv[1:]
+expected_attr, expected_url = sys.argv[1:]
 elements = json.load(sys.stdin).get("elements", {})
-expected_urls = {
-    "git+file://" + expected_repo,
-    "path:" + expected_repo,
-}
 for name, element in elements.items():
     if not element.get("active"):
         continue
-    original_url = element.get("originalUrl", "").split("?", 1)[0]
-    if element.get("attrPath") == expected_attr and original_url in expected_urls:
+    if element.get("attrPath") == expected_attr and element.get("originalUrl") == expected_url:
         print(name)
-' "$expected_attr" "$repo_root"
+' "$expected_attr" "$flake_url"
     )
 
     if ((${#matching_names[@]} > 1)); then
