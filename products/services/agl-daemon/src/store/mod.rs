@@ -19,7 +19,7 @@ pub use error::{Result, StoreError};
 pub use handle::StoreHandle;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const STORE_BASELINE_VERSION: u32 = 22;
+pub const STORE_BASELINE_VERSION: u32 = 23;
 
 const STORE_APPLICATION_ID: u32 = 0x4147_4c32;
 

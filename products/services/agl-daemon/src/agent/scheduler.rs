@@ -100,6 +100,7 @@ pub(crate) fn prepare_tools(
     Ok(tools)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn worker_loop(
     receiver: mpsc::Receiver<Command>,
     scheduler: mpsc::SyncSender<Command>,
@@ -107,6 +108,7 @@ pub(crate) fn worker_loop(
     tools: BTreeMap<String, PreparedTool>,
     progress: ProgressSubscribers,
     recoverable: Vec<AgentRun>,
+    publication: Option<super::memory_worker::PublicationQueue>,
 ) {
     let tools = Arc::new(tools);
     let mut active = BTreeMap::new();
@@ -227,6 +229,22 @@ pub(crate) fn worker_loop(
                 cancellation,
             } => {
                 active.remove(&run_id);
+                if dependencies
+                    .store
+                    .agent_run_view(run_id)
+                    .is_ok_and(|view| view.status.is_terminal())
+                    && let Some(publication) = &publication
+                    && let Err(reason) = publication.submit(run_id)
+                {
+                    tracing::warn!(%run_id, reason, "memory publication deferred; claims remain pending");
+                    if let Err(error) = dependencies.store.record_memory_publication_deferred(
+                        run_id,
+                        reason.into(),
+                        None,
+                    ) {
+                        tracing::error!(%run_id, %error, "failed to record deferred memory publication");
+                    }
+                }
                 if retry && !shutting_down {
                     match dependencies.store.agent_run(run_id) {
                         Ok(run) if !run.status.is_terminal() => {
@@ -319,9 +337,6 @@ fn spawn_run(
                 );
                 Ok(())
             });
-            // Publication failure never changes the terminal Run outcome.
-            if dependencies.store.agent_run_view(run_id).is_ok_and(|view| view.status.is_terminal())
-                && let Some(publisher) = &dependencies.memory { publisher.after_run(&dependencies.store, run_id); }
             if let Some(index) = &dependencies.memory_index { index.run_finished(run_id); }
             let retry = outcome.as_ref().is_err_and(retry_scheduler_failure);
             if let Err(error) = &outcome {

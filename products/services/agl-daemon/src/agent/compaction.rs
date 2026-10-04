@@ -534,6 +534,7 @@ pub(super) fn execute(
         return Err(error);
     }
     let correction_attempt = u32::from(request.correction_of.is_some());
+    execution.reserve_model_call(operation, 0)?;
     let generated = match inference.generate(summary.clone()) {
         Ok(generated) => generated,
         Err(error @ (InferenceServiceError::Cancelled | InferenceServiceError::Deadline)) => {

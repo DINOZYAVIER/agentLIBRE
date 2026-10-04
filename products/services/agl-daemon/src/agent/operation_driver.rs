@@ -13,6 +13,58 @@ pub(crate) struct OperationExecution<'a> {
 }
 
 impl OperationExecution<'_> {
+    pub(super) fn reserve_model_call(
+        &self,
+        operation: &AgentOperation,
+        correction_attempt: u32,
+    ) -> Result<(), AgentOperationFailure> {
+        let failed = |kind| AgentOperationFailure { kind };
+        if self.cancellation.is_cancelled() {
+            return Err(failed(AgentOperationFailureKind::Cancelled));
+        }
+        if now_ms() >= self.deadline_at_ms {
+            return Err(failed(AgentOperationFailureKind::Deadline));
+        }
+        let run = self
+            .dependencies
+            .store
+            .agent_run(operation.key.run_id)
+            .map_err(|_| failed(AgentOperationFailureKind::Unavailable))?;
+        let machine = AgentFsm::new(
+            run.id,
+            self.conversation_id,
+            run.snapshot.limits,
+            run.snapshot.model.runtime.generation.max_output_tokens,
+            &run.snapshot.tools,
+        );
+        let transition = machine
+            .transition(
+                &AgentFsmState {
+                    status: run.status,
+                    checkpoint: run.checkpoint,
+                    usage: run.usage,
+                },
+                AgentFsmInput::ModelCallStarted {
+                    key: operation.key.clone(),
+                    delivery_attempt: operation.delivery_attempt,
+                    correction_attempt,
+                },
+            )
+            .map_err(|error| {
+                failed(if error == agl_core::agent::AgentFsmError::LimitExceeded {
+                    AgentOperationFailureKind::LimitsExceeded
+                } else {
+                    AgentOperationFailureKind::Execution
+                })
+            })?;
+        self.dependencies
+            .store
+            .commit_agent_transition(run.id, run.revision, &transition.state, &transition.output)
+            .map_err(|_| failed(AgentOperationFailureKind::Unavailable))?;
+        emit_durable(self.progress, run.id);
+        Ok(())
+    }
+
     pub(crate) fn complete(
         &self,
         mut operation: AgentOperation,
@@ -258,6 +310,7 @@ impl OperationExecution<'_> {
                             kind: AgentOperationFailureKind::CompactionRequired(capacity),
                         });
                     }
+                    self.reserve_model_call(operation, 0)?;
                     let generated = dependencies.inference.generate(inference_request);
                     match generated {
                         Ok(result) => validate_model_result(snapshot, tools, generation, &result)
@@ -275,16 +328,12 @@ impl OperationExecution<'_> {
                                 });
                             };
                             correct_invalid_model_output(
-                                dependencies,
-                                tools,
+                                self,
                                 operation,
-                                snapshot,
                                 context,
                                 raw_output,
                                 output.usage,
                                 realization,
-                                deadline_at_ms,
-                                cancellation,
                             )
                         }
                         Err(error) => Err(map_inference_failure(error)),
@@ -486,19 +535,19 @@ pub(super) fn record_model_output_rejection(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn correct_invalid_model_output(
-    dependencies: &AgentDependencies,
-    prepared_tools: &BTreeMap<String, PreparedTool>,
+    execution: &OperationExecution<'_>,
     operation: &AgentOperation,
-    snapshot: &agl_core::agent::AgentRunSnapshot,
     mut context: Vec<agl_core::agent::AgentContextEntry>,
     raw_output: Content,
     primary_usage: agl_core::agent::ModelUsage,
     primary_realization: agl_core::agent::InferenceRealizationRef,
-    deadline_at_ms: i64,
-    cancellation: &RunCancellation,
 ) -> Result<agl_core::agent::ModelGenerationResult, AgentOperationFailure> {
+    let dependencies = execution.dependencies;
+    let prepared_tools = execution.tools;
+    let snapshot = execution.snapshot;
+    let deadline_at_ms = execution.deadline_at_ms;
+    let cancellation = execution.cancellation;
     let Some(recovery) = &snapshot.invalid_model_output_recovery else {
         return Err(AgentOperationFailure {
             kind: AgentOperationFailureKind::InvalidModelOutput {
@@ -577,6 +626,7 @@ fn correct_invalid_model_output(
             .iter()
             .map(|entry| entry.message.id.clone())
             .collect();
+        execution.reserve_model_call(operation, attempt as u32)?;
         let result = dependencies.inference.generate(InferenceGenerateRequest {
             operation: operation.key.clone(),
             delivery_attempt: operation.delivery_attempt,

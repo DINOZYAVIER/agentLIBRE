@@ -117,6 +117,7 @@ impl AgentHandle {
 pub struct AgentService {
     sender: mpsc::SyncSender<Command>,
     worker: Option<thread::JoinHandle<()>>,
+    publication: Option<super::memory_worker::PublicationWorker>,
 }
 
 impl AgentService {
@@ -128,6 +129,19 @@ impl AgentService {
         let (sender, receiver) = mpsc::sync_channel(SCHEDULER_QUEUE_CAPACITY);
         let tools = prepare_tools(extensions)?;
         let recoverable = load_recoverable_runs(&dependencies, &tools)?;
+        let (publication, publication_queue) = match &dependencies.memory {
+            Some(publisher) => {
+                let publisher = publisher.clone();
+                let store = dependencies.store.clone();
+                let (worker, queue) =
+                    super::memory_worker::PublicationWorker::start(move |run_id| {
+                        publisher.after_run(&store, run_id);
+                    })
+                    .map_err(|_| AgentServiceError::Unavailable)?;
+                (Some(worker), Some(queue))
+            }
+            None => (None, None),
+        };
         let worker_progress = progress.clone();
         let worker = thread::Builder::new()
             .name("agl-scheduler".into())
@@ -141,6 +155,7 @@ impl AgentService {
                         tools,
                         worker_progress,
                         recoverable,
+                        publication_queue,
                     )
                 }
             })
@@ -153,12 +168,16 @@ impl AgentService {
             Self {
                 sender,
                 worker: Some(worker),
+                publication,
             },
             handle,
         ))
     }
 
     pub fn shutdown(mut self) {
+        if let Some(publication) = &self.publication {
+            publication.stop_accepting();
+        }
         let _ = self.sender.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -168,6 +187,9 @@ impl AgentService {
 
 impl Drop for AgentService {
     fn drop(&mut self) {
+        if let Some(publication) = &self.publication {
+            publication.stop_accepting();
+        }
         let _ = self.sender.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

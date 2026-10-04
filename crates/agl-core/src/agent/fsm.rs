@@ -28,6 +28,11 @@ pub struct AgentFsmState {
 #[allow(clippy::large_enum_variant)]
 pub enum AgentFsmInput {
     Drive,
+    ModelCallStarted {
+        key: AgentOperationKey,
+        delivery_attempt: NonZeroU32,
+        correction_attempt: u32,
+    },
     OperationFinished {
         operation: AgentOperation,
         message_id: Option<MessageId>,
@@ -146,10 +151,6 @@ impl AgentFsm {
         usage: &mut AgentRunUsage,
         tokens: Option<super::ModelUsage>,
     ) -> Result<(), AgentFsmError> {
-        usage.model_calls = usage
-            .model_calls
-            .checked_add(1)
-            .ok_or(AgentFsmError::LimitExceeded)?;
         if let Some(tokens) = tokens {
             usage.model_input_tokens = usage
                 .model_input_tokens
@@ -213,6 +214,42 @@ impl Fsm for AgentFsm {
         let mut next = state.clone();
         let mut output = Self::output();
         match input {
+            AgentFsmInput::ModelCallStarted {
+                key,
+                delivery_attempt,
+                correction_attempt,
+            } => {
+                let AgentCheckpoint::Waiting { operation, .. } = &state.checkpoint else {
+                    return Err(AgentFsmError::NotReady);
+                };
+                if operation != &key || key.run_id != self.run_id {
+                    return Err(AgentFsmError::OperationMismatch);
+                }
+                let calls = if correction_attempt == 0 {
+                    if !self.model_budget_available(&next.usage) {
+                        return Err(AgentFsmError::LimitExceeded);
+                    }
+                    &mut next.usage.model_calls
+                } else {
+                    if next.usage.correction_calls >= self.limits.correction_calls
+                        || next.usage.correction_input_tokens >= self.limits.correction_input_tokens
+                        || next.usage.correction_output_tokens
+                            >= self.limits.correction_output_tokens
+                    {
+                        return Err(AgentFsmError::LimitExceeded);
+                    }
+                    &mut next.usage.correction_calls
+                };
+                *calls = calls.checked_add(1).ok_or(AgentFsmError::LimitExceeded)?;
+                output.events.push(AgentEventData::ModelCallStarted {
+                    key,
+                    delivery_attempt,
+                    correction_attempt,
+                });
+                output
+                    .events
+                    .push(AgentEventData::UsageUpdated { usage: next.usage });
+            }
             AgentFsmInput::Cancel | AgentFsmInput::DeadlineReached => {
                 if !matches!(state.checkpoint, AgentCheckpoint::Ready { .. }) {
                     return Err(AgentFsmError::NotReady);
@@ -406,18 +443,12 @@ impl Fsm for AgentFsm {
                         if let Some(super::AgentOperationFailure {
                             kind:
                                 super::AgentOperationFailureKind::CorrectionFailed {
-                                    calls,
                                     input_tokens,
                                     output_tokens,
                                     ..
                                 },
                         }) = operation.failure.as_ref()
                         {
-                            next.usage.correction_calls = next
-                                .usage
-                                .correction_calls
-                                .checked_add(*calls)
-                                .ok_or(AgentFsmError::LimitExceeded)?;
                             next.usage.correction_input_tokens = next
                                 .usage
                                 .correction_input_tokens
@@ -514,6 +545,9 @@ impl Fsm for AgentFsm {
                                 {
                                     Some(super::AgentOperationFailureKind::Deadline) => {
                                         AgentRunFailureKind::Deadline
+                                    }
+                                    Some(super::AgentOperationFailureKind::LimitsExceeded) => {
+                                        AgentRunFailureKind::LimitsExceeded
                                     }
                                     Some(super::AgentOperationFailureKind::ToolLoopDetected) => {
                                         AgentRunFailureKind::ToolLoopDetected
@@ -623,11 +657,6 @@ impl Fsm for AgentFsm {
                         };
                     }
                     AgentOperationResult::ModelGeneration(result) => {
-                        next.usage.model_calls = next
-                            .usage
-                            .model_calls
-                            .checked_add(1)
-                            .ok_or(AgentFsmError::LimitExceeded)?;
                         next.usage.model_input_tokens = next
                             .usage
                             .model_input_tokens
@@ -639,11 +668,6 @@ impl Fsm for AgentFsm {
                             .checked_add(result.usage.output_tokens)
                             .ok_or(AgentFsmError::LimitExceeded)?;
                         if let Some(correction) = &result.correction {
-                            next.usage.correction_calls = next
-                                .usage
-                                .correction_calls
-                                .checked_add(u64::from(correction.attempts))
-                                .ok_or(AgentFsmError::LimitExceeded)?;
                             next.usage.correction_input_tokens = next
                                 .usage
                                 .correction_input_tokens

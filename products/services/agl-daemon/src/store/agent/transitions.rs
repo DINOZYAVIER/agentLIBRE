@@ -302,11 +302,30 @@ impl StoreHandle {
                     ],
                 )?;
             }
-            let operation_revisions = output
+            let mut operation_revisions = output
                 .operation
                 .as_ref()
                 .map(|operation| vec![(&operation.key, operation.revision)])
                 .unwrap_or_default();
+            let mut call_operation = None;
+            for event in &output.events {
+                if let AgentEventData::ModelCallStarted { key, delivery_attempt, correction_attempt } = event {
+                    let (kind, saved_state, attempt, revision): (String, String, u32, u64) = tx.query_row(
+                        "SELECT kind,state,delivery_attempt,revision FROM agent_operations WHERE agent_run_id=?1 AND ordinal=?2",
+                        params![key.run_id.as_bytes().as_slice(), key.ordinal.get()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )?;
+                    if key.run_id != run_id || saved_state != "running" || attempt != delivery_attempt.get()
+                        || !(kind == "model_generation" || (kind == "compaction" && *correction_attempt == 0))
+                    {
+                        return Err(StoreError::TransitionRejected {
+                            resource: format!("{key:?}"), from: saved_state, to: "model_call_started".into(),
+                        });
+                    }
+                    operation_revisions.push((key, revision));
+                    call_operation = Some((key, revision));
+                }
+            }
             append_events(
                 tx,
                 run_id,
@@ -314,7 +333,7 @@ impl StoreHandle {
                 unix_ms(),
                 expected_revision.saturating_add(1),
                 &operation_revisions,
-                None,
+                call_operation,
             )
         })
     }

@@ -28,6 +28,7 @@ and private inference isolation in the execution helper.
 | `agent/compaction.rs` | Context compaction and memory-extraction processing. |
 | `agent/memory_io.rs` | Contained citation reads and pure corpus write plans. |
 | `agent/memory_publication.rs` | Source Git commits, Run/Archive journal recovery, revision update and Forge sync. |
+| `agent/memory_worker.rs` | One bounded terminal-publication worker outside active Run slots; pending claims/journals stay in the existing Store/files. |
 | `agent/memory_index.rs` | Disposable FTS5 projection bound to a Forge source under its read guard. |
 | `planner.rs` | Planner policy, instruction construction and implementation-plan response schema. |
 | `plans.rs` | Plan artifact files and create/view/approve coordination. |

@@ -26,6 +26,7 @@ mod tests {
     include!("compaction_tests.rs");
     include!("effect_result_tests.rs");
     include!("schedule_tests.rs");
+    include!("call_budget_tests.rs");
 
     fn parse_diagnostic(raw: &str) -> agl_core::agent::ModelOutputDiagnostic {
         agl_core::agent::ModelOutputDiagnostic {
@@ -2279,7 +2280,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agl-daemon-retry-{}", uuid::Uuid::now_v7()));
         let store = StoreHandle::open_at(&root).unwrap();
         let conversation_id = ConversationId::generate();
-        bind_conversation(&store, conversation_id, &snapshot(&root));
+        let mut configured = snapshot(&root);
+        configured.limits.model_calls = 3;
+        bind_conversation(&store, conversation_id, &configured);
         let generator = Arc::new(FlakyGenerator(AtomicUsize::new(0)));
         let (inference_service, inference) = InferenceService::start(
             InferenceConfig::custom(generator.clone()),
@@ -2315,6 +2318,7 @@ mod tests {
             AgentRunStatus::Completed
         );
         assert_eq!(generator.0.load(Ordering::SeqCst), 3);
+        assert_eq!(store.agent_run_view(run_id).unwrap().usage.model_calls, 3);
         let operation = store
             .agent_operation(&agl_core::agent::AgentOperationKey {
                 run_id,

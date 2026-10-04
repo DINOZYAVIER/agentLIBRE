@@ -29,6 +29,15 @@ When a Function enables preserved reasoning, private reasoning is stored only
 inside operation metadata and is materialized solely for later inference
 context. It is never returned by message, CLI, or Matrix queries.
 
+Before each generation or compaction inference attempt, `AgentFsm` reserves
+one `model_calls` unit; output correction reserves `correction_calls` instead.
+Store commits `ModelCallStarted` and the updated usage before inference dispatch.
+An interrupted attempt retains that charge across restart, including transport
+retries. Measurement/tokenization do not consume a call. Completion adds known
+token usage without charging calls again; an exhausted call budget fails before
+inference dispatch. Token usage for an interrupted attempt without a committed
+result remains unknown.
+
 ## Immutable admission
 
 `AgentRunSnapshot` freezes exactly:
@@ -70,6 +79,13 @@ process memory.
 When a Run reaches a terminal state, the scheduler reloads its durable view and
 logs the status, failure kind, input and output tokens, model calls, and Tool
 calls.
+
+Terminal memory publication runs on one separate worker in the same daemon,
+after the scheduler releases the Run slot. Its nonblocking queue holds up to
+256 Run IDs. Overflow records `MemoryPublicationDeferred`; pending claims and
+publication journals remain for a later terminal Run. Shutdown stops admission,
+discards queued notifications and waits only for an already-started publication
+within its configured sync deadline. Run status does not depend on publication.
 
 Agent source is `agents/<ui-name>/AGENT.md` plus sibling `SYSTEM.md`.
 `AGENT.md` contains direct `agentlibre.agent/v1` metadata and required Tool

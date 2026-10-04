@@ -24,6 +24,77 @@ fn limits() -> AgentRunLimits {
 }
 
 #[test]
+fn model_call_admission_spends_each_bucket_and_rejection_keeps_the_state() {
+    let run_id = AgentRunId::generate();
+    let machine = AgentFsm::new(run_id, None, limits(), 100, &[]);
+    let ready = AgentFsmState {
+        status: AgentRunStatus::Pending,
+        checkpoint: AgentCheckpoint::Ready {
+            context: vec![MessageId::generate()],
+            next_operation_ordinal: NonZeroU32::MIN,
+        },
+        usage: AgentRunUsage::default(),
+    };
+    let driven = machine.transition(&ready, AgentFsmInput::Drive).unwrap();
+    let key = driven.output.operation.unwrap().key;
+    let mut state = driven.state;
+    for correction_attempt in [0, 0, 1, 2] {
+        let reserved = machine
+            .transition(
+                &state,
+                AgentFsmInput::ModelCallStarted {
+                    key: key.clone(),
+                    delivery_attempt: NonZeroU32::MIN,
+                    correction_attempt,
+                },
+            )
+            .unwrap();
+        assert!(
+            reserved
+                .output
+                .events
+                .iter()
+                .any(|event| matches!(event, AgentEventData::ModelCallStarted { .. }))
+        );
+        state = reserved.state;
+    }
+    assert_eq!(state.usage.model_calls, 2);
+    assert_eq!(state.usage.correction_calls, 2);
+    for correction_attempt in [0, 3] {
+        assert_eq!(
+            machine
+                .transition(
+                    &state,
+                    AgentFsmInput::ModelCallStarted {
+                        key: key.clone(),
+                        delivery_attempt: NonZeroU32::MIN,
+                        correction_attempt,
+                    }
+                )
+                .unwrap_err(),
+            agl_core::agent::AgentFsmError::LimitExceeded
+        );
+    }
+    let mut wrong = key;
+    wrong.run_id = AgentRunId::generate();
+    assert_eq!(
+        machine
+            .transition(
+                &state,
+                AgentFsmInput::ModelCallStarted {
+                    key: wrong,
+                    delivery_attempt: NonZeroU32::MIN,
+                    correction_attempt: 0,
+                }
+            )
+            .unwrap_err(),
+        agl_core::agent::AgentFsmError::OperationMismatch
+    );
+    assert_eq!(state.usage.model_calls, 2);
+    assert_eq!(state.usage.correction_calls, 2);
+}
+
+#[test]
 fn absent_input_limit_removes_only_the_aggregate_input_cap() {
     for (input_limit, output_tokens, model_calls, expected) in [
         (None, 0, 0, AgentRunStatus::Running),

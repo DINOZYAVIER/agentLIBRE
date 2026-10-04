@@ -888,6 +888,7 @@ fn append_events(
     for data in events {
         let explicit_operation = match data {
             AgentEventData::OperationCreated { key, .. }
+            | AgentEventData::ModelCallStarted { key, .. }
             | AgentEventData::OperationStarted { key, .. }
             | AgentEventData::OperationRetryScheduled { key, .. }
             | AgentEventData::OperationCompleted { key, .. }

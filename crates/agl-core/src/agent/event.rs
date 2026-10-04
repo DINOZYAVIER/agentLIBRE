@@ -18,6 +18,12 @@ pub struct AgentEventId(pub u64);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentEventData {
+    /// A call-budget reservation committed before inference dispatch.
+    ModelCallStarted {
+        key: AgentOperationKey,
+        delivery_attempt: NonZeroU32,
+        correction_attempt: u32,
+    },
     ModelOutputRejected {
         key: AgentOperationKey,
         delivery_attempt: NonZeroU32,

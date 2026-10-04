@@ -246,7 +246,6 @@ pub(crate) fn drive(
                     &driven.output,
                 )?;
                 emit_durable(progress, run.id);
-                revision += 1;
                 state = driven.state;
                 if state.status.is_terminal() {
                     return Ok(());
@@ -271,6 +270,15 @@ pub(crate) fn drive(
             deadline_at_ms,
         };
         let (previous_operation, operation, operation_output) = execution.complete(operation)?;
+        // Inference attempts commit call reservations while this checkpoint is
+        // Waiting. Resume from that durable state, including spent calls after retry.
+        let saved = dependencies.store.agent_run(run.id)?;
+        revision = saved.revision;
+        state = AgentFsmState {
+            status: saved.status,
+            checkpoint: saved.checkpoint,
+            usage: saved.usage,
+        };
         let message_id = operation_message_id(&operation);
         let resumed = fsm.transition(
             &state,

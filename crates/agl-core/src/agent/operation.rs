@@ -241,6 +241,7 @@ pub enum AgentOperationResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentOperationFailureKind {
+    LimitsExceeded,
     DecisionRequired,
     InvalidInput,
     InvalidResult,

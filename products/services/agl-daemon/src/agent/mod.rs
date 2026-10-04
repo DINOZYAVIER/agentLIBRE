@@ -32,6 +32,7 @@ mod compaction;
 pub(crate) mod memory_index;
 mod memory_io;
 pub(crate) mod memory_publication;
+mod memory_worker;
 mod operation_driver;
 mod progress;
 mod run_driver;

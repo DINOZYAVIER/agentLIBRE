@@ -66,7 +66,7 @@ bubblewrap with `--bind-fd` (introduced in
 Nix store executables; the development Nix shell provides the
 clients and GNU tools. A shell `agl serve` also creates a managed user service.
 
-The current alpha Store baseline is 22. Generated active config includes
+The current alpha Store baseline is 23. Generated active config includes
 service_git and forge_sync_timeout_seconds to generated active config. Re-run config apply for the new format.
 Older Store schemas are rejected; use the existing reviewed config/Store
 rotation workflow rather than deleting data. Retire previously installed execd
