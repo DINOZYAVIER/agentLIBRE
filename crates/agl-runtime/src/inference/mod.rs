@@ -15,6 +15,9 @@ pub use llama_host::{LlamaRuntimeProfile, LlamaServerConfig};
 pub use service::{
     InferenceCancellation, InferenceConfig, InferenceGenerateRequest, InferenceGenerateResult,
     InferenceGenerator, InferenceHandle, InferenceHealthSink, InferenceProgressSink,
-    InferenceRoute, InferenceService, InferenceServiceError, InvalidModelOutput,
-    RegisteredModelService,
+    InferenceRoute, InferenceService, InferenceServiceError, InferenceTokenizeRequest,
+    InvalidModelOutput, RegisteredModelService,
 };
+
+mod process;
+pub use process::{PrivateInference, ProcessAction, ProcessHost, ProcessResult};

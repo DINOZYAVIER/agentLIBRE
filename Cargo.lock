@@ -48,14 +48,15 @@ dependencies = [
  "agl-core",
  "agl-daemon",
  "agl-daemon-api",
- "agl-execution-api",
  "agl-runtime",
+ "agl-tool-api",
  "agl-tools",
  "anyhow",
  "ayeque-forge-core",
  "clap",
  "crossterm",
  "garde",
+ "libc",
  "nu-ansi-term",
  "pulldown-cmark",
  "reedline",
@@ -90,11 +91,11 @@ version = "1.0.0-alpha.19"
 dependencies = [
  "agl-core",
  "agl-daemon-api",
- "agl-execution-api",
  "agl-runtime",
  "agl-tool-api",
  "agl-tools",
  "anyhow",
+ "ayeque-forge-core",
  "chrono",
  "futures-util",
  "jsonschema",
@@ -121,36 +122,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-execd"
-version = "1.0.0-alpha.19"
-dependencies = [
- "agl-core",
- "agl-execution-api",
- "agl-runtime",
- "anyhow",
- "libc",
- "rusqlite",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "agl-execution-api"
-version = "1.0.0-alpha.19"
-dependencies = [
- "agl-core",
- "libc",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "agl-matrix-bridge"
 version = "1.0.0-alpha.19"
 dependencies = [
@@ -174,10 +145,10 @@ name = "agl-runtime"
 version = "1.0.0-alpha.19"
 dependencies = [
  "agl-core",
- "agl-execution-api",
  "agl-tool-api",
  "anyhow",
  "ayeque-forge-core",
+ "base64 0.22.1",
  "bytes",
  "hf-hub",
  "http-body-util",
@@ -211,7 +182,6 @@ name = "agl-tools"
 version = "1.0.0-alpha.19"
 dependencies = [
  "agl-core",
- "agl-execution-api",
  "agl-tool-api",
  "anyhow",
  "chrono",
@@ -521,11 +491,13 @@ dependencies = [
 [[package]]
 name = "ayeque-forge-core"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/DINOZYAVIER/ayeque-forge.git?rev=a466846#a4668465f98faf7e4c5bf99a17ddaadc2fcf56ae"
+source = "git+https://github.com/DINOZYAVIER/ayeque-forge.git?rev=113b311d951a76e80ca3654392e00a06e78c9a69#113b311d951a76e80ca3654392e00a06e78c9a69"
 dependencies = [
  "anyhow",
  "fs2",
+ "libc",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "toml 0.9.12+spec-1.1.0",
 ]

@@ -4,12 +4,13 @@ mod activation;
 pub mod agent;
 pub mod extension;
 mod forge;
+pub mod forge_verification;
 pub mod function;
 pub mod inference;
 pub mod model;
 pub mod package;
 pub mod skill;
-mod workspace_artifacts;
+mod workspace_forge;
 
 pub use activation::{
     ActivatedFunction, ActivationProgress, ModelServiceDisposition, RuntimeConfig, RuntimeHandle,
@@ -18,8 +19,9 @@ pub use activation::{
 pub use forge::{
     FunctionIdentity, function_identity, resolve_function_model, resolve_function_requirement,
 };
-pub use workspace_artifacts::{
-    ArtifactDeclaration, ResolvedWorkspaceArtifact, WORKSPACE_CONFIG_FILE_NAME, WorkspaceArtifacts,
-    read_workspace_artifact_declarations, read_workspace_output_directories,
-    resolve_workspace_artifacts, serialize_workspace_artifact_declarations,
+pub use workspace_forge::{
+    ForgeDeclaration, ResolvedForgeDeclaration, WORKSPACE_CONFIG_FILE_NAME, WorkspaceForge,
+    backend_declarations as workspace_backend_declarations, read_workspace_forge_declarations,
+    read_workspace_forge_declarations_at, read_workspace_output_directories,
+    resolve_workspace_forge, serialize_workspace_forge_declarations,
 };

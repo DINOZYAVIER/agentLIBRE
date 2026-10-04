@@ -25,6 +25,16 @@ pub(super) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum Command {
+    /// Archive one exact memory topic through the daemon.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Enable, disable or inspect autonomous Function schedules.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
     /// Generate and inspect an implementation plan.
     Plan {
         #[command(subcommand)]
@@ -34,6 +44,11 @@ pub(super) enum Command {
     Store {
         #[command(subcommand)]
         command: StoreCommand,
+    },
+    /// Manage reusable planner command output.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
     },
     /// Resume a durable Conversation.
     Resume(ResumeArgs),
@@ -69,15 +84,18 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: FunctionFamilyCommand,
     },
-    /// Manage workspace artifacts through AGL.
-    Artifact {
+    /// Manage Forge declarations through AGL.
+    Forge {
         #[command(subcommand)]
-        command: ArtifactCommand,
+        command: ForgeCommand,
     },
     /// Run one foreground turn with an explicit Function.
     Run {
         function_directory: String,
         prompt: String,
+        /// Attach an image; may be repeated.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<std::path::PathBuf>,
     },
     /// Read the durable public projection of one AgentRun.
     View { run_id: AgentRunId },
@@ -117,6 +135,46 @@ pub(super) enum PlanCommand {
     /// View durable slice execution state.
     Status {
         plan_id: agl_core::implementation_plan::PlanId,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum MemoryCommand {
+    Archive {
+        slug: String,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ScheduleCommand {
+    /// Enable a Function schedule and display its permissions.
+    Enable {
+        function_id: String,
+        #[arg(long, value_name = "PATH")]
+        workspace: PathBuf,
+    },
+    /// Disable future triggers and cancel its active autonomous Run.
+    Disable {
+        function_id: String,
+        #[arg(long, value_name = "PATH")]
+        workspace: PathBuf,
+    },
+    /// Show scheduled Functions, including those not enabled.
+    Show {
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum CacheCommand {
+    /// Remove the planner cache for this workspace.
+    Clear {
+        /// Workspace directory; defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
     },
 }
 
@@ -169,7 +227,12 @@ pub(super) enum FunctionFamilyCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub(super) enum ArtifactCommand {
+pub(super) enum ForgeCommand {
+    /// Record a human choice for a Forge content check.
+    Verification {
+        #[command(subcommand)]
+        command: ForgeVerificationCommand,
+    },
     /// Declare and materialize a workspace artifact.
     Add {
         #[arg(long)]
@@ -204,10 +267,26 @@ pub(super) enum ArtifactCommand {
     Remove { id: String },
     /// Reconcile internal artifact state from agentLIBRE.toml.
     Sync,
-    /// Import the current verified artifact catalog into agentLIBRE.toml.
-    Migrate,
     /// List declared artifacts and their verified materializations.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum ForgeVerificationCommand {
+    Set {
+        id: String,
+        file: String,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long, value_enum)]
+        decision: ForgeVerificationDecision,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub(super) enum ForgeVerificationDecision {
+    Verify,
+    Skip,
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,10 +324,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_artifact_add_contract() {
+    fn parses_forge_add_contract() {
         let cli = Cli::try_parse_from([
             "agl",
-            "artifact",
+            "forge",
             "add",
             "--id",
             "agentlibre.memory",
@@ -264,9 +343,9 @@ mod tests {
             "memory",
         ])
         .unwrap();
-        let Some(Command::Artifact {
+        let Some(Command::Forge {
             command:
-                ArtifactCommand::Add {
+                ForgeCommand::Add {
                     id,
                     kind,
                     schema,
@@ -276,7 +355,7 @@ mod tests {
                 },
         }) = cli.command
         else {
-            panic!("artifact add was not parsed");
+            panic!("forge add was not parsed");
         };
         assert_eq!(id, "agentlibre.memory");
         assert_eq!(kind, "memory");

@@ -53,6 +53,48 @@ impl AgentProtocolRequest {
             ));
         }
         match &self.command {
+            AgentCommand::MemoryArchive {
+                workspace_path,
+                slug,
+            } => {
+                if workspace_path.is_empty()
+                    || workspace_path.len() > 32_768
+                    || !std::path::Path::new(workspace_path).is_absolute()
+                    || !agl_core::agent::is_valid_slug(slug)
+                {
+                    return Err(ProtocolError::invalid(
+                        "memory archive requires an absolute workspace path and valid exact slug",
+                    ));
+                }
+            }
+            AgentCommand::ScheduleEnable { workspace_path, .. }
+            | AgentCommand::ScheduleDisable { workspace_path, .. } => {
+                if workspace_path.is_empty()
+                    || workspace_path.len() > 32_768
+                    || !std::path::Path::new(workspace_path).is_absolute()
+                {
+                    return Err(ProtocolError::invalid(
+                        "schedule workspace_path must be an absolute path containing 1 to 32768 UTF-8 bytes",
+                    ));
+                }
+            }
+            AgentCommand::ScheduleShow {
+                workspace_path: Some(path),
+            } if path.is_empty()
+                || path.len() > 32_768
+                || !std::path::Path::new(path).is_absolute() =>
+            {
+                return Err(ProtocolError::invalid(
+                    "schedule workspace_path must be an absolute path containing 1 to 32768 UTF-8 bytes",
+                ));
+            }
+            AgentCommand::StartRun { spec }
+                if !matches!(&spec.origin, AgentRunOrigin::User { .. }) =>
+            {
+                return Err(ProtocolError::invalid(
+                    "autonomous Run origins are reserved for the scheduler",
+                ));
+            }
             AgentCommand::PlanCreate {
                 function_path,
                 workspace_path,
@@ -146,6 +188,21 @@ impl AgentProtocolRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentCommand {
+    MemoryArchive {
+        workspace_path: String,
+        slug: String,
+    },
+    ScheduleEnable {
+        function_id: agl_core::package::PackageId,
+        workspace_path: String,
+    },
+    ScheduleDisable {
+        function_id: agl_core::package::PackageId,
+        workspace_path: String,
+    },
+    ScheduleShow {
+        workspace_path: Option<String>,
+    },
     PlanCreate {
         function_path: String,
         workspace_path: String,
@@ -286,6 +343,24 @@ pub enum AgentReply {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentResponse {
+    MemoryArchived {
+        slug: String,
+        revision: String,
+    },
+    MemoryArchiveDeferred {
+        slug: String,
+        reason: String,
+        details: Option<agl_core::CanonicalJson>,
+    },
+    ScheduleEnabled {
+        schedule: Box<ScheduleView>,
+    },
+    ScheduleDisabled {
+        schedule: Box<ScheduleView>,
+    },
+    Schedules {
+        schedules: Vec<ScheduleView>,
+    },
     PlanCreated {
         plan: Box<PlanArtifactView>,
         conversation: ConversationView,
@@ -333,6 +408,22 @@ pub enum AgentResponse {
     Messages {
         page: AgentMessagePage,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleView {
+    pub function: ExactPackageRef,
+    pub workspace_path: Option<String>,
+    pub conversation_id: Option<ConversationId>,
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub prompt: String,
+    pub max_run_seconds: u64,
+    pub events: Vec<String>,
+    pub permissions: serde_json::Value,
+    pub last_run: Option<AgentRunId>,
+    pub next_tick_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -404,6 +495,47 @@ impl ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_start_run_cannot_inject_timer_or_file_events() {
+        let conversation_id = ConversationId::generate();
+        for origin in [
+            serde_json::json!({"type": "timer", "conversation_id": conversation_id,
+                "function_id": "test.function", "tick_at_ms": 1000}),
+            serde_json::json!({"type": "file_event", "conversation_id": conversation_id,
+                "function_id": "test.function", "event_id": RequestId::generate(),
+                "paths": ["source.txt"]}),
+        ] {
+            let request = AgentProtocolRequest::new(
+                RequestId::generate(),
+                AgentCommand::StartRun {
+                    spec: AgentRunSpec {
+                        origin: serde_json::from_value(origin).unwrap(),
+                        input: Content::text("task").unwrap(),
+                        reasoning: None,
+                    },
+                },
+            );
+            assert_eq!(
+                request.validate().unwrap_err().code,
+                ProtocolErrorCode::InvalidRequest
+            );
+        }
+        let request = AgentProtocolRequest::new(
+            RequestId::generate(),
+            AgentCommand::StartRun {
+                spec: AgentRunSpec {
+                    origin: AgentRunOrigin::User {
+                        conversation_id,
+                        message_id: MessageId::generate(),
+                    },
+                    input: Content::text("task").unwrap(),
+                    reasoning: None,
+                },
+            },
+        );
+        request.validate().unwrap();
+    }
 
     #[test]
     fn event_page_limit_is_bounded() {

@@ -34,9 +34,9 @@ The directory name is the local UI name and may differ from the manifest
 `id`. Manifests expose their entity schema directly; there is no public
 Package wrapper.
 
-The AGL repository-root `agentLIBRE.toml` declares the Function and its Agent,
+The configured catalog's `agentLIBRE.toml` declares the Function and its Agent,
 Model, Skill and Extension artifacts, including Git source, full commit SHA
-and path within that source. `agl artifact sync` reconciles these declarations
+and path within that source. `agl forge sync` reconciles these declarations
 with Forge's generated catalog, lock and materialized directories.
 
 Activation resolves the Function directory and every referenced entity through
@@ -60,7 +60,7 @@ the runtime hard maximum of 65,536 serialized bytes.
 
 Every field is set directly in the Function's `[limits]` table. After changing
 the Function source, commit it in its source repository and update the
-Function artifact's pinned revision through `agl artifact update` in the AGL
+Function artifact's pinned revision through `agl forge update` in the AGL
 workspace. The new limits apply to new Conversations; an existing Conversation
 retains its immutable Function snapshot.
 
@@ -156,3 +156,47 @@ The dedicated `agentlibre.search-qwen38-27b-reasoning` Function is the first
 search consumer. It admits `agentlibre.searxng:search` and grants
 `agentlibre.searxng:query` for logical service `ayeque-search` with the sorted
 source set `web`, `wikipedia`. Existing chat Functions do not admit search.
+
+Function and Family resolution uses `${data}/source/` by default. Set an
+absolute `[forge] catalog_root` in the user TOML to select another catalog.
+A missing catalog produces an error; resolution never searches the build tree.
+The catalog path is stored in generated active configuration and passed to the
+runtime separately from the conversation workspace.
+
+## Autonomous schedules
+
+A Function can declare timer and workspace file triggers:
+
+```toml
+[schedule]
+interval_seconds = 60
+prompt = "Inspect changes and report the result"
+max_run_seconds = 30
+events = ["file:src/main.rs"]
+```
+
+Both numbers must be positive. Events name relative workspace files. The
+Function's permissions apply to each autonomous Run. Declaring a schedule
+leaves it disabled until `agl schedule enable FUNCTION_ID --workspace PATH`.
+Enable displays its permissions. `agl schedule show [--workspace PATH]` lists
+scheduled Functions, enabled state, triggers, last Run and next timer.
+
+Ticks follow a fixed grid from enable; the first occurs after one interval.
+An active Run of the same Function in that workspace skips the trigger and
+logs the skip. Different workspaces can run concurrently. A manual start
+gets Busy while that workspace's autonomous Run is active.
+
+A schedule has a separate persistent Conversation. Previous Run messages
+become its history; the configured prompt is added to Run instructions,
+without a User message. File changes during an active Run of this Function
+are discarded, including external changes. The baseline is refreshed after
+completion; events from that interval are not replayed. Restart skips elapsed ticks
+and offline file changes, then resumes the original grid with a fresh baseline.
+
+`agl schedule disable FUNCTION_ID --workspace PATH` prevents future triggers
+and cancels the active autonomous Run and its executions. Re-enabling the
+same Function preserves history and starts a new grid. Repeated enable of an
+already enabled unchanged Function preserves both history and grid. Enable
+with a changed snapshot creates a new schedule Conversation; the previous
+Conversation remains available. Source updates alone do not change an enabled
+schedule's snapshot or permissions.

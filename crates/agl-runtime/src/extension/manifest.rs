@@ -245,8 +245,10 @@ delivery = "at_most_once"
             command
                 .input_schema
                 .validate(
-                    &agl_core::CanonicalJson::new(serde_json::json!({"argv":["cargo","test"]}))
-                        .unwrap()
+                    &agl_core::CanonicalJson::new(
+                        serde_json::json!({"action":"start","argv":["cargo","test"]})
+                    )
+                    .unwrap()
                 )
                 .is_ok()
         );

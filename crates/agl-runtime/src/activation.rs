@@ -43,6 +43,7 @@ const DEFAULT_QUEUE_CAPACITY: u32 = 32;
 
 pub struct RuntimeConfig {
     pub data_root: PathBuf,
+    pub catalog_root: PathBuf,
     pub inference: InferenceConfig,
     pub extensions: Vec<ExtensionBindings>,
     pub max_resident_bytes: Option<u64>,
@@ -83,6 +84,8 @@ pub struct ActivatedFunction {
     pub function_id: PackageId,
     pub function_version: PackageVersion,
     pub function_digest: PackageDigest,
+    pub schedule: Option<crate::function::FunctionSchedule>,
+    pub permissions: crate::function::FunctionPermissions,
     pub snapshot: AgentRunSnapshot,
     pub service: ModelServiceDisposition,
     pub progress: ActivationProgress,
@@ -101,6 +104,7 @@ pub struct RuntimeHandle {
 
 struct RuntimeShared {
     data_root: PathBuf,
+    catalog_root: PathBuf,
     inference: crate::inference::InferenceHandle,
     health: crate::inference::InferenceHealthSink,
     engine_build_digest: PackageDigest,
@@ -157,6 +161,10 @@ impl RuntimeService {
             config.data_root.is_absolute(),
             "runtime data root must be absolute"
         );
+        ensure!(
+            config.catalog_root.is_absolute(),
+            "Forge catalog root must be absolute"
+        );
         std::fs::create_dir_all(&config.data_root)?;
         let data_root = config.data_root.canonicalize()?;
         let engine_build_digest =
@@ -170,6 +178,7 @@ impl RuntimeService {
         ensure!(max_resident_bytes > 0, "runtime memory budget is empty");
         let shared = Arc::new(RuntimeShared {
             data_root,
+            catalog_root: config.catalog_root,
             inference,
             health: config.health,
             engine_build_digest,
@@ -221,6 +230,20 @@ impl Drop for RuntimeService {
 }
 
 impl RuntimeHandle {
+    pub fn scheduled_functions(&self) -> Result<Vec<crate::forge::ScheduledFunction>> {
+        crate::forge::scheduled_functions(&self.shared.catalog_root)
+    }
+
+    pub fn scheduled_function_directory(&self, id: &PackageId) -> Result<PathBuf> {
+        let requirement = crate::function::parse_function_requirement(&format!("function:{id}@*"))?;
+        Ok(crate::forge::resolve_function_requirement(
+            id,
+            &requirement.version,
+            &self.shared.catalog_root,
+        )?
+        .directory)
+    }
+
     pub async fn activate(
         &self,
         function_directory: impl AsRef<Path>,
@@ -233,8 +256,9 @@ impl RuntimeHandle {
         let function_directory = function_directory.as_ref().to_path_buf();
         let workspace_root = workspace_root.as_ref().to_path_buf();
         let resolve_workspace = workspace_root.clone();
+        let catalog_root = self.shared.catalog_root.clone();
         let resolved = tokio::task::spawn_blocking(move || {
-            resolve_function(function_directory, resolve_workspace)
+            resolve_function(function_directory, resolve_workspace, catalog_root)
         })
         .await
         .context("Function source verification task failed")??;
@@ -271,6 +295,12 @@ impl RuntimeHandle {
         drop(registry);
         let artifact = self
             .verified_runtime_artifact(&runtime.artifact)
+            .map_err(|_| InferenceServiceError::InvalidRequest)?;
+        let mmproj = runtime
+            .mmproj
+            .as_ref()
+            .map(|artifact| self.verified_runtime_artifact(artifact))
+            .transpose()
             .map_err(|_| InferenceServiceError::InvalidRequest)?;
         let adapters = runtime
             .adapters
@@ -317,6 +347,7 @@ impl RuntimeHandle {
                 model: model.clone(),
                 runtime: runtime.clone(),
                 artifact,
+                mmproj,
                 adapters,
             },
             self.shared.health.clone(),
@@ -385,6 +416,10 @@ impl RuntimeHandle {
         validate_artifact_kinds(&graph, &resolved.manifest.inference)?;
         validate_reasoning_selection(&resolved.manifest.inference, &graph.model.manifest)?;
         let model_artifact = self.acquire_model(&graph.model).await?;
+        if let Some(projector) = mmproj_ref(&graph.model.manifest) {
+            self.verified_runtime_artifact(&projector)
+                .context("mmproj is not downloaded or failed verification; download the selected model through `agl chat`")?;
+        }
         let mut adapter_artifacts = Vec::new();
         for adapter in &graph.adapters {
             adapter_artifacts.push(self.acquire_model(adapter).await?);
@@ -413,6 +448,10 @@ impl RuntimeHandle {
         ) {
             validate_reasoning_selection(&config.inference, &model.manifest)?;
             let artifact = self.acquire_model(model).await?;
+            if let Some(projector) = mmproj_ref(&model.manifest) {
+                self.verified_runtime_artifact(&projector)
+                    .context("recovery mmproj is not downloaded or failed verification")?;
+            }
             let recovery_runtime = realize_model_runtime(
                 &config.inference,
                 model,
@@ -457,6 +496,8 @@ impl RuntimeHandle {
             function_id: resolved.manifest.id,
             function_version: resolved.manifest.version,
             function_digest,
+            schedule: resolved.manifest.schedule,
+            permissions: resolved.manifest.permissions,
             snapshot,
             service,
             progress: ActivationProgress {
@@ -568,6 +609,17 @@ impl RuntimeHandle {
 }
 
 impl InferenceRoute for RuntimeHandle {
+    fn count_text_tokens(
+        &self,
+        request: crate::inference::InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError> {
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return Err(InferenceServiceError::Stopped);
+        }
+        let _lease = self.lease_service(&request.model, &request.runtime)?;
+        self.shared.inference.count_text_tokens(request)
+    }
+
     fn measure(
         &self,
         request: InferenceGenerateRequest,
@@ -1090,17 +1142,19 @@ fn realize_model_runtime(
             kv_cache_type_v: runtime_kv(selection.kv_cache_type_v),
         },
     });
+    let mmproj = mmproj_ref(&model.manifest);
     let key = service_key(
         &artifact,
+        mmproj.as_ref(),
         &load,
         speculative,
         &adapters,
-        slots,
-        queue_capacity,
+        (slots, queue_capacity),
         inference.service.continuous_batching,
     )?;
     Ok(ModelRuntimeSelection {
         artifact,
+        mmproj,
         dialect: match model.manifest.dialect {
             crate::model::ModelDialect::Generic => ModelDialect::Generic,
             crate::model::ModelDialect::Qwen3 => ModelDialect::Qwen3,
@@ -1152,11 +1206,11 @@ fn validate_reasoning_selection(
 
 fn service_key(
     artifact: &ModelArtifactRef,
+    mmproj: Option<&ModelArtifactRef>,
     load: &ModelLoadSelection,
     speculative: Option<SpeculativeSelection>,
     adapters: &[ModelAdapterSelection],
-    slots: u32,
-    queue_capacity: u32,
+    capacity: (u32, u32),
     continuous_batching: bool,
 ) -> Result<PackageDigest> {
     #[derive(Serialize)]
@@ -1173,6 +1227,7 @@ fn service_key(
     #[derive(Serialize)]
     struct Key<'a> {
         artifact: ArtifactKey,
+        mmproj: Option<ArtifactKey>,
         load: &'a ModelLoadSelection,
         speculative: Option<SpeculativeSelection>,
         adapters: Vec<AdapterKey>,
@@ -1186,6 +1241,11 @@ fn service_key(
             digest: artifact.digest,
             bytes: artifact.bytes,
         },
+        mmproj: mmproj.map(|artifact| ArtifactKey {
+            kind: artifact.kind,
+            digest: artifact.digest,
+            bytes: artifact.bytes,
+        }),
         load,
         speculative,
         adapters: adapters
@@ -1199,8 +1259,8 @@ fn service_key(
                 scale: adapter.scale,
             })
             .collect(),
-        slots,
-        queue_capacity,
+        slots: capacity.0,
+        queue_capacity: capacity.1,
         continuous_batching,
     })?;
     let mut hasher = Sha256::new();
@@ -1215,13 +1275,17 @@ fn same_service_plan(left: &ModelRuntimeSelection, right: &ModelRuntimeSelection
 
 fn estimated_resident_bytes(runtime: &ModelRuntimeSelection) -> u64 {
     let gpu = !matches!(runtime.load.gpu_layers, GpuLayerSelection::Count(0));
-    let artifacts = runtime.artifact.bytes.saturating_add(
-        runtime
-            .adapters
-            .iter()
-            .map(|adapter| adapter.artifact.bytes)
-            .sum(),
-    );
+    let artifacts = runtime
+        .artifact
+        .bytes
+        .saturating_add(runtime.mmproj.as_ref().map_or(0, |artifact| artifact.bytes))
+        .saturating_add(
+            runtime
+                .adapters
+                .iter()
+                .map(|adapter| adapter.artifact.bytes)
+                .sum(),
+        );
     let contexts = u64::from(runtime.load.context_tokens)
         .saturating_mul(u64::from(runtime.service.slots))
         .saturating_mul(if gpu { 128 * 1024 } else { 256 * 1024 });
@@ -1250,6 +1314,15 @@ fn normalize_tensor_split(values: &[f64]) -> Result<Vec<f64>> {
         "normalized tensor_split contains a nonpositive value"
     );
     Ok(normalized)
+}
+
+fn mmproj_ref(manifest: &ModelManifest) -> Option<ModelArtifactRef> {
+    manifest.mmproj.as_ref().map(|artifact| ModelArtifactRef {
+        kind: ModelArtifactKind::Gguf,
+        url: artifact.url.clone(),
+        digest: PackageDigest::from_bytes(*artifact.sha256.as_bytes()),
+        bytes: artifact.bytes,
+    })
 }
 
 fn artifact_ref(manifest: &ModelManifest) -> Result<ModelArtifactRef> {
@@ -1450,6 +1523,7 @@ mod tests {
 
     fn runtime_selection() -> ModelRuntimeSelection {
         ModelRuntimeSelection {
+            mmproj: None,
             artifact: ModelArtifactRef {
                 kind: ModelArtifactKind::Gguf,
                 url: "https://example.invalid/model.gguf".to_owned(),
@@ -1501,6 +1575,43 @@ mod tests {
                 idle_timeout_ms: 900_000,
             },
         }
+    }
+
+    #[test]
+    fn mmproj_changes_service_identity_and_resident_admission() {
+        let mut runtime = runtime_selection();
+        let key = |runtime: &ModelRuntimeSelection| {
+            service_key(
+                &runtime.artifact,
+                runtime.mmproj.as_ref(),
+                &runtime.load,
+                runtime.speculative,
+                &runtime.adapters,
+                (runtime.service.slots, runtime.service.queue_capacity),
+                runtime.service.continuous_batching,
+            )
+            .unwrap()
+        };
+        let original = runtime.clone();
+        let initial_key = key(&runtime);
+        let initial_bytes = estimated_resident_bytes(&runtime);
+        runtime.mmproj = Some(ModelArtifactRef {
+            kind: ModelArtifactKind::Gguf,
+            url: "https://example.invalid/projector.gguf".into(),
+            digest: PackageDigest::from_bytes([7; 32]),
+            bytes: 19,
+        });
+        assert_ne!(initial_key, key(&runtime));
+        assert!(!runtime.shares_service_with(&original));
+        assert_eq!(estimated_resident_bytes(&runtime), initial_bytes + 38);
+        let projector_key = key(&runtime);
+        let projector_runtime = runtime.clone();
+        runtime.mmproj.as_mut().unwrap().url = "https://other.invalid/projector.gguf".into();
+        assert_eq!(projector_key, key(&runtime));
+        assert!(runtime.shares_service_with(&projector_runtime));
+        runtime.mmproj.as_mut().unwrap().digest = PackageDigest::from_bytes([8; 32]);
+        assert_ne!(projector_key, key(&runtime));
+        assert!(!runtime.shares_service_with(&projector_runtime));
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 This crate owns the user-facing `agl` CLI entrypoint.
 It owns argument parsing, configuration composition, the interactive REPL, and
-human-readable rendering. Delegate Agent state to `agl-daemon` and every child
-process or PTY to `agl-execd`.
+human-readable rendering. Delegate Agent state to `agl-daemon` and execution to the daemon adapter using systemd/tmux. `agl serve` requires
+a user manager; a shell invocation runs through a transient user service.
 
 ## Directory map
 

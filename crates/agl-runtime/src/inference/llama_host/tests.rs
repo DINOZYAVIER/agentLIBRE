@@ -47,7 +47,7 @@ fn cold_registration_never_launches_and_failed_unload_retains_service() {
     runtime.artifact.digest = artifact_digest;
     runtime.artifact.bytes = 9;
     let key = runtime.service.key;
-    let execution = BlockingExecutionClient::new(directory.join("absent-execd.sock"));
+    let execution = unavailable_process();
     let host = LlamaHost {
         executable: directory.join("absent-llama-server"),
         execution: execution.clone(),
@@ -58,6 +58,7 @@ fn cold_registration_never_launches_and_failed_unload_retains_service() {
         services: Mutex::new(BTreeMap::new()),
     };
     host.register_service(RegisteredModelService {
+        mmproj: None,
         model: agl_core::agent::ModelDefinitionRef {
             id: crate::package::PackageId::new("test-model").unwrap(),
             version: crate::package::PackageVersion::new("1.0.0").unwrap(),
@@ -98,88 +99,70 @@ fn cold_registration_never_launches_and_failed_unload_retains_service() {
 
 #[test]
 fn engine_release_requires_confirmed_reap_and_keeps_unknown_ownership() {
-    use agl_execution_api::{
-        ExecutionCommand, ExecutionOutput, ExecutionProtocolRequest, ExecutionProtocolResponse,
-        ExecutionResponse, ExecutionStatus,
+    use crate::inference::{ProcessAction, ProcessResult};
+    use agl_core::execution::{
+        ExecutionOutput, ExecutionOutputStream, ExecutionStatus, ExecutionStreamStatus,
     };
-    use std::io::BufRead as _;
-
     let directory = private_directory().unwrap();
-    let socket = directory.join("execd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
     let execution_id = ExecutionId::generate();
-    let server = std::thread::spawn(move || {
-        for index in 0..5 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut line = String::new();
-            std::io::BufReader::new(&mut stream)
-                .read_line(&mut line)
-                .unwrap();
-            let request: ExecutionProtocolRequest = serde_json::from_str(&line).unwrap();
-            let response = match request.command {
-                ExecutionCommand::Signal {
-                    execution_id: id,
-                    signal: ExecutionSignal::Terminate,
-                } => {
-                    assert_eq!(id, execution_id);
-                    assert!(matches!(index, 0 | 2));
-                    ExecutionResponse::Acknowledged
-                }
-                ExecutionCommand::Inspect { execution_id: id } => {
-                    assert_eq!(id, execution_id);
-                    assert!(matches!(index, 1 | 3));
-                    ExecutionResponse::Status {
-                        status: ExecutionStatus {
-                            execution_id,
-                            terminal_id: None,
-                            owner: ExecutionOwner::Runtime {
-                                component: "inference".into(),
-                            },
-                            state: if index == 1 {
-                                ExecutionState::OutcomeUnknown
-                            } else {
-                                ExecutionState::Exited
-                            },
-                            outcome: Some(if index == 1 {
-                                ExecutionOutcome::UnknownAfterServiceRestart
-                            } else {
-                                ExecutionOutcome::Terminated
-                            }),
-                            output_bytes: 0,
-                            output_truncated: false,
-                        },
-                    }
-                }
-                ExecutionCommand::Read {
-                    execution_id: id,
-                    after,
-                    ..
-                } => {
-                    assert_eq!(id, execution_id);
-                    assert_eq!(index, 4);
-                    ExecutionResponse::Output {
-                        output: ExecutionOutput {
-                            execution_id,
-                            after,
-                            next: after,
-                            chunks: vec![],
-                            eof: true,
-                            truncated: false,
-                        },
-                    }
-                }
-                other => panic!("unexpected release request: {other:?}"),
-            };
-            serde_json::to_writer(
-                &mut stream,
-                &ExecutionProtocolResponse::success(request.request_id, response),
-            )
-            .unwrap();
-            stream.write_all(b"\n").unwrap();
-        }
+    let calls = Arc::new(Mutex::new(0));
+    let observed = calls.clone();
+    let execution = ProcessHost::new(move |action| {
+        let mut count = observed.lock().unwrap();
+        let index = *count;
+        *count += 1;
+        Ok(match action {
+            ProcessAction::Stop(id) => {
+                assert_eq!(id, execution_id);
+                assert!(matches!(index, 0 | 2));
+                ProcessResult::Stopped
+            }
+            ProcessAction::Inspect(id) => {
+                assert_eq!(id, execution_id);
+                assert!(matches!(index, 1 | 3));
+                ProcessResult::Status(ExecutionStatus {
+                    execution_id,
+                    state: if index == 1 {
+                        ExecutionState::OutcomeUnknown
+                    } else {
+                        ExecutionState::Exited
+                    },
+                    outcome: if index == 1 {
+                        None
+                    } else {
+                        Some(ExecutionOutcome::Signal {
+                            signal: libc::SIGTERM,
+                        })
+                    },
+                    stopped_by: None,
+                    stdout: Some(ExecutionStreamStatus::default()),
+                    stderr: Some(ExecutionStreamStatus::default()),
+                    terminal: None,
+                    outputs_removed: false,
+                })
+            }
+            ProcessAction::Read {
+                execution_id: id,
+                offset,
+                ..
+            } => {
+                assert_eq!(id, execution_id);
+                assert_eq!(index, 4);
+                ProcessResult::Output(ExecutionOutput {
+                    execution_id,
+                    stream: ExecutionOutputStream::Stderr,
+                    offset,
+                    next: offset,
+                    data: vec![],
+                    eof: true,
+                    truncated: false,
+                })
+            }
+            _ => panic!("unexpected release action"),
+        })
     });
     let engine = ResidentEngine {
-        execution: BlockingExecutionClient::new(socket),
+        execution,
         execution_id,
         directory: directory.clone(),
         socket_path: directory.join("llama.sock"),
@@ -200,8 +183,8 @@ fn engine_release_requires_confirmed_reap_and_keeps_unknown_ownership() {
     engine.terminate().unwrap();
     assert!(engine.terminated.load(Ordering::Acquire));
     assert!(!directory.exists());
-    server.join().unwrap();
-    // Confirmed release is idempotent and needs no reachable execd socket.
+    assert_eq!(*calls.lock().unwrap(), 5);
+    // Confirmed release is idempotent.
     engine.terminate().unwrap();
 }
 
@@ -568,7 +551,7 @@ fn generator_requires_the_exact_private_engine_bundle_digest() {
                 executable: executable.clone(),
             },
             engine_build,
-            BlockingExecutionClient::new("/test-does-not-use-execd"),
+            unavailable_process(),
             &RestoredInferenceHealth::default(),
         )
         .is_ok()
@@ -579,7 +562,7 @@ fn generator_requires_the_exact_private_engine_bundle_digest() {
         generator(
             LlamaServerConfig { executable },
             engine_build,
-            BlockingExecutionClient::new("/test-does-not-use-execd"),
+            unavailable_process(),
             &RestoredInferenceHealth::default(),
         ),
         Err(InferenceServiceError::InvalidRequest)
@@ -894,10 +877,7 @@ fn device_loss_requires_an_exact_backend_symbol() {
         })
     );
     assert_eq!(
-        worker_failure_kind(
-            &InferenceServiceError::OutcomeUnknown,
-            Some(ExecutionOutcome::UnknownAfterServiceRestart),
-        ),
+        worker_failure_kind(&InferenceServiceError::OutcomeUnknown, None,),
         None
     );
     assert_eq!(
@@ -1273,4 +1253,136 @@ fn cancellation_requires_a_terminal_error_frame() {
     assert!(error_requires_engine_restart(
         &InferenceServiceError::OutcomeUnknown
     ));
+}
+
+fn unavailable_process() -> ProcessHost {
+    ProcessHost::new(|_| Err("process host unavailable".into()))
+}
+
+#[test]
+fn plain_text_tokenizer_posts_raw_text_without_prompt_or_generation() {
+    use std::io::BufRead as _;
+    let directory = private_directory().unwrap();
+    let socket = directory.join("tokenize.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        for response in [r#"{"tokens":[7,11,42]}"#, r#"{"tokens":["bad"]}"#] {
+            let (connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(connection);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line, "POST /tokenize HTTP/1.1\r\n");
+            let mut size = None;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(!line.is_empty());
+                if let Some(length) = line.to_lowercase().strip_prefix("content-length:") {
+                    size = Some(length.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; size.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"content":"raw 世界 text", "add_special":false, "parse_special":false})
+            );
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .unwrap();
+        }
+    });
+    assert_eq!(
+        count_plain_text_tokens(&socket, "raw 世界 text").unwrap(),
+        3
+    );
+    assert_eq!(
+        count_plain_text_tokens(&socket, "raw 世界 text"),
+        Err(InferenceServiceError::InvalidResult)
+    );
+    server.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mmproj_uses_fd_after_adapters_and_registration_requires_verified_binding() {
+    let directory = private_directory().unwrap();
+    let model_path = directory.join("model.gguf");
+    let projector_path = directory.join("projector.gguf");
+    fs::write(&model_path, b"GGUF-model").unwrap();
+    fs::write(&projector_path, b"GGUF-projector").unwrap();
+    let import = |path: PathBuf, bytes: &[u8]| {
+        crate::model::import_model(&crate::model::ModelImportRequest {
+            path,
+            expected_digest: model_artifact_digest(PackageDigest::from_bytes(hash32(bytes)))
+                .unwrap(),
+        })
+        .unwrap()
+    };
+    let artifact = import(model_path, b"GGUF-model");
+    let projector = import(projector_path.clone(), b"GGUF-projector");
+    let mut runtime = crate::inference::service::test_runtime_selection();
+    runtime.artifact.digest = PackageDigest::from_bytes(hash32(b"GGUF-model"));
+    runtime.artifact.bytes = 10;
+    runtime.mmproj = Some(agl_core::agent::ModelArtifactRef {
+        kind: ModelArtifactKind::Gguf,
+        url: "https://example.invalid/projector.gguf".into(),
+        digest: PackageDigest::from_bytes(hash32(b"GGUF-projector")),
+        bytes: 14,
+    });
+    let registration = RegisteredModelService {
+        model: agl_core::agent::ModelDefinitionRef {
+            id: crate::package::PackageId::new("vision").unwrap(),
+            version: crate::package::PackageVersion::new("1.0.0").unwrap(),
+            digest: runtime.artifact.digest,
+        },
+        runtime: runtime.clone(),
+        artifact,
+        mmproj: Some(projector),
+        adapters: vec![],
+    };
+    let build = EngineBuildDigest::from_bytes(*runtime.load.engine_build_digest.as_bytes());
+    validate_registration(&registration, build).unwrap();
+    let mut missing = registration.clone();
+    missing.mmproj = None;
+    assert!(validate_registration(&missing, build).is_err());
+    let mut wrong = registration.clone();
+    wrong.runtime.mmproj.as_mut().unwrap().digest = PackageDigest::from_bytes([0; 32]);
+    assert!(validate_registration(&wrong, build).is_err());
+    let arguments = launch_arguments(&runtime, &profile()).unwrap();
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--mmproj", "/proc/self/fd/201"])
+    );
+    runtime
+        .adapters
+        .push(agl_core::agent::ModelAdapterSelection {
+            model: registration.model.clone(),
+            artifact: runtime.artifact.clone(),
+            scale: 1.0,
+        });
+    let arguments = launch_arguments(&runtime, &profile()).unwrap();
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--mmproj", "/proc/self/fd/202"])
+    );
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--lora-scaled", "/proc/self/fd/201"])
+    );
+    fs::write(projector_path, b"GGUF-corrupted").unwrap();
+    assert!(validate_registration(&registration, build).is_err());
+    fs::remove_dir_all(directory).unwrap();
 }

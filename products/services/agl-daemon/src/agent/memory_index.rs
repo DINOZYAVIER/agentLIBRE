@@ -1,127 +1,385 @@
-//! Disposable SQLite FTS5 search index for durable memory claims (M2 tasks 1-2).
-//!
-//! Implements the one-way build from entry files to a claims table plus an
-//! FTS5 virtual table, per `reports/semantic-memory.md` sections 12.1-12.2
-//! and `reports/m2-implementation-tasks.md` tasks 1-2.
-//!
-//! - The index is a machine-local cache; entry files remain canonical.
-//! - Full rebuild on demand; no incremental sync.
-//! - Per-entry isolation: a parse or I/O error skips one entry only (Q4).
-//! - Atomic publish: build into a temp file, rename under the workspace
-//!   mutation lock only if the generation is unchanged (Q2).
-//! - Normalization: lowercase, identifier split, Porter stem (section 12.2).
-
+//! Disposable FTS5 projection of a Forge memory source. The source read
+//! guard prevents publication during rebuild/query; cache metadata binds the
+//! canonical workspace and four-field source declaration.
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use agl_core::agent::{FileSource, MemoryEntry, StoredClaim, ClaimStatus, parse_entry};
-use rusqlite::Connection;
+use agl_core::AgentRunId;
+use agl_core::agent::{ClaimStatus, MemoryEntry, StoredClaim, parse_entry};
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, params};
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use stemmer::{Language, Stemmer};
+use stemmer::Stemmer;
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-/// Failure to build or open the memory index.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IndexError {
-    /// The workspace root is missing or not canonicalizable.
-    RootUnavailable,
-    /// The `memory/` or `memory/entries/` directory structure is wrong.
-    LayoutError(String),
-    /// An entry file could not be read.
-    Unreadable(String),
-    /// The index directory could not be created.
-    DirError(String),
-    /// A SQLite operation failed.
-    Sqlite(String),
-    /// The stored workspace root in the DB does not match the expected root.
-    RootMismatch { stored: String, expected: String },
-    /// The index file is missing (not an error for rebuild; for open it is).
-    Missing,
-    /// The generation changed during rebuild (after one retry).
-    GenerationConflict,
-    /// The workspace mutation lock is poisoned.
-    LockPoisoned,
+pub(crate) fn index_db_path(data: &Path, workspace: &Path) -> PathBuf {
+    let digest = Sha256::digest(workspace.as_os_str().as_encoded_bytes());
+    let name = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    data.join("store/memory-index").join(format!("{name}.db"))
 }
 
-impl fmt::Display for IndexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RootUnavailable => write!(f, "workspace root is unavailable"),
-            Self::LayoutError(path) => write!(f, "memory layout error at {path}"),
-            Self::Unreadable(path) => write!(f, "cannot read {path}"),
-            Self::DirError(path) => write!(f, "cannot create directory {path}"),
-            Self::Sqlite(msg) => write!(f, "sqlite error: {msg}"),
-            Self::RootMismatch { stored, expected } => {
-                write!(f, "index root mismatch: stored={stored}, expected={expected}")
+pub(crate) struct MemorySource {
+    workspace: PathBuf,
+    declaration: agl_runtime::ForgeDeclaration,
+    reader: ayeque_forge_core::ForgeWorkspace,
+}
+impl MemorySource {
+    pub(crate) fn open(storage: &Path, workspace: &Path) -> Result<Self> {
+        let workspace = workspace.canonicalize()?;
+        let declarations = agl_runtime::read_workspace_forge_declarations_at(&workspace)?;
+        let sources = agl_runtime::workspace_backend_declarations(&declarations)?;
+        let mut memory = declarations
+            .into_iter()
+            .filter(|source| source.kind == "memory");
+        let declaration = memory.next().context("workspace has no memory source")?;
+        ensure!(
+            memory.next().is_none(),
+            "multiple memory sources are not allowed"
+        );
+        let reader = ayeque_forge_core::ForgeWorkspace::open(storage, &workspace, &sources)?;
+        Ok(Self {
+            workspace,
+            declaration,
+            reader,
+        })
+    }
+    fn binding(&self) -> Result<String> {
+        let source = ayeque_forge_core::ForgeDeclaration::new(
+            self.declaration.id.clone(),
+            self.declaration.git.clone(),
+            self.declaration.revision.clone(),
+            self.declaration.path.clone(),
+        )?;
+        Ok(serde_json::to_string(&source)?)
+    }
+    pub(crate) fn index_path(&self) -> String {
+        format!("forge:{}/INDEX.md", self.declaration.id)
+    }
+    fn file(&self, relative: &Path) -> Result<agl_tool_api::ForgeFile> {
+        let (file, guard, status) = self.reader.open_file(&self.declaration.id, relative)?;
+        let status = match status {
+            ayeque_forge_core::VerificationStatus::Verified => {
+                agl_tool_api::VerificationStatus::Verified
             }
-            Self::Missing => write!(f, "index file is missing"),
-            Self::GenerationConflict => {
-                write!(f, "workspace generation changed during rebuild")
+            ayeque_forge_core::VerificationStatus::Unchecked => {
+                agl_tool_api::VerificationStatus::Unchecked
             }
-            Self::LockPoisoned => write!(f, "workspace mutation lock is poisoned"),
+        };
+        Ok(agl_tool_api::ForgeFile::new(file, guard, status))
+    }
+    fn entries(&self) -> Result<(Vec<ClaimRow>, Vec<String>, Vec<String>)> {
+        let root = self.reader.materialized_path(&self.declaration.id)?;
+        let entries = root.join("entries");
+        if !entries.try_exists()? {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
+        let mut names = fs::read_dir(entries)?
+            .map(|entry| Ok(entry?.file_name()))
+            .collect::<Result<Vec<_>>>()?;
+        names.sort();
+        let mut rows = Vec::new();
+        let mut skipped = Vec::new();
+        let mut unchecked = Vec::new();
+        for name in names {
+            if !name.as_encoded_bytes().ends_with(b".md") {
+                continue;
+            }
+            let path = PathBuf::from("entries").join(&name);
+            let parsed = (|| -> Result<_> {
+                let mut file = self.file(&path)?;
+                if file.verification_status() == agl_tool_api::VerificationStatus::Unchecked {
+                    unchecked.push(format!("forge:{}/{}", self.declaration.id, path.display()));
+                }
+                let mut content = String::new();
+                file.read_to_string(&mut content)?;
+                let entry = parse_entry(&content)?;
+                ensure!(
+                    path.file_stem().and_then(|name| name.to_str()) == Some(entry.slug.as_str()),
+                    "entry filename and slug differ"
+                );
+                Ok(project_entry(&entry, &content))
+            })();
+            match parsed {
+                Ok(entry_rows) => rows.extend(entry_rows),
+                Err(error) => {
+                    tracing::warn!(path=%path.display(), %error, "skipping malformed memory entry");
+                    skipped.push(path.display().to_string());
+                }
+            }
+        }
+        resolve_supersession(&mut rows);
+        Ok((rows, skipped, unchecked))
     }
 }
 
-impl std::error::Error for IndexError {}
+#[derive(Default)]
+struct WorkspaceIndex {
+    binding: String,
+    searched_runs: BTreeSet<AgentRunId>,
+}
+pub(crate) struct MemoryIndex {
+    data: PathBuf,
+    storage: PathBuf,
+    workspaces: Mutex<BTreeMap<PathBuf, Arc<Mutex<WorkspaceIndex>>>>,
+}
+impl MemoryIndex {
+    pub(crate) fn new(data: PathBuf, storage: PathBuf) -> Self {
+        Self {
+            data,
+            storage,
+            workspaces: Mutex::new(BTreeMap::new()),
+        }
+    }
+    pub(crate) fn memory_source_id(&self, workspace: &Path) -> Option<String> {
+        MemorySource::open(&self.storage, workspace)
+            .ok()
+            .map(|source| source.declaration.id)
+    }
+    pub(crate) fn run_finished(&self, run: AgentRunId) {
+        if let Ok(workspaces) = self.workspaces.lock() {
+            for state in workspaces.values() {
+                if let Ok(mut state) = state.lock() {
+                    state.searched_runs.remove(&run);
+                }
+            }
+        }
+    }
+    pub(crate) fn search(
+        &self,
+        workspace: &Path,
+        run: AgentRunId,
+        query: &str,
+        limit: i64,
+    ) -> Result<SearchPage> {
+        let source = MemorySource::open(&self.storage, workspace)?;
+        let binding = source.binding()?;
+        let state = self
+            .workspaces
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory index registry poisoned"))?
+            .entry(source.workspace.clone())
+            .or_default()
+            .clone();
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory index state poisoned"))?;
+        let path = index_db_path(&self.data, &source.workspace);
+        let fresh = state.binding == binding && state.searched_runs.contains(&run);
+        if !fresh {
+            rebuild(&path, &source, &binding)?;
+        }
+        let page = match query_index(&path, &source, &binding, query, limit) {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, "memory index query failed; rebuilding once");
+                rebuild(&path, &source, &binding)?;
+                query_index(&path, &source, &binding, query, limit)?
+            }
+        };
+        state.binding = binding;
+        state.searched_runs.insert(run);
+        Ok(page)
+    }
+}
 
-// ---------------------------------------------------------------------------
-// Result types
-// ---------------------------------------------------------------------------
-
-/// Outcome of a full index rebuild.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RebuildResult {
-    /// Total number of claims indexed.
-    pub claim_count: usize,
-    /// Slugs of entries that were skipped due to parse or I/O errors (Q4).
+pub(crate) struct SearchPage {
+    pub hits: Vec<SearchHit>,
+    pub total: usize,
     pub skipped: Vec<String>,
+    pub unchecked: Vec<String>,
+    pub fallback: String,
+    pub index_path: String,
+}
+pub(crate) struct SearchHit {
+    pub score: f64,
+    pub slug: String,
+    pub text: String,
+    pub sources: String,
+    pub stale: bool,
+    pub superseded: bool,
+    pub supersession: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Path computation
-// ---------------------------------------------------------------------------
-
-/// Compute the index database path: `<data_root>/store/memory-index/<sha256>.db`.
-///
-/// The filename is the full SHA-256 hex digest of the canonical workspace root
-/// path string (section 12.5 Q1, amended 2026-09-17).
-pub(crate) fn index_db_path(data_root: &Path, workspace_root: &Path) -> PathBuf {
-    let digest = Sha256::digest(workspace_root.to_string_lossy().as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    data_root
-        .join("store")
-        .join("memory-index")
-        .join(format!("{hex}.db"))
+fn resolve_supersession(rows: &mut [ClaimRow]) {
+    let mut lookup = BTreeMap::new();
+    let mut ordinals = BTreeMap::<String, usize>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let ordinal = ordinals.entry(row.slug.clone()).or_default();
+        *ordinal += 1;
+        lookup.insert((row.slug.clone(), *ordinal), index + 1);
+    }
+    for row in rows {
+        row.superseded_by = row
+            .superseded_by_raw
+            .as_deref()
+            .and_then(parse_supersession_ref)
+            .and_then(|(slug, ordinal)| lookup.get(&(slug.to_owned(), ordinal)).copied());
+    }
+}
+fn parse_supersession_ref(target: &str) -> Option<(&str, usize)> {
+    let (slug, claim) = target.split_once("#claim-")?;
+    let ordinal = claim.parse::<usize>().ok()?;
+    (ordinal > 0).then_some((slug, ordinal))
 }
 
-// ---------------------------------------------------------------------------
-// Normalization (section 12.2)
-// ---------------------------------------------------------------------------
+fn rebuild(path: &Path, source: &MemorySource, binding: &str) -> Result<()> {
+    let parent = path.parent().context("index path has no parent")?;
+    crate::store::path::ensure_private_dir(parent)?;
+    let temp = parent.join(format!(".memory-{}.db", agl_core::RequestId::generate()));
+    let result = (|| -> Result<()> {
+        let (rows, skipped, unchecked) = source.entries()?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        crate::store::path::set_private_file_permissions(&temp)?;
+        drop(file);
+        let mut connection = Connection::open(&temp)?;
+        connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+        connection.execute_batch(SCHEMA)?;
+        let tx = connection.transaction()?;
+        for (index, row) in rows.iter().enumerate() {
+            tx.execute("INSERT INTO claims (id,slug,text,search_text,sources,stale,superseded_by,line_no,created_run,superseded_target) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![index+1,row.slug,row.text,row.search_text,row.sources_json,row.stale,row.superseded_by,row.line_no,row.created_run,row.superseded_by_raw])?;
+        }
+        tx.execute("INSERT INTO metadata (key,value) VALUES ('workspace_root',?1),('binding',?2),('skipped',?3),('unchecked',?4)", params![source.workspace.to_str().context("workspace is not UTF-8")?, binding, serde_json::to_string(&skipped)?, serde_json::to_string(&unchecked)?])?;
+        tx.execute("INSERT INTO claims_fts(claims_fts) VALUES('rebuild')", [])?;
+        tx.commit()?;
+        connection.close().map_err(|(_, error)| error)?;
+        crate::store::path::set_private_file_permissions(&temp)?;
+        File::open(&temp)?.sync_all()?;
+        fs::rename(&temp, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
 
-/// The shared deterministic normalization pipeline for `search_text` and
-/// query tokenization (section 12.2).
-///
-/// Pipeline:
-/// 1. Split on non-alphanumeric characters (whitespace, punctuation, `/`, `\\`,
-///    `.`, `:`, `-`, `_`, etc.).
-/// 2. Within each alphanumeric run, split at:
-///    - lowercase-to-uppercase boundary (`fooBar` → `foo`, `Bar`)
-///    - acronym-to-following-word boundary (`HTTPServer` → `HTTP`, `Server`)
-///    - letter-to-digit boundary (`sha256` → `sha`, `256`)
-///    - digit-to-letter boundary (`256abc` → `256`, `abc`)
-/// 3. Unicode lowercase each token.
-/// 4. Apply Porter stemming only to tokens that are entirely ASCII `[a-z]`.
-/// 5. Remove empty tokens and exact duplicates, preserving first occurrence.
-/// 6. Join with a single space.
+#[derive(Deserialize)]
+struct SourceFile {
+    path: String,
+    digest: Option<String>,
+}
+#[derive(Deserialize)]
+struct Sources {
+    messages: Vec<String>,
+    files: Vec<SourceFile>,
+}
+fn query_index(
+    path: &Path,
+    source: &MemorySource,
+    binding: &str,
+    query: &str,
+    limit: i64,
+) -> Result<SearchPage> {
+    crate::store::path::validate_private_regular_file(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let stored: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='workspace_root'",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        stored
+            == source
+                .workspace
+                .to_str()
+                .context("workspace is not UTF-8")?,
+        "memory index workspace mismatch"
+    );
+    let stored: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='binding'",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(stored == binding, "memory index source binding mismatch");
+    let total = connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
+    let skipped: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='skipped'",
+        [],
+        |row| row.get(0),
+    )?;
+    let skipped = serde_json::from_str(&skipped)?;
+    let unchecked: String = connection.query_row(
+        "SELECT value FROM metadata WHERE key='unchecked'",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut unchecked: Vec<String> = serde_json::from_str(&unchecked)?;
+    let mut hits = Vec::new();
+    if let Some(expression) = build_match_expression(&tokenize_query(query)) {
+        let mut statement = connection.prepare("SELECT bm25(claims_fts),c.slug,c.text,c.sources,c.stale,c.superseded_by IS NOT NULL,c.superseded_target FROM claims_fts JOIN claims c ON c.id=claims_fts.rowid WHERE claims_fts MATCH ?1 ORDER BY bm25(claims_fts),c.id LIMIT ?2")?;
+        let rows = statement.query_map(params![expression, limit.clamp(1, 10)], |row| {
+            Ok(SearchHit {
+                score: row.get(0)?,
+                slug: row.get(1)?,
+                text: row.get(2)?,
+                sources: row.get(3)?,
+                stale: row.get(4)?,
+                superseded: row.get(5)?,
+                supersession: row.get(6)?,
+            })
+        })?;
+        let memory = super::memory_io::MemoryWorkspace::authoring(
+            source.reader.materialized_path(&source.declaration.id)?,
+            &source.workspace,
+        )
+        .map_err(|error| anyhow::anyhow!("memory reader: {error:?}"))?;
+        for hit in rows {
+            let mut hit = hit?;
+            let sources: Sources = serde_json::from_str(&hit.sources)?;
+            hit.stale |= sources.files.iter().any(|file| {
+                memory
+                    .stamped_file(&file.path)
+                    .is_none_or(|current| current.digest != file.digest)
+            });
+            hit.sources =
+                sources
+                    .messages
+                    .into_iter()
+                    .chain(sources.files.into_iter().map(|file| {
+                        format!("file:{}@{}", file.path, file.digest.unwrap_or_default())
+                    }))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+            hits.push(hit);
+        }
+    }
+    let fallback = if hits.is_empty() {
+        let mut index = String::new();
+        let mut file = source.file(Path::new("INDEX.md"))?;
+        if file.verification_status() == agl_tool_api::VerificationStatus::Unchecked {
+            unchecked.push(source.index_path());
+        }
+        file.read_to_string(&mut index)?;
+        index
+    } else {
+        String::new()
+    };
+    Ok(SearchPage {
+        hits,
+        total,
+        skipped,
+        unchecked,
+        fallback,
+        index_path: source.index_path(),
+    })
+}
+
 pub(crate) fn normalize_for_search(text: &str) -> String {
     let raw_tokens = split_identifier_tokens(text);
-    let stemmer = Stemmer::new(Language::English);
+    let mut stemmer = Stemmer::new("porter").expect("bundled Porter stemmer must be available");
 
     let mut seen = BTreeSet::new();
     let mut result: Vec<String> = Vec::new();
@@ -133,7 +391,7 @@ pub(crate) fn normalize_for_search(text: &str) -> String {
         }
         // Porter-stem only pure ASCII alphabetic tokens.
         let final_token = if lower.chars().all(|c| c.is_ascii_lowercase()) {
-            stemmer.stem_word(&lower).to_owned()
+            stemmer.stem(&lower)
         } else {
             lower
         };
@@ -214,10 +472,6 @@ fn split_identifier_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-// ---------------------------------------------------------------------------
-// Corpus projection (Task 1)
-// ---------------------------------------------------------------------------
-
 /// One projected claim row ready for insertion into the `claims` table.
 #[derive(Clone, Debug)]
 struct ClaimRow {
@@ -229,6 +483,7 @@ struct ClaimRow {
     stale: bool,
     /// Resolved row ID of the superseding claim, or None.
     superseded_by: Option<usize>,
+    superseded_by_raw: Option<String>,
     line_no: usize,
     created_run: String,
 }
@@ -246,10 +501,7 @@ fn project_entry(entry: &MemoryEntry, raw_text: &str) -> Vec<ClaimRow> {
         .iter()
         .enumerate()
         .map(|(idx, claim)| {
-            let line_no = line_numbers
-                .get(idx)
-                .copied()
-                .unwrap_or(idx + 1); // fallback: 1-based index
+            let line_no = line_numbers.get(idx).copied().unwrap_or(idx + 1); // fallback: 1-based index
 
             let sources_json = serialize_sources(claim);
             let search_text = normalize_for_search(&claim.text);
@@ -261,7 +513,8 @@ fn project_entry(entry: &MemoryEntry, raw_text: &str) -> Vec<ClaimRow> {
                 search_text,
                 sources_json,
                 stale,
-                superseded_by: None, // resolved in a second pass below
+                superseded_by: None,
+                superseded_by_raw: claim.superseded_by.clone(),
                 line_no,
                 created_run: entry.created.to_string(),
             }
@@ -295,524 +548,9 @@ fn claim_bullet_line_numbers(raw_text: &str) -> Vec<usize> {
 /// Serialize a claim's sources into the JSON format stored in the `sources`
 /// column: `{"messages":[...],"files":[{"path":...,"digest":...}]}`.
 fn serialize_sources(claim: &StoredClaim) -> String {
-    #[derive(serde::Serialize)]
-    struct Sources {
-        messages: Vec<String>,
-        files: Vec<FileJson>,
-    }
-    #[derive(serde::Serialize)]
-    struct FileJson {
-        path: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        digest: Option<String>,
-    }
-
-    let sources = Sources {
-        messages: claim.sources.iter().map(|id| id.to_string()).collect(),
-        files: claim
-            .files
-            .iter()
-            .map(|f| FileJson {
-                path: f.path.clone(),
-                digest: f.digest.clone(),
-            })
-            .collect(),
-    };
-
-    serde_json::to_string(&sources).unwrap_or_else(|_| {
-        // Serialization of this simple struct cannot fail; unreachable.
-        r#"{"messages":[],"files":[]}"#.to_owned()
-    })
+    serde_json::json!({ "messages": claim.sources.iter().map(ToString::to_string).collect::<Vec<_>>(), "files": claim.files.iter().map(|file| serde_json::json!({"path":file.path,"digest":file.digest})).collect::<Vec<_>>() }).to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Index build (Task 2)
-// ---------------------------------------------------------------------------
-
-/// Build the complete index from entry files and publish it atomically.
-///
-/// This function:
-/// 1. Reads all entry files from `workspace_root/memory/entries/`.
-/// 2. Parses each entry in isolation (Q4: one bad entry is skipped).
-/// 3. Projects claims into rows, resolving supersession references.
-/// 4. Builds a complete temporary SQLite database.
-/// 5. Under the workspace mutation lock, publishes by atomic rename if the
-///    generation is unchanged; otherwise retries once (Q2).
-pub(crate) fn rebuild_index(
-    data_root: &Path,
-    workspace_root: &Path,
-    generation: u64,
-    current_generation: impl Fn() -> u64,
-) -> Result<RebuildResult, IndexError> {
-    // Attempt up to two builds (initial + one retry on generation conflict).
-    for attempt in 0..2u32 {
-        // Step 1-3: build the temp database (no lock needed).
-        let temp_path = build_temp_index(data_root, workspace_root)?;
-
-        // Step 5: publish under the workspace mutation lock.
-        let lock = crate::tools::workspace_mutation(workspace_root);
-        let guard = lock.lock().map_err(|_| IndexError::LockPoisoned)?;
-
-        // Check generation before publishing.
-        if current_generation() != generation {
-            drop(guard);
-            // Clean up the temp file.
-            let _ = fs::remove_file(&temp_path);
-            if attempt == 0 {
-                // Retry once with the new generation.
-                return rebuild_index_with_generation(
-                    data_root,
-                    workspace_root,
-                    current_generation(),
-                    &current_generation,
-                );
-            }
-            return Err(IndexError::GenerationConflict);
-        }
-
-        // Ensure the target directory exists.
-        let target_path = index_db_path(data_root, workspace_root);
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).map_err(|_| IndexError::DirError(parent.display().to_owned()))?;
-            crate::store::path::ensure_private_dir(parent)
-                .map_err(|_| IndexError::DirError(parent.display().to_owned()))?;
-        }
-
-        // Set private permissions on the temp file before rename.
-        crate::store::path::set_private_file_permissions(&temp_path)
-            .map_err(|_| IndexError::DirError(temp_path.display().to_owned()))?;
-
-        // Atomic rename.
-        fs::rename(&temp_path, &target_path).map_err(|e| {
-            let _ = fs::remove_file(&temp_path);
-            IndexError::DirError(format!("rename failed: {e}"))
-        })?;
-
-        drop(guard);
-
-        // Read back the claim count for the result.
-        let result = open_and_verify(&target_path, workspace_root)
-            .and_then(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT COUNT(*) FROM claims").map_err(|e| IndexError::Sqlite(e.to_string()))?;
-                let count: usize = stmt
-                    .query_row([], |row| row.get(0))
-                    .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-                Ok::<usize, IndexError>(count)
-            });
-
-        // Re-read skipped from a metadata row we stored during build.
-        let skipped: Vec<String> = open_and_verify(&target_path, workspace_root)
-            .and_then(|conn| {
-                let mut stmt = conn
-                    .prepare("SELECT value FROM metadata WHERE key = 'skipped'")
-                    .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-                let val: String = stmt
-                    .query_row([], |row| row.get(0))
-                    .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-                serde_json::from_str(&val).map_err(|e| IndexError::Sqlite(e.to_string()))
-            })
-            .unwrap_or_default();
-
-        let claim_count = result?;
-        return Ok(RebuildResult { claim_count, skipped });
-    }
-
-    unreachable!("loop runs at most twice and returns")
-}
-
-/// Internal: same as `rebuild_index` but takes an explicit generation (used
-/// for the single retry).
-fn rebuild_index_with_generation(
-    data_root: &Path,
-    workspace_root: &Path,
-    generation: u64,
-    current_generation: &impl Fn() -> u64,
-) -> Result<RebuildResult, IndexError> {
-    let temp_path = build_temp_index(data_root, workspace_root)?;
-
-    let lock = crate::tools::workspace_mutation(workspace_root);
-    let guard = lock.lock().map_err(|_| IndexError::LockPoisoned)?;
-
-    if current_generation() != generation {
-        drop(guard);
-        let _ = fs::remove_file(&temp_path);
-        return Err(IndexError::GenerationConflict);
-    }
-
-    let target_path = index_db_path(data_root, workspace_root);
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|_| IndexError::DirError(parent.display().to_owned()))?;
-        crate::store::path::ensure_private_dir(parent)
-            .map_err(|_| IndexError::DirError(parent.display().to_owned()))?;
-    }
-
-    crate::store::path::set_private_file_permissions(&temp_path)
-        .map_err(|_| IndexError::DirError(temp_path.display().to_owned()))?;
-
-    fs::rename(&temp_path, &target_path).map_err(|e| {
-        let _ = fs::remove_file(&temp_path);
-        IndexError::DirError(format!("rename failed: {e}"))
-    })?;
-
-    drop(guard);
-
-    let claim_count: usize = open_and_verify(&target_path, workspace_root)
-        .and_then(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT COUNT(*) FROM claims")
-                .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-            stmt.query_row([], |row| row.get(0))
-                .map_err(|e| IndexError::Sqlite(e.to_string()))
-        })?;
-
-    let skipped: Vec<String> = open_and_verify(&target_path, workspace_root)
-        .and_then(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT value FROM metadata WHERE key = 'skipped'")
-                .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-            let val: String = stmt
-                .query_row([], |row| row.get(0))
-                .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-            serde_json::from_str(&val).map_err(|e| IndexError::Sqlite(e.to_string()))
-        })
-        .unwrap_or_default();
-
-    Ok(RebuildResult {
-        claim_count,
-        skipped,
-    })
-}
-
-/// Build the complete index into a temporary file (no lock, no publish).
-///
-/// Returns the path to the temp file. The caller is responsible for
-/// publishing or cleaning it up.
-fn build_temp_index(data_root: &Path, workspace_root: &Path) -> Result<PathBuf, IndexError> {
-    // Ensure the memory-index directory exists for the temp file.
-    let dir = data_root.join("store").join("memory-index");
-    fs::create_dir_all(&dir)
-        .map_err(|_| IndexError::DirError(dir.display().to_owned()))?;
-
-    // Temp file in the same directory for atomic rename on the same filesystem.
-    let target = index_db_path(data_root, workspace_root);
-    let temp_path = dir.join(format!(".{}.tmp", target.file_name().unwrap().to_string_lossy()));
-
-    // Clean up any stale temp file.
-    let _ = fs::remove_file(&temp_path);
-
-    // Build the database.
-    let conn = Connection::open(&temp_path).map_err(|e| IndexError::Sqlite(e.to_string()))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-        .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-
-    // Read and project entries.
-    let (rows, skipped) = read_and_project_entries(workspace_root)?;
-
-    // Resolve supersession references (second pass).
-    let resolved_rows = resolve_supersession(rows);
-
-    // Create schema and insert rows.
-    create_schema(&conn)?;
-    insert_rows(&conn, &resolved_rows)?;
-    store_metadata(&conn, workspace_root, &skipped)?;
-
-    // Build the FTS5 index from the content table.
-    conn.execute("INSERT INTO claims_fts(claims_fts) VALUES('rebuild')", [])
-        .map_err(|e| {
-            let _ = fs::remove_file(&temp_path);
-            IndexError::Sqlite(format!("FTS5 rebuild failed: {e}"))
-        })?;
-
-    conn.close().map_err(|e| {
-        let _ = fs::remove_file(&temp_path);
-        IndexError::Sqlite(e.to_string())
-    })?;
-
-    Ok(temp_path)
-}
-
-/// Read all entry files from `workspace_root/memory/entries/` and project
-/// them into claim rows. Per-entry isolation: a parse or I/O error skips
-/// that entry only (Q4).
-fn read_and_project_entries(
-    workspace_root: &Path,
-) -> Result<(Vec<ClaimRow>, Vec<String>), IndexError> {
-    // Canonicalize the workspace root.
-    let canonical_root = workspace_root
-        .canonicalize()
-        .map_err(|_| IndexError::RootUnavailable)?;
-
-    let memory_dir = canonical_root.join("memory");
-    if !memory_dir.is_dir() {
-        // No memory/ directory: empty index (opt-out).
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let entries_dir = memory_dir.join("entries");
-    if !entries_dir.is_dir() {
-        // memory/ exists but no entries/: empty index.
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let mut all_rows: Vec<ClaimRow> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-
-    // Deterministic order: sort by filename (BTreeMap would do this, but we
-    // collect manually to handle per-entry isolation).
-    let mut files: Vec<PathBuf> = Vec::new();
-    let read_dir = fs::read_dir(&entries_dir)
-        .map_err(|_| IndexError::Unreadable("memory/entries".to_owned()))?;
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let name = entry.file_name().to_string_lossy().to_owned();
-        if !name.ends_with(".md") {
-            continue;
-        }
-        let path = entry.path();
-        // Skip symlinks (containment rule).
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-        }
-        files.push(path);
-    }
-    files.sort();
-
-    for path in files {
-        let slug = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_owned())
-            .unwrap_or_default();
-
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => {
-                skipped.push(slug);
-                continue;
-            }
-        };
-
-        let entry = match parse_entry(&content) {
-            Ok(e) => e,
-            Err(_) => {
-                skipped.push(slug);
-                continue;
-            }
-        };
-
-        let rows = project_entry(&entry, &content);
-        all_rows.extend(rows);
-    }
-
-    Ok((all_rows, skipped))
-}
-
-/// Resolve `superseded_by` string references (`<slug>#claim-<n>`) to row IDs.
-///
-/// The input rows are in deterministic insertion order (sorted by slug, then
-/// by claim ordinal within the entry). The `id` column will be assigned
-/// sequentially starting from 1 in that order.
-///
-/// Unresolvable references become None (Q3: the tag stays in display text).
-fn resolve_supersession(rows: Vec<ClaimRow>) -> Vec<ClaimRow> {
-    // Build a lookup: (slug, claim_ordinal) → row index (0-based).
-    // The row index + 1 will be the SQLite `id`.
-    let mut lookup: BTreeMap<(&str, usize), usize> = BTreeMap::new();
-    for (idx, row) in rows.iter().enumerate() {
-        // The ordinal is the 1-based position within the entry's claims.
-        // We can recover it by counting how many rows share the same slug
-        // up to and including this one.
-        let ordinal = rows
-            .iter()
-            .take(idx + 1)
-            .filter(|r| r.slug == row.slug)
-            .count();
-        lookup.insert((row.slug.as_str(), ordinal), idx);
-    }
-
-    let mut resolved = rows;
-    for row in resolved.iter_mut() {
-        if let Some(ref target) = row_superseded_by_raw(&row) {
-            // Parse `<slug>#claim-<n>`.
-            if let Some((target_slug, target_ordinal)) = parse_supersession_ref(target) {
-                let target_idx = lookup.get(&(target_slug, target_ordinal));
-                row.superseded_by = target_idx.map(|idx| idx + 1); // 1-based ID
-            } else {
-                row.superseded_by = None;
-            }
-        }
-    }
-
-    resolved
-}
-
-/// Extract the raw `superseded_by` string from a row. Since we don't store
-/// it in `ClaimRow` directly (it's in the original claim), we need to recover
-/// it. Actually, we should store it in the row during projection. Let me
-/// restructure: add a `superseded_by_raw` field to `ClaimRow`.
-fn row_superseded_by_raw(row: &ClaimRow) -> Option<&str> {
-    // This is a placeholder; the actual implementation stores the raw ref
-    // in the row. See the updated ClaimRow struct.
-    row.superseded_by_raw.as_deref()
-}
-
-/// Parse a `<slug>#claim-<n>` reference into (slug, ordinal).
-fn parse_supersession_ref(target: &str) -> Option<(&str, usize)> {
-    let (slug, claim_part) = target.split_once("#claim-")?;
-    let ordinal: usize = claim_part.parse().ok()?;
-    if ordinal == 0 {
-        return None; // ordinals are 1-based
-    }
-    Some((slug, ordinal))
-}
-
-// ---------------------------------------------------------------------------
-// SQLite schema and insertion
-// ---------------------------------------------------------------------------
-
-const SCHEMA: &str = r#"
-CREATE TABLE claims (
-    id INTEGER PRIMARY KEY,
-    slug TEXT NOT NULL,
-    text TEXT NOT NULL,
-    search_text TEXT NOT NULL,
-    sources TEXT NOT NULL,
-    stale INTEGER NOT NULL DEFAULT 0,
-    superseded_by INTEGER REFERENCES claims(id),
-    line_no INTEGER NOT NULL,
-    created_run TEXT NOT NULL
-);
-CREATE VIRTUAL TABLE claims_fts USING fts5(search_text, content='claims');
-CREATE TABLE metadata (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"#;
-
-fn create_schema(conn: &Connection) -> Result<(), IndexError> {
-    conn.execute_batch(SCHEMA).map_err(|e| IndexError::Sqlite(e.to_string()))
-}
-
-fn insert_rows(conn: &Connection, rows: &[ClaimRow]) -> Result<(), IndexError> {
-    let tx = conn.transaction().map_err(|e| IndexError::Sqlite(e.to_string()))?;
-
-    {
-        let mut stmt = tx
-            .prepare(
-                "INSERT INTO claims (id, slug, text, search_text, sources, stale, superseded_by, line_no, created_run)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-
-        for (idx, row) in rows.iter().enumerate() {
-            let id = (idx + 1) as i64;
-            stmt.execute(rusqlite::params![
-                id,
-                row.slug,
-                row.text,
-                row.search_text,
-                row.sources_json,
-                row.stale as i32,
-                row.superseded_by.map(|v| v as i64),
-                row.line_no as i64,
-                row.created_run,
-            ])
-            .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-        }
-    }
-
-    tx.commit().map_err(|e| IndexError::Sqlite(e.to_string()))
-}
-
-fn store_metadata(
-    conn: &Connection,
-    workspace_root: &Path,
-    skipped: &[String],
-) -> Result<(), IndexError> {
-    let root_string = workspace_root
-        .canonicalize()
-        .map_err(|_| IndexError::RootUnavailable)?
-        .to_string_lossy()
-        .to_owned();
-
-    let skipped_json = serde_json::to_string(skipped)
-        .map_err(|e| IndexError::Sqlite(e.to_string()))?;
-
-    conn.execute(
-        "INSERT INTO metadata (key, value) VALUES ('workspace_root', ?1), ('skipped', ?2)",
-        rusqlite::params![root_string, skipped_json],
-    )
-    .map_err(|e| IndexError::Sqlite(e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Open and verify
-// ---------------------------------------------------------------------------
-
-/// Open an existing index database and verify that the stored workspace root
-/// matches the expected canonical root. Returns a read-only connection.
-pub(crate) fn open_and_verify(
-    db_path: &Path,
-    workspace_root: &Path,
-) -> Result<Connection, IndexError> {
-    if !db_path.try_exists().map_err(|_| IndexError::Missing)? {
-        return Err(IndexError::Missing);
-    }
-
-    let conn = Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| {
-        if e.to_string().contains("not a database") {
-            IndexError::Sqlite("corrupt or not a database file".to_owned())
-        } else {
-            IndexError::Sqlite(e.to_string())
-        }
-    })?;
-
-    // Verify the stored workspace root.
-    let stored_root: String = conn
-        .query_row("SELECT value FROM metadata WHERE key = 'workspace_root'", [], |row| {
-            row.get(0)
-        })
-        .map_err(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                IndexError::Sqlite("missing metadata".to_owned())
-            } else {
-                IndexError::Sqlite(e.to_string())
-            }
-        })?;
-
-    let expected_root = workspace_root
-        .canonicalize()
-        .map_err(|_| IndexError::RootUnavailable)?
-        .to_string_lossy()
-        .to_owned();
-
-    if stored_root != expected_root {
-        return Err(IndexError::RootMismatch {
-            stored: stored_root,
-            expected: expected_root,
-        });
-    }
-
-    Ok(conn)
-}
-
-// ---------------------------------------------------------------------------
-// Query-side tokenization (Q5)
-// ---------------------------------------------------------------------------
-
-/// Tokenize a user query using the same normalization pipeline as the index.
-/// Returns a deduplicated list of tokens. A query that tokenizes to zero
-/// terms is a no-match (not an error).
 pub(crate) fn tokenize_query(query: &str) -> Vec<String> {
     if query.trim().is_empty() {
         return Vec::new();
@@ -839,9 +577,25 @@ pub(crate) fn build_match_expression(tokens: &[String]) -> Option<String> {
     Some(quoted.join(" OR "))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+const SCHEMA: &str = r#"
+CREATE TABLE claims (
+    id INTEGER PRIMARY KEY,
+    slug TEXT NOT NULL,
+    text TEXT NOT NULL,
+    search_text TEXT NOT NULL,
+    sources TEXT NOT NULL,
+    stale INTEGER NOT NULL DEFAULT 0,
+    superseded_by INTEGER REFERENCES claims(id),
+    superseded_target TEXT,
+    line_no INTEGER NOT NULL,
+    created_run TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE claims_fts USING fts5(search_text, content='claims');
+CREATE TABLE metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -885,9 +639,9 @@ mod tests {
     fn normalize_paths() {
         let result = normalize_for_search("products/services/agl-daemon/src");
         // Split on / and - and _
-        // "products" → "product", "services" → "service", "agl" → "agl",
+        // "products" → "product", "services" → "servic", "agl" → "agl",
         // "daemon" → "daemon", "src" → "src"
-        assert_eq!(result, "product service agl daemon src");
+        assert_eq!(result, "product servic agl daemon src");
     }
 
     #[test]
@@ -984,14 +738,14 @@ mod tests {
     fn claim_line_numbers_basic() {
         let text = "# Title\n\n- slug: test\n- created: run_01\n- updated: run_01\n\n## Claims\n\n- First claim [src: msg_01]\n- Second claim [src: msg_02]\n";
         let lines = claim_bullet_line_numbers(text);
-        assert_eq!(lines, vec![8, 9]);
+        assert_eq!(lines, vec![9, 10]);
     }
 
     #[test]
     fn claim_line_numbers_with_blank_lines() {
         let text = "# T\n\n- slug: t\n- created: run_01\n- updated: run_01\n\n## Claims\n\n- A [src: m1]\n\n- B [src: m2]\n";
         let lines = claim_bullet_line_numbers(text);
-        assert_eq!(lines, vec![8, 10]);
+        assert_eq!(lines, vec![9, 11]);
     }
 
     // -- Supersession reference parsing --
@@ -1038,202 +792,11 @@ mod tests {
     #[test]
     fn build_match_expression_quotes() {
         let expr = build_match_expression(&["say \"hello\"".to_owned()]).unwrap();
-        assert_eq!(expr, r#""say \"\"hello\"\"""#);
+        assert_eq!(expr, r#""say ""hello""""#);
     }
 
     // -- Path computation --
-
-    #[test]
-    fn index_path_deterministic() {
-        let data_root = Path::new("/tmp/data");
-        let ws = Path::new("/home/user/project");
-        let p1 = index_db_path(data_root, ws);
-        let p2 = index_db_path(data_root, ws);
-        assert_eq!(p1, p2);
-        assert!(p1.to_string_lossy().contains("/store/memory-index/"));
-        assert!(p1.to_string_lossy().ends_with(".db"));
-        // Full SHA-256 hex is 64 characters.
-        let filename = p1.file_name().unwrap().to_string_lossy().to_owned();
-        assert_eq!(filename.len(), 67); // 64 hex + ".db" (3) = 67
-    }
-
-    // -- Full rebuild integration (requires temp dir) --
-
-    #[test]
-    fn rebuild_and_open_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agl-index-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let data_root = tmp.join("data");
-        let ws_root = tmp.join("workspace");
-
-        // Create workspace with a memory entry.
-        fs::create_dir_all(ws_root.join("memory/entries")).unwrap();
-        let entry = r#"# Test Topic
-
-- slug: test-topic
-- created: run_01a00000-0000-7000-8000-000000000001
-- updated: run_01a00000-0000-7000-8000-000000000001
-
-## Claims
-
-- The test claim text here. [src: msg_01a00000-0000-7000-8000-000000000001]
-- Another claim. [src: msg_01a00000-0000-7000-8000-000000000002] [status: stale]
-"#;
-        fs::write(ws_root.join("memory/entries/test-topic.md"), entry).unwrap();
-
-        // Rebuild with a static generation.
-        let gen = 1u64;
-        let result = rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-        assert_eq!(result.claim_count, 2);
-        assert!(result.skipped.is_empty());
-
-        // Open and verify.
-        let db_path = index_db_path(&data_root, &ws_root);
-        let conn = open_and_verify(&db_path, &ws_root).unwrap();
-        let count: usize = conn
-            .query_row("SELECT COUNT(*) FROM claims", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-
-        // Check the stale flag.
-        let stale_count: usize = conn
-            .query_row("SELECT COUNT(*) FROM claims WHERE stale = 1", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(stale_count, 1);
-
-        // Check FTS5 search works.
-        let fts_count: usize = conn
-            .query_row(
-                "SELECT COUNT(*) FROM claims_fts WHERE claims_fts MATCH ?",
-                [r#""test""#],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(fts_count >= 1);
-
-        // Cleanup.
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn rebuild_skips_malformed_entry() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agl-index-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let data_root = tmp.join("data");
-        let ws_root = tmp.join("workspace");
-
-        fs::create_dir_all(ws_root.join("memory/entries")).unwrap();
-
-        // Good entry.
-        let good = r#"# Good
-
-- slug: good
-- created: run_01a00000-0000-7000-8000-000000000001
-- updated: run_01a00000-0000-7000-8000-000000000001
-
-## Claims
-
-- A valid claim. [src: msg_01a00000-0000-7000-8000-000000000001]
-"#;
-        fs::write(ws_root.join("memory/entries/good.md"), good).unwrap();
-
-        // Malformed entry (missing title).
-        fs::write(ws_root.join("memory/entries/bad.md"), "no title here\n").unwrap();
-
-        let gen = 1u64;
-        let result = rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-        assert_eq!(result.claim_count, 1);
-        assert_eq!(result.skipped, vec!["bad".to_owned()]);
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn rebuild_empty_memory() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agl-index-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let data_root = tmp.join("data");
-        let ws_root = tmp.join("workspace");
-
-        // No memory/ directory at all.
-        fs::create_dir_all(&ws_root).unwrap();
-
-        let gen = 1u64;
-        let result = rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-        assert_eq!(result.claim_count, 0);
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn open_and_verify_root_mismatch() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agl-index-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let data_root = tmp.join("data");
-        let ws_root = tmp.join("workspace");
-        let other_root = tmp.join("other-workspace");
-
-        fs::create_dir_all(ws_root.join("memory/entries")).unwrap();
-        fs::create_dir_all(&other_root).unwrap();
-
-        let entry = r#"# T
-
-- slug: t
-- created: run_01a00000-0000-7000-8000-000000000001
-- updated: run_01a00000-0000-7000-8000-000000000001
-
-## Claims
-
-- A claim. [src: msg_01a00000-0000-7000-8000-000000000001]
-"#;
-        fs::write(ws_root.join("memory/entries/t.md"), entry).unwrap();
-
-        let gen = 1u64;
-        rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-
-        // Opening with a different root should fail.
-        let db_path = index_db_path(&data_root, &ws_root);
-        let err = open_and_verify(&db_path, &other_root).unwrap_err();
-        assert!(matches!(err, IndexError::RootMismatch { .. }));
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn rebuild_idempotent() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agl-index-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let data_root = tmp.join("data");
-        let ws_root = tmp.join("workspace");
-
-        fs::create_dir_all(ws_root.join("memory/entries")).unwrap();
-        let entry = r#"# T
-
-- slug: t
-- created: run_01a00000-0000-7000-8000-000000000001
-- updated: run_01a00000-0000-7000-8000-000000000001
-
-## Claims
-
-- A claim. [src: msg_01a00000-0000-7000-8000-000000000001]
-"#;
-        fs::write(ws_root.join("memory/entries/t.md"), entry).unwrap();
-
-        let gen = 1u64;
-        let r1 = rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-        let r2 = rebuild_index(&data_root, &ws_root, gen, || gen).unwrap();
-        assert_eq!(r1.claim_count, r2.claim_count);
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
 }
+
+#[cfg(test)]
+mod integration_tests;

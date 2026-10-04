@@ -134,6 +134,7 @@ pub(super) fn initialize_baseline(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     crate::store::agent::create_agent_schema_connection(&transaction)?;
     crate::store::inference_health::create_schema(&transaction)?;
+    crate::store::execution::create_schema(&transaction)?;
     transaction.pragma_update(None, "application_id", STORE_APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", STORE_BASELINE_VERSION)?;
     transaction.commit()?;

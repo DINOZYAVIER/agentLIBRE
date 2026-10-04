@@ -40,6 +40,8 @@ pub(crate) fn sha256(bytes: &[u8]) -> [u8; 32] {
 pub struct AgentDependencies {
     pub store: StoreHandle,
     pub inference: Arc<dyn InferenceRoute>,
+    pub(crate) memory_index: Option<Arc<super::memory_index::MemoryIndex>>,
+    pub(crate) memory: Option<Arc<super::memory_publication::MemoryPublisher>>,
 }
 
 #[derive(Clone)]
@@ -50,10 +52,27 @@ pub struct AgentHandle {
 
 impl AgentHandle {
     pub(crate) fn start_run(&self, spec: AgentRunSpec) -> Result<AgentRunId, AgentServiceError> {
+        self.start(spec, None)
+    }
+
+    pub(crate) fn start_scheduled_run(
+        &self,
+        spec: AgentRunSpec,
+        generation: agl_core::RequestId,
+    ) -> Result<AgentRunId, AgentServiceError> {
+        self.start(spec, Some(generation))
+    }
+
+    fn start(
+        &self,
+        spec: AgentRunSpec,
+        schedule_generation: Option<agl_core::RequestId>,
+    ) -> Result<AgentRunId, AgentServiceError> {
         let (sender, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(Command::StartRun {
                 spec,
+                schedule_generation,
                 reply: sender,
             })
             .map_err(map_command_send)?;

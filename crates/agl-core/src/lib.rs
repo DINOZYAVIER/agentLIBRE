@@ -9,7 +9,7 @@ pub mod implementation_plan;
 pub mod package;
 mod tool;
 
-pub use content::{Content, ContentError, MAX_TEXT_BYTES};
+pub use content::{Content, ContentError, ImageRef, ImageSource, MAX_TEXT_BYTES};
 pub use correlation_id::{
     AgentRunId, ConversationId, DaemonInstanceId, MessageId, ParseIdError, RequestId,
 };
@@ -18,3 +18,5 @@ pub use extension::ExtensionDefinition;
 pub use fsm::{Fsm, Transition};
 pub use ids::{EffectId, ExtensionId, IdentifierError, ToolId};
 pub use tool::ToolDefinition;
+
+pub mod execution;

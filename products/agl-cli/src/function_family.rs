@@ -134,7 +134,7 @@ fn selected_function(roots: &ApplicationRoots) -> Result<Option<String>> {
 }
 
 pub(crate) fn list(roots: &ApplicationRoots) -> Result<()> {
-    let families = discover_function_families()?;
+    let families = discover_function_families(config::catalog_root(&roots.config, &roots.data)?)?;
     let selected = selected_function(roots)?;
     if families.is_empty() {
         println!("no Function Family is declared in the AGL workspace");
@@ -167,7 +167,7 @@ pub(crate) fn list(roots: &ApplicationRoots) -> Result<()> {
 }
 
 pub(crate) fn show(roots: &ApplicationRoots, family_id: &str) -> Result<()> {
-    let families = discover_function_families()?;
+    let families = discover_function_families(config::catalog_root(&roots.config, &roots.data)?)?;
     let family = find(&families, family_id)?;
     let selected = selected_function(roots)?;
     let machine = Machine::detect();
@@ -252,7 +252,7 @@ pub(crate) async fn select(
     family_id: &str,
     profile_id: &str,
 ) -> Result<()> {
-    let families = discover_function_families()?;
+    let families = discover_function_families(config::catalog_root(&roots.config, &roots.data)?)?;
     let family = find(&families, family_id)?;
     let profile = family.profile(profile_id).with_context(|| {
         format!(
@@ -308,34 +308,63 @@ async fn ensure_model(
     roots: &ApplicationRoots,
     requirement: &agl_runtime::function::FunctionRequirement,
 ) -> Result<ModelStatus> {
-    let model = agl_runtime::resolve_function_model(&requirement.id, &requirement.version)?;
-    let digest = model
-        .artifact
-        .sha256
-        .to_string()
-        .strip_prefix("sha256:")
-        .context("model digest has no sha256 prefix")?
-        .to_owned();
-    let destination = roots
-        .data
-        .join("runtime/models")
-        .join(format!("{digest}.gguf"));
-    if model_present(&destination, model.artifact.bytes)? {
+    let model = agl_runtime::resolve_function_model(
+        &requirement.id,
+        &requirement.version,
+        config::catalog_root(&roots.config, &roots.data)?,
+    )?;
+    let cache = roots.data.join("runtime/models");
+    let destination = cache.join(format!(
+        "{}.gguf",
+        model
+            .artifact
+            .sha256
+            .to_string()
+            .strip_prefix("sha256:")
+            .context("model digest has no sha256 prefix")?
+    ));
+    let mut requests = vec![model.fetch_request(destination)?];
+    if let Some(projector) = &model.mmproj {
+        requests.push(agl_runtime::model::ModelFetchRequest {
+            url: projector.url.parse()?,
+            destination: cache.join(format!(
+                "{}.gguf",
+                projector
+                    .sha256
+                    .to_string()
+                    .strip_prefix("sha256:")
+                    .context("mmproj digest has no sha256 prefix")?
+            )),
+            expected_digest: projector.sha256,
+            expected_bytes: projector.bytes,
+        });
+    }
+    let mut missing = Vec::new();
+    for request in requests {
+        if !model_present(&request.destination, request.expected_bytes)? {
+            missing.push(request);
+        }
+    }
+    if missing.is_empty() {
         return Ok(ModelStatus::Present);
     }
-    println!(
-        "model {} is not downloaded ({}, {})",
-        model.id,
-        gb(model.artifact.bytes),
-        model.artifact.url
-    );
+    for request in &missing {
+        println!(
+            "model {} artifact is not downloaded ({}, {})",
+            model.id,
+            gb(request.expected_bytes),
+            request.url
+        );
+    }
     if !interactive() {
         return Ok(ModelStatus::NonInteractive);
     }
-    if !confirm("Download the model now?")? {
+    if !confirm("Download the model artifacts now?")? {
         return Ok(ModelStatus::Declined);
     }
-    download(&model, &destination).await?;
+    for request in &missing {
+        download(request).await?;
+    }
     Ok(ModelStatus::Downloaded)
 }
 
@@ -377,11 +406,10 @@ fn model_present(path: &Path, expected_bytes: u64) -> Result<bool> {
     }
 }
 
-async fn download(model: &agl_runtime::model::ModelManifest, destination: &Path) -> Result<()> {
-    let request = model.fetch_request(destination.to_owned())?;
+async fn download(request: &agl_runtime::model::ModelFetchRequest) -> Result<()> {
     let cancelled = AtomicBool::new(false);
     let mut last_percent = None;
-    let imported = agl_runtime::model::fetch_model(&request, &cancelled, move |progress| {
+    let imported = agl_runtime::model::fetch_model(request, &cancelled, move |progress| {
         if let Some(total) = progress.total_bytes.filter(|total| *total > 0) {
             let percent = progress.downloaded_bytes * 100 / total;
             if last_percent != Some(percent) && percent % 5 == 0 {

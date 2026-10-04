@@ -149,6 +149,8 @@ pub struct ToolResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolFailureKind {
+    /// A human must choose before this operation can proceed.
+    DecisionRequired,
     /// The rejected input class; `ToolFailure.effect` separately establishes effect state.
     InvalidInput,
     InvalidResult,
@@ -239,6 +241,7 @@ pub enum AgentOperationResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentOperationFailureKind {
+    DecisionRequired,
     InvalidInput,
     InvalidResult,
     InvalidModelOutput {
@@ -283,6 +286,7 @@ impl From<ToolFailure> for AgentOperationFailure {
         }
         Self {
             kind: match failure.kind {
+                ToolFailureKind::DecisionRequired => AgentOperationFailureKind::DecisionRequired,
                 ToolFailureKind::InvalidInput => AgentOperationFailureKind::InvalidInput,
                 ToolFailureKind::InvalidResult => AgentOperationFailureKind::InvalidResult,
                 ToolFailureKind::ResultTooLarge => AgentOperationFailureKind::ResultTooLarge,

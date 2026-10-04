@@ -1,0 +1,10 @@
+schema = "agentlibre.extension/v1"
+id = "agentlibre.memory"
+version = "1.0.0-alpha.19"
+description = "Durable workspace memory lookup"
+
+[[tools]]
+id = "agentlibre.memory:search"
+description = "Ranked lookup over durable memory claims: facts from previous runs. Use before re-investigating a known topic. Query in English domain vocabulary: identifiers, module names, file paths; translate the query if the user asked in another language. Try up to three searches with different vocabulary. Empty result: rephrase or read the Forge memory INDEX. Results carry sources and status; verify stale claims before using them."
+input_schema = "schemas/search.json"
+delivery = "retryable"

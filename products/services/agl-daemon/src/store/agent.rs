@@ -16,12 +16,21 @@ use agl_core::{AgentRunId, ConversationId, MessageId};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingMemory {
+    pub id: agl_core::RequestId,
+    pub key: AgentOperationKey,
+    pub topic: MemoryTopic,
+}
+
 const MAX_STORED_JSON_BYTES: usize = 72 * 1024 * 1024;
 const MAX_STORED_JSON_DEPTH: usize = 64;
 
 use crate::store::{StoreError, StoreHandle};
 mod compaction;
 mod queries;
+pub(crate) mod schedules;
 mod transitions;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -701,7 +710,7 @@ pub(crate) fn create_agent_schema_connection(
             agent_run_id BLOB PRIMARY KEY CHECK(length(agent_run_id) = 16),
             origin_json TEXT NOT NULL CHECK(json_valid(origin_json) AND length(origin_json)<=75497472),
             origin_conversation_id BLOB NOT NULL CHECK(length(origin_conversation_id)=16),
-            origin_message_id TEXT NOT NULL,
+            origin_key TEXT NOT NULL,
             input_json TEXT NOT NULL CHECK(json_valid(input_json) AND length(input_json)<=75497472),
             snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json) AND length(snapshot_json)<=75497472),
             agent_package_digest BLOB NOT NULL CHECK(length(agent_package_digest)=32),
@@ -727,8 +736,8 @@ pub(crate) fn create_agent_schema_connection(
             revision INTEGER NOT NULL CHECK(revision >= 0),
             FOREIGN KEY(origin_conversation_id) REFERENCES agent_conversations(conversation_id) ON DELETE CASCADE
         ) STRICT;
-        CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_origin_user
-            ON agent_runs(origin_conversation_id, origin_message_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_origin
+            ON agent_runs(origin_conversation_id, origin_key);
         CREATE TABLE IF NOT EXISTS agent_messages (
             message_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id TEXT NOT NULL UNIQUE,
@@ -831,6 +840,26 @@ pub(crate) fn create_agent_schema_connection(
         ) STRICT;
         CREATE INDEX IF NOT EXISTS implementation_plan_slices_state
             ON implementation_plan_slices(plan_id, state);
+        CREATE TABLE IF NOT EXISTS agent_schedule_conversations (
+            conversation_id BLOB PRIMARY KEY CHECK(length(conversation_id)=16),
+            FOREIGN KEY(conversation_id) REFERENCES agent_conversations(conversation_id) ON DELETE CASCADE
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS agent_schedules (
+            workspace_root TEXT NOT NULL,
+            function_id TEXT NOT NULL,
+            conversation_id BLOB NOT NULL CHECK(length(conversation_id)=16),
+            enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+            enabled_at_ms INTEGER NOT NULL CHECK(enabled_at_ms>=0),
+            generation TEXT NOT NULL,
+            config_json TEXT NOT NULL CHECK(json_valid(config_json) AND length(config_json)<=4194304),
+            permissions_json TEXT NOT NULL CHECK(json_valid(permissions_json) AND length(permissions_json)<=4194304),
+            PRIMARY KEY(workspace_root, function_id),
+            FOREIGN KEY(conversation_id) REFERENCES agent_schedule_conversations(conversation_id)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS agent_memory_maintenance (
+            workspace_root TEXT PRIMARY KEY CHECK(length(workspace_root) BETWEEN 1 AND 32768),
+            request_id TEXT NOT NULL
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS agent_memory_pending (
             workspace_root TEXT PRIMARY KEY CHECK(length(workspace_root) BETWEEN 1 AND 32768),
             claims_json TEXT NOT NULL CHECK(json_valid(claims_json) AND length(claims_json)<=75497472)
@@ -993,10 +1022,26 @@ fn enum_text<T: serde::Serialize>(value: &T) -> crate::store::Result<String> {
 }
 
 fn origin_conversation_bytes(origin: &agl_core::agent::AgentRunOrigin) -> Option<&[u8]> {
-    let agl_core::agent::AgentRunOrigin::User {
-        conversation_id, ..
-    } = origin;
+    let conversation_id = match origin {
+        agl_core::agent::AgentRunOrigin::User {
+            conversation_id, ..
+        }
+        | agl_core::agent::AgentRunOrigin::Timer {
+            conversation_id, ..
+        }
+        | agl_core::agent::AgentRunOrigin::FileEvent {
+            conversation_id, ..
+        } => conversation_id,
+    };
     Some(conversation_id.as_bytes().as_slice())
+}
+
+fn origin_key(origin: &agl_core::agent::AgentRunOrigin) -> String {
+    match origin {
+        agl_core::agent::AgentRunOrigin::User { message_id, .. } => format!("user:{message_id}"),
+        agl_core::agent::AgentRunOrigin::Timer { tick_at_ms, .. } => format!("timer:{tick_at_ms}"),
+        agl_core::agent::AgentRunOrigin::FileEvent { event_id, .. } => format!("file:{event_id}"),
+    }
 }
 
 fn existing_agent_run(
@@ -1005,10 +1050,8 @@ fn existing_agent_run(
 ) -> crate::store::Result<Option<AgentRun>> {
     let origin = strict_json(&spec.origin)?;
     let input = strict_json(&spec.input)?;
-    let agl_core::agent::AgentRunOrigin::User {
-        conversation_id,
-        message_id,
-    } = &spec.origin;
+    let conversation_id = spec.origin.conversation_id();
+    let origin_key = origin_key(&spec.origin);
     let stored = connection
         .query_row(
             "SELECT origin_json, input_json, agent_run_id, snapshot_json,
@@ -1020,8 +1063,8 @@ fn existing_agent_run(
                     usage_tool_calls, revision
              FROM agent_runs
              WHERE origin_conversation_id=?1
-               AND origin_message_id=?2",
-            params![conversation_id.as_bytes().as_slice(), message_id.as_str(),],
+               AND origin_key=?2",
+            params![conversation_id.as_bytes().as_slice(), origin_key,],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

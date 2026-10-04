@@ -27,6 +27,71 @@ impl AgentClient {
         }
     }
 
+    pub async fn memory_archive(
+        &self,
+        workspace: impl Into<String>,
+        slug: impl Into<String>,
+    ) -> Result<AgentResponse, ClientError> {
+        match self
+            .request(AgentCommand::MemoryArchive {
+                workspace_path: workspace.into(),
+                slug: slug.into(),
+            })
+            .await?
+        {
+            response @ (AgentResponse::MemoryArchived { .. }
+            | AgentResponse::MemoryArchiveDeferred { .. }) => Ok(response),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn enable_schedule(
+        &self,
+        function_id: agl_core::package::PackageId,
+        workspace_path: impl Into<String>,
+    ) -> Result<crate::ScheduleView, ClientError> {
+        match self
+            .request(AgentCommand::ScheduleEnable {
+                function_id,
+                workspace_path: workspace_path.into(),
+            })
+            .await?
+        {
+            AgentResponse::ScheduleEnabled { schedule } => Ok(*schedule),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn disable_schedule(
+        &self,
+        function_id: agl_core::package::PackageId,
+        workspace_path: impl Into<String>,
+    ) -> Result<crate::ScheduleView, ClientError> {
+        match self
+            .request(AgentCommand::ScheduleDisable {
+                function_id,
+                workspace_path: workspace_path.into(),
+            })
+            .await?
+        {
+            AgentResponse::ScheduleDisabled { schedule } => Ok(*schedule),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn schedules(
+        &self,
+        workspace_path: Option<String>,
+    ) -> Result<Vec<crate::ScheduleView>, ClientError> {
+        match self
+            .request(AgentCommand::ScheduleShow { workspace_path })
+            .await?
+        {
+            AgentResponse::Schedules { schedules } => Ok(schedules),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
     pub async fn open_conversation(
         &self,
         conversation_id: ConversationId,

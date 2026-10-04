@@ -112,6 +112,17 @@ pub struct InferenceGenerateRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct InferenceTokenizeRequest {
+    pub operation: AgentOperationKey,
+    pub model: ModelDefinitionRef,
+    pub runtime: agl_core::agent::ModelRuntimeSelection,
+    pub text: String,
+    pub deadline_at_ms: i64,
+    pub cancellation: InferenceCancellation,
+    pub health: Option<InferenceHealthSink>,
+}
+
+#[derive(Clone, Debug)]
 pub struct InferenceGenerateResult {
     pub operation: AgentOperationKey,
     pub delivery_attempt: NonZeroU32,
@@ -123,10 +134,16 @@ pub struct RegisteredModelService {
     pub model: ModelDefinitionRef,
     pub runtime: agl_core::agent::ModelRuntimeSelection,
     pub artifact: crate::model::ImportedModel,
+    pub mmproj: Option<crate::model::ImportedModel>,
     pub adapters: Vec<crate::model::ImportedModel>,
 }
 
 pub trait InferenceGenerator: Send + Sync + 'static {
+    fn count_text_tokens(
+        &self,
+        request: InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError>;
+
     fn measure(
         &self,
         request: InferenceGenerateRequest,
@@ -157,6 +174,11 @@ pub trait InferenceGenerator: Send + Sync + 'static {
 }
 
 pub trait InferenceRoute: Send + Sync + 'static {
+    fn count_text_tokens(
+        &self,
+        request: InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError>;
+
     fn measure(
         &self,
         request: InferenceGenerateRequest,
@@ -177,7 +199,7 @@ enum InferenceBackendConfig {
     LlamaServer {
         config: crate::inference::LlamaServerConfig,
         engine_build: crate::inference::EngineBuildDigest,
-        execution: agl_execution_api::BlockingExecutionClient,
+        execution: Option<crate::inference::ProcessHost>,
     },
 }
 
@@ -188,15 +210,21 @@ impl InferenceConfig {
 
     pub fn llama_server(
         config: crate::inference::LlamaServerConfig,
-        execution: agl_execution_api::BlockingExecutionClient,
     ) -> Result<Self, InferenceServiceError> {
         let engine_build = crate::inference::private_engine_build_digest(&config.executable)
             .map_err(|_| InferenceServiceError::InvalidRequest)?;
         Ok(Self(InferenceBackendConfig::LlamaServer {
             config,
             engine_build,
-            execution,
+            execution: None,
         }))
+    }
+
+    pub fn with_process_host(mut self, host: crate::inference::ProcessHost) -> Self {
+        if let InferenceBackendConfig::LlamaServer { execution, .. } = &mut self.0 {
+            *execution = Some(host);
+        }
+        self
     }
 
     pub fn engine_build_digest(&self) -> crate::inference::EngineBuildDigest {
@@ -274,6 +302,17 @@ impl InferenceHandle {
         })
     }
 
+    pub fn count_text_tokens(
+        &self,
+        request: InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError> {
+        let cancellation = request.cancellation.clone();
+        let deadline = request.deadline_at_ms;
+        self.send_request(request, cancellation, deadline, |request, reply| {
+            Command::Tokenize { request, reply }
+        })
+    }
+
     fn request<T>(
         &self,
         request: InferenceGenerateRequest,
@@ -282,17 +321,27 @@ impl InferenceHandle {
             mpsc::SyncSender<Result<T, InferenceServiceError>>,
         ) -> Command,
     ) -> Result<T, InferenceServiceError> {
+        let cancellation = request.cancellation.clone();
+        let deadline = request.deadline_at_ms;
+        self.send_request(request, cancellation, deadline, command)
+    }
+
+    fn send_request<T, R>(
+        &self,
+        request: R,
+        cancellation: InferenceCancellation,
+        deadline_at_ms: i64,
+        command: impl FnOnce(Box<R>, mpsc::SyncSender<Result<T, InferenceServiceError>>) -> Command,
+    ) -> Result<T, InferenceServiceError> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(InferenceServiceError::Stopped);
         }
-        if request.cancellation.is_cancelled() {
+        if cancellation.is_cancelled() {
             return Err(InferenceServiceError::Cancelled);
         }
-        if request.deadline_at_ms <= unix_ms() {
+        if deadline_at_ms <= unix_ms() {
             return Err(InferenceServiceError::Deadline);
         }
-        let cancellation = request.cancellation.clone();
-        let deadline_at_ms = request.deadline_at_ms;
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(command(Box::new(request), reply))
@@ -319,6 +368,13 @@ impl InferenceHandle {
 }
 
 impl InferenceRoute for InferenceHandle {
+    fn count_text_tokens(
+        &self,
+        request: InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError> {
+        InferenceHandle::count_text_tokens(self, request)
+    }
+
     fn measure(
         &self,
         request: InferenceGenerateRequest,
@@ -355,7 +411,7 @@ impl InferenceService {
             } => crate::inference::llama_host::generator(
                 config,
                 engine_build,
-                execution,
+                execution.ok_or(InferenceServiceError::Unavailable)?,
                 &restored_health,
             )?,
         };
@@ -395,6 +451,10 @@ impl Drop for InferenceService {
 }
 
 enum Command {
+    Tokenize {
+        request: Box<InferenceTokenizeRequest>,
+        reply: mpsc::SyncSender<Result<u64, InferenceServiceError>>,
+    },
     Measure {
         request: Box<InferenceGenerateRequest>,
         reply: mpsc::SyncSender<Result<agl_core::agent::ContextCapacity, InferenceServiceError>>,
@@ -420,73 +480,49 @@ fn inference_loop(receiver: mpsc::Receiver<Command>, generator: Arc<dyn Inferenc
     let mut workers = Vec::<thread::JoinHandle<()>>::new();
     while let Ok(command) = receiver.recv() {
         reap_finished(&mut workers);
-        match command {
-            Command::Measure { request, reply } => {
-                wait_for_worker_capacity(&mut workers);
-                let generator = Arc::clone(&generator);
-                if let Ok(worker) = thread::Builder::new()
-                    .name("agl-runtime-inference-measure".into())
-                    .spawn(move || {
-                        let health = request.health.clone();
-                        let measured = generator.measure(*request);
-                        let persisted = persist_health(&*generator, health);
-                        let _ = reply.send(persisted.and(measured));
-                    })
-                {
-                    workers.push(worker);
-                }
-            }
-            Command::Register {
-                service,
-                health,
-                reply,
-            } => {
-                wait_for_worker_capacity(&mut workers);
-                let generator = Arc::clone(&generator);
-                if let Ok(worker) = thread::Builder::new()
-                    .name("agl-runtime-inference-register".into())
-                    .spawn(move || {
-                        let lifecycle = generator.register_service(*service);
-                        let persisted = persist_health(&*generator, Some(health));
-                        let _ = reply.send(persisted.and(lifecycle));
-                    })
-                {
-                    workers.push(worker);
-                }
-            }
-            Command::Unload { key, health, reply } => {
-                wait_for_worker_capacity(&mut workers);
-                let generator = Arc::clone(&generator);
-                if let Ok(worker) = thread::Builder::new()
-                    .name("agl-runtime-inference-unload".into())
-                    .spawn(move || {
-                        let lifecycle = generator.unload_service(key);
-                        let persisted = persist_health(&*generator, Some(health));
-                        let _ = reply.send(persisted.and(lifecycle));
-                    })
-                {
-                    workers.push(worker);
-                }
-            }
-            Command::Generate { request, reply } => {
-                wait_for_worker_capacity(&mut workers);
-                let generator = Arc::clone(&generator);
-                match thread::Builder::new()
-                    .name(format!(
-                        "agl-runtime-inference-{}",
-                        request.operation.run_id
-                    ))
-                    .spawn(move || generate_one(generator, *request, reply))
-                {
-                    Ok(worker) => workers.push(worker),
-                    Err(_) => {
-                        // The receiver was moved only when the worker was created.
-                        // A spawn failure is therefore represented by a disconnected
-                        // reply and maps to Stopped at the caller boundary.
-                    }
-                }
+        let name = match &command {
+            Command::Tokenize { .. } => "agl-runtime-tokenize".into(),
+            Command::Measure { .. } => "agl-runtime-inference-measure".into(),
+            Command::Register { .. } => "agl-runtime-inference-register".into(),
+            Command::Unload { .. } => "agl-runtime-inference-unload".into(),
+            Command::Generate { request, .. } => {
+                format!("agl-runtime-inference-{}", request.operation.run_id)
             }
             Command::Shutdown => break,
+        };
+        wait_for_worker_capacity(&mut workers);
+        let generator = Arc::clone(&generator);
+        // On spawn failure the command/reply is dropped, so the caller observes Stopped.
+        if let Ok(worker) = thread::Builder::new()
+            .name(name)
+            .spawn(move || match command {
+                Command::Tokenize { request, reply } => {
+                    let health = request.health.clone();
+                    let measured = generator.count_text_tokens(*request);
+                    let _ = reply.send(persist_health(&*generator, health).and(measured));
+                }
+                Command::Measure { request, reply } => {
+                    let health = request.health.clone();
+                    let measured = generator.measure(*request);
+                    let _ = reply.send(persist_health(&*generator, health).and(measured));
+                }
+                Command::Register {
+                    service,
+                    health,
+                    reply,
+                } => {
+                    let lifecycle = generator.register_service(*service);
+                    let _ = reply.send(persist_health(&*generator, Some(health)).and(lifecycle));
+                }
+                Command::Unload { key, health, reply } => {
+                    let lifecycle = generator.unload_service(key);
+                    let _ = reply.send(persist_health(&*generator, Some(health)).and(lifecycle));
+                }
+                Command::Generate { request, reply } => generate_one(generator, *request, reply),
+                Command::Shutdown => unreachable!("shutdown does not dispatch a worker"),
+            })
+        {
+            workers.push(worker);
         }
     }
     for worker in workers {
@@ -643,6 +679,7 @@ pub(crate) fn test_runtime_selection() -> agl_core::agent::ModelRuntimeSelection
     };
 
     ModelRuntimeSelection {
+        mmproj: None,
         artifact: ModelArtifactRef {
             kind: ModelArtifactKind::Gguf,
             url: "https://example.invalid/model.gguf".to_owned(),
@@ -697,7 +734,7 @@ pub(crate) fn test_runtime_selection() -> agl_core::agent::ModelRuntimeSelection
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::package::{PackageId, PackageVersion};
@@ -736,6 +773,13 @@ mod tests {
     }
 
     impl InferenceGenerator for HealthGenerator {
+        fn count_text_tokens(
+            &self,
+            _: crate::inference::InferenceTokenizeRequest,
+        ) -> Result<u64, InferenceServiceError> {
+            Err(InferenceServiceError::Unavailable)
+        }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -779,6 +823,13 @@ mod tests {
     }
 
     impl InferenceGenerator for ExactGenerator {
+        fn count_text_tokens(
+            &self,
+            request: InferenceTokenizeRequest,
+        ) -> Result<u64, InferenceServiceError> {
+            Ok(request.text.split_whitespace().count() as u64)
+        }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -830,6 +881,13 @@ mod tests {
     }
 
     impl InferenceGenerator for BlockingRegistrationGenerator {
+        fn count_text_tokens(
+            &self,
+            _: crate::inference::InferenceTokenizeRequest,
+        ) -> Result<u64, InferenceServiceError> {
+            Err(InferenceServiceError::Unavailable)
+        }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -865,6 +923,13 @@ mod tests {
     }
 
     impl InferenceGenerator for BlockingGenerationGenerator {
+        fn count_text_tokens(
+            &self,
+            _: crate::inference::InferenceTokenizeRequest,
+        ) -> Result<u64, InferenceServiceError> {
+            Err(InferenceServiceError::Unavailable)
+        }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -893,7 +958,7 @@ mod tests {
         }
     }
 
-    fn request(cancellation: InferenceCancellation) -> InferenceGenerateRequest {
+    pub(crate) fn request(cancellation: InferenceCancellation) -> InferenceGenerateRequest {
         InferenceGenerateRequest {
             operation: AgentOperationKey {
                 run_id: AgentRunId::generate(),
@@ -941,6 +1006,50 @@ mod tests {
         .unwrap();
         std::fs::remove_file(path).unwrap();
         imported
+    }
+
+    #[test]
+    fn plain_text_tokenization_uses_the_worker_without_generation() {
+        let generator = Arc::new(ExactGenerator {
+            calls: AtomicUsize::new(0),
+            mismatch_operation: false,
+            mismatch_attempt: false,
+        });
+        let (service, handle) = InferenceService::start(
+            InferenceConfig::custom(generator.clone()),
+            RestoredInferenceHealth::default(),
+        )
+        .unwrap();
+        let sample = request(InferenceCancellation::new());
+        let tokenize = InferenceTokenizeRequest {
+            operation: sample.operation,
+            model: sample.model,
+            runtime: sample.runtime,
+            text: "exact tokenizer fixture".into(),
+            deadline_at_ms: sample.deadline_at_ms,
+            cancellation: sample.cancellation,
+            health: None,
+        };
+        assert_eq!(handle.count_text_tokens(tokenize.clone()).unwrap(), 3);
+        let mut expired = tokenize.clone();
+        expired.deadline_at_ms = unix_ms();
+        assert_eq!(
+            handle.count_text_tokens(expired),
+            Err(InferenceServiceError::Deadline)
+        );
+        let mut cancelled = tokenize.clone();
+        cancelled.cancellation = InferenceCancellation::new();
+        cancelled.cancellation.cancel();
+        assert_eq!(
+            handle.count_text_tokens(cancelled),
+            Err(InferenceServiceError::Cancelled)
+        );
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 0);
+        service.shutdown();
+        assert_eq!(
+            handle.count_text_tokens(tokenize),
+            Err(InferenceServiceError::Stopped)
+        );
     }
 
     #[test]
@@ -1032,6 +1141,7 @@ mod tests {
         .unwrap();
         let sample = request(InferenceCancellation::new());
         let registration = RegisteredModelService {
+            mmproj: None,
             model: sample.model.clone(),
             runtime: sample.runtime.clone(),
             artifact: imported_model(),
@@ -1196,6 +1306,7 @@ mod tests {
         let sample = request(InferenceCancellation::new());
         let result = handle.register_service(
             RegisteredModelService {
+                mmproj: None,
                 model: sample.model,
                 runtime: sample.runtime,
                 artifact: imported_model(),

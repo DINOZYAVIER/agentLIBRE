@@ -8,7 +8,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/install-agl-cargo.sh [options]
 
-Build and install agl, execd, its private launcher, Matrix bridge and private
+Build and install agl, Matrix bridge and private
 llama.cpp runtime under one prefix. Stage the complete runtime before replacing
 installed files. With --services, also replace and restart user-systemd units.
 
@@ -70,10 +70,15 @@ engine_target="$root/libexec/agentlibre"
 rust_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 [[ "$rust_target" == /* ]] || rust_target="$repo_root/$rust_target"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+app_config_root="${AGL_HOME:+$AGL_HOME/config}"
+app_config_root="${app_config_root:-$config_home/agentLIBRE}"
+app_data_root="${AGL_HOME:+$AGL_HOME/data}"
+app_data_root="${app_data_root:-${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE}"
+catalog="$app_data_root/source"
 matrix_config="${AGL_MATRIX_BRIDGE_CONFIG:-$config_home/agentLIBRE/matrix-bridge/agl.toml}"
 
 if [[ "$force" -eq 0 ]]; then
-  for installed in "$root/bin/agl" "$root/bin/agl-execd" "$root/bin/agl-matrix-bridge" "$root/bin/agl-execd-launcher" "$engine_target"; do
+  for installed in "$root/bin/agl" "$root/bin/agl-matrix-bridge" "$engine_target"; do
     [[ ! -e "$installed" && ! -L "$installed" ]] || {
       echo "refusing to replace installed runtime: $installed" >&2
       exit 1
@@ -87,10 +92,6 @@ if [[ "$dry_run" -eq 0 ]]; then
   done
   if [[ "$services" -eq 1 ]]; then
     command -v systemctl >/dev/null || { echo "missing required tool: systemctl" >&2; exit 1; }
-    [[ -f "$config_home/agentLIBRE/agentLIBRE.toml" ]] || {
-      echo "missing daemon config: $config_home/agentLIBRE/agentLIBRE.toml" >&2
-      exit 1
-    }
     systemctl --user show-environment >/dev/null
   fi
 fi
@@ -113,7 +114,7 @@ shopt -s nullglob
 libraries=("$engine_source"/lib*.so*)
 shopt -u nullglob
 if [[ "$dry_run" -eq 0 ]]; then
-  for binary in agl agl-execd agl-execd-launcher agl-matrix-bridge; do
+  for binary in agl agl-matrix-bridge; do
     [[ -x "$rust_target/$profile/$binary" ]] || { echo "missing built binary: $rust_target/$profile/$binary" >&2; exit 1; }
   done
   [[ -x "$engine_source/llama-server" ]] || { echo "missing private llama-server: $engine_source/llama-server" >&2; exit 1; }
@@ -127,7 +128,7 @@ if [[ "$dry_run" -eq 0 ]]; then
   trap 'rm -rf -- "$stage"' EXIT
 fi
 run install -d -m 0755 "$stage/bin" "$stage/engine"
-for binary in agl agl-execd agl-execd-launcher agl-matrix-bridge; do
+for binary in agl agl-matrix-bridge; do
   run install -m 0755 "$rust_target/$profile/$binary" "$stage/bin/$binary"
 done
 run install -m 0755 "$engine_source/llama-server" "$stage/engine/llama-server"
@@ -140,14 +141,41 @@ else
   (exec 3>/dev/null; env -i AGL_LLAMA_SERVER_INVENTORY_FD=3 "$stage/engine/llama-server")
 fi
 
+# Seed only a new catalog. Updating binaries does not advance user pins.
+manifest="$catalog/agentLIBRE.toml"
+catalog_lock="$catalog/agentLIBRE.lock"
+if [[ -e "$manifest" || -e "$catalog_lock" ]]; then
+  [[ -f "$manifest" && -f "$catalog_lock" ]] || {
+    echo "incomplete catalog: run agl forge sync from $catalog; existing files were preserved" >&2
+    exit 1
+  }
+else
+  run install -d -m 0755 "$catalog"
+  run cp --no-clobber -- "$repo_root/assets/default-catalog.toml" "$manifest"
+  if [[ "$dry_run" -eq 1 ]]; then
+    printf '+ (cd %q && %q forge sync)\n' "$catalog" "$stage/bin/agl"
+  else
+    (cd "$catalog"; "$stage/bin/agl" forge sync)
+    [[ -f "$catalog_lock" ]] || { echo "initial Forge sync did not publish $catalog_lock" >&2; exit 1; }
+  fi
+fi
+settings="$app_config_root/agentLIBRE.toml"
+if [[ ! -e "$settings" ]]; then
+  run install -d -m 0700 "$app_config_root"
+  if [[ "$dry_run" -eq 1 ]]; then
+    printf '+ create CPU Small settings at %q\n' "$settings"
+  else
+    (umask 077; set -o noclobber; printf '[chat]\ndefault_function = "function:agentlibre.cpu-small@^1.0"\n' > "$settings")
+  fi
+fi
+
 if [[ "$services" -eq 1 ]]; then
   run "$script_dir/restart-services.sh" --stop
 fi
 # Same-filesystem rename replaces running ELF files without truncating them.
-for binary in agl agl-execd agl-matrix-bridge; do
+for binary in agl agl-matrix-bridge; do
   run mv -fT -- "$stage/bin/$binary" "$root/bin/$binary"
 done
-run mv -- "$stage/bin/agl-execd-launcher" "$stage/engine/agl-execd-launcher"
 run install -d -m 0755 "$engine_target"
 # Replace managed flat files only. Runtime generations and their read-only
 # dependency/GC-root directories are state, not stale engine libraries.
@@ -168,7 +196,6 @@ else
 fi
 
 if [[ "$services" -eq 1 ]]; then
-  run "$script_dir/agentlibre-execd-systemd-service.sh" --binary "$root/bin/agl-execd" --enable
   run "$script_dir/agentlibre-daemon-systemd-service.sh" --binary "$root/bin/agl" --enable
   if [[ -f "$matrix_config" ]]; then
     run "$script_dir/agentlibre-matrix-bridge-systemd-service.sh" --binary "$root/bin/agl-matrix-bridge" --config "$matrix_config" --enable

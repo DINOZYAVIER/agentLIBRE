@@ -652,6 +652,44 @@ pub struct FunctionPermissions {
     pub search: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionSchedule {
+    pub interval_seconds: u64,
+    pub prompt: String,
+    pub max_run_seconds: u64,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+impl FunctionSchedule {
+    pub fn validate(&self) -> Result<()> {
+        for (name, value) in [
+            ("interval_seconds", self.interval_seconds),
+            ("max_run_seconds", self.max_run_seconds),
+        ] {
+            ensure!(
+                value > 0 && value <= i64::MAX as u64 / 1000,
+                "schedule.{name} must be positive and fit UTC milliseconds"
+            );
+        }
+        ensure!(
+            !self.prompt.trim().is_empty(),
+            "schedule.prompt must not be empty"
+        );
+        agl_core::Content::text(self.prompt.clone()).context("invalid schedule.prompt")?;
+        let mut events = BTreeSet::new();
+        for event in &self.events {
+            let path = event
+                .strip_prefix("file:")
+                .context("schedule.events accepts file:relative/path")?;
+            validate_relative(path, false).context("invalid scheduled file path")?;
+            ensure!(events.insert(event), "schedule.events contains duplicates");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionToolOutputPresentation {
@@ -707,6 +745,8 @@ pub struct FunctionManifest {
     pub working_directory: String,
     #[serde(default)]
     pub permissions: FunctionPermissions,
+    #[serde(default)]
+    pub schedule: Option<FunctionSchedule>,
     #[serde(default)]
     pub inference: FunctionInference,
     #[serde(default)]
@@ -781,6 +821,9 @@ impl FunctionManifest {
             extension.validate().context("invalid Function Extension")?;
         }
         self.validate_permissions()?;
+        if let Some(schedule) = &self.schedule {
+            schedule.validate()?;
+        }
         let _: RelativePath = self
             .working_directory
             .clone()
@@ -1129,6 +1172,35 @@ input_selected = "bold oklch(0.518 0.253 323.949)"
 details = false
 "##
         .to_owned()
+    }
+
+    #[test]
+    fn schedule_is_explicit_and_validates_timer_prompt_deadline_and_file_events() {
+        assert!(
+            FunctionManifest::parse(&minimal())
+                .unwrap()
+                .schedule
+                .is_none()
+        );
+        let document = format!(
+            "{}\n[schedule]\ninterval_seconds = 60\nmax_run_seconds = 30\nprompt = 'Inspect the changed file'\nevents = ['file:src/main.rs']\n",
+            minimal()
+        );
+        let manifest = FunctionManifest::parse(&document).unwrap();
+        assert_eq!(manifest.schedule.unwrap().events, ["file:src/main.rs"]);
+        for invalid in [
+            document.replace("interval_seconds = 60", "interval_seconds = 0"),
+            document.replace("max_run_seconds = 30", "max_run_seconds = 0"),
+            document.replace("Inspect the changed file", "  "),
+            document.replace("file:src/main.rs", "file:../secret"),
+            document.replace("file:src/main.rs", "matrix:room"),
+            document.replace(
+                "['file:src/main.rs']",
+                "['file:src/main.rs', 'file:src/main.rs']",
+            ),
+        ] {
+            assert!(FunctionManifest::parse(&invalid).is_err());
+        }
     }
 
     #[test]

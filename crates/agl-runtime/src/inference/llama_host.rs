@@ -1,3 +1,4 @@
+use crate::inference::{PrivateInference, ProcessHost};
 mod output;
 mod wire;
 
@@ -22,9 +23,9 @@ use agl_core::agent::{
     ModelGenerationResult, ModelOutputDiagnostic, ModelOutputFailureClass, ModelRuntimeSelection,
     ModelUsage, PackageDigest, PhysicalDeviceSelector, ToolCallFormat as RuntimeToolCallFormat,
 };
-use agl_execution_api::{
-    BlockingExecutionClient, ExecutionId, ExecutionIo, ExecutionIsolation, ExecutionOutcome,
-    ExecutionOutputStream, ExecutionOwner, ExecutionSignal, ExecutionStartRequest, ExecutionState,
+use agl_core::execution::{
+    ExecutionId, ExecutionIo, ExecutionIsolation, ExecutionOutcome, ExecutionOwner,
+    ExecutionStartRequest, ExecutionState,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -97,7 +98,7 @@ pub struct LlamaServerConfig {
 pub(crate) fn generator(
     config: LlamaServerConfig,
     expected_engine_build: EngineBuildDigest,
-    execution: BlockingExecutionClient,
+    execution: ProcessHost,
     restored_health: &RestoredInferenceHealth,
 ) -> Result<Arc<dyn InferenceGenerator>, InferenceServiceError> {
     let executable = verified_regular_file(&config.executable)?;
@@ -119,7 +120,7 @@ pub(crate) fn generator(
 
 struct LlamaHost {
     executable: PathBuf,
-    execution: BlockingExecutionClient,
+    execution: ProcessHost,
     engine_build: EngineBuildDigest,
     health: Mutex<RestoredInferenceHealth>,
     health_updates: Mutex<Vec<InferenceHealthUpdate>>,
@@ -212,7 +213,62 @@ impl Drop for ServiceLease<'_> {
     }
 }
 
+fn count_plain_text_tokens(socket: &Path, text: &str) -> Result<u64, InferenceServiceError> {
+    let body =
+        serde_json::to_vec(&json!({"content":text,"add_special":false,"parse_special":false}))
+            .map_err(|_| InferenceServiceError::InvalidRequest)?;
+    let response = http_request(socket, "POST", "/tokenize", Some(&body))?;
+    if response.status != 200 {
+        return Err(InferenceServiceError::Unavailable);
+    }
+    let value: Value =
+        serde_json::from_slice(&response.body).map_err(|_| InferenceServiceError::InvalidResult)?;
+    let tokens = value
+        .get("tokens")
+        .and_then(Value::as_array)
+        .ok_or(InferenceServiceError::InvalidResult)?;
+    if !tokens
+        .iter()
+        .all(|token| token.as_u64().is_some_and(|token| token <= i32::MAX as u64))
+    {
+        return Err(InferenceServiceError::InvalidResult);
+    }
+    Ok(tokens.len() as u64)
+}
+
 impl InferenceGenerator for LlamaHost {
+    fn count_text_tokens(
+        &self,
+        request: crate::inference::InferenceTokenizeRequest,
+    ) -> Result<u64, InferenceServiceError> {
+        let service = self
+            .services
+            .lock()
+            .map_err(|_| InferenceServiceError::Unavailable)?
+            .get(&request.runtime.service.key)
+            .cloned()
+            .filter(|service| {
+                service.registration.model == request.model
+                    && same_service_plan(&service.registration.runtime, &request.runtime)
+            })
+            .ok_or(InferenceServiceError::Unavailable)?;
+        let _lease = service
+            .gate
+            .acquire(&request.cancellation, request.deadline_at_ms)?;
+        let engine = self.resident_engine(&service, &request.cancellation)?;
+        if engine.execution_status()? != ExecutionState::Running {
+            return Err(engine.unavailable_error());
+        }
+        let count = count_plain_text_tokens(&engine.socket_path, &request.text)?;
+        if request.cancellation.is_cancelled() {
+            return Err(InferenceServiceError::Cancelled);
+        }
+        if request.deadline_at_ms <= unix_ms() {
+            return Err(InferenceServiceError::Deadline);
+        }
+        Ok(count)
+    }
+
     fn measure(
         &self,
         request: InferenceGenerateRequest,
@@ -369,7 +425,8 @@ impl InferenceGenerator for LlamaHost {
             .get(&key)
             .cloned()
         {
-            return if existing.registration.artifact == registration.artifact
+            return if existing.registration.mmproj == registration.mmproj
+                && existing.registration.artifact == registration.artifact
                 && existing.registration.adapters == registration.adapters
                 && same_service_plan(&existing.registration.runtime, &registration.runtime)
             {
@@ -517,7 +574,7 @@ impl LlamaHost {
                 )))
             }
             Err(EngineStartError::Unreleased(engine)) => {
-                // Keep ownership and its reservation until execd confirms reap.
+                // Keep ownership and its reservation until the managed execution confirms completion.
                 *resident = Some(Arc::new(*engine));
                 Err(InferenceServiceError::OutcomeUnknown)
             }
@@ -638,6 +695,16 @@ fn validate_registration(
     {
         return Err(InferenceServiceError::InvalidRequest);
     }
+    match (&runtime.mmproj, &registration.mmproj) {
+        (None, None) => {}
+        (Some(artifact), Some(imported))
+            if artifact.kind == ModelArtifactKind::Gguf
+                && artifact.bytes > 0
+                && imported.verify_unchanged().is_ok()
+                && imported.digest() == model_artifact_digest(artifact.digest)?
+                && imported.bytes() == artifact.bytes => {}
+        _ => return Err(InferenceServiceError::InvalidRequest),
+    }
     for (adapter, imported) in runtime.adapters.iter().zip(&registration.adapters) {
         if imported.verify_unchanged().is_err()
             || imported.digest() != model_artifact_digest(adapter.artifact.digest)?
@@ -691,13 +758,17 @@ fn generated_profile(
     if runtime.speculative.is_some() && !gpu {
         return Err(InferenceServiceError::InvalidRequest);
     }
-    let model_bytes = runtime.artifact.bytes.saturating_add(
-        runtime
-            .adapters
-            .iter()
-            .map(|adapter| adapter.artifact.bytes)
-            .sum(),
-    );
+    let model_bytes = runtime
+        .artifact
+        .bytes
+        .saturating_add(runtime.mmproj.as_ref().map_or(0, |artifact| artifact.bytes))
+        .saturating_add(
+            runtime
+                .adapters
+                .iter()
+                .map(|adapter| adapter.artifact.bytes)
+                .sum(),
+        );
     let context_bytes = u64::from(runtime.load.context_tokens)
         .saturating_mul(u64::from(runtime.service.slots))
         .saturating_mul(if gpu { 128 * 1024 } else { 256 * 1024 });
@@ -897,7 +968,7 @@ fn unix_ms() -> i64 {
 }
 
 pub(crate) struct ResidentEngine {
-    execution: BlockingExecutionClient,
+    execution: ProcessHost,
     execution_id: ExecutionId,
     directory: PathBuf,
     socket_path: PathBuf,
@@ -927,12 +998,17 @@ impl ResidentEngine {
         executable: &Path,
         registration: &RegisteredModelService,
         profile: LlamaRuntimeProfile,
-        execution: BlockingExecutionClient,
+        execution: ProcessHost,
     ) -> Result<Self, EngineStartError> {
         registration
             .artifact
             .verify_unchanged()
             .map_err(|_| InferenceServiceError::Unavailable)?;
+        if let Some(projector) = &registration.mmproj {
+            projector
+                .verify_unchanged()
+                .map_err(|_| InferenceServiceError::Unavailable)?;
+        }
         for adapter in &registration.adapters {
             adapter
                 .verify_unchanged()
@@ -959,24 +1035,39 @@ impl ResidentEngine {
         let mut argv = Vec::with_capacity(arguments.len() + 1);
         argv.push(executable.to_string_lossy().into_owned());
         argv.extend(arguments);
-        let artifacts = std::iter::once(registration.artifact.path())
-            .chain(registration.adapters.iter().map(|adapter| adapter.path()))
-            .map(|path| path.to_string_lossy().into_owned())
+        // Hold the verified file identities through the helper's exec. The
+        // manager cannot inherit our FDs, so reopen only these pinned proc FDs,
+        // never the mutable artifact pathname.
+        let artifact_files = std::iter::once(&registration.artifact)
+            .chain(registration.adapters.iter())
+            .chain(registration.mmproj.iter())
+            .map(|artifact| artifact.try_clone_file())
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|_| InferenceServiceError::Unavailable)?;
+        let artifacts = artifact_files
+            .iter()
+            .map(|file| {
+                use std::os::fd::AsRawFd;
+                format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
+            })
             .collect::<Vec<_>>();
         let status = execution
-            .start(ExecutionStartRequest {
-                owner: ExecutionOwner::Runtime {
-                    component: "inference".to_owned(),
+            .start(
+                ExecutionStartRequest {
+                    owner: ExecutionOwner::Runtime {
+                        component: "inference".to_owned(),
+                    },
+                    argv,
+                    cwd: directory.to_string_lossy().into_owned(),
+                    environment,
+                    clear_environment: true,
+                    io: ExecutionIo::Pipes,
+                    timeout_ms: 0,
+                    max_output_bytes: 4 * 1024 * 1024,
+                    terminal_size: None,
+                    isolation: ExecutionIsolation::Standard,
                 },
-                argv,
-                cwd: directory.to_string_lossy().into_owned(),
-                environment,
-                clear_environment: true,
-                io: ExecutionIo::Pipes,
-                timeout_ms: 0,
-                max_output_bytes: 4 * 1024 * 1024,
-                terminal_size: None,
-                isolation: ExecutionIsolation::PrivateInference {
+                PrivateInference {
                     artifacts,
                     listen_socket: socket_path.to_string_lossy().into_owned(),
                     device_paths: profile
@@ -986,8 +1077,9 @@ impl ResidentEngine {
                         .collect(),
                     address_space_limit_bytes: address_limit,
                 },
-            })
+            )
             .map_err(|_| InferenceServiceError::Unavailable)?;
+        drop(artifact_files);
         let device_lost = Arc::new(AtomicBool::new(false));
         let engine = Self {
             execution,
@@ -1140,9 +1232,7 @@ impl ResidentEngine {
             return Ok(());
         }
         self.retiring.store(true, Ordering::Release);
-        let _ = self
-            .execution
-            .signal(self.execution_id, ExecutionSignal::Terminate);
+        let _ = self.execution.stop(self.execution_id);
         for _ in 0..200 {
             match self.execution_status() {
                 Ok(ExecutionState::Exited) => {
@@ -1195,29 +1285,23 @@ impl ResidentEngine {
             let Ok(output) = self.execution.read(
                 self.execution_id,
                 *cursor,
-                agl_execution_api::MAX_EXECUTION_OUTPUT_READ_BYTES,
+                agl_core::execution::MAX_EXECUTION_OUTPUT_READ_BYTES,
             ) else {
                 return;
             };
-            for chunk in output
-                .chunks
-                .iter()
-                .filter(|chunk| chunk.stream == ExecutionOutputStream::Stderr)
-            {
-                for line in String::from_utf8_lossy(&chunk.data).lines() {
-                    if engine_diagnostic_is_device_lost(line) {
-                        self.device_lost.store(true, Ordering::Release);
-                    }
-                    tracing::debug!(
-                        target: "agl_inference_engine",
-                        execution_id = %self.execution_id,
-                        diagnostic_bytes = line.len(),
-                        "private llama-server diagnostic"
-                    );
+            for line in String::from_utf8_lossy(&output.data).lines() {
+                if engine_diagnostic_is_device_lost(line) {
+                    self.device_lost.store(true, Ordering::Release);
                 }
+                tracing::debug!(
+                    target: "agl_inference_engine",
+                    execution_id = %self.execution_id,
+                    diagnostic_bytes = line.len(),
+                    "private llama-server diagnostic"
+                );
             }
             *cursor = output.next;
-            if output.eof || output.chunks.is_empty() {
+            if output.eof || output.data.is_empty() {
                 break;
             }
         }
@@ -1229,17 +1313,11 @@ impl ResidentEngine {
 
     fn execution_record(
         &self,
-    ) -> Result<agl_execution_api::ExecutionStatus, InferenceServiceError> {
-        let mut status = self
+    ) -> Result<agl_core::execution::ExecutionStatus, InferenceServiceError> {
+        let status = self
             .execution
             .inspect(self.execution_id)
             .map_err(|_| InferenceServiceError::OutcomeUnknown)?;
-        if matches!(
-            status.outcome,
-            Some(ExecutionOutcome::UnknownAfterServiceRestart)
-        ) {
-            status.state = ExecutionState::OutcomeUnknown;
-        }
         Ok(status)
     }
 }
@@ -1554,6 +1632,15 @@ fn launch_arguments(
             "--lora-scaled".into(),
             format!("/proc/self/fd/{}", FIRST_ADAPTER_FD + index as i32),
             adapter.scale.to_string(),
+        ]);
+    }
+    if runtime.mmproj.is_some() {
+        args.extend([
+            "--mmproj".into(),
+            format!(
+                "/proc/self/fd/{}",
+                FIRST_ADAPTER_FD + runtime.adapters.len() as i32
+            ),
         ]);
     }
     if let Some(device) = &profile.device {

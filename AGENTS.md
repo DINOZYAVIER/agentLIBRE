@@ -9,7 +9,6 @@
 | `crates/` | Domain types, service clients, package/inference runtime and native Tool interfaces/handlers. See `crates/AGENTS.md`. |
 | `products/agl-cli/` | `agl` entrypoint, daemon command, configuration, artifact commands and terminal chat. |
 | `products/services/agl-daemon/` | Agent scheduling, activation, Store, planner and implementation coordination. |
-| `products/services/agl-execd/` | Execution service and private launcher: child processes, PTYs and planner isolation. |
 | `products/agl-matrix-bridge/` | Matrix transport, access policy, encryption/device verification and conversation bindings. |
 | `extensions/` | First-party Extension manifests and Tool/Effect JSON schemas; Rust handlers are in `crates/agl-tools/`. |
 | `scripts/` | Build/install, systemd deployment, CI and live inference/plan checks. |
@@ -28,8 +27,8 @@ manifest live in separate repositories. There is no repository-root
 `functions/` tree. Forge materializations are generated state, not sources.
 
 The production request path is CLI/Matrix -> `agl-daemon-api` -> daemon Agent
-service -> runtime inference or native Tools -> `agl-execution-api` -> execd.
-Daemon state is persisted by Store; execution state is persisted by execd.
+service -> runtime inference or native Tools -> daemon execution adapter ->
+systemd/tmux. Store persists Agent and execution bindings/results.
 
 ## Alpha compatibility policy
 
@@ -49,13 +48,15 @@ The application directory is `agentLIBRE` below each XDG base:
 | Root | Default base | Current contents |
 | --- | --- | --- |
 | Config | `${XDG_CONFIG_HOME:-$HOME/.config}/agentLIBRE` | Application settings: `agentLIBRE.toml`; generated systemd user units are in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`. The Matrix service script defaults to `matrix-bridge/agl.toml`. |
-| Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution store: `execd/executions.sqlite3`; per-Execution planner views and scratch: `execd/planner-scratch/<ExecutionId>/` (removed on completion/recovery). |
-| State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; execution socket: `execd/execd.sock`. |
+| Data | `${XDG_DATA_HOME:-$HOME/.local/share}/agentLIBRE` | Installed source tree: `source/` (including `source/functions/`); generated active config: `config/active.json`; daemon store: `store/agentlibre.sqlite3` with SQLite `-wal`/`-shm` sidecars; Function/package cache: `runtime/packages/`; managed GGUF models: `runtime/models/<digest>.gguf`; execution files: `executions/<ExecutionId>/`; per-Execution planner views and scratch: `executions/planner-scratch/<ExecutionId>/` (removed on completion/recovery); persistent planner cache: `planner-cache/<workspace-sha256>/`. |
+| State | `${XDG_STATE_HOME:-$HOME/.local/state}/agentLIBRE` | Daemon socket: `daemon/agl.sock`; private tmux socket: `executions/tmux.sock`. |
 | Cache | `XDG_CACHE_HOME` | Not currently used by the production agentLIBRE code. Do not assume an agentLIBRE cache directory here. |
 
 For `agl config check/apply`, the default Function and typed Function
-requirements resolve against the AGL repository-root `agentLIBRE.toml`,
-independent of the caller's current directory. Direct Function directory
+requirements resolve against the configured Forge catalog manifest,
+independent of the caller's current directory. The catalog defaults to
+`${data}/source/`; `[forge] catalog_root` in the user TOML may select an
+absolute path. A missing catalog is an error. Direct Function directory
 locators remain relative to the caller's current directory and are checked
 against that workspace. `FUNCTION.toml` remains in
 each Function source directory. The Matrix bridge's session, encrypted-room store,
@@ -65,7 +66,7 @@ from XDG at runtime. The repository example places them below
 
 The repository-root `agentLIBRE.toml` is a separate AGL workspace manifest. It
 is the source of truth for all Forge entities and is edited through `agl
-artifact` commands; Forge catalogs, locks and materializations are generated
+forge` commands; Forge catalogs, locks and materializations are generated
 backend state.
 
 The workspace manifest may also declare `[workspace] output_directories` as
@@ -79,12 +80,11 @@ Service logs are not written to an agentLIBRE file by the systemd units. Both
 stdout and stderr go to the per-user systemd journal:
 
 ```text
-journalctl --user -u agentlibre-execd.service
 journalctl --user -u agentlibre-daemon.service
 journalctl --user -u agl-matrix-bridge.service
 ```
 
-For an isolated CLI or `agl-execd` invocation, `AGL_HOME=/absolute/path`
+For an isolated CLI/daemon invocation, `AGL_HOME=/absolute/path`
 replaces the three application roots with `$AGL_HOME/config`,
 `$AGL_HOME/data`, and `$AGL_HOME/state`; this is an explicit override, not the
 default layout above.

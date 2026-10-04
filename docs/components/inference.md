@@ -1,7 +1,7 @@
 # Inference
 
 `agl-runtime::inference` runs exact digest-checked GGUF artifacts through
-private `llama-server` services owned by `agl-execd`. The daemon config supplies the engine executable and
+private `llama-server` services owned by systemd user units. The daemon config supplies the engine executable and
 may supply private host profiles keyed by GGUF digest. The engine bundle digest
 is calculated and checked by agentLIBRE; Model format and acquisition come from
 the locked Model declaration.
@@ -10,8 +10,9 @@ Download and explicit import verify the complete artifact SHA-256. Later
 activations open the already verified managed-cache file without rehashing it;
 they require the declared size and GGUF header plus current-user ownership, one
 hard link, owner-only access, and stable file identity. The retained descriptor
-is cloned into the execd-owned inference launch, so activation does not reopen
-the model through an untrusted path.
+is cloned and held through the managed launch. The helper opens its pinned
+/proc/<daemon-pid>/fd/<fd> identity and supplies the model FD to the engine;
+activation does not reopen the mutable model pathname.
 
 `agl-runtime` owns a process-local registry keyed by the exact realized load
 plan. Compatible Functions reuse one resident service. Each service has
@@ -32,7 +33,7 @@ hold leases. Worker crashes/device loss produce cooldown health, while
 allocation overage produces resource quarantine; both are persisted by the
 daemon Store.
 
-When execd reports that an engine ended from a signal, worker health stores the
+When the execution adapter reports that an engine ended from a signal, worker health stores the
 exact signal as `unattributed_signal`. A signal alone is never labeled as OOM;
 device loss and allocation failures require their own observed backend or
 allocation evidence.

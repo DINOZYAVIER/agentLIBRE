@@ -1,11 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-use ayeque_forge_core::resolve_project_at;
-use ayeque_forge_core::{
-    VerifiedEntity, VerifiedProject, resolve_entity, resolve_project, verify_lock,
-};
+use crate::workspace_forge::{ResolvedForgeDeclaration, WorkspaceForge};
 use semver::{Version, VersionReq};
 
 use crate::agent::AGENT_PAYLOAD_SCHEMA;
@@ -32,6 +28,7 @@ pub(crate) struct ResolvedFunctionSource {
     pub manifest: FunctionManifest,
     pub function_digest: PackageTreeDigest,
     pub entities: Vec<ResolvedEntity>,
+    _forge: WorkspaceForge,
 }
 
 #[derive(Clone, Debug)]
@@ -46,24 +43,23 @@ pub(crate) struct ResolvedEntity {
 pub(crate) fn resolve_function(
     function_directory: impl AsRef<Path>,
     workspace: impl AsRef<Path>,
+    catalog_root: impl AsRef<Path>,
 ) -> Result<ResolvedFunctionSource> {
     let workspace = workspace.as_ref();
-    crate::resolve_workspace_artifacts(workspace)?;
-    let project = resolve_agl_project()?;
+    crate::resolve_workspace_forge(workspace)?;
+    let project = resolve_agl_project(catalog_root.as_ref())?;
     resolve_function_from_project(&project, function_directory.as_ref())
 }
 
-pub(crate) fn agl_workspace_root() -> Result<PathBuf> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+fn resolve_agl_project(catalog_root: &Path) -> Result<WorkspaceForge> {
+    ensure!(
+        catalog_root.is_absolute(),
+        "Forge catalog root must be absolute"
+    );
+    let root = catalog_root
         .canonicalize()
-        .context("failed to locate the AGL workspace manifest")
-}
-
-fn resolve_agl_project() -> Result<VerifiedProject> {
-    let root = agl_workspace_root()?;
-    crate::resolve_workspace_artifacts(&root)?;
-    resolve_project(&root)
+        .with_context(|| format!("Forge catalog {} is unavailable", catalog_root.display()))?;
+    crate::resolve_workspace_forge(&root)
 }
 
 #[cfg(test)]
@@ -72,16 +68,18 @@ fn resolve_function_at(
     function_directory: impl AsRef<Path>,
     workspace: impl AsRef<Path>,
 ) -> Result<ResolvedFunctionSource> {
-    let project = resolve_project_at(storage_root, workspace.as_ref())?;
+    let project =
+        crate::workspace_forge::resolve_workspace_forge_at(storage_root, workspace.as_ref())?;
     resolve_function_from_project(&project, function_directory.as_ref())
 }
 
 pub fn function_identity(
     function_directory: impl AsRef<Path>,
     workspace: impl AsRef<Path>,
+    catalog_root: impl AsRef<Path>,
 ) -> Result<FunctionIdentity> {
     let directory = function_directory.as_ref().canonicalize()?;
-    let resolved = resolve_function(&directory, workspace)?;
+    let resolved = resolve_function(&directory, workspace, catalog_root)?;
     Ok(FunctionIdentity {
         directory,
         id: resolved.manifest.id,
@@ -90,21 +88,55 @@ pub fn function_identity(
     })
 }
 
+#[derive(Clone, Debug)]
+pub struct ScheduledFunction {
+    pub identity: FunctionIdentity,
+    pub schedule: crate::function::FunctionSchedule,
+    pub permissions: crate::function::FunctionPermissions,
+}
+
+pub fn scheduled_functions(catalog_root: impl AsRef<Path>) -> Result<Vec<ScheduledFunction>> {
+    let project = resolve_agl_project(catalog_root.as_ref())?;
+    let mut scheduled = Vec::new();
+    for declaration in project
+        .declarations
+        .iter()
+        .filter(|entity| entity.kind == "function")
+    {
+        let entity = verified_entity(&project, &declaration.id, "function", FUNCTION_SCHEMA)?;
+        let directory = entity.materialized_path.canonicalize()?;
+        let manifest = read_function(&directory)?;
+        ensure!(
+            manifest.id.as_str() == declaration.id,
+            "Forge Function identity differs from FUNCTION.toml"
+        );
+        if let Some(schedule) = manifest.schedule.clone() {
+            let permissions = manifest.permissions.clone();
+            scheduled.push(ScheduledFunction {
+                identity: function_identity_at(&directory, manifest)?,
+                schedule,
+                permissions,
+            });
+        }
+    }
+    scheduled.sort_by(|a, b| a.identity.id.as_str().cmp(b.identity.id.as_str()));
+    Ok(scheduled)
+}
+
 pub fn resolve_function_requirement(
     id: &PackageId,
     requirement: &VersionReq,
-    _workspace: impl AsRef<Path>,
+    catalog_root: impl AsRef<Path>,
 ) -> Result<FunctionIdentity> {
-    let project = resolve_agl_project()?;
+    let project = resolve_agl_project(catalog_root.as_ref())?;
     let mut candidates = Vec::new();
     for declared in project
-        .manifest()
-        .entities()
+        .declarations
         .iter()
-        .filter(|entity| entity.kind() == "function" && entity.id() == id.as_str())
+        .filter(|entity| entity.kind == "function" && entity.id == id.as_str())
     {
-        let entity = verified_entity(&project, declared.id(), "function", FUNCTION_SCHEMA)?;
-        let directory = entity.materialized_path().canonicalize()?;
+        let entity = verified_entity(&project, &declared.id, "function", FUNCTION_SCHEMA)?;
+        let directory = entity.materialized_path.canonicalize()?;
         let manifest = read_function(&directory)?;
         ensure!(
             manifest.id == *id,
@@ -134,18 +166,19 @@ pub fn resolve_function_requirement(
 pub fn resolve_function_model(
     id: &PackageId,
     requirement: &VersionReq,
+    catalog_root: impl AsRef<Path>,
 ) -> Result<crate::model::ModelManifest> {
-    let identity = resolve_function_requirement(id, requirement, agl_workspace_root()?)?;
-    let project = resolve_agl_project()?;
+    let identity = resolve_function_requirement(id, requirement, catalog_root.as_ref())?;
+    let project = resolve_agl_project(catalog_root.as_ref())?;
     let manifest = read_function(&identity.directory)?;
     let model = verified_entity(&project, manifest.model.id.as_str(), "model", MODEL_SCHEMA)?;
     crate::model::parse_package_view(&DirectoryPackageView::new(
-        model.materialized_path().canonicalize()?,
+        model.materialized_path.canonicalize()?,
     )?)
 }
 
 fn resolve_function_from_project(
-    project: &VerifiedProject,
+    project: &WorkspaceForge,
     function_directory: &Path,
 ) -> Result<ResolvedFunctionSource> {
     let function_directory = function_directory.canonicalize().with_context(|| {
@@ -154,25 +187,21 @@ fn resolve_function_from_project(
             function_directory.display()
         )
     })?;
-    verify_lock(project)?;
-    let function = project
-        .manifest()
-        .entities()
+    let declaration = project
+        .declarations
         .iter()
-        .filter(|entity| entity.kind() == "function")
-        .map(|declared| verified_entity(project, declared.id(), "function", FUNCTION_SCHEMA))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
+        .filter(|entity| entity.kind == "function")
         .find(|entity| {
             entity
-                .materialized_path()
+                .materialized_path
                 .canonicalize()
                 .is_ok_and(|path| path == function_directory)
         })
         .context("Function is not materialized from the AGL workspace artifact catalog")?;
+    let function = verified_entity(project, &declaration.id, "function", FUNCTION_SCHEMA)?;
     let manifest = read_function(&function_directory)?;
     ensure!(
-        manifest.id.as_str() == function.id(),
+        manifest.id.as_str() == function.id,
         "Function artifact identity differs from FUNCTION.toml"
     );
     let function_digest =
@@ -186,8 +215,8 @@ fn resolve_function_from_project(
         );
         let (forge_kind, schema) = kind_schema(kind);
         let verified = verified_entity(project, reference.id.as_str(), forge_kind, schema)?;
-        let root = verified.materialized_path().canonicalize()?;
-        let id = PackageId::new(verified.id().to_owned())?;
+        let root = verified.materialized_path.canonicalize()?;
+        let id = PackageId::new(verified.id.to_owned())?;
         let version = PackageVersion::new(package_version(&root, kind)?)?;
         ensure!(
             id == reference.id && version == reference.version,
@@ -207,6 +236,7 @@ fn resolve_function_from_project(
         manifest,
         function_digest,
         entities,
+        _forge: project.clone(),
     })
 }
 
@@ -219,18 +249,22 @@ fn function_identity_at(directory: &Path, manifest: FunctionManifest) -> Result<
     })
 }
 
-fn verified_entity(
-    project: &VerifiedProject,
+fn verified_entity<'a>(
+    project: &'a WorkspaceForge,
     id: &str,
     expected_kind: &str,
     expected_schema: &str,
-) -> Result<VerifiedEntity> {
-    let entity = resolve_entity(project, id)?;
+) -> Result<&'a ResolvedForgeDeclaration> {
+    let entity = project
+        .declarations
+        .iter()
+        .find(|entity| entity.id == id)
+        .context("Forge source is not declared")?;
     ensure!(
-        entity.kind() == expected_kind && entity.schema() == expected_schema,
+        entity.kind == expected_kind && entity.schema == expected_schema,
         "Forge entity {id} has kind/schema {}/{}; expected {expected_kind}/{expected_schema}",
-        entity.kind(),
-        entity.schema()
+        entity.kind,
+        entity.schema
     );
     Ok(entity)
 }
@@ -317,27 +351,35 @@ fn package_version(root: &Path, kind: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ayeque_forge_core::LockEntry;
     use std::fs;
+
+    #[test]
+    fn requirement_resolution_rejects_missing_or_relative_catalog() {
+        let id = PackageId::new("test".to_owned()).unwrap();
+        let requirement = VersionReq::STAR;
+        assert!(
+            resolve_function_requirement(&id, &requirement, "relative")
+                .unwrap_err()
+                .to_string()
+                .contains("must be absolute")
+        );
+        let missing =
+            std::env::temp_dir().join(format!("agl-missing-catalog-{}", uuid::Uuid::now_v7()));
+        assert!(
+            resolve_function_requirement(&id, &requirement, missing)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+    }
 
     #[test]
     fn resolves_function_and_dependencies_only_through_forge_catalog() {
         let root = std::env::temp_dir().join(format!("agl-runtime-forge-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("workspace");
         let storage = root.join("forge");
-        fs::create_dir_all(workspace.join(".git")).unwrap();
         fs::create_dir_all(workspace.join("src")).unwrap();
-        fs::create_dir_all(storage.join("projects/workspace/entities")).unwrap();
-        fs::write(workspace.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        fs::write(workspace.join(".git/config"), "").unwrap();
-        let project = storage.join("projects/workspace");
-        let workspace_sha =
-            ayeque_forge_core::workspace_identity(&workspace.canonicalize().unwrap());
-        fs::write(
-            project.join("project.toml"),
-            format!("format = 1\nworkspace_sha256 = \"{workspace_sha}\"\n"),
-        )
-        .unwrap();
+        let project = root.join("source");
         let function = project.join("entities/coder");
         let agent = project.join("entities/coder-agent");
         let model = project.join("entities/test-model");
@@ -352,40 +394,77 @@ mod tests {
         .unwrap();
         fs::write(agent.join("SYSTEM.md"), "Answer precisely.").unwrap();
         fs::write(model.join("MODEL.toml"), format!("schema = \"agentlibre.model/v1\"\nid = \"test-model\"\nversion = \"1.0.0\"\ndialect = \"generic\"\ntool_call_format = \"hermes_json\"\n\n[artifact]\nkind = \"gguf\"\nurl = \"https://example.invalid/model.gguf\"\nsha256 = \"sha256:{}\"\nbytes = 4\n", "01".repeat(32))).unwrap();
-        let manifest = "format = 2\n\n[[entity]]\nid = \"coder\"\nkind = \"function\"\nschema = \"agentlibre.function/v2\"\ngit = \"https://example.invalid/coder.git\"\nrevision = \"main\"\n\n[[entity]]\nid = \"coder-agent\"\nkind = \"agent\"\nschema = \"agentlibre.agent/v1\"\ngit = \"https://example.invalid/agent.git\"\nrevision = \"main\"\n\n[[entity]]\nid = \"test-model\"\nkind = \"model\"\nschema = \"agentlibre.model/v1\"\ngit = \"https://example.invalid/model.git\"\nrevision = \"main\"\n"
-            .to_owned();
-        fs::write(project.join("FORGE.toml"), manifest).unwrap();
-        let project_value = resolve_project_at(&storage, &workspace).unwrap();
-        let entries = project_value
-            .manifest()
-            .entities()
-            .iter()
-            .map(|entity| {
-                LockEntry::new(
-                    entity.id().to_owned(),
-                    entity.git().to_owned(),
-                    "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                    ".".to_owned(),
-                    "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                )
-                .unwrap()
-            })
-            .collect();
+        // An unrelated invalid Function package must not prevent this activation.
+        fs::create_dir_all(project.join("entities/unrelated")).unwrap();
         fs::write(
-            project.join("FORGE.lock"),
-            serialize_lock_for_test(&project_value, entries),
+            project.join("entities/unrelated/FUNCTION.toml"),
+            "not a Function",
         )
         .unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project)
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "fixture"]);
+        let revision = git(&["rev-parse", "HEAD"]);
+        let declarations = [
+            ("coder", "function", FUNCTION_SCHEMA),
+            ("coder-agent", "agent", AGENT_PAYLOAD_SCHEMA),
+            ("test-model", "model", MODEL_SCHEMA),
+            ("unrelated", "function", "not-the-function-schema"),
+        ]
+        .into_iter()
+        .map(|(id, kind, schema)| crate::ForgeDeclaration {
+            id: id.into(),
+            kind: kind.into(),
+            schema: schema.into(),
+            git: project.to_string_lossy().into_owned(),
+            revision: revision.clone(),
+            path: format!("entities/{id}"),
+        })
+        .collect::<Vec<_>>();
+        fs::write(
+            workspace.join("agentLIBRE.toml"),
+            crate::serialize_workspace_forge_declarations(&workspace, declarations.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut mutation = ayeque_forge_core::ForgeMutation::begin(&storage, &workspace).unwrap();
+        mutation
+            .sync(&crate::workspace_forge::backend_declarations(&declarations).unwrap())
+            .unwrap();
+        drop(mutation);
+        let function = storage.join("projects/workspace/entities/coder");
         let resolved = resolve_function_at(&storage, &function, &workspace).unwrap();
         assert_eq!(resolved.manifest.id.as_str(), "coder");
         assert_eq!(resolved.entities.len(), 2);
+        drop(resolved);
+        ayeque_forge_core::ForgeMutation::begin(&storage, &workspace)
+            .unwrap()
+            .sync(&[])
+            .unwrap();
         fs::remove_dir_all(root).unwrap();
-    }
-
-    fn serialize_lock_for_test(
-        project: &VerifiedProject,
-        entries: Vec<ayeque_forge_core::LockEntry>,
-    ) -> Vec<u8> {
-        ayeque_forge_core::serialize_lock(project, entries).unwrap()
     }
 }

@@ -25,6 +25,7 @@ mod tests {
     use super::*;
     include!("compaction_tests.rs");
     include!("effect_result_tests.rs");
+    include!("schedule_tests.rs");
 
     fn parse_diagnostic(raw: &str) -> agl_core::agent::ModelOutputDiagnostic {
         agl_core::agent::ModelOutputDiagnostic {
@@ -51,6 +52,7 @@ mod tests {
             SplitMode,
         };
         ModelRuntimeSelection {
+            mmproj: None,
             artifact: ModelArtifactRef {
                 kind: ModelArtifactKind::Gguf,
                 url: "https://example.invalid/model.gguf".into(),
@@ -106,6 +108,8 @@ mod tests {
 
     struct FakeGenerator(AtomicUsize);
     impl InferenceGenerator for FakeGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -145,6 +149,8 @@ mod tests {
     struct CancellableGenerator(AtomicBool);
 
     impl InferenceGenerator for CancellableGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -176,6 +182,8 @@ mod tests {
     struct FlakyGenerator(AtomicUsize);
 
     impl InferenceGenerator for FlakyGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -225,6 +233,8 @@ mod tests {
     }
 
     impl InferenceGenerator for OutputCorrectingGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -302,6 +312,8 @@ mod tests {
     struct FailingCorrectorGenerator(AtomicUsize);
 
     impl InferenceGenerator for FailingCorrectorGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -379,6 +391,8 @@ mod tests {
     struct InvalidToolGenerator;
 
     impl InferenceGenerator for InvalidToolGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -420,6 +434,8 @@ mod tests {
     struct StreamingGenerator;
 
     impl InferenceGenerator for StreamingGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -461,6 +477,8 @@ mod tests {
     struct ToolCallingGenerator(AtomicUsize);
 
     impl InferenceGenerator for ToolCallingGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -513,6 +531,8 @@ mod tests {
     struct StructuredToolGenerator(ToolCallingGenerator);
 
     impl InferenceGenerator for StructuredToolGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -544,6 +564,8 @@ mod tests {
     }
 
     impl InferenceGenerator for CorrectedToolGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -593,6 +615,8 @@ mod tests {
     }
 
     impl InferenceGenerator for RepeatingReadGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -635,6 +659,8 @@ mod tests {
     struct RepeatingEchoGenerator(AtomicUsize);
 
     impl InferenceGenerator for RepeatingEchoGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -677,6 +703,8 @@ mod tests {
     struct CorrectingReadGenerator(AtomicUsize);
 
     impl InferenceGenerator for CorrectingReadGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -734,6 +762,8 @@ mod tests {
     }
 
     impl InferenceGenerator for PreservedReasoningGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -1169,7 +1199,7 @@ mod tests {
                 )
                 .unwrap();
                 let (service, handle) = AgentService::start(
-                    AgentDependencies {
+                    AgentDependencies { memory: None, memory_index: None,
                         store: store.clone(),
                         inference: Arc::new(inference),
                     },
@@ -1249,7 +1279,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1375,7 +1405,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1493,7 +1523,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1638,7 +1668,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1735,7 +1765,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1798,7 +1828,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1851,7 +1881,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -1911,7 +1941,7 @@ mod tests {
             RestoredInferenceHealth::default(),
         ).unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies { store: store.clone(), inference: Arc::new(inference) },
+            AgentDependencies { memory: None, memory_index: None, store: store.clone(), inference: Arc::new(inference) },
             vec![bindings],
         ).unwrap();
         let run_id = handle.start_run(AgentRunSpec {
@@ -1957,7 +1987,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2014,7 +2044,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2064,7 +2094,7 @@ mod tests {
             RestoredInferenceHealth::default(),
         )
         .unwrap();
-        let dependencies = AgentDependencies {
+        let dependencies = AgentDependencies { memory: None, memory_index: None,
             store: store.clone(),
             inference: Arc::new(inference),
         };
@@ -2128,11 +2158,7 @@ mod tests {
         };
         let fsm = AgentFsm::new(
             run.id,
-            Some(match &run.origin {
-                AgentRunOrigin::User {
-                    conversation_id, ..
-                } => *conversation_id,
-            }),
+            Some(run.origin.conversation_id()),
             run_snapshot.limits,
             run_snapshot.model.runtime.generation.max_output_tokens,
             &run_snapshot.tools,
@@ -2171,7 +2197,7 @@ mod tests {
         )
         .unwrap();
         let (service, _handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2209,7 +2235,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2261,7 +2287,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2326,7 +2352,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2395,7 +2421,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2498,7 +2524,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },
@@ -2555,7 +2581,7 @@ mod tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },

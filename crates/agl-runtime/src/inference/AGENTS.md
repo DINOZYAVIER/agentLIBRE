@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This component owns the host-safe service API, bounded queue, codecs, private
-engine transport and profile selection. `agl-execd` owns subordinate process
+engine transport and profile selection. systemd owns subordinate process
 supervision.
 Native runtime execution belongs in the constrained `llama-server` process;
 host modules must not initialize or link llama.cpp, ggml or Vulkan inference

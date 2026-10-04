@@ -1,274 +1,90 @@
 format = 2
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.chat-agent"
 kind = "agent"
 schema = "agentlibre.agent/v1"
-git = "/home/dinozyavier/repos/agentlibre-agents"
+git = "https://github.com/DINOZYAVIER/agentlibre-agents.git"
 revision = "46ba3556c9141bbed5913156a97bdd9caa11b9c9"
 path = "agents/chat"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.qwen38-27b"
 kind = "model"
 schema = "agentlibre.model/v1"
-git = "/home/dinozyavier/repos/agentlibre-models"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
 revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
 path = "models/qwen38-27b"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.files"
 kind = "extension"
 schema = "agentlibre.extension/v1"
-git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
 path = "extensions/agentlibre-files"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.forge"
 kind = "extension"
 schema = "agentlibre.extension/v1"
-git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
 path = "extensions/agentlibre-forge"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.execution"
 kind = "extension"
 schema = "agentlibre.extension/v1"
-git = "/home/dinozyavier/repos/agentLIBRE"
-revision = "55e280dca3ee07f85eaed98f847f1f15f725bddd"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
 path = "extensions/agentlibre-execution"
 
-[[artifacts.entity]]
-id = "agentlibre.searxng"
-kind = "extension"
-schema = "agentlibre.extension/v1"
-git = "/home/dinozyavier/repos/agentlibre-extensions"
-revision = "7779eac7171c6fb2c5bd3763c7107bcd46bf04e2"
-path = "extensions/searxng"
-
-[[artifacts.entity]]
-id = "agentlibre.search-qwen38-27b-reasoning-128k-q8"
-kind = "function"
-schema = "agentlibre.function/v2"
-git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
-path = "functions/search-qwen38-27b-reasoning-128k-q8"
-
-[[artifacts.entity]]
-id = "agentlibre.memory"
-kind = "memory"
-schema = "agentlibre.memory/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/memory"
-revision = "d126ca8879b1a5bb9f64a884133ec2dce099cf95"
-path = "memory"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.compaction-json-schema"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/compaction-json-schema"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.compaction-reproduction-analysis"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/compaction-reproduction-analysis"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.compaction-work-context"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/compaction-work-context"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m0-memory-seeding"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m0-memory-seeding"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m1-implementation-tasks"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m1-implementation-tasks"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m1-memory-extraction"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m1-memory-extraction"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m1-semantic-memory"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m1-semantic-memory"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m2-implementation-tasks"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m2-implementation-tasks"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.m2-open-questions"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/m2-open-questions"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.planning-implementation-e2e"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/planning-implementation-e2e"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.planning-implementation-flow"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/planning-implementation-flow"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.repl-architecture"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/repl-architecture"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.repl-daemon-protocol"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/repl-daemon-protocol"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.repl-flow-renderer"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/repl-flow-renderer"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.repl-terminal-ui"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/repl-terminal-ui"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.semantic-memory"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/semantic-memory"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.terminal-restart-recovery"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "d95bf12db6535afc7a650260fe5b9a53cadc0fc4"
-path = "documents/terminal-restart-recovery"
-
-[[artifacts.entity]]
-id = "agentlibre.chat-agent-windows-opinion"
-kind = "agent"
-schema = "agentlibre.agent/v1"
-git = "/home/dinozyavier/repos/agentlibre-agents"
-revision = "46ba3556c9141bbed5913156a97bdd9caa11b9c9"
-path = "agents/windows-opinion"
-
-[[artifacts.entity]]
-id = "agentlibre.search-qwen38-27b-reasoning-32k-q8"
-kind = "function"
-schema = "agentlibre.function/v2"
-git = "/home/dinozyavier/repos/agentlibre-functions"
-revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
-path = "functions/search-qwen38-27b-reasoning-32k-q8"
-
-[[artifacts.entity]]
-id = "agentlibre.doc.agl-owned-artifact-config"
-kind = "document"
-schema = "agentlibre.document/v1"
-git = "/home/dinozyavier/.local/share/agentLIBRE/forge/agentLIBRE/documents"
-revision = "7d9da4124110d9b2f2eabbe153291da8a087c62b"
-path = "documents/agl-owned-artifact-config"
-
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.gemma4-12b"
 kind = "model"
 schema = "agentlibre.model/v1"
-git = "/home/dinozyavier/repos/agentlibre-models"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
 revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
 path = "models/gemma4-12b"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.gemma4-e4b"
 kind = "model"
 schema = "agentlibre.model/v1"
-git = "/home/dinozyavier/repos/agentlibre-models"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
 revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
 path = "models/gemma4-e4b"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.cpu-small"
 kind = "function"
 schema = "agentlibre.function/v2"
-git = "/home/dinozyavier/repos/agentlibre-functions"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
 revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/cpu-small"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.gpu-small"
 kind = "function"
 schema = "agentlibre.function/v2"
-git = "/home/dinozyavier/repos/agentlibre-functions"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
 revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/gpu-small"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.gpu-high"
 kind = "function"
 schema = "agentlibre.function/v2"
-git = "/home/dinozyavier/repos/agentlibre-functions"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
 revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "functions/gpu-high"
 
-[[artifacts.entity]]
+[[forge]]
 id = "agentlibre.general"
 kind = "function-family"
 schema = "agentlibre.function-family/v1"
-git = "/home/dinozyavier/repos/agentlibre-functions"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
 revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
 path = "families/general"
 

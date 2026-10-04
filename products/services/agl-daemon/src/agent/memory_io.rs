@@ -17,15 +17,10 @@
 //!   message source OR at least one readable contained file source after the
 //!   drops.
 //!
-//! Workspace-bound plans below perform guarded entry/INDEX writes. Coordination
-//! and conflict retry belong to task 4b.3, and compaction wiring to task 5.
-
-// Consumed by task 4b (digest-checked writes) and task 5 (compaction
-// wiring); its public surface is intentionally unused until then.
-#![allow(dead_code)]
+//! Pure write plans feed memory_publication. Source commits, durable recovery
+//! and Forge sync are owned by that publisher.
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -68,20 +63,6 @@ pub(crate) struct StampedClaim {
     pub supersedes: Option<Vec<String>>,
 }
 
-impl StampedClaim {
-    /// The stored form for the task 4b writer: new claims carry no `status:`
-    /// tag and are not superseded themselves.
-    pub(crate) fn into_stored(self) -> StoredClaim {
-        StoredClaim {
-            text: self.text,
-            sources: self.sources,
-            files: self.files,
-            status: None,
-            superseded_by: None,
-        }
-    }
-}
-
 /// Per-claim outcome of `stamp_topic` (per-claim, like task 1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StampedOutcome {
@@ -107,6 +88,7 @@ pub(crate) struct MemoryWorkspace {
     workspace_root: PathBuf,
     forge_owned: bool,
     memory_enabled: bool,
+    _forge_memory: Option<(ayeque_forge_core::ForgeWorkspace, String)>,
 }
 
 impl MemoryWorkspace {
@@ -129,96 +111,73 @@ impl MemoryWorkspace {
                 workspace_root,
                 forge_owned: false,
                 memory_enabled: true,
+                _forge_memory: None,
             })
         }
         #[cfg(not(test))]
         {
-            let artifacts = agl_runtime::resolve_workspace_artifacts(&workspace_root)
-                .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
-            let Some(memory) = artifacts.memory else {
-                return Ok(Self {
-                    root: workspace_root.clone(),
-                    workspace_root,
-                    forge_owned: true,
-                    memory_enabled: false,
-                });
-            };
-            let materialized = memory.materialized_path;
-            let metadata = fs::symlink_metadata(&materialized).map_err(|_| {
-                CorpusLoadError::Unreadable("Forge memory materialization".to_owned())
-            })?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(CorpusLoadError::EscapingPath);
-            }
-            let materialized = materialized.canonicalize().map_err(|_| {
-                CorpusLoadError::Unreadable("Forge memory materialization".to_owned())
-            })?;
-            Ok(Self {
-                root: materialized,
+            Self::new_forge(
+                &workspace_root,
+                &ayeque_forge_core::data_root()
+                    .map_err(|error| CorpusLoadError::Forge(error.to_string()))?,
+            )
+        }
+    }
+
+    pub(crate) fn new_forge(root: &Path, storage: &Path) -> Result<Self, CorpusLoadError> {
+        let workspace_root = root
+            .canonicalize()
+            .map_err(|_| CorpusLoadError::RootUnavailable)?;
+        let declarations = agl_runtime::read_workspace_forge_declarations_at(&workspace_root)
+            .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
+        let mut memory = declarations.iter().filter(|source| source.kind == "memory");
+        let Some(source) = memory.next() else {
+            return Ok(Self {
+                root: workspace_root.clone(),
                 workspace_root,
                 forge_owned: true,
-                memory_enabled: true,
-            })
+                memory_enabled: false,
+                _forge_memory: None,
+            });
+        };
+        if memory.next().is_some() {
+            return Err(CorpusLoadError::Forge("multiple memory sources".into()));
         }
+        let sources = agl_runtime::workspace_backend_declarations(&declarations)
+            .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
+        let reader = ayeque_forge_core::ForgeWorkspace::open(storage, &workspace_root, &sources)
+            .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
+        let materialized = reader
+            .materialized_path(&source.id)
+            .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
+        Ok(Self {
+            root: materialized.to_path_buf(),
+            workspace_root,
+            forge_owned: true,
+            memory_enabled: true,
+            _forge_memory: Some((reader, source.id.clone())),
+        })
     }
 
-    /// Plan and capture the complete filesystem evidence used by a memory
-    /// write. The pure [`plan_writes`] function remains available for codec
-    /// tests, but a plan intended for `apply_write_plan` must come from this
-    /// workspace-bound method.
-    pub(crate) fn plan_writes(
-        &self,
-        corpus: &MemoryCorpus,
-        topic_slug: &str,
-        stamped: &[StampedOutcome],
-        current_run: &AgentRunId,
-    ) -> Result<(WritePlan, Vec<WritePlanOutcome>), MemoryWriteError> {
-        let evidence = snapshot_memory(&self.root)?;
-        let (mut plan, outcomes) = plan_writes(corpus, topic_slug, stamped, current_run);
-        plan.evidence = Some(evidence);
-        Ok((plan, outcomes))
-    }
-
-    /// Apply a workspace-bound plan as one contained, rollback-capable file
-    /// transaction. Forge-owned materializations are read-only; this method is
-    /// retained only for the local codec transaction tests.
-    pub(crate) fn apply_write_plan(&self, plan: &WritePlan) -> Result<(), MemoryWriteError> {
-        if self.forge_owned {
-            return Err(MemoryWriteError::ForgeOwnedMaterialization);
+    pub(crate) fn authoring(memory: &Path, workspace: &Path) -> Result<Self, CorpusLoadError> {
+        let root = memory
+            .canonicalize()
+            .map_err(|_| CorpusLoadError::RootUnavailable)?;
+        let workspace_root = workspace
+            .canonicalize()
+            .map_err(|_| CorpusLoadError::RootUnavailable)?;
+        if !root.is_dir() || !workspace_root.is_dir() {
+            return Err(CorpusLoadError::RootUnavailable);
         }
-        let lock = crate::tools::workspace_mutation(&self.root);
-        let _guard = lock.lock().map_err(|_| MemoryWriteError::LockPoisoned)?;
-        apply_write_plan_inner(&self.root, plan, None)
+        Ok(Self {
+            root,
+            workspace_root,
+            forge_owned: true,
+            memory_enabled: true,
+            _forge_memory: None,
+        })
     }
 
-    /// Apply a plan and, once only, ask the caller for a fresh plan after a
-    /// digest conflict. The callback runs after the lock is released, so its
-    /// load/plan operation can take the same lock if needed. A callback that
-    /// returns the original stale plan remains a conflict.
-    pub(crate) fn apply_write_plan_with_retry<F>(
-        &self,
-        plan: &WritePlan,
-        mut replan: F,
-    ) -> Result<(), MemoryWriteError>
-    where
-        F: FnMut() -> Result<WritePlan, MemoryWriteError>,
-    {
-        match self.apply_write_plan(plan) {
-            Ok(()) => Ok(()),
-            Err(MemoryWriteError::Stale { .. } | MemoryWriteError::UnexpectedPath { .. }) => {
-                let retry = replan()?;
-                self.apply_write_plan(&retry)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Load the opt-in corpus from `memory/entries/` through the task-3
-    /// codec. `Ok(None)` is the opt-out and only when `memory/` is absent;
-    /// a present `memory/` without an `entries/` directory yields an empty
-    /// corpus; a present `memory` or `entries` that is not a directory is a
-    /// load error (`CorpusLoadError::NotADirectory`); one invalid entry file
-    /// fails the whole load (`CorpusLoadError::Parse`).
     pub(crate) fn load_corpus(&self) -> Result<Option<MemoryCorpus>, CorpusLoadError> {
         if !self.memory_enabled {
             return Ok(None);
@@ -242,6 +201,18 @@ impl MemoryWorkspace {
                 dir_entry.map_err(|_| CorpusLoadError::Unreadable("memory/entries".to_owned()))?;
             let name = dir_entry.file_name().to_string_lossy().into_owned();
             if !name.ends_with(".md") {
+                continue;
+            }
+            if let Some((reader, id)) = &self._forge_memory {
+                use std::io::Read as _;
+                let relative = Path::new("entries").join(&name);
+                let (mut file, _guard, _status) = reader
+                    .open_file(id, &relative)
+                    .map_err(|error| CorpusLoadError::Forge(error.to_string()))?;
+                let mut content = String::new();
+                file.read_to_string(&mut content)
+                    .map_err(|_| CorpusLoadError::Unreadable(name.clone()))?;
+                files.insert(format!("entries/{name}"), content);
                 continue;
             }
             let path = entries.join(&name);
@@ -290,19 +261,68 @@ impl MemoryWorkspace {
         {
             return None;
         }
-        let path = self.workspace_root.join(rel);
-        if !path.starts_with(&self.workspace_root) || !reject_symlinks(&self.workspace_root, &path)
-        {
+        use std::io::Read as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let components = rel
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let (leaf, parents) = components.split_last()?;
+        let mut directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&self.workspace_root)
+            .ok()?;
+        for component in parents {
+            let name = std::ffi::CString::new(component.as_encoded_bytes()).ok()?;
+            let fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return None;
+            }
+            directory = unsafe { fs::File::from_raw_fd(fd) };
+        }
+        let name = std::ffi::CString::new(leaf.as_encoded_bytes()).ok()?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
             return None;
         }
-        let canonical = path.canonicalize().ok()?;
-        if !canonical.starts_with(&self.workspace_root) || !canonical.is_file() {
+        let mut file = unsafe { fs::File::from_raw_fd(fd) };
+        if !file.metadata().ok()?.is_file() {
             return None;
         }
-        let bytes = fs::read(&canonical).ok()?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = file.read(&mut buffer).ok()?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        let digest = hash.finalize();
+        let digest = digest[..6]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         Some(FileSource {
             path: relative.to_owned(),
-            digest: Some(sha256_12(&bytes)),
+            digest: Some(digest),
         })
     }
 
@@ -369,38 +389,6 @@ impl MemoryWorkspace {
     }
 }
 
-/// Walk each path component between `root` and `target` (which must sit
-/// lexically inside `root`) and reject any symlink component, mirroring the
-/// daemon `agentlibre.files:file.read` containment rules.
-fn reject_symlinks(root: &Path, target: &Path) -> bool {
-    let Ok(relative) = target.strip_prefix(root) else {
-        return false;
-    };
-    let mut cursor = root.to_path_buf();
-    for part in relative.components() {
-        let Component::Normal(part) = part else {
-            continue;
-        };
-        cursor.push(part);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return false,
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
-/// `sha256-12`: the first 12 hex characters of the file's SHA-256 (M1 D3).
-fn sha256_12(bytes: &[u8]) -> String {
-    let value = Sha256::digest(bytes);
-    value
-        .iter()
-        .take(6)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Task 4b.1: plan writes (no filesystem mutation)
 // ---------------------------------------------------------------------------
@@ -413,69 +401,6 @@ pub(crate) struct WritePlan {
     pub entries: BTreeMap<String, String>,
     /// The regenerated INDEX.md, present only when at least one entry changed.
     pub index: Option<String>,
-    /// Snapshot captured before planning. It is intentionally not populated
-    /// by the pure planner, because only a workspace can observe absence,
-    /// bytes, permissions, and unexpected files.
-    evidence: Option<MemorySnapshot>,
-}
-
-/// A filesystem transaction failure. `RollbackFailed` is deliberately
-/// distinct from an ordinary I/O failure: the caller cannot assume that the
-/// workspace was restored when it is returned.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryWriteError {
-    ForgeOwnedMaterialization,
-    MissingEvidence,
-    EscapingPath,
-    Stale { path: String },
-    UnexpectedPath { path: String },
-    InvalidPlan(String),
-    Io { operation: String, path: String },
-    LockPoisoned,
-    RollbackFailed { operation: String, path: String },
-}
-
-impl fmt::Display for MemoryWriteError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ForgeOwnedMaterialization => {
-                write!(formatter, "Forge-owned memory materialization is read-only")
-            }
-            Self::MissingEvidence => {
-                write!(formatter, "memory write plan has no filesystem evidence")
-            }
-            Self::EscapingPath => write!(formatter, "memory write path escapes the workspace"),
-            Self::Stale { path } => write!(formatter, "memory write precondition changed: {path}"),
-            Self::UnexpectedPath { path } => write!(formatter, "unexpected memory path: {path}"),
-            Self::InvalidPlan(reason) => write!(formatter, "invalid memory write plan: {reason}"),
-            Self::Io { operation, path } => {
-                write!(formatter, "memory write {operation} failed: {path}")
-            }
-            Self::LockPoisoned => write!(formatter, "memory workspace lock is poisoned"),
-            Self::RollbackFailed { operation, path } => {
-                write!(
-                    formatter,
-                    "memory write rollback {operation} failed: {path}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for MemoryWriteError {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MemorySnapshot(BTreeMap<String, MemoryFileState>);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MemoryFileState {
-    File {
-        bytes: Vec<u8>,
-        digest: String,
-        readonly: bool,
-    },
-    Directory,
-    Absent,
 }
 
 /// Per-claim outcome of `plan_writes` (per-claim, like task 1 and 3).
@@ -517,7 +442,6 @@ pub(crate) fn plan_writes(
             WritePlan {
                 entries: BTreeMap::new(),
                 index: None,
-                evidence: None,
             },
             outcomes,
         );
@@ -534,7 +458,6 @@ pub(crate) fn plan_writes(
             WritePlan {
                 entries: BTreeMap::new(),
                 index: None,
-                evidence: None,
             },
             outcomes,
         );
@@ -667,7 +590,6 @@ pub(crate) fn plan_writes(
         WritePlan {
             entries: changed,
             index,
-            evidence: None,
         },
         outcomes,
     )
@@ -684,372 +606,6 @@ fn rendered_entries(corpus: &MemoryCorpus) -> BTreeMap<String, String> {
             )
         })
         .collect()
-}
-
-fn sha256_full(bytes: &[u8]) -> String {
-    let value = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(7 + value.len() * 2);
-    encoded.push_str("sha256:");
-    for byte in value {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    encoded
-}
-
-fn snapshot_memory(root: &Path) -> Result<MemorySnapshot, MemoryWriteError> {
-    let mut files = BTreeMap::new();
-    capture_memory_path(&root.join("memory"), "memory", &mut files)?;
-    Ok(MemorySnapshot(files))
-}
-
-fn capture_memory_path(
-    path: &Path,
-    relative: &str,
-    files: &mut BTreeMap<String, MemoryFileState>,
-) -> Result<(), MemoryWriteError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            files.insert(relative.to_owned(), MemoryFileState::Absent);
-            return Ok(());
-        }
-        Err(_) => {
-            return Err(MemoryWriteError::Io {
-                operation: "inspect".to_owned(),
-                path: relative.to_owned(),
-            });
-        }
-    };
-    if metadata.file_type().is_symlink() {
-        return Err(MemoryWriteError::EscapingPath);
-    }
-    if metadata.is_dir() {
-        files.insert(relative.to_owned(), MemoryFileState::Directory);
-        let mut entries = fs::read_dir(path)
-            .map_err(|_| MemoryWriteError::Io {
-                operation: "read directory".to_owned(),
-                path: relative.to_owned(),
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| MemoryWriteError::Io {
-                operation: "read directory".to_owned(),
-                path: relative.to_owned(),
-            })?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let child_relative = format!("{relative}/{name}");
-            capture_memory_path(&entry.path(), &child_relative, files)?;
-        }
-        return Ok(());
-    }
-    if !metadata.is_file() {
-        return Err(MemoryWriteError::Io {
-            operation: "inspect special file".to_owned(),
-            path: relative.to_owned(),
-        });
-    }
-    let bytes = fs::read(path).map_err(|_| MemoryWriteError::Io {
-        operation: "read".to_owned(),
-        path: relative.to_owned(),
-    })?;
-    files.insert(
-        relative.to_owned(),
-        MemoryFileState::File {
-            digest: sha256_full(&bytes),
-            bytes,
-            readonly: metadata.permissions().readonly(),
-        },
-    );
-    Ok(())
-}
-
-fn state_at(snapshot: &MemorySnapshot, path: &str) -> MemoryFileState {
-    snapshot
-        .0
-        .get(path)
-        .cloned()
-        .unwrap_or(MemoryFileState::Absent)
-}
-
-fn validate_memory_target(relative: &str) -> Result<(), MemoryWriteError> {
-    let path = Path::new(relative);
-    if relative == "INDEX.md" {
-        return Ok(());
-    }
-    let mut components = path.components();
-    let Some(Component::Normal(first)) = components.next() else {
-        return Err(MemoryWriteError::InvalidPlan(relative.to_owned()));
-    };
-    let Some(Component::Normal(name)) = components.next() else {
-        return Err(MemoryWriteError::InvalidPlan(relative.to_owned()));
-    };
-    if first != "entries"
-        || components.next().is_some()
-        || !name
-            .to_string_lossy()
-            .strip_suffix(".md")
-            .is_some_and(is_valid_slug)
-    {
-        return Err(MemoryWriteError::InvalidPlan(relative.to_owned()));
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct TransactionFault {
-    fail_after: Option<usize>,
-    fail_rollback: bool,
-}
-
-fn apply_write_plan_inner(
-    root: &Path,
-    plan: &WritePlan,
-    fault: Option<TransactionFault>,
-) -> Result<(), MemoryWriteError> {
-    let evidence = plan
-        .evidence
-        .as_ref()
-        .ok_or(MemoryWriteError::MissingEvidence)?;
-    if plan.entries.is_empty() && plan.index.is_none() {
-        return Ok(());
-    }
-    if plan.entries.is_empty() && plan.index.is_some() {
-        return Err(MemoryWriteError::InvalidPlan(
-            "INDEX cannot change without an entry change".to_owned(),
-        ));
-    }
-    if plan.index.is_none() && !plan.entries.is_empty() {
-        return Err(MemoryWriteError::InvalidPlan(
-            "entry changes require a regenerated INDEX".to_owned(),
-        ));
-    }
-
-    let mut changes = Vec::<(String, Vec<u8>)>::new();
-    for (relative, text) in &plan.entries {
-        validate_memory_target(relative)?;
-        changes.push((format!("memory/{relative}"), text.as_bytes().to_vec()));
-    }
-    if let Some(index) = &plan.index {
-        changes.push(("memory/INDEX.md".to_owned(), index.as_bytes().to_vec()));
-    }
-
-    let observed = snapshot_memory(root)?;
-    if observed.0.len() != evidence.0.len() {
-        let path = observed
-            .0
-            .keys()
-            .find(|path| !evidence.0.contains_key(*path))
-            .or_else(|| {
-                evidence
-                    .0
-                    .keys()
-                    .find(|path| !observed.0.contains_key(*path))
-            })
-            .cloned()
-            .unwrap_or_else(|| "memory".to_owned());
-        return Err(MemoryWriteError::UnexpectedPath { path });
-    }
-    for path in evidence.0.keys().chain(observed.0.keys()) {
-        let expected = state_at(evidence, path);
-        let actual = state_at(&observed, path);
-        if expected != actual {
-            return match (&expected, &actual) {
-                (
-                    MemoryFileState::File { digest: old, .. },
-                    MemoryFileState::File { digest: new, .. },
-                ) if old != new => Err(MemoryWriteError::Stale { path: path.clone() }),
-                (MemoryFileState::Absent, _) => {
-                    Err(MemoryWriteError::UnexpectedPath { path: path.clone() })
-                }
-                _ => Err(MemoryWriteError::Stale { path: path.clone() }),
-            };
-        }
-    }
-    for (path, _) in &changes {
-        match state_at(evidence, path) {
-            MemoryFileState::Absent | MemoryFileState::File { .. } => {}
-            _ => return Err(MemoryWriteError::InvalidPlan(path.clone())),
-        }
-    }
-
-    let transaction = root.join(format!(
-        ".agentlibre-memory-transaction-{}",
-        uuid::Uuid::now_v7()
-    ));
-    let staged = transaction.join("staged");
-    let backups = transaction.join("backups");
-    fs::create_dir(&transaction)
-        .and_then(|_| fs::create_dir(&staged))
-        .and_then(|_| fs::create_dir(&backups))
-        .map_err(|_| MemoryWriteError::Io {
-            operation: "create transaction".to_owned(),
-            path: transaction.display().to_string(),
-        })?;
-
-    let result = (|| {
-        // Stage the complete changed file set before touching the workspace.
-        for (index, (_, bytes)) in changes.iter().enumerate() {
-            fs::write(staged.join(index.to_string()), bytes).map_err(|_| MemoryWriteError::Io {
-                operation: "stage".to_owned(),
-                path: staged.join(index.to_string()).display().to_string(),
-            })?;
-        }
-        let mut created_directories = Vec::new();
-        let mut applied = Vec::<(String, usize)>::new();
-        let apply_result = (|| {
-            for (index, (relative, _)) in changes.iter().enumerate() {
-                let destination = root.join(relative);
-                if let Some(parent) = destination.parent() {
-                    create_memory_directories(root, parent, &mut created_directories)?;
-                }
-                if matches!(state_at(evidence, relative), MemoryFileState::File { .. }) {
-                    fs::rename(&destination, backups.join(index.to_string())).map_err(|_| {
-                        MemoryWriteError::Io {
-                            operation: "backup".to_owned(),
-                            path: relative.clone(),
-                        }
-                    })?;
-                }
-                fs::rename(staged.join(index.to_string()), &destination).map_err(|_| {
-                    MemoryWriteError::Io {
-                        operation: "apply".to_owned(),
-                        path: relative.clone(),
-                    }
-                })?;
-                applied.push((relative.clone(), index));
-                if fault.is_some_and(|fault| fault.fail_after == Some(applied.len())) {
-                    return Err(MemoryWriteError::Io {
-                        operation: "injected apply failure".to_owned(),
-                        path: relative.clone(),
-                    });
-                }
-            }
-            Ok::<_, MemoryWriteError>(())
-        })();
-        if let Err(error) = apply_result {
-            if fault.is_some_and(|fault| fault.fail_rollback) {
-                return Err(MemoryWriteError::RollbackFailed {
-                    operation: "injected rollback failure".to_owned(),
-                    path: "memory".to_owned(),
-                });
-            }
-            rollback_memory(root, evidence, &changes, &created_directories, &applied)?;
-            return Err(error);
-        }
-        Ok::<_, MemoryWriteError>(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&transaction);
-        return result;
-    }
-    fs::remove_dir_all(&transaction).map_err(|_| MemoryWriteError::Io {
-        operation: "cleanup transaction".to_owned(),
-        path: transaction.display().to_string(),
-    })
-}
-
-fn create_memory_directories(
-    root: &Path,
-    directory: &Path,
-    created: &mut Vec<PathBuf>,
-) -> Result<(), MemoryWriteError> {
-    let relative = directory
-        .strip_prefix(root)
-        .map_err(|_| MemoryWriteError::EscapingPath)?;
-    let mut cursor = root.to_path_buf();
-    for part in relative.components() {
-        let Component::Normal(part) = part else {
-            return Err(MemoryWriteError::EscapingPath);
-        };
-        cursor.push(part);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(MemoryWriteError::EscapingPath),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&cursor).map_err(|_| MemoryWriteError::Io {
-                    operation: "create directory".to_owned(),
-                    path: cursor.display().to_string(),
-                })?;
-                created.push(cursor.clone());
-            }
-            Err(_) => {
-                return Err(MemoryWriteError::Io {
-                    operation: "inspect directory".to_owned(),
-                    path: cursor.display().to_string(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rollback_memory(
-    root: &Path,
-    evidence: &MemorySnapshot,
-    changes: &[(String, Vec<u8>)],
-    created_directories: &[PathBuf],
-    applied: &[(String, usize)],
-) -> Result<(), MemoryWriteError> {
-    for (relative, _) in applied.iter().rev() {
-        let destination = root.join(relative);
-        match fs::remove_file(&destination) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                return Err(MemoryWriteError::RollbackFailed {
-                    operation: "remove applied file".to_owned(),
-                    path: relative.clone(),
-                });
-            }
-        }
-    }
-    for (relative, _) in changes {
-        if let MemoryFileState::File {
-            bytes, readonly, ..
-        } = state_at(evidence, relative)
-        {
-            let destination = root.join(relative);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|_| MemoryWriteError::RollbackFailed {
-                    operation: "restore parent".to_owned(),
-                    path: relative.clone(),
-                })?;
-            }
-            fs::write(&destination, bytes).map_err(|_| MemoryWriteError::RollbackFailed {
-                operation: "restore file".to_owned(),
-                path: relative.clone(),
-            })?;
-            let mut permissions = fs::metadata(&destination)
-                .map_err(|_| MemoryWriteError::RollbackFailed {
-                    operation: "inspect restored file".to_owned(),
-                    path: relative.clone(),
-                })?
-                .permissions();
-            permissions.set_readonly(readonly);
-            fs::set_permissions(&destination, permissions).map_err(|_| {
-                MemoryWriteError::RollbackFailed {
-                    operation: "restore permissions".to_owned(),
-                    path: relative.clone(),
-                }
-            })?;
-        }
-    }
-    for directory in created_directories.iter().rev() {
-        match fs::remove_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
-            Err(_) => {
-                return Err(MemoryWriteError::RollbackFailed {
-                    operation: "remove created directory".to_owned(),
-                    path: directory.display().to_string(),
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1610,307 +1166,43 @@ mod tests {
         assert_eq!(plan1.entries.len(), 1);
         assert!(plan1.entries.contains_key("entries/seeded.md"));
     }
-
     #[test]
-    fn workspace_write_creates_entry_and_keeps_index_consistent() {
+    fn cited_files_reject_special_nodes_and_parent_symlink_races() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let root = temp_root();
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(root.join("citation")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("citation/file"), b"abc").unwrap();
+        fs::write(outside.join("file"), b"outside bytes").unwrap();
+        let fifo =
+            std::ffi::CString::new(root.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = MemoryCorpus::parse(&BTreeMap::new()).unwrap();
-        let claims = vec![stamped(
-            "Created on disk.",
-            vec![msg("msg_01a090d5-03b2-7a01-ac4c-8c7b192c76e9")],
-            vec![],
-        )];
-        let (plan, outcomes) = workspace
-            .plan_writes(&corpus, "created", &claims, &run_a())
-            .unwrap();
-        assert_eq!(outcomes, vec![WritePlanOutcome::Appended { ordinal: 1 }]);
-        workspace.apply_write_plan(&plan).unwrap();
-
-        let loaded = workspace.load_corpus().unwrap().unwrap();
-        assert_eq!(
-            loaded.entry("created").unwrap().claims[0].text,
-            "Created on disk."
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("memory/INDEX.md")).unwrap(),
-            loaded.render_index()
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_rejects_stale_plan_evidence() {
-        let root = temp_root();
-        write(&root, "memory/INDEX.md", "# Memory Index\n");
-        write(&root, "memory/entries/seeded.md", SEED_ENTRY);
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = workspace.load_corpus().unwrap().unwrap();
-        let (plan, _) = workspace
-            .plan_writes(
-                &corpus,
-                "seeded",
-                &[stamped(
-                    "Planned before another writer.",
-                    vec![msg("msg_01a090d5-4b9b-71b0-aae8-d5421f5c3513")],
-                    vec![],
-                )],
-                &run_b(),
-            )
-            .unwrap();
-        write(
-            &root,
-            "memory/entries/seeded.md",
-            "changed after planning\n",
-        );
-        assert!(matches!(
-            workspace.apply_write_plan(&plan),
-            Err(MemoryWriteError::Stale { path }) if path == "memory/entries/seeded.md"
-        ));
-        assert_eq!(
-            fs::read_to_string(root.join("memory/entries/seeded.md")).unwrap(),
-            "changed after planning\n"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_rejects_unexpected_files_and_symlink_paths() {
-        let root = temp_root();
-        write(&root, "memory/INDEX.md", "# Memory Index\n");
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = MemoryCorpus::parse(&BTreeMap::new()).unwrap();
-        let (plan, _) = workspace
-            .plan_writes(
-                &corpus,
-                "created",
-                &[stamped(
-                    "A planned claim.",
-                    vec![msg("msg_01a090d5-03b2-7a01-ac4c-8c7b192c76e9")],
-                    vec![],
-                )],
-                &run_a(),
-            )
-            .unwrap();
-        write(&root, "memory/entries/unexpected.md", "unexpected\n");
-        assert!(matches!(
-            workspace.apply_write_plan(&plan),
-            Err(MemoryWriteError::UnexpectedPath { .. })
-        ));
-
-        let outside = root.join("outside");
-        fs::create_dir_all(outside.join("entries")).unwrap();
-        fs::remove_file(root.join("memory/entries/unexpected.md")).unwrap();
-        fs::remove_dir_all(root.join("memory")).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("memory")).unwrap();
-        assert_eq!(
-            workspace.apply_write_plan(&plan),
-            Err(MemoryWriteError::EscapingPath)
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_rolls_back_after_partial_io_failure() {
-        let root = temp_root();
-        let mut files = BTreeMap::new();
-        files.insert("entries/seeded.md".to_owned(), SEED_ENTRY.to_owned());
-        files.insert(
-            "entries/other.md".to_owned(),
-            "# Other topic\n\n- slug: other\n- created: run_01a090d4-5628-77d3-8f53-1abe34dbda5d\n- updated: run_01a090d4-5628-77d3-8f53-1abe34dbda5d\n\n## Claims\n\n- Old cross-topic fact. [src: msg_01a090d5-03b2-7a01-ac4c-8c7b192c76e9]\n".to_owned(),
-        );
-        let corpus = MemoryCorpus::parse(&files).unwrap();
-        write(&root, "memory/INDEX.md", &corpus.render_index());
-        for (path, text) in &files {
-            write(&root, &format!("memory/{path}"), text);
+        assert!(workspace.stamped_file("fifo").is_none());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker_root = root.clone();
+        let worker_outside = outside.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                fs::rename(worker_root.join("citation"), worker_root.join("held")).unwrap();
+                std::os::unix::fs::symlink(&worker_outside, worker_root.join("citation")).unwrap();
+                fs::remove_file(worker_root.join("citation")).unwrap();
+                fs::rename(worker_root.join("held"), worker_root.join("citation")).unwrap();
+            }
+        });
+        let mut escaped = false;
+        for _ in 0..1000 {
+            if let Some(file) = workspace.stamped_file("citation/file") {
+                escaped |= file.digest.as_deref() != Some("ba7816bf8f01");
+            }
         }
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let superseding = StampedOutcome::Stamped {
-            index: 0,
-            claim: StampedClaim {
-                text: "Replacement fact.".to_owned(),
-                sources: vec![msg("msg_01a090d5-4b9b-71b0-aae8-d5421f5c3513")],
-                files: vec![],
-                supersedes: Some(vec!["other#claim-1".to_owned()]),
-            },
-        };
-        let (plan, _) = workspace
-            .plan_writes(&corpus, "seeded", &[superseding], &run_b())
-            .unwrap();
-        let before_seeded = fs::read(root.join("memory/entries/seeded.md")).unwrap();
-        let before_other = fs::read(root.join("memory/entries/other.md")).unwrap();
-        let error = apply_write_plan_inner(
-            &root,
-            &plan,
-            Some(TransactionFault {
-                fail_after: Some(1),
-                fail_rollback: false,
-            }),
-        )
-        .unwrap_err();
-        assert!(matches!(error, MemoryWriteError::Io { .. }));
-        assert_eq!(
-            fs::read(root.join("memory/entries/seeded.md")).unwrap(),
-            before_seeded
-        );
-        assert_eq!(
-            fs::read(root.join("memory/entries/other.md")).unwrap(),
-            before_other
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("memory/INDEX.md")).unwrap(),
-            corpus.render_index()
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_surfaces_rollback_failure() {
-        let root = temp_root();
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = MemoryCorpus::parse(&BTreeMap::new()).unwrap();
-        let (plan, _) = workspace
-            .plan_writes(
-                &corpus,
-                "created",
-                &[stamped(
-                    "A planned claim.",
-                    vec![msg("msg_01a090d5-03b2-7a01-ac4c-8c7b192c76e9")],
-                    vec![],
-                )],
-                &run_a(),
-            )
-            .unwrap();
-        assert!(matches!(
-            apply_write_plan_inner(
-                &root,
-                &plan,
-                Some(TransactionFault {
-                    fail_after: Some(1),
-                    fail_rollback: true,
-                }),
-            ),
-            Err(MemoryWriteError::RollbackFailed { .. })
-        ));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_lock_is_shared_by_canonical_root() {
-        let root = temp_root();
-        let first = crate::tools::workspace_mutation(&root);
-        let second = crate::tools::workspace_mutation(&root);
-        assert!(std::sync::Arc::ptr_eq(&first, &second));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_retries_once_with_fresh_evidence() {
-        let root = temp_root();
-        write(&root, "memory/INDEX.md", "# Memory Index\n");
-        write(&root, "memory/entries/seeded.md", SEED_ENTRY);
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = workspace.load_corpus().unwrap().unwrap();
-        let (stale, _) = workspace
-            .plan_writes(
-                &corpus,
-                "seeded",
-                &[stamped(
-                    "Retried claim.",
-                    vec![msg("msg_01a090d5-4b9b-71b0-aae8-d5421f5c3513")],
-                    vec![],
-                )],
-                &run_b(),
-            )
-            .unwrap();
-        write(&root, "memory/INDEX.md", "# intervening writer\n");
-        let mut attempts = 0;
-        workspace
-            .apply_write_plan_with_retry(&stale, || {
-                attempts += 1;
-                let corpus = workspace.load_corpus().unwrap().unwrap();
-                workspace
-                    .plan_writes(
-                        &corpus,
-                        "seeded",
-                        &[stamped(
-                            "Retried claim.",
-                            vec![msg("msg_01a090d5-4b9b-71b0-aae8-d5421f5c3513")],
-                            vec![],
-                        )],
-                        &run_b(),
-                    )
-                    .map(|(plan, _)| plan)
-            })
-            .unwrap();
-        assert_eq!(attempts, 1);
-        assert!(
-            fs::read_to_string(root.join("memory/entries/seeded.md"))
-                .unwrap()
-                .contains("Retried claim.")
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspace_write_does_not_retry_stale_plan_without_new_evidence() {
-        let root = temp_root();
-        write(&root, "memory/INDEX.md", "# Memory Index\n");
-        write(&root, "memory/entries/seeded.md", SEED_ENTRY);
-        let workspace = MemoryWorkspace::new(&root).unwrap();
-        let corpus = workspace.load_corpus().unwrap().unwrap();
-        let (stale, _) = workspace
-            .plan_writes(
-                &corpus,
-                "seeded",
-                &[stamped(
-                    "Must not overwrite.",
-                    vec![msg("msg_01a090d5-4b9b-71b0-aae8-d5421f5c3513")],
-                    vec![],
-                )],
-                &run_b(),
-            )
-            .unwrap();
-        let intervening = "intervening writer\n";
-        write(&root, "memory/entries/seeded.md", intervening);
-        let mut attempts = 0;
-        let error = workspace
-            .apply_write_plan_with_retry(&stale, || {
-                attempts += 1;
-                Ok(stale.clone())
-            })
-            .unwrap_err();
-        assert_eq!(attempts, 1);
-        assert!(matches!(error, MemoryWriteError::Stale { .. }));
-        assert_eq!(
-            fs::read_to_string(root.join("memory/entries/seeded.md")).unwrap(),
-            intervening
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn forge_owned_materialization_rejects_in_place_writes() {
-        let root = temp_root();
-        fs::create_dir_all(root.join("materialized")).unwrap();
-        let workspace = MemoryWorkspace {
-            root: root.join("materialized"),
-            workspace_root: root.clone(),
-            forge_owned: true,
-            memory_enabled: true,
-        };
-        let plan = WritePlan {
-            entries: [("entries/topic.md".to_owned(), "new\n".to_owned())]
-                .into_iter()
-                .collect(),
-            index: Some("# Memory Index\n".to_owned()),
-            evidence: None,
-        };
-        assert_eq!(
-            workspace.apply_write_plan(&plan),
-            Err(MemoryWriteError::ForgeOwnedMaterialization)
-        );
-        assert!(!workspace.root.join("entries/topic.md").exists());
-        let _ = fs::remove_dir_all(root);
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+        assert!(!escaped);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 }

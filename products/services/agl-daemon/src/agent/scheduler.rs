@@ -3,6 +3,7 @@ use super::*;
 pub(crate) enum Command {
     StartRun {
         spec: AgentRunSpec,
+        schedule_generation: Option<agl_core::RequestId>,
         reply: mpsc::SyncSender<Result<AgentRunId, AgentServiceError>>,
     },
     CancelRun {
@@ -157,10 +158,15 @@ pub(crate) fn worker_loop(
             Command::CancelRun { reply, .. } if shutting_down => {
                 let _ = reply.send(Err(AgentServiceError::Stopped));
             }
-            Command::StartRun { spec, reply } => match admit(
+            Command::StartRun {
+                spec,
+                schedule_generation,
+                reply,
+            } => match admit(
                 &dependencies,
                 &tools,
                 spec,
+                schedule_generation.as_ref(),
                 queued.len() < SCHEDULER_QUEUE_CAPACITY,
             ) {
                 Ok(run) => {
@@ -313,6 +319,10 @@ fn spawn_run(
                 );
                 Ok(())
             });
+            // Publication failure never changes the terminal Run outcome.
+            if dependencies.store.agent_run_view(run_id).is_ok_and(|view| view.status.is_terminal())
+                && let Some(publisher) = &dependencies.memory { publisher.after_run(&dependencies.store, run_id); }
+            if let Some(index) = &dependencies.memory_index { index.run_finished(run_id); }
             let retry = outcome.as_ref().is_err_and(retry_scheduler_failure);
             if let Err(error) = &outcome {
                 tracing::error!(%run_id, %error, retry, "AgentRun driver stopped before a terminal state");

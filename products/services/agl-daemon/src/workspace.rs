@@ -194,7 +194,7 @@ mod tests {
         fs::create_dir_all(root.join("target-source")).unwrap();
         fs::write(
             root.join("agentLIBRE.toml"),
-            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+            "format = 2\nforge = []\n[workspace]\noutput_directories = [\"target\"]\n",
         )
         .unwrap();
         fs::write(root.join("target/build"), "old build").unwrap();
@@ -223,7 +223,7 @@ mod tests {
         );
         fs::write(
             root.join("agentLIBRE.toml"),
-            "format = 2\n[artifacts]\n[workspace]\noutput_directories = []\n",
+            "format = 2\nforge = []\n[workspace]\noutput_directories = []\n",
         )
         .unwrap();
         let scope = capture(&root).unwrap();

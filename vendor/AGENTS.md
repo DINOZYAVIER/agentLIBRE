@@ -9,4 +9,4 @@ Currently `llama.cpp` is a git submodule pinned for the managed local inference 
 request/template/parser support (`common/`), GGUF utilities (`gguf-py/`) and
 the HTTP engine (`tools/server/`). Its own AGENTS.md belongs to the submodule.
 AGL builds it through `scripts/build-llama-cpp.sh` and accesses the resulting
-private process through `agl-runtime::inference` and execd.
+private process through `agl-runtime::inference` and the daemon systemd adapter.

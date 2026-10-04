@@ -90,9 +90,7 @@ impl StoreHandle {
         key: &AgentOperationKey,
     ) -> crate::store::Result<CompactionExactState> {
         let run = self.agent_run(key.run_id)?;
-        let agl_core::agent::AgentRunOrigin::User {
-            conversation_id, ..
-        } = run.origin;
+        let conversation_id = run.origin.conversation_id();
         let snapshot_digest =
             PackageDigest::from_bytes(Sha256::digest(serde_json::to_vec(&run.snapshot)?).into());
         let operations = self.read(|connection| {

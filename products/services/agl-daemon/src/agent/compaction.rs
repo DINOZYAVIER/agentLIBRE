@@ -42,14 +42,17 @@ fn persist_memory(
     let Ok(workspace) = super::memory_io::MemoryWorkspace::new(root) else {
         return;
     };
+    if let Err(error) = execution
+        .dependencies
+        .store
+        .request_memory_maintenance(root)
+    {
+        tracing::warn!(workspace=%root.display(), %error, "failed to request memory maintenance");
+    }
     let Ok(Some(_)) = workspace.load_corpus() else {
         return;
     };
-    let mut candidates = execution
-        .dependencies
-        .store
-        .pending_memory(root)
-        .unwrap_or_default();
+    let mut candidates = Vec::new();
     for topic in memory {
         let validated = topic.validate(source);
         let accepted = validated
@@ -87,7 +90,7 @@ fn persist_memory(
     let _ = execution
         .dependencies
         .store
-        .replace_pending_memory(root, &candidates);
+        .append_pending_memory(root, &operation.key, &candidates);
 }
 
 /// Decode the narrative independently from the optional memory side channel.
@@ -438,6 +441,20 @@ pub(super) fn execute(
         narrative.push(marker);
         let mut visible = entry.clone();
         visible.private_reasoning = None;
+        if !visible.message.content.images().is_empty() {
+            let mut text = visible.message.content.as_text().to_owned();
+            for image in visible.message.content.images() {
+                use std::fmt::Write as _;
+                write!(
+                    &mut text,
+                    "\nImage source: {}; SHA-256: {}. Re-read this source explicitly if needed.",
+                    serde_json::to_string(image.source()).map_err(|_| early())?,
+                    image.digest()
+                )
+                .map_err(|_| early())?;
+            }
+            visible.message.content = Content::text(text).map_err(|_| early())?;
+        }
         if matches!(
             entry.source_request,
             Some(AgentOperationRequest::Compaction(_))

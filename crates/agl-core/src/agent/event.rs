@@ -37,6 +37,11 @@ pub enum AgentEventData {
         text: Option<String>,
         sources: Vec<MessageId>,
     },
+    /// Publication was deferred; accepted claims remain pending and Run status is unchanged.
+    MemoryPublicationDeferred {
+        reason: String,
+        details: Option<crate::CanonicalJson>,
+    },
     RunAdmitted {
         origin: AgentRunOrigin,
     },

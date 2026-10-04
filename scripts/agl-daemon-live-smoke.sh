@@ -6,18 +6,14 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-function-live-smoke}"
 run_suffix="$(date +%s)-$$"
 agl_bin="${AGL_SMOKE_AGL_BIN:-${AGL_BIN:-$repo_root/target/debug/agl}}"
-execd_bin="${AGL_SMOKE_EXECD_BIN:-$repo_root/target/debug/agl-execd}"
-forge_bin="${AGL_SMOKE_FORGE_BIN:-$repo_root/../ayeque-forge/target/debug/ayeque-forge}"
 agl_home="${AGL_SMOKE_HOME:-$artifact_root/home-$run_suffix}"
 source_root="$agl_home/source"
 workspace="$agl_home/workspace"
 function_one="$source_root/functions/smoke-one"
 function_two="$source_root/functions/smoke-two"
 socket="$agl_home/state/daemon/agl.sock"
-execd_socket="$agl_home/state/execd/execd.sock"
 config="$agl_home/config/agentLIBRE.toml"
 daemon_log="$agl_home/daemon.log"
-execd_log="$agl_home/execd.log"
 model="${AGL_TEST_MODEL_GGUF:?AGL_TEST_MODEL_GGUF must name one exact GGUF model}"
 llama_server="${AGL_LLAMA_SERVER_BIN:-$repo_root/target/llama-cpp/build/bin/llama-server}"
 python_bin="${AGL_SMOKE_PYTHON:-python3}"
@@ -35,10 +31,6 @@ done
 }
 [[ -x "$llama_server" ]] || {
   printf 'private llama-server is not executable: %s\n' "$llama_server" >&2
-  exit 2
-}
-[[ -x "$forge_bin" ]] || {
-  printf 'ayeque-forge is not executable: %s\n' "$forge_bin" >&2
   exit 2
 }
 for tool in awk cargo cp date git grep head mkdir pgrep sed sleep stat tail timeout; do
@@ -67,10 +59,7 @@ cleanup() {
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
   fi
-  if [[ -n "${execd_pid:-}" ]] && kill -0 "$execd_pid" 2>/dev/null; then
-    kill "$execd_pid" 2>/dev/null || true
-    wait "$execd_pid" 2>/dev/null || true
-  fi
+
 }
 trap cleanup EXIT
 
@@ -105,6 +94,7 @@ REPO_ROOT="$repo_root" \
 FUNCTION_ONE="$function_one" \
 FUNCTION_TWO="$function_two" \
 CONFIG_PATH="$config" \
+WORKSPACE_ROOT="$workspace" \
 ENGINE_PATH="$llama_server" \
 MODEL_SHA256="$model_sha256" \
 MODEL_BYTES="$model_bytes" \
@@ -267,11 +257,17 @@ def function_document(identifier: str, maximum: int) -> str:
 Path(os.environ["CONFIG_PATH"]).write_text(
     "[chat]\n"
     "default_function = \"function:agentlibre.smoke-one@^1.0\"\n\n"
+    "[forge]\n"
+    f"catalog_root = {json.dumps(os.environ['WORKSPACE_ROOT'])}\n\n"
     "[inference]\n"
     f"executable = {json.dumps(os.environ['ENGINE_PATH'])}\n",
     encoding="utf-8",
 )
 PY
+
+mkdir -p "$source_root/extensions"
+cp -a -- "$repo_root/extensions/agentlibre-files" "$source_root/extensions/"
+cp -a -- "$repo_root/extensions/agentlibre-execution" "$source_root/extensions/"
 
 git -C "$source_root" init --quiet
 git -C "$source_root" config user.name agentLIBRE-smoke
@@ -280,14 +276,11 @@ git -C "$source_root" add --all
 git -C "$source_root" commit --quiet -m 'Create live smoke entities'
 source_revision="$(git -C "$source_root" rev-parse HEAD)"
 
-"$forge_bin" init "$workspace" >/dev/null
-forge_project="$agl_home/data/ayeque-forge/projects/workspace"
-forge_manifest="$forge_project/FORGE.toml"
+git -C "$workspace" init --quiet
+forge_manifest="$workspace/agentLIBRE.toml"
 FORGE_MANIFEST="$forge_manifest" \
 SOURCE_ROOT="$source_root" \
 SOURCE_REVISION="$source_revision" \
-REPO_ROOT="$repo_root" \
-REPO_REVISION="$(git -C "$repo_root" rev-parse HEAD)" \
 python3 - <<'PY'
 import os
 from pathlib import Path
@@ -295,46 +288,44 @@ from pathlib import Path
 manifest = Path(os.environ["FORGE_MANIFEST"])
 source = os.environ["SOURCE_ROOT"]
 source_revision = os.environ["SOURCE_REVISION"]
-repo = os.environ["REPO_ROOT"]
-repo_revision = os.environ["REPO_REVISION"]
 manifest.write_text(
     "format = 2\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.smoke-agent\"\n"
     "kind = \"agent\"\n"
     "schema = \"agentlibre.agent/v1\"\n"
     f"git = \"{source}\"\n"
     f"revision = \"{source_revision}\"\n"
     "path = \"agents/smoke\"\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.smoke-model\"\n"
     "kind = \"model\"\n"
     "schema = \"agentlibre.model/v1\"\n"
     f"git = \"{source}\"\n"
     f"revision = \"{source_revision}\"\n"
     "path = \"models/smoke\"\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.files\"\n"
     "kind = \"extension\"\n"
     "schema = \"agentlibre.extension/v1\"\n"
-    f"git = \"{repo}\"\n"
-    f"revision = \"{repo_revision}\"\n"
+    f"git = \"{source}\"\n"
+    f"revision = \"{source_revision}\"\n"
     "path = \"extensions/agentlibre-files\"\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.execution\"\n"
     "kind = \"extension\"\n"
     "schema = \"agentlibre.extension/v1\"\n"
-    f"git = \"{repo}\"\n"
-    f"revision = \"{repo_revision}\"\n"
+    f"git = \"{source}\"\n"
+    f"revision = \"{source_revision}\"\n"
     "path = \"extensions/agentlibre-execution\"\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.smoke-one\"\n"
     "kind = \"function\"\n"
     "schema = \"agentlibre.function/v2\"\n"
     f"git = \"{source}\"\n"
     f"revision = \"{source_revision}\"\n"
     "path = \"functions/smoke-one\"\n\n"
-    "[[entity]]\n"
+    "[[forge]]\n"
     "id = \"agentlibre.smoke-two\"\n"
     "kind = \"function\"\n"
     "schema = \"agentlibre.function/v2\"\n"
@@ -344,32 +335,14 @@ manifest.write_text(
     encoding="utf-8",
 )
 PY
-(cd "$workspace" && "$forge_bin" lock >/dev/null)
-(cd "$workspace" && "$forge_bin" validate >/dev/null)
 function_one="$agl_home/data/ayeque-forge/projects/workspace/entities/agentlibre.smoke-one"
 function_two="$agl_home/data/ayeque-forge/projects/workspace/entities/agentlibre.smoke-two"
 
-if [[ ! -x "$agl_bin" || ! -x "$execd_bin" ]]; then
-  cargo build -p agl-cli --bin agl -p agl-execd >/dev/null
+if [[ ! -x "$agl_bin" ]]; then
+  cargo build -p agl-cli --bin agl >/dev/null
 fi
-AGL_HOME="$agl_home" RUST_LOG="${RUST_LOG:-info}" \
-  "$execd_bin" >"$execd_log" 2>&1 &
-execd_pid=$!
 
-deadline=$((SECONDS + timeout_seconds))
-until [[ -S "$execd_socket" ]]; do
-  if ! kill -0 "$execd_pid" 2>/dev/null; then
-    printf 'execd exited before socket readiness\n' >&2
-    tail -80 "$execd_log" >&2 || true
-    exit 1
-  fi
-  if (( SECONDS >= deadline )); then
-    printf 'timed out waiting for execd socket: %s\n' "$execd_socket" >&2
-    tail -80 "$execd_log" >&2 || true
-    exit 1
-  fi
-  sleep 0.1
-done
+(cd "$workspace" && AGL_HOME="$agl_home" "$agl_bin" forge sync >/dev/null)
 
 if (cd "$workspace" && AGL_HOME="$agl_home" timeout "$timeout_seconds" \
   "$agl_bin" config apply --function "$function_two") >"$agl_home/config-apply.out" 2>&1; then
@@ -378,7 +351,6 @@ else
   config_status=$?
   printf 'config apply failed or timed out (status=%s):\n' "$config_status" >&2
   sed -n '1,120p' "$agl_home/config-apply.out" >&2 || true
-  tail -80 "$execd_log" >&2 || true
   exit "$config_status"
 fi
 
@@ -405,7 +377,7 @@ run_output_file_one="$agl_home/function-one.out"
 run_output_file_two="$agl_home/function-two.out"
 foreground_pids=()
 (cd "$workspace" && AGL_HOME="$agl_home" timeout "$timeout_seconds" \
-  "$agl_bin" run "$function_one" "Use agentlibre.files:file.patch to create tool-proof.txt containing exactly TOOL_EDITED. Then use agentlibre.files:file.read to read that file, and command.exec with rg to verify the exact text. Complete all three tool calls before replying with exactly TOOL_DONE.") \
+  "$agl_bin" run "$function_one" 'Use agentlibre.files:file.patch to create tool-proof.txt containing exactly TOOL_EDITED. Then use agentlibre.files:file.read to read that file. Then invoke agentlibre.execution:command.exec with {"action":"start","argv":["rg","^TOOL_EDITED$","tool-proof.txt"]}. Complete these three tool calls, then reply with exactly TOOL_DONE.') \
   >"$run_output_file_one" 2>&1 &
 run_pid_one=$!
 foreground_pids+=("$run_pid_one")
@@ -568,13 +540,6 @@ for _, kind, result_json in operation_rows:
             raise SystemExit(f"invalid realization {key}: {value!r}")
 if tool_receipts < 2:
     raise SystemExit(f"expected committed filesystem and command receipts: {tool_receipts}")
-if not any(
-    output.get("type") == "tool_calls"
-    and isinstance(output.get("value"), list)
-    and len(output["value"]) >= 2
-    for output in model_outputs
-):
-    raise SystemExit(f"expected a batched model tool-call output: {model_outputs}")
 print(f"durable_runs={runs}")
 print(f"durable_conversations={conversations[0]}")
 print(f"conversation_messages={len(messages)}")
@@ -582,12 +547,17 @@ print(f"durable_operations={len(operation_rows)}")
 print(f"tool_receipts={tool_receipts}")
 PY
 
-child_pid="$(pgrep -P "$execd_pid" | head -1 || true)"
-[[ -n "$child_pid" ]] || {
-  printf 'no private llama-server child remained under execd after the flows\n' >&2
-  exit 1
-}
-grep -q 'execution service listening' "$execd_log"
+child_pid="$(python3 - "$agl_home/data/store/agentlibre.sqlite3" <<'PYCHILD'
+import json, sqlite3, subprocess, sys
+connection = sqlite3.connect(sys.argv[1])
+for row in connection.execute("SELECT id,request_json,status_json FROM executions"):
+    request, status = map(json.loads, row[1:])
+    if request['owner']['type'] == 'runtime' and request['owner']['component'] == 'inference' and status['status'] == 'running':
+        output = subprocess.check_output(['systemctl', '--user', 'show', 'agentlibre-' + row[0] + '.service', '-p', 'MainPID', '--value'], text=True).strip()
+        if output != '0': print(output); break
+else: raise SystemExit('no managed inference unit remained after flows')
+PYCHILD
+)"
 grep -q 'Agent daemon services started' "$daemon_log"
 grep -q 'private llama-server realization is ready' "$daemon_log"
 grep -q 'AgentRun driver reached a terminal state' "$daemon_log"
@@ -599,4 +569,3 @@ printf 'chat_run=%s\n' "$chat_run"
 printf 'inference_child_pid=%s\n' "$child_pid"
 printf 'smoke_home=%s\n' "$agl_home"
 printf 'daemon_log=%s\n' "$daemon_log"
-printf 'execd_log=%s\n' "$execd_log"

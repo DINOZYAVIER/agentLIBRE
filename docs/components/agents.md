@@ -53,7 +53,7 @@ fail before Run admission.
 
 `agl-runtime` activates a locked Function and supplies the frozen snapshot.
 `agl-runtime::inference` owns shared model services, bounded slots and request
-correlation. Process lifecycle is delegated to `agl-execd`. Every result
+correlation. Process lifecycle is delegated to systemd through the daemon adapter. Every result
 records the actual runtime-profile, engine-build and physical-resource
 digests. Worker health and resource quarantine are the only durable inference
 safety records.

@@ -6,11 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ayeque-forge-core.workspace = true
 agl-core.workspace = true
 agl-tool-api.workspace = true
 agl-tools.workspace = true
 agl-daemon-api.workspace = true
-agl-execution-api.workspace = true
 agl-runtime.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
@@ -25,3 +25,5 @@ stemmer.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]

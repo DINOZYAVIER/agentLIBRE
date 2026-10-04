@@ -40,6 +40,8 @@ mod compaction_tests {
     }
 
     impl InferenceGenerator for CompactionModel {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -295,7 +297,7 @@ mod compaction_tests {
         )
         .unwrap();
         let (service, handle) = AgentService::start(
-            AgentDependencies {
+            AgentDependencies { memory: None, memory_index: None,
                 store: store.clone(),
                 inference: Arc::new(inference),
             },

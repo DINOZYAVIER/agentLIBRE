@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/restart-services.sh [--stop|--restart] [--dry-run]
 
-Stop/restart the user-systemd daemon and execution service including sockets.
+Stop/restart the user-systemd daemon and its socket.
 Include the Matrix bridge only when its unit is installed. Restart reloads
 unit files and clears failed/start-limit state before starting the services.
 USAGE
@@ -27,8 +27,8 @@ run() {
   printf '\n'
   if [[ "$dry_run" -eq 0 ]]; then "$@"; fi
 }
-services=(agentlibre-daemon.service agentlibre-execd.service)
-sockets=(agentlibre-daemon.socket agentlibre-execd.socket)
+services=(agentlibre-daemon.service)
+sockets=(agentlibre-daemon.socket)
 matrix=()
 if [[ "$dry_run" -eq 1 ]] || [[ "$(systemctl --user show agl-matrix-bridge.service -p LoadState --value)" == loaded ]]; then
   matrix=(agl-matrix-bridge.service)
@@ -43,8 +43,8 @@ if [[ ${#installed[@]} -gt 0 ]]; then run systemctl --user stop "${installed[@]}
 if [[ "$action" == restart ]]; then
   run systemctl --user daemon-reload
   run systemctl --user reset-failed "${services[@]}" "${sockets[@]}" "${matrix[@]}"
-  run systemctl --user start agentlibre-execd.socket agentlibre-daemon.socket
-  run systemctl --user start agentlibre-execd.service agentlibre-daemon.service
+  run systemctl --user start agentlibre-daemon.socket
+  run systemctl --user start agentlibre-daemon.service
   if [[ ${#matrix[@]} -gt 0 ]]; then run systemctl --user start "${matrix[@]}"; fi
   if [[ "$dry_run" -eq 0 ]]; then
     systemctl --user is-active "${services[@]}" "${sockets[@]}" "${matrix[@]}"

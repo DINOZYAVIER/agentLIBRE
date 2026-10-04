@@ -1,45 +1,117 @@
 use super::*;
 impl StoreHandle {
+    pub(crate) fn request_memory_maintenance(&self, workspace: &Path) -> crate::store::Result<()> {
+        let store = self.lock()?;
+        store.transaction(|tx| {
+            tx.execute("INSERT INTO agent_memory_maintenance(workspace_root,request_id) VALUES (?1,?2) ON CONFLICT(workspace_root) DO UPDATE SET request_id=excluded.request_id", params![workspace.to_string_lossy().as_ref(), agl_core::RequestId::generate().to_string()])?;
+            Ok(())
+        })
+    }
+    pub(crate) fn memory_maintenance(
+        &self,
+        workspace: &Path,
+    ) -> crate::store::Result<Option<agl_core::RequestId>> {
+        self.read(|connection| {
+            let value: Option<String> = connection
+                .query_row(
+                    "SELECT request_id FROM agent_memory_maintenance WHERE workspace_root=?1",
+                    [workspace.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            value
+                .map(|value| {
+                    agl_core::RequestId::parse(&value).map_err(|_| StoreError::InvalidValue {
+                        field: "memory maintenance",
+                        value,
+                        reason: "invalid request id",
+                    })
+                })
+                .transpose()
+        })
+    }
+    pub(crate) fn complete_memory_maintenance(
+        &self,
+        workspace: &Path,
+        request: &agl_core::RequestId,
+    ) -> crate::store::Result<()> {
+        let store = self.lock()?;
+        store.transaction(|tx| {
+            tx.execute(
+                "DELETE FROM agent_memory_maintenance WHERE workspace_root=?1 AND request_id=?2",
+                params![workspace.to_string_lossy().as_ref(), request.to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn pending_memory(
         &self,
         workspace_root: &Path,
-    ) -> crate::store::Result<Vec<MemoryTopic>> {
+    ) -> crate::store::Result<Vec<PendingMemory>> {
         self.read(|connection| {
-            let value: Option<String> = connection
+            let json: Option<String> = connection
                 .query_row(
                     "SELECT claims_json FROM agent_memory_pending WHERE workspace_root=?1",
                     [workspace_root.to_string_lossy().as_ref()],
                     |row| row.get(0),
                 )
                 .optional()?;
-            value
-                .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            json.map(|json| serde_json::from_str(&json).map_err(Into::into))
                 .transpose()
                 .map(|value| value.unwrap_or_default())
         })
     }
 
-    pub(crate) fn replace_pending_memory(
+    pub(crate) fn append_pending_memory(
         &self,
         workspace_root: &Path,
-        claims: &[MemoryTopic],
+        key: &AgentOperationKey,
+        topics: &[MemoryTopic],
+    ) -> crate::store::Result<()> {
+        if topics.is_empty() {
+            return Ok(());
+        }
+        let store = self.lock()?;
+        store.transaction(|tx| {
+            let json: Option<String> = tx.query_row("SELECT claims_json FROM agent_memory_pending WHERE workspace_root=?1", [workspace_root.to_string_lossy().as_ref()], |row| row.get(0)).optional()?;
+            let mut pending: Vec<PendingMemory> = json.map(|json| serde_json::from_str(&json)).transpose()?.unwrap_or_default();
+            pending.extend(topics.iter().map(|topic| PendingMemory { id: agl_core::RequestId::generate(), key: key.clone(), topic: topic.clone() }));
+            tx.execute("INSERT INTO agent_memory_pending(workspace_root, claims_json) VALUES (?1, ?2) ON CONFLICT(workspace_root) DO UPDATE SET claims_json=excluded.claims_json", params![workspace_root.to_string_lossy().as_ref(), serde_json::to_string(&pending)?])?;
+            Ok(())
+        })
+    }
+
+    // Queue removal and rejection events commit together. Repeating journal
+    // completion after a crash cannot emit the same rejection a second time.
+    pub(crate) fn complete_pending_memory(
+        &self,
+        workspace_root: &Path,
+        published: &[(
+            PendingMemory,
+            Vec<(usize, agl_core::agent::MemoryClaimRejection)>,
+        )],
     ) -> crate::store::Result<()> {
         let store = self.lock()?;
         store.transaction(|tx| {
-            create_agent_schema(tx)?;
-            if claims.is_empty() {
-                tx.execute(
-                    "DELETE FROM agent_memory_pending WHERE workspace_root=?1",
-                    [workspace_root.to_string_lossy().as_ref()],
-                )?;
+            let json: Option<String> = tx.query_row("SELECT claims_json FROM agent_memory_pending WHERE workspace_root=?1", [workspace_root.to_string_lossy().as_ref()], |row| row.get(0)).optional()?;
+            let mut pending: Vec<PendingMemory> = json.map(|json| serde_json::from_str(&json)).transpose()?.unwrap_or_default();
+            for (record, rejections) in published {
+                let Some(position) = pending.iter().position(|value| value == record) else { continue; };
+                if !rejections.is_empty() {
+                    let revision: u64 = tx.query_row("SELECT revision FROM agent_operations WHERE agent_run_id=?1 AND ordinal=?2", params![record.key.run_id.as_bytes().as_slice(), record.key.ordinal.get()], |row| row.get(0))?;
+                    let events = rejections.iter().map(|(index, reason)| {
+                        let claim = record.topic.claims.get(*index);
+                        AgentEventData::MemoryClaimRejected { key: record.key.clone(), slug: Some(record.topic.slug.clone()), reason: *reason, text: claim.map(|value| value.text.clone()), sources: claim.map(|value| value.sources.clone()).unwrap_or_default() }
+                    }).collect::<Vec<_>>();
+                    append_events(tx, record.key.run_id, &events, unix_ms(), stored_run_revision(tx, record.key.run_id)?, &[(&record.key, revision)], Some((&record.key, revision)))?;
+                }
+                pending.remove(position);
+            }
+            if pending.is_empty() {
+                tx.execute("DELETE FROM agent_memory_pending WHERE workspace_root=?1", [workspace_root.to_string_lossy().as_ref()])?;
             } else {
-                let json = serde_json::to_string(claims)?;
-                tx.execute(
-                    "INSERT INTO agent_memory_pending(workspace_root, claims_json)
-                     VALUES (?1, ?2)
-                     ON CONFLICT(workspace_root) DO UPDATE SET claims_json=excluded.claims_json",
-                    params![workspace_root.to_string_lossy().as_ref(), json],
-                )?;
+                tx.execute("UPDATE agent_memory_pending SET claims_json=?2 WHERE workspace_root=?1", params![workspace_root.to_string_lossy().as_ref(), serde_json::to_string(&pending)?])?;
             }
             Ok(())
         })
@@ -797,9 +869,7 @@ impl StoreHandle {
         origin: &agl_core::agent::AgentRunOrigin,
     ) -> crate::store::Result<AgentRunSnapshot> {
         self.read(|connection| {
-            let agl_core::agent::AgentRunOrigin::User {
-                conversation_id, ..
-            } = origin;
+            let conversation_id = origin.conversation_id();
             let snapshot = connection
                 .query_row(
                     "SELECT snapshot_json FROM agent_conversations WHERE conversation_id=?1",

@@ -20,6 +20,7 @@ fn model_runtime() -> agl_core::agent::ModelRuntimeSelection {
         ModelLoadSelection, ModelRuntimeSelection, ModelServiceSelection, SplitMode,
     };
     ModelRuntimeSelection {
+        mmproj: None,
         artifact: ModelArtifactRef {
             kind: ModelArtifactKind::Gguf,
             url: "https://example.invalid/model.gguf".into(),
@@ -251,9 +252,7 @@ fn agent_admission_is_atomic_replay_safe_and_uses_blob_identity() {
         },
         input: Content::text("hello").unwrap(),
     };
-    let AgentRunOrigin::User {
-        conversation_id, ..
-    } = &spec.origin;
+    let conversation_id = &spec.origin.conversation_id();
     bind_conversation(&store, &root, *conversation_id);
     let created = store.admit_agent_run(&spec, snapshot(&root)).unwrap();
     let AgentRunAdmission::Created(created) = created else {
@@ -302,11 +301,7 @@ fn agent_admission_is_atomic_replay_safe_and_uses_blob_identity() {
 
     let fsm = AgentFsm::new(
         created.id,
-        Some(match &created.origin {
-            AgentRunOrigin::User {
-                conversation_id, ..
-            } => *conversation_id,
-        }),
+        Some(created.origin.conversation_id()),
         created.snapshot.limits,
         created.snapshot.model.runtime.generation.max_output_tokens,
         &created.snapshot.tools,
@@ -389,11 +384,7 @@ fn accepted_content_is_stored_once_and_reconstructed_for_the_operation() {
     };
     let fsm = AgentFsm::new(
         run.id,
-        Some(match &run.origin {
-            AgentRunOrigin::User {
-                conversation_id, ..
-            } => *conversation_id,
-        }),
+        Some(run.origin.conversation_id()),
         run.snapshot.limits,
         run.snapshot.model.runtime.generation.max_output_tokens,
         &run.snapshot.tools,
@@ -521,9 +512,7 @@ fn accepted_content_is_stored_once_and_reconstructed_for_the_operation() {
     let AgentCheckpoint::Ready { context, .. } = second.checkpoint else {
         panic!("new Run must start ready")
     };
-    let first_input_id = match &spec.origin {
-        AgentRunOrigin::User { message_id, .. } => message_id,
-    };
+    let first_input_id = spec.origin.user_message_id().unwrap();
     assert_eq!(
         context,
         [
@@ -830,9 +819,7 @@ fn concurrent_user_origin_admission_has_one_natural_identity() {
         },
         input: Content::text("user prompt").unwrap(),
     };
-    let AgentRunOrigin::User {
-        conversation_id, ..
-    } = &spec.origin;
+    let conversation_id = &spec.origin.conversation_id();
     bind_conversation(&store, &root, *conversation_id);
     let ids = concurrently_admit(&store, &root, &spec, &snapshot(&root));
     assert!(ids.iter().all(|id| id == &ids[0]));
@@ -1107,18 +1094,396 @@ fn record_memory_claim_rejection_rejects_a_mismatched_delivery_attempt() {
 }
 
 #[test]
-fn pending_memory_round_trips_by_workspace_root() {
+fn pending_memory_preserves_later_identical_claims_and_audits_once() {
     let root = std::env::temp_dir().join(format!("agl-pending-memory-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir_all(&root).unwrap();
-    let store = StoreHandle::open_at(&root).unwrap();
-    let pending = vec![MemoryTopic {
-        slug: "daemon-state".to_owned(),
+    let (store, operation) = running_operation(&root);
+    let transition = AgentOperationFsm::for_operation(&operation)
+        .transition(
+            &operation.state,
+            AgentOperationFsmInput::Failure {
+                key: operation.key.clone(),
+                delivery_attempt: operation.delivery_attempt,
+                failure: AgentOperationFailure {
+                    kind: AgentOperationFailureKind::Unavailable,
+                },
+                retry_at_ms: None,
+            },
+        )
+        .unwrap();
+    let terminal = operation
+        .apply_fsm_transition(transition.state, &transition.output)
+        .unwrap();
+    store
+        .commit_agent_operation_transition(&operation, &terminal, &transition.output)
+        .unwrap();
+    let operation = terminal;
+    let topic = MemoryTopic {
+        slug: "daemon-state".into(),
         claims: vec![],
-    }];
-    store.replace_pending_memory(&root, &pending).unwrap();
-    assert_eq!(store.pending_memory(&root).unwrap(), pending);
-    store.replace_pending_memory(&root, &[]).unwrap();
+    };
+    store
+        .append_pending_memory(&root, &operation.key, std::slice::from_ref(&topic))
+        .unwrap();
+    let snapshot = store.pending_memory(&root).unwrap();
+    store
+        .append_pending_memory(&root, &operation.key, std::slice::from_ref(&topic))
+        .unwrap();
+    let completed = vec![(
+        snapshot[0].clone(),
+        vec![(0, agl_core::agent::MemoryClaimRejection::IndexCapReached)],
+    )];
+    store.complete_pending_memory(&root, &completed).unwrap();
+    let remaining = store.pending_memory(&root).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_ne!(remaining[0].id, snapshot[0].id);
+    assert_eq!(remaining[0].topic, topic);
+    store.complete_pending_memory(&root, &completed).unwrap();
+    let events = store.agent_event_page(None, 100).unwrap().events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, AgentEventData::MemoryClaimRejected { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(store.agent_operation(&operation.key).unwrap(), operation);
+    store
+        .complete_pending_memory(&root, &[(remaining[0].clone(), vec![])])
+        .unwrap();
     assert!(store.pending_memory(&root).unwrap().is_empty());
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scheduled_origins_replay_without_user_messages_and_reuse_history_after_restart() {
+    let root = std::env::temp_dir().join(format!("agl-schedule-history-{}", uuid::Uuid::now_v7()));
+    let store = StoreHandle::open_at(&root).unwrap();
+    let conversation_id = enable_test_schedule(&store, &root).conversation_id;
+    let spec = AgentRunSpec {
+        reasoning: None,
+        origin: AgentRunOrigin::Timer {
+            conversation_id,
+            function_id: function_ref().id,
+            tick_at_ms: 1000,
+        },
+        input: Content::text("scheduled task").unwrap(),
+    };
+    let AgentRunAdmission::Created(run) = store.admit_agent_run(&spec, snapshot(&root)).unwrap()
+    else {
+        panic!("first tick must create")
+    };
+    assert_eq!(
+        run.snapshot.instructions.blocks.last().unwrap().content,
+        spec.input
+    );
+    assert!(
+        matches!(&run.checkpoint, AgentCheckpoint::Ready { context, .. } if context.is_empty())
+    );
+    let fsm = AgentFsm::new(
+        run.id,
+        Some(conversation_id),
+        run.snapshot.limits,
+        run.snapshot.model.runtime.generation.max_output_tokens,
+        &run.snapshot.tools,
+    );
+    let initial = AgentFsmState {
+        status: run.status,
+        checkpoint: run.checkpoint,
+        usage: run.usage,
+    };
+    let driven = fsm.transition(&initial, AgentFsmInput::Drive).unwrap();
+    store
+        .commit_agent_transition(run.id, 0, &driven.state, &driven.output)
+        .unwrap();
+    let operation = driven.output.operation.unwrap();
+    let machine = AgentOperationFsm::for_operation(&operation);
+    let started = machine
+        .transition(
+            &operation.state,
+            AgentOperationFsmInput::Start {
+                key: operation.key.clone(),
+                delivery_attempt: operation.delivery_attempt,
+                request: operation.request.clone(),
+            },
+        )
+        .unwrap();
+    let started_operation = operation
+        .apply_fsm_transition(started.state, &started.output)
+        .unwrap();
+    store
+        .commit_agent_operation_transition(&operation, &started_operation, &started.output)
+        .unwrap();
+    let content = Content::text("previous scheduled result").unwrap();
+    let private_reasoning = Content::text("durable-private-reasoning").unwrap();
+    let finished = machine
+        .transition(
+            &started_operation.state,
+            AgentOperationFsmInput::Result {
+                key: started_operation.key.clone(),
+                delivery_attempt: started_operation.delivery_attempt,
+                result: AgentOperationResult::ModelGeneration(ModelGenerationResult {
+                    private_reasoning: Some(private_reasoning.clone()),
+                    output: ModelGenerationOutput::Assistant(content.clone()),
+                    finish_reason: ModelFinishReason::Stop,
+                    usage: ModelUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
+                    realization: InferenceRealizationRef {
+                        runtime_profile_digest:
+                            agl_core::agent::InferenceRuntimeProfileDigest::from_bytes([1; 32]),
+                        engine_build_digest:
+                            agl_core::agent::InferenceEngineBuildDigest::from_bytes([2; 32]),
+                        physical_resource_digest:
+                            agl_core::agent::PhysicalResourceDigest::from_bytes([3; 32]),
+                    },
+                    correction: None,
+                }),
+            },
+        )
+        .unwrap();
+    let finished_operation = started_operation
+        .apply_fsm_transition(finished.state, &finished.output)
+        .unwrap();
+    let message_id = MessageId::generate();
+    let resumed = fsm
+        .transition(
+            &driven.state,
+            AgentFsmInput::OperationFinished {
+                operation: finished_operation.clone(),
+                message_id: Some(message_id.clone()),
+            },
+        )
+        .unwrap();
+    store
+        .commit_agent_cycle(
+            &started_operation,
+            &finished_operation,
+            &finished.output,
+            1,
+            &resumed.state,
+            &resumed.output,
+        )
+        .unwrap();
+
+    drop(store);
+    let store = StoreHandle::open_at(&root).unwrap();
+    assert!(
+        matches!(store.admit_agent_run(&spec, snapshot(&root)).unwrap(), AgentRunAdmission::Replayed(replayed) if replayed.id == run.id)
+    );
+    let event = AgentRunSpec {
+        origin: AgentRunOrigin::FileEvent {
+            conversation_id,
+            function_id: function_ref().id,
+            event_id: agl_core::RequestId::generate(),
+            paths: vec![RelativePath::try_from("source.txt".to_owned()).unwrap()],
+        },
+        ..spec
+    };
+    let AgentRunAdmission::Created(event_run) =
+        store.admit_agent_run(&event, snapshot(&root)).unwrap()
+    else {
+        panic!("file event must create")
+    };
+    assert!(
+        matches!(event_run.checkpoint, AgentCheckpoint::Ready { context, .. } if context == vec![message_id.clone()])
+    );
+    assert!(
+        matches!(store.admit_agent_run(&event, snapshot(&root)).unwrap(), AgentRunAdmission::Replayed(replayed) if replayed.id == event_run.id)
+    );
+    let messages = store
+        .conversation_messages(conversation_id, None, 100)
+        .unwrap();
+    assert_eq!(messages.messages.len(), 1);
+    assert_eq!(messages.messages[0].id, message_id);
+    assert_eq!(messages.messages[0].role, MessageRole::Assistant);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scheduled_admission_blocks_same_function_in_same_workspace_only() {
+    let root = std::env::temp_dir().join(format!("agl-schedule-overlap-{}", uuid::Uuid::now_v7()));
+    let workspace_a = root.join("a");
+    let workspace_b = root.join("b");
+    std::fs::create_dir_all(&workspace_a).unwrap();
+    std::fs::create_dir_all(&workspace_b).unwrap();
+    let store = StoreHandle::open_at(root.join("store")).unwrap();
+    let manual_conversation = ConversationId::generate();
+    let schedule_a = enable_test_schedule(&store, &workspace_a).conversation_id;
+    let schedule_b = enable_test_schedule(&store, &workspace_b).conversation_id;
+    bind_conversation(&store, &workspace_a, manual_conversation);
+
+    let manual = AgentRunSpec {
+        reasoning: None,
+        origin: AgentRunOrigin::User {
+            conversation_id: manual_conversation,
+            message_id: MessageId::generate(),
+        },
+        input: Content::text("manual task").unwrap(),
+    };
+    store
+        .admit_agent_run(&manual, snapshot(&workspace_a))
+        .unwrap();
+    let scheduled = |conversation_id| AgentRunSpec {
+        reasoning: None,
+        origin: AgentRunOrigin::Timer {
+            conversation_id,
+            function_id: function_ref().id,
+            tick_at_ms: 1000,
+        },
+        input: Content::text("scheduled task").unwrap(),
+    };
+    assert!(
+        matches!(store.admit_agent_run(&scheduled(schedule_a), snapshot(&workspace_a)),
+        Err(StoreError::ConversationBusy { conversation_id }) if conversation_id == manual_conversation)
+    );
+    assert!(matches!(
+        store
+            .admit_agent_run(&scheduled(schedule_b), snapshot(&workspace_b))
+            .unwrap(),
+        AgentRunAdmission::Created(_)
+    ));
+    let manual_b = ConversationId::generate();
+    bind_conversation(&store, &workspace_b, manual_b);
+    let manual_b_spec = AgentRunSpec {
+        origin: AgentRunOrigin::User {
+            conversation_id: manual_b,
+            message_id: MessageId::generate(),
+        },
+        ..manual.clone()
+    };
+    assert!(
+        matches!(store.admit_agent_run(&manual_b_spec, snapshot(&workspace_b)),
+        Err(StoreError::ConversationBusy { conversation_id }) if conversation_id == schedule_b)
+    );
+    let another_manual_a = ConversationId::generate();
+    bind_conversation(&store, &workspace_a, another_manual_a);
+    let another_manual_spec = AgentRunSpec {
+        origin: AgentRunOrigin::User {
+            conversation_id: another_manual_a,
+            message_id: MessageId::generate(),
+        },
+        ..manual
+    };
+    assert!(matches!(
+        store
+            .admit_agent_run(&another_manual_spec, snapshot(&workspace_a))
+            .unwrap(),
+        AgentRunAdmission::Created(_)
+    ));
+    let invalid = AgentRunSpec {
+        origin: AgentRunOrigin::Timer {
+            conversation_id: schedule_a,
+            function_id: PackageId::new("another-function").unwrap(),
+            tick_at_ms: 1000,
+        },
+        ..scheduled(schedule_a)
+    };
+    assert!(matches!(
+        store.admit_agent_run(&invalid, snapshot(&workspace_a)),
+        Err(StoreError::InvalidValue { .. })
+    ));
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn enable_test_schedule(store: &StoreHandle, root: &std::path::Path) -> schedules::ScheduleRecord {
+    store.enable_schedule(&function_ref(), &snapshot(root), &agl_runtime::function::FunctionSchedule {
+        interval_seconds: 1, max_run_seconds: 5, prompt: "scheduled task".into(), events: vec!["file:source.txt".into()],
+    }, &serde_json::json!({"files": "none", "commands": [], "terminal": false, "search": false})).unwrap()
+}
+
+#[test]
+fn schedule_enable_disable_restart_and_updated_snapshot_preserve_the_selected_history() {
+    let root = std::env::temp_dir().join(format!("agl-schedule-enable-{}", uuid::Uuid::now_v7()));
+    let store = StoreHandle::open_at(&root).unwrap();
+    let enabled = enable_test_schedule(&store, &root);
+    let again = enable_test_schedule(&store, &root);
+    assert_eq!(enabled.conversation_id, again.conversation_id);
+    assert_eq!(enabled.enabled_at_ms, again.enabled_at_ms);
+    assert_eq!(enabled.generation, again.generation);
+    let (disabled, cancelled) = store.disable_schedule(&root, &function_ref().id).unwrap();
+    assert!(!disabled.enabled);
+    assert!(cancelled.is_empty());
+    let spec = AgentRunSpec {
+        reasoning: None,
+        input: Content::text("scheduled task").unwrap(),
+        origin: AgentRunOrigin::Timer {
+            conversation_id: enabled.conversation_id,
+            function_id: function_ref().id,
+            tick_at_ms: 1000,
+        },
+    };
+    assert!(matches!(
+        store.admit_agent_run(&spec, snapshot(&root)),
+        Err(StoreError::InvalidValue { .. })
+    ));
+    let resumed = enable_test_schedule(&store, &root);
+    assert_eq!(resumed.conversation_id, enabled.conversation_id);
+    assert!(resumed.enabled_at_ms >= enabled.enabled_at_ms);
+    assert_ne!(resumed.generation, enabled.generation);
+    assert!(matches!(
+        store.admit_scheduled_run(&spec, snapshot(&root), &enabled.generation),
+        Err(StoreError::InvalidValue { .. })
+    ));
+    let user = AgentRunSpec {
+        origin: AgentRunOrigin::User {
+            conversation_id: resumed.conversation_id,
+            message_id: MessageId::generate(),
+        },
+        ..spec.clone()
+    };
+    assert!(matches!(
+        store.admit_agent_run(&user, snapshot(&root)),
+        Err(StoreError::InvalidValue { .. })
+    ));
+    let AgentRunAdmission::Created(run) = store.admit_agent_run(&spec, snapshot(&root)).unwrap()
+    else {
+        panic!("tick must create")
+    };
+    assert_eq!(run.snapshot.limits.deadline_ms, 5000);
+    let (disabled, cancelled) = store.disable_schedule(&root, &function_ref().id).unwrap();
+    assert_eq!(cancelled, [run.id]);
+    let mut updated_snapshot = snapshot(&root);
+    updated_snapshot.instructions = InstructionSet::new(vec![agl_core::agent::InstructionBlock {
+        source: agl_core::agent::InstructionSource::Agent,
+        content: Content::text("new dependency instructions").unwrap(),
+    }])
+    .unwrap();
+    let updated = store
+        .enable_schedule(
+            &function_ref(),
+            &updated_snapshot,
+            &disabled.config,
+            &disabled.permissions,
+        )
+        .unwrap();
+    assert_ne!(updated.conversation_id, enabled.conversation_id);
+    assert!(store.conversation_binding(enabled.conversation_id).is_ok());
+    drop(store);
+    let store = StoreHandle::open_at(&root).unwrap();
+    let records = store.schedules(Some(&root)).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].conversation_id, updated.conversation_id);
+    assert_eq!(records[0].snapshot, updated_snapshot);
+    assert!(records[0].enabled);
+    let (_, active_old_generation) = store.disable_schedule(&root, &function_ref().id).unwrap();
+    assert_eq!(active_old_generation, [run.id]);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn schedule_next_tick_keeps_enable_anchor_and_skips_missed_ticks() {
+    assert_eq!(schedules::next_tick_after(1000, 2, 1000), Some(3000));
+    assert_eq!(schedules::next_tick_after(1000, 2, 3000), Some(5000));
+    assert_eq!(schedules::next_tick_after(1000, 2, 100_000), Some(101_000));
+    assert_eq!(schedules::next_tick_after(1000, 2, 999), Some(3000));
+    assert_eq!(
+        schedules::next_tick_after(i64::MAX - 10, 1, i64::MAX - 10),
+        None
+    );
+    assert_eq!(schedules::next_tick_after(1000, 0, 1000), None);
 }

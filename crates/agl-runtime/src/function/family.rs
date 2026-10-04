@@ -124,13 +124,20 @@ impl FamilyProfile {
     }
 }
 
-/// Read every Function Family declared in the AGL repository-root manifest.
-pub fn discover_function_families() -> Result<Vec<FunctionFamily>> {
-    let root = crate::forge::agl_workspace_root()?;
-    let artifacts = crate::resolve_workspace_artifacts(&root)?;
+/// Read every Function Family declared in the configured catalog manifest.
+pub fn discover_function_families(catalog_root: impl AsRef<Path>) -> Result<Vec<FunctionFamily>> {
+    let catalog_root = catalog_root.as_ref();
+    ensure!(
+        catalog_root.is_absolute(),
+        "Forge catalog root must be absolute"
+    );
+    let root = catalog_root
+        .canonicalize()
+        .with_context(|| format!("Forge catalog {} is unavailable", catalog_root.display()))?;
+    let artifacts = crate::resolve_workspace_forge(&root)?;
     let mut families = Vec::new();
     for artifact in artifacts
-        .artifacts
+        .declarations
         .iter()
         .filter(|artifact| artifact.kind == FUNCTION_FAMILY_KIND)
     {

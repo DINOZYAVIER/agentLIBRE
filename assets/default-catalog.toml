@@ -1,0 +1,92 @@
+format = 2
+
+[[forge]]
+id = "agentlibre.chat-agent"
+kind = "agent"
+schema = "agentlibre.agent/v1"
+git = "https://github.com/DINOZYAVIER/agentlibre-agents.git"
+revision = "46ba3556c9141bbed5913156a97bdd9caa11b9c9"
+path = "agents/chat"
+
+[[forge]]
+id = "agentlibre.qwen38-27b"
+kind = "model"
+schema = "agentlibre.model/v1"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
+path = "models/qwen38-27b"
+
+[[forge]]
+id = "agentlibre.files"
+kind = "extension"
+schema = "agentlibre.extension/v1"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
+path = "extensions/agentlibre-files"
+
+[[forge]]
+id = "agentlibre.forge"
+kind = "extension"
+schema = "agentlibre.extension/v1"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
+path = "extensions/agentlibre-forge"
+
+[[forge]]
+id = "agentlibre.execution"
+kind = "extension"
+schema = "agentlibre.extension/v1"
+git = "https://github.com/DINOZYAVIER/agentLIBRE.git"
+revision = "60b404b27496a8e4c66cd3c019c7563495ade843"
+path = "extensions/agentlibre-execution"
+
+[[forge]]
+id = "agentlibre.gemma4-12b"
+kind = "model"
+schema = "agentlibre.model/v1"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
+path = "models/gemma4-12b"
+
+[[forge]]
+id = "agentlibre.gemma4-e4b"
+kind = "model"
+schema = "agentlibre.model/v1"
+git = "https://github.com/DINOZYAVIER/agentlibre-models.git"
+revision = "18a881571f84bd5b258dc89e72e1bb3adab9f4d8"
+path = "models/gemma4-e4b"
+
+[[forge]]
+id = "agentlibre.cpu-small"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
+path = "functions/cpu-small"
+
+[[forge]]
+id = "agentlibre.gpu-small"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
+path = "functions/gpu-small"
+
+[[forge]]
+id = "agentlibre.gpu-high"
+kind = "function"
+schema = "agentlibre.function/v2"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
+path = "functions/gpu-high"
+
+[[forge]]
+id = "agentlibre.general"
+kind = "function-family"
+schema = "agentlibre.function-family/v1"
+git = "https://github.com/DINOZYAVIER/agentlibre-functions.git"
+revision = "8fa68d2c43e9a36281f1c23b5b6f146eeedbc578"
+path = "families/general"
+
+[workspace]
+output_directories = ["target"]

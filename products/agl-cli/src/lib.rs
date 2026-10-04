@@ -1,3 +1,4 @@
+mod attachments;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{IsTerminal as _, Write as _};
@@ -17,14 +18,12 @@ use agl_daemon_api::{AgentClient, AgentProgress, AgentProgressStatus, AgentSubsc
 use agl_runtime::inference::{InferenceConfig, LlamaServerConfig};
 use agl_tools::searxng::SearxngConfig;
 use anyhow::{Context, Result, bail, ensure};
-use artifacts::{
-    add_artifact, list_artifacts, migrate_artifacts, remove_artifact, sync_artifacts,
-    update_artifact,
-};
 use clap::Parser;
 use cli::{
-    APPLICATION_DESCRIPTION, ArtifactCommand, Cli, Command, ConfigCommand, ConversationCommand,
-    FunctionCommand, FunctionFamilyCommand, PlanCommand, ResumeArgs, StoreCommand, parse_reasoning,
+    APPLICATION_DESCRIPTION, CacheCommand, Cli, Command, ConfigCommand, ConversationCommand,
+    ForgeCommand, ForgeVerificationCommand, ForgeVerificationDecision, FunctionCommand,
+    FunctionFamilyCommand, MemoryCommand, PlanCommand, ResumeArgs, ScheduleCommand, StoreCommand,
+    parse_reasoning,
 };
 use config::Decorations;
 use crossterm::{
@@ -36,6 +35,10 @@ use crossterm::{
     execute, queue,
     style::Print,
     terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
+};
+use forge::{
+    add_forge_declaration, list_forge_declarations, remove_forge_declaration,
+    sync_forge_declarations, update_forge_declaration,
 };
 use pulldown_cmark::{Event, Options, Parser as MarkdownParser, Tag, TagEnd};
 use reedline::{Completer, Span, Suggestion};
@@ -196,9 +199,9 @@ macro_rules! eprintln {
 
 // Declare child modules after the output macros so their `println!` and
 // `eprintln!` calls use the REPL renderer while raw terminal mode is active.
-mod artifacts;
 mod cli;
 mod config;
+mod forge;
 mod function_family;
 mod render;
 mod repl;
@@ -229,14 +232,14 @@ fn short_splash() -> String {
 
 #[derive(Debug, Default)]
 struct RunQueue {
-    messages: VecDeque<String>,
+    messages: VecDeque<Content>,
 }
 
 impl RunQueue {
-    fn push(&mut self, message: String) {
+    fn push(&mut self, message: Content) {
         self.messages.push_back(message);
     }
-    fn pop(&mut self) -> Option<String> {
+    fn pop(&mut self) -> Option<Content> {
         self.messages.pop_front()
     }
     fn len(&self) -> usize {
@@ -364,6 +367,72 @@ fn run() -> Result<()> {
                     Ok(())
                 }
             },
+            Some(Command::Memory {
+                command: MemoryCommand::Archive { slug, workspace },
+            }) => {
+                let workspace = ayeque_forge_core::discover_workspace(
+                    &workspace.unwrap_or(std::env::current_dir()?),
+                )?;
+                let response = client
+                    .memory_archive(utf8_path(&workspace, "workspace")?, slug)
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+                if let agl_daemon_api::AgentResponse::MemoryArchiveDeferred { reason, .. } =
+                    response
+                {
+                    bail!("memory archive deferred: {reason}");
+                }
+                Ok(())
+            }
+            Some(Command::Schedule { command }) => {
+                match command {
+                    ScheduleCommand::Enable {
+                        function_id,
+                        workspace,
+                    } => {
+                        let id = agl_runtime::package::PackageId::new(function_id)?;
+                        let workspace = workspace.canonicalize()?;
+                        let schedule = client
+                            .enable_schedule(id, utf8_path(&workspace, "workspace")?)
+                            .await?;
+                        println!("{}", serde_json::to_string_pretty(&schedule)?);
+                    }
+                    ScheduleCommand::Disable {
+                        function_id,
+                        workspace,
+                    } => {
+                        let id = agl_runtime::package::PackageId::new(function_id)?;
+                        let workspace = workspace.canonicalize()?;
+                        let schedule = client
+                            .disable_schedule(id, utf8_path(&workspace, "workspace")?)
+                            .await?;
+                        println!("{}", serde_json::to_string_pretty(&schedule)?);
+                    }
+                    ScheduleCommand::Show { workspace } => {
+                        let workspace = workspace.map(|p| p.canonicalize()).transpose()?;
+                        let schedules = client
+                            .schedules(
+                                workspace
+                                    .as_deref()
+                                    .map(|p| utf8_path(p, "workspace"))
+                                    .transpose()?,
+                            )
+                            .await?;
+                        println!("{}", serde_json::to_string_pretty(&schedules)?);
+                    }
+                }
+                Ok(())
+            }
+            Some(Command::Cache {
+                command: CacheCommand::Clear { workspace },
+            }) => {
+                let workspace = workspace
+                    .unwrap_or(std::env::current_dir()?)
+                    .canonicalize()?;
+                agl_daemon::clear_planner_cache(&roots.data, &workspace)?;
+                println!("cleared planner cache for {}", workspace.display());
+                Ok(())
+            }
             Some(Command::Store {
                 command: StoreCommand::Rotate,
             }) => {
@@ -380,7 +449,7 @@ fn run() -> Result<()> {
                     ConfigCommand::Check { function } => function.clone(),
                     ConfigCommand::Apply { function } => function.clone(),
                 };
-                let plan = config::plan(&roots.config, &extra)?;
+                let plan = config::plan(&roots.config, &roots.data, &extra)?;
                 agl_daemon::preflight_store(&roots.data)
                     .context("Store preflight failed; active configuration was not changed")?;
                 match command {
@@ -440,6 +509,9 @@ fn run() -> Result<()> {
                 }
             },
             Some(Command::Serve) => {
+                if agl_daemon::managed_unit()?.is_none() {
+                    return managed_serve().await;
+                }
                 let active = config::read_active(&roots.data)
                     .context("no generated configuration; run `agl config apply` first")?;
                 let searxng = active.search.as_ref().map(|search| IntegrationConfig {
@@ -452,15 +524,13 @@ fn run() -> Result<()> {
                 });
                 let server = DaemonServer::start(DaemonConfig {
                     data_root: roots.data,
-                    execution_socket: agl_execd_socket(&roots.state),
-                    inference: InferenceConfig::llama_server(
-                        LlamaServerConfig {
-                            executable: active.executable,
-                        },
-                        agl_execution_api::BlockingExecutionClient::new(agl_execd_socket(
-                            &roots.state,
-                        )),
-                    )?,
+                    state_root: roots.state.clone(),
+                    catalog_root: active.catalog_root,
+                    service_git: active.service_git,
+                    forge_sync_timeout_seconds: active.forge_sync_timeout_seconds,
+                    inference: InferenceConfig::llama_server(LlamaServerConfig {
+                        executable: active.executable,
+                    })?,
                     extensions: vec![],
                     searxng,
                     max_resident_bytes: active
@@ -477,7 +547,11 @@ fn run() -> Result<()> {
             Some(Command::Function { command }) => match command {
                 FunctionCommand::Lock { function_directory } => {
                     let workspace = std::env::current_dir()?.canonicalize()?;
-                    let identity = agl_runtime::function_identity(function_directory, &workspace)?;
+                    let identity = agl_runtime::function_identity(
+                        function_directory,
+                        &workspace,
+                        config::catalog_root(&roots.config, &roots.data)?,
+                    )?;
                     println!(
                         "{}@{}\t{}\tdigest={}",
                         identity.id,
@@ -495,8 +569,25 @@ fn run() -> Result<()> {
                     function_family::select(&roots, &family, &profile).await
                 }
             },
-            Some(Command::Artifact { command }) => match command {
-                ArtifactCommand::Add {
+            Some(Command::Forge { command }) => match command {
+                ForgeCommand::Verification { command } => match command {
+                    ForgeVerificationCommand::Set {
+                        id,
+                        file,
+                        workspace,
+                        decision,
+                    } => {
+                        let roots = application_roots()?;
+                        forge::set_verification_choice(
+                            &roots.data,
+                            &workspace,
+                            &id,
+                            &file,
+                            decision,
+                        )
+                    }
+                },
+                ForgeCommand::Add {
                     id,
                     kind,
                     schema,
@@ -506,21 +597,36 @@ fn run() -> Result<()> {
                 } => {
                     let workspace = std::env::current_dir()?;
                     let storage = ayeque_forge_core::data_root()?;
-                    let registration = ayeque_forge_core::EntityRegistration::new(
-                        id, kind, schema, git_source, revision, source_dir,
+                    let source = agl_runtime::ForgeDeclaration {
+                        id: id.clone(),
+                        kind,
+                        schema,
+                        git: git_source,
+                        revision,
+                        path: source_dir,
+                    };
+                    let entity = add_forge_declaration(
+                        &storage,
+                        &workspace,
+                        source,
+                        &forge::options(&roots.config, &roots.data)?,
                     )?;
-                    let entity = add_artifact(&storage, &workspace, registration)?;
-                    println!("{}\t{}", entity.id(), entity.materialized_path().display());
+                    println!("{}\t{}", id, entity.display());
                     Ok(())
                 }
-                ArtifactCommand::Remove { id } => {
+                ForgeCommand::Remove { id } => {
                     let workspace = std::env::current_dir()?;
                     let storage = ayeque_forge_core::data_root()?;
-                    remove_artifact(&storage, &workspace, &id)?;
+                    remove_forge_declaration(
+                        &storage,
+                        &workspace,
+                        &id,
+                        &forge::options(&roots.config, &roots.data)?,
+                    )?;
                     println!("removed {id}");
                     Ok(())
                 }
-                ArtifactCommand::Update {
+                ForgeCommand::Update {
                     id,
                     kind,
                     schema,
@@ -530,31 +636,46 @@ fn run() -> Result<()> {
                 } => {
                     let workspace = std::env::current_dir()?;
                     let storage = ayeque_forge_core::data_root()?;
-                    update_artifact(
-                        &storage, &workspace, &id, kind, schema, git_source, revision, source_dir,
+                    update_forge_declaration(
+                        &storage,
+                        &workspace,
+                        &id,
+                        kind,
+                        schema,
+                        git_source,
+                        revision,
+                        source_dir,
+                        &forge::options(&roots.config, &roots.data)?,
                     )?;
                     println!("updated {id}");
                     Ok(())
                 }
-                ArtifactCommand::Sync => {
+                ForgeCommand::Sync => {
                     let workspace = std::env::current_dir()?;
                     let storage = ayeque_forge_core::data_root()?;
-                    sync_artifacts(&storage, &workspace)
+                    sync_forge_declarations(
+                        &storage,
+                        &workspace,
+                        &forge::options(&roots.config, &roots.data)?,
+                    )
                 }
-                ArtifactCommand::Migrate => {
+                ForgeCommand::List => {
                     let workspace = std::env::current_dir()?;
-                    let storage = ayeque_forge_core::data_root()?;
-                    migrate_artifacts(&storage, &workspace)
-                }
-                ArtifactCommand::List => {
-                    let workspace = std::env::current_dir()?;
-                    list_artifacts(&workspace)
+                    list_forge_declarations(&workspace)
                 }
             },
             Some(Command::Run {
                 function_directory,
                 prompt,
+                images,
             }) => {
+                let prompt = Content::with_images(
+                    prompt,
+                    images
+                        .iter()
+                        .map(|path| attachments::image_ref(path))
+                        .collect::<Result<Vec<_>>>()?,
+                )?;
                 let workspace = std::env::current_dir()?.canonicalize()?;
                 let active = config::read_active(&roots.data)
                     .context("no generated configuration; run `agl config apply` first")?;
@@ -602,10 +723,6 @@ fn run() -> Result<()> {
             }
         }
     })
-}
-
-fn agl_execd_socket(state_root: &Path) -> PathBuf {
-    state_root.join("execd").join("execd.sock")
 }
 
 async fn interactive_chat(
@@ -759,6 +876,70 @@ async fn select_resume_conversation(
         .cloned()
         .context("selection is outside the displayed range")
 }
+async fn managed_serve() -> Result<()> {
+    let unit = format!("agentlibre-daemon-shell-{}.service", std::process::id());
+    let mut command = ProcessCommand::new("systemd-run");
+    command
+        .args([
+            "--user",
+            "--wait",
+            "--pipe",
+            "--collect",
+            "--service-type=exec",
+            "--expand-environment=no",
+        ])
+        .arg(format!("--unit={unit}"))
+        .args([
+            "--property=KillMode=control-group",
+            "--property=TimeoutStopSec=2s",
+            "--property=Restart=no",
+            "--property=UMask=0077",
+        ])
+        .arg(format!(
+            "--working-directory={}",
+            std::env::current_dir()?.display()
+        ));
+    for name in [
+        "AGL_HOME",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "PATH",
+        "RUST_LOG",
+        "VK_DRIVER_FILES",
+        "VK_ICD_FILENAMES",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            command.arg(format!("--setenv={name}={value}"));
+        }
+    }
+    command
+        .arg("--")
+        .arg(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1));
+    let mut worker = tokio::task::spawn_blocking(move || command.status());
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let status = tokio::select! {
+        status=&mut worker=>status??,
+        _=tokio::signal::ctrl_c()=>{
+            let unit=unit.clone();
+            tokio::task::spawn_blocking(move || ProcessCommand::new("systemctl").args(["--user","stop",&unit]).status()).await??;
+            worker.await??
+        },
+        _=terminate.recv()=>{
+            tokio::task::spawn_blocking(move || ProcessCommand::new("systemctl").args(["--user","stop",&unit]).status()).await??;
+            worker.await??
+        },
+    };
+    ensure!(status.success(), "managed daemon exited: {status}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -1362,8 +1543,11 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "memory",
+                "schedule",
                 "plan",
                 "store",
+                "cache",
                 "resume",
                 "chat",
                 "conversation",
@@ -1372,13 +1556,15 @@ mod tests {
                 "doctor",
                 "function",
                 "function-family",
-                "artifact",
+                "forge",
                 "run",
                 "view",
                 "cancel"
             ]
         );
         for removed in [
+            ["agl", "artifact", "list"].as_slice(),
+            ["agl", "forge", "migrate"].as_slice(),
             ["agl", "events", "--help"].as_slice(),
             ["agl", "messages", "--help"].as_slice(),
             ["agl", "serve", "--config", "/tmp/daemon.json"].as_slice(),

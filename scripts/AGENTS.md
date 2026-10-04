@@ -8,7 +8,7 @@ Keep scripts explicit about required tools and environment variables; avoid hidd
 | Scripts | Responsibility |
 | --- | --- |
 | `build-release.sh` | Locked workspace release, native engine build, deployment to the Cargo prefix and service refresh; `--no-services` installs binaries only. |
-| `install-agl-cargo.sh`, `uninstall-agl-cargo.sh` | Install/remove CLI, execd, launcher and private engine bundle. |
+| `install-agl-cargo.sh`, `uninstall-agl-cargo.sh` | Install/remove CLI, Matrix bridge and private engine bundle. |
 | `build-llama-cpp.sh`, `agl-nix-vulkan.sh` | Dynamic CPU/Vulkan engine build and Nix build environment wrapper. |
 | `restart-services.sh` | Explicit user-systemd stop/restart, including socket units and Matrix bridge. |
 | `agentlibre-*-systemd-service.sh`, `systemd-lib.sh` | Generate/install user units and configure service paths/environments. |

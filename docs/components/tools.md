@@ -13,7 +13,7 @@ bindings to `AgentService::start`; `agl-daemon` validates their definition
 digests and invokes only Tools present in the immutable Run snapshot.
 
 `agl-tools` supplies the `agentlibre.files` Extension (bounded UTF-8
-`agentlibre.files:file.read` and digest-preconditioned atomic
+`agentlibre.files:file.read` and Git text-diff
 `agentlibre.files:file.patch`) and the `agentlibre.forge` Extension
 (`agentlibre.forge:artifact.read` for declared document and memory
 artifacts). `agentlibre.files:file.read` requires `cursor`
@@ -21,7 +21,7 @@ artifacts). `agentlibre.files:file.read` requires `cursor`
 Directory discovery and text search use `command.exec`, which checks the
 admitted executable and contains its working directory within the workspace.
 Its Standard execution mode does not install filesystem isolation for command
-arguments. Planner Runs request `ReadOnlyWorkspace` instead: execd supplies
+arguments. Planner Runs request `ReadOnlyWorkspace` instead: the execution adapter supplies
 a read-only reflink view and a writable scratch directory using the Linux/Nix
 profile described in [Execution](execution.md). The executable Effect
 allowlist applies in both modes; planner commands have no separate command
@@ -38,7 +38,7 @@ patch requires the exact workspace-write Effect grant.
 `extensions/agentlibre-execution` declares `command.exec` and
 `terminal.session`. `agl-tools::execution` supplies their stock native bindings; daemon retains
 Tool and Effect admission. The handlers delegate every process and PTY operation
-to `agl-execd` through `agl-execution-api`.
+to the daemon-supplied ExecutionHost; systemd owns cgroups and tmux owns terminals.
 
 `extensions/agentlibre-searxng` declares the retryable
 `agentlibre.searxng:search` Tool and its external-query Effect. Its trusted
@@ -57,6 +57,20 @@ also receive an artifact resolver and a workspace mutation-lock callback.
 The daemon owns artifact resolution and the shared lock registry used by both
 patch handlers and memory commits.
 
+Forge readers retain a shared backend guard until Drop. `artifact.read` returns
+text pages, recognized image references, or binary metadata with an absolute
+read-only path. Verification status is returned separately from content.
+`agentlibre.memory:memory.search` uses the daemon's Forge-bound FTS5 index and
+the current Run tokenizer to fit its 600-token budget, with the accepted byte
+fallback. The Function must select `agentlibre.memory` to admit this Tool.
+
 For planner commands the daemon also supplies `ToolContext.output_directories`;
-execution bindings forward it to execd with the read-only workspace root.
+execution bindings forward it to the daemon adapter with the read-only workspace root.
 This list comes from the workspace manifest and is not inferred by handlers.
+
+`file.patch` accepts `{patch}`. Its private Git recipe checks contained regular
+paths (including both rename/copy paths), rejects symlinks, traversal, .git,
+binary patches and non-regular modes, then runs numstat, check and apply under
+one Tool deadline. Workspace Git hooks, filters and attribute conversions are
+excluded. Failed preflight proves no workspace change; an unproven mutating
+apply returns unknown, without a backup/rollback or automatic retry.

@@ -11,10 +11,11 @@ name = "agl"
 path = "src/main.rs"
 
 [dependencies]
+agl-tool-api.workspace = true
+libc.workspace = true
 agl-core.workspace = true
 agl-tools.workspace = true
 agl-daemon-api.workspace = true
-agl-execution-api.workspace = true
 agl-daemon.workspace = true
 agl-runtime.workspace = true
 ayeque-forge-core.workspace = true

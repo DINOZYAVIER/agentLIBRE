@@ -19,6 +19,8 @@ mod tests {
     use agl_runtime::package::{PackageId, PackageVersion};
 
     use super::*;
+    include!("schedule_protocol_tests.rs");
+    include!("memory_protocol_tests.rs");
 
     fn root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -38,6 +40,7 @@ mod tests {
             SplitMode,
         };
         ModelRuntimeSelection {
+            mmproj: None,
             artifact: ModelArtifactRef {
                 kind: ModelArtifactKind::Gguf,
                 url: "https://example.invalid/model.gguf".into(),
@@ -117,6 +120,8 @@ mod tests {
     }
 
     impl InferenceGenerator for GatedGenerator {
+        fn count_text_tokens(&self, _: agl_runtime::inference::InferenceTokenizeRequest) -> Result<u64, InferenceServiceError> { Err(InferenceServiceError::Unavailable) }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -233,9 +238,11 @@ mod tests {
         install_test_model(&root);
         let socket = root.join("state/daemon/agl.sock");
         let release = Arc::new(AtomicBool::new(false));
-        let server = DaemonServer::start(DaemonConfig {
+        let server = DaemonServer::start(DaemonConfig { forge_sync_timeout_seconds: 300,
             data_root: root.join("data"),
-            execution_socket: root.join("state/execd/execd.sock"),
+            state_root: root.join("state"),
+            catalog_root: root.join("source"),
+            service_git: Default::default(),
             inference: InferenceConfig::custom(Arc::new(GatedGenerator {
                 release: release.clone(),
             })),
@@ -326,9 +333,11 @@ mod tests {
             std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let _server = DaemonServer::start(DaemonConfig {
+        let _server = DaemonServer::start(DaemonConfig { forge_sync_timeout_seconds: 300,
             data_root: root.join("data"),
-            execution_socket: root.join("state/execd/execd.sock"),
+            state_root: root.join("state"),
+            catalog_root: root.join("source"),
+            service_git: Default::default(),
             inference: InferenceConfig::custom(Arc::new(GatedGenerator {
                 release: release.clone(),
             })),
@@ -360,9 +369,11 @@ mod tests {
             std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        let error = DaemonServer::start(DaemonConfig {
+        let error = DaemonServer::start(DaemonConfig { forge_sync_timeout_seconds: 300,
             data_root: root.join("data"),
-            execution_socket: root.join("state/execd/execd.sock"),
+            state_root: root.join("state"),
+            catalog_root: root.join("source"),
+            service_git: Default::default(),
             inference: InferenceConfig::custom(Arc::new(GatedGenerator {
                 release: Arc::new(AtomicBool::new(true)),
             })),

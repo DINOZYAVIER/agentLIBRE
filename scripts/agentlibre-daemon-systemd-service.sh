@@ -68,12 +68,13 @@ socket_unit="${unit%.service}.socket"
 service_content="[Unit]
 Description=agentLIBRE daemon
 Requires=$socket_unit
-Wants=agentlibre-execd.socket
-After=$socket_unit agentlibre-execd.socket
+After=$socket_unit
 
 [Service]
-Type=simple
+Type=exec
 UMask=0077
+KillMode=control-group
+TimeoutStopSec=2s
 WorkingDirectory=$(agl_systemd_escape_scalar "$cwd")
 Environment=$(agl_systemd_quote "RUST_LOG=$log_filter")
 Environment=$(agl_systemd_quote "XDG_CONFIG_HOME=$config_home")

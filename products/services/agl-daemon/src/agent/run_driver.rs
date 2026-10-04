@@ -9,24 +9,17 @@ fn effective_generation_max_output(configured: u64, context_tokens: u32) -> u64 
     configured.min(u64::from(context_tokens) / 2)
 }
 
-const MEMORY_POINTER_INSTRUCTION: &str = "Durable workspace memory is opt-in. If the task touches memory, use agentlibre.forge:artifact.read with forge:agentlibre.memory/INDEX.md and then the relevant forge:agentlibre.memory/entries/<slug>.md before re-investigating. Do not treat memory as authoritative without checking its cited sources.";
-
-fn memory_opted_in(root: &Path) -> bool {
-    super::memory_io::MemoryWorkspace::new(root)
-        .is_ok_and(|workspace| workspace.load_corpus().is_ok_and(|corpus| corpus.is_some()))
-}
-
 fn append_memory_pointer(
-    root: &Path,
     instructions: &InstructionSet,
+    memory_id: Option<&str>,
 ) -> Result<InstructionSet, AgentServiceError> {
-    if !memory_opted_in(root) {
+    let Some(memory_id) = memory_id else {
         return Ok(instructions.clone());
-    }
+    };
     let mut blocks = instructions.blocks.clone();
     blocks.push(InstructionBlock {
         source: InstructionSource::Agent,
-        content: Content::text(MEMORY_POINTER_INSTRUCTION.to_owned())
+        content: Content::text(format!("Durable workspace memory is available via agentlibre.memory:search. Use it before re-investigating a known topic. If the tool is unavailable, read forge:{memory_id}/INDEX.md and use rg."))
             .map_err(|_| AgentServiceError::InvalidSnapshot)?,
     });
     InstructionSet::new(blocks).map_err(|_| AgentServiceError::InvalidSnapshot)
@@ -36,9 +29,12 @@ pub(crate) fn admit(
     dependencies: &AgentDependencies,
     bindings: &BTreeMap<String, PreparedTool>,
     spec: AgentRunSpec,
+    schedule_generation: Option<&agl_core::RequestId>,
     allow_creation: bool,
 ) -> Result<AgentRun, AgentServiceError> {
-    if let Some(run) = dependencies.store.replay_agent_run(&spec)? {
+    if schedule_generation.is_none()
+        && let Some(run) = dependencies.store.replay_agent_run(&spec)?
+    {
         return Ok(run);
     }
     if !allow_creation {
@@ -47,10 +43,23 @@ pub(crate) fn admit(
     let mut snapshot = dependencies
         .store
         .resolve_agent_run_snapshot(&spec.origin)?;
-    snapshot.instructions =
-        append_memory_pointer(snapshot.workspace.root.as_path(), &snapshot.instructions)?;
+    let memory_id = dependencies
+        .memory_index
+        .as_ref()
+        .and_then(|index| index.memory_source_id(snapshot.workspace.root.as_path()));
+    if memory_id.is_none() {
+        snapshot
+            .tools
+            .retain(|tool| tool.definition.id.as_str() != agl_tools::memory::SEARCH);
+    }
+    snapshot.instructions = append_memory_pointer(&snapshot.instructions, memory_id.as_deref())?;
     validate_snapshot(&snapshot, bindings)?;
-    let admitted = dependencies.store.admit_agent_run(&spec, snapshot)?;
+    let admitted = match schedule_generation {
+        Some(generation) => dependencies
+            .store
+            .admit_scheduled_run(&spec, snapshot, generation)?,
+        None => dependencies.store.admit_agent_run(&spec, snapshot)?,
+    };
     Ok(match admitted {
         AgentRunAdmission::Created(run) | AgentRunAdmission::Replayed(run) => run,
     })
@@ -169,10 +178,7 @@ pub(crate) fn drive(
     run: AgentRun,
 ) -> Result<(), AgentServiceError> {
     let deadline_at_ms = dependencies.store.agent_run_deadline_at_ms(run.id)?;
-    let agl_core::agent::AgentRunOrigin::User {
-        conversation_id, ..
-    } = &run.origin;
-    let conversation_id = Some(*conversation_id);
+    let conversation_id = Some(run.origin.conversation_id());
     // A generation reservation larger than half the realized window can make
     // even a minimal exact-state compaction impossible to resume. Apply this
     // at execution time so durable Conversations created with an older,
@@ -342,38 +348,17 @@ mod realized_scope_tests {
     }
 
     #[test]
-    fn memory_pointer_is_added_only_for_an_opted_in_workspace() {
-        let root =
-            std::env::temp_dir().join(format!("agl-memory-pointer-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).unwrap();
-        let instructions = InstructionSet::new(vec![]).unwrap();
-        let absent = append_memory_pointer(&root, &instructions).unwrap();
-        assert_eq!(absent, instructions);
-        std::fs::create_dir(root.join("memory")).unwrap();
-        let present = append_memory_pointer(&root, &instructions).unwrap();
-        assert_eq!(present.blocks.len(), 1);
-        assert!(
-            present.blocks[0]
-                .content
-                .as_text()
-                .contains("memory/INDEX.md")
-        );
-        assert_ne!(present.digest, instructions.digest);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn memory_pointer_does_not_follow_a_memory_symlink() {
-        let root =
-            std::env::temp_dir().join(format!("agl-memory-pointer-{}", uuid::Uuid::now_v7()));
-        let outside = root.join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("memory")).unwrap();
+    fn memory_pointer_uses_the_selected_forge_role() {
         let instructions = InstructionSet::new(vec![]).unwrap();
         assert_eq!(
-            append_memory_pointer(&root, &instructions).unwrap(),
+            append_memory_pointer(&instructions, None).unwrap(),
             instructions
         );
-        let _ = std::fs::remove_dir_all(root);
+        let present = append_memory_pointer(&instructions, Some("project.memory")).unwrap();
+        assert_eq!(present.blocks.len(), 1);
+        let text = present.blocks[0].content.as_text();
+        assert!(text.contains("agentlibre.memory:search"));
+        assert!(text.contains("forge:project.memory/INDEX.md"));
+        assert_ne!(present.digest, instructions.digest);
     }
 }

@@ -14,6 +14,6 @@ pub use acquisition::{
 };
 pub use format::{ModelConfig, ModelDialect, ToolCallFormat};
 pub use manifest::{
-    MODEL_FILE_NAME, MODEL_SCHEMA, ModelArtifact, ModelArtifactKind, ModelManifest, ModelReasoning,
-    parse_package_view,
+    MODEL_FILE_NAME, MODEL_SCHEMA, MmprojArtifact, ModelArtifact, ModelArtifactKind, ModelManifest,
+    ModelReasoning, parse_package_view,
 };

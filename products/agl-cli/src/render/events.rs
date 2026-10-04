@@ -4,7 +4,7 @@ use super::*;
 pub(crate) async fn foreground_turn(
     client: &AgentClient,
     conversation_id: ConversationId,
-    prompt: String,
+    prompt: Content,
     interactive: bool,
     reasoning: Option<agl_core::agent::ReasoningEffort>,
     decorations: Decorations,
@@ -23,7 +23,7 @@ pub(crate) async fn foreground_turn(
                 conversation_id,
                 message_id: message_id.clone(),
             },
-            input: Content::text(prompt)?,
+            input: prompt,
         })
         .await?;
     if let Some(active_id) = active_id {
@@ -61,7 +61,7 @@ pub(crate) async fn foreground_turn(
             let durable = message.content.into_text();
             if decorations != Decorations::Off && interactive {
                 render_answer_block(&durable, started.elapsed(), theme);
-            } else if !interactive || streamed != durable {
+            } else {
                 println!("{}", safe_terminal_text(&durable));
             }
         }

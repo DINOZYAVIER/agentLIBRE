@@ -18,6 +18,12 @@ pub(crate) struct HumanConfig {
     pub chat: ChatConfig,
     #[serde(default)]
     #[garde(dive)]
+    pub forge: ForgeConfig,
+    #[serde(default)]
+    #[garde(skip)]
+    pub service_git: agl_daemon::ServiceGitConfig,
+    #[serde(default)]
+    #[garde(dive)]
     pub inference: InferenceConfig,
     #[serde(default)]
     #[garde(dive)]
@@ -28,6 +34,36 @@ pub(crate) struct HumanConfig {
     #[serde(default)]
     #[garde(dive)]
     pub repl: ReplConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, garde::Validate)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ForgeConfig {
+    #[garde(skip)]
+    pub catalog_root: Option<PathBuf>,
+    #[garde(range(min = 1))]
+    pub sync_timeout_seconds: u64,
+}
+
+impl Default for ForgeConfig {
+    fn default() -> Self {
+        Self {
+            catalog_root: None,
+            sync_timeout_seconds: 300,
+        }
+    }
+}
+
+pub(crate) fn catalog_root(config_root: &Path, data_root: &Path) -> Result<PathBuf> {
+    let configured = if config_root.join(CONFIG_FILE_NAME).try_exists()? {
+        load_document(config_root)?.0.forge.catalog_root
+    } else {
+        None
+    };
+    configured
+        .unwrap_or_else(|| data_root.join("source"))
+        .canonicalize()
+        .context("Forge catalog is unavailable")
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, garde::Validate)]
@@ -153,9 +189,12 @@ pub(crate) fn load_document(config_root: &Path) -> Result<(HumanConfig, Vec<u8>)
 #[derive(Clone, Debug)]
 pub(crate) struct ConfigPlan {
     pub source_digest: String,
+    pub catalog_root: PathBuf,
+    pub forge_sync_timeout_seconds: u64,
     pub functions: Vec<PreparedFunction>,
     pub executable: PathBuf,
     pub search: Option<ActiveSearch>,
+    pub service_git: agl_daemon::ServiceGitConfig,
     pub keep_free_ram: Option<u64>,
     pub keep_free_vram: Option<u64>,
 }
@@ -173,9 +212,12 @@ pub(crate) struct PreparedFunction {
 pub(crate) struct ActiveConfig {
     pub schema: String,
     pub source_digest: String,
+    pub catalog_root: PathBuf,
+    pub forge_sync_timeout_seconds: u64,
     pub functions: Vec<ActiveFunction>,
     pub executable: PathBuf,
     pub search: Option<ActiveSearch>,
+    pub service_git: agl_daemon::ServiceGitConfig,
     pub keep_free_ram: Option<u64>,
     pub keep_free_vram: Option<u64>,
 }
@@ -198,13 +240,20 @@ pub(crate) struct ActiveSearch {
     pub private_ca: PathBuf,
 }
 
-pub(crate) fn plan(config_root: &Path, extra_functions: &[String]) -> Result<ConfigPlan> {
+pub(crate) fn plan(
+    config_root: &Path,
+    data_root: &Path,
+    extra_functions: &[String],
+) -> Result<ConfigPlan> {
     let (human, bytes) = load_document(config_root)?;
     let cwd = std::env::current_dir()?.canonicalize()?;
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+    let workspace = human
+        .forge
+        .catalog_root
+        .clone()
+        .unwrap_or_else(|| data_root.join("source"))
         .canonicalize()
-        .context("failed to locate the AGL workspace manifest")?;
+        .context("Forge catalog is unavailable")?;
     let default = resolve_requirement(&human.chat.default_function, &workspace)?;
     let mut directories = vec![(default.directory, workspace.clone())];
     for locator in extra_functions {
@@ -226,7 +275,8 @@ pub(crate) fn plan(config_root: &Path, extra_functions: &[String]) -> Result<Con
     let functions = directories
         .into_iter()
         .map(|(directory, function_workspace)| {
-            let identity = agl_runtime::function_identity(&directory, &function_workspace)?;
+            let identity =
+                agl_runtime::function_identity(&directory, &function_workspace, &workspace)?;
             Ok(PreparedFunction {
                 directory: identity.directory,
                 id: identity.id.to_string(),
@@ -255,9 +305,12 @@ pub(crate) fn plan(config_root: &Path, extra_functions: &[String]) -> Result<Con
     });
     Ok(ConfigPlan {
         source_digest: digest(&bytes),
+        catalog_root: workspace,
+        forge_sync_timeout_seconds: human.forge.sync_timeout_seconds,
         functions,
         executable,
         search,
+        service_git: human.service_git,
         keep_free_ram: human.inference.memory.keep_free_ram.map(|value| value.0),
         keep_free_vram: human.inference.memory.keep_free_vram.map(|value| value.0),
     })
@@ -267,6 +320,8 @@ pub(crate) fn active(plan: &ConfigPlan) -> ActiveConfig {
     ActiveConfig {
         schema: "agentlibre.active-config/v1".to_owned(),
         source_digest: plan.source_digest.clone(),
+        catalog_root: plan.catalog_root.clone(),
+        forge_sync_timeout_seconds: plan.forge_sync_timeout_seconds,
         functions: plan
             .functions
             .iter()
@@ -279,6 +334,7 @@ pub(crate) fn active(plan: &ConfigPlan) -> ActiveConfig {
             .collect(),
         executable: plan.executable.clone(),
         search: plan.search.clone(),
+        service_git: plan.service_git,
         keep_free_ram: plan.keep_free_ram,
         keep_free_vram: plan.keep_free_vram,
     }
@@ -296,6 +352,14 @@ pub(crate) fn read_active(data_root: &Path) -> Result<ActiveConfig> {
     ensure!(
         active.schema == "agentlibre.active-config/v1",
         "unsupported generated config schema"
+    );
+    ensure!(
+        active.forge_sync_timeout_seconds > 0,
+        "forge sync timeout must be positive"
+    );
+    ensure!(
+        active.catalog_root.is_absolute(),
+        "Forge catalog root must be absolute"
     );
     Ok(active)
 }
@@ -359,6 +423,16 @@ fn validate_executable(path: &Path) -> Result<()> {
 
 impl HumanConfig {
     fn validate(&self, path: &Path) -> Result<()> {
+        if let Some(root) = &self.forge.catalog_root {
+            ensure!(
+                root.is_absolute(),
+                "forge.catalog_root in {} must be absolute",
+                path.display()
+            );
+        }
+        self.service_git
+            .validate()
+            .with_context(|| format!("invalid service_git in {}", path.display()))?;
         if let Some(executable) = &self.inference.executable {
             ensure!(
                 executable.is_absolute(),
@@ -499,6 +573,83 @@ fn validate_logical_id(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_selection_uses_data_root_or_absolute_override_without_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("agl-catalog-{}", agl_core::AgentRunId::generate()));
+        let config = root.join("config");
+        let data = root.join("data");
+        let default = data.join("source");
+        let selected = root.join("selected");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::create_dir_all(&selected).unwrap();
+        assert_eq!(
+            catalog_root(&config, &data).unwrap(),
+            default.canonicalize().unwrap()
+        );
+        let write = |value: &Path| {
+            std::fs::write(
+                config.join(CONFIG_FILE_NAME),
+                format!(
+                    "[chat]\ndefault_function='function:test@1.0.0'\n[forge]\ncatalog_root='{}'\n",
+                    value.display()
+                ),
+            )
+            .unwrap();
+        };
+        write(&selected);
+        assert_eq!(
+            catalog_root(&config, &data).unwrap(),
+            selected.canonicalize().unwrap()
+        );
+        write(&root.join("missing"));
+        assert!(catalog_root(&config, &data).is_err());
+        write(Path::new("relative"));
+        assert!(
+            catalog_root(&config, &data)
+                .unwrap_err()
+                .to_string()
+                .contains("must be absolute")
+        );
+        std::fs::remove_file(config.join(CONFIG_FILE_NAME)).unwrap();
+        std::fs::remove_dir_all(default).unwrap();
+        assert!(catalog_root(&config, &data).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_git_limits_are_positive_and_defaults_are_exact() {
+        let parse = |section: &str| {
+            toml::from_str::<HumanConfig>(&format!(
+                "[chat]\ndefault_function='function:test@1.0.0'\n{section}"
+            ))
+            .unwrap()
+        };
+        let defaults = parse("");
+        assert_eq!(defaults.forge.sync_timeout_seconds, 300);
+        let forge = parse("[forge]\nsync_timeout_seconds=7");
+        assert_eq!(forge.forge.sync_timeout_seconds, 7);
+        assert!(garde::Validate::validate(&parse("[forge]\nsync_timeout_seconds=0")).is_err());
+        assert_eq!(defaults.service_git.memory_max_bytes, 1073741824);
+        assert_eq!(defaults.service_git.max_output_bytes, 1048576);
+        for section in [
+            "[service_git]\nmemory_max_bytes=0",
+            "[service_git]\nmax_output_bytes=0",
+        ] {
+            assert!(
+                parse(section)
+                    .validate(Path::new("/config/agentLIBRE.toml"))
+                    .is_err()
+            );
+        }
+        let selected = parse("[service_git]\nmemory_max_bytes=134217728\nmax_output_bytes=7");
+        selected
+            .validate(Path::new("/config/agentLIBRE.toml"))
+            .unwrap();
+        assert_eq!(selected.service_git.max_output_bytes, 7);
+    }
 
     #[test]
     fn strict_human_config_requires_typed_function_and_explicit_integration_criticality() {

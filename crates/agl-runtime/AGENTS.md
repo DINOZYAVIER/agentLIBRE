@@ -10,8 +10,7 @@ crate per manifest kind.
 
 The runtime must not own Agent scheduling, durable Agent state, CLI rendering,
 or concrete builtin Tool handlers. Child-process and PTY lifecycle belongs to
-`agl-execd`; runtime package resolution and inference use the typed execution
-client.
+systemd through a daemon-supplied ProcessHost.
 
 Do not infer model bindings from filenames, scan arbitrary model directories,
 persist credentials, or add in-process native llama.cpp linkage.
@@ -28,7 +27,8 @@ persist credentials, or add in-process native llama.cpp linkage.
 | `function/requirement.rs` | Typed Function requirement parsing. |
 | `function/family.rs` | `FAMILY.toml` profiles and family discovery from workspace artifacts. |
 | `forge.rs` | AGL workspace lookup, Function identity/dependency resolution and Forge locks/materializations. |
-| `workspace_artifacts.rs` | Workspace artifact declarations, serialization/editing, output directories and resolution. |
+| `workspace_forge.rs` | Workspace artifact declarations, serialization/editing, output directories and resolution. |
+| `forge_verification.rs` | Local per-source-revision human choices for large-file content checks; atomic JSON updates with a shared CLI/daemon lock. |
 | `activation.rs` | Dependency/package assembly, permission grants, active Function snapshots and model-service activation. |
 | `model/manifest.rs`, `model/format.rs` | Model package metadata, inference dialect and format configuration. |
 | `model/acquisition.rs` | Explicit model fetch/import and digest-verified managed GGUF files. |

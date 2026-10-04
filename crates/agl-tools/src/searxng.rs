@@ -47,7 +47,6 @@ pub fn bindings(
 ) -> Result<ExtensionBindings> {
     crate::validate_declaration(
         &declaration(),
-        &version,
         &content_digest,
         &definition,
         "agentlibre.searxng",

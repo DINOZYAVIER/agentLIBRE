@@ -19,7 +19,7 @@ llama_bin="${AGL_LLAMA_CPP_BUILD_DIR:-$AGL_CI_REPO_ROOT/target/llama-cpp/build}/
 engine="$llama_bin/llama-server"
 
 ci_section "Building release host and selected engine"
-ci_run cargo build --locked --release -p agl-cli --bin agl -p agl-execd
+ci_run cargo build --locked --release -p agl-cli --bin agl
 ci_run "$AGL_CI_REPO_ROOT/scripts/build-llama-cpp.sh"
 [[ -x "$agl_bin" ]] || ci_fail "missing release host: $agl_bin"
 [[ -x "$engine" ]] || ci_fail "missing private engine: $engine"
@@ -73,7 +73,6 @@ fi
 if [[ -n "${AGL_TEST_MODEL_GGUF:-}" ]]; then
   ci_section "Running installed-shape Function and Tool smoke"
   AGL_SMOKE_AGL_BIN="$agl_bin" \
-    AGL_SMOKE_EXECD_BIN="$AGL_CI_REPO_ROOT/target/release/agl-execd" \
     AGL_LLAMA_SERVER_BIN="$engine" \
     "$AGL_CI_REPO_ROOT/scripts/agl-daemon-live-smoke.sh"
 else

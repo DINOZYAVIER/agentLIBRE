@@ -210,6 +210,201 @@ async fn write_stream_frame(
 async fn dispatch(request: AgentProtocolRequest, handle: DaemonHandle) -> AgentProtocolResponse {
     let request_id = request.request_id;
     let result = match request.command {
+        AgentCommand::MemoryArchive {
+            workspace_path,
+            slug,
+        } => {
+            async {
+                let workspace = PathBuf::from(workspace_path)
+                    .canonicalize()
+                    .map_err(protocol_io_error)?;
+                if !workspace.is_dir() {
+                    return Err(ProtocolError::new(
+                        ProtocolErrorCode::InvalidRequest,
+                        "memory workspace must be a directory",
+                        false,
+                    ));
+                }
+                let memory = handle.memory.clone();
+                let store = handle.store.clone();
+                let requested_slug = slug.clone();
+                let id = request_id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    memory.archive(&store, &workspace, &requested_slug, id)
+                })
+                .await
+                .map_err(|error| {
+                    ProtocolError::new(
+                        ProtocolErrorCode::Internal,
+                        format!("memory publisher task failed: {error}"),
+                        true,
+                    )
+                })?;
+                Ok(match result {
+                    Ok(revision) => AgentResponse::MemoryArchived { slug, revision },
+                    Err(error) => {
+                        let details = error
+                            .downcast_ref::<ayeque_forge_core::VerificationRequired>()
+                            .and_then(|request| serde_json::to_value(request).ok())
+                            .and_then(|value| agl_core::CanonicalJson::new(value).ok());
+                        tracing::warn!(%slug, reason=%error, "memory archive deferred");
+                        AgentResponse::MemoryArchiveDeferred {
+                            slug,
+                            reason: format!("{error:#}"),
+                            details,
+                        }
+                    }
+                })
+            }
+            .await
+        }
+        AgentCommand::ScheduleEnable {
+            function_id,
+            workspace_path,
+        } => {
+            async {
+                let workspace = PathBuf::from(workspace_path)
+                    .canonicalize()
+                    .map_err(protocol_io_error)?;
+                if !workspace.is_dir() {
+                    return Err(ProtocolError::new(
+                        ProtocolErrorCode::InvalidRequest,
+                        "schedule workspace must be a directory",
+                        false,
+                    ));
+                }
+                let runtime = handle.runtime.clone();
+                let selected_id = function_id.clone();
+                let directory = tokio::task::spawn_blocking(move || {
+                    runtime.scheduled_function_directory(&selected_id)
+                })
+                .await
+                .map_err(protocol_join_error)?
+                .map_err(protocol_io_error)?;
+                let activated = handle
+                    .runtime
+                    .activate(directory, workspace)
+                    .await
+                    .map_err(protocol_activation_error)?;
+                let config = activated.schedule.ok_or_else(|| {
+                    ProtocolError::new(
+                        ProtocolErrorCode::InvalidRequest,
+                        "Function has no [schedule]",
+                        false,
+                    )
+                })?;
+                let function = ExactPackageRef {
+                    id: activated.function_id,
+                    version: activated.function_version,
+                    digest: activated.function_digest,
+                };
+                if function.id != function_id {
+                    return Err(ProtocolError::new(
+                        ProtocolErrorCode::InvalidRequest,
+                        "activated Function differs from requested schedule",
+                        false,
+                    ));
+                }
+                let permissions =
+                    serde_json::to_value(activated.permissions).map_err(protocol_io_error)?;
+                let store = handle.store.clone();
+                let record = tokio::task::spawn_blocking(move || {
+                    store.enable_schedule(&function, &activated.snapshot, &config, &permissions)
+                })
+                .await
+                .map_err(protocol_join_error)?
+                .map_err(protocol_store_error)?;
+                Ok(AgentResponse::ScheduleEnabled {
+                    schedule: Box::new(record.view(crate::agent::now_ms())),
+                })
+            }
+            .await
+        }
+        AgentCommand::ScheduleDisable {
+            function_id,
+            workspace_path,
+        } => {
+            let store = handle.store.clone();
+            let agent = handle.agent.clone();
+            let execution = handle.execution.clone();
+            tokio::task::spawn_blocking(move || {
+                let workspace = PathBuf::from(workspace_path)
+                    .canonicalize()
+                    .map_err(protocol_io_error)?;
+                let (record, runs) = store
+                    .disable_schedule(&workspace, &function_id)
+                    .map_err(protocol_store_error)?;
+                for run in runs {
+                    agent.cancel(run).map_err(protocol_agent_error)?;
+                    execution.cancel_run(run).map_err(protocol_io_error)?;
+                }
+                Ok(AgentResponse::ScheduleDisabled {
+                    schedule: Box::new(record.view(crate::agent::now_ms())),
+                })
+            })
+            .await
+            .map_err(protocol_join_error)
+            .and_then(|result| result)
+        }
+        AgentCommand::ScheduleShow { workspace_path } => {
+            let store = handle.store.clone();
+            let runtime = handle.runtime.clone();
+            tokio::task::spawn_blocking(move || {
+                let workspace = workspace_path
+                    .map(PathBuf::from)
+                    .map(|p| p.canonicalize())
+                    .transpose()
+                    .map_err(protocol_io_error)?;
+                let records = store
+                    .schedules(workspace.as_deref())
+                    .map_err(protocol_store_error)?;
+                let mut views = records
+                    .iter()
+                    .map(|record| record.view(crate::agent::now_ms()))
+                    .collect::<Vec<_>>();
+                let functions = runtime.scheduled_functions().map_err(protocol_io_error)?;
+                for function in functions {
+                    if records
+                        .iter()
+                        .any(|r| r.function.id == function.identity.id)
+                    {
+                        continue;
+                    }
+                    let digest = function.identity.digest.as_str().parse().map_err(
+                        |error: &'static str| {
+                            ProtocolError::new(ProtocolErrorCode::Internal, error, false)
+                        },
+                    )?;
+                    views.push(agl_daemon_api::ScheduleView {
+                        function: ExactPackageRef {
+                            id: function.identity.id,
+                            version: function.identity.version,
+                            digest,
+                        },
+                        workspace_path: workspace
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        conversation_id: None,
+                        enabled: false,
+                        interval_seconds: function.schedule.interval_seconds,
+                        prompt: function.schedule.prompt,
+                        max_run_seconds: function.schedule.max_run_seconds,
+                        events: function.schedule.events,
+                        permissions: serde_json::to_value(function.permissions)
+                            .map_err(protocol_io_error)?,
+                        last_run: None,
+                        next_tick_at_ms: None,
+                    });
+                }
+                views.sort_by(|a, b| {
+                    (&a.function.id, &a.workspace_path).cmp(&(&b.function.id, &b.workspace_path))
+                });
+                Ok(AgentResponse::Schedules { schedules: views })
+            })
+            .await
+            .map_err(protocol_join_error)
+            .and_then(|result| result)
+        }
         AgentCommand::OpenConversation {
             conversation_id,
             function_path,
@@ -479,11 +674,17 @@ async fn dispatch(request: AgentProtocolRequest, handle: DaemonHandle) -> AgentP
         }
         AgentCommand::CancelRun { run_id } => {
             let agent = handle.agent.clone();
-            tokio::task::spawn_blocking(move || agent.cancel(run_id))
-                .await
-                .map_err(protocol_join_error)
-                .and_then(|result| result.map_err(protocol_agent_error))
-                .map(|()| AgentResponse::RunCancelled { run_id })
+            let execution = handle.execution.clone();
+            tokio::task::spawn_blocking(move || {
+                agent.cancel(run_id)?;
+                execution
+                    .cancel_run(run_id)
+                    .map_err(|_| crate::agent::AgentServiceError::Unavailable)
+            })
+            .await
+            .map_err(protocol_join_error)
+            .and_then(|result| result.map_err(protocol_agent_error))
+            .map(|()| AgentResponse::RunCancelled { run_id })
         }
         AgentCommand::RunView { run_id } => {
             let store = handle.store.clone();
@@ -562,6 +763,10 @@ fn protocol_activation_error(error: anyhow::Error) -> ProtocolError {
     };
     let message = error.to_string().chars().take(512).collect::<String>();
     ProtocolError::new(code, message, retryable)
+}
+
+fn protocol_io_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::new(ProtocolErrorCode::InvalidRequest, error.to_string(), false)
 }
 
 fn protocol_join_error(error: tokio::task::JoinError) -> ProtocolError {

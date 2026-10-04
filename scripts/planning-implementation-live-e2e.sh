@@ -10,9 +10,7 @@ artifact_root="${AGL_E2E_ARTIFACT_ROOT:-/tmp/agl-planning-implementation-e2e}"
 run_root="$artifact_root/$(date +%Y%m%d-%H%M%S)-$$"
 agl_home="$run_root/agl-home"
 workspace="$run_root/workspace"
-forge_bin="${AGL_E2E_FORGE_BIN:-$repo_root/../ayeque-forge/target/debug/ayeque-forge}"
 agl_bin="${AGL_E2E_AGL_BIN:-$repo_root/target/debug/agl}"
-execd_bin="${AGL_E2E_EXECD_BIN:-$repo_root/target/debug/agl-execd}"
 engine="${AGL_E2E_LLAMA_SERVER_BIN:-$HOME/.cargo/libexec/agentlibre/llama-server}"
 planner_function="${AGL_E2E_PLANNER_FUNCTION:-$HOME/repos/agentlibre-functions/functions/qwen38-27b-reasoning}"
 coder_function="${AGL_E2E_CODER_FUNCTION:-$HOME/repos/agentlibre-functions/functions/search-qwen38-27b-reasoning}"
@@ -32,7 +30,6 @@ search_certificate="${AGL_E2E_SEARCH_CERTIFICATE:-$HOME/.config/agentLIBRE/crede
 search_private_key="${AGL_E2E_SEARCH_PRIVATE_KEY:-$HOME/.config/agentLIBRE/credentials/ayeque-search/client.pk8}"
 search_ca="${AGL_E2E_SEARCH_CA:-$HOME/.config/agentLIBRE/credentials/ayeque-search/ca.crt}"
 daemon_log="$run_root/daemon.log"
-execd_log="$run_root/execd.log"
 
 die() {
   echo "planning E2E: $*" >&2
@@ -57,12 +54,7 @@ need "Functions repository" "$functions_repo"
 need "search client certificate" "$search_certificate"
 need "search client private key" "$search_private_key"
 need "search CA" "$search_ca"
-if [[ ! -e "$forge_bin" ]]; then
-  forge_bin="$(command -v ayeque-forge || true)"
-fi
-need_exec ayeque-forge "$forge_bin"
 need_exec agl "$agl_bin"
-need_exec agl-execd "$execd_bin"
 need_exec llama-server "$engine"
 command -v python3 >/dev/null || die "python3 is required"
 command -v git >/dev/null || die "git is required"
@@ -70,24 +62,19 @@ command -v timeout >/dev/null || die "timeout is required"
 
 # The interactive shell may inherit systemd socket-activation variables from
 # the installed agentLIBRE service.  This harness owns its temporary socket;
-# do not make the isolated execd try to claim fd 3 from that service.
+# keep the isolated daemon from claiming fd 3 from that service.
 unset LISTEN_FDS LISTEN_PID LISTEN_FDNAMES LISTEN_PIDFDID
 
 mkdir -p "$run_root" "$agl_home/config" "$agl_home/data/runtime/models" "$agl_home/state"
 mkdir -p "$(dirname -- "$report_path")"
-execd_pid=""
 daemon_pid=""
 export AGL_E2E_DAEMON_SOCKET="$agl_home/state/daemon/agl.sock"
-export AGL_E2E_EXECD_SOCKET="$agl_home/state/execd/execd.sock"
 cleanup() {
   if [[ -n "$daemon_pid" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
   fi
-  if [[ -n "$execd_pid" ]] && kill -0 "$execd_pid" 2>/dev/null; then
-    kill "$execd_pid" 2>/dev/null || true
-    wait "$execd_pid" 2>/dev/null || true
-  fi
+
 }
 trap cleanup EXIT
 
@@ -104,7 +91,17 @@ export AGL_E2E_ENGINE="$engine"
 export AGL_E2E_PLANNER_MODEL="$planner_model"
 export AGL_E2E_CODER_MODEL="$coder_model"
 export AGL_E2E_REPORT_PATH="$report_path"
-export AGL_E2E_REPO_ROOT="$repo_root"
+extensions_source="$run_root/extensions-source"
+mkdir -p "$extensions_source/extensions"
+for extension in agentlibre-files agentlibre-forge agentlibre-execution; do
+  cp -a -- "$repo_root/extensions/$extension" "$extensions_source/extensions/"
+done
+git -C "$extensions_source" init --quiet
+git -C "$extensions_source" config user.name agentLIBRE-e2e
+git -C "$extensions_source" config user.email agentlibre-e2e.invalid
+git -C "$extensions_source" add --all
+git -C "$extensions_source" commit --quiet -m 'Snapshot current native Extension declarations'
+export AGL_E2E_NATIVE_EXTENSIONS_REPO="$extensions_source"
 export AGL_E2E_PLANNER_SOURCE="$planner_source"
 export AGL_E2E_CODER_SOURCE="$coder_source"
 export AGL_E2E_PLANNER_MODEL_DIGEST="$planner_model_digest"
@@ -144,9 +141,7 @@ fixture_commit="$(git -C "$workspace" rev-parse HEAD)"
 
 export XDG_CONFIG_HOME="$agl_home/config"
 export XDG_DATA_HOME="$agl_home/data"
-"$forge_bin" init "$workspace" >/dev/null
-forge_project="$agl_home/data/ayeque-forge/projects/workspace/FORGE.toml"
-[[ -f "$forge_project" ]] || die "Forge init did not create a project manifest"
+forge_project="$workspace/agentLIBRE.toml"
 export AGL_E2E_FORGE_MANIFEST="$forge_project"
 
 python3 - <<'PY'
@@ -175,10 +170,10 @@ for _, function in functions:
     add(function["model"]["id"], "model", "agentlibre.model/v1",
         os.environ["AGL_E2E_MODELS_REPO"], model_paths[function["model"]["id"]])
 extension_paths = {
-    "agentlibre.files": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-files"),
-    "agentlibre.forge": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-forge"),
+    "agentlibre.files": (os.environ["AGL_E2E_NATIVE_EXTENSIONS_REPO"], "extensions/agentlibre-files"),
+    "agentlibre.forge": (os.environ["AGL_E2E_NATIVE_EXTENSIONS_REPO"], "extensions/agentlibre-forge"),
     "agentlibre.searxng": (os.environ["AGL_E2E_EXTENSIONS_REPO"], "extensions/searxng"),
-    "agentlibre.execution": (os.environ["AGL_E2E_REPO_ROOT"], "extensions/agentlibre-execution"),
+    "agentlibre.execution": (os.environ["AGL_E2E_NATIVE_EXTENSIONS_REPO"], "extensions/agentlibre-execution"),
 }
 for _, function in functions:
     for extension in function.get("extensions", []):
@@ -190,18 +185,20 @@ for function_path, function in functions:
         str(Path(function_path).relative_to(os.environ["AGL_E2E_FUNCTIONS_REPO"])))
 lines = ["format = 2", ""]
 for entity in sorted(entities.values(), key=lambda e: (e["kind"], e["id"])):
-    lines += ["[[entity]]", f'id = "{entity["id"]}"',
+    lines += ["[[forge]]", f'id = "{entity["id"]}"',
               f'kind = "{entity["kind"]}"', f'schema = "{entity["schema"]}"',
               f'git = "{entity["git"]}"', f'revision = "{entity["revision"]}"',
               f'path = "{entity["path"]}"', ""]
 Path(os.environ["AGL_E2E_FORGE_MANIFEST"]).write_text("\n".join(lines), encoding="utf-8")
 PY
-(cd "$workspace" && "$forge_bin" lock >/dev/null)
-(cd "$workspace" && "$forge_bin" validate >/dev/null)
+(cd "$workspace" && AGL_HOME="$agl_home" "$agl_bin" forge sync >/dev/null)
+git -C "$workspace" add --all
+git -C "$workspace" commit --quiet -m 'Declare planning fixture Forge sources'
+fixture_commit="$(git -C "$workspace" rev-parse HEAD)"
 planner_id="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1], "rb"))["id"])' "$planner_source/FUNCTION.toml")"
 coder_id="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1], "rb"))["id"])' "$coder_source/FUNCTION.toml")"
-planner_function="$(cd "$workspace" && XDG_DATA_HOME="$agl_home/data" "$forge_bin" path "$planner_id")"
-coder_function="$(cd "$workspace" && XDG_DATA_HOME="$agl_home/data" "$forge_bin" path "$coder_id")"
+planner_function="$agl_home/data/ayeque-forge/projects/workspace/entities/$planner_id"
+coder_function="$agl_home/data/ayeque-forge/projects/workspace/entities/$coder_id"
 [[ -n "$planner_function" && -n "$coder_function" ]] || die "Forge did not materialize both Functions"
 export AGL_E2E_PLANNER_FUNCTION="$planner_function"
 export AGL_E2E_CODER_FUNCTION="$coder_function"
@@ -216,6 +213,8 @@ from pathlib import Path
 config = Path(os.environ["AGL_E2E_AGL_HOME"]) / "config" / "agentLIBRE.toml"
 config.write_text("[chat]\n"
                   "default_function = \"function:agentlibre.qwen38-27b-reasoning@^1.0\"\n\n"
+                  "[forge]\n"
+                  f"catalog_root = {json.dumps(os.environ['AGL_E2E_WORKSPACE'])}\n\n"
                   "[inference]\n"
                   f"executable = {json.dumps(os.environ['AGL_E2E_ENGINE'])}\n\n"
                   "[integrations.search]\n"
@@ -227,18 +226,7 @@ config.write_text("[chat]\n"
                   f"private_ca = {json.dumps(os.environ['AGL_E2E_SEARCH_CA'])}\n",
                   encoding="utf-8")
 PY
-AGL_HOME="$agl_home" "$execd_bin" >"$execd_log" 2>&1 &
-execd_pid=$!
-execd_socket="$agl_home/state/execd/execd.sock"
-deadline=$((SECONDS + timeout_seconds))
-until [[ -S "$execd_socket" ]]; do
-  kill -0 "$execd_pid" 2>/dev/null || { tail -80 "$execd_log" >&2 || true; die "agl-execd exited"; }
-  (( SECONDS < deadline )) || die "timed out waiting for agl-execd"
-  sleep 0.2
-done
-(cd "$workspace" && AGL_HOME="$agl_home" timeout "$timeout_seconds" \
-  "$agl_bin" config apply --function "$planner_function" --function "$coder_function") \
-  >"$run_root/config-apply.out" 2>&1 || { sed -n '1,160p' "$run_root/config-apply.out" >&2; die "config apply failed"; }
+(cd "$workspace" && AGL_HOME="$agl_home" "$agl_bin" config apply --function "$coder_function" >/dev/null)
 AGL_HOME="$agl_home" "$agl_bin" serve >"$daemon_log" 2>&1 &
 daemon_pid=$!
 daemon_socket="$agl_home/state/daemon/agl.sock"
@@ -272,27 +260,15 @@ PY
 kill "$daemon_pid" 2>/dev/null || true
 wait "$daemon_pid" 2>/dev/null || true
 daemon_pid=""
-kill "$execd_pid" 2>/dev/null || true
-wait "$execd_pid" 2>/dev/null || true
-execd_pid=""
 python3 - <<'PY'
 from pathlib import Path
 import os
-for name in ("AGL_E2E_DAEMON_SOCKET", "AGL_E2E_EXECD_SOCKET"):
+for name in ("AGL_E2E_DAEMON_SOCKET",):
     path = os.environ.get(name)
     if path:
         Path(path).unlink(missing_ok=True)
 PY
 sleep 2
-AGL_HOME="$agl_home" "$execd_bin" >"$execd_log" 2>&1 &
-execd_pid=$!
-execd_socket="$agl_home/state/execd/execd.sock"
-deadline=$((SECONDS + timeout_seconds))
-until [[ -S "$execd_socket" ]]; do
-  kill -0 "$execd_pid" 2>/dev/null || { tail -80 "$execd_log" >&2 || true; die "agl-execd restart exited"; }
-  (( SECONDS < deadline )) || die "timed out waiting for restarted agl-execd"
-  sleep 0.2
-done
 AGL_HOME="$agl_home" "$agl_bin" serve >"$daemon_log" 2>&1 &
 daemon_pid=$!
 daemon_socket="$agl_home/state/daemon/agl.sock"

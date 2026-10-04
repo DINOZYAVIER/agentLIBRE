@@ -1,13 +1,14 @@
 //! Host composition for native tools. Admission and mutation ownership stay here.
+pub(crate) mod memory;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use agl_core::agent::{ToolFailure, ToolFailureKind};
-use agl_execution_api::ExecutionClient;
 use agl_runtime::extension::parse_package_view;
-use agl_tool_api::ExtensionBindings;
+use agl_tool_api::ExecutionHost;
+use agl_tool_api::{ExtensionBindings, ServiceGit};
 use agl_tools::searxng::SearxngConfig;
 use anyhow::Result;
 
@@ -28,7 +29,7 @@ pub(crate) fn workspace_mutation(root: &Path) -> Arc<Mutex<()>> {
     )
 }
 
-pub(crate) fn files_bindings() -> Result<ExtensionBindings> {
+pub(crate) fn files_bindings(git: ServiceGit) -> Result<ExtensionBindings> {
     let view = agl_tools::files_declaration();
     let package = parse_package_view(&view)?;
     agl_tools::files_bindings(
@@ -36,6 +37,7 @@ pub(crate) fn files_bindings() -> Result<ExtensionBindings> {
         agl_core::package::compute_package_digest(&view)?,
         package.definition,
         Arc::new(workspace_mutation),
+        git,
     )
 }
 
@@ -50,7 +52,7 @@ pub(crate) fn forge_bindings() -> Result<ExtensionBindings> {
     )
 }
 
-pub(crate) fn execution_bindings(client: ExecutionClient) -> Result<ExtensionBindings> {
+pub(crate) fn execution_bindings(client: ExecutionHost) -> Result<ExtensionBindings> {
     let view = agl_tools::execution::declaration();
     let package = parse_package_view(&view)?;
     agl_tools::execution::bindings(
@@ -72,8 +74,12 @@ pub(crate) fn search_bindings(config: SearxngConfig) -> Result<ExtensionBindings
     )
 }
 
-fn resolve_artifact(workspace: &Path, id: &str) -> Result<PathBuf, ToolFailure> {
-    let artifacts = agl_runtime::resolve_workspace_artifacts(workspace).map_err(|_| {
+fn resolve_artifact(
+    workspace: &Path,
+    id: &str,
+    relative: &Path,
+) -> Result<agl_tool_api::ForgeFile, ToolFailure> {
+    let artifacts = agl_runtime::resolve_workspace_forge(workspace).map_err(|_| {
         ToolFailure::no_effect(
             ToolFailureKind::Execution,
             Some("forge"),
@@ -81,18 +87,66 @@ fn resolve_artifact(workspace: &Path, id: &str) -> Result<PathBuf, ToolFailure> 
         )
     })?;
     artifacts
-        .memory
+        .declarations
         .iter()
-        .chain(artifacts.documents.iter())
         .find(|artifact| artifact.id == id)
-        .map(|artifact| artifact.materialized_path.clone())
+        .map(|artifact| {
+            artifact.open_file(relative).map_err(|_| {
+                ToolFailure::no_effect(
+                    ToolFailureKind::Execution,
+                    Some("forge"),
+                    &["Run agl forge sync and use a contained file."],
+                )
+            })
+        })
         .ok_or_else(|| {
             ToolFailure::no_effect(
                 ToolFailureKind::InvalidInput,
                 Some("path"),
                 &["Use an artifact ID declared by the workspace and an existing relative file."],
             )
+        })?
+}
+
+#[cfg(test)]
+fn unavailable_execution() -> ExecutionHost {
+    ExecutionHost::new(|_, _| {
+        Box::pin(async { Err(ToolFailure::unknown(ToolFailureKind::Unavailable)) })
+    })
+}
+
+#[cfg(test)]
+fn unavailable_git() -> ServiceGit {
+    Arc::new(|_| Err(agl_tool_api::ServiceGitNotStarted))
+}
+#[cfg(test)]
+fn test_git() -> ServiceGit {
+    use std::io::Write;
+    Arc::new(|request| {
+        let mut child = std::process::Command::new("git")
+            .args(request.args)
+            .current_dir(request.cwd)
+            .env_clear()
+            .envs(request.env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|_| agl_tool_api::ServiceGitNotStarted)?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&request.stdin)
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        Ok(agl_tool_api::ServiceGitOutput {
+            exit_code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+            ..Default::default()
         })
+    })
 }
 
 #[cfg(test)]
@@ -144,7 +198,7 @@ mod tests {
     fn files_declarations_and_bindings_are_exact() {
         let view = agl_tools::files_declaration();
         assert_source_matches(&view, "agentlibre-files");
-        let bindings = files_bindings().unwrap();
+        let bindings = files_bindings(unavailable_git()).unwrap();
         assert_bindings_exact(&bindings, &view);
         assert_eq!(bindings.tools.len(), 2);
         let grant = |root| agl_core::AuthorityGrant {
@@ -168,7 +222,7 @@ mod tests {
     fn stock_execution_bindings_match_the_declarative_package() {
         let view = agl_tools::execution::declaration();
         assert_source_matches(&view, "agentlibre-execution");
-        let bindings = execution_bindings(ExecutionClient::new("/unreachable-test-execd")).unwrap();
+        let bindings = execution_bindings(unavailable_execution()).unwrap();
         assert_bindings_exact(&bindings, &view);
         assert_eq!(bindings.tools.len(), 2);
     }
@@ -210,6 +264,7 @@ mod tests {
                 observed.store(true, Ordering::SeqCst);
                 lock
             }),
+            test_git(),
         )
         .unwrap();
         let forge_view = agl_tools::forge_declaration();
@@ -218,10 +273,15 @@ mod tests {
             forge_package.manifest.version,
             compute_package_digest(&forge_view).unwrap(),
             forge_package.definition,
-            Arc::new(move |workspace, id| {
+            Arc::new(move |workspace, id, relative| {
                 assert_eq!(workspace, resolver_root);
                 assert_eq!(id, "test.document");
-                Ok(artifact.clone())
+                assert_eq!(relative, Path::new("README.md"));
+                Ok(agl_tool_api::ForgeFile::new(
+                    std::fs::File::open(artifact.join(relative)).unwrap(),
+                    Box::new(()),
+                    agl_tool_api::VerificationStatus::Verified,
+                ))
             }),
         )
         .unwrap();
@@ -254,12 +314,20 @@ mod tests {
                 .unwrap()
                 .contains("Host artifact")
         );
+        std::fs::write(root.join("artifact/README.md"), [0xff, 0, 0xa5]).unwrap();
+        let binary = read.handler.call(context.clone(), serde_json::json!({"path":"forge:test.document/README.md","cursor":1,"limit_lines":10})).await.unwrap();
+        let encoded = serde_json::to_value(binary).unwrap();
+        let encoded = serde_json::to_string(&encoded).unwrap();
+        assert!(encoded.contains("binary"));
+        assert!(encoded.contains("sha256:"));
+        assert!(encoded.contains("verified"));
+        assert!(encoded.contains("artifact/README.md"));
         let patch = files
             .tools
             .iter()
             .find(|tool| tool.tool_id.as_str() == "agentlibre.files:file.patch")
             .unwrap();
-        patch.handler.call(context, serde_json::json!({"operations":[{"op":"create","path":"created.txt","content":"Created\n","expected_absent":true}]})).await.unwrap();
+        patch.handler.call(context, serde_json::json!({"patch":"diff --git a/created.txt b/created.txt\nnew file mode 100644\n--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+Created\n"})).await.unwrap();
         assert!(requested_lock.load(Ordering::SeqCst));
         assert_eq!(
             std::fs::read_to_string(root.join("created.txt")).unwrap(),
@@ -278,7 +346,7 @@ mod tests {
                 package.manifest.version.clone(),
                 wrong_digest,
                 package.definition.clone(),
-                ExecutionClient::new("/unreachable")
+                unavailable_execution()
             )
             .is_err()
         );
@@ -290,7 +358,7 @@ mod tests {
                 package.manifest.version,
                 compute_package_digest(&view).unwrap(),
                 wrong_definition,
-                ExecutionClient::new("/unreachable")
+                unavailable_execution()
             )
             .is_err()
         );

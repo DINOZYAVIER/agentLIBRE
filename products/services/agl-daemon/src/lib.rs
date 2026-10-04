@@ -1,3 +1,5 @@
+mod execution;
+pub use execution::{ServiceGitConfig, clear_planner_cache, run_helper as run_execution_helper};
 mod activation;
 mod agent;
 mod implementation;
@@ -19,12 +21,12 @@ use agl_daemon_api::{
     AgentResponse, AgentSubscriptionFrame, FunctionActivationView, MAX_JSONL_FRAME_BYTES,
     PlanArtifactView, ProtocolError, ProtocolErrorCode,
 };
-use agl_execution_api::ExecutionClient;
 use agl_runtime::inference::InferenceConfig;
 use agl_runtime::{RuntimeConfig, RuntimeHandle, RuntimeService};
 use agl_tool_api::ExtensionBindings;
 use agl_tools::searxng::SearxngConfig;
 use anyhow::{Context, Result};
+use execution::ExecutionBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -84,7 +86,10 @@ pub fn default_socket_path(state_dir: impl AsRef<Path>) -> PathBuf {
 
 pub struct DaemonConfig {
     pub data_root: PathBuf,
-    pub execution_socket: PathBuf,
+    pub state_root: PathBuf,
+    pub catalog_root: PathBuf,
+    pub service_git: ServiceGitConfig,
+    pub forge_sync_timeout_seconds: u64,
     pub inference: InferenceConfig,
     pub extensions: Vec<ExtensionBindings>,
     pub searxng: Option<IntegrationConfig<SearxngConfig>>,
@@ -103,11 +108,13 @@ pub struct DaemonHandle {
     agent: AgentHandle,
     store: StoreHandle,
     runtime: RuntimeHandle,
-    execution: ExecutionClient,
+    execution: ExecutionBackend,
     plans: PlanArtifactStore,
+    memory: Arc<agent::memory_publication::MemoryPublisher>,
 }
 
 pub struct DaemonServer {
+    schedule_service: Option<agent::ScheduleService>,
     handle: DaemonHandle,
     agent_service: Option<AgentService>,
     runtime_service: Option<RuntimeService>,
@@ -115,6 +122,11 @@ pub struct DaemonServer {
 
 impl DaemonServer {
     pub fn start(config: DaemonConfig) -> Result<Self> {
+        config.service_git.validate()?;
+        anyhow::ensure!(
+            config.forge_sync_timeout_seconds > 0,
+            "Forge sync timeout must be positive"
+        );
         let store = StoreHandle::open_at(config.data_root.join("store"))
             .context("failed to open the Agent Store")?;
         let plans = PlanArtifactStore::new(&config.data_root)
@@ -122,11 +134,27 @@ impl DaemonServer {
         let restored_health = store
             .inference_health()
             .context("failed to restore inference health")?;
-        let execution = ExecutionClient::new(config.execution_socket);
+        let execution = ExecutionBackend::new(
+            &config.data_root,
+            &config.state_root,
+            store.clone(),
+            managed_unit()?.unwrap_or_default(),
+        )?;
+        let memory_index = Arc::new(agent::memory_index::MemoryIndex::new(
+            config.data_root.clone(),
+            ayeque_forge_core::data_root()?,
+        ));
+        let memory_tools = Arc::new(crate::tools::memory::MemoryTools::new(
+            memory_index.clone(),
+            store.clone(),
+        ));
         let mut extensions = config.extensions;
-        extensions.push(crate::tools::files_bindings()?);
+        extensions.push(crate::tools::files_bindings(
+            execution.service_git(config.service_git),
+        )?);
         extensions.push(crate::tools::forge_bindings()?);
-        extensions.push(crate::tools::execution_bindings(execution.clone())?);
+        extensions.push(memory_tools.bindings()?);
+        extensions.push(crate::tools::execution_bindings(execution.tool_host())?);
         if let Some(search) = config.searxng {
             match crate::tools::search_bindings(search.binding) {
                 Ok(binding) => extensions.push(binding),
@@ -151,7 +179,8 @@ impl DaemonServer {
         let (runtime_service, runtime) = RuntimeService::start(
             RuntimeConfig {
                 data_root: config.data_root.join("runtime"),
-                inference: config.inference,
+                catalog_root: config.catalog_root,
+                inference: config.inference.with_process_host(execution.process_host()),
                 extensions: extensions.clone(),
                 max_resident_bytes: config.max_resident_bytes,
                 health: {
@@ -164,10 +193,24 @@ impl DaemonServer {
             restored_health,
         )
         .context("failed to start Function runtime")?;
+        let inference = Arc::new(runtime.clone());
+        memory_tools.initialize(inference.clone())?;
+        let memory = Arc::new(agent::memory_publication::MemoryPublisher::new(
+            config.data_root.clone(),
+            ayeque_forge_core::data_root()?,
+            {
+                let backend = execution.clone();
+                let limits = config.service_git;
+                Arc::new(move |request| backend.run_forge_git(request, limits))
+            },
+            std::time::Duration::from_secs(config.forge_sync_timeout_seconds),
+        )?);
         let (agent_service, agent) = AgentService::start(
             AgentDependencies {
                 store: store.clone(),
-                inference: Arc::new(runtime.clone()),
+                inference,
+                memory_index: Some(memory_index),
+                memory: Some(memory.clone()),
             },
             extensions,
         )
@@ -178,12 +221,16 @@ impl DaemonServer {
             runtime,
             execution,
             plans,
+            memory,
         };
+        let schedule_service =
+            agent::ScheduleService::start(handle.store.clone(), handle.agent.clone())?;
         tracing::info!(
             store_root=%config.data_root.join("store").display(),
             "Agent daemon services started"
         );
         Ok(Self {
+            schedule_service: Some(schedule_service),
             handle,
             agent_service: Some(agent_service),
             runtime_service: Some(runtime_service),
@@ -207,6 +254,7 @@ impl DaemonServer {
 
 impl Drop for DaemonServer {
     fn drop(&mut self) {
+        drop(self.schedule_service.take());
         if let Some(agent_service) = self.agent_service.take() {
             agent_service.shutdown();
         }
@@ -294,6 +342,43 @@ fn prepare_socket_path(path: &Path) -> Result<()> {
         Err(error) => return Err(error).context("failed to inspect daemon socket path"),
     }
     Ok(())
+}
+
+/// Read the actual service cgroup rather than trusting an inherited env flag.
+pub fn managed_unit() -> Result<Option<String>> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
+    let manager = format!("user@{}.service", unsafe { libc::geteuid() });
+    let Some(path) = cgroup
+        .lines()
+        .find_map(|line| line.split_once("::").map(|(_, path)| path))
+    else {
+        return Ok(None);
+    };
+    let parts = path.split('/').collect::<Vec<_>>();
+    let Some(manager_index) = parts.iter().position(|part| *part == manager) else {
+        return Ok(None);
+    };
+    let Some(unit) = parts[manager_index + 1..]
+        .iter()
+        .rev()
+        .find(|part| part.ends_with(".service"))
+    else {
+        return Ok(None);
+    };
+    // A shell inside a terminal/service cgroup is not the daemon unit owner.
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "show", "--property=MainPID", unit])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cannot verify daemon user unit: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let main = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .strip_prefix("MainPID=")
+        .and_then(|value| value.parse::<u32>().ok());
+    Ok((main == Some(std::process::id())).then(|| (*unit).to_owned()))
 }
 
 include!("lib_tests.rs");

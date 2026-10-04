@@ -535,6 +535,40 @@ pub enum AgentRunOrigin {
         conversation_id: ConversationId,
         message_id: MessageId,
     },
+    Timer {
+        conversation_id: ConversationId,
+        function_id: PackageId,
+        tick_at_ms: i64,
+    },
+    FileEvent {
+        conversation_id: ConversationId,
+        function_id: PackageId,
+        event_id: crate::RequestId,
+        paths: Vec<RelativePath>,
+    },
+}
+
+impl AgentRunOrigin {
+    pub fn conversation_id(&self) -> ConversationId {
+        match self {
+            Self::User {
+                conversation_id, ..
+            }
+            | Self::Timer {
+                conversation_id, ..
+            }
+            | Self::FileEvent {
+                conversation_id, ..
+            } => *conversation_id,
+        }
+    }
+
+    pub fn user_message_id(&self) -> Option<&MessageId> {
+        match self {
+            Self::User { message_id, .. } => Some(message_id),
+            Self::Timer { .. } | Self::FileEvent { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

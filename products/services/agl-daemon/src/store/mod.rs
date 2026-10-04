@@ -13,11 +13,13 @@ mod plans;
 pub(crate) mod rotation;
 
 pub use agent::AgentRunAdmission;
+pub(crate) use agent::PendingMemory;
+pub(crate) use agent::schedules::{ScheduleRecord, next_tick_after};
 pub use error::{Result, StoreError};
 pub use handle::StoreHandle;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const STORE_BASELINE_VERSION: u32 = 19;
+pub const STORE_BASELINE_VERSION: u32 = 22;
 
 const STORE_APPLICATION_ID: u32 = 0x4147_4c32;
 
@@ -307,3 +309,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+mod execution;

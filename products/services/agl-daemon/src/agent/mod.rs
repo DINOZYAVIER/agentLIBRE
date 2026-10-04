@@ -29,11 +29,15 @@ use crate::store::{AgentRunAdmission, StoreHandle};
 
 mod common;
 mod compaction;
+pub(crate) mod memory_index;
 mod memory_io;
+pub(crate) mod memory_publication;
 mod operation_driver;
 mod progress;
 mod run_driver;
+mod schedule_events;
 mod scheduler;
+mod schedules;
 mod service;
 
 pub(crate) use common::AgentServiceError;
@@ -49,6 +53,7 @@ pub(crate) use run_driver::{admit, drive, validate_snapshot};
 pub(crate) use scheduler::{
     Command, load_recoverable_runs, map_command_send, prepare_tools, worker_loop,
 };
+pub(crate) use schedules::ScheduleService;
 #[cfg(test)]
 use service::PROGRESS_CAPACITY;
 pub(crate) use service::{AgentDependencies, AgentHandle, AgentService};

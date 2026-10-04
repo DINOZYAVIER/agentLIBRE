@@ -8,7 +8,6 @@ repository.workspace = true
 [dependencies]
 agl-core.workspace = true
 agl-tool-api.workspace = true
-agl-execution-api.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

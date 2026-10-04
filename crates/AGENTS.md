@@ -8,9 +8,8 @@ Workspace crate and package names must use the `agl-*` prefix.
 
 | Crate | Responsibility |
 | --- | --- |
-| `agl-core` | Validated domain values, Agent/Operation FSMs, messages, grants, memory and implementation-plan types. |
+| `agl-core` | Validated domain values, Agent/Operation FSMs, messages, grants, memory, implementation-plan and execution values. |
 | `agl-daemon-api` | Public daemon commands/replies, Unix-socket client and progress/subscription frames. |
-| `agl-execution-api` | Execution request/status/output protocol and async/blocking Unix-socket clients. |
 | `agl-runtime` | Package manifests, Forge resolution, Function activation, model acquisition and inference. |
 | `agl-tool-api` | Native Tool context, cancellation, handler and binding interfaces. |
 | `agl-tools` | Filesystem, Forge, execution and SearxNG Tool implementations. |

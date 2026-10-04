@@ -3,7 +3,7 @@
 `products/agl-cli` builds the deliberately small `agl` surface:
 
 ```bash
-agl [--function function:agentlibre.coder@^1.0] [--entity-root /absolute/path/to/agents/coder]
+agl [--function function:agentlibre.coder@^1.0]
 agl resume [conversation-id-or-name] [--last] [--all]
 agl chat [FUNCTION]
 agl conversation rename conversation-id-or-name new-name
@@ -11,14 +11,19 @@ agl serve
 agl config check [--function FUNCTION]
 agl config apply [--function FUNCTION]
 agl doctor
-agl artifact add --id ID --kind KIND --schema SCHEMA --git SOURCE --revision FULL_SHA --path PATH
-agl artifact update --id ID [--revision FULL_SHA] [--git SOURCE] [--path PATH]
-agl artifact remove ID
-agl artifact sync
-agl artifact list
-agl artifact migrate
+agl cache clear [--workspace PATH]
+agl memory archive SLUG [--workspace PATH]
+agl schedule enable FUNCTION_ID --workspace PATH
+agl schedule disable FUNCTION_ID --workspace PATH
+agl schedule show [--workspace PATH]
+agl forge add --id ID --kind KIND --schema SCHEMA --git SOURCE --revision FULL_SHA --path PATH
+agl forge update --id ID [--revision FULL_SHA] [--git SOURCE] [--path PATH]
+agl forge remove ID
+agl forge sync
+agl forge list
+agl forge verification set ID FILE --workspace PATH --decision verify|skip
 agl function lock /path/to/functions/coder
-agl [--entity-root /path/to/agents/coder] run /path/to/functions/coder "prompt"
+agl run /path/to/functions/coder "prompt" [--image PATH ...]
 agl view run_...
 agl cancel run_...
 ```
@@ -37,8 +42,9 @@ default_function = "function:agentlibre.coder@^1.0"
 [repl]
 decorations_default = "default"
 
-[packages]
-directories = ["/absolute/path/to/local/source"]
+[forge]
+catalog_root = "/absolute/path/to/source"
+sync_timeout_seconds = 300
 
 [inference.memory]
 keep_free_ram = "12 GiB"
@@ -46,10 +52,27 @@ keep_free_ram = "12 GiB"
 
 `AGL_HOME` replaces the XDG roots for isolated runs. `--function` overrides the
 chat default for a new Conversation and accepts either a typed package
-requirement or an existing Function directory. Repeated `--entity-root`
-arguments replace generated package roots for that invocation. `agl run` also
+requirement or an existing Function directory. `agl run` also
 uses the current directory as workspace and has no workspace option; it creates
 one Conversation turn and exits.
+
+`agl forge verification set` records a content-check choice for the current
+declared source revision and relative file path. Choices are stored in the
+application data root at `forge/verification-choices.json`, separately from
+the daemon Store and project manifest/lock. The command does not run sync.
+Sync consumes these choices; without a choice for a file above 1 GiB it reports
+the source and file requiring verification. Interactive sync can save a choice
+and retry after releasing the mutation guard.
+
+`agl run --image PATH` attaches an explicitly selected human file; repeat the
+flag for multiple images. In chat, `/attach PATH` queues an image for the next
+message. Image bytes are read and checked against their SHA-256 at inference;
+the selected Model must declare its multimodal projector. Conversation storage
+keeps source/digest references, and compaction replaces images with text references.
+
+`agl memory archive` requires a running daemon. It archives the entry in its
+separate local authoring repository, commits it and publishes the pinned Forge
+revision. Busy or deferred publication is reported without modifying Run status.
 
 During a turn, Agent text, operation state, Tool activity, and terminal Run
 state are rendered from the daemon subscription as they arrive. One `Ctrl-C`
@@ -62,27 +85,26 @@ aliases; surrounding whitespace is ignored.
 `agl config check` is read-only. `agl config apply` resolves the requested
 Function graphs, writes source-adjacent locks and atomically activates generated
 state; unfinished Runs make it return busy. The configured default, typed
-Function requirements, and their dependency graphs resolve from the AGL
-repository-root `agentLIBRE.toml`, regardless of the caller's current directory.
+Function requirements, and their dependency graphs resolve from the configured
+Forge catalog manifest, regardless of the caller's current directory.
 The current directory remains the Conversation workspace and controls the
 filesystem boundary for each Run. Direct Function directory locators must name
-a Function materialized from the AGL repository-root catalog. `agl doctor` reports active state
+a Function materialized from the configured Forge catalog. `agl doctor` reports active state
 and unfinished Runs without credential bytes. `agl serve` reads generated state
 and owns one same-UID Unix socket below the state root. Obsolete `agl.toml` and
 `daemon.json` files are not read.
 Events and message queries remain internal protocol operations; they are not
 public CLI commands.
 
-Artifact operations use the repository-root `agentLIBRE.toml`. It declares the
+Forge operations use the repository-root `agentLIBRE.toml`. It declares the
 complete workspace catalog, including Git source and full commit SHA for every
-entity. `agl artifact add`, `update`, and `remove` edit that declaration and
+entity. `agl forge add`, `update`, and `remove` edit that declaration and
 reconcile Forge's generated catalog and materializations. If reconciliation
 fails, the new declaration remains in `agentLIBRE.toml` and the command reports
-the failure. `agl artifact sync`
+the failure. `agl forge sync`
 rebuilds Forge state from the root declaration; `list` shows verified state.
-`migrate` imports the current verified Forge catalog into the root declaration
-once. Routine artifact work does not require direct Forge CLI commands or
-editing `FORGE.toml` / `FORGE.lock`.
+Routine Forge work uses this command group. Old `artifact` commands and
+`[[artifacts.entity]]` declarations are rejected.
 
 The repository-root manifest is separate from the XDG application settings
 file: the former selects and pins workspace entities, while the latter

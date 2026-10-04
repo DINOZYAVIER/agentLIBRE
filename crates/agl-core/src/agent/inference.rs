@@ -159,6 +159,7 @@ pub struct ModelServiceSelection {
 #[serde(deny_unknown_fields)]
 pub struct ModelRuntimeSelection {
     pub artifact: ModelArtifactRef,
+    pub mmproj: Option<ModelArtifactRef>,
     pub dialect: ModelDialect,
     pub tool_call_format: ToolCallFormat,
     pub generation: GenerationSettings,
@@ -172,6 +173,11 @@ pub struct ModelRuntimeSelection {
 impl ModelRuntimeSelection {
     pub fn shares_service_with(&self, other: &Self) -> bool {
         same_artifact(&self.artifact, &other.artifact)
+            && match (&self.mmproj, &other.mmproj) {
+                (Some(left), Some(right)) => same_artifact(left, right),
+                (None, None) => true,
+                _ => false,
+            }
             && self.load == other.load
             && self.speculative == other.speculative
             && self.adapters.len() == other.adapters.len()

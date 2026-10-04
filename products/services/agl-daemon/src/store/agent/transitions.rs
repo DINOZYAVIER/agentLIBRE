@@ -3,12 +3,36 @@ impl StoreHandle {
     pub fn admit_agent_run(
         &self,
         spec: &AgentRunSpec,
+        snapshot: AgentRunSnapshot,
+    ) -> crate::store::Result<AgentRunAdmission> {
+        self.admit_run(spec, snapshot, None)
+    }
+
+    pub(crate) fn admit_scheduled_run(
+        &self,
+        spec: &AgentRunSpec,
+        snapshot: AgentRunSnapshot,
+        generation: &agl_core::RequestId,
+    ) -> crate::store::Result<AgentRunAdmission> {
+        self.admit_run(spec, snapshot, Some(generation))
+    }
+
+    fn admit_run(
+        &self,
+        spec: &AgentRunSpec,
         mut snapshot: AgentRunSnapshot,
+        generation: Option<&agl_core::RequestId>,
     ) -> crate::store::Result<AgentRunAdmission> {
         spec.input.validate().map_err(StoreError::Content)?;
         let store = self.lock()?;
         store.transaction(|tx| {
             create_agent_schema(tx)?;
+            if let Some(generation) = generation {
+                let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_schedules
+                    WHERE conversation_id=?1 AND enabled=1 AND generation=?2)",
+                    params![spec.origin.conversation_id().as_bytes().as_slice(), generation.as_str()], |row| row.get(0))?;
+                if !valid { return Err(StoreError::InvalidValue { field: "schedule generation", value: generation.to_string(), reason: "schedule was disabled or replaced before admission" }); }
+            }
             if let Some(run) = existing_agent_run(tx, spec)? {
                 return Ok(AgentRunAdmission::Replayed(run));
             }
@@ -31,12 +55,55 @@ impl StoreHandle {
                 }
                 *effort = Some(selected);
             }
+            schedules::validate_scheduled_origin(tx, spec, &mut snapshot)?;
             let origin = strict_json(&spec.origin)?;
             let input = strict_json(&spec.input)?;
-            let agl_core::agent::AgentRunOrigin::User {
-                conversation_id,
-                message_id,
-            } = &spec.origin;
+            let conversation_id = spec.origin.conversation_id();
+            let origin_key = origin_key(&spec.origin);
+            {
+                let binding: Option<(String, String)> = tx.query_row(
+                    "SELECT function_json, workspace_root FROM agent_conversations
+                     WHERE conversation_id=?1",
+                    [conversation_id.as_bytes().as_slice()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                let Some((function_json, workspace_root)) = binding else {
+                    return Err(StoreError::NotFound {
+                        resource: format!("Conversation {conversation_id}"),
+                    });
+                };
+                let function: ExactPackageRef = serde_json::from_str(&function_json)?;
+                let scheduled_function = match &spec.origin {
+                    agl_core::agent::AgentRunOrigin::Timer { function_id, .. }
+                    | agl_core::agent::AgentRunOrigin::FileEvent { function_id, .. } => Some(function_id),
+                    agl_core::agent::AgentRunOrigin::User { .. } => None,
+                };
+                if scheduled_function.is_some_and(|id| *id != function.id)
+                    || snapshot.workspace.root.as_path() != Path::new(&workspace_root) {
+                    return Err(StoreError::InvalidValue {
+                        field: "scheduled Run binding",
+                        value: conversation_id.to_string(),
+                        reason: "Function and workspace must match the schedule Conversation",
+                    });
+                }
+                let active: Option<Vec<u8>> = tx.query_row(
+                    "SELECT r.origin_conversation_id FROM agent_runs r
+                     JOIN agent_conversations c ON c.conversation_id=r.origin_conversation_id
+                     WHERE r.status IN ('pending','running') AND c.workspace_root=?1
+                       AND json_extract(c.function_json,'$.id')=?2
+                       AND (?3 OR json_extract(r.origin_json,'$.type') IN ('timer','file_event'))
+                     LIMIT 1",
+                    params![workspace_root, function.id.as_str(), scheduled_function.is_some()],
+                    |row| row.get(0),
+                ).optional()?;
+                if let Some(active) = active {
+                    let active = decode_optional_id(Some(active), "ConversationId", ConversationId::from_bytes)?
+                        .ok_or_else(|| StoreError::NotFound { resource: "active Conversation".into() })?;
+                    return Err(StoreError::ConversationBusy {
+                        conversation_id: active,
+                    });
+                }
+            }
             let busy: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM agent_runs
                  WHERE origin_conversation_id=?1 AND status IN ('pending','running'))",
@@ -45,7 +112,7 @@ impl StoreHandle {
             )?;
             if busy {
                 return Err(StoreError::ConversationBusy {
-                    conversation_id: *conversation_id,
+                    conversation_id,
                 });
             }
             let id = AgentRunId::generate();
@@ -71,10 +138,23 @@ impl StoreHandle {
                         reason: "deadline overflows UTC milliseconds",
                     })?
             };
-            let input_message_id = message_id.clone();
+            let input_message_id = spec.origin.user_message_id().cloned();
             let input_visibility = agl_core::agent::MessageVisibility::Conversation;
-            let mut context = compaction::conversation_context(tx, *conversation_id)?;
-            context.push(input_message_id.clone());
+            let mut context = compaction::conversation_context(tx, conversation_id)?;
+            if let Some(message_id) = &input_message_id {
+                context.push(message_id.clone());
+            } else {
+                let mut instructions = snapshot.instructions.blocks.clone();
+                instructions.push(agl_core::agent::InstructionBlock {
+                    source: agl_core::agent::InstructionSource::Agent,
+                    content: spec.input.clone(),
+                });
+                snapshot.instructions = agl_core::agent::InstructionSet::new(instructions)
+                    .map_err(|_| StoreError::InvalidValue {
+                        field: "schedule.prompt", value: "invalid instructions".into(),
+                        reason: "scheduled task cannot be added to Function instructions",
+                    })?;
+            }
             let checkpoint = AgentCheckpoint::Ready {
                 context,
                 next_operation_ordinal: NonZeroU32::MIN,
@@ -83,7 +163,7 @@ impl StoreHandle {
             tx.execute(
                 "INSERT INTO agent_runs (
                     agent_run_id, origin_json, origin_conversation_id,
-                    origin_message_id,
+                    origin_key,
                     input_json, snapshot_json, agent_package_digest,
                     model_package_digest, instruction_digest, status,
                     checkpoint_json, deadline_ms, admitted_at_ms, deadline_at_ms,
@@ -101,7 +181,7 @@ impl StoreHandle {
                     id.as_bytes().as_slice(),
                     origin,
                     conversation_id.as_bytes().as_slice(),
-                    message_id.as_str(),
+                    origin_key,
                     input,
                     strict_json(&snapshot)?,
                     snapshot.agent.digest.as_bytes().as_slice(),
@@ -118,36 +198,18 @@ impl StoreHandle {
                     snapshot.limits.tool_result_bytes,
                 ],
             )?;
-            tx.execute(
-                "INSERT INTO agent_messages (
-                    message_id, conversation_id, agent_run_id, role, visibility, content_json
-                 ) VALUES (?1, ?2, ?3, 'user', ?4, ?5)",
-                params![
-                    input_message_id.as_str(),
-                    origin_conversation_bytes(&spec.origin),
-                    id.as_bytes().as_slice(),
-                    enum_text(&input_visibility)?,
-                    strict_json(&spec.input)?,
-                ],
-            )?;
-            append_events(
-                tx,
-                id,
-                &[
-                    AgentEventData::RunAdmitted {
-                        origin: spec.origin.clone(),
-                    },
-                    AgentEventData::MessageAppended {
-                        message_id: input_message_id,
-                        role: agl_core::agent::MessageRole::User,
-                        visibility: input_visibility,
-                    },
-                ],
-                admitted_at_ms,
-                0,
-                &[],
-                None,
-            )?;
+            let mut events = vec![AgentEventData::RunAdmitted { origin: spec.origin.clone() }];
+            if let Some(input_message_id) = input_message_id {
+                tx.execute(
+                    "INSERT INTO agent_messages (message_id, conversation_id, agent_run_id, role, visibility, content_json)
+                     VALUES (?1, ?2, ?3, 'user', ?4, ?5)",
+                    params![input_message_id.as_str(), origin_conversation_bytes(&spec.origin),
+                        id.as_bytes().as_slice(), enum_text(&input_visibility)?, strict_json(&spec.input)?],
+                )?;
+                events.push(AgentEventData::MessageAppended { message_id: input_message_id,
+                    role: agl_core::agent::MessageRole::User, visibility: input_visibility });
+            }
+            append_events(tx, id, &events, admitted_at_ms, 0, &[], None)?;
             Ok(AgentRunAdmission::Created(AgentRun {
                 id,
                 origin: spec.origin.clone(),
@@ -300,6 +362,27 @@ impl StoreHandle {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    pub(crate) fn record_memory_publication_deferred(
+        &self,
+        run_id: AgentRunId,
+        reason: String,
+        details: Option<agl_core::CanonicalJson>,
+    ) -> crate::store::Result<()> {
+        let store = self.lock()?;
+        store.transaction(|tx| {
+            append_events(
+                tx,
+                run_id,
+                &[AgentEventData::MemoryPublicationDeferred { reason, details }],
+                unix_ms(),
+                stored_run_revision(tx, run_id)?,
+                &[],
+                None,
+            )
+            .map(|_| ())
         })
     }
 

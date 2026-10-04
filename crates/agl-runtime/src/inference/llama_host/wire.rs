@@ -1,4 +1,99 @@
 use super::*;
+use base64::Engine as _;
+
+fn image_bytes(
+    image: &agl_core::ImageRef,
+    source: &InferenceGenerateRequest,
+) -> Result<Vec<u8>, InferenceServiceError> {
+    use agl_core::ImageSource;
+    fn read(
+        mut reader: impl std::io::Read,
+        source: &InferenceGenerateRequest,
+    ) -> Result<Vec<u8>, InferenceServiceError> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            if source.cancellation.is_cancelled() {
+                return Err(InferenceServiceError::Cancelled);
+            }
+            if unix_ms() >= source.deadline_at_ms {
+                return Err(InferenceServiceError::Deadline);
+            }
+            let count = reader
+                .read(&mut chunk)
+                .map_err(|_| InferenceServiceError::InvalidRequest)?;
+            if count == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+    }
+    let bytes = match image.source() {
+        ImageSource::File { path } => {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path.as_path())
+                .map_err(|_| InferenceServiceError::InvalidRequest)?;
+            if !file
+                .metadata()
+                .map_err(|_| InferenceServiceError::InvalidRequest)?
+                .is_file()
+            {
+                return Err(InferenceServiceError::InvalidRequest);
+            }
+            read(file, source)?
+        }
+        ImageSource::Forge {
+            workspace,
+            id,
+            relative,
+        } => {
+            let storage =
+                ayeque_forge_core::data_root().map_err(|_| InferenceServiceError::Unavailable)?;
+            let forge =
+                crate::workspace_forge::resolve_workspace_forge_at(&storage, workspace.as_path())
+                    .map_err(|_| InferenceServiceError::InvalidRequest)?;
+            let declaration = forge
+                .declarations
+                .iter()
+                .find(|declaration| declaration.id == *id)
+                .ok_or(InferenceServiceError::InvalidRequest)?;
+            let reader = declaration
+                .open_file(relative.as_path())
+                .map_err(|_| InferenceServiceError::InvalidRequest)?;
+            read(reader, source)?
+        }
+    };
+    if PackageDigest::from_bytes(hash32(&bytes)) != image.digest() {
+        return Err(InferenceServiceError::InvalidRequest);
+    }
+    Ok(bytes)
+}
+
+fn native_content(
+    content: &agl_core::Content,
+    source: &InferenceGenerateRequest,
+) -> Result<Value, InferenceServiceError> {
+    if content.images().is_empty() {
+        return Ok(json!(content.as_text()));
+    }
+    if source.runtime.mmproj.is_none() {
+        return Err(InferenceServiceError::InvalidRequest);
+    }
+    let mut blocks = vec![json!({"type":"text", "text":content.as_text()})];
+    for image in content.images() {
+        let bytes = image_bytes(image, source)?;
+        let format = agl_tool_api::image::detect_format(&bytes)
+            .ok_or(InferenceServiceError::InvalidRequest)?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        blocks.push(json!({"type":"image_url", "image_url": {
+            "url": format!("data:{};base64,{encoded}", format.media_type())
+        }}));
+    }
+    Ok(json!(blocks))
+}
 
 pub(crate) fn native_request(
     request: &crate::inference::request_codec::RenderedModelRequest,
@@ -18,7 +113,8 @@ pub(crate) fn native_request(
             let content = message
                 .content
                 .as_ref()
-                .map(|content| content.as_text().to_owned());
+                .map(|content| native_content(content, source))
+                .transpose()?;
             let mut value = json!({"role": role, "content": content});
             if let Some(name) = &message.name {
                 value["name"] = json!(name);
@@ -697,5 +793,52 @@ impl StreamTimings {
             return Err(InferenceServiceError::InvalidResult);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    #[test]
+    fn multimodal_body_contains_verified_bytes_and_refuses_changed_missing_or_unpinned_images() {
+        let directory = private_directory().unwrap();
+        let path = directory.join("human-image.ppm");
+        let bytes = b"P6\n1 1\n255\nabc";
+        fs::write(&path, bytes).unwrap();
+        let image = agl_core::ImageRef::new(
+            agl_core::ImageSource::File {
+                path: path.to_str().unwrap().to_owned().try_into().unwrap(),
+            },
+            PackageDigest::from_bytes(hash32(bytes)),
+        )
+        .unwrap();
+        let content = agl_core::Content::with_images("describe", vec![image]).unwrap();
+        let mut source = crate::inference::service::tests::request(InferenceCancellation::new());
+        assert!(native_content(&content, &source).is_err());
+        source.runtime.mmproj = Some(source.runtime.artifact.clone());
+        let blocks = native_content(&content, &source).unwrap();
+        assert_eq!(blocks[0]["text"], "describe");
+        assert_eq!(blocks[1]["type"], "image_url");
+        let uri = blocks[1]["image_url"]["url"].as_str().unwrap();
+        let encoded = uri
+            .strip_prefix("data:image/x-portable-anymap;base64,")
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            bytes
+        );
+        fs::write(&path, b"P6\n1 1\n255\nxyz").unwrap();
+        assert!(native_content(&content, &source).is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(native_content(&content, &source).is_err());
+        source.cancellation.cancel();
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            native_content(&content, &source),
+            Err(InferenceServiceError::Cancelled)
+        ));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

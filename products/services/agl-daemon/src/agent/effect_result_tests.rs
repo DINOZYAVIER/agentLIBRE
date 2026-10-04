@@ -105,7 +105,7 @@ mod effect_result_tests {
             )
             .unwrap();
             let (service, handle) = AgentService::start(
-                AgentDependencies {
+                AgentDependencies { memory: None, memory_index: None,
                     store: store.clone(),
                     inference: Arc::new(inference),
                 },

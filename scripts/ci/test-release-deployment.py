@@ -21,12 +21,14 @@ class DeploymentTests(unittest.TestCase):
         self.scripts.mkdir(parents=True)
         for name in ('build-release.sh', 'install-agl-cargo.sh', 'restart-services.sh'):
             shutil.copy2(SCRIPT_ROOT / name, self.scripts / name)
-        for name in ('systemd-lib.sh', 'agentlibre-execd-systemd-service.sh',
+        for name in ('systemd-lib.sh',
                      'agentlibre-daemon-systemd-service.sh',
                      'agentlibre-matrix-bridge-systemd-service.sh'):
             shutil.copy2(SCRIPT_ROOT / name, self.scripts / name)
         (self.repo / 'vendor/llama.cpp').mkdir(parents=True)
         (self.repo / 'vendor/llama.cpp/CMakeLists.txt').touch()
+        (self.repo / 'assets').mkdir()
+        (self.repo / 'assets/default-catalog.toml').write_text('format = 2\n')
         self.prefix = self.root / 'installed runtime'
         self.home = self.root / 'home'
         self.config = self.home / '.config'
@@ -44,9 +46,13 @@ if os.environ.get('TEST_BUILD_FAIL') == '1': sys.exit(17)
 target = pathlib.Path(os.environ['CARGO_TARGET_DIR'])
 profile = 'release' if '--release' in sys.argv else 'debug'
 (target / profile).mkdir(parents=True, exist_ok=True)
-for name in ['agl', 'agl-execd', 'agl-execd-launcher', 'agl-matrix-bridge']:
+for name in ['agl', 'agl-matrix-bridge']:
     path = target / profile / name
-    path.write_text('#!/bin/sh\\necho new-' + name + '\\n')
+    path.write_text('#!/bin/sh\\nif [ "$1" = forge ]; then\\n'
+                    '  echo forge-sync >> "$TEST_LOG_FORGE"\\n'
+                    '  [ "${TEST_SYNC_FAIL:-0}" != 1 ] || exit 19\\n'
+                    '  printf "format = 1\\\\n" > agentLIBRE.lock\\n'
+                    'fi\\necho new-' + name + '\\n')
     path.chmod(0o755)
 ''')
         self.executable(self.bin / 'systemctl', '''#!/usr/bin/env python3
@@ -77,6 +83,7 @@ if os.environ.get('TEST_NO_LIBS') != '1':
                         XDG_STATE_HOME=str(self.home / '.local/state'),
                         PATH=str(self.bin) + ':' + os.environ['PATH'],
                         TEST_LOG=str(self.log), AGL_NIX_VULKAN_ACTIVE='1',
+                        TEST_LOG_FORGE=str(self.root / 'forge.log'),
                         CARGO_TARGET_DIR=str(self.root / 'build output'),
                         AGL_LLAMA_CPP_BUILD_DIR=str(self.root / 'engine build'))
         for name in ('CARGO_INSTALL_ROOT', 'AGL_MATRIX_BRIDGE_CONFIG', 'AGL_HOME'):
@@ -110,7 +117,6 @@ if os.environ.get('TEST_NO_LIBS') != '1':
             result = self.run_script()
             self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn('new-agl', (self.prefix / 'bin/agl').read_text())
-        self.assertTrue((self.prefix / 'libexec/agentlibre/agl-execd-launcher').is_file())
         self.assertFalse((self.prefix / 'libexec/agentlibre/libobsolete-backend.so').exists())
         self.assertEqual((generation / 'runtime-manifest.json').read_text(), 'saved generation')
         self.assertEqual(generation.stat().st_mode & 0o777, 0o555)
@@ -130,7 +136,6 @@ if os.environ.get('TEST_NO_LIBS') != '1':
         self.assertLess(reset, start)
         units = self.config / 'systemd/user'
         for unit, binary in [('agentlibre-daemon.service', 'agl'),
-                             ('agentlibre-execd.service', 'agl-execd'),
                              ('agl-matrix-bridge.service', 'agl-matrix-bridge')]:
             self.assertIn(str(self.prefix / 'bin' / binary), (units / unit).read_text())
         self.assertIn('RestartPreventExitStatus=78', (units / 'agentlibre-daemon.service').read_text())
@@ -166,6 +171,49 @@ if os.environ.get('TEST_NO_LIBS') != '1':
         result = self.run_script('install-agl-cargo.sh', ('--no-force',))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('refusing to replace', result.stdout)
+
+    def test_new_catalog_and_settings_use_agl_home_without_model_download(self):
+        app = self.root / 'isolated agl home'
+        result = self.run_script(args=('--no-services',), AGL_HOME=str(app))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((app / 'data/source/agentLIBRE.toml').read_text(), 'format = 2\n')
+        self.assertTrue((app / 'data/source/agentLIBRE.lock').is_file())
+        settings = app / 'config/agentLIBRE.toml'
+        self.assertIn('function:agentlibre.cpu-small@^1.0', settings.read_text())
+        self.assertEqual(settings.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root / 'forge.log').read_text(), 'forge-sync\n')
+        self.assertFalse((app / 'data/runtime/models').exists())
+
+    def test_existing_catalog_and_settings_are_preserved_and_partial_pair_fails(self):
+        catalog = self.home / '.local/share/agentLIBRE/source'
+        catalog.mkdir(parents=True)
+        manifest, lock = catalog / 'agentLIBRE.toml', catalog / 'agentLIBRE.lock'
+        manifest.write_text('user declarations')
+        settings = self.config / 'agentLIBRE/agentLIBRE.toml'
+        settings.write_text('user settings')
+        result = self.run_script(args=('--no-services',))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('incomplete catalog', result.stdout)
+        self.assertFalse((self.prefix / 'bin/agl').exists())
+        self.assertEqual(manifest.read_text(), 'user declarations')
+        lock.write_text('user pins')
+        result = self.run_script(args=('--no-services',))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(manifest.read_text(), 'user declarations')
+        self.assertEqual(lock.read_text(), 'user pins')
+        self.assertEqual(settings.read_text(), 'user settings')
+        self.assertFalse((self.root / 'forge.log').exists())
+
+    def test_initial_sync_failure_keeps_installed_runtime_and_requested_manifest(self):
+        (self.prefix / 'bin').mkdir(parents=True)
+        self.executable(self.prefix / 'bin/agl', '#!/bin/sh\necho old\n')
+        result = self.run_script(TEST_SYNC_FAIL='1')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((self.prefix / 'bin/agl').read_text(), '#!/bin/sh\necho old\n')
+        catalog = self.home / '.local/share/agentLIBRE/source'
+        self.assertTrue((catalog / 'agentLIBRE.toml').is_file())
+        self.assertFalse((catalog / 'agentLIBRE.lock').exists())
+        self.assertFalse(any(c[:3] == ['systemctl', '--user', 'stop'] for c in self.commands()))
 
 
 if __name__ == '__main__':

@@ -614,6 +614,13 @@ mod tests {
     }
 
     impl InferenceGenerator for PlannerGenerator {
+        fn count_text_tokens(
+            &self,
+            _: agl_runtime::inference::InferenceTokenizeRequest,
+        ) -> Result<u64, InferenceServiceError> {
+            Err(InferenceServiceError::Unavailable)
+        }
+
         fn measure(
             &self,
             request: InferenceGenerateRequest,
@@ -757,6 +764,7 @@ mod tests {
             ModelArtifactRef, ModelLoadSelection, ModelServiceSelection, SplitMode,
         };
         ModelRuntimeSelection {
+            mmproj: None,
             artifact: ModelArtifactRef {
                 kind: ModelArtifactKind::Gguf,
                 url: "https://example.invalid/model.gguf".into(),
@@ -884,6 +892,8 @@ mod tests {
             .unwrap();
             let (service, agent) = crate::agent::AgentService::start(
                 crate::agent::AgentDependencies {
+                    memory: None,
+                    memory_index: None,
                     store: store.clone(),
                     inference: Arc::new(inference_handle),
                 },
@@ -937,6 +947,8 @@ mod tests {
                 function_id: function.id.clone(),
                 function_version: function.version.clone(),
                 function_digest: function.digest,
+                schedule: None,
+                permissions: Default::default(),
                 snapshot,
                 service: agl_runtime::ModelServiceDisposition::New,
                 progress: agl_runtime::ActivationProgress {
@@ -952,6 +964,7 @@ mod tests {
             let (runtime_service, runtime) = RuntimeService::start(
                 RuntimeConfig {
                     data_root: root.join("runtime"),
+                    catalog_root: root.join("source"),
                     inference: InferenceConfig::custom(Arc::new(PlannerGenerator {
                         calls: Arc::new(AtomicUsize::new(0)),
                         mode: GenerationMode::AlwaysInvalid,
@@ -1015,7 +1028,7 @@ mod tests {
         let harness = Harness::new(GenerationMode::FirstPass);
         std::fs::write(
             harness.workspace.join("agentLIBRE.toml"),
-            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+            "format = 2\nforge = []\n[workspace]\noutput_directories = [\"target\"]\n",
         )
         .unwrap();
         let (stored, _) = create(&harness).unwrap();
@@ -1158,7 +1171,13 @@ mod tests {
                 &reopened,
                 &harness.agent,
                 &harness.runtime,
-                &agl_execution_api::ExecutionClient::new(harness.root.join("unused-execd")),
+                &crate::execution::ExecutionBackend::new(
+                    &harness.root.join("data"),
+                    &harness.root.join("state"),
+                    reopened.clone(),
+                    String::new(),
+                )
+                .unwrap(),
                 &draft.plan.id,
                 &approved.digest,
                 Path::new("/unused-coder-function"),

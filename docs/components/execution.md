@@ -1,65 +1,84 @@
 # Execution
 
-`agl-execd` is the agentLIBRE process and PTY authority. It serves a private
-same-UID Unix socket, launches exact argument vectors without shell
-interpretation, supervises process groups, and retains bounded output and
-terminal outcomes in SQLite independently of client connections.
+`agl-core::execution` owns ExecutionId, request, stream and outcome values.
+The daemon reserves each AgentOperationKey in its Store before launch. Native
+Tools use the daemon-supplied ExecutionHost; private inference uses ProcessHost.
+There is no execution socket, separate execution database or execd product.
 
-`agl-execution-api` contains the transport-neutral IDs, requests, outcomes,
-JSONL protocol, and async client. Agent-owned requests identify their
-Conversation and AgentRun; trusted runtime requests identify their internal
-component.
+systemd user services own payload processes, timeouts and cgroups. Each
+execution uses Type=exec, ExitType=main, KillMode=control-group and Restart=no.
+Stop sends SIGTERM, then SIGKILL to remaining group members after two seconds.
+Main-process completion also ends its remaining descendants. Exit/signal is
+stored separately from the requested stop cause. Failed preparation/exec or
+missing outcome evidence is unknown; a reserved Operation is never replayed.
 
-`agl-daemon` admits `agentlibre.execution:command.exec` and
-`agentlibre.execution:terminal.session` like every other Tool, then maps the
-admitted call to the execution API. `command.exec` uses pipes and waits for a
-bounded result. `terminal.session` opens or controls a managed PTY using
-cursor-based reads, input, resize, interrupt, and terminate operations.
-Reads include the current lifecycle state, terminal outcome, and valid next
-actions. A control request for an exited Terminal is a typed no-effect Tool
-result with the same lifecycle detail, so a model can read final output or open
-a new Terminal without attempting to revive the old process.
+An independent tmux server has its own user service and private socket.
+Ordinary executions bind to that service and survive daemon restart or normal
+Run completion. Explicit Run cancellation stops executions owned by that Run;
+later Runs in the same Conversation may inspect/control them without taking
+ownership. Other Conversations cannot access them. Loss of tmux stops their
+cgroups. Git, planner and inference executions instead bind to the daemon unit.
 
-The service can run in the foreground during development or claim its socket
-from systemd. Its private launcher establishes the process-group and
-controlling-terminal boundary. No terminal-emulator frontend participates in
-this path.
+`command.exec` actions are start, inspect, read, wait, stop and cleanup.
+`terminal.session` additionally provides open, write, resize and interrupt.
+Both use ExecutionId. Start/open are asynchronous; timeout_ms defaults to zero
+(no process timeout), and wait has its own wait_timeout_ms. Cleanup removes
+completed output files but retains the short Store record and Operation binding.
 
-Planner commands use `ExecutionIsolation::ReadOnlyWorkspace { workspace_root, output_directories }`,
-which requires an Agent owner and pipes. Execd prepares a separate reflink view
-of the workspace, its external Git directory and `commondir` for each Execution.
-The view contains regular files, directories and symlinks; special source entries
-fail preparation. File data, permissions and access/modification timestamps are
-copied; source files retain their own inodes. Preparation uses the execution
-timeout budget. Missing FICLONE support fails explicitly without copying file
-contents through a fallback.
+Command capture preserves separate raw stdout/stderr bytes. Terminal capture
+uses tmux pipe-pane and a controlling PTY supplied to the systemd service.
+Capture readiness gates payload execution, retaining its first output.
+Each stream retains its first 16 MiB by default and continues draining excess
+bytes; status reports bytes and truncated. Reads use stream-specific offsets.
+Result files are published after outcome and capture completion under the data
+root at executions/<ExecutionId>/. The daemon reconciles them into its Store.
 
-The daemon reads `[workspace] output_directories` from the root
-`agentLIBRE.toml` and passes it through `ToolContext` and the execution request.
-These literal relative directory trees are omitted from the planner view;
-execd validates that the paths contain no traversal and cannot exclude the
-workspace root or its manifest. Tools and execd do not parse the workspace TOML.
-An excluded build cache is unavailable to planner commands, including through
-workspace symlinks. Builds can use the existing per-Execution scratch.
+Planner commands retain ReadOnlyWorkspace isolation: a separate reflink view
+of workspace and external Git/commondir trees, mounted read-only by bubblewrap.
+The declared output_directories trees are excluded; regular files, metadata and
+symlink boundaries remain protected. Missing FICLONE support fails without a
+copy fallback. The executable must resolve into the Nix store. The daemon
+resolves bubblewrap from its PATH and passes the absolute path to the helper.
+Host HOME, /run and /tmp are not mounted wholesale. Namespaces and seccomp
+block network, host sockets and process inspection. Per-execution scratch is
+writable and removed by ExecStopPost; recovery removes inactive orphan trees.
+The scratch lives at executions/planner-scratch/<ExecutionId>/ below data.
 
-The current profile requires Linux, bubblewrap on execd's PATH, and a canonical
-Nix store executable. The sandbox exposes the view read-only, the trusted NAR
-tree at `/nix/store`, Nix runtime executable/PATH aliases, and copies of
-`/etc/passwd`, `group`, `nsswitch.conf`, `hosts` and `localtime` when present.
-It creates fresh `/proc` and `/dev`. Host HOME, `/run` and `/tmp` are not mounted
-as whole trees; only declared workspace/Git paths and Nix runtime aliases below
-them are exposed. Workspace symlinks resolve against this limited view.
-Host FIFO inodes are not shared through workspace bind mounts, and later host
-entries do not appear in an already prepared view. Networking, host sockets,
-host IPC and process-inspection syscalls are blocked by namespaces and seccomp.
-Failure to launch bubblewrap never selects Standard execution.
+Planner commands also share a persistent cache for their canonical workspace
+under data/planner-cache/<workspace-path-sha256>/. The sandbox exposes it as
+XDG_CACHE_HOME; output_directories remain excluded and commands choose their
+own build target directory. AGL does not serialize cache access. CARGO_HOME
+points to the cache's cargo/ directory, with the host Cargo registry/ and git/
+mounted read-only when present. Host Cargo configuration and credentials are
+not mounted, and CARGO_NET_OFFLINE=true. Seccomp rejects mknod/mknodat,
+including FIFO creation in this writable cache. The cache is opened without
+following a root symlink and mounted by its pinned descriptor, which is closed
+before the command starts.
+`agl cache clear [--workspace PATH]` removes that workspace's cache; the default
+workspace is the current directory. Cache contents have no automatic TTL/quota.
 
-Execd creates the private view and scratch under its data root at
-`execd/planner-scratch/<ExecutionId>/`. Only the `scratch/` subtree is writable;
-TMPDIR, TMP, TEMP and XDG_CACHE_HOME point there. Execution storage must lie
-outside the copied source trees. Execd removes both view and scratch before
-recording the terminal outcome, including timeout, and removes orphaned trees
-during service recovery. The development Nix shell includes bubblewrap;
-service deployments must also make it available on execd's PATH. Tool names
-resolve through the daemon's PATH, so a name that selects an executable outside
-the Nix store fails this profile.
+Private inference retains pinned executable/model descriptors, a private
+pre-opened listener, Landlock ABI 5, seccomp, device authority and its address
+space bound. Lifecycle belongs to systemd; these isolation controls are not
+replaced by cgroup ownership.
+
+Service Git receives an otherwise empty environment, exact argv and private
+stdin. Its absolute Tool deadline includes startup; cancellation/deadline
+initiates the same two-second stop sequence. `[service_git] memory_max_bytes`
+sets MemoryMax for the whole cgroup (default 1073741824); max_output_bytes sets
+the capture bound per stream (default 1048576). Both are positive integers.
+A started git apply with unproven completion remains OutcomeUnknown and is not
+rolled back or retried automatically.
+
+All daemon modes require a systemd user manager. `agl serve` from a shell runs
+its daemon in a transient user service and waits; Ctrl+C/SIGTERM stops that
+service. Installed socket activation starts the daemon directly as its own
+service MainPID. The tmux socket is executions/tmux.sock below the state root.
+
+Run live execution checks with the built agl helper and a user manager:
+
+```sh
+cargo build -p agl-cli --bin agl
+scripts/agl-nix-vulkan.sh -- env AGL_TEST_HELPER="$PWD/target/debug/agl" \
+  cargo test -p agl-daemon execution::tests::systemd -- --ignored --nocapture
+```

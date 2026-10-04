@@ -95,6 +95,7 @@ async fn chat_loop_tty(
     let mut active: Option<tokio::task::JoinHandle<Result<agl_core::agent::AgentRunView>>> = None;
     let mut last_run: Option<AgentRunId> = None;
     let mut continuation = String::new();
+    let mut attachments = Vec::new();
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c(), if active.is_some() => {
@@ -166,12 +167,12 @@ async fn chat_loop_tty(
                         line = std::mem::take(&mut continuation);
                     }
                     renderer.continuation = false;
-                    if line.trim().is_empty() { continue; }
+                    if line.trim().is_empty() && attachments.is_empty() { continue; }
                     renderer.editor.save_history(&history_path, &line)?;
                     renderer.append_submitted(&line)?;
                     if is_quit_command(&line) { return Ok(()); }
                     if line.trim() == "/help" {
-                        println!("/help  /status  /reasoning [default|low|medium|xhigh]  /decorations [off|default|full|reset]  /tool-output [lines N|chars N|reset]  /tool-frame [on|off|reset]  /model-generation [details on|off|reset]  /tool N [input|result]  /quit  /exit");
+                        println!("/help  /attach PATH  /status  /reasoning [default|low|medium|xhigh]  /decorations [off|default|full|reset]  /tool-output [lines N|chars N|reset]  /tool-frame [on|off|reset]  /model-generation [details on|off|reset]  /tool N [input|result]  /quit  /exit");
                         continue;
                     }
                     if line.trim() == "/status" {
@@ -211,7 +212,13 @@ async fn chat_loop_tty(
                         Err(error) => { eprintln!("{error}"); continue; }
                         Ok(false) => {}
                     }
+                    match crate::attachments::attach_command(&line, &mut attachments) {
+                        Ok(true) => continue,
+                        Err(error) => { eprintln!("{error:#}"); continue; },
+                        Ok(false) => {},
+                    }
                     if line.starts_with('/') { eprintln!("unknown command; use /help"); continue; }
+                    let line = agl_core::Content::with_images(line, std::mem::take(&mut attachments))?;
                     if active.is_some() { queue.push(line); }
                     else {
                         renderer.activity = "Generating".to_owned();
@@ -230,7 +237,7 @@ async fn chat_loop_tty(
 fn spawn_tty_run(
     client: &AgentClient,
     conversation: ConversationId,
-    prompt: String,
+    prompt: agl_core::Content,
     reasoning: Option<agl_core::agent::ReasoningEffort>,
     decorations: Decorations,
     theme: &TerminalTheme,
@@ -276,6 +283,7 @@ async fn chat_loop_linear(
     let mut active_run: Option<AgentRunId> = None;
     let mut run_queue = RunQueue::default();
     let mut input = BufReader::new(tokio::io::stdin());
+    let mut attachments = Vec::new();
     loop {
         let mut prompt = match read_repl_line(&mut input).await? {
             ReplRead::Line(line) => line,
@@ -292,7 +300,7 @@ async fn chat_loop_linear(
                 ReplRead::Eof | ReplRead::Interrupted => return Ok(()),
             }
         }
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() && attachments.is_empty() {
             continue;
         }
         let prompt = prompt.as_str();
@@ -301,7 +309,7 @@ async fn chat_loop_linear(
         }
         if prompt.trim() == "/help" {
             println!(
-                "/help  /status  /reasoning [default|low|medium|xhigh]  /decorations [off|default|full|reset]  /tool-output [lines N|chars N|reset]  /tool-frame [on|off|reset]  /model-generation [details on|off|reset]  /tool N [input|result]  /quit  /exit"
+                "/help  /attach PATH  /status  /reasoning [default|low|medium|xhigh]  /decorations [off|default|full|reset]  /tool-output [lines N|chars N|reset]  /tool-frame [on|off|reset]  /model-generation [details on|off|reset]  /tool N [input|result]  /quit  /exit"
             );
             continue;
         }
@@ -406,18 +414,27 @@ async fn chat_loop_linear(
             }
             Ok(false) => {}
         }
+        match crate::attachments::attach_command(prompt, &mut attachments) {
+            Ok(true) => continue,
+            Err(error) => {
+                eprintln!("{error:#}");
+                continue;
+            }
+            Ok(false) => {}
+        }
         if prompt.trim_start().starts_with('/') {
             eprintln!("unknown command; use /help");
             continue;
         }
+        let prompt = agl_core::Content::with_images(prompt, std::mem::take(&mut attachments))?;
         if active_run.is_some() {
-            run_queue.push(prompt.to_owned());
+            run_queue.push(prompt);
             continue;
         }
         match foreground_turn(
             client,
             conversation.id,
-            prompt.to_owned(),
+            prompt,
             false,
             reasoning,
             decorations_override.unwrap_or(decorations_default),

@@ -7,6 +7,10 @@ use agl_core::agent::{
     AgentRunOrigin, AgentRunStatus, InstructionBlock, InstructionSet, InstructionSource,
     MessageRole,
 };
+use agl_core::execution::{
+    ExecutionIo, ExecutionOutcome, ExecutionOutputStream, ExecutionOwner, ExecutionStartRequest,
+    ExecutionState, MAX_EXECUTION_OUTPUT_READ_BYTES,
+};
 use agl_core::implementation_plan::{
     AdditionalRead, GitCommit, ImplementationPlan, ImplementationSlice, PlanDigest, PlanId,
     PlanState, PlanText, SliceChangedPath, SliceResult, SliceResultSchema, SliceState,
@@ -14,10 +18,6 @@ use agl_core::implementation_plan::{
 };
 use agl_core::{Content, ConversationId, MessageId};
 use agl_daemon_api::PlanArtifactView;
-use agl_execution_api::{
-    ExecutionClient, ExecutionIo, ExecutionOutcome, ExecutionOutputStream, ExecutionOwner,
-    ExecutionStartRequest, ExecutionState,
-};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -89,7 +89,7 @@ impl PlanArtifactStore {
         store: &StoreHandle,
         agent: &AgentHandle,
         runtime: &agl_runtime::RuntimeHandle,
-        execution: &ExecutionClient,
+        execution: &crate::execution::ExecutionBackend,
         id: &PlanId,
         expected: &PlanDigest,
         function_path: &Path,
@@ -298,7 +298,7 @@ fn execute_slice(
     store: &StoreHandle,
     agent: &AgentHandle,
     runtime: &agl_runtime::RuntimeHandle,
-    execution: &ExecutionClient,
+    execution: &crate::execution::ExecutionBackend,
     plan: &ImplementationPlan,
     slice: &ImplementationSlice,
     completed: &[SliceResult],
@@ -603,7 +603,7 @@ fn now_ms() -> i64 {
 }
 
 fn run_approved_verifications(
-    execution: &ExecutionClient,
+    execution: &crate::execution::ExecutionBackend,
     slice: &ImplementationSlice,
     root: &Path,
 ) -> Vec<VerificationResult> {
@@ -615,7 +615,7 @@ fn run_approved_verifications(
 }
 
 fn run_verification(
-    execution: &ExecutionClient,
+    execution: &crate::execution::ExecutionBackend,
     verification: &agl_core::implementation_plan::Verification,
     root: &Path,
 ) -> VerificationResult {
@@ -655,8 +655,7 @@ fn run_verification(
         terminal_size: None,
         isolation: Default::default(),
     };
-    let handle = tokio::runtime::Handle::current();
-    let started = match handle.block_on(execution.start(request)) {
+    let started = match execution.launch(None, request, None, None) {
         Ok(status) => status,
         Err(error) => return failure(format!("verification could not start: {error}")),
     };
@@ -664,30 +663,33 @@ fn run_verification(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     loop {
-        let status = match handle.block_on(execution.inspect(started.execution_id)) {
+        let status = match execution.inspect(started.execution_id) {
             Ok(status) => status,
             Err(error) => return failure(format!("verification status failed: {error}")),
         };
-        let output = match handle.block_on(execution.read(
+        let output = match execution.read(
             started.execution_id,
+            ExecutionOutputStream::Stdout,
             cursor,
-            agl_execution_api::MAX_EXECUTION_OUTPUT_READ_BYTES,
-        )) {
+            MAX_EXECUTION_OUTPUT_READ_BYTES,
+        ) {
             Ok(output) => output,
             Err(error) => return failure(format!("verification output failed: {error}")),
         };
-        for chunk in output.chunks {
-            match chunk.stream {
-                ExecutionOutputStream::Stdout => stdout.extend(chunk.data),
-                ExecutionOutputStream::Stderr => stderr.extend(chunk.data),
-                ExecutionOutputStream::Pty => {
-                    return failure("verification returned PTY output".into());
-                }
-            }
-        }
+        let error_output = match execution.read(
+            started.execution_id,
+            ExecutionOutputStream::Stderr,
+            stderr.len() as u64,
+            MAX_EXECUTION_OUTPUT_READ_BYTES,
+        ) {
+            Ok(output) => output,
+            Err(error) => return failure(format!("verification stderr failed: {error}")),
+        };
+        stdout.extend_from_slice(&output.data);
+        stderr.extend_from_slice(&error_output.data);
         cursor = output.next;
         if output.eof && status.state != ExecutionState::Running {
-            let truncated = output.truncated || status.output_truncated;
+            let truncated = output.truncated || error_output.truncated;
             let (passed, evidence) = evaluate_verification(
                 &verification.expected,
                 status.state,
@@ -895,7 +897,7 @@ fn initial_evidence_mismatch_paths(
 }
 
 fn git_evidence(
-    client: &ExecutionClient,
+    client: &crate::execution::ExecutionBackend,
     root: &Path,
     require_commit: bool,
 ) -> Result<GitEvidence> {
@@ -952,7 +954,7 @@ fn git_executable() -> Result<PathBuf> {
 }
 
 fn run_read_only_command(
-    client: &ExecutionClient,
+    client: &crate::execution::ExecutionBackend,
     root: &Path,
     argv: Vec<String>,
 ) -> Result<Vec<u8>> {
@@ -973,24 +975,24 @@ fn run_read_only_command(
         terminal_size: None,
         isolation: Default::default(),
     };
-    let handle = tokio::runtime::Handle::current();
-    let started = handle
-        .block_on(client.start(request))
+    let started = client
+        .launch(None, request, None, None)
         .context("failed to start workspace evidence command")?;
     let mut after = 0;
     let mut stdout = Vec::new();
     loop {
-        let status = handle
-            .block_on(client.inspect(started.execution_id))
+        let status = client
+            .inspect(started.execution_id)
             .context("failed to inspect workspace evidence command")?;
-        let output = handle
-            .block_on(client.read(started.execution_id, after, 1024 * 1024))
+        let output = client
+            .read(
+                started.execution_id,
+                ExecutionOutputStream::Stdout,
+                after,
+                1024 * 1024,
+            )
             .context("failed to read workspace evidence command")?;
-        for chunk in output.chunks {
-            if chunk.stream == ExecutionOutputStream::Stdout {
-                stdout.extend_from_slice(&chunk.data);
-            }
-        }
+        stdout.extend_from_slice(&output.data);
         after = output.next;
         if output.eof && status.state != ExecutionState::Running {
             match status.outcome {
@@ -1173,7 +1175,7 @@ mod tests {
             !evaluate_verification(
                 &expected,
                 ExecutionState::OutcomeUnknown,
-                Some(&ExecutionOutcome::UnknownAfterServiceRestart),
+                None,
                 args.0,
                 args.1,
                 false
@@ -1615,7 +1617,7 @@ mod tests {
         fs::create_dir_all(root.join("target")).unwrap();
         fs::write(
             root.join("agentLIBRE.toml"),
-            "format = 2\n[artifacts]\n[workspace]\noutput_directories = [\"target\"]\n",
+            "format = 2\nforge = []\n[workspace]\noutput_directories = [\"target\"]\n",
         )
         .unwrap();
         fs::write(root.join("one.rs"), "old").unwrap();
