@@ -16,7 +16,7 @@ delivery = "retryable"
 
 [[tools]]
 id = "agentlibre.files:file.patch"
-description = "Atomically create, update, delete, or move workspace files using digest preconditions"
+description = "Apply a unified/git text diff with git apply. Paths are relative to the workspace root (a/ b/ prefixes). Regular text files only (modes 100644/100755), at most 64 paths and 8 MiB; no symlinks, submodules, binary patches or .git paths. The diff is checked first and nothing changes if the check fails. If the result is outcome-unknown, re-read the affected files before another edit; never retry blindly."
 input_schema = "schemas/file-patch.json"
 required_effects = ["agentlibre.files:file.write"]
 delivery = "at_most_once"

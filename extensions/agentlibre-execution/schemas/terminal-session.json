@@ -4,76 +4,221 @@
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "argv"],
       "properties": {
-        "action": { "const": "open" },
+        "action": {
+          "const": "open"
+        },
         "argv": {
           "type": "array",
           "minItems": 1,
           "maxItems": 256,
-          "prefixItems": [
-            {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
-            }
-          ],
-          "items": { "type": "string", "maxLength": 32768 }
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          }
         },
-        "cwd": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "columns": { "type": "integer", "minimum": 1, "maximum": 1000 }
-      }
+        "cwd": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "action",
+        "argv"
+      ]
     },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "terminal_id"],
       "properties": {
-        "action": { "enum": ["inspect", "interrupt", "terminate"] },
-        "terminal_id": { "$ref": "#/$defs/terminal_id" }
-      }
+        "action": {
+          "const": "inspect"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        }
+      },
+      "required": [
+        "action",
+        "execution_id"
+      ]
     },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "terminal_id"],
       "properties": {
-        "action": { "const": "read" },
-        "terminal_id": { "$ref": "#/$defs/terminal_id" },
-        "after": { "type": "integer", "minimum": 0 },
-        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
-      }
+        "action": {
+          "const": "read"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        },
+        "stream": {
+          "enum": [
+            "terminal"
+          ]
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      },
+      "required": [
+        "action",
+        "execution_id",
+        "stream"
+      ]
     },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "terminal_id", "input"],
       "properties": {
-        "action": { "const": "write" },
-        "terminal_id": { "$ref": "#/$defs/terminal_id" },
-        "input": { "type": "string", "maxLength": 1048576 }
-      }
+        "action": {
+          "const": "wait"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        },
+        "wait_timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        }
+      },
+      "required": [
+        "action",
+        "execution_id",
+        "wait_timeout_ms"
+      ]
     },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["action", "terminal_id", "rows", "columns"],
       "properties": {
-        "action": { "const": "resize" },
-        "terminal_id": { "$ref": "#/$defs/terminal_id" },
-        "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "columns": { "type": "integer", "minimum": 1, "maximum": 1000 }
-      }
+        "action": {
+          "const": "write"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        },
+        "input": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "action",
+        "execution_id",
+        "input"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "resize"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "action",
+        "execution_id",
+        "rows",
+        "columns"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "interrupt"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        }
+      },
+      "required": [
+        "action",
+        "execution_id"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "stop"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        }
+      },
+      "required": [
+        "action",
+        "execution_id"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "cleanup"
+        },
+        "execution_id": {
+          "type": "string",
+          "pattern": "^exec_"
+        }
+      },
+      "required": [
+        "action",
+        "execution_id"
+      ]
     }
-  ],
-  "$defs": {
-    "terminal_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^term_[A-Za-z0-9_-]+$"
-    }
-  }
+  ]
 }
