@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "llamaCpp": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791128905,
+        "narHash": "sha256-SzT3hEjOgj6rjgA44LCykzNmP2KMnBgn8fjPhjfI0KI=",
+        "owner": "DINOZYAVIER",
+        "repo": "llama.cpp",
+        "rev": "cab1892bc9847f2ba17efdc5f74cd955d8995748",
+        "type": "github"
+      },
+      "original": {
+        "owner": "DINOZYAVIER",
+        "repo": "llama.cpp",
+        "rev": "cab1892bc9847f2ba17efdc5f74cd955d8995748",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1791048980,
+        "narHash": "sha256-KgItSKML8Xvte0B7/uGnBDsYzSnnKHcOaiUbgWBXLXw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a7868a727837f3c09cee2ce0ca671c76b1589fed",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "llamaCpp": "llamaCpp",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -3,7 +3,6 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-nix_file="$repo_root/nix/agl-local-vulkan.nix"
 
 usage() {
   cat <<'USAGE'
@@ -34,9 +33,9 @@ enter_nix_shell() {
   if [[ $# -eq 0 ]]; then
     command="cd $(printf '%q' "$repo_root") && exec bash -l"
   else
-    command="cd $(printf '%q' "$repo_root") && exec $(quote_command "$0" "$@")"
+    command="cd $(printf '%q' "$repo_root") && exec $(quote_command "$script_dir/agl-nix-vulkan.sh" "$@")"
   fi
-  exec nix-shell "$nix_file" --run "$command"
+  exec nix develop "$repo_root#default" --command bash -lc "$command"
 }
 
 diagnose() {

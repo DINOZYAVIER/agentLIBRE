@@ -1,4 +1,4 @@
-{ pkgs ? import <nixpkgs> { } }:
+{ pkgs }:
 
 let
   runtimeLibraryPath = pkgs.lib.makeLibraryPath [
@@ -22,18 +22,25 @@ pkgs.mkShell {
     bashInteractive
     binutils
     bubblewrap
+    cargo
     cmake
+    coreutils
     curl
+    findutils
     gcc
     git
     glslang
+    gnugrep
+    gnused
     ninja
     pkg-config
     python3
-    rustup
+    rustc
     shaderc
     spirv-headers
     spirv-tools
+    systemd
+    tmux
     vulkan-headers
     vulkan-loader
     vulkan-tools
@@ -45,13 +52,11 @@ pkgs.mkShell {
   AGL_LLAMA_CPP_VULKAN_GLSLANG_VALIDATOR = "${pkgs.glslang}/bin/glslangValidator";
 
   shellHook = ''
+    export AGL_NIX_VULKAN_ACTIVE=1
     export AGL_NIX_VULKAN_SHELL=1
-    export RUSTUP_TOOLCHAIN="''${RUSTUP_TOOLCHAIN:-stable}"
     export CMAKE_PREFIX_PATH="${pkgs.spirv-headers}:${pkgs.spirv-tools}''${CMAKE_PREFIX_PATH:+:''${CMAKE_PREFIX_PATH}}"
     export LD_LIBRARY_PATH="${runtimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
-    # mkShell adds its non-realised output directory to NIX_LDFLAGS. Keeping
-    # that entry would embed a RUNPATH which can never be pinned or loaded.
     shell_rpath_prefix="-rpath $out/lib  "
     if [[ "''${NIX_LDFLAGS:-}" == "$shell_rpath_prefix"* ]]; then
       export NIX_LDFLAGS="''${NIX_LDFLAGS#"$shell_rpath_prefix"}"
