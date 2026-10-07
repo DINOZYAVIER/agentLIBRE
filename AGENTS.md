@@ -5,7 +5,7 @@
 | Path | Responsibility |
 | --- | --- |
 | `README.md` | Short project description. |
-| `SPEC.md` | Working spec and human decisions. Git-ignored; never commit it. |
+| `SPEC.md` | Working spec and human decisions (Ukrainian). Read it before any task. |
 | `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
 
 Update this map when adding top-level paths.
@@ -46,8 +46,8 @@ consequences. Keep output concise and exact.
   `task-NN-<slug>` (for example `task-01-llama-client`) on its last commit.
   Tags mark tasks, not versions. Review fixes go in new commits; re-tag only
   when the human asks.
-- The repository is local only. Do not add remotes or push without an explicit
-  instruction.
+- Remote: private GitHub repository `DINOZYAVIER/agl-lite`. Push only when
+  the human asks.
 
 ## LLM-assisted commits
 
