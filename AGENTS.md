@@ -6,6 +6,7 @@
 | --- | --- |
 | `README.md` | Short project description. |
 | `SPEC.md` | Working spec and human decisions (Ukrainian). Read it before any task. |
+| `experiments/` | Grammar probes and raw results behind `SPEC.md` Appendix B; not part of the product. |
 | `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
 
 Update this map when adding top-level paths.
