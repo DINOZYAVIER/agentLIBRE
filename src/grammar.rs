@@ -1,6 +1,7 @@
 //! Grammars that constrain what the model may generate, rendered as
 //! llama.cpp GBNF (D7, D20, D41).
 
+pub mod pattern;
 
 use std::fmt::Write;
 
