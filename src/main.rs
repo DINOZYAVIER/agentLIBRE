@@ -8,17 +8,19 @@
 mod action;
 mod cli;
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Function loading uses formats from task-04")
-)]
 mod format;
+mod function;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the agent step uses it from task-08")
 )]
 mod grammar;
 mod i18n;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agent loop runs it from task-08")
+)]
+mod machine;
 mod paths;
 mod settings;
 #[cfg(test)]
@@ -31,6 +33,7 @@ use std::process::ExitCode;
 
 use cli::Command;
 use error::Error;
+use function::Function;
 use i18n::Lang;
 use paths::Paths;
 use settings::{ProjectFile, Settings, UserFile};
@@ -77,11 +80,12 @@ fn run(
     let project = settings::find_project(&cwd, &user_path)
         .map(|path| ProjectFile::load(&path, &user_path))
         .transpose()?;
-    let _settings = Settings::resolve(
+    let settings = Settings::resolve(
         &user,
         &user_path,
         project.as_ref(),
         args.function.as_deref(),
     )?;
+    let _function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
     Err(Error::NotImplemented)
 }

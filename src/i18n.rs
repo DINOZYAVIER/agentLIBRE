@@ -2,7 +2,8 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected, TemplateProblem};
+use crate::error::{Error, Expected, FunctionProblem, TemplateProblem};
+use crate::grammar::pattern::{PatternError, PatternErrorKind};
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +138,10 @@ impl Error {
                 let expected = match expected {
                     Expected::String => "a string",
                     Expected::Table => "a table",
+                    Expected::Bool => "true or false",
+                    Expected::Integer => "an integer",
+                    Expected::Number => "a number",
+                    Expected::Strings => "an array of strings",
                 };
                 format!("`{key}` in {} must be {expected}", path.display())
             }
@@ -151,6 +156,10 @@ impl Error {
                 let expected = match expected {
                     Expected::String => "рядком",
                     Expected::Table => "таблицею",
+                    Expected::Bool => "true або false",
+                    Expected::Integer => "цілим числом",
+                    Expected::Number => "числом",
+                    Expected::Strings => "масивом рядків",
                 };
                 format!("`{key}` у {} має бути {expected}", path.display())
             }
@@ -215,6 +224,21 @@ impl Error {
                     Uk => format!("`{key}` у {}: {problem}", path.display()),
                 }
             }
+            (Error::FunctionNotFound { name, path }, En) => format!(
+                "Function `{name}` not found: no {} and no built-in Function of that name",
+                path.display()
+            ),
+            (Error::FunctionNotFound { name, path }, Uk) => format!(
+                "Function `{name}` не знайдено: немає {} і вбудованої Function з такою назвою",
+                path.display()
+            ),
+            (Error::Function { path, key, problem }, lang) => {
+                let problem = function_problem(problem, lang);
+                match lang {
+                    En => format!("`{key}` in {}: {problem}", path.display()),
+                    Uk => format!("`{key}` у {}: {problem}", path.display()),
+                }
+            }
             (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
             (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
         }
@@ -246,6 +270,97 @@ fn template_problem(problem: &TemplateProblem, lang: Lang) -> String {
         }
         (TemplateProblem::Empty, En) => "must not be empty".into(),
         (TemplateProblem::Empty, Uk) => "не може бути порожнім".into(),
+    }
+}
+
+fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
+    use FunctionProblem as P;
+    use Lang::{En, Uk};
+    match (problem, lang) {
+        (P::UnknownState(name), En) => format!("there is no state `{name}`"),
+        (P::UnknownState(name), Uk) => format!("стану `{name}` немає"),
+        (P::BadTransitionKey, En) => {
+            "a transition key is a tool of the state, `tool.ok`/`.fail`/`.timeout`, or `else`"
+                .into()
+        }
+        (P::BadTransitionKey, Uk) => {
+            "ключ переходу — tool цього стану, `tool.ok`/`.fail`/`.timeout` або `else`".into()
+        }
+        (P::MissingTransition { tool, outcome }, En) => {
+            format!("no transition for `{tool}.{outcome}`; add it, `{tool}` or `else` to `next`")
+        }
+        (P::MissingTransition { tool, outcome }, Uk) => {
+            format!(
+                "немає переходу для `{tool}.{outcome}`; додай його, `{tool}` або `else` у `next`"
+            )
+        }
+        (P::NoActions, En) => "the state has no tools and no `answer = true`".into(),
+        (P::NoActions, Uk) => "стан не має ні tools, ні `answer = true`".into(),
+        (P::NextWithoutTools, En) => "`next` needs tools; an answer ends the turn".into(),
+        (P::NextWithoutTools, Uk) => "`next` потребує tools; відповідь завершує хід".into(),
+        (P::OnLimitWithoutLimit, En) => "`on_limit` needs `max_steps` or `max_visits`".into(),
+        (P::OnLimitWithoutLimit, Uk) => "`on_limit` потребує `max_steps` або `max_visits`".into(),
+        (P::OnLimitCycle, En) => "`on_limit` states lead back to this state".into(),
+        (P::OnLimitCycle, Uk) => "стани `on_limit` ведуть назад у цей стан".into(),
+        (P::Unreachable, En) => "no transition leads to this state".into(),
+        (P::Unreachable, Uk) => "у цей стан не веде жоден перехід".into(),
+        (P::NoThinking { format }, En) => {
+            format!("model format `{format}` has no thinking; remove `think = true`")
+        }
+        (P::NoThinking { format }, Uk) => {
+            format!("формат моделі `{format}` не має thinking; прибери `think = true`")
+        }
+        (P::Pattern(error), lang) => pattern_error(error, lang),
+        (P::PatternMayEndValue { end }, En) => {
+            format!("the pattern may produce {end:?}, which ends a value in this model format")
+        }
+        (P::PatternMayEndValue { end }, Uk) => {
+            format!("шаблон може дати {end:?}, а це кінець значення у форматі моделі")
+        }
+        (P::EmptyEnum, En) => "`enum` needs at least one value".into(),
+        (P::EmptyEnum, Uk) => "`enum` потребує хоча б одного значення".into(),
+        (P::BadRange, En) => "needs `min <= max`, and `min >= 1` for `timeout`".into(),
+        (P::BadRange, Uk) => "потрібно `min <= max`, а для `timeout` ще `min >= 1`".into(),
+        (P::ConstraintKeys, En) => "a constraint has exactly one key".into(),
+        (P::ConstraintKeys, Uk) => "обмеження має рівно один ключ".into(),
+        (P::NotPositive, En) => "must be at least 1".into(),
+        (P::NotPositive, Uk) => "має бути щонайменше 1".into(),
+    }
+}
+
+fn pattern_error(error: &PatternError, lang: Lang) -> String {
+    use Lang::{En, Uk};
+    use PatternErrorKind as K;
+    let at = error.offset;
+    match (&error.kind, lang) {
+        (K::Anchor, En) => {
+            format!("pattern byte {at}: remove `^`/`$`; a pattern covers the whole value")
+        }
+        (K::Anchor, Uk) => {
+            format!("шаблон, байт {at}: прибери `^`/`$`; шаблон і так охоплює все значення")
+        }
+        (K::GroupSyntax, En) => format!("pattern byte {at}: `(?` groups are not supported"),
+        (K::GroupSyntax, Uk) => format!("шаблон, байт {at}: групи `(?` не підтримуються"),
+        (K::Escape(c), En) => format!("pattern byte {at}: `\\{c}` is not supported"),
+        (K::Escape(c), Uk) => format!("шаблон, байт {at}: `\\{c}` не підтримується"),
+        (K::TrailingBackslash, En) => format!("pattern byte {at}: `\\` at the end"),
+        (K::TrailingBackslash, Uk) => format!("шаблон, байт {at}: `\\` у кінці"),
+        (K::NothingToRepeat, En) => format!("pattern byte {at}: nothing to repeat"),
+        (K::NothingToRepeat, Uk) => format!("шаблон, байт {at}: нема чого повторювати"),
+        (K::BadRepetition, En) => {
+            format!("pattern byte {at}: use `{{n}}`, `{{n,}}` or `{{n,m}}` with n <= m")
+        }
+        (K::BadRepetition, Uk) => {
+            format!("шаблон, байт {at}: потрібно `{{n}}`, `{{n,}}` або `{{n,m}}` з n <= m")
+        }
+        (K::UnbalancedGroup, En) => format!("pattern byte {at}: unbalanced parenthesis"),
+        (K::UnbalancedGroup, Uk) => format!("шаблон, байт {at}: незакрита або зайва дужка"),
+        (K::BadClass, En) => format!("pattern byte {at}: bad class; escape `[` and `]` inside it"),
+        (K::BadClass, Uk) => {
+            format!("шаблон, байт {at}: некоректний клас; екрануй `[` і `]` усередині")
+        }
+        (K::BadRange, En) => format!("pattern byte {at}: bad class range"),
+        (K::BadRange, Uk) => format!("шаблон, байт {at}: некоректний діапазон у класі"),
     }
 }
 

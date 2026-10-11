@@ -44,6 +44,16 @@ impl Paths {
     pub fn settings_file(&self) -> PathBuf {
         self.config.join(SETTINGS_FILE)
     }
+
+    /// User Functions, `functions/*.toml` (D39).
+    pub fn functions(&self) -> PathBuf {
+        self.config.join("functions")
+    }
+
+    /// User model formats, `formats/*.toml` (D39).
+    pub fn formats(&self) -> PathBuf {
+        self.config.join("formats")
+    }
 }
 
 #[cfg(test)]
@@ -66,6 +76,14 @@ mod tests {
         assert_eq!(
             paths.settings_file(),
             PathBuf::from("/home/u/.config/agentLIBRE/agentLIBRE.toml")
+        );
+        assert_eq!(
+            paths.functions(),
+            PathBuf::from("/home/u/.config/agentLIBRE/functions")
+        );
+        assert_eq!(
+            paths.formats(),
+            PathBuf::from("/home/u/.config/agentLIBRE/formats")
         );
     }
 

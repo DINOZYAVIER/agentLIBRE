@@ -49,9 +49,7 @@ impl Format {
     /// Loads format `name` from `dir/<name>.toml` or, when that file does
     /// not exist, from the built-in formats.
     pub fn load(dir: &Path, name: &str) -> Result<Format, Error> {
-        if name.is_empty() || name.contains('/') || name.starts_with('.') {
-            return Err(Error::InvalidName(name.into()));
-        }
+        tomlfile::check_name(name)?;
         let path = dir.join(format!("{name}.toml"));
         if let Some(table) = tomlfile::read(&path)? {
             return Format::from_table(&path, table);

@@ -41,10 +41,6 @@ pub struct Tool {
 }
 
 /// The built-in tools with unconstrained parameters (D24-D26, D80).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Function loading uses it from task-04")
-)]
 pub fn builtin_tools() -> Vec<Tool> {
     let text = |name: &str| Param {
         name: name.into(),
@@ -70,6 +66,33 @@ pub fn builtin_tools() -> Vec<Tool> {
             params: vec![text("path"), text("old"), text("new")],
         },
     ]
+}
+
+/// How a tool call ended (D16, D25, D26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Ok,
+    Fail,
+    Timeout,
+}
+
+impl Outcome {
+    /// The name in transition keys such as `bash.ok` (D43).
+    pub fn name(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Fail => "fail",
+            Outcome::Timeout => "timeout",
+        }
+    }
+}
+
+/// The outcomes a built-in tool can have.
+pub fn outcomes(tool: &str) -> &'static [Outcome] {
+    match tool {
+        "bash" => &[Outcome::Ok, Outcome::Fail, Outcome::Timeout],
+        _ => &[Outcome::Ok, Outcome::Fail],
+    }
 }
 
 /// Everything the model may do in a state: call one of `tools` or, when

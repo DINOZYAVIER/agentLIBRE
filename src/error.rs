@@ -3,6 +3,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::grammar::pattern::PatternError;
+
 /// An error that stops `agl-lite`.
 #[derive(Debug)]
 pub enum Error {
@@ -54,6 +56,15 @@ pub enum Error {
         key: String,
         problem: TemplateProblem,
     },
+    /// Neither `path` nor a built-in Function is called `name`.
+    FunctionNotFound { name: String, path: PathBuf },
+    /// A Function is unusable; `key` locates the problem (D21, D42, D72,
+    /// D78, D82-D93).
+    Function {
+        path: PathBuf,
+        key: String,
+        problem: FunctionProblem,
+    },
     /// Everything after loading the settings arrives in later tasks (D62).
     NotImplemented,
 }
@@ -63,6 +74,10 @@ pub enum Error {
 pub enum Expected {
     String,
     Table,
+    Bool,
+    Integer,
+    Number,
+    Strings,
 }
 
 /// What is wrong with a format template (D81).
@@ -83,6 +98,42 @@ pub enum TemplateProblem {
     NothingAfterValue,
     /// A `think` string is empty.
     Empty,
+}
+
+/// What is wrong with a Function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FunctionProblem {
+    /// The value names a state that does not exist.
+    UnknownState(String),
+    /// A transition key is not a tool of the state, with or without an
+    /// outcome, nor `else`.
+    BadTransitionKey,
+    /// No transition for a tool and outcome of the state (D21).
+    MissingTransition { tool: String, outcome: &'static str },
+    /// The state has neither tools nor `answer` (D87).
+    NoActions,
+    /// The state has `next` but no tools.
+    NextWithoutTools,
+    /// `on_limit` without `max_steps` or `max_visits`.
+    OnLimitWithoutLimit,
+    /// `on_limit` references lead back to this state (D83).
+    OnLimitCycle,
+    /// No transition leads to the state (D91).
+    Unreachable,
+    /// `think = true` with a format without thinking (D78).
+    NoThinking { format: String },
+    /// The pattern is not in the supported subset (D69, D75).
+    Pattern(PatternError),
+    /// The pattern may produce `end`, which ends values (D72).
+    PatternMayEndValue { end: char },
+    /// An empty `enum`.
+    EmptyEnum,
+    /// `min > max`, or `min < 1` for `timeout` (D93).
+    BadRange,
+    /// A constraint needs exactly one key (D88).
+    ConstraintKeys,
+    /// A limit below 1.
+    NotPositive,
 }
 
 impl Error {

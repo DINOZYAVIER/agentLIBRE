@@ -5,13 +5,13 @@
 use super::Expr;
 
 /// Why a pattern is rejected, at byte `offset` of the pattern.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatternError {
     pub offset: usize,
     pub kind: PatternErrorKind,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternErrorKind {
     /// `^` or `$`: a pattern always covers the whole value (D75).
     Anchor,

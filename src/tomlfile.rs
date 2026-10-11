@@ -29,6 +29,15 @@ pub fn parse(path: &Path, text: &str) -> Result<Table, Error> {
     })
 }
 
+/// Rejects a Function or format name that cannot name a file in its
+/// directory.
+pub fn check_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return Err(Error::InvalidName(name.into()));
+    }
+    Ok(())
+}
+
 /// A table being read. Keys are removed as they are read.
 pub struct Section {
     path: PathBuf,
@@ -50,8 +59,12 @@ impl Section {
         &self.path
     }
 
-    /// The full name of `key` in the file.
+    /// The full name of `key` in the file; with an empty `key`, the name of
+    /// this table.
     pub fn key(&self, key: &str) -> String {
+        if key.is_empty() {
+            return self.prefix.trim_end_matches('.').to_owned();
+        }
         format!("{}{key}", self.prefix)
     }
 
@@ -87,6 +100,73 @@ impl Section {
     /// Takes the string `key`, which must be present.
     pub fn required_string(&mut self, key: &str) -> Result<String, Error> {
         self.string(key)?.ok_or_else(|| self.missing(key))
+    }
+
+    /// Takes the boolean `key`, if present.
+    pub fn bool(&mut self, key: &str) -> Result<Option<bool>, Error> {
+        match self.table.remove(key) {
+            None => Ok(None),
+            Some(Value::Boolean(value)) => Ok(Some(value)),
+            Some(_) => Err(self.wrong_type(key, Expected::Bool)),
+        }
+    }
+
+    /// Takes the integer `key`, if present.
+    pub fn integer(&mut self, key: &str) -> Result<Option<i64>, Error> {
+        match self.table.remove(key) {
+            None => Ok(None),
+            Some(Value::Integer(value)) => Ok(Some(value)),
+            Some(_) => Err(self.wrong_type(key, Expected::Integer)),
+        }
+    }
+
+    /// Takes the number `key`, integer or float, if present.
+    pub fn number(&mut self, key: &str) -> Result<Option<f64>, Error> {
+        match self.table.remove(key) {
+            None => Ok(None),
+            Some(Value::Float(value)) => Ok(Some(value)),
+            Some(Value::Integer(value)) => Ok(Some(value as f64)),
+            Some(_) => Err(self.wrong_type(key, Expected::Number)),
+        }
+    }
+
+    /// Takes the array of strings `key`, if present.
+    pub fn strings(&mut self, key: &str) -> Result<Option<Vec<String>>, Error> {
+        let wrong = |section: &Section| section.wrong_type(key, Expected::Strings);
+        match self.table.remove(key) {
+            None => Ok(None),
+            Some(Value::Array(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    Value::String(text) => Ok(text),
+                    _ => Err(wrong(self)),
+                })
+                .collect::<Result<_, _>>()
+                .map(Some),
+            Some(_) => Err(wrong(self)),
+        }
+    }
+
+    /// Takes every remaining key as a table, in key order.
+    pub fn sections(&mut self) -> Result<Vec<(String, Section)>, Error> {
+        let keys: Vec<String> = self.table.keys().cloned().collect();
+        keys.into_iter()
+            .map(|key| {
+                let section = self.required_section(&key)?;
+                Ok((key, section))
+            })
+            .collect()
+    }
+
+    /// Takes every remaining key as a string, in key order.
+    pub fn string_entries(&mut self) -> Result<Vec<(String, String)>, Error> {
+        let keys: Vec<String> = self.table.keys().cloned().collect();
+        keys.into_iter()
+            .map(|key| {
+                let value = self.required_string(&key)?;
+                Ok((key, value))
+            })
+            .collect()
     }
 
     /// Takes the table `key`, if present.

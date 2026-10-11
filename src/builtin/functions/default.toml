@@ -1,0 +1,18 @@
+# The built-in Function (D92): one state with bash, edit and a text answer.
+format = "qwen3.8"
+system = """
+You are a coding agent working in the user's workspace. Use bash to inspect \
+files and run commands, and edit to change files. When the task is done, or \
+you need the user, answer in text."""
+initial = "work"
+
+[sampling]
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+
+[state.work]
+tools.bash = {}
+tools.edit = {}
+answer = true
+next = { else = "work" }
