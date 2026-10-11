@@ -281,4 +281,6 @@ impl Cursor<'_> {
 }
 
 #[cfg(test)]
+mod server_test;
+#[cfg(test)]
 mod tests;
