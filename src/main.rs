@@ -3,6 +3,11 @@
 
 mod cli;
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the action grammar uses it from task-03")
+)]
+mod grammar;
 mod i18n;
 mod paths;
 mod settings;
