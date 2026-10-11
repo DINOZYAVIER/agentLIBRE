@@ -6,6 +6,11 @@
     expect(dead_code, reason = "the agent step uses actions from task-08")
 )]
 mod action;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agent step uses the backend from task-08")
+)]
+mod backend;
 mod cli;
 mod error;
 mod format;

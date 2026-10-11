@@ -239,6 +239,38 @@ impl Error {
                     Uk => format!("`{key}` у {}: {problem}", path.display()),
                 }
             }
+            (Error::ServerUnreachable { url, detail }, En) => {
+                format!("cannot reach llama-server at {url}: {detail}")
+            }
+            (Error::ServerUnreachable { url, detail }, Uk) => {
+                format!("не вдалося з'єднатися з llama-server за адресою {url}: {detail}")
+            }
+            (
+                Error::ServerStatus {
+                    url,
+                    status,
+                    message,
+                },
+                En,
+            ) => {
+                format!("llama-server at {url} answered {status}: {message}")
+            }
+            (
+                Error::ServerStatus {
+                    url,
+                    status,
+                    message,
+                },
+                Uk,
+            ) => {
+                format!("llama-server за адресою {url} відповів {status}: {message}")
+            }
+            (Error::ServerReply { url, detail }, En) => {
+                format!("unexpected reply from llama-server at {url}: {detail}")
+            }
+            (Error::ServerReply { url, detail }, Uk) => {
+                format!("неочікувана відповідь llama-server за адресою {url}: {detail}")
+            }
             (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
             (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
         }

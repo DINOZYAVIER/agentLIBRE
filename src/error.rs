@@ -65,6 +65,16 @@ pub enum Error {
         key: String,
         problem: FunctionProblem,
     },
+    /// llama-server cannot be reached (D97).
+    ServerUnreachable { url: String, detail: String },
+    /// llama-server answered with an error status.
+    ServerStatus {
+        url: String,
+        status: u16,
+        message: String,
+    },
+    /// llama-server answered something agl-lite does not understand.
+    ServerReply { url: String, detail: String },
     /// Everything after loading the settings arrives in later tasks (D62).
     NotImplemented,
 }
