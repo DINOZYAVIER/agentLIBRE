@@ -6,6 +6,8 @@
 | --- | --- |
 | `README.md` | Short project description. |
 | `SPEC.md` | Working spec and human decisions (Ukrainian). Read it before any task. |
+| `Cargo.toml`, `Cargo.lock` | Crate manifest and locked dependencies. |
+| `src/` | The `agl-lite` binary: arguments (`cli.rs`), XDG paths (`paths.rs`), `agentLIBRE.toml` files (`settings.rs`), errors (`error.rs`) and their English/Ukrainian messages (`i18n.rs`). |
 | `experiments/` | Grammar probes and raw results behind `SPEC.md` Appendix B; not part of the product. |
 | `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
 
