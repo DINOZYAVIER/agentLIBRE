@@ -127,6 +127,29 @@ impl Format {
         })
     }
 
+    /// Ends a rendered `prompt` so that the model thinks or not (D94):
+    /// with thinking, the prompt ends in `think.open`; without, in an empty
+    /// block `think.open` + `think.close`. A `think.open` the template
+    /// already added is replaced. Formats without `think` leave the prompt
+    /// as it is.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the agent step uses it from task-08")
+    )]
+    pub fn start_step(&self, mut prompt: String, think: bool) -> String {
+        let Some(Think { open, close }) = &self.think else {
+            return prompt;
+        };
+        if prompt.ends_with(open.as_str()) {
+            prompt.truncate(prompt.len() - open.len());
+        }
+        prompt.push_str(open);
+        if !think {
+            prompt.push_str(close);
+        }
+        prompt
+    }
+
     /// The first character that ends a value. A `pattern` that may produce
     /// it is rejected (D72).
     pub fn value_end_start(&self) -> char {
@@ -223,6 +246,21 @@ pub mod tests {
             }
         );
         assert_eq!(format.value_end_start(), '\n');
+    }
+
+    #[test]
+    fn start_step() {
+        let format = qwen();
+        let rendered = "<|im_start|>assistant\n<think>\n";
+        let base = "<|im_start|>assistant\n";
+        assert_eq!(format.start_step(rendered.into(), true), rendered);
+        assert_eq!(
+            format.start_step(rendered.into(), false),
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(format.start_step(base.into(), true), rendered);
+        let plain = parse(CALL).unwrap();
+        assert_eq!(plain.start_step(base.into(), true), base);
     }
 
     #[test]
