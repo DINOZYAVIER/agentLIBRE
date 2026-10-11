@@ -1,6 +1,11 @@
 //! agl-lite: a coding agent for local models whose state machine drives
 //! the grammar. See `SPEC.md`.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agent step uses actions from task-08")
+)]
+mod action;
 mod cli;
 mod error;
 #[cfg_attr(
@@ -10,12 +15,14 @@ mod error;
 mod format;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the action grammar uses it from task-03")
+    expect(dead_code, reason = "the agent step uses it from task-08")
 )]
 mod grammar;
 mod i18n;
 mod paths;
 mod settings;
+#[cfg(test)]
+mod test_server;
 mod tomlfile;
 
 use std::ffi::OsString;

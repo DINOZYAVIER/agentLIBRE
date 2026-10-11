@@ -1,21 +1,14 @@
 //! Checks that llama-server accepts the rendered grammars and samples text
-//! that matches them (D71). Run with a server that has any model loaded:
-//!
-//! ```sh
-//! AGL_TEST_SERVER=http://127.0.0.1:18080 cargo test -- --ignored
-//! ```
+//! that matches them (D71); see [`crate::test_server`].
 
 use serde_json::{Value, json};
 
 use super::matcher::matches;
 use super::{Expr, Grammar, int_range, pattern};
+use crate::test_server;
 
 /// Sends a `/completion` request; returns the status and the body.
-fn complete(server: &str, prompt: &str, grammar: &str, n_predict: u32) -> (u16, String) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
+fn complete(prompt: &str, grammar: &str, n_predict: u32) -> (u16, String) {
     let body = json!({
         "prompt": prompt,
         "grammar": grammar,
@@ -23,13 +16,7 @@ fn complete(server: &str, prompt: &str, grammar: &str, n_predict: u32) -> (u16, 
         "temperature": 1.0,
         "cache_prompt": false,
     });
-    let mut response = agent
-        .post(format!("{server}/completion"))
-        .header("Content-Type", "application/json")
-        .send(body.to_string())
-        .expect("llama-server is not reachable");
-    let status = response.status().as_u16();
-    (status, response.body_mut().read_to_string().unwrap())
+    test_server::post("/completion", &body)
 }
 
 /// A grammar to send, with a prompt that invites the model to fill it.
@@ -114,25 +101,17 @@ fn cases() -> Vec<Case> {
 #[test]
 #[ignore = "needs a llama-server at AGL_TEST_SERVER"]
 fn llama_server_accepts_grammars() {
-    // The matcher recurses once per character of free text.
-    std::thread::Builder::new()
-        .stack_size(256 << 20)
-        .spawn(check_server)
-        .unwrap()
-        .join()
-        .unwrap();
+    test_server::with_big_stack(check_server);
 }
 
 fn check_server() {
-    let server = std::env::var("AGL_TEST_SERVER").expect("set AGL_TEST_SERVER");
-
     // Without a visible rejection the checks below would prove nothing.
-    let (status, body) = complete(&server, "Hi", "root ::= (", 4);
+    let (status, body) = complete("Hi", "root ::= (", 4);
     assert_ne!(status, 200, "a broken grammar was accepted: {body}");
 
     for case in cases() {
         let grammar = case.grammar.render(&case.root);
-        let (status, body) = complete(&server, case.prompt, &grammar, 128);
+        let (status, body) = complete(case.prompt, &grammar, 128);
         assert_eq!(status, 200, "{}: {body}\n{grammar}", case.name);
         let body: Value = serde_json::from_str(&body).unwrap();
         let content = body["content"].as_str().unwrap();
