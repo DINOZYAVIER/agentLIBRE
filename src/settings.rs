@@ -1,13 +1,11 @@
 //! User and project `agentLIBRE.toml` files (D54-D60, D66).
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
-use toml::{Table, Value};
-
-use crate::error::{Error, Expected};
+use crate::error::Error;
 use crate::i18n::Lang;
+use crate::tomlfile::{self, Section};
 
 /// Name of the user and project settings files.
 pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
@@ -27,12 +25,14 @@ pub struct UserFile {
 impl UserFile {
     /// Loads `path`; a missing file has no settings.
     pub fn load(path: &Path) -> Result<UserFile, Error> {
-        let Some(mut table) = read_table(path)? else {
+        let Some(table) = tomlfile::read(path)? else {
             return Ok(UserFile::default());
         };
-        check_keys(path, &table, "", &["function", "language", "server"])?;
-        let function = take_string(path, &mut table, "", "function")?;
-        let language = take_string(path, &mut table, "", "language")?
+        let mut file = Section::new(path, table);
+        file.check_keys(&["function", "language", "server"])?;
+        let function = file.string("function")?;
+        let language = file
+            .string("language")?
             .map(|code| {
                 Lang::from_code(&code).ok_or_else(|| Error::UnsupportedLanguage {
                     path: path.into(),
@@ -40,13 +40,12 @@ impl UserFile {
                 })
             })
             .transpose()?;
-        let server_url = match table.remove("server") {
+        let server_url = match file.section("server")? {
             None => None,
-            Some(Value::Table(mut server)) => {
-                check_keys(path, &server, "server.", &["url"])?;
-                take_string(path, &mut server, "server.", "url")?
+            Some(mut server) => {
+                server.check_keys(&["url"])?;
+                server.string("url")?
             }
-            Some(_) => return Err(wrong_type(path, "server", Expected::Table)),
         };
         if let Some(url) = &server_url
             && !url.starts_with("http://")
@@ -74,16 +73,16 @@ impl ProjectFile {
     /// Loads `path`. `user_path` names the user file in the error that
     /// rejects `[server]` (D57).
     pub fn load(path: &Path, user_path: &Path) -> Result<ProjectFile, Error> {
-        let mut table = read_table(path)?.unwrap_or_default();
-        if table.contains_key("server") {
+        let mut file = Section::new(path, tomlfile::read(path)?.unwrap_or_default());
+        if file.contains("server") {
             return Err(Error::ServerInProject {
                 path: path.into(),
                 user_path: user_path.into(),
             });
         }
-        check_keys(path, &table, "", &["function"])?;
+        file.check_keys(&["function"])?;
         Ok(ProjectFile {
-            function: take_string(path, &mut table, "", "function")?,
+            function: file.string("function")?,
         })
     }
 }
@@ -135,73 +134,10 @@ impl Settings {
     }
 }
 
-/// Reads and parses `path`; `None` when it does not exist.
-fn read_table(path: &Path) -> Result<Option<Table>, Error> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::Read {
-                path: path.into(),
-                source,
-            });
-        }
-    };
-    text.parse()
-        .map(Some)
-        .map_err(|error: toml::de::Error| Error::Parse {
-            path: path.into(),
-            detail: error.to_string().trim_end().to_owned(),
-        })
-}
-
-/// Rejects a key of `table` outside `allowed` (D60). `prefix` locates
-/// `table` in the file, such as `server.`.
-fn check_keys(
-    path: &Path,
-    table: &Table,
-    prefix: &str,
-    allowed: &'static [&'static str],
-) -> Result<(), Error> {
-    match table.keys().find(|key| !allowed.contains(&key.as_str())) {
-        Some(key) => Err(Error::UnknownKey {
-            path: path.into(),
-            key: format!("{prefix}{key}"),
-            allowed,
-        }),
-        None => Ok(()),
-    }
-}
-
-/// Removes the string `key` from `table`.
-fn take_string(
-    path: &Path,
-    table: &mut Table,
-    prefix: &str,
-    key: &str,
-) -> Result<Option<String>, Error> {
-    match table.remove(key) {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(_) => Err(wrong_type(
-            path,
-            &format!("{prefix}{key}"),
-            Expected::String,
-        )),
-    }
-}
-
-fn wrong_type(path: &Path, key: &str, expected: Expected) -> Error {
-    Error::WrongType {
-        path: path.into(),
-        key: key.into(),
-        expected,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Expected;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A directory removed when dropped.

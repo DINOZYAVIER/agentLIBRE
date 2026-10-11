@@ -5,12 +5,18 @@ mod cli;
 mod error;
 #[cfg_attr(
     not(test),
+    expect(dead_code, reason = "Function loading uses formats from task-04")
+)]
+mod format;
+#[cfg_attr(
+    not(test),
     expect(dead_code, reason = "the action grammar uses it from task-03")
 )]
 mod grammar;
 mod i18n;
 mod paths;
 mod settings;
+mod tomlfile;
 
 use std::ffi::OsString;
 use std::io::{self, Write};

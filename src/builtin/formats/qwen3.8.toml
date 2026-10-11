@@ -1,0 +1,7 @@
+# Qwen3.8: thinking and XML tool calls, as in experiments B2-B4.
+think = { open = "<think>\n", close = "\n</think>\n\n" }
+
+[call]
+begin = "<tool_call>\n<function={name}>\n"
+param = "<parameter={name}>\n{value}\n</parameter>\n"
+end = "</function>\n</tool_call>"

@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected};
+use crate::error::{Error, Expected, TemplateProblem};
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,9 +188,64 @@ impl Error {
                 "адресу llama-server не задано; додай у {}:\n\n[server]\nurl = \"http://HOST:PORT\"",
                 user_path.display()
             ),
+            (Error::MissingKey { path, key }, En) => {
+                format!("`{key}` is missing in {}", path.display())
+            }
+            (Error::MissingKey { path, key }, Uk) => {
+                format!("у {} немає `{key}`", path.display())
+            }
+            (Error::InvalidName(name), En) => format!(
+                "invalid name `{name}`: a name is not empty, has no `/` and does not start with `.`"
+            ),
+            (Error::InvalidName(name), Uk) => format!(
+                "некоректна назва `{name}`: назва непорожня, без `/` і не починається з `.`"
+            ),
+            (Error::FormatNotFound { name, path }, En) => format!(
+                "model format `{name}` not found: no {} and no built-in format of that name",
+                path.display()
+            ),
+            (Error::FormatNotFound { name, path }, Uk) => format!(
+                "формат моделі `{name}` не знайдено: немає {} і вбудованого формату з такою назвою",
+                path.display()
+            ),
+            (Error::Template { path, key, problem }, lang) => {
+                let problem = template_problem(problem, lang);
+                match lang {
+                    En => format!("`{key}` in {}: {problem}", path.display()),
+                    Uk => format!("`{key}` у {}: {problem}", path.display()),
+                }
+            }
             (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
             (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
         }
+    }
+}
+
+fn template_problem(problem: &TemplateProblem, lang: Lang) -> String {
+    use Lang::{En, Uk};
+    match (problem, lang) {
+        (TemplateProblem::Missing(p), En) => format!("needs {p}"),
+        (TemplateProblem::Missing(p), Uk) => format!("потрібен {p}"),
+        (TemplateProblem::Repeated(p), En) => format!("{p} appears more than once"),
+        (TemplateProblem::Repeated(p), Uk) => format!("{p} трапляється більше одного разу"),
+        (TemplateProblem::Unexpected(p), En) => format!("{p} does not belong here"),
+        (TemplateProblem::Unexpected(p), Uk) => format!("{p} тут не дозволений"),
+        (TemplateProblem::ValueBeforeName, En) => "{value} comes before {name}".into(),
+        (TemplateProblem::ValueBeforeName, Uk) => "{value} стоїть перед {name}".into(),
+        (TemplateProblem::NothingBeforeName, En) => {
+            "needs text before {name}, or answers cannot be told apart from calls".into()
+        }
+        (TemplateProblem::NothingBeforeName, Uk) => {
+            "потрібен текст перед {name}, інакше відповідь не відрізнити від виклику".into()
+        }
+        (TemplateProblem::NothingAfterValue, En) => {
+            "needs text after {value}, or a value has no end".into()
+        }
+        (TemplateProblem::NothingAfterValue, Uk) => {
+            "потрібен текст після {value}, інакше значення не має кінця".into()
+        }
+        (TemplateProblem::Empty, En) => "must not be empty".into(),
+        (TemplateProblem::Empty, Uk) => "не може бути порожнім".into(),
     }
 }
 
