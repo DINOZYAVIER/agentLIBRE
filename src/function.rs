@@ -19,6 +19,11 @@ const BUILTIN: &[(&str, &str)] = &[("default", include_str!("builtin/functions/d
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 
+/// Token limits of one generation when the Function does not set them
+/// (D18, D96).
+const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
+const DEFAULT_MAX_ACTION_TOKENS: u32 = 2048;
+
 /// A loaded Function.
 #[derive(Debug)]
 #[cfg_attr(
@@ -30,6 +35,8 @@ pub struct Function {
     pub system: String,
     pub preserve_thinking: bool,
     pub max_steps_total: u32,
+    pub max_think_tokens: u32,
+    pub max_action_tokens: u32,
     pub sampling: Sampling,
     pub initial: usize,
     pub states: Vec<State>,
@@ -120,6 +127,8 @@ impl Function {
             "system",
             "preserve_thinking",
             "max_steps_total",
+            "max_think_tokens",
+            "max_action_tokens",
             "sampling",
             "initial",
             "state",
@@ -130,6 +139,10 @@ impl Function {
         let preserve_thinking = file.bool("preserve_thinking")?.unwrap_or(true);
         let max_steps_total =
             positive(&mut file, "max_steps_total")?.unwrap_or(DEFAULT_MAX_STEPS_TOTAL);
+        let max_think_tokens =
+            positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
+        let max_action_tokens =
+            positive(&mut file, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
         let sampling = match file.section("sampling")? {
             None => Sampling::default(),
             Some(sampling) => read_sampling(sampling)?,
@@ -160,6 +173,8 @@ impl Function {
             system,
             preserve_thinking,
             max_steps_total,
+            max_think_tokens,
+            max_action_tokens,
             sampling,
             initial,
             states,
