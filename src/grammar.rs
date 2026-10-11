@@ -39,7 +39,10 @@ impl Expr {
 
     /// One of `values`, each taken literally (`enum`).
     pub fn one_of<S: AsRef<str>>(values: &[S]) -> Expr {
-        Expr::Alt(values.iter().map(|v| Expr::literal(v.as_ref())).collect())
+        match values {
+            [value] => Expr::literal(value.as_ref()),
+            _ => Expr::Alt(values.iter().map(|v| Expr::literal(v.as_ref())).collect()),
+        }
     }
 
     /// Whether some text matching the expression contains `c`. Rules count
@@ -191,11 +194,26 @@ impl Grammar {
     }
 
     /// Any text that does not contain `forbidden`, with at least one
-    /// character when `non_empty` (D20, D73). The rules follow the
-    /// Knuth-Morris-Pratt automaton of `forbidden`: state `s` means the text
-    /// ends with the first `s` characters of `forbidden`.
+    /// character when `non_empty` (D20, D73).
     pub fn text_without(&mut self, hint: &str, forbidden: &str, non_empty: bool) -> Expr {
-        let pattern: Vec<char> = forbidden.chars().collect();
+        self.kmp_text(hint, forbidden, non_empty, false)
+    }
+
+    /// A value that `terminator` follows: `terminator` occurs in the value
+    /// followed by `terminator` only at the end (D81). This is stronger
+    /// than not containing it: with the Qwen3.8 `"\n</parameter>\n"`, a value
+    /// ending in `"\n</parameter>"` would end early.
+    pub fn text_before(&mut self, hint: &str, terminator: &str) -> Expr {
+        self.kmp_text(hint, terminator, false, true)
+    }
+
+    /// Text without `pattern`, built on its Knuth-Morris-Pratt automaton:
+    /// state `s` means the text ends with the first `s` characters of
+    /// `pattern`. With `followed`, the text may end only in states from
+    /// which reading `pattern` matches it no earlier than its last
+    /// character.
+    fn kmp_text(&mut self, hint: &str, pattern: &str, non_empty: bool, followed: bool) -> Expr {
+        let pattern: Vec<char> = pattern.chars().collect();
         assert!(!pattern.is_empty(), "nothing to forbid");
         let fail = failure_function(&pattern);
         let step = |mut state: usize, c: char| {
@@ -203,6 +221,16 @@ impl Grammar {
                 state = fail[state - 1];
             }
             if pattern[state] == c { state + 1 } else { 0 }
+        };
+        let can_end = |state: usize| {
+            !followed || {
+                let (head, _) = pattern.split_at(pattern.len() - 1);
+                let mut state = state;
+                head.iter().all(|&c| {
+                    state = step(state, c);
+                    state < pattern.len()
+                })
+            }
         };
         let mut alphabet = pattern.clone();
         alphabet.sort_unstable();
@@ -228,12 +256,16 @@ impl Grammar {
             Expr::Alt(alts)
         };
         for state in 0..pattern.len() {
-            let optional = Expr::Repeat {
-                expr: Box::new(transitions(state)),
-                min: 0,
-                max: Some(1),
+            let rule = if can_end(state) {
+                Expr::Repeat {
+                    expr: Box::new(transitions(state)),
+                    min: 0,
+                    max: Some(1),
+                }
+            } else {
+                transitions(state)
             };
-            self.rules.push((state_name(state), optional));
+            self.rules.push((state_name(state), rule));
         }
         if non_empty {
             transitions(0)
@@ -626,6 +658,27 @@ mod tests {
                         "{text:?} without {forbidden:?}, non_empty={non_empty}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn text_before_ends_only_at_the_terminator() {
+        for terminator in ["\n</p>\n", "aba", "aa", "ab"] {
+            let mut grammar = Grammar::new();
+            let value = grammar.text_before("value", terminator);
+            let mut alphabet: Vec<char> = terminator.chars().collect();
+            alphabet.push('x');
+            alphabet.sort_unstable();
+            alphabet.dedup();
+            for text in strings(&alphabet, 6) {
+                let whole = format!("{text}{terminator}");
+                let expected = whole.find(terminator) == Some(text.len());
+                assert_eq!(
+                    matches(&grammar, &value, &text),
+                    expected,
+                    "{text:?} before {terminator:?}"
+                );
             }
         }
     }
