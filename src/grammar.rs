@@ -2,6 +2,8 @@
 //! llama.cpp GBNF (D7, D20, D41).
 
 pub mod pattern;
+#[cfg(test)]
+mod server_test;
 
 use std::fmt::Write;
 
