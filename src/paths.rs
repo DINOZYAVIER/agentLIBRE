@@ -16,10 +16,6 @@ pub struct Paths {
     /// `$XDG_CONFIG_HOME/agentLIBRE`.
     pub config: PathBuf,
     /// `$XDG_DATA_HOME/agentLIBRE`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "sessions are stored from task-07")
-    )]
     pub data: PathBuf,
 }
 
@@ -48,6 +44,11 @@ impl Paths {
     /// User Functions, `functions/*.toml` (D39).
     pub fn functions(&self) -> PathBuf {
         self.config.join("functions")
+    }
+
+    /// Sessions, `sessions/*.jsonl` (D30, D39).
+    pub fn sessions(&self) -> PathBuf {
+        self.data.join("sessions")
     }
 
     /// User model formats, `formats/*.toml` (D39).

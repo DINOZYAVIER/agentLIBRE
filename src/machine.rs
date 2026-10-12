@@ -2,7 +2,9 @@
 //! (D11, D15, D33, D42, D44, D82-D84, D93).
 
 use crate::action::Outcome;
+use crate::error::Error;
 use crate::function::{Function, State};
+use crate::session::Unfinished;
 
 /// Whether the turn may go on after a step.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,6 +38,40 @@ impl<'f> Machine<'f> {
         };
         machine.enter(function.initial);
         machine
+    }
+
+    /// Continues an unfinished turn (D105): the state and visits come from
+    /// the session, `max_steps_total` counts anew. `function_name` names
+    /// the Function in errors.
+    pub fn resume(
+        function: &'f Function,
+        function_name: &str,
+        turn: &Unfinished,
+    ) -> Result<Machine<'f>, Error> {
+        let index = |name: &str| {
+            function
+                .states
+                .iter()
+                .position(|s| s.name == name)
+                .ok_or_else(|| Error::SessionState {
+                    state: name.into(),
+                    function: function_name.into(),
+                })
+        };
+        let Some(state) = &turn.state else {
+            return Ok(Machine::new(function));
+        };
+        let mut visits = vec![0; function.states.len()];
+        for (name, count) in &turn.visits {
+            visits[index(name)?] = *count;
+        }
+        Ok(Machine {
+            function,
+            state: index(state)?,
+            steps_in_visit: turn.steps_in_visit,
+            visits,
+            steps_total: 0,
+        })
     }
 
     /// The current state.

@@ -16,6 +16,8 @@ pub enum Error {
     MissingValue(String),
     /// An option is given twice.
     RepeatedOption(String),
+    /// `--function` with `--resume`: the session names its Function (D106).
+    FunctionWithResume,
     /// Neither `var` nor `HOME` is an absolute path.
     NoHome { var: &'static str },
     /// The current directory cannot be read.
@@ -75,6 +77,20 @@ pub enum Error {
     },
     /// llama-server answered something agl-lite does not understand.
     ServerReply { url: String, detail: String },
+    /// No session in `dir` has an id that is or starts with `id`.
+    SessionNotFound { id: String, dir: PathBuf },
+    /// More than one session id starts with `id` (D107).
+    SessionAmbiguous { id: String, count: usize },
+    /// Line `line` of a session file is not a valid event.
+    SessionLine {
+        path: PathBuf,
+        line: usize,
+        detail: String,
+    },
+    /// A session file cannot be written.
+    SessionWrite { path: PathBuf, source: io::Error },
+    /// The session continues a turn in a state the Function no longer has.
+    SessionState { state: String, function: String },
     /// Everything after loading the settings arrives in later tasks (D62).
     NotImplemented,
 }
@@ -155,6 +171,7 @@ impl Error {
                 | Error::UnknownOption(_)
                 | Error::MissingValue(_)
                 | Error::RepeatedOption(_)
+                | Error::FunctionWithResume
         )
     }
 

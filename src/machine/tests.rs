@@ -1,5 +1,6 @@
 use super::*;
 use crate::function::tests::{CODER, function, with_states};
+use crate::session::Unfinished;
 
 fn name(machine: &Machine) -> String {
     machine.state().name.clone()
@@ -99,4 +100,71 @@ fn leaving_resets_the_visit_steps() {
     assert_eq!(name(&machine), "a");
     machine.after_call("bash", Outcome::Ok);
     assert_eq!(name(&machine), "c");
+}
+
+#[test]
+fn resuming_an_unfinished_turn() {
+    let coder = function(CODER).unwrap();
+    let turn = Unfinished {
+        state: Some("explore".into()),
+        visits: vec![("explore".into(), 3), ("verify".into(), 2)],
+        steps_in_visit: 14,
+    };
+    let mut machine = Machine::resume(&coder, "coder", &turn).unwrap();
+    assert_eq!(name(&machine), "explore");
+    // One more step uses up the visit's 15 steps (D105).
+    machine.after_call("bash", Outcome::Ok);
+    assert_eq!(name(&machine), "answer");
+
+    // Visits carry over: verify has one visit left, explore none.
+    let turn = Unfinished {
+        state: Some("explore".into()),
+        visits: vec![("explore".into(), 3), ("verify".into(), 2)],
+        steps_in_visit: 0,
+    };
+    let mut machine = Machine::resume(&coder, "coder", &turn).unwrap();
+    machine.after_call("edit", Outcome::Ok);
+    assert_eq!(name(&machine), "verify");
+    machine.after_call("bash", Outcome::Fail);
+    assert_eq!(name(&machine), "answer");
+}
+
+#[test]
+fn resuming_counts_total_steps_anew() {
+    let function = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 2\ninitial = \"a\"\n\
+         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
+    )
+    .unwrap();
+    let turn = Unfinished {
+        state: Some("a".into()),
+        visits: vec![("a".into(), 1)],
+        steps_in_visit: 2,
+    };
+    let mut machine = Machine::resume(&function, "f", &turn).unwrap();
+    assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
+    assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::StepLimit);
+}
+
+#[test]
+fn resuming_without_a_state_starts_in_initial() {
+    let coder = function(CODER).unwrap();
+    let turn = Unfinished {
+        state: None,
+        visits: Vec::new(),
+        steps_in_visit: 0,
+    };
+    assert_eq!(
+        name(&Machine::resume(&coder, "coder", &turn).unwrap()),
+        "explore"
+    );
+    let gone = Unfinished {
+        state: Some("review".into()),
+        visits: vec![("review".into(), 1)],
+        steps_in_visit: 0,
+    };
+    assert!(matches!(
+        Machine::resume(&coder, "coder", &gone),
+        Err(Error::SessionState { state, .. }) if state == "review"
+    ));
 }

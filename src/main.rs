@@ -27,6 +27,11 @@ mod i18n;
 )]
 mod machine;
 mod paths;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agent loop writes sessions from task-08")
+)]
+mod session;
 mod settings;
 #[cfg(test)]
 mod test_server;
@@ -45,7 +50,9 @@ use cli::Command;
 use error::Error;
 use function::Function;
 use i18n::Lang;
+use machine::Machine;
 use paths::Paths;
+use session::Session;
 use settings::{ProjectFile, Settings, UserFile};
 
 fn main() -> ExitCode {
@@ -90,12 +97,25 @@ fn run(
     let project = settings::find_project(&cwd, &user_path)
         .map(|path| ProjectFile::load(&path, &user_path))
         .transpose()?;
+    if args.resume.is_some() && args.function.is_some() {
+        return Err(Error::FunctionWithResume);
+    }
+    let session = args
+        .resume
+        .as_deref()
+        .map(|id| Session::open(&paths.sessions(), id))
+        .transpose()?;
+    // A resumed session keeps its Function (D106).
+    let function = session.as_ref().map(|s| s.function.as_str());
     let settings = Settings::resolve(
         &user,
         &user_path,
         project.as_ref(),
-        args.function.as_deref(),
+        function.or(args.function.as_deref()),
     )?;
-    let _function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    let function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
+        Machine::resume(&function, &settings.function, &turn)?;
+    }
     Err(Error::NotImplemented)
 }

@@ -93,6 +93,12 @@ impl Error {
             (Error::MissingValue(arg), Uk) => format!("параметру `{arg}` потрібне значення"),
             (Error::RepeatedOption(arg), En) => format!("option `{arg}` is given twice"),
             (Error::RepeatedOption(arg), Uk) => format!("параметр `{arg}` вказано двічі"),
+            (Error::FunctionWithResume, En) => {
+                "`--function` cannot go with `--resume`: the session keeps its Function".into()
+            }
+            (Error::FunctionWithResume, Uk) => {
+                "`--function` не можна разом із `--resume`: сесія має свою Function".into()
+            }
             (Error::NoHome { var }, En) => {
                 format!("HOME is not set and {var} is not an absolute path")
             }
@@ -271,6 +277,36 @@ impl Error {
             (Error::ServerReply { url, detail }, Uk) => {
                 format!("неочікувана відповідь llama-server за адресою {url}: {detail}")
             }
+            (Error::SessionNotFound { id, dir }, En) => {
+                format!("no session `{id}` in {}", dir.display())
+            }
+            (Error::SessionNotFound { id, dir }, Uk) => {
+                format!("сесії `{id}` немає в {}", dir.display())
+            }
+            (Error::SessionAmbiguous { id, count }, En) => {
+                format!("{count} sessions start with `{id}`; give more of the id")
+            }
+            (Error::SessionAmbiguous { id, count }, Uk) => {
+                format!("сесій, що починаються з `{id}`: {count}; вкажи довшу частину id")
+            }
+            (Error::SessionLine { path, line, detail }, En) => {
+                format!("line {line} of {}: {detail}", path.display())
+            }
+            (Error::SessionLine { path, line, detail }, Uk) => {
+                format!("рядок {line} у {}: {detail}", path.display())
+            }
+            (Error::SessionWrite { path, source }, En) => {
+                format!("cannot write {}: {source}", path.display())
+            }
+            (Error::SessionWrite { path, source }, Uk) => {
+                format!("не вдалося записати {}: {source}", path.display())
+            }
+            (Error::SessionState { state, function }, En) => format!(
+                "the session continues in state `{state}`, which Function `{function}` no longer has"
+            ),
+            (Error::SessionState { state, function }, Uk) => format!(
+                "сесія продовжується в стані `{state}`, якого Function `{function}` вже не має"
+            ),
             (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
             (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
         }
