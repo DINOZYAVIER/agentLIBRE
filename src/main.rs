@@ -31,6 +31,11 @@ mod settings;
 #[cfg(test)]
 mod test_server;
 mod tomlfile;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the agent step runs tools from task-08")
+)]
+mod tools;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
