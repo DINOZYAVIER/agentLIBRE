@@ -114,14 +114,16 @@ impl Inner {
     }
 }
 
-/// `/help` (D134).
-fn help_text(lang: Lang) -> String {
-    let mut text = String::new();
-    for name in COMMANDS {
-        text.push_str(&format!("{name:<9} {}\n", texts::command(name, lang)));
+/// `/help` (D134); the keys only make sense in a terminal.
+fn help_text(lang: Lang, with_keys: bool) -> String {
+    let mut lines: Vec<String> = COMMANDS
+        .iter()
+        .map(|name| format!("{name:<9} {}", texts::command(name, lang)))
+        .collect();
+    if with_keys {
+        lines.push(texts::keys(lang).into());
     }
-    text.push_str(texts::keys(lang));
-    text
+    lines.join("\n")
 }
 
 /// `/status` (D134).
@@ -193,7 +195,7 @@ impl Input {
         }
         let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
         match name {
-            "/help" => self.notice(&help_text(self.lang), Role::Muted),
+            "/help" => self.notice(&help_text(self.lang, true), Role::Muted),
             "/status" => {
                 let info = self.control.lock().info.clone();
                 self.notice(&status_text(&self.facts, &info, self.lang), Role::Muted);
@@ -233,7 +235,6 @@ impl Input {
             inner.queue.clear();
             drop(inner);
             self.dock.set_queued(0);
-            self.notice(texts::interrupted_cleared(self.lang), Role::StatusPending);
         } else if self.dock.input_is_empty() {
             inner.quit = true;
             drop(inner);
@@ -475,7 +476,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 let mut failed = None;
                 match result {
                     Ok(TurnEnd::Answer(_)) => {}
-                    Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {}
+                    Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
+                        presenter
+                            .show_notice(texts::interrupted_cleared(lang), Role::StatusPending);
+                    }
                     Ok(TurnEnd::Stopped(reason)) => {
                         failed = Some(texts::stopped(reason, function, lang));
                     }
@@ -544,7 +548,7 @@ pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
             let name = message.split_whitespace().next().unwrap_or(message);
             match name {
                 "/quit" | "/exit" => break,
-                "/help" => println!("{}", help_text(lang)),
+                "/help" => println!("{}", help_text(lang, false)),
                 "/status" => {
                     let info = Info {
                         session: session.id.clone(),
@@ -618,6 +622,8 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let sink = Sink::default();
         let commands = COMMANDS
             .iter()
@@ -652,7 +658,7 @@ mod tests {
             theme: Theme::plain(),
             lang: Lang::En,
             history_file: std::env::temp_dir().join(format!(
-                "agl-lite-repl-{}/history.jsonl",
+                "agl-lite-repl-{}-{n}/history.jsonl",
                 std::process::id()
             )),
             request_stop: {
@@ -762,7 +768,6 @@ mod tests {
         f.input.key(Key::Ctrl('c'));
         assert_eq!(f.stops.load(Ordering::SeqCst), 1);
         assert!(f.inner().queue.is_empty());
-        assert!(f.output().contains("interrupted; queued input cleared"));
         assert_eq!(f.exits.load(Ordering::SeqCst), 0);
         // A second Ctrl-C during the same turn leaves at once (D120).
         f.input.key(Key::Ctrl('c'));

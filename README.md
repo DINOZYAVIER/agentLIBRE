@@ -5,5 +5,6 @@ machines to make local models more deterministic, without heavy
 guard rails: the tools it calls keep their own protections.
 
 Work in progress: `agl-lite -p "..."` runs one turn against an already
-running llama-server; the interactive mode is not implemented yet. Build
-with `cargo build --release`.
+running llama-server; `agl-lite` alone opens the interactive session (a
+line editor, a dock with the state and the queue, streamed thinking and
+text, tool cards). Build with `cargo build --release`.

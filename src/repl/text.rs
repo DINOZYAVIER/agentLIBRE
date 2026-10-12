@@ -55,6 +55,18 @@ pub fn hard_wrap(text: &str, width_limit: usize) -> Vec<String> {
     rows
 }
 
+/// Wraps one line of text at word boundaries into rows of at most
+/// `width_limit` columns.
+pub fn wrap_line(text: &str, width_limit: usize) -> Vec<String> {
+    let mut wrap = StreamWrap::new(width_limit);
+    let mut rows = wrap.push(text);
+    rows.extend(wrap.finish());
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
 /// Cuts `text` to `limit` columns, ending with `…` when it was longer.
 pub fn truncate(text: &str, limit: usize) -> String {
     if width(text) <= limit {
@@ -120,6 +132,11 @@ impl StreamWrap {
                 continue;
             }
             let w = ch.width().unwrap_or(0);
+            if self.current_width + w > self.width && ch == ' ' {
+                // The line is full; the space between words is dropped.
+                done.push(self.take());
+                continue;
+            }
             if self.current_width + w > self.width {
                 // Break at the last space when there is one.
                 match self.current.rfind(' ') {
@@ -194,6 +211,13 @@ mod tests {
         assert_eq!(wrap.live(), "next");
         assert_eq!(wrap.finish().as_deref(), Some("next"));
         assert_eq!(wrap.finish(), None);
+    }
+
+    #[test]
+    fn lines_wrap_at_words() {
+        assert_eq!(wrap_line("hello world foo", 11), ["hello world", "foo"]);
+        assert_eq!(wrap_line("", 5), [""]);
+        assert_eq!(wrap_line("abcdefgh", 5), ["abcde", "fgh"]);
     }
 
     #[test]

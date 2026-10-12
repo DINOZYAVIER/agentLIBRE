@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::markdown;
-use super::text::{StreamWrap, clean, hard_wrap, width};
+use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
@@ -394,9 +394,7 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
     let reset = theme.reset();
     let mut rows = Vec::new();
     for line in clean(message).trim_end().split('\n') {
-        for row in hard_wrap(line, columns - 2) {
-            rows.push(row);
-        }
+        rows.extend(wrap_line(line, columns - 2));
     }
     rows.iter()
         .enumerate()
@@ -661,6 +659,8 @@ mod tests {
         assert_eq!(rows, ["› hi      ", "  there   "]);
         let rows = user_lines(&Theme::plain(), "abcdefghijkl", 10);
         assert_eq!(rows, ["› abcdefgh", "  ijkl    "]);
+        let rows = user_lines(&Theme::plain(), "one two three", 10);
+        assert_eq!(rows, ["› one two ", "  three   "]);
     }
 
     #[test]

@@ -804,7 +804,8 @@ pub mod repl {
     /// Time as `5s`, `2m 3s` or `1h 4m`.
     pub fn duration(seconds: u64) -> String {
         match seconds {
-            0..=59 => format!("{seconds}s"),
+            0 => "<1s".into(),
+            1..=59 => format!("{seconds}s"),
             60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
             _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
         }
