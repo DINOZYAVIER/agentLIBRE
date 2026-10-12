@@ -16,6 +16,7 @@ mod paths;
 mod report;
 mod session;
 mod settings;
+mod term;
 #[cfg(test)]
 mod test_server;
 mod theme;
