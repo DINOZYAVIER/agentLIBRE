@@ -399,10 +399,10 @@ pub fn session(id: &str, lang: Lang) -> String {
     }
 }
 
-/// Why a turn stopped, and how to go on (D113).
-pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) -> String {
+/// Why a turn stopped (D113).
+pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> String {
     use Lang::{En, Uk};
-    let why = match (reason, lang) {
+    match (reason, lang) {
         (StopReason::StepLimit, En) => format!(
             "stopped: the turn took max_steps_total ({}) steps",
             function.max_steps_total
@@ -429,10 +429,15 @@ pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) ->
         (StopReason::ServerError, Uk) => "зупинено: помилка llama-server".into(),
         (StopReason::Interrupted, En) => "interrupted".into(),
         (StopReason::Interrupted, Uk) => "перервано".into(),
-    };
+    }
+}
+
+/// Why a turn stopped, and how to go on (D113).
+pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) -> String {
+    let why = stop_reason(reason, function, lang);
     let next = match lang {
-        En => "to continue",
-        Uk => "щоб продовжити",
+        Lang::En => "to continue",
+        Lang::Uk => "щоб продовжити",
     };
     format!(
         "{why}
@@ -638,5 +643,192 @@ mod tests {
         assert_eq!(Lang::from_code("en"), Some(Lang::En));
         assert_eq!(Lang::from_code("uk"), Some(Lang::Uk));
         assert_eq!(Lang::from_code("uk_UA"), None);
+    }
+}
+
+/// Texts of the interactive session (D118, D120, D124, D134, D135, D138).
+pub mod repl {
+    use super::Lang::{self, En, Uk};
+    use crate::session::StopReason;
+
+    /// The hint of an empty prompt.
+    pub fn hint(lang: Lang) -> &'static str {
+        match lang {
+            En => "Type a message or / for commands",
+            Uk => "Введіть повідомлення або / для команд",
+        }
+    }
+
+    /// The dock's state.
+    pub fn ready(lang: Lang) -> &'static str {
+        match lang {
+            En => "Ready",
+            Uk => "Готово",
+        }
+    }
+
+    pub fn generating(lang: Lang) -> &'static str {
+        match lang {
+            En => "Generating",
+            Uk => "Генерація",
+        }
+    }
+
+    pub fn running(tool: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("Running {tool}"),
+            Uk => format!("Виконується {tool}"),
+        }
+    }
+
+    pub fn queued(n: usize, lang: Lang) -> String {
+        match lang {
+            En => format!("queued {n}"),
+            Uk => format!("у черзі {n}"),
+        }
+    }
+
+    /// The description of a `/` command in the menu and in `/help`.
+    pub fn command(name: &str, lang: Lang) -> &'static str {
+        match (name, lang) {
+            ("/quit", En) => "close agl-lite",
+            ("/quit", Uk) => "закрити agl-lite",
+            ("/exit", En) => "same as /quit",
+            ("/exit", Uk) => "те саме, що /quit",
+            ("/help", En) => "show commands and keys",
+            ("/help", Uk) => "показати команди й клавіші",
+            ("/status", En) => "show the session",
+            ("/status", Uk) => "показати сесію",
+            ("/new", En) => "start a new session",
+            ("/new", Uk) => "почати нову сесію",
+            _ => "",
+        }
+    }
+
+    pub fn keys(lang: Lang) -> &'static str {
+        match lang {
+            En => {
+                "Enter sends; Shift-Enter or Alt-Enter adds a line; Up/Down walk the history; \
+                 Ctrl-C stops the turn (or clears the line, or quits when it is empty); \
+                 Ctrl-D quits"
+            }
+            Uk => {
+                "Enter надсилає; Shift-Enter або Alt-Enter додає рядок; Вгору/Вниз — історія; \
+                 Ctrl-C зупиняє хід (або очищає рядок, або виходить, якщо він порожній); \
+                 Ctrl-D виходить"
+            }
+        }
+    }
+
+    pub fn unknown_command(name: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("unknown command {name}; try /help"),
+            Uk => format!("невідома команда {name}; спробуй /help"),
+        }
+    }
+
+    pub fn busy(name: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("{name} is not available during a turn; stop it with Ctrl-C first"),
+            Uk => format!("{name} недоступна під час ходу; спершу зупини його Ctrl-C"),
+        }
+    }
+
+    /// One line of `/status`.
+    pub fn status_line(label: &str, value: &str, lang: Lang) -> String {
+        let label = match (label, lang) {
+            ("session", En) => "session",
+            ("session", Uk) => "сесія",
+            ("function", En) => "Function",
+            ("function", Uk) => "Function",
+            ("workspace", En) => "workspace",
+            ("workspace", Uk) => "робоча тека",
+            ("server", En) => "server",
+            ("server", Uk) => "сервер",
+            ("context", En) => "context",
+            ("context", Uk) => "контекст",
+            ("state", En) => "state",
+            ("state", Uk) => "стан",
+            (other, _) => other,
+        };
+        format!("{label}: {value}")
+    }
+
+    pub fn tokens(n: usize, lang: Lang) -> String {
+        match lang {
+            En => format!("{n} tokens"),
+            Uk => format!("{n} токенів"),
+        }
+    }
+
+    pub fn idle(lang: Lang) -> &'static str {
+        match lang {
+            En => "waiting for a message",
+            Uk => "чекає повідомлення",
+        }
+    }
+
+    pub fn unfinished(state: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("an interrupted turn in state {state}; the next message continues it"),
+            Uk => format!("обірваний хід у стані {state}; наступне повідомлення продовжить його"),
+        }
+    }
+
+    /// The note under a cut-short card (D138).
+    pub fn limited(lines: usize, chars: usize, lang: Lang) -> String {
+        match lang {
+            En => format!("… limited to {lines} lines / {chars} chars"),
+            Uk => format!("… обмежено {lines} рядками / {chars} символами"),
+        }
+    }
+
+    pub fn worked_for(time: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("Worked for {time}"),
+            Uk => format!("Працював {time}"),
+        }
+    }
+
+    /// Time as `5s`, `2m 3s` or `1h 4m`.
+    pub fn duration(seconds: u64) -> String {
+        match seconds {
+            0..=59 => format!("{seconds}s"),
+            60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
+            _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+        }
+    }
+
+    pub fn interrupted_cleared(lang: Lang) -> &'static str {
+        match lang {
+            En => "interrupted; queued input cleared",
+            Uk => "перервано; чергу введення очищено",
+        }
+    }
+
+    pub fn error_cleared(lang: Lang) -> &'static str {
+        match lang {
+            En => "queued input cleared",
+            Uk => "чергу введення очищено",
+        }
+    }
+
+    /// The line that ends a turn that stopped (D127).
+    pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {
+        super::stop_reason(reason, function, lang)
+    }
+
+    pub fn new_session(id: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("new session {id}"),
+            Uk => format!("нова сесія {id}"),
+        }
+    }
+
+    pub fn tool_label(lang: Lang) -> &'static str {
+        match lang {
+            En => "TOOL",
+            Uk => "TOOL",
+        }
     }
 }

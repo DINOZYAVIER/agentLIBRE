@@ -2,4 +2,5 @@
 
 mod editor;
 mod markdown;
+mod present;
 mod text;
