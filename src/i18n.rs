@@ -3,7 +3,9 @@
 use std::ffi::OsString;
 
 use crate::error::{Error, Expected, FunctionProblem, TemplateProblem};
+use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
+use crate::session::StopReason;
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,10 +309,92 @@ impl Error {
             (Error::SessionState { state, function }, Uk) => format!(
                 "сесія продовжується в стані `{state}`, якого Function `{function}` вже не має"
             ),
+            (Error::OutsideGrammar(text), En) => {
+                format!("llama-server generated text outside the grammar: {text:?}")
+            }
+            (Error::OutsideGrammar(text), Uk) => {
+                format!("llama-server згенерував текст поза граматикою: {text:?}")
+            }
+            (Error::Interrupted, En) => "interrupted".into(),
+            (Error::Interrupted, Uk) => "перервано".into(),
             (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
             (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
         }
     }
+}
+
+/// The label of streamed thinking (D109).
+pub fn thinking(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "thinking",
+        Lang::Uk => "міркування",
+    }
+}
+
+/// `n` lines of output.
+pub fn lines(n: usize, lang: Lang) -> String {
+    match lang {
+        Lang::En if n == 1 => "1 line".into(),
+        Lang::En => format!("{n} lines"),
+        Lang::Uk => {
+            let word = match (n % 10, n % 100) {
+                (1, 11) | (2..=4, 12..=14) | (0 | 5..=9, _) => "рядків",
+                (1, _) => "рядок",
+                (2..=4, _) => "рядки",
+                _ => "рядків",
+            };
+            format!("{n} {word}")
+        }
+    }
+}
+
+/// The session line at the start of a run (D109).
+pub fn session(id: &str, lang: Lang) -> String {
+    match lang {
+        Lang::En => format!("session {id}"),
+        Lang::Uk => format!("сесія {id}"),
+    }
+}
+
+/// Why a turn stopped, and how to go on (D113).
+pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) -> String {
+    use Lang::{En, Uk};
+    let why = match (reason, lang) {
+        (StopReason::StepLimit, En) => format!(
+            "stopped: the turn took max_steps_total ({}) steps",
+            function.max_steps_total
+        ),
+        (StopReason::StepLimit, Uk) => format!(
+            "зупинено: хід зробив max_steps_total ({}) кроків",
+            function.max_steps_total
+        ),
+        (StopReason::ContextFull, En) => {
+            "stopped: the conversation no longer fits the model context; start a new session".into()
+        }
+        (StopReason::ContextFull, Uk) => {
+            "зупинено: розмова вже не вміщується в контекст моделі; почни нову сесію".into()
+        }
+        (StopReason::CutOff, En) => format!(
+            "stopped: the action hit max_action_tokens ({})",
+            function.max_action_tokens
+        ),
+        (StopReason::CutOff, Uk) => format!(
+            "зупинено: дія дійшла до max_action_tokens ({})",
+            function.max_action_tokens
+        ),
+        (StopReason::ServerError, En) => "stopped: llama-server failed".into(),
+        (StopReason::ServerError, Uk) => "зупинено: помилка llama-server".into(),
+        (StopReason::Interrupted, En) => "interrupted".into(),
+        (StopReason::Interrupted, Uk) => "перервано".into(),
+    };
+    let next = match lang {
+        En => "to continue",
+        Uk => "щоб продовжити",
+    };
+    format!(
+        "{why}
+{next}: agl-lite --resume {id} -p \"...\""
+    )
 }
 
 fn template_problem(problem: &TemplateProblem, lang: Lang) -> String {
@@ -479,6 +563,31 @@ mod tests {
             "невідомий параметр `--url`\nДив. `agl-lite --help`."
         );
         assert!(!Error::NotImplemented.message(Lang::En).contains("--help"));
+    }
+
+    #[test]
+    fn ukrainian_line_counts() {
+        let words: Vec<String> = [0, 1, 2, 5, 11, 12, 21, 22, 25, 101, 112]
+            .iter()
+            .map(|&n| lines(n, Lang::Uk))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "0 рядків",
+                "1 рядок",
+                "2 рядки",
+                "5 рядків",
+                "11 рядків",
+                "12 рядків",
+                "21 рядок",
+                "22 рядки",
+                "25 рядків",
+                "101 рядок",
+                "112 рядків"
+            ]
+        );
+        assert_eq!(lines(1, Lang::En), "1 line");
     }
 
     #[test]

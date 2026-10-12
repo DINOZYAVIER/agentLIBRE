@@ -13,7 +13,7 @@ fn history() -> Vec<Message> {
         Message::User("What is in the current directory?".into()),
         Message::Assistant {
             thinking: Some("EARLIER-THOUGHT".into()),
-            answer: None,
+            text: None,
             call: Some(ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
@@ -26,13 +26,13 @@ fn history() -> Vec<Message> {
         },
         Message::Assistant {
             thinking: Some("EARLIER-ANSWER-THOUGHT".into()),
-            answer: Some("Cargo.toml and src.".into()),
+            text: Some("Cargo.toml and src.".into()),
             call: None,
         },
         Message::User("Show the manifest.".into()),
         Message::Assistant {
             thinking: Some("CURRENT-THOUGHT".into()),
-            answer: None,
+            text: None,
             call: Some(ToolCall {
                 id: "c2".into(),
                 name: "bash".into(),

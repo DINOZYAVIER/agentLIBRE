@@ -25,6 +25,8 @@ pub struct Machine<'f> {
     /// Visits of each state in this turn.
     visits: Vec<u32>,
     steps_total: u32,
+    /// Whether the last call started a visit.
+    entered: bool,
 }
 
 impl<'f> Machine<'f> {
@@ -35,6 +37,7 @@ impl<'f> Machine<'f> {
             steps_in_visit: 0,
             visits: vec![0; function.states.len()],
             steps_total: 0,
+            entered: false,
         };
         machine.enter(function.initial);
         machine
@@ -71,6 +74,7 @@ impl<'f> Machine<'f> {
             steps_in_visit: turn.steps_in_visit,
             visits,
             steps_total: 0,
+            entered: false,
         })
     }
 
@@ -79,9 +83,15 @@ impl<'f> Machine<'f> {
         &self.function.states[self.state]
     }
 
+    /// Whether the last call started a visit, to log it (D104).
+    pub fn entered(&self) -> bool {
+        self.entered
+    }
+
     /// Records a call of `tool` that ended with `outcome` and moves to the
     /// next state. An answer ends the turn instead (D44).
     pub fn after_call(&mut self, tool: &str, outcome: Outcome) -> Progress {
+        self.entered = false;
         self.steps_total += 1;
         self.steps_in_visit += 1;
         let state = self.state();
@@ -118,6 +128,7 @@ impl<'f> Machine<'f> {
         self.visits[target] += 1;
         self.state = target;
         self.steps_in_visit = 0;
+        self.entered = true;
     }
 }
 

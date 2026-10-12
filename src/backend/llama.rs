@@ -10,6 +10,7 @@ use super::{Backend, Generated, Message, Prompt, Request, Stop, ToolDoc, kept_th
 use crate::action::Value;
 use crate::error::Error;
 use crate::function::Sampling;
+use crate::interrupt;
 
 /// How long connecting may take (D97).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -124,7 +125,18 @@ impl Backend for Llama {
         let mut text = String::new();
         let reader = BufReader::new(response.into_body().into_reader());
         for line in reader.lines() {
-            let line = line.map_err(|error| self.unreachable(error))?;
+            // Ctrl-C interrupts the read (D111); dropping the response
+            // closes the connection, and the server stops generating.
+            if interrupt::interrupted() {
+                return Err(Error::Interrupted);
+            }
+            let line = line.map_err(|error| {
+                if interrupt::interrupted() {
+                    Error::Interrupted
+                } else {
+                    self.unreachable(error)
+                }
+            })?;
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
@@ -182,12 +194,12 @@ fn messages_json(prompt: &Prompt) -> Vec<Json> {
             Message::User(text) => json!({"role": "user", "content": text}),
             Message::Assistant {
                 thinking,
-                answer,
+                text,
                 call,
             } => {
                 let mut json = json!({
                     "role": "assistant",
-                    "content": answer.as_deref().unwrap_or_default(),
+                    "content": text.as_deref().unwrap_or_default(),
                 });
                 if let Some(thinking) = thinking.as_deref().filter(|_| keep_thinking) {
                     json["reasoning_content"] = thinking.into();

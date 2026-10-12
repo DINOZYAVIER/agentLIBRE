@@ -99,10 +99,6 @@ pub fn find_project(cwd: &Path, user_path: &Path) -> Option<PathBuf> {
 
 /// Settings of a run.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the agent loop from task-08")
-)]
 pub struct Settings {
     pub server_url: String,
     pub function: String,

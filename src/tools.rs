@@ -10,6 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::action::{Outcome, Value};
+use crate::interrupt::{self, signal_group};
+use crate::session::INTERRUPTED;
 
 /// How much of a result the model sees (D28, D103).
 const LIMIT: usize = 16 * 1024;
@@ -136,16 +138,18 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
 
     let group = child.id();
     let status = wait_until(&mut child, Instant::now() + timeout);
-    let timed_out = status.is_none();
+    // Ctrl-C stops the command like a timeout (D111).
+    let interrupted = status.is_none() && interrupt::interrupted();
+    let timed_out = status.is_none() && !interrupted;
     // End what the command left running, gently first (D102, D103).
-    signal_group(group, "TERM");
+    signal_group(group, libc::SIGTERM);
     let status = status.or_else(|| wait_until(&mut child, Instant::now() + GRACE));
     let deadline = Instant::now() + GRACE;
     while !reading.is_finished() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
     if !reading.is_finished() || status.is_none() {
-        signal_group(group, "KILL");
+        signal_group(group, libc::SIGKILL);
     }
     let status = status.or_else(|| child.wait().ok());
     // A process that left the group may still hold the pipe; do not wait
@@ -155,6 +159,12 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
         thread::sleep(Duration::from_millis(10));
     }
 
+    if interrupted {
+        return ToolResult {
+            outcome: Outcome::Fail,
+            content: INTERRUPTED.into(),
+        };
+    }
     let mut content = tail.lock().unwrap().text();
     let mut footer = Vec::new();
     let outcome = if timed_out {
@@ -186,24 +196,18 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
     ToolResult { outcome, content }
 }
 
-/// Waits for `child` until `deadline`; `None` if it is still running.
+/// Waits for `child` until `deadline` or Ctrl-C; `None` if it is still
+/// running.
 fn wait_until(child: &mut Child, deadline: Instant) -> Option<std::process::ExitStatus> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline && !interrupt::interrupted() => {
+                thread::sleep(Duration::from_millis(10))
+            }
             _ => return None,
         }
     }
-}
-
-/// Sends SIG`name` to the process group `group`. An empty group is fine.
-fn signal_group(group: u32, name: &str) {
-    let _ = Command::new("kill")
-        .args(["-s", name, "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// Replaces the only occurrence of `old` in the file at `path` with `new`

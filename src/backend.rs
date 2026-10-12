@@ -11,10 +11,11 @@ use crate::function::Sampling;
 pub enum Message {
     System(String),
     User(String),
-    /// One step of the model: its thinking and either a call or an answer.
+    /// One step of the model: its thinking, its text (an answer, or what
+    /// it wrote before a call, D114) and its call.
     Assistant {
         thinking: Option<String>,
-        answer: Option<String>,
+        text: Option<String>,
         call: Option<ToolCall>,
     },
     /// The result of the call `id`.
@@ -134,7 +135,7 @@ mod tests {
     fn step(thinking: &str) -> Message {
         Message::Assistant {
             thinking: Some(thinking.into()),
-            answer: Some("a".into()),
+            text: Some("a".into()),
             call: None,
         }
     }

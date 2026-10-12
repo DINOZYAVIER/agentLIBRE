@@ -135,7 +135,7 @@ fn check_actions() {
             ),
         ],
     );
-    if let Some(Action::Call { tool, args }) = &edit
+    if let Some(Action::Call { tool, args, .. }) = &edit
         && tool == "edit"
     {
         assert_eq!(args[0], ("path".into(), Value::Text("src/lib.rs".into())));

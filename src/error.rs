@@ -91,6 +91,10 @@ pub enum Error {
     SessionWrite { path: PathBuf, source: io::Error },
     /// The session continues a turn in a state the Function no longer has.
     SessionState { state: String, function: String },
+    /// Ctrl-C stopped a generation (D111).
+    Interrupted,
+    /// The server generated text the grammar does not allow.
+    OutsideGrammar(String),
     /// Everything after loading the settings arrives in later tasks (D62).
     NotImplemented,
 }
@@ -177,6 +181,10 @@ impl Error {
 
     /// Process exit status for this error.
     pub fn exit_code(&self) -> u8 {
-        if self.is_usage() { 2 } else { 1 }
+        match self {
+            Error::Interrupted => crate::interrupt::EXIT_CODE,
+            _ if self.is_usage() => 2,
+            _ => 1,
+        }
     }
 }

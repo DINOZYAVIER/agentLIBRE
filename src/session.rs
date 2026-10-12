@@ -60,7 +60,11 @@ pub enum Event {
     /// A visit of a state begins.
     State(String),
     Thinking(String),
-    Call(ToolCall),
+    /// A call and the text written before it (D114).
+    Call {
+        text: Option<String>,
+        call: ToolCall,
+    },
     Result {
         id: String,
         outcome: Outcome,
@@ -192,7 +196,7 @@ impl Session {
                     source,
                 })?;
         }
-        if let Some(Event::Call(call)) = session.events.last() {
+        if let Some(Event::Call { call, .. }) = session.events.last() {
             let id = call.id.clone();
             session.append(Event::Result {
                 id,
@@ -235,9 +239,9 @@ impl Session {
                     messages.push(Message::User(text.clone()));
                 }
                 Event::Thinking(text) => thinking = Some(text.clone()),
-                Event::Call(call) => messages.push(Message::Assistant {
+                Event::Call { text, call } => messages.push(Message::Assistant {
                     thinking: thinking.take(),
-                    answer: None,
+                    text: text.clone(),
                     call: Some(call.clone()),
                 }),
                 Event::Result { id, content, .. } => messages.push(Message::Tool {
@@ -246,7 +250,7 @@ impl Session {
                 }),
                 Event::Answer(text) => messages.push(Message::Assistant {
                     thinking: thinking.take(),
-                    answer: Some(text.clone()),
+                    text: Some(text.clone()),
                     call: None,
                 }),
                 Event::State(_) | Event::Stop(_) => {}
@@ -294,7 +298,7 @@ impl Session {
         let calls = self
             .events
             .iter()
-            .filter(|e| matches!(e, Event::Call(_)))
+            .filter(|e| matches!(e, Event::Call { .. }))
             .count();
         format!("c{}", calls + 1)
     }
@@ -345,7 +349,7 @@ fn event_json(event: &Event) -> Json {
         Event::User(text) => json!({"type": "user", "text": text}),
         Event::State(state) => json!({"type": "state", "state": state}),
         Event::Thinking(text) => json!({"type": "thinking", "text": text}),
-        Event::Call(call) => {
+        Event::Call { text, call } => {
             let args: Map<String, Json> = call
                 .args
                 .iter()
@@ -357,7 +361,11 @@ fn event_json(event: &Event) -> Json {
                     (name.clone(), value)
                 })
                 .collect();
-            json!({"type": "call", "id": call.id, "tool": call.name, "args": args})
+            let mut json = json!({"type": "call", "id": call.id, "tool": call.name, "args": args});
+            if let Some(text) = text {
+                json["text"] = text.as_str().into();
+            }
+            json
         }
         Event::Result {
             id,
@@ -391,11 +399,14 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 })
                 .collect::<Option<Vec<_>>>()?;
             let name = text("tool")?;
-            Event::Call(ToolCall {
-                args: args_in_order(&name, args),
-                id: text("id")?,
-                name,
-            })
+            Event::Call {
+                text: text("text"),
+                call: ToolCall {
+                    args: args_in_order(&name, args),
+                    id: text("id")?,
+                    name,
+                },
+            }
         }
         "result" => Event::Result {
             id: text("id")?,

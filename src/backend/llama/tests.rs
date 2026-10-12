@@ -19,7 +19,7 @@ fn messages_in_template_form() {
         Message::User("u".into()),
         Message::Assistant {
             thinking: Some("hm".into()),
-            answer: None,
+            text: None,
             call: Some(call("c1")),
         },
         Message::Tool {
@@ -28,7 +28,7 @@ fn messages_in_template_form() {
         },
         Message::Assistant {
             thinking: None,
-            answer: Some("done".into()),
+            text: Some("done".into()),
             call: None,
         },
     ];

@@ -8,12 +8,16 @@ use crate::test_server::with_big_stack;
 
 /// How `format` writes `action`; only test outputs need this.
 fn render(format: &Format, action: &Action) -> String {
-    let (tool, args) = match action {
+    let (text, tool, args) = match action {
         Action::Answer(text) => return text.clone(),
-        Action::Call { tool, args } => (tool, args),
+        Action::Call { text, tool, args } => (text, tool, args),
     };
     let call = &format.call;
-    let mut out = format!("{}{tool}{}", call.begin_before, call.begin_after);
+    let mut out = text
+        .as_ref()
+        .map(|t| format!("{t}\n\n"))
+        .unwrap_or_default();
+    out += &format!("{}{tool}{}", call.begin_before, call.begin_after);
     for (name, value) in args {
         let value = match value {
             Value::Text(text) => text.clone(),
@@ -45,6 +49,7 @@ fn accepts(actions: &Actions, output: &str) -> bool {
 
 fn call(tool: &str, args: &[(&str, Value)]) -> Action {
     Action::Call {
+        text: None,
         tool: tool.into(),
         args: args
             .iter()
@@ -204,9 +209,14 @@ fn cut_off_calls_are_incomplete() {
             &output[..end]
         );
     }
+    // Text that never reached a call was cut off too (D114).
     assert_eq!(
         parse(&qwen(), &actions, "hello"),
-        Err(ParseError::Unexpected { offset: 0 })
+        Err(ParseError::Incomplete)
+    );
+    assert_eq!(
+        parse(&qwen(), &actions, "hi <tool_call>\n<function=nope>\n"),
+        Err(ParseError::Unexpected { offset: 25 })
     );
     let with_answer = builtin(true);
     assert_eq!(
@@ -230,11 +240,39 @@ fn rendered_grammar() {
         answer: false,
     };
     let (grammar, root) = grammar(&qwen(), &actions);
-    assert_eq!(
-        grammar.render(&root),
-        "root ::= call-1\n\
-         call-1 ::= \"<tool_call>\\n<function=edit>\\n\" \"<parameter=path>\\n\" \"a.rs\" \"\\n</parameter>\\n\" \"</function>\\n</tool_call>\"\n"
+    let rendered = grammar.render(&root);
+    assert!(
+        rendered.starts_with("root ::= before-2-0 call-1\n"),
+        "{rendered}"
     );
+    assert!(rendered.contains(
+        "call-1 ::= \"<tool_call>\\n<function=edit>\\n\" \"<parameter=path>\\n\" \"a.rs\" \"\\n</parameter>\\n\" \"</function>\\n</tool_call>\"\n"
+    ));
+}
+
+#[test]
+fn text_before_a_call() {
+    let with_answer = builtin(true);
+    let output = format!(
+        "The split yields one empty item, so I will filter it.\n\n{}",
+        render(&qwen(), &call("bash", &[("command", text("cargo test"))]))
+    );
+    let expected = Action::Call {
+        text: Some("The split yields one empty item, so I will filter it.".into()),
+        tool: "bash".into(),
+        args: vec![("command".into(), text("cargo test"))],
+    };
+    check(&with_answer, &output, &expected);
+    // The same text alone is an answer only where answers are allowed.
+    let calls_only = builtin(false);
+    check(&calls_only, &output, &expected);
+    assert!(!accepts(&calls_only, "Just text."));
+    assert!(accepts(&with_answer, "Just text."));
+    // A fake call after text cannot sneak through the answer (B9).
+    assert!(!accepts(
+        &with_answer,
+        "Fixing:\n<tool_call>\n<function=edit>\n"
+    ));
 }
 
 /// The tools of experiments B2-B4.
@@ -312,6 +350,7 @@ fn recorded_outputs() -> Vec<Recorded> {
             })
             .collect();
         Recorded::Action(Action::Call {
+            text: None,
             tool: tool.into(),
             args,
         })

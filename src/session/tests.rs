@@ -19,14 +19,17 @@ impl Drop for Dir {
 }
 
 fn call(id: &str, command: &str) -> Event {
-    Event::Call(ToolCall {
-        id: id.into(),
-        name: "bash".into(),
-        args: vec![
-            ("command".into(), Value::Text(command.into())),
-            ("timeout".into(), Value::Int(30)),
-        ],
-    })
+    Event::Call {
+        text: None,
+        call: ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            args: vec![
+                ("command".into(), Value::Text(command.into())),
+                ("timeout".into(), Value::Int(30)),
+            ],
+        },
+    }
 }
 
 fn result(id: &str, outcome: Outcome) -> Event {
@@ -109,14 +112,17 @@ fn write_and_read_back() {
 #[test]
 fn edit_arguments_keep_their_order() {
     let dir = Dir::new("order");
-    let edit = Event::Call(ToolCall {
-        id: "c1".into(),
-        name: "edit".into(),
-        args: ["path", "old", "new"]
-            .iter()
-            .map(|n| (n.to_string(), Value::Text(n.to_string())))
-            .collect(),
-    });
+    let edit = Event::Call {
+        text: Some("Let me fix it.".into()),
+        call: ToolCall {
+            id: "c1".into(),
+            name: "edit".into(),
+            args: ["path", "old", "new"]
+                .iter()
+                .map(|n| (n.to_string(), Value::Text(n.to_string())))
+                .collect(),
+        },
+    };
     let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
     session.append(edit.clone()).unwrap();
     session.append(result("c1", Outcome::Ok)).unwrap();
@@ -146,9 +152,9 @@ fn history_for_the_template() {
             Message::User("u1".into()),
             Message::Assistant {
                 thinking: Some("t1".into()),
-                answer: None,
+                text: None,
                 call: Some(match &session.events[3] {
-                    Event::Call(call) => call.clone(),
+                    Event::Call { call, .. } => call.clone(),
                     _ => unreachable!(),
                 }),
             },
@@ -158,7 +164,7 @@ fn history_for_the_template() {
             },
             Message::Assistant {
                 thinking: None,
-                answer: Some("a1".into()),
+                text: Some("a1".into()),
                 call: None,
             },
             Message::User("u2".into()),

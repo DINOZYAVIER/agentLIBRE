@@ -113,8 +113,10 @@ pub enum Value {
 /// What the model did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// A tool call with its arguments in call order.
+    /// A tool call with its arguments in call order, and the text the model
+    /// wrote before it, if any (D114).
     Call {
+        text: Option<String>,
         tool: String,
         args: Vec<(String, Value)>,
     },
@@ -170,13 +172,24 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
         items.push(Expr::literal(&call.end));
         alts.push(grammar.rule("call", Expr::Seq(items)));
     }
-    if actions.answer {
-        alts.push(grammar.text_without("answer", &call.begin_before, true));
+    let mut root = Vec::new();
+    if !alts.is_empty() {
+        // Text may come before a call (D114); it cannot start one.
+        let before = grammar.text_without("before", &call.begin_before, false);
+        let calls = if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            Expr::Alt(alts)
+        };
+        root.push(Expr::Seq(vec![before, calls]));
     }
-    let root = if alts.len() == 1 {
-        alts.pop().unwrap()
+    if actions.answer {
+        root.push(grammar.text_without("answer", &call.begin_before, true));
+    }
+    let root = if root.len() == 1 {
+        root.pop().unwrap()
     } else {
-        Expr::Alt(alts)
+        Expr::Alt(root)
     };
     (grammar, root)
 }
@@ -184,19 +197,25 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
 /// Parses an output generated under [`grammar`].
 pub fn parse(format: &Format, actions: &Actions, output: &str) -> Result<Action, ParseError> {
     let call = &format.call;
-    let mut cursor = Cursor {
-        text: output,
-        pos: 0,
-    };
-    // The grammar keeps the start of a call out of answers.
-    if actions.tools.is_empty() || !output.starts_with(&call.begin_before) {
+    // The grammar keeps the start of a call out of any text, so the first
+    // one starts the call (D114).
+    let start = output
+        .find(&call.begin_before)
+        .filter(|_| !actions.tools.is_empty());
+    let Some(start) = start else {
         if actions.answer && !output.is_empty() {
             return Ok(Action::Answer(output.into()));
         }
-        if actions.tools.is_empty() {
-            return Err(ParseError::Incomplete);
-        }
-    }
+        // Without an answer, the output must reach a call.
+        return Err(ParseError::Incomplete);
+    };
+    let text = Some(output[..start].trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let mut cursor = Cursor {
+        text: output,
+        pos: start,
+    };
     cursor.expect(&call.begin_before)?;
     let tool = cursor.choose(
         actions
@@ -246,6 +265,7 @@ pub fn parse(format: &Format, actions: &Actions, output: &str) -> Result<Action,
         return Err(cursor.unexpected());
     }
     Ok(Action::Call {
+        text,
         tool: tool.name.clone(),
         args,
     })

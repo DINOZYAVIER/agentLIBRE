@@ -1,65 +1,48 @@
 //! agl-lite: a coding agent for local models whose state machine drives
 //! the grammar. See `SPEC.md`.
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent step uses actions from task-08")
-)]
 mod action;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent step uses the backend from task-08")
-)]
+mod agent;
 mod backend;
 mod cli;
 mod error;
 mod format;
 mod function;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent step uses it from task-08")
-)]
 mod grammar;
 mod i18n;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent loop runs it from task-08")
-)]
+mod interrupt;
 mod machine;
 mod paths;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent loop writes sessions from task-08")
-)]
+mod report;
 mod session;
 mod settings;
 #[cfg(test)]
 mod test_server;
 mod tomlfile;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent step runs tools from task-08")
-)]
 mod tools;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+use agent::{Agent, TurnEnd};
+use backend::Backend;
+use backend::llama::Llama;
 use cli::Command;
 use error::Error;
 use function::Function;
 use i18n::Lang;
 use machine::Machine;
 use paths::Paths;
-use session::Session;
+use report::StderrReport;
+use session::{Session, StopReason};
 use settings::{ProjectFile, Settings, UserFile};
 
 fn main() -> ExitCode {
     let env = |name: &str| std::env::var_os(name);
     let mut lang = Lang::from_locale(env);
     match run(env, std::env::args_os().skip(1), &mut lang) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("agl-lite: {}", error.message(lang));
             ExitCode::from(error.exit_code())
@@ -73,7 +56,7 @@ fn run(
     env: impl Fn(&str) -> Option<OsString>,
     args: impl IntoIterator<Item = OsString>,
     lang: &mut Lang,
-) -> Result<(), Error> {
+) -> Result<ExitCode, Error> {
     let loaded = Paths::from_env(&env).and_then(|paths| {
         let user = UserFile::load(&paths.settings_file())?;
         Ok((paths, user))
@@ -87,7 +70,7 @@ fn run(
         Command::Help => {
             // A closed pipe, as in `agl-lite --help | head -1`, is not an error.
             let _ = writeln!(io::stdout(), "{}", i18n::help(*lang));
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
     };
@@ -114,8 +97,43 @@ fn run(
         function.or(args.function.as_deref()),
     )?;
     let function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    // A turn to continue needs its state in the Function (D105).
     if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
         Machine::resume(&function, &settings.function, &turn)?;
     }
-    Err(Error::NotImplemented)
+    let Some(message) = args.prompt else {
+        return Err(Error::NotImplemented);
+    };
+
+    let workspace = session.as_ref().map_or(cwd, |s| s.workspace.clone());
+    let backend = Llama::new(&settings.server_url);
+    let context = backend.context_size()?;
+    let mut session = match session {
+        Some(session) => session,
+        None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
+    };
+    eprintln!("{}", i18n::session(&session.id, *lang));
+    interrupt::install();
+    let id = session.id.clone();
+    let mut agent = Agent {
+        function: &function,
+        function_name: &settings.function,
+        backend: &backend,
+        session: &mut session,
+        workspace: &workspace,
+        context,
+    };
+    match agent.turn(&message, &mut StderrReport::new(*lang))? {
+        TurnEnd::Answer(text) => {
+            println!("{text}");
+            Ok(ExitCode::SUCCESS)
+        }
+        TurnEnd::Stopped(reason) => {
+            eprintln!("agl-lite: {}", i18n::stopped(reason, &function, &id, *lang));
+            Ok(ExitCode::from(match reason {
+                StopReason::Interrupted => interrupt::EXIT_CODE,
+                _ => 1,
+            }))
+        }
+    }
 }

@@ -132,10 +132,6 @@ impl Format {
     /// block `think.open` + `think.close`. A `think.open` the template
     /// already added is replaced. Formats without `think` leave the prompt
     /// as it is.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the agent step uses it from task-08")
-    )]
     pub fn start_step(&self, mut prompt: String, think: bool) -> String {
         let Some(Think { open, close }) = &self.think else {
             return prompt;

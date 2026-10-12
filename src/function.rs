@@ -26,10 +26,6 @@ const DEFAULT_MAX_ACTION_TOKENS: u32 = 2048;
 
 /// A loaded Function.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent loop reads it from task-08")
-)]
 pub struct Function {
     pub format: Format,
     pub system: String,
@@ -55,10 +51,6 @@ pub struct Sampling {
 
 /// A state of the Function (D11).
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the agent loop reads it from task-08")
-)]
 pub struct State {
     pub name: String,
     pub instruction: Option<String>,
