@@ -86,8 +86,17 @@ impl Report for Log {
         }
     }
     fn thinking_done(&mut self) {}
+    fn action_text(&mut self, piece: &str) {
+        match self.0.last_mut() {
+            Some(last) if last.starts_with("stream: ") => last.push_str(piece),
+            _ => self.0.push(format!("stream: {piece}")),
+        }
+    }
     fn text(&mut self, text: &str) {
         self.0.push(format!("text: {text}"));
+    }
+    fn answer(&mut self, text: &str) {
+        self.0.push(format!("answer: {text}"));
     }
     fn call(&mut self, call: &ToolCall) {
         self.0.push(format!("> {}", call.name));
@@ -162,7 +171,9 @@ fn a_call_then_an_answer() {
             "thinking: I will list files",
             "> bash",
             "  ok",
-            "thinking: Done."
+            "thinking: Done.",
+            "stream: It printed hello.",
+            "answer: It printed hello."
         ]
     );
     let kinds: Vec<&str> = session
@@ -300,4 +311,57 @@ fn only_function_tools_are_listed() {
     let coder = function(CODER).unwrap();
     let names: Vec<&str> = function_tools(&coder).iter().map(|d| d.name).collect();
     assert_eq!(names, ["bash", "edit"]);
+}
+
+#[test]
+fn text_stream_cuts_out_the_call() {
+    const BEGIN: &str = "<tool_call>\n<function=";
+    let run = |pieces: &[&str]| {
+        let mut stream = TextStream::new(BEGIN);
+        let mut shown = String::new();
+        for piece in pieces {
+            shown.extend(stream.push(piece));
+        }
+        shown.extend(stream.finish());
+        shown
+    };
+    assert_eq!(
+        run(&["Let me ", "look.\n\n", "<tool_call>\n<function=bash>"]),
+        "Let me look.\n\n"
+    );
+    // The start of a call split over pieces is never shown.
+    assert_eq!(run(&["a<", "tool", "_call>", "\n<function=x>"]), "a");
+    // A tail that only looks like the start of a call is shown at the end.
+    assert_eq!(run(&["x < y <", "tool"]), "x < y <tool");
+    assert_eq!(run(&["no call"]), "no call");
+    assert_eq!(run(&["<tool_call>\n<function=bash>"]), "");
+    assert_eq!(run(&["é", "<tool_call>\n<fu", "nction=bash>"]), "é");
+}
+
+#[test]
+fn text_before_a_call_streams_and_is_reported_whole() {
+    let dir = Dir::new("stream");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[
+        ("t", THOUGHT),
+        (&format!("I will run it.\n{}", bash_call("true")), Stop::End),
+        ("t", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let (end, log, _) = run(&default, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert_eq!(
+        log,
+        [
+            "[work]",
+            "thinking: t",
+            "stream: I will run it.\n",
+            "text: I will run it.",
+            "> bash",
+            "  ok",
+            "thinking: t",
+            "stream: Done.",
+            "answer: Done."
+        ]
+    );
 }

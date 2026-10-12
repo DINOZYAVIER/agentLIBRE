@@ -21,8 +21,13 @@ pub trait Report {
     fn thinking(&mut self, piece: &str);
     /// Thinking of this step is over.
     fn thinking_done(&mut self);
-    /// Text the model wrote before a call (D114).
+    /// A piece of the action's text as it streams; never a piece of the
+    /// call itself (D131).
+    fn action_text(&mut self, _piece: &str) {}
+    /// Text the model wrote before a call (D114), whole.
     fn text(&mut self, text: &str);
+    /// The answer, whole; the turn ends (D131).
+    fn answer(&mut self, _text: &str) {}
     fn call(&mut self, call: &ToolCall);
     fn result(&mut self, call: &ToolCall, result: &ToolResult);
 }
@@ -142,6 +147,7 @@ impl Agent<'_> {
         }
 
         let (grammar, root) = action::grammar(format, &state.actions);
+        let mut stream = TextStream::new(&format.call.begin_before);
         let generated = self.backend.generate(
             &Request {
                 prompt: &prompt,
@@ -150,8 +156,15 @@ impl Agent<'_> {
                 max_tokens: function.max_action_tokens,
                 sampling: &function.sampling,
             },
-            &mut |_| {},
+            &mut |piece| {
+                if let Some(text) = stream.push(piece) {
+                    report.action_text(&text);
+                }
+            },
         )?;
+        if let Some(text) = stream.finish() {
+            report.action_text(&text);
+        }
         // Cut-off text may have been heading for a call (D113, D114).
         if generated.stop == Stop::Limit {
             return self.stop(StopReason::CutOff);
@@ -166,6 +179,7 @@ impl Agent<'_> {
         match action {
             Action::Answer(text) => {
                 self.session.append(Event::Answer(text.clone()))?;
+                report.answer(&text);
                 Ok(Some(TurnEnd::Answer(text)))
             }
             Action::Call { text, tool, args } => {
@@ -209,6 +223,61 @@ impl Agent<'_> {
     fn stop(&mut self, reason: StopReason) -> Result<Option<TurnEnd>, Error> {
         self.session.append(Event::Stop(reason))?;
         Ok(Some(TurnEnd::Stopped(reason)))
+    }
+}
+
+/// Cuts the call out of the streamed action: passes the text before the
+/// start of a call and holds back what may still turn into that start
+/// (D131).
+struct TextStream<'a> {
+    begin: &'a str,
+    held: String,
+    in_call: bool,
+}
+
+impl<'a> TextStream<'a> {
+    fn new(begin: &'a str) -> TextStream<'a> {
+        TextStream {
+            begin,
+            held: String::new(),
+            in_call: false,
+        }
+    }
+
+    /// The text to show for `piece`, if any.
+    fn push(&mut self, piece: &str) -> Option<String> {
+        if self.in_call {
+            return None;
+        }
+        self.held.push_str(piece);
+        let (shown, kept) = match self.held.find(self.begin) {
+            Some(start) => {
+                self.in_call = true;
+                (start, self.held.len())
+            }
+            None => {
+                let keep_from = self
+                    .held
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .find(|index| self.begin.starts_with(&self.held[*index..]))
+                    .unwrap_or(self.held.len());
+                (keep_from, keep_from)
+            }
+        };
+        let text = self.held[..shown].to_owned();
+        if self.in_call {
+            self.held.clear();
+        } else {
+            self.held.drain(..kept);
+        }
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The held-back text when no call began.
+    fn finish(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.held);
+        (!self.in_call && !text.is_empty()).then_some(text)
     }
 }
 
