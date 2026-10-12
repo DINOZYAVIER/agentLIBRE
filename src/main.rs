@@ -13,6 +13,7 @@ mod i18n;
 mod interrupt;
 mod machine;
 mod paths;
+mod repl;
 mod report;
 mod session;
 mod settings;
