@@ -140,6 +140,7 @@ macro_rules! roles {
             pub const ALL: &'static [Role] = &[$(Role::$variant,)*];
 
             /// The key in `[colors]`.
+            #[cfg(test)]
             pub fn key(self) -> &'static str {
                 match self {
                     $(Role::$variant => $key,)*
@@ -222,12 +223,9 @@ impl Theme {
     }
 
     /// A theme that paints nothing.
+    #[cfg(test)]
     pub fn plain() -> Theme {
         Theme::new(false, &[])
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.enabled
     }
 
     /// The escape sequence that starts `role`; empty when colors are off.

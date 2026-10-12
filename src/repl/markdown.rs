@@ -36,6 +36,9 @@ pub fn render(source: &str, columns: usize, theme: &Theme) -> Vec<String> {
     renderer.lines
 }
 
+/// Words without a space between them, with their roles.
+type Atom = Vec<(String, Option<Role>)>;
+
 /// A piece of inline text.
 enum Piece {
     Word(String, Option<Role>),
@@ -322,7 +325,7 @@ impl Renderer<'_> {
     /// Wraps `pieces` into lines of at most `avail` columns.
     fn flow(&self, pieces: Vec<Piece>, avail: usize) -> Vec<String> {
         // Words without a space between them stay together.
-        let mut atoms: Vec<Option<Vec<(String, Option<Role>)>>> = Vec::new();
+        let mut atoms: Vec<Option<Atom>> = Vec::new();
         let mut open = false;
         for piece in pieces {
             match piece {

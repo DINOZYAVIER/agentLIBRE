@@ -17,6 +17,8 @@ pub struct Paths {
     pub config: PathBuf,
     /// `$XDG_DATA_HOME/agentLIBRE`.
     pub data: PathBuf,
+    /// `$XDG_STATE_HOME/agentLIBRE` (D133).
+    pub state: PathBuf,
 }
 
 impl Paths {
@@ -33,6 +35,7 @@ impl Paths {
         Ok(Paths {
             config: base("XDG_CONFIG_HOME", ".config")?.join(APP_DIR),
             data: base("XDG_DATA_HOME", ".local/share")?.join(APP_DIR),
+            state: base("XDG_STATE_HOME", ".local/state")?.join(APP_DIR),
         })
     }
 
@@ -49,6 +52,11 @@ impl Paths {
     /// Sessions, `sessions/*.jsonl` (D30, D39).
     pub fn sessions(&self) -> PathBuf {
         self.data.join("sessions")
+    }
+
+    /// The input history of the REPL (D133).
+    pub fn history_file(&self) -> PathBuf {
+        self.state.join("history.jsonl")
     }
 
     /// User model formats, `formats/*.toml` (D39).
@@ -75,6 +83,10 @@ mod tests {
         assert_eq!(paths.config, PathBuf::from("/home/u/.config/agentLIBRE"));
         assert_eq!(paths.data, PathBuf::from("/home/u/.local/share/agentLIBRE"));
         assert_eq!(
+            paths.history_file(),
+            PathBuf::from("/home/u/.local/state/agentLIBRE/history.jsonl")
+        );
+        assert_eq!(
             paths.settings_file(),
             PathBuf::from("/home/u/.config/agentLIBRE/agentLIBRE.toml")
         );
@@ -94,10 +106,12 @@ mod tests {
             ("HOME", "/home/u"),
             ("XDG_CONFIG_HOME", "/c"),
             ("XDG_DATA_HOME", "/d"),
+            ("XDG_STATE_HOME", "/s"),
         ])
         .unwrap();
         assert_eq!(paths.config, PathBuf::from("/c/agentLIBRE"));
         assert_eq!(paths.data, PathBuf::from("/d/agentLIBRE"));
+        assert_eq!(paths.state, PathBuf::from("/s/agentLIBRE"));
     }
 
     #[test]
@@ -114,7 +128,12 @@ mod tests {
 
     #[test]
     fn xdg_variables_work_without_home() {
-        let paths = paths(&[("XDG_CONFIG_HOME", "/c"), ("XDG_DATA_HOME", "/d")]).unwrap();
+        let paths = paths(&[
+            ("XDG_CONFIG_HOME", "/c"),
+            ("XDG_DATA_HOME", "/d"),
+            ("XDG_STATE_HOME", "/s"),
+        ])
+        .unwrap();
         assert_eq!(paths.config, PathBuf::from("/c/agentLIBRE"));
     }
 

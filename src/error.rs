@@ -101,12 +101,12 @@ pub enum Error {
     SessionWrite { path: PathBuf, source: io::Error },
     /// The session continues a turn in a state the Function no longer has.
     SessionState { state: String, function: String },
+    /// The terminal cannot be switched to raw mode.
+    Terminal { source: io::Error },
     /// Ctrl-C stopped a generation (D111).
     Interrupted,
     /// The server generated text the grammar does not allow.
     OutsideGrammar(String),
-    /// Everything after loading the settings arrives in later tasks (D62).
-    NotImplemented,
 }
 
 /// TOML type a settings key requires.

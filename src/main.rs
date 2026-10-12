@@ -40,6 +40,7 @@ use paths::Paths;
 use report::StderrReport;
 use session::{Session, StopReason};
 use settings::{ProjectFile, Settings, UserFile};
+use theme::Theme;
 
 fn main() -> ExitCode {
     let env = |name: &str| std::env::var_os(name);
@@ -104,16 +105,37 @@ fn run(
     if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
         Machine::resume(&function, &settings.function, &turn)?;
     }
-    let Some(message) = args.prompt else {
-        return Err(Error::NotImplemented);
-    };
 
     let workspace = session.as_ref().map_or(cwd, |s| s.workspace.clone());
     let backend = Llama::new(&settings.server_url);
     let context = backend.context_size()?;
+    let resumed = session.is_some();
     let mut session = match session {
         Some(session) => session,
         None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
+    };
+    let Some(message) = args.prompt else {
+        // No `-p`: the interactive session (D136).
+        let interactive = term::is_interactive();
+        let setup = repl::Setup {
+            function: &function,
+            function_name: &settings.function,
+            backend: &backend,
+            session,
+            resumed,
+            sessions_dir: &paths.sessions(),
+            context,
+            server_url: &settings.server_url,
+            theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
+            repl: settings.repl,
+            lang: *lang,
+            history_file: paths.history_file(),
+        };
+        return if interactive {
+            repl::run(setup)
+        } else {
+            repl::run_lines(setup)
+        };
     };
     eprintln!("{}", i18n::session(&session.id, *lang));
     interrupt::install();

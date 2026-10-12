@@ -148,11 +148,6 @@ impl Screen for Dock {
         self.lock().columns
     }
 
-    fn rows(&self) -> usize {
-        let state = self.lock();
-        state.rows.saturating_sub(state.layout().rows.len())
-    }
-
     fn print(&self, lines: &[String]) {
         let mut state = self.lock();
         let mut text = String::new();

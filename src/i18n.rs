@@ -360,8 +360,12 @@ impl Error {
             }
             (Error::Interrupted, En) => "interrupted".into(),
             (Error::Interrupted, Uk) => "перервано".into(),
-            (Error::NotImplemented, En) => "the agent loop is not implemented yet".into(),
-            (Error::NotImplemented, Uk) => "агентний цикл ще не реалізовано".into(),
+            (Error::Terminal { source }, En) => {
+                format!("cannot switch the terminal to raw mode: {source}")
+            }
+            (Error::Terminal { source }, Uk) => {
+                format!("не вдалося перемкнути термінал у raw-режим: {source}")
+            }
         }
     }
 }
@@ -610,7 +614,14 @@ mod tests {
             error.message(Lang::Uk),
             "невідомий параметр `--url`\nДив. `agl-lite --help`."
         );
-        assert!(!Error::NotImplemented.message(Lang::En).contains("--help"));
+        assert!(
+            !Error::FunctionNotFound {
+                name: "x".into(),
+                path: "/p".into()
+            }
+            .message(Lang::En)
+            .contains("--help")
+        );
     }
 
     #[test]

@@ -27,8 +27,6 @@ pub enum Activity {
 /// Where the transcript is drawn: above the dock.
 pub trait Screen: Send + Sync {
     fn columns(&self) -> usize;
-    /// Rows the transcript can show at once.
-    fn rows(&self) -> usize;
     /// Appends finished lines.
     fn print(&self, lines: &[String]);
     /// The unfinished line below the printed ones; empty clears it.
@@ -75,6 +73,11 @@ impl Presenter {
             thinking: None,
             action: None,
         }
+    }
+
+    /// The dock is idle again.
+    pub fn set_ready(&self) {
+        self.screen.activity(Activity::Ready);
     }
 
     /// A user message starts a turn.
@@ -138,12 +141,12 @@ impl Presenter {
 
     /// A line of the session itself: help, a stop, an error.
     pub fn show_notice(&self, text: &str, role: Role) {
-        let lines: Vec<String> = text
-            .lines()
-            .flat_map(|line| hard_wrap(&clean(line), self.screen.columns()))
-            .map(|line| self.theme.paint(role, &line))
-            .collect();
-        self.screen.print(&lines);
+        self.screen.print(&notice_lines(
+            &self.theme,
+            text,
+            self.screen.columns(),
+            role,
+        ));
     }
 
     /// Shows what a session already holds (D126).
@@ -376,6 +379,14 @@ impl Report for Presenter {
     }
 }
 
+/// `text` as wrapped lines painted with `role`.
+pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Vec<String> {
+    text.lines()
+        .flat_map(|line| hard_wrap(&clean(line), columns))
+        .map(|line| theme.paint(role, &line))
+        .collect()
+}
+
 /// The user's message as rows on the input background (D138).
 pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
     let columns = columns.max(4);
@@ -467,9 +478,6 @@ mod tests {
     impl Screen for Mock {
         fn columns(&self) -> usize {
             40
-        }
-        fn rows(&self) -> usize {
-            10
         }
         fn print(&self, lines: &[String]) {
             self.printed.lock().unwrap().extend_from_slice(lines);
