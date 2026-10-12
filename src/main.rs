@@ -18,6 +18,7 @@ mod session;
 mod settings;
 #[cfg(test)]
 mod test_server;
+mod theme;
 mod tomlfile;
 mod tools;
 

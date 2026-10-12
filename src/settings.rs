@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::i18n::Lang;
+use crate::theme::{COLOR_KEYS, Role, Style};
 use crate::tomlfile::{self, Section};
 
 /// Name of the user and project settings files.
@@ -20,6 +21,36 @@ pub struct UserFile {
     pub language: Option<Lang>,
     /// `[server] url`.
     pub server_url: Option<String>,
+    /// `[colors]` (D121).
+    pub colors: Vec<(Role, Style)>,
+    /// `[repl]` (D124, D130).
+    pub repl: ReplFile,
+}
+
+/// `[repl]`: the limits of tool cards and their frame (D130).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReplFile {
+    pub tool_lines: Option<usize>,
+    pub tool_chars: Option<usize>,
+    pub frame: Option<bool>,
+}
+
+/// `[repl]` with the defaults of the old agl (D130).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplSettings {
+    pub tool_lines: usize,
+    pub tool_chars: usize,
+    pub frame: bool,
+}
+
+impl Default for ReplSettings {
+    fn default() -> ReplSettings {
+        ReplSettings {
+            tool_lines: 10,
+            tool_chars: 500,
+            frame: true,
+        }
+    }
 }
 
 impl UserFile {
@@ -29,7 +60,7 @@ impl UserFile {
             return Ok(UserFile::default());
         };
         let mut file = Section::new(path, table);
-        file.check_keys(&["function", "language", "server"])?;
+        file.check_keys(&["function", "language", "server", "colors", "repl"])?;
         let function = file.string("function")?;
         let language = file
             .string("language")?
@@ -55,10 +86,55 @@ impl UserFile {
                 url: url.clone(),
             });
         }
+        let colors = match file.section("colors")? {
+            None => Vec::new(),
+            Some(mut colors) => {
+                colors.check_keys(COLOR_KEYS)?;
+                let mut parsed = Vec::new();
+                for (key, value) in colors.string_entries()? {
+                    let role = Role::from_key(&key).expect("keys are checked");
+                    let style = Style::parse(&value, role.is_background()).map_err(|problem| {
+                        Error::InvalidStyle {
+                            path: path.into(),
+                            key: colors.key(&key),
+                            value,
+                            problem,
+                        }
+                    })?;
+                    parsed.push((role, style));
+                }
+                parsed
+            }
+        };
+        let repl = match file.section("repl")? {
+            None => ReplFile::default(),
+            Some(mut repl) => {
+                repl.check_keys(&["tool_lines", "tool_chars", "frame"])?;
+                let mut count = |key: &str| -> Result<Option<usize>, Error> {
+                    repl.integer(key)?
+                        .map(|n| {
+                            usize::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
+                                Error::NotPositive {
+                                    path: path.into(),
+                                    key: repl.key(key),
+                                }
+                            })
+                        })
+                        .transpose()
+                };
+                ReplFile {
+                    tool_lines: count("tool_lines")?,
+                    tool_chars: count("tool_chars")?,
+                    frame: repl.bool("frame")?,
+                }
+            }
+        };
         Ok(UserFile {
             function,
             language,
             server_url,
+            colors,
+            repl,
         })
     }
 }
@@ -102,6 +178,8 @@ pub fn find_project(cwd: &Path, user_path: &Path) -> Option<PathBuf> {
 pub struct Settings {
     pub server_url: String,
     pub function: String,
+    pub colors: Vec<(Role, Style)>,
+    pub repl: ReplSettings,
 }
 
 impl Settings {
@@ -123,9 +201,16 @@ impl Settings {
             .or(user.function.as_deref())
             .unwrap_or(DEFAULT_FUNCTION)
             .to_owned();
+        let defaults = ReplSettings::default();
         Ok(Settings {
             server_url,
             function,
+            colors: user.colors.clone(),
+            repl: ReplSettings {
+                tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
+                tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),
+                frame: user.repl.frame.unwrap_or(defaults.frame),
+            },
         })
     }
 }
@@ -178,8 +263,79 @@ mod tests {
                 function: Some("coder".into()),
                 language: Some(Lang::Uk),
                 server_url: Some("http://127.0.0.1:18080".into()),
+                ..UserFile::default()
             }
         );
+    }
+
+    #[test]
+    fn colors_and_repl_tables() {
+        let loaded = user(
+            "[colors]\nmuted = \"italic #010203\"\ninput_background = \"#000000\"\n\
+             [repl]\ntool_lines = 3\nframe = false\n",
+        )
+        .unwrap();
+        assert_eq!(loaded.colors.len(), 2);
+        assert_eq!(loaded.colors[0].0, Role::InputBackground);
+        assert_eq!(loaded.colors[1].0, Role::Muted);
+        assert_eq!(
+            loaded.repl,
+            ReplFile {
+                tool_lines: Some(3),
+                tool_chars: None,
+                frame: Some(false),
+            }
+        );
+        let settings = Settings::resolve(
+            &loaded_with_server(loaded),
+            Path::new("/c/x.toml"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.repl,
+            ReplSettings {
+                tool_lines: 3,
+                tool_chars: 500,
+                frame: false,
+            }
+        );
+    }
+
+    fn loaded_with_server(file: UserFile) -> UserFile {
+        UserFile {
+            server_url: Some("http://x".into()),
+            ..file
+        }
+    }
+
+    #[test]
+    fn invalid_colors_and_repl_values() {
+        assert!(matches!(
+            user("[colors]\nmuted = \"red\""),
+            Err(Error::InvalidStyle { key, .. }) if key == "colors.muted"
+        ));
+        assert!(matches!(
+            user("[colors]\nmutd = \"dim\""),
+            Err(Error::UnknownKey { key, .. }) if key == "colors.mutd"
+        ));
+        assert!(matches!(
+            user("[colors]\nmuted = 1"),
+            Err(Error::WrongType { key, .. }) if key == "colors.muted"
+        ));
+        assert!(matches!(
+            user("[repl]\ntool_lines = 0"),
+            Err(Error::NotPositive { key, .. }) if key == "repl.tool_lines"
+        ));
+        assert!(matches!(
+            user("[repl]\ntool_chars = -5"),
+            Err(Error::NotPositive { key, .. }) if key == "repl.tool_chars"
+        ));
+        assert!(matches!(
+            user("[repl]\nlines = 5"),
+            Err(Error::UnknownKey { key, .. }) if key == "repl.lines"
+        ));
     }
 
     #[test]
@@ -287,8 +443,8 @@ mod tests {
         let path = Path::new("/c/agentLIBRE.toml");
         let user = UserFile {
             function: Some("user".into()),
-            language: None,
             server_url: Some("http://x".into()),
+            ..UserFile::default()
         };
         let project = ProjectFile {
             function: Some("project".into()),

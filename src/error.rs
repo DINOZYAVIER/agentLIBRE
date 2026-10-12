@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::grammar::pattern::PatternError;
+use crate::theme::StyleError;
 
 /// An error that stops `agl-lite`.
 #[derive(Debug)]
@@ -40,6 +41,15 @@ pub enum Error {
         key: String,
         expected: Expected,
     },
+    /// A `[colors]` value is not a valid style (D121).
+    InvalidStyle {
+        path: PathBuf,
+        key: String,
+        value: String,
+        problem: StyleError,
+    },
+    /// A `[repl]` limit below 1 (D130).
+    NotPositive { path: PathBuf, key: String },
     /// `language` names a language without translations.
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `[server] url` is not an `http://` URL (D52).

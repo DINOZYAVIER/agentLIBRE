@@ -6,6 +6,7 @@ use crate::error::{Error, Expected, FunctionProblem, TemplateProblem};
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
+use crate::theme::StyleError;
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +171,48 @@ impl Error {
                     Expected::Strings => "масивом рядків",
                 };
                 format!("`{key}` у {} має бути {expected}", path.display())
+            }
+            (
+                Error::InvalidStyle {
+                    path,
+                    key,
+                    value,
+                    problem,
+                },
+                lang,
+            ) => {
+                let problem = match (problem, lang) {
+                    (StyleError::Empty, En) => "a style cannot be empty".to_owned(),
+                    (StyleError::Empty, Uk) => "стиль не може бути порожнім".to_owned(),
+                    (StyleError::Color(color), En) => {
+                        format!("`{color}` is not #RRGGBB or oklch(L C H)")
+                    }
+                    (StyleError::Color(color), Uk) => {
+                        format!("`{color}` не є #RRGGBB або oklch(L C H)")
+                    }
+                    (StyleError::Oklch, En) => {
+                        "oklch needs three numbers, lightness 0..1 and chroma >= 0".to_owned()
+                    }
+                    (StyleError::Oklch, Uk) => {
+                        "oklch потребує трьох чисел, яскравість 0..1, насиченість >= 0".to_owned()
+                    }
+                };
+                match lang {
+                    En => format!(
+                        "invalid style `{value}` for `{key}` in {}: {problem}",
+                        path.display()
+                    ),
+                    Uk => format!(
+                        "некоректний стиль `{value}` для `{key}` у {}: {problem}",
+                        path.display()
+                    ),
+                }
+            }
+            (Error::NotPositive { path, key }, En) => {
+                format!("`{key}` in {} must be at least 1", path.display())
+            }
+            (Error::NotPositive { path, key }, Uk) => {
+                format!("`{key}` у {} має бути не менше 1", path.display())
             }
             (Error::UnsupportedLanguage { path, value }, En) => format!(
                 "unsupported language `{value}` in {}; supported: en, uk",
