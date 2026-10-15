@@ -1,4 +1,4 @@
-//! The interactive session (D34, D115-D138): a line editor and a dock in
+//! The interactive session (D34, D115-D140): a line editor and a dock in
 //! the terminal while the turn runs, or lines on stdin without a terminal.
 
 mod dock;
@@ -19,7 +19,7 @@ use dock::Dock;
 use editor::{Editor, MenuItem, Outcome, save_history};
 use present::{Presenter, Screen, notice_lines};
 
-use crate::agent::{Agent, Report, TurnEnd};
+use crate::agent::{Agent, Compaction, Report, TurnEnd};
 use crate::backend::{Backend, ToolCall};
 use crate::error::Error;
 use crate::function::Function;
@@ -32,8 +32,8 @@ use crate::term::{self, Key, Parser, RawGuard};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 
-/// The `/` commands (D118).
-const COMMANDS: [&str; 5] = ["/quit", "/exit", "/help", "/status", "/new"];
+/// The `/` commands (D118, D139).
+const COMMANDS: [&str; 6] = ["/quit", "/exit", "/help", "/status", "/new", "/compact"];
 
 /// Everything a session needs.
 pub struct Setup<'a> {
@@ -78,6 +78,7 @@ struct Inner {
     running: bool,
     quit: bool,
     new_session: bool,
+    compact: bool,
     info: Info,
 }
 
@@ -200,7 +201,7 @@ impl Input {
                 let info = self.control.lock().info.clone();
                 self.notice(&status_text(&self.facts, &info, self.lang), Role::Muted);
             }
-            "/quit" | "/exit" | "/new" => {
+            "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
@@ -209,6 +210,8 @@ impl Input {
                 }
                 if name == "/new" {
                     inner.new_session = true;
+                } else if name == "/compact" {
+                    inner.compact = true;
                 } else {
                     inner.quit = true;
                 }
@@ -339,6 +342,7 @@ impl Report for Reporter<'_> {
 enum Next {
     Message(String),
     New,
+    Compact,
     Quit,
 }
 
@@ -351,6 +355,13 @@ fn wait_for_next(control: &Control) -> Next {
         if inner.new_session {
             inner.new_session = false;
             return Next::New;
+        }
+        if inner.compact {
+            inner.compact = false;
+            // Ctrl-C stops the compaction as it stops a turn.
+            inner.running = true;
+            interrupt::reset();
+            return Next::Compact;
         }
         if let Some(message) = inner.queue.pop_front() {
             inner.running = true;
@@ -459,6 +470,25 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
             },
+            Next::Compact => {
+                let result = Agent {
+                    function,
+                    function_name,
+                    backend,
+                    session: &mut session,
+                    workspace: &workspace,
+                    context,
+                }
+                .compact(&mut Reporter {
+                    presenter: &mut presenter,
+                    control: &control,
+                });
+                control.lock().running = false;
+                if let Some((text, role)) = compact_notice(result, function, lang) {
+                    presenter.show_notice(&text, role);
+                }
+                presenter.set_ready();
+            }
             Next::Message(message) => {
                 dock.set_queued(control.lock().queue.len());
                 presenter.begin_turn();
@@ -519,6 +549,27 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// What to tell after `/compact`; a summary shows itself (D140).
+fn compact_notice(
+    result: Result<Compaction, Error>,
+    function: &Function,
+    lang: Lang,
+) -> Option<(String, Role)> {
+    match result {
+        Ok(Compaction::Done) => None,
+        Ok(Compaction::Nothing) => Some((texts::nothing_to_compact(lang).into(), Role::Muted)),
+        Ok(Compaction::Impossible) => Some((
+            texts::compaction_failed(function, lang),
+            Role::StatusFailure,
+        )),
+        Err(Error::Interrupted) => Some((
+            texts::stopped(StopReason::Interrupted, function, lang),
+            Role::StatusPending,
+        )),
+        Err(error) => Some((error.message(lang), Role::StatusFailure)),
+    }
+}
+
 /// The session without a terminal (D128): every line of stdin is a
 /// message; the answers go to stdout and the progress to stderr, as with
 /// `-p` (D109).
@@ -567,6 +618,24 @@ pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
                     session = Session::create(sessions_dir, function_name, &workspace)?;
                     state = None;
                     eprintln!("{}", texts::new_session(&session.id, lang));
+                }
+                "/compact" => {
+                    let result = Agent {
+                        function,
+                        function_name,
+                        backend,
+                        session: &mut session,
+                        workspace: &workspace,
+                        context,
+                    }
+                    .compact(&mut StderrReport::new(lang));
+                    let interrupted = matches!(result, Err(Error::Interrupted));
+                    if let Some((text, _)) = compact_notice(result, function, lang) {
+                        eprintln!("{text}");
+                    }
+                    if interrupted {
+                        return Ok(ExitCode::from(interrupt::EXIT_CODE));
+                    }
                 }
                 _ => eprintln!("{}", texts::unknown_command(name, lang)),
             }
@@ -731,6 +800,7 @@ mod tests {
         f.type_text("/help");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/quit"));
+        assert!(f.output().contains("/compact  replace the history"));
         assert!(f.output().contains("Shift-Enter"));
         f.type_text("/status");
         f.input.key(Key::Enter);
@@ -742,14 +812,18 @@ mod tests {
         assert!(f.output().contains("unknown command /nope"));
         assert!(f.inner().queue.is_empty());
 
-        // During a turn /new and /quit are refused (D134).
+        // During a turn /new, /compact and /quit are refused (D134, D140).
         f.inner().running = true;
-        for command in ["/new", "/quit", "/exit"] {
+        for command in ["/new", "/compact", "/quit", "/exit"] {
             f.type_text(command);
             f.input.key(Key::Enter);
         }
         assert!(f.output().contains("/new is not available during a turn"));
-        assert!(!f.inner().quit && !f.inner().new_session);
+        assert!(
+            f.output()
+                .contains("/compact is not available during a turn")
+        );
+        assert!(!f.inner().quit && !f.inner().new_session && !f.inner().compact);
         // /status still works and shows the state.
         f.inner().info.state = Some("verify".into());
         f.type_text("/status");
@@ -761,6 +835,9 @@ mod tests {
         f.input.key(Key::Enter);
         assert!(f.inner().new_session);
         f.inner().new_session = false;
+        f.type_text("/compact");
+        f.input.key(Key::Enter);
+        assert!(f.inner().compact);
         f.type_text("/exit");
         f.input.key(Key::Enter);
         assert!(f.inner().quit);
@@ -805,13 +882,37 @@ mod tests {
     }
 
     #[test]
+    fn what_compact_tells() {
+        let none = Path::new("/none");
+        let function = Function::load(none, none, "default").unwrap();
+        let notice = |result| compact_notice(result, &function, Lang::En);
+        assert_eq!(notice(Ok(Compaction::Done)), None);
+        assert_eq!(
+            notice(Ok(Compaction::Nothing)),
+            Some(("Nothing to compact.".into(), Role::Muted))
+        );
+        let (text, role) = notice(Ok(Compaction::Impossible)).unwrap();
+        assert!(text.starts_with("cannot compact: the history and max_compact_tokens (2048)"));
+        assert_eq!(role, Role::StatusFailure);
+        assert_eq!(
+            notice(Err(Error::Interrupted)),
+            Some(("interrupted".into(), Role::StatusPending))
+        );
+    }
+
+    #[test]
     fn the_main_thread_takes_what_the_user_sent() {
         let control = Control::new(Info::default());
         control.lock().queue.push_back("one".into());
         assert!(matches!(wait_for_next(&control), Next::Message(m) if m == "one"));
         assert!(control.lock().running);
+        control.lock().running = false;
         control.lock().new_session = true;
         assert!(matches!(wait_for_next(&control), Next::New));
+        // A compaction counts as running, so that Ctrl-C can stop it.
+        control.lock().compact = true;
+        assert!(matches!(wait_for_next(&control), Next::Compact));
+        assert!(control.lock().running);
         control.lock().quit = true;
         assert!(matches!(wait_for_next(&control), Next::Quit));
     }

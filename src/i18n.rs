@@ -719,6 +719,8 @@ pub mod repl {
             ("/status", Uk) => "показати сесію",
             ("/new", En) => "start a new session",
             ("/new", Uk) => "почати нову сесію",
+            ("/compact", En) => "replace the history with a summary",
+            ("/compact", Uk) => "замінити історію резюме",
             _ => "",
         }
     }
@@ -835,6 +837,28 @@ pub mod repl {
     /// The line that ends a turn that stopped (D127).
     pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {
         super::stop_reason(reason, function, lang)
+    }
+
+    pub fn nothing_to_compact(lang: Lang) -> &'static str {
+        match lang {
+            En => "Nothing to compact.",
+            Uk => "Нічого стискати.",
+        }
+    }
+
+    /// `/compact` could not make a summary (D140).
+    pub fn compaction_failed(function: &crate::function::Function, lang: Lang) -> String {
+        let limit = function.max_compact_tokens;
+        match lang {
+            En => format!(
+                "cannot compact: the history and max_compact_tokens ({limit}) do not fit the \
+                 model context, or the summary was cut off or empty"
+            ),
+            Uk => format!(
+                "не вдалося стиснути: історія й max_compact_tokens ({limit}) не вміщуються в \
+                 контекст моделі, або резюме обрізане чи порожнє"
+            ),
+        }
     }
 
     pub fn new_session(id: &str, lang: Lang) -> String {
