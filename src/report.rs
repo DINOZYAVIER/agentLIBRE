@@ -61,6 +61,10 @@ impl Report for StderrReport {
     fn compacted(&mut self) {
         eprintln!("[compacted]");
     }
+
+    fn cut_off(&mut self) {
+        eprintln!("[cut off]");
+    }
 }
 
 /// `bash`: the command's first line, shortened; `edit`: the path.

@@ -115,6 +115,12 @@ impl Presenter {
             .print(&[self.theme.paint(Role::Muted, &format!("[{state}]"))]);
     }
 
+    /// `[cut off]` where an action hit its token limit (D154).
+    pub fn show_cut_off(&self) {
+        self.screen
+            .print(&[self.theme.paint(Role::Muted, "[cut off]")]);
+    }
+
     /// `[compacted]` where a summary replaced the history (D140).
     pub fn show_compacted(&self) {
         self.screen
@@ -187,6 +193,7 @@ impl Presenter {
                 }
                 Event::Answer(text) => self.show_answer(text, None),
                 Event::Compact(_) => self.show_compacted(),
+                Event::CutOff(_) => self.show_cut_off(),
                 Event::Stop(_) => {}
             }
         }
@@ -396,6 +403,11 @@ impl Report for Presenter {
     fn compacted(&mut self) {
         self.show_compacted();
         self.screen.activity(Activity::Generating);
+    }
+
+    fn cut_off(&mut self) {
+        self.close();
+        self.show_cut_off();
     }
 
     fn context_used(&mut self, tokens: usize) {

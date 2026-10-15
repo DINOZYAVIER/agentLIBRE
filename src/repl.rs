@@ -336,6 +336,9 @@ impl Report for Reporter<'_> {
     fn compacted(&mut self) {
         self.presenter.compacted();
     }
+    fn cut_off(&mut self) {
+        self.presenter.cut_off();
+    }
     fn context_used(&mut self, tokens: usize) {
         self.presenter.context_used(tokens);
     }

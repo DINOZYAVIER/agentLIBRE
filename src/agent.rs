@@ -35,6 +35,8 @@ pub trait Report {
     fn compacting(&mut self) {}
     /// A summary replaced the history (D139).
     fn compacted(&mut self) {}
+    /// An action hit `max_action_tokens` and was discarded (D154).
+    fn cut_off(&mut self) {}
     /// The prompt of the next step has this many tokens (D152).
     fn context_used(&mut self, _tokens: usize) {}
 }
@@ -187,9 +189,20 @@ impl Agent<'_> {
         if let Some(text) = stream.finish() {
             report.action_text(&text);
         }
-        // Cut-off text may have been heading for a call (D113, D114).
+        // Cut-off text may have been heading for a call: it is discarded
+        // and the model is told to split the work (D154).
         if generated.stop == Stop::Limit {
-            return self.stop(StopReason::CutOff);
+            self.session
+                .append(Event::CutOff(function.max_action_tokens))?;
+            report.cut_off();
+            let progress = machine.after_cut_off();
+            if machine.entered() {
+                self.enter(machine.state().name.as_str(), report)?;
+            }
+            return match progress {
+                Progress::Continue => Ok(None),
+                Progress::StepLimit => self.stop(StopReason::StepLimit),
+            };
         }
         let action = match action::parse(format, &state.actions, &generated.text) {
             Ok(action) => action,

@@ -81,6 +81,7 @@ fn write_and_read_back() {
         Event::Stop(StopReason::StepLimit),
         Event::Answer("Done: `Vec<&str>`\nok".into()),
         Event::Compact("The test is fixed.".into()),
+        Event::CutOff(8192),
     ];
     let mut session = Session::create(&dir.0, "coder", Path::new("/home/u/repos/a")).unwrap();
     for event in &events {
@@ -91,12 +92,16 @@ fn write_and_read_back() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 9);
+    assert_eq!(lines.len(), 10);
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["version"], 1);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
     assert_eq!(lines[4]["args"], json!({"command": "ls", "timeout": 30}));
     assert_eq!(lines[8]["summary"], "The test is fixed.");
+    assert_eq!(
+        lines[9],
+        json!({"type": "cut_off", "limit": 8192, "time": lines[9]["time"]})
+    );
     assert!(
         lines
             .iter()
@@ -248,6 +253,8 @@ fn unfinished_turns() {
         result("c3", Outcome::Ok),
         call("c4", "ls"),
         result("c4", Outcome::Ok),
+        // A discarded action is a step of the visit (D154).
+        Event::CutOff(8192),
         Event::Stop(StopReason::Interrupted),
         // The next message continues the same turn (D105).
         Event::User("u3".into()),
@@ -259,7 +266,7 @@ fn unfinished_turns() {
         Some(Unfinished {
             state: Some("explore".into()),
             visits: vec![("explore".into(), 2), ("verify".into(), 1)],
-            steps_in_visit: 2,
+            steps_in_visit: 3,
         })
     );
     session.append(Event::Answer("a3".into())).unwrap();

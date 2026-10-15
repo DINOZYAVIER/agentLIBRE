@@ -91,11 +91,21 @@ impl<'f> Machine<'f> {
     /// Records a call of `tool` that ended with `outcome` and moves to the
     /// next state. An answer ends the turn instead (D44).
     pub fn after_call(&mut self, tool: &str, outcome: Outcome) -> Progress {
+        self.after(Some((tool, outcome)))
+    }
+
+    /// Records a discarded action: a step that keeps the state unless the
+    /// visit's steps are used up (D154).
+    pub fn after_cut_off(&mut self) -> Progress {
+        self.after(None)
+    }
+
+    fn after(&mut self, call: Option<(&str, Outcome)>) -> Progress {
         self.entered = false;
         self.steps_total += 1;
         self.steps_in_visit += 1;
         let state = self.state();
-        let target = state.next(tool, outcome);
+        let target = call.map_or(self.state, |(tool, outcome)| state.next(tool, outcome));
         if target != self.state {
             self.enter(target);
         } else if state

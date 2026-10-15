@@ -27,7 +27,8 @@ pub enum StopReason {
     ContextFull,
     /// llama-server failed (D97).
     ServerError,
-    /// The token limit cut a generation (D18).
+    /// The token limit cut a generation (D18). Older versions stopped the
+    /// turn with it; sessions still hold it (D154).
     CutOff,
     /// The user interrupted the turn.
     Interrupted,
@@ -71,6 +72,9 @@ pub enum Event {
         content: String,
     },
     Answer(String),
+    /// An action hit `max_action_tokens` (the field) and was discarded
+    /// (D154).
+    CutOff(u32),
     Stop(StopReason),
     /// A summary that replaces the history before it (D139).
     Compact(String),
@@ -261,6 +265,10 @@ impl Session {
                     text: Some(text.clone()),
                     call: None,
                 }),
+                Event::CutOff(limit) => {
+                    thinking = None;
+                    messages.push(Message::User(cut_off_notice(*limit)));
+                }
                 Event::State(_) | Event::Stop(_) => {}
             }
         }
@@ -276,7 +284,11 @@ impl Session {
             .any(|e| {
                 matches!(
                     e,
-                    Event::User(_) | Event::Call { .. } | Event::Result { .. } | Event::Answer(_)
+                    Event::User(_)
+                        | Event::Call { .. }
+                        | Event::Result { .. }
+                        | Event::Answer(_)
+                        | Event::CutOff(_)
                 )
             })
     }
@@ -308,7 +320,7 @@ impl Session {
                     unfinished.state = Some(name.clone());
                     unfinished.steps_in_visit = 0;
                 }
-                Event::Result { .. } => unfinished.steps_in_visit += 1,
+                Event::Result { .. } | Event::CutOff(_) => unfinished.steps_in_visit += 1,
                 _ => {}
             }
         }
@@ -395,6 +407,7 @@ fn event_json(event: &Event) -> Json {
             content,
         } => json!({"type": "result", "id": id, "outcome": outcome.name(), "content": content}),
         Event::Answer(text) => json!({"type": "answer", "text": text}),
+        Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
     }
@@ -439,6 +452,7 @@ fn event_from_json(json: &Json) -> Option<Event> {
             content: text("content")?,
         },
         "answer" => Event::Answer(text("text")?),
+        "cut_off" => Event::CutOff(u32::try_from(json["limit"].as_u64()?).ok()?),
         "stop" => Event::Stop(
             StopReason::ALL
                 .into_iter()
@@ -447,6 +461,14 @@ fn event_from_json(json: &Json) -> Option<Event> {
         "compact" => Event::Compact(text("summary")?),
         _ => return None,
     })
+}
+
+/// What the model reads after an action hit `max_action_tokens` (D154).
+fn cut_off_notice(limit: u32) -> String {
+    format!(
+        "The action hit max_action_tokens ({limit}) and was discarded. Split the work into \
+         smaller actions, for example write a large file in parts."
+    )
 }
 
 /// `args` in the parameter order of the built-in tool `tool` (D79).

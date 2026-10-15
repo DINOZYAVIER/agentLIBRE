@@ -133,6 +133,9 @@ impl Report for Log {
     fn compacted(&mut self) {
         self.0.push("[compacted]".into());
     }
+    fn cut_off(&mut self) {
+        self.0.push("[cut off]".into());
+    }
     fn context_used(&mut self, tokens: usize) {
         self.1.push(tokens);
     }
@@ -205,6 +208,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Answer(_) => "answer",
             Event::Stop(_) => "stop",
             Event::Compact(_) => "compact",
+            Event::CutOff(_) => "cut_off",
         })
         .collect()
 }
@@ -253,7 +257,8 @@ fn a_call_then_an_answer() {
 #[test]
 fn states_and_instructions() {
     let dir = Dir::new("states");
-    let coder = function(CODER).unwrap();
+    // Three steps: the edit, the failed test and the discarded action.
+    let coder = function(&CODER.replace("max_steps_total = 50", "max_steps_total = 3")).unwrap();
     fs::write(dir.0.join("lib.rs"), "fn a() {}\n").unwrap();
     let edit = "<tool_call>\n<function=edit>\n<parameter=path>\nlib.rs\n</parameter>\n\
                 <parameter=old>\nfn a\n</parameter>\n<parameter=new>\npub fn a\n</parameter>\n\
@@ -268,7 +273,7 @@ fn states_and_instructions() {
         ("<tool_call>\n<function=bash>", Stop::Limit),
     ]);
     let (end, log, _) = run(&coder, &script, &dir, "Make a public");
-    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::CutOff));
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StepLimit));
     assert_eq!(
         log,
         [
@@ -280,7 +285,8 @@ fn states_and_instructions() {
             "> bash",
             "  fail",
             "[explore]",
-            "thinking: t"
+            "thinking: t",
+            "[cut off]"
         ]
     );
     assert_eq!(
@@ -290,6 +296,42 @@ fn states_and_instructions() {
     let prompts = script.prompts.borrow();
     assert!(prompts[2].contains("Only verification is available now"));
     assert!(prompts[2].ends_with("<think>\n\n</think>\n\n"));
+}
+
+#[test]
+fn a_cut_off_action_is_discarded_and_the_model_is_told() {
+    let dir = Dir::new("cut-off");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (
+            "<tool_call>\n<function=bash>\n<parameter=command>\ncat <<EOF",
+            Stop::Limit,
+        ),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let (end, log, session) = run(&default, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert_eq!(
+        kinds(&session),
+        ["user", "state", "thinking", "cut_off", "thinking", "answer"]
+    );
+    assert_eq!(session.events[3], Event::CutOff(8192));
+    assert!(log.contains(&"[cut off]".to_string()));
+    // The discarded text is not kept; the model reads the notice instead.
+    let history = session.history();
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        history[1],
+        Message::User(
+            "The action hit max_action_tokens (8192) and was discarded. Split the work into \
+             smaller actions, for example write a large file in parts."
+                .into()
+        )
+    );
+    // The turn went on with the notice in the second step's prompt.
+    assert!(script.prompts.borrow()[2].starts_with("[3 messages"));
 }
 
 #[test]
@@ -312,11 +354,12 @@ fn stops() {
         "<tool_call>\n<function=bash>\n<parameter=command>\nyes",
         Stop::Limit,
     )]);
+    // A discarded action is a step (D154).
     let (end, _, session) = run(&one_step, &script, &dir, "go");
-    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::CutOff));
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StepLimit));
     assert_eq!(
-        session.events.last(),
-        Some(&Event::Stop(StopReason::CutOff))
+        session.events[session.events.len() - 2..],
+        [Event::CutOff(8192), Event::Stop(StopReason::StepLimit)]
     );
 
     let mut full = Script::new(&[]);
