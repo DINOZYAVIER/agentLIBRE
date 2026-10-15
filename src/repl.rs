@@ -336,6 +336,9 @@ impl Report for Reporter<'_> {
     fn compacted(&mut self) {
         self.presenter.compacted();
     }
+    fn context_used(&mut self, tokens: usize) {
+        self.presenter.context_used(tokens);
+    }
 }
 
 /// What the main thread waits for.
@@ -405,15 +408,18 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         .collect();
     let editor = Editor::new(editor::load_history(&history_file), commands);
     let _raw = RawGuard::new().map_err(|source| Error::Terminal { source })?;
-    let dock = Arc::new(Dock::new(
-        Box::new(io::stdout()),
-        theme.clone(),
-        lang,
-        facts.function.clone(),
-        facts.workspace.clone(),
-        editor,
-        term::size(),
-    ));
+    let dock = Arc::new(
+        Dock::new(
+            Box::new(io::stdout()),
+            theme.clone(),
+            lang,
+            facts.function.clone(),
+            facts.workspace.clone(),
+            editor,
+            term::size(),
+        )
+        .with_context(facts.context),
+    );
     let control = Arc::new(Control::new(Info {
         session: session.id.clone(),
         ..Info::default()
@@ -707,15 +713,18 @@ mod tests {
                 description: String::new(),
             })
             .collect();
-        let dock = Arc::new(Dock::new(
-            Box::new(sink.clone()),
-            Theme::plain(),
-            Lang::En,
-            "default".into(),
-            "~/project".into(),
-            Editor::new(Vec::new(), commands),
-            (40, 20),
-        ));
+        let dock = Arc::new(
+            Dock::new(
+                Box::new(sink.clone()),
+                Theme::plain(),
+                Lang::En,
+                "default".into(),
+                "~/project".into(),
+                Editor::new(Vec::new(), commands),
+                (40, 20),
+            )
+            .with_context(16384),
+        );
         let stops = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(AtomicUsize::new(0));
         let input = Input {
@@ -892,7 +901,7 @@ mod tests {
             Some(("Nothing to compact.".into(), Role::Muted))
         );
         let (text, role) = notice(Ok(Compaction::Impossible)).unwrap();
-        assert!(text.starts_with("cannot compact: the history and max_compact_tokens (2048)"));
+        assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
         assert_eq!(role, Role::StatusFailure);
         assert_eq!(
             notice(Err(Error::Interrupted)),

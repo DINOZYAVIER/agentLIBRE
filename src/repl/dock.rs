@@ -22,6 +22,38 @@ const MAX_MENU_ROWS: usize = 6;
 /// How many printed lines are remembered for erasing.
 const REMEMBERED_LINES: usize = 400;
 
+/// The context usage for the status row and its role (D152): `41 213 /
+/// 131 072 (32%)`, with `—` before the first step; yellow from 70%, red
+/// from 90%.
+fn context_usage(used: Option<usize>, size: usize) -> (String, Role) {
+    let Some(used) = used else {
+        return (format!("— / {}", grouped(size)), Role::Muted);
+    };
+    let percent = used.saturating_mul(100) / size.max(1);
+    let role = match percent {
+        90.. => Role::StatusFailure,
+        70.. => Role::StatusPending,
+        _ => Role::Muted,
+    };
+    (
+        format!("{} / {} ({percent}%)", grouped(used), grouped(size)),
+        role,
+    )
+}
+
+/// `n` with a no-break space between groups of three digits.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push('\u{a0}');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// What the dock looks like: its rows and where the cursor is.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -36,6 +68,9 @@ struct State {
     lang: Lang,
     function: String,
     workspace: String,
+    /// The context size and the tokens of the last prompt (D152).
+    context: usize,
+    context_used: Option<usize>,
     editor: Editor,
     activity: Activity,
     queued: usize,
@@ -69,6 +104,8 @@ impl Dock {
                 lang,
                 function,
                 workspace,
+                context: 0,
+                context_used: None,
                 editor,
                 activity: Activity::Ready,
                 queued: 0,
@@ -79,6 +116,16 @@ impl Dock {
                 printed: VecDeque::new(),
             }),
         }
+    }
+
+    /// The size of the context the status row measures the prompt by
+    /// (D152).
+    pub fn with_context(mut self, size: usize) -> Dock {
+        self.state
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .context = size;
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -161,6 +208,12 @@ impl Screen for Dock {
             state.printed.pop_front();
         }
         state.redraw(&text);
+    }
+
+    fn context(&self, used: usize) {
+        let mut state = self.lock();
+        state.context_used = Some(used);
+        state.redraw("");
     }
 
     fn live(&self, text: &str) {
@@ -337,16 +390,24 @@ impl State {
 
     fn status_row(&self) -> String {
         let columns = self.columns;
-        let room = columns.saturating_sub(4);
+        let usage = context_usage(self.context_used, self.context);
+        // The usage is dropped when the row is too narrow for it.
+        let usage = Some(usage).filter(|(text, _)| columns >= 3 * width(text));
+        let usage_width = usage.as_ref().map_or(0, |(text, _)| width(text) + 2);
+        let room = columns.saturating_sub(4 + usage_width);
         let workspace = truncate_start(&self.workspace, room / 2 + room % 2);
         let function = truncate(&self.function, room.saturating_sub(width(&workspace)));
         let left = format!("  {function}");
         let right = format!("{workspace}  ");
-        let gap = columns.saturating_sub(width(&left) + width(&right));
+        let gap = columns.saturating_sub(width(&left) + usage_width + width(&right));
+        let usage = usage
+            .map(|(text, role)| format!("{}{}", self.theme.paint(role, &text), "  "))
+            .unwrap_or_default();
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             self.theme.paint(Role::Muted, &left),
             " ".repeat(gap),
+            usage,
             self.theme.paint(Role::Muted, &right)
         )
     }
@@ -459,7 +520,8 @@ mod tests {
             "/home/u/project".into(),
             Editor::new(Vec::new(), commands),
             (columns, rows),
-        );
+        )
+        .with_context(131_072);
         (dock, sink)
     }
 
@@ -480,7 +542,7 @@ mod tests {
                 " ".repeat(40),
                 format!("› {}", pad("Type a message or / for commands", 38)),
                 " ".repeat(40),
-                format!("  default{}/home/u/project  ", " ".repeat(40 - 9 - 17)),
+                "  default    — / 131\u{a0}072  …e/u/project  ".to_string(),
             ]
         );
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
@@ -589,6 +651,38 @@ mod tests {
         dock.print(&["y".into()]);
         dock.resize((30, 12));
         assert!(!dock.erase(1));
+    }
+
+    #[test]
+    fn context_usage_is_grouped_and_colored_by_fill() {
+        assert_eq!(
+            context_usage(None, 131_072),
+            ("— / 131\u{a0}072".into(), Role::Muted)
+        );
+        assert_eq!(
+            context_usage(Some(41_213), 131_072),
+            ("41\u{a0}213 / 131\u{a0}072 (31%)".into(), Role::Muted)
+        );
+        assert_eq!(context_usage(Some(999), 1000).1, Role::StatusFailure);
+        assert_eq!(context_usage(Some(899), 1000).1, Role::StatusPending);
+        assert_eq!(context_usage(Some(699), 1000).1, Role::Muted);
+        assert_eq!(grouped(7), "7");
+        assert_eq!(grouped(1000), "1\u{a0}000");
+    }
+
+    #[test]
+    fn the_status_row_follows_the_last_prompt() {
+        let (dock, _) = dock(80, 20);
+        dock.context(41_213);
+        let layout = dock.lock().layout();
+        assert!(
+            layout
+                .rows
+                .last()
+                .unwrap()
+                .contains("41\u{a0}213 / 131\u{a0}072 (31%)")
+        );
+        assert_eq!(width(layout.rows.last().unwrap()), 80);
     }
 
     #[test]

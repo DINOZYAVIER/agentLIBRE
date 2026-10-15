@@ -36,6 +36,8 @@ pub trait Screen: Send + Sync {
     /// the screen; false when they are not.
     fn erase(&self, count: usize) -> bool;
     fn activity(&self, activity: Activity);
+    /// The tokens of the last prompt (D152).
+    fn context(&self, _used: usize) {}
 }
 
 /// The streamed text of one action.
@@ -394,6 +396,10 @@ impl Report for Presenter {
     fn compacted(&mut self) {
         self.show_compacted();
         self.screen.activity(Activity::Generating);
+    }
+
+    fn context_used(&mut self, tokens: usize) {
+        self.screen.context(tokens);
     }
 }
 

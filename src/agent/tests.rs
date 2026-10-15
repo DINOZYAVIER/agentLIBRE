@@ -95,7 +95,8 @@ impl Backend for Script {
 }
 
 #[derive(Default)]
-struct Log(Vec<String>);
+/// The lines of the report, and the prompt sizes it was told (D152).
+struct Log(Vec<String>, Vec<usize>);
 
 impl Report for Log {
     fn state(&mut self, state: &str) {
@@ -131,6 +132,9 @@ impl Report for Log {
     }
     fn compacted(&mut self) {
         self.0.push("[compacted]".into());
+    }
+    fn context_used(&mut self, tokens: usize) {
+        self.1.push(tokens);
     }
 }
 
@@ -457,6 +461,27 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
     assert_eq!(*script.thinking.borrow(), [false, true, false, false]);
     // The turn goes on from the summary alone.
     assert!(prompts[3].starts_with("[2 messages; -]"));
+}
+
+#[test]
+fn the_prompt_size_of_every_step_is_reported() {
+    let dir = Dir::new("used");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        (" The user said go; true ran. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, FITS, 200]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    agent(&default, &script, &mut session, &dir)
+        .turn("go", &mut log)
+        .unwrap();
+    // The summary prompt (the third count) is not a step.
+    assert_eq!(log.1, [100, OVERFLOW, 200]);
 }
 
 #[test]

@@ -35,6 +35,8 @@ pub trait Report {
     fn compacting(&mut self) {}
     /// A summary replaced the history (D139).
     fn compacted(&mut self) {}
+    /// The prompt of the next step has this many tokens (D152).
+    fn context_used(&mut self, _tokens: usize) {}
 }
 
 /// How a turn ended.
@@ -131,9 +133,9 @@ impl Agent<'_> {
         } else {
             0
         };
-        let needed = self.backend.count_tokens(&prompt)?
-            + think_budget
-            + function.max_action_tokens as usize;
+        let prompt_tokens = self.backend.count_tokens(&prompt)?;
+        report.context_used(prompt_tokens);
+        let needed = prompt_tokens + think_budget + function.max_action_tokens as usize;
         if needed > self.context {
             // A summary of the history may make room (D139, D140).
             return match self.compact(report)? {
