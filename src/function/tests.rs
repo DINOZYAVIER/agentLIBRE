@@ -84,7 +84,7 @@ fn builtin_default() {
     assert_eq!(function.max_steps_total, 50);
     assert_eq!(
         (function.max_think_tokens, function.max_action_tokens),
-        (4096, 2048)
+        (4096, 8192)
     );
     assert!(
         function
