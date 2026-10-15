@@ -48,13 +48,13 @@ fn main() -> ExitCode {
     match run(env, std::env::args_os().skip(1), &mut lang) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("agl-lite: {}", error.message(lang));
+            eprintln!("agl: {}", error.message(lang));
             ExitCode::from(error.exit_code())
         }
     }
 }
 
-/// Runs `agl-lite`. Switches `lang` to the user file's `language` as soon
+/// Runs `agl`. Switches `lang` to the user file's `language` as soon
 /// as that file loads, so later errors and `--help` use it (D66).
 fn run(
     env: impl Fn(&str) -> Option<OsString>,
@@ -72,7 +72,7 @@ fn run(
     }
     let args = match cli::parse(args)? {
         Command::Help => {
-            // A closed pipe, as in `agl-lite --help | head -1`, is not an error.
+            // A closed pipe, as in `agl --help | head -1`, is not an error.
             let _ = writeln!(io::stdout(), "{}", i18n::help(*lang));
             return Ok(ExitCode::SUCCESS);
         }
@@ -154,7 +154,7 @@ fn run(
             Ok(ExitCode::SUCCESS)
         }
         TurnEnd::Stopped(reason) => {
-            eprintln!("agl-lite: {}", i18n::stopped(reason, &function, &id, *lang));
+            eprintln!("agl: {}", i18n::stopped(reason, &function, &id, *lang));
             Ok(ExitCode::from(match reason {
                 StopReason::Interrupted => interrupt::EXIT_CODE,
                 _ => 1,

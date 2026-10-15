@@ -6,6 +6,11 @@ license = "LGPL-3.0-or-later"
 description = "A coding agent for local models whose state machine drives the grammar"
 publish = false
 
+# The command is `agl` (D143).
+[[bin]]
+name = "agl"
+path = "src/main.rs"
+
 [dependencies]
 libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }

@@ -46,9 +46,9 @@ pub fn help(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
             "\
-Usage: agl-lite [-p <message>] [--resume <id>] [--function <name>]
+Usage: agl [-p <message>] [--resume <id>] [--function <name>]
 
-Without -p, agl-lite starts an interactive session.
+Without -p, agl starts an interactive session.
 
 Options:
   -p <message>        send one message, print the answer and exit
@@ -58,9 +58,9 @@ Options:
         }
         Lang::Uk => {
             "\
-Використання: agl-lite [-p <повідомлення>] [--resume <id>] [--function <назва>]
+Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>]
 
-Без -p agl-lite запускає інтерактивну сесію.
+Без -p agl запускає інтерактивну сесію.
 
 Параметри:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
@@ -80,8 +80,8 @@ impl Error {
             return message;
         }
         match lang {
-            Lang::En => format!("{message}\nRun `agl-lite --help` for usage."),
-            Lang::Uk => format!("{message}\nДив. `agl-lite --help`."),
+            Lang::En => format!("{message}\nRun `agl --help` for usage."),
+            Lang::Uk => format!("{message}\nДив. `agl --help`."),
         }
     }
 
@@ -445,7 +445,7 @@ pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) ->
     };
     format!(
         "{why}
-{next}: agl-lite --resume {id} -p \"...\""
+{next}: agl --resume {id} -p \"...\""
     )
 }
 
@@ -608,11 +608,11 @@ mod tests {
         let error = Error::UnknownOption("--url".into());
         assert_eq!(
             error.message(Lang::En),
-            "unknown option `--url`\nRun `agl-lite --help` for usage."
+            "unknown option `--url`\nRun `agl --help` for usage."
         );
         assert_eq!(
             error.message(Lang::Uk),
-            "невідомий параметр `--url`\nДив. `agl-lite --help`."
+            "невідомий параметр `--url`\nДив. `agl --help`."
         );
         assert!(
             !Error::FunctionNotFound {
@@ -709,8 +709,8 @@ pub mod repl {
     /// The description of a `/` command in the menu and in `/help`.
     pub fn command(name: &str, lang: Lang) -> &'static str {
         match (name, lang) {
-            ("/quit", En) => "close agl-lite",
-            ("/quit", Uk) => "закрити agl-lite",
+            ("/quit", En) => "close agl",
+            ("/quit", Uk) => "закрити agl",
             ("/exit", En) => "same as /quit",
             ("/exit", Uk) => "те саме, що /quit",
             ("/help", En) => "show commands and keys",

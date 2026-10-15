@@ -662,9 +662,9 @@ pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
             Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agl-lite: {}", texts::stopped(reason, function, lang));
+                eprintln!("agl: {}", texts::stopped(reason, function, lang));
             }
-            Err(error) => eprintln!("agl-lite: {}", error.message(lang)),
+            Err(error) => eprintln!("agl: {}", error.message(lang)),
         }
     }
     Ok(ExitCode::SUCCESS)

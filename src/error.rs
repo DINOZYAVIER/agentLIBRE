@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::grammar::pattern::PatternError;
 use crate::theme::StyleError;
 
-/// An error that stops `agl-lite`.
+/// An error that stops `agl`.
 #[derive(Debug)]
 pub enum Error {
     /// An argument is not valid UTF-8.
