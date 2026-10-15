@@ -7,5 +7,6 @@ guard rails: the tools it calls keep their own protections.
 The command is `agl`. Work in progress: `agl -p "..."` runs one turn
 against an already running llama-server; `agl` alone opens the
 interactive session (a line editor, a dock with the state and the queue,
-streamed thinking and text, tool cards). Install with
-`cargo install --path .`.
+streamed thinking and text, tool cards); `agl server start` runs
+llama-server as a systemd user unit from `[server]` in
+`agentLIBRE.toml`. Install with `cargo install --path .`.
