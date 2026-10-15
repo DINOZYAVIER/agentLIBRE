@@ -12,7 +12,11 @@ use crate::session::Event;
 struct Script {
     outputs: RefCell<VecDeque<Generated>>,
     prompts: RefCell<Vec<String>>,
+    /// Token counts to give in turn, then `tokens`.
+    counts: RefCell<VecDeque<usize>>,
     tokens: usize,
+    /// Whether each rendered prompt carried any thinking.
+    thinking: RefCell<Vec<bool>>,
 }
 
 impl Script {
@@ -32,13 +36,31 @@ impl Script {
                     .collect(),
             ),
             prompts: RefCell::new(Vec::new()),
+            counts: RefCell::new(VecDeque::new()),
             tokens: 100,
+            thinking: RefCell::new(Vec::new()),
         }
+    }
+
+    fn with_counts(mut self, counts: &[usize]) -> Script {
+        self.counts = RefCell::new(counts.iter().copied().collect());
+        self
     }
 }
 
 impl Backend for Script {
     fn render(&self, prompt: &Prompt) -> Result<String, Error> {
+        self.thinking
+            .borrow_mut()
+            .push(prompt.messages.iter().any(|m| {
+                matches!(
+                    m,
+                    Message::Assistant {
+                        thinking: Some(_),
+                        ..
+                    }
+                )
+            }));
         let instruction = prompt.instruction.unwrap_or("-");
         Ok(format!(
             "[{} messages; {instruction}]<think>\n",
@@ -64,7 +86,7 @@ impl Backend for Script {
     }
 
     fn count_tokens(&self, _: &str) -> Result<usize, Error> {
-        Ok(self.tokens)
+        Ok(self.counts.borrow_mut().pop_front().unwrap_or(self.tokens))
     }
 
     fn context_size(&self) -> Result<usize, Error> {
@@ -104,6 +126,12 @@ impl Report for Log {
     fn result(&mut self, _: &ToolCall, result: &ToolResult) {
         self.0.push(format!("  {}", result.outcome.name()));
     }
+    fn compacting(&mut self) {
+        self.0.push("compacting".into());
+    }
+    fn compacted(&mut self) {
+        self.0.push("[compacted]".into());
+    }
 }
 
 struct Dir(PathBuf);
@@ -140,16 +168,41 @@ fn run(
 ) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    let end = Agent {
+    let end = agent(function, script, &mut session, dir).turn(message, &mut log);
+    (end, log.0, session)
+}
+
+fn agent<'a>(
+    function: &'a Function,
+    script: &'a Script,
+    session: &'a mut Session,
+    dir: &'a Dir,
+) -> Agent<'a> {
+    Agent {
         function,
         function_name: "f",
         backend: script,
-        session: &mut session,
+        session,
         workspace: &dir.0,
         context: 16384,
     }
-    .turn(message, &mut log);
-    (end, log.0, session)
+}
+
+fn kinds(session: &Session) -> Vec<&'static str> {
+    session
+        .events
+        .iter()
+        .map(|e| match e {
+            Event::User(_) => "user",
+            Event::State(_) => "state",
+            Event::Thinking(_) => "thinking",
+            Event::Call { .. } => "call",
+            Event::Result { .. } => "result",
+            Event::Answer(_) => "answer",
+            Event::Stop(_) => "stop",
+            Event::Compact(_) => "compact",
+        })
+        .collect()
 }
 
 #[test]
@@ -176,21 +229,8 @@ fn a_call_then_an_answer() {
             "answer: It printed hello."
         ]
     );
-    let kinds: Vec<&str> = session
-        .events
-        .iter()
-        .map(|e| match e {
-            Event::User(_) => "user",
-            Event::State(_) => "state",
-            Event::Thinking(_) => "thinking",
-            Event::Call { .. } => "call",
-            Event::Result { .. } => "result",
-            Event::Answer(_) => "answer",
-            Event::Stop(_) => "stop",
-        })
-        .collect();
     assert_eq!(
-        kinds,
+        kinds(&session),
         [
             "user", "state", "thinking", "call", "result", "thinking", "answer"
         ]
@@ -363,5 +403,118 @@ fn text_before_a_call_streams_and_is_reported_whole() {
             "stream: Done.",
             "answer: Done."
         ]
+    );
+}
+
+/// Token counts of a step that overflows the context (with 4096 for
+/// thinking and 2048 for the action) and of a compaction prompt that fits
+/// with its 2048 tokens.
+const OVERFLOW: usize = 12_000;
+const FITS: usize = 5_000;
+
+#[test]
+fn a_full_context_is_compacted_and_the_turn_goes_on() {
+    let dir = Dir::new("compact");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        (" The user said go; true ran. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, FITS]);
+    let (end, log, session) = run(&default, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert_eq!(
+        log,
+        [
+            "[work]",
+            "thinking: t1",
+            "> bash",
+            "  ok",
+            "compacting",
+            "[compacted]",
+            "thinking: t2",
+            "stream: Done.",
+            "answer: Done."
+        ]
+    );
+    assert_eq!(
+        kinds(&session),
+        [
+            "user", "state", "thinking", "call", "result", "compact", "thinking", "answer"
+        ]
+    );
+    assert_eq!(
+        session.events[5],
+        Event::Compact("The user said go; true ran.".into())
+    );
+    let prompts = script.prompts.borrow();
+    // The summary is asked for after the history, without thinking.
+    assert!(prompts[2].starts_with("[4 messages; Summarize the conversation so far"));
+    assert!(prompts[2].ends_with("<think>\n\n</think>\n\n"));
+    assert_eq!(*script.thinking.borrow(), [false, true, false, false]);
+    // The turn goes on from the summary alone.
+    assert!(prompts[3].starts_with("[2 messages; -]"));
+}
+
+#[test]
+fn a_context_that_compaction_cannot_free_stops_the_turn() {
+    let dir = Dir::new("no-room");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    // The compaction prompt itself does not fit.
+    let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
+    let (end, log, session) = run(&default, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
+    assert_eq!(log, ["[work]", "compacting"]);
+    assert_eq!(kinds(&session), ["user", "state", "stop"]);
+
+    // A summary cut off by max_compact_tokens or an empty one is dropped.
+    for summary in [("a long summary", Stop::Limit), (" \n", Stop::End)] {
+        let script = Script::new(&[summary]).with_counts(&[OVERFLOW, FITS]);
+        let (end, _, session) = run(&default, &script, &dir, "go");
+        assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
+        assert_eq!(kinds(&session), ["user", "state", "stop"]);
+    }
+
+    // Still too long after a summary: nothing is left to compact.
+    let script = Script::new(&[("s", Stop::End)]).with_counts(&[OVERFLOW, FITS, OVERFLOW]);
+    let (end, _, session) = run(&default, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
+    assert_eq!(kinds(&session), ["user", "state", "compact", "stop"]);
+}
+
+#[test]
+fn compaction_on_request() {
+    let dir = Dir::new("on-request");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[("t", THOUGHT), ("Hi.", Stop::End), ("Greeted.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    assert_eq!(
+        agent(&default, &script, &mut session, &dir)
+            .compact(&mut log)
+            .unwrap(),
+        Compaction::Nothing
+    );
+    agent(&default, &script, &mut session, &dir)
+        .turn("hello", &mut log)
+        .unwrap();
+    assert_eq!(
+        agent(&default, &script, &mut session, &dir)
+            .compact(&mut log)
+            .unwrap(),
+        Compaction::Done
+    );
+    assert_eq!(
+        session.events.last(),
+        Some(&Event::Compact("Greeted.".into()))
+    );
+    assert_eq!(
+        agent(&default, &script, &mut session, &dir)
+            .compact(&mut log)
+            .unwrap(),
+        Compaction::Nothing
     );
 }

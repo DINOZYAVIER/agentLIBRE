@@ -320,6 +320,7 @@ impl State {
             Activity::Ready => texts::ready(lang).to_owned(),
             Activity::Generating => texts::generating(lang).to_owned(),
             Activity::Running(tool) => texts::running(tool, lang),
+            Activity::Compacting => texts::compacting(lang).to_owned(),
         };
         if self.queued > 0 {
             label.push_str(&format!(" · {}", texts::queued(self.queued, lang)));

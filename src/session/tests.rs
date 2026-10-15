@@ -80,6 +80,7 @@ fn write_and_read_back() {
         result("c1", Outcome::Ok),
         Event::Stop(StopReason::StepLimit),
         Event::Answer("Done: `Vec<&str>`\nok".into()),
+        Event::Compact("The test is fixed.".into()),
     ];
     let mut session = Session::create(&dir.0, "coder", Path::new("/home/u/repos/a")).unwrap();
     for event in &events {
@@ -90,11 +91,12 @@ fn write_and_read_back() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 8);
+    assert_eq!(lines.len(), 9);
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["version"], 1);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
     assert_eq!(lines[4]["args"], json!({"command": "ls", "timeout": 30}));
+    assert_eq!(lines[8]["summary"], "The test is fixed.");
     assert!(
         lines
             .iter()
@@ -169,6 +171,49 @@ fn history_for_the_template() {
             },
             Message::User("u2".into()),
         ]
+    );
+}
+
+#[test]
+fn history_after_a_summary() {
+    let dir = Dir::new("compact");
+    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    assert!(!session.compactable());
+    for event in [
+        Event::User("u1".into()),
+        Event::State("work".into()),
+        Event::Thinking("t1".into()),
+        call("c1", "ls"),
+        result("c1", Outcome::Ok),
+    ] {
+        session.append(event).unwrap();
+    }
+    assert!(session.compactable());
+    session.append(Event::Compact("s1".into())).unwrap();
+    assert!(!session.compactable());
+    let summary = |text: &str| Message::Assistant {
+        thinking: None,
+        text: Some(text.into()),
+        call: None,
+    };
+    assert_eq!(session.history(), vec![summary("s1")]);
+    // A summary in the middle of a turn keeps the turn going (D140).
+    assert_eq!(
+        session.unfinished(),
+        Some(Unfinished {
+            state: Some("work".into()),
+            visits: vec![("work".into(), 1)],
+            steps_in_visit: 1,
+        })
+    );
+    session.append(Event::Answer("a1".into())).unwrap();
+    assert!(session.compactable());
+    assert_eq!(session.history(), vec![summary("s1"), summary("a1")]);
+    session.append(Event::Compact("s2".into())).unwrap();
+    session.append(Event::User("u2".into())).unwrap();
+    assert_eq!(
+        session.history(),
+        vec![summary("s2"), Message::User("u2".into())]
     );
 }
 

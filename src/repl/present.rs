@@ -22,6 +22,7 @@ pub enum Activity {
     Ready,
     Generating,
     Running(String),
+    Compacting,
 }
 
 /// Where the transcript is drawn: above the dock.
@@ -112,6 +113,12 @@ impl Presenter {
             .print(&[self.theme.paint(Role::Muted, &format!("[{state}]"))]);
     }
 
+    /// `[compacted]` where a summary replaced the history (D140).
+    pub fn show_compacted(&self) {
+        self.screen
+            .print(&[self.theme.paint(Role::Muted, "[compacted]")]);
+    }
+
     pub fn show_thinking(&self, thinking: &str) {
         let mut wrap = StreamWrap::new(self.screen.columns());
         let mut lines = wrap.push(&format!("{}: {thinking}", i18n::thinking(self.lang)));
@@ -177,6 +184,7 @@ impl Presenter {
                     }
                 }
                 Event::Answer(text) => self.show_answer(text, None),
+                Event::Compact(_) => self.show_compacted(),
                 Event::Stop(_) => {}
             }
         }
@@ -375,6 +383,16 @@ impl Report for Presenter {
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         let elapsed = self.call_started.elapsed();
         self.show_card(call, result, Some(elapsed));
+        self.screen.activity(Activity::Generating);
+    }
+
+    fn compacting(&mut self) {
+        self.close();
+        self.screen.activity(Activity::Compacting);
+    }
+
+    fn compacted(&mut self) {
+        self.show_compacted();
         self.screen.activity(Activity::Generating);
     }
 }

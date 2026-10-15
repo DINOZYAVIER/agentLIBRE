@@ -692,6 +692,13 @@ pub mod repl {
         }
     }
 
+    pub fn compacting(lang: Lang) -> &'static str {
+        match lang {
+            En => "Compacting",
+            Uk => "Стиснення",
+        }
+    }
+
     pub fn queued(n: usize, lang: Lang) -> String {
         match lang {
             En => format!("queued {n}"),

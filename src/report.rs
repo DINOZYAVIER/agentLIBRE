@@ -57,6 +57,10 @@ impl Report for StderrReport {
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         eprintln!("  {}", result_summary(call, result, self.lang));
     }
+
+    fn compacted(&mut self) {
+        eprintln!("[compacted]");
+    }
 }
 
 /// `bash`: the command's first line, shortened; `edit`: the path.

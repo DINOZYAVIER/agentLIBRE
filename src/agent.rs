@@ -1,6 +1,7 @@
 //! The agent turn: steps of thinking and an action under the state
 //! grammar until an answer or a stop (D11, D14, D19, D32, D33, D44, D45,
-//! D94, D105, D108, D110, D113).
+//! D94, D105, D108, D110, D113), and compaction of the history (D139,
+//! D140).
 
 use std::path::Path;
 
@@ -30,6 +31,10 @@ pub trait Report {
     fn answer(&mut self, _text: &str) {}
     fn call(&mut self, call: &ToolCall);
     fn result(&mut self, call: &ToolCall, result: &ToolResult);
+    /// The summary is being generated (D140).
+    fn compacting(&mut self) {}
+    /// A summary replaced the history (D139).
+    fn compacted(&mut self) {}
 }
 
 /// How a turn ended.
@@ -37,6 +42,17 @@ pub trait Report {
 pub enum TurnEnd {
     Answer(String),
     Stopped(StopReason),
+}
+
+/// What a compaction did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Compaction {
+    Done,
+    /// The history holds nothing besides the last summary.
+    Nothing,
+    /// The prompt and the summary do not fit the context, or the summary
+    /// was cut off or empty (D140).
+    Impossible,
 }
 
 /// Everything a turn needs.
@@ -119,7 +135,11 @@ impl Agent<'_> {
             + think_budget
             + function.max_action_tokens as usize;
         if needed > self.context {
-            return self.stop(StopReason::ContextFull);
+            // A summary of the history may make room (D139, D140).
+            return match self.compact(report)? {
+                Compaction::Done => Ok(None),
+                Compaction::Nothing | Compaction::Impossible => self.stop(StopReason::ContextFull),
+            };
         }
 
         if let Some(think) = format.think.as_ref().filter(|_| state.think) {
@@ -217,6 +237,60 @@ impl Agent<'_> {
                 }
             }
         }
+    }
+
+    /// Replaces the history with a summary the model writes without
+    /// thinking or a grammar, from the history without thinking (D139,
+    /// D140).
+    pub fn compact(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+        if !self.session.compactable() {
+            return Ok(Compaction::Nothing);
+        }
+        report.compacting();
+        let function = self.function;
+        let mut messages = vec![Message::System(function.system.clone())];
+        messages.extend(
+            self.session
+                .history()
+                .into_iter()
+                .map(|message| match message {
+                    Message::Assistant { text, call, .. } => Message::Assistant {
+                        thinking: None,
+                        text,
+                        call,
+                    },
+                    other => other,
+                }),
+        );
+        let tools = function_tools(function);
+        let rendered = self.backend.render(&Prompt {
+            messages: &messages,
+            instruction: Some(&function.compact),
+            tools: &tools,
+            preserve_thinking: false,
+        })?;
+        let prompt = function.format.start_step(rendered, false);
+        let needed = self.backend.count_tokens(&prompt)? + function.max_compact_tokens as usize;
+        if needed > self.context {
+            return Ok(Compaction::Impossible);
+        }
+        let generated = self.backend.generate(
+            &Request {
+                prompt: &prompt,
+                grammar: None,
+                stop: &[],
+                max_tokens: function.max_compact_tokens,
+                sampling: &function.sampling,
+            },
+            &mut |_| {},
+        )?;
+        let summary = generated.text.trim();
+        if generated.stop == Stop::Limit || summary.is_empty() {
+            return Ok(Compaction::Impossible);
+        }
+        self.session.append(Event::Compact(summary.into()))?;
+        report.compacted();
+        Ok(Compaction::Done)
     }
 
     /// Logs a stop and ends the turn with it.

@@ -327,6 +327,12 @@ impl Report for Reporter<'_> {
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         self.presenter.result(call, result);
     }
+    fn compacting(&mut self) {
+        self.presenter.compacting();
+    }
+    fn compacted(&mut self) {
+        self.presenter.compacted();
+    }
 }
 
 /// What the main thread waits for.

@@ -1,5 +1,5 @@
 //! Sessions: an append-only JSONL log of a conversation that can be
-//! resumed (D30, D31, D36, D49, D104-D108).
+//! resumed (D30, D31, D36, D49, D104-D108, D139, D140).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -72,6 +72,8 @@ pub enum Event {
     },
     Answer(String),
     Stop(StopReason),
+    /// A summary that replaces the history before it (D139).
+    Compact(String),
 }
 
 /// Where an unfinished turn continues (D105).
@@ -227,13 +229,23 @@ impl Session {
             })
     }
 
-    /// The conversation for the chat template, without the system prompt.
-    /// Thinking that no call or answer followed is left out.
+    /// The conversation for the chat template, without the system prompt:
+    /// the last summary as a message of the model, then what followed it
+    /// (D139). Thinking that no call or answer followed is left out.
     pub fn history(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut thinking = None;
         for event in &self.events {
             match event {
+                Event::Compact(summary) => {
+                    messages.clear();
+                    thinking = None;
+                    messages.push(Message::Assistant {
+                        thinking: None,
+                        text: Some(summary.clone()),
+                        call: None,
+                    });
+                }
                 Event::User(text) => {
                     thinking = None;
                     messages.push(Message::User(text.clone()));
@@ -257,6 +269,20 @@ impl Session {
             }
         }
         messages
+    }
+
+    /// Whether the history holds more than the last summary.
+    pub fn compactable(&self) -> bool {
+        self.events
+            .iter()
+            .rev()
+            .take_while(|e| !matches!(e, Event::Compact(_)))
+            .any(|e| {
+                matches!(
+                    e,
+                    Event::User(_) | Event::Call { .. } | Event::Result { .. } | Event::Answer(_)
+                )
+            })
     }
 
     /// The last turn if it has not ended with an answer (D105). A turn
@@ -374,6 +400,7 @@ fn event_json(event: &Event) -> Json {
         } => json!({"type": "result", "id": id, "outcome": outcome.name(), "content": content}),
         Event::Answer(text) => json!({"type": "answer", "text": text}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
+        Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
     }
 }
 
@@ -421,6 +448,7 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 .into_iter()
                 .find(|r| json["reason"] == r.name())?,
         ),
+        "compact" => Event::Compact(text("summary")?),
         _ => return None,
     })
 }
