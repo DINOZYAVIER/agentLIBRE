@@ -1,5 +1,5 @@
 //! Sessions: an append-only JSONL log of a conversation that can be
-//! resumed (D30, D31, D36, D49, D104-D108, D139, D140).
+//! resumed (D30, D31, D36, D49, D104-D108, D139-D141).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -230,8 +230,8 @@ impl Session {
     }
 
     /// The conversation for the chat template, without the system prompt:
-    /// the last summary as a message of the model, then what followed it
-    /// (D139). Thinking that no call or answer followed is left out.
+    /// the last summary as a user message, then what followed it (D139,
+    /// D141). Thinking that no call or answer followed is left out.
     pub fn history(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut thinking = None;
@@ -240,11 +240,7 @@ impl Session {
                 Event::Compact(summary) => {
                     messages.clear();
                     thinking = None;
-                    messages.push(Message::Assistant {
-                        thinking: None,
-                        text: Some(summary.clone()),
-                        call: None,
-                    });
+                    messages.push(Message::User(summary.clone()));
                 }
                 Event::User(text) => {
                     thinking = None;
