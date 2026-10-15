@@ -1,4 +1,4 @@
-//! Command-line arguments (D51, D53).
+//! Command-line arguments (D51, D53, D146).
 
 use std::ffi::OsString;
 
@@ -11,6 +11,15 @@ pub enum Command {
     Help,
     /// Run the agent.
     Run(Args),
+    /// `agl server start|stop|status` (D146).
+    Server(ServerAction),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerAction {
+    Start,
+    Stop,
+    Status,
 }
 
 /// Options of a run.
@@ -28,9 +37,25 @@ pub struct Args {
 /// next argument as its value, even one that starts with `-`.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error> {
     let mut parsed = Args::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    let text = |arg: OsString| arg.into_string().map_err(|_| Error::InvalidUnicode);
+    if args.peek().is_some_and(|arg| arg == "server") {
+        args.next();
+        let action = match args.next().map(text).transpose()?.as_deref() {
+            Some("start") => ServerAction::Start,
+            Some("stop") => ServerAction::Stop,
+            Some("status") => ServerAction::Status,
+            Some("-h" | "--help") => return Ok(Command::Help),
+            Some(other) => return Err(Error::UnknownOption(other.into())),
+            None => return Err(Error::MissingValue("server".into())),
+        };
+        return match args.next().map(text).transpose()? {
+            None => Ok(Command::Server(action)),
+            Some(extra) => Err(Error::UnknownOption(extra)),
+        };
+    }
     while let Some(arg) = args.next() {
-        let arg = arg.into_string().map_err(|_| Error::InvalidUnicode)?;
+        let arg = text(arg)?;
         let slot = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "-p" => &mut parsed.prompt,
@@ -44,7 +69,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         let value = args
             .next()
             .ok_or_else(|| Error::MissingValue(arg.clone()))?;
-        *slot = Some(value.into_string().map_err(|_| Error::InvalidUnicode)?);
+        *slot = Some(text(value)?);
     }
     Ok(Command::Run(parsed))
 }
@@ -108,6 +133,41 @@ mod tests {
             parse_strs(&["-p", "a", "-p", "b"]),
             Err(Error::RepeatedOption(o)) if o == "-p"
         ));
+    }
+
+    #[test]
+    fn server_commands() {
+        for (word, action) in [
+            ("start", ServerAction::Start),
+            ("stop", ServerAction::Stop),
+            ("status", ServerAction::Status),
+        ] {
+            assert_eq!(
+                parse_strs(&["server", word]).unwrap(),
+                Command::Server(action)
+            );
+        }
+        assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help);
+        assert!(matches!(
+            parse_strs(&["server"]),
+            Err(Error::MissingValue(o)) if o == "server"
+        ));
+        assert!(matches!(
+            parse_strs(&["server", "restart"]),
+            Err(Error::UnknownOption(o)) if o == "restart"
+        ));
+        assert!(matches!(
+            parse_strs(&["server", "start", "-p"]),
+            Err(Error::UnknownOption(o)) if o == "-p"
+        ));
+        // Only the first word is a command; a message may say "server".
+        assert_eq!(
+            parse_strs(&["-p", "server"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("server".into()),
+                ..Args::default()
+            })
+        );
     }
 
     #[test]

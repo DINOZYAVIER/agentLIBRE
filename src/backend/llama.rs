@@ -34,6 +34,14 @@ impl Llama {
         }
     }
 
+    /// The status of `/health`; `None` when the server does not answer
+    /// (D149, D150).
+    pub fn health(&self) -> Option<u16> {
+        let url = format!("{}/health", self.url);
+        let response = self.agent.get(&url).call().ok()?;
+        Some(response.status().as_u16())
+    }
+
     fn unreachable(&self, error: impl std::fmt::Display) -> Error {
         Error::ServerUnreachable {
             url: self.url.clone(),

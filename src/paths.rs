@@ -59,6 +59,11 @@ impl Paths {
         self.state.join("history.jsonl")
     }
 
+    /// GGUF models (D38).
+    pub fn models(&self) -> PathBuf {
+        self.data.join("models")
+    }
+
     /// User model formats, `formats/*.toml` (D39).
     pub fn formats(&self) -> PathBuf {
         self.config.join("formats")

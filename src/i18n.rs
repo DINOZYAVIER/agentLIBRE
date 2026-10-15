@@ -47,6 +47,7 @@ pub fn help(lang: Lang) -> &'static str {
         Lang::En => {
             "\
 Usage: agl [-p <message>] [--resume <id>] [--function <name>]
+       agl server start|stop|status
 
 Without -p, agl starts an interactive session.
 
@@ -54,11 +55,17 @@ Options:
   -p <message>        send one message, print the answer and exit
   --resume <id>       continue session <id>
   --function <name>   use Function <name>
-  -h, --help          print this help"
+  -h, --help          print this help
+
+Server (systemd user unit agl-llama-server, [server] in agentLIBRE.toml):
+  server start        start llama-server and wait until it is ready
+  server stop         stop it
+  server status       show whether it runs and is ready"
         }
         Lang::Uk => {
             "\
 Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>]
+              agl server start|stop|status
 
 Без -p agl запускає інтерактивну сесію.
 
@@ -66,7 +73,12 @@ Options:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
   --resume <id>       продовжити сесію <id>
   --function <назва>  використати Function <назва>
-  -h, --help          показати цю довідку"
+  -h, --help          показати цю довідку
+
+Сервер (user-unit systemd agl-llama-server, [server] в agentLIBRE.toml):
+  server start        запустити llama-server і дочекатися готовності
+  server stop         зупинити його
+  server status       показати, чи він працює і чи готовий"
         }
     }
 }
@@ -290,12 +302,53 @@ impl Error {
                     Uk => format!("`{key}` у {}: {problem}", path.display()),
                 }
             }
-            (Error::ServerUnreachable { url, detail }, En) => {
-                format!("cannot reach llama-server at {url}: {detail}")
-            }
-            (Error::ServerUnreachable { url, detail }, Uk) => {
-                format!("не вдалося з'єднатися з llama-server за адресою {url}: {detail}")
-            }
+            (Error::ServerUnreachable { url, detail }, En) => format!(
+                "cannot reach llama-server at {url}: {detail}\nTo start it: agl server start"
+            ),
+            (Error::ServerUnreachable { url, detail }, Uk) => format!(
+                "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\n\
+                 Щоб запустити: agl server start"
+            ),
+            (Error::MissingModel { user_path, models }, En) => format!(
+                "the model is not set; add the name of a file in {} to {}:\n\n[server]\nmodel = \"NAME.gguf\"",
+                models.display(),
+                user_path.display()
+            ),
+            (Error::MissingModel { user_path, models }, Uk) => format!(
+                "модель не задано; додай назву файлу з {} у {}:\n\n[server]\nmodel = \"NAME.gguf\"",
+                models.display(),
+                user_path.display()
+            ),
+            (Error::ModelNotFound { path }, En) => format!("no model file {}", path.display()),
+            (Error::ModelNotFound { path }, Uk) => format!("немає файлу моделі {}", path.display()),
+            (Error::NotLocalServer { url }, En) => format!(
+                "agl server start runs llama-server only on 127.0.0.1 or localhost, not at {url}"
+            ),
+            (Error::NotLocalServer { url }, Uk) => format!(
+                "agl server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}"
+            ),
+            (Error::LlamaServerNotFound, En) => "llama-server is not in PATH".into(),
+            (Error::LlamaServerNotFound, Uk) => "llama-server немає в PATH".into(),
+            (Error::Systemd { detail }, En) => format!("systemd failed: {detail}"),
+            (Error::Systemd { detail }, Uk) => format!("помилка systemd: {detail}"),
+            (Error::ServerFailed, En) => format!(
+                "llama-server stopped before it was ready; see journalctl --user -u {}",
+                crate::server::UNIT
+            ),
+            (Error::ServerFailed, Uk) => format!(
+                "llama-server зупинився, не встигнувши стати готовим; див. journalctl --user -u {}",
+                crate::server::UNIT
+            ),
+            (Error::ServerTimeout { seconds }, En) => format!(
+                "llama-server was not ready after {seconds} s; it keeps loading in the background \
+                 (agl server status, journalctl --user -u {})",
+                crate::server::UNIT
+            ),
+            (Error::ServerTimeout { seconds }, Uk) => format!(
+                "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні \
+                 (agl server status, journalctl --user -u {})",
+                crate::server::UNIT
+            ),
             (
                 Error::ServerStatus {
                     url,
@@ -654,6 +707,89 @@ mod tests {
         assert_eq!(Lang::from_code("en"), Some(Lang::En));
         assert_eq!(Lang::from_code("uk"), Some(Lang::Uk));
         assert_eq!(Lang::from_code("uk_UA"), None);
+    }
+}
+
+/// Texts of `agl server` (D146-D150).
+pub mod server {
+    use super::Lang::{self, En, Uk};
+    use crate::server::{Health, UNIT};
+
+    pub fn starting(model: &str, url: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("starting llama-server ({model}) at {url} as unit {UNIT}…"),
+            Uk => format!("запускаю llama-server ({model}) за {url} як unit {UNIT}…"),
+        }
+    }
+
+    pub fn ready(url: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("llama-server is ready at {url}"),
+            Uk => format!("llama-server готовий за {url}"),
+        }
+    }
+
+    pub fn already_running(url: &str, lang: Lang) -> String {
+        match lang {
+            En => format!("llama-server is already running at {url}"),
+            Uk => format!("llama-server уже працює за {url}"),
+        }
+    }
+
+    pub fn stopped(lang: Lang) -> &'static str {
+        match lang {
+            En => "llama-server stopped",
+            Uk => "llama-server зупинено",
+        }
+    }
+
+    pub fn not_running(lang: Lang) -> String {
+        match lang {
+            En => format!("unit {UNIT} is not running"),
+            Uk => format!("unit {UNIT} не працює"),
+        }
+    }
+
+    /// `agl server status`.
+    pub fn status(
+        active: bool,
+        url: &str,
+        model: Option<&str>,
+        health: Health,
+        lang: Lang,
+    ) -> String {
+        let (unit, model, health) = match lang {
+            En => (
+                if active { "active" } else { "inactive" },
+                model.unwrap_or("not set"),
+                match health {
+                    Health::Ready => "ready",
+                    Health::Loading => "loading",
+                    Health::Down => "not responding",
+                },
+            ),
+            Uk => (
+                if active {
+                    "активний"
+                } else {
+                    "неактивний"
+                },
+                model.unwrap_or("не задано"),
+                match health {
+                    Health::Ready => "готовий",
+                    Health::Loading => "завантажується",
+                    Health::Down => "не відповідає",
+                },
+            ),
+        };
+        let labels = match lang {
+            En => ["unit", "url", "model", "health"],
+            Uk => ["unit", "адреса", "модель", "стан"],
+        };
+        format!(
+            "{}: {UNIT} ({unit})\n{}: {url}\n{}: {model}\n{}: {health}",
+            labels[0], labels[1], labels[2], labels[3]
+        )
     }
 }
 

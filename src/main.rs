@@ -15,6 +15,7 @@ mod machine;
 mod paths;
 mod repl;
 mod report;
+mod server;
 mod session;
 mod settings;
 mod term;
@@ -77,6 +78,17 @@ fn run(
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
+        Command::Server(action) => {
+            let (paths, user) = loaded?;
+            return server::run(
+                action,
+                &user,
+                &paths.settings_file(),
+                &paths.models(),
+                env("PATH"),
+                *lang,
+            );
+        }
     };
     let (paths, user) = loaded?;
     let user_path = paths.settings_file();

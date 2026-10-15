@@ -1,4 +1,4 @@
-//! User and project `agentLIBRE.toml` files (D54-D60, D66).
+//! User and project `agentLIBRE.toml` files (D54-D60, D66, D148).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,10 +21,22 @@ pub struct UserFile {
     pub language: Option<Lang>,
     /// `[server] url`.
     pub server_url: Option<String>,
+    /// What `agl server start` runs (D148).
+    pub launch: Launch,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
     /// `[repl]` (D124, D130).
     pub repl: ReplFile,
+}
+
+/// `[server]` keys of `agl server start` (D148).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Launch {
+    /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
+    pub model: Option<String>,
+    pub context: Option<u32>,
+    /// More llama-server arguments.
+    pub args: Vec<String>,
 }
 
 /// `[repl]`: the limits of tool cards and their frame (D130).
@@ -71,11 +83,35 @@ impl UserFile {
                 })
             })
             .transpose()?;
-        let server_url = match file.section("server")? {
-            None => None,
+        let (server_url, launch) = match file.section("server")? {
+            None => (None, Launch::default()),
             Some(mut server) => {
-                server.check_keys(&["url"])?;
-                server.string("url")?
+                server.check_keys(&["url", "model", "context", "args"])?;
+                let url = server.string("url")?;
+                let model = server.string("model")?;
+                if let Some(model) = &model {
+                    tomlfile::check_name(model)?;
+                }
+                let context = server
+                    .integer("context")?
+                    .map(|n| {
+                        u32::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
+                            Error::NotPositive {
+                                path: path.into(),
+                                key: server.key("context"),
+                            }
+                        })
+                    })
+                    .transpose()?;
+                let args = server.strings("args")?.unwrap_or_default();
+                (
+                    url,
+                    Launch {
+                        model,
+                        context,
+                        args,
+                    },
+                )
             }
         };
         if let Some(url) = &server_url
@@ -133,6 +169,7 @@ impl UserFile {
             function,
             language,
             server_url,
+            launch,
             colors,
             repl,
         })
@@ -266,6 +303,20 @@ mod tests {
                 ..UserFile::default()
             }
         );
+        let launch = user(
+            "[server]\nurl = \"http://127.0.0.1:18080\"\nmodel = \"m.gguf\"\ncontext = 8192\n\
+             args = [\"-ngl\", \"999\"]\n",
+        )
+        .unwrap()
+        .launch;
+        assert_eq!(
+            launch,
+            Launch {
+                model: Some("m.gguf".into()),
+                context: Some(8192),
+                args: vec!["-ngl".into(), "999".into()],
+            }
+        );
     }
 
     #[test]
@@ -384,6 +435,18 @@ mod tests {
             Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
         ));
         assert!(matches!(user("function ="), Err(Error::Parse { .. })));
+        assert!(matches!(
+            user("[server]\nmodel = \"/tmp/m.gguf\""),
+            Err(Error::InvalidName(name)) if name == "/tmp/m.gguf"
+        ));
+        assert!(matches!(
+            user("[server]\ncontext = 0"),
+            Err(Error::NotPositive { key, .. }) if key == "server.context"
+        ));
+        assert!(matches!(
+            user("[server]\nargs = \"-ngl 999\""),
+            Err(Error::WrongType { key, .. }) if key == "server.args"
+        ));
     }
 
     #[test]

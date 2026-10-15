@@ -107,6 +107,20 @@ pub enum Error {
     Interrupted,
     /// The server generated text the grammar does not allow.
     OutsideGrammar(String),
+    /// `agl server start` without `[server] model` (D148).
+    MissingModel { user_path: PathBuf, models: PathBuf },
+    /// `[server] model` names no file in the models directory.
+    ModelNotFound { path: PathBuf },
+    /// `agl server start` with a `url` whose host is not local (D148).
+    NotLocalServer { url: String },
+    /// No `llama-server` in `PATH` (D147).
+    LlamaServerNotFound,
+    /// `systemd-run` or `systemctl` failed.
+    Systemd { detail: String },
+    /// The unit stopped before llama-server was ready (D149).
+    ServerFailed,
+    /// llama-server was not ready in time (D149).
+    ServerTimeout { seconds: u64 },
 }
 
 /// TOML type a settings key requires.
