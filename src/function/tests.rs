@@ -92,7 +92,7 @@ fn builtin_default() {
             .starts_with("Summarize the conversation so far")
     );
     assert!(function.compact.ends_with("Write only the summary."));
-    assert_eq!(function.max_compact_tokens, 2048);
+    assert_eq!(function.max_compact_tokens, 4096);
     assert_eq!(
         function.sampling,
         Sampling {

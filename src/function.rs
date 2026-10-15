@@ -24,7 +24,7 @@ const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 /// (D18, D96).
 const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
 const DEFAULT_MAX_ACTION_TOKENS: u32 = 2048;
-const DEFAULT_MAX_COMPACT_TOKENS: u32 = 2048;
+const DEFAULT_MAX_COMPACT_TOKENS: u32 = 4096;
 
 /// The summary instruction when the Function does not set `compact`
 /// (D140).
