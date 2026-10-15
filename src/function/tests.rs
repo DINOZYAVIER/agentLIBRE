@@ -86,6 +86,13 @@ fn builtin_default() {
         (function.max_think_tokens, function.max_action_tokens),
         (4096, 2048)
     );
+    assert!(
+        function
+            .compact
+            .starts_with("Summarize the conversation so far")
+    );
+    assert!(function.compact.ends_with("Write only the summary."));
+    assert_eq!(function.max_compact_tokens, 2048);
     assert_eq!(
         function.sampling,
         Sampling {
@@ -202,6 +209,22 @@ fn top_level_errors() {
              [state.a]\nanswer = true"
         )),
         ("max_steps_total".into(), FunctionProblem::NotPositive)
+    );
+    let compaction = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact = \"Sum up.\"\nmax_compact_tokens = 512\n\
+         initial = \"a\"\n[state.a]\nanswer = true",
+    )
+    .unwrap();
+    assert_eq!(
+        (compaction.compact.as_str(), compaction.max_compact_tokens),
+        ("Sum up.", 512)
+    );
+    assert_eq!(
+        problem_of(function(
+            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_compact_tokens = 0\ninitial = \"a\"\n\
+             [state.a]\nanswer = true"
+        )),
+        ("max_compact_tokens".into(), FunctionProblem::NotPositive)
     );
 }
 

@@ -1,5 +1,6 @@
 //! Functions: the model format, prompt, sampling and state machine of an
-//! agent, checked when loaded (D11, D15, D17, D21, D39, D41-D43, D82-D93).
+//! agent, checked when loaded (D11, D15, D17, D21, D39, D41-D43, D82-D93,
+//! D139, D140).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,13 @@ const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 /// (D18, D96).
 const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
 const DEFAULT_MAX_ACTION_TOKENS: u32 = 2048;
+const DEFAULT_MAX_COMPACT_TOKENS: u32 = 2048;
+
+/// The summary instruction when the Function does not set `compact`
+/// (D140).
+const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can continue the \
+     work from this summary alone: the user's requests, what has been done and found, files \
+     and commands that matter, and what remains to be done. Write only the summary.";
 
 /// A loaded Function.
 #[derive(Debug)]
@@ -33,6 +41,9 @@ pub struct Function {
     pub max_steps_total: u32,
     pub max_think_tokens: u32,
     pub max_action_tokens: u32,
+    /// The instruction that asks for a summary of the history (D139).
+    pub compact: String,
+    pub max_compact_tokens: u32,
     pub sampling: Sampling,
     pub initial: usize,
     pub states: Vec<State>,
@@ -121,6 +132,8 @@ impl Function {
             "max_steps_total",
             "max_think_tokens",
             "max_action_tokens",
+            "compact",
+            "max_compact_tokens",
             "sampling",
             "initial",
             "state",
@@ -135,6 +148,11 @@ impl Function {
             positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens =
             positive(&mut file, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
+        let compact = file
+            .string("compact")?
+            .unwrap_or_else(|| DEFAULT_COMPACT.into());
+        let max_compact_tokens =
+            positive(&mut file, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
         let sampling = match file.section("sampling")? {
             None => Sampling::default(),
             Some(sampling) => read_sampling(sampling)?,
@@ -167,6 +185,8 @@ impl Function {
             max_steps_total,
             max_think_tokens,
             max_action_tokens,
+            compact,
+            max_compact_tokens,
             sampling,
             initial,
             states,
