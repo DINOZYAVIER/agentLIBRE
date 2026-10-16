@@ -4,7 +4,7 @@
 mod dock;
 mod editor;
 mod markdown;
-mod present;
+mod transcript;
 mod text;
 
 use std::collections::VecDeque;
@@ -17,7 +17,7 @@ use std::thread;
 
 use dock::Dock;
 use editor::{Editor, MenuItem, Outcome, save_history};
-use present::{Presenter, Screen, notice_lines};
+use transcript::{Presenter, Screen, notice_lines};
 
 use crate::agent::{Agent, Compaction, Report, TurnEnd};
 use crate::backend::{Backend, ToolCall};

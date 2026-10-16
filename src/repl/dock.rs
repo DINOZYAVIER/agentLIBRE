@@ -9,7 +9,7 @@ use std::io::Write;
 use std::sync::{Mutex, MutexGuard};
 
 use super::editor::{Editor, Outcome};
-use super::present::{Activity, Screen};
+use super::transcript::{Activity, Screen};
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::{Lang, repl as texts};
 use crate::term::Key;
