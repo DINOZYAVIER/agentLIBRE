@@ -15,6 +15,7 @@ mod paths;
 mod repl;
 mod session;
 mod settings;
+mod status;
 #[cfg(test)]
 mod test_server;
 mod theme;
@@ -23,6 +24,7 @@ mod tools;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use agent::{Agent, TurnEnd};
@@ -36,8 +38,25 @@ use i18n::Lang;
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
-use settings::{ProjectFile, Settings, UserFile};
+use settings::{ProjectFile, ReplSettings, Settings, UserFile};
 use theme::Theme;
+
+/// Everything a session needs.
+pub struct Setup<'a> {
+    pub function: &'a Function,
+    pub function_name: &'a str,
+    pub backend: &'a dyn Backend,
+    pub session: Session,
+    /// Whether the session existed before this run (D126).
+    pub resumed: bool,
+    pub sessions_dir: &'a Path,
+    pub context: usize,
+    pub server_url: &'a str,
+    pub theme: Theme,
+    pub repl: ReplSettings,
+    pub lang: Lang,
+    pub history_file: PathBuf,
+}
 
 fn main() -> ExitCode {
     let env = |name: &str| std::env::var_os(name);
@@ -125,7 +144,7 @@ fn run(
     let Some(message) = args.prompt else {
         // No `-p`: the interactive session (D136).
         let interactive = repl::term::is_interactive();
-        let setup = repl::Setup {
+        let setup = Setup {
             function: &function,
             function_name: &settings.function,
             backend: &backend,

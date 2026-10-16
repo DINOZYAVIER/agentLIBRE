@@ -10,7 +10,7 @@ pub(crate) mod term;
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -21,56 +21,17 @@ use editor::{Editor, MenuItem, Outcome, save_history};
 use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines};
 
-use crate::agent::{Agent, Compaction, Report, TurnEnd};
-use crate::backend::{Backend, ToolCall};
+use crate::Setup;
+use crate::agent::{Agent, Report, TurnEnd};
+use crate::backend::ToolCall;
 use crate::cli::report::StderrReport;
 use crate::error::Error;
-use crate::function::Function;
 use crate::i18n::{self, Lang, repl as texts};
 use crate::interrupt;
 use crate::session::{Session, StopReason};
-use crate::settings::ReplSettings;
+use crate::status::{COMMANDS, Facts, Info, compact_notice, display_path, help_text, status_text};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
-
-/// The `/` commands (D118, D139).
-const COMMANDS: [&str; 6] = ["/quit", "/exit", "/help", "/status", "/new", "/compact"];
-
-/// Everything a session needs.
-pub struct Setup<'a> {
-    pub function: &'a Function,
-    pub function_name: &'a str,
-    pub backend: &'a dyn Backend,
-    pub session: Session,
-    /// Whether the session existed before this run (D126).
-    pub resumed: bool,
-    pub sessions_dir: &'a Path,
-    pub context: usize,
-    pub server_url: &'a str,
-    pub theme: Theme,
-    pub repl: ReplSettings,
-    pub lang: Lang,
-    pub history_file: PathBuf,
-}
-
-/// What `/status` tells besides the session (D134).
-#[derive(Clone)]
-struct Facts {
-    function: String,
-    workspace: String,
-    server: String,
-    context: usize,
-}
-
-/// What changes during the session.
-#[derive(Clone, Default)]
-struct Info {
-    session: String,
-    /// The state of the last visit.
-    state: Option<String>,
-    /// The state of an interrupted turn.
-    unfinished: Option<String>,
-}
 
 #[derive(Default)]
 struct Inner {
@@ -113,48 +74,6 @@ impl Inner {
     /// A turn runs or messages wait for one.
     fn busy(&self) -> bool {
         self.running || !self.queue.is_empty()
-    }
-}
-
-/// `/help` (D134); the keys only make sense in a terminal.
-fn help_text(lang: Lang, with_keys: bool) -> String {
-    let mut lines: Vec<String> = COMMANDS
-        .iter()
-        .map(|name| format!("{name:<9} {}", texts::command(name, lang)))
-        .collect();
-    if with_keys {
-        lines.push(texts::keys(lang).into());
-    }
-    lines.join("\n")
-}
-
-/// `/status` (D134).
-fn status_text(facts: &Facts, info: &Info, lang: Lang) -> String {
-    let state = match (&info.unfinished, &info.state) {
-        (Some(state), _) => texts::unfinished(state, lang),
-        (None, Some(state)) => state.clone(),
-        (None, None) => texts::idle(lang).to_owned(),
-    };
-    [
-        texts::status_line("session", &info.session, lang),
-        texts::status_line("function", &facts.function, lang),
-        texts::status_line("workspace", &facts.workspace, lang),
-        texts::status_line("server", &facts.server, lang),
-        texts::status_line("context", &texts::tokens(facts.context, lang), lang),
-        texts::status_line("state", &state, lang),
-    ]
-    .join("\n")
-}
-
-fn display_path(path: &Path) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match home
-        .as_deref()
-        .and_then(|home| path.strip_prefix(home).ok())
-    {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
     }
 }
 
@@ -559,27 +478,6 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What to tell after `/compact`; a summary shows itself (D140).
-fn compact_notice(
-    result: Result<Compaction, Error>,
-    function: &Function,
-    lang: Lang,
-) -> Option<(String, Role)> {
-    match result {
-        Ok(Compaction::Done) => None,
-        Ok(Compaction::Nothing) => Some((texts::nothing_to_compact(lang).into(), Role::Muted)),
-        Ok(Compaction::Impossible) => Some((
-            texts::compaction_failed(function, lang),
-            Role::StatusFailure,
-        )),
-        Err(Error::Interrupted) => Some((
-            texts::stopped(StopReason::Interrupted, function, lang),
-            Role::StatusPending,
-        )),
-        Err(error) => Some((error.message(lang), Role::StatusFailure)),
-    }
-}
-
 /// The session without a terminal (D128): every line of stdin is a
 /// message; the answers go to stdout and the progress to stderr, as with
 /// `-p` (D109).
@@ -682,9 +580,12 @@ pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+    use crate::agent::Compaction;
+    use crate::function::Function;
 
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
