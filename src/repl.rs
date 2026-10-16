@@ -9,7 +9,7 @@ mod text;
 pub(crate) mod term;
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead};
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +24,6 @@ use transcript::{Presenter, Screen, notice_lines};
 use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::backend::ToolCall;
-use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::i18n::{self, Lang, repl as texts};
 use crate::interrupt;
@@ -475,106 +474,6 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
     dock.finish();
-    Ok(ExitCode::SUCCESS)
-}
-
-/// The session without a terminal (D128): every line of stdin is a
-/// message; the answers go to stdout and the progress to stderr, as with
-/// `-p` (D109).
-pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
-    let Setup {
-        function,
-        function_name,
-        backend,
-        mut session,
-        sessions_dir,
-        context,
-        server_url,
-        lang,
-        ..
-    } = setup;
-    let workspace = session.workspace.clone();
-    let facts = Facts {
-        function: function_name.into(),
-        workspace: display_path(&workspace),
-        server: server_url.into(),
-        context,
-    };
-    interrupt::install();
-    eprintln!("{}", i18n::session(&session.id, lang));
-    let mut state: Option<String> = None;
-    for line in io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
-        let message = line.trim();
-        if message.is_empty() {
-            continue;
-        }
-        if message.starts_with('/') {
-            let name = message.split_whitespace().next().unwrap_or(message);
-            match name {
-                "/quit" | "/exit" => break,
-                "/help" => println!("{}", help_text(lang, false)),
-                "/status" => {
-                    let info = Info {
-                        session: session.id.clone(),
-                        state: state.clone(),
-                        unfinished: session.unfinished().and_then(|turn| turn.state),
-                    };
-                    println!("{}", status_text(&facts, &info, lang));
-                }
-                "/new" => {
-                    session = Session::create(sessions_dir, function_name, &workspace)?;
-                    state = None;
-                    eprintln!("{}", texts::new_session(&session.id, lang));
-                }
-                "/compact" => {
-                    let result = Agent {
-                        function,
-                        function_name,
-                        backend,
-                        session: &mut session,
-                        workspace: &workspace,
-                        context,
-                    }
-                    .compact(&mut StderrReport::new(lang));
-                    let interrupted = matches!(result, Err(Error::Interrupted));
-                    if let Some((text, _)) = compact_notice(result, function, lang) {
-                        eprintln!("{text}");
-                    }
-                    if interrupted {
-                        return Ok(ExitCode::from(interrupt::EXIT_CODE));
-                    }
-                }
-                _ => eprintln!("{}", texts::unknown_command(name, lang)),
-            }
-            continue;
-        }
-        let mut report = StderrReport::new(lang);
-        let end = Agent {
-            function,
-            function_name,
-            backend,
-            session: &mut session,
-            workspace: &workspace,
-            context,
-        }
-        .turn(message, &mut report);
-        state = None;
-        match end {
-            Ok(TurnEnd::Answer(text)) => println!("{text}"),
-            Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
-                eprintln!(
-                    "{}",
-                    texts::stopped(StopReason::Interrupted, function, lang)
-                );
-                return Ok(ExitCode::from(interrupt::EXIT_CODE));
-            }
-            Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agentLIBRE: {}", texts::stopped(reason, function, lang));
-            }
-            Err(error) => eprintln!("agentLIBRE: {}", error.message(lang)),
-        }
-    }
     Ok(ExitCode::SUCCESS)
 }
 

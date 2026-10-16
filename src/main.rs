@@ -161,7 +161,7 @@ fn run(
         return if interactive {
             repl::run(setup)
         } else {
-            repl::run_lines(setup)
+            cli::lines::run(setup)
         };
     };
     eprintln!("{}", i18n::session(&session.id, *lang));
