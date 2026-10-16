@@ -1,5 +1,5 @@
 //! agl-lite: a coding agent for local models whose state machine drives
-//! the grammar. See `SPEC.md`.
+//! the grammar.
 
 mod action;
 mod agent;

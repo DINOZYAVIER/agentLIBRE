@@ -3,7 +3,7 @@ use std::fs;
 use super::*;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 
-/// The Function example of SPEC.md section 3.
+/// A multi-state Function used by the load and transition tests.
 pub const CODER: &str = r#"
 format = "qwen3.8"
 system = "You are a coding agent working in this repository."

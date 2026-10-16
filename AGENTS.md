@@ -5,11 +5,10 @@
 | Path | Responsibility |
 | --- | --- |
 | `README.md` | Short project description. |
-| `SPEC.md` | Working spec and human decisions (Ukrainian). Read it before any task. |
 | `Cargo.toml`, `Cargo.lock` | Crate manifest and locked dependencies. |
 | `src/` | The `agl` binary of the `agl-lite` crate: arguments (`cli.rs`), XDG paths (`paths.rs`), `agentLIBRE.toml` files (`settings.rs`), strict TOML reading (`tomlfile.rs`), errors (`error.rs`) and their English/Ukrainian messages (`i18n.rs`), grammars and GBNF (`grammar.rs`, `grammar/`), model formats (`format.rs`), Functions (`function.rs`, `function/`), built-in formats and Functions (`builtin/`), the turn state machine (`machine.rs`, `machine/`), action grammars and output parsing (`action.rs`, `action/`), the inference backend and its llama-server client (`backend.rs`, `backend/`), the bash and edit tools (`tools.rs`, `tools/`), session files (`session.rs`, `session/`), the agent turn (`agent.rs`, `agent/`), `-p` progress output (`report.rs`), `agl server` and its systemd unit (`server.rs`), Ctrl-C handling (`interrupt.rs`), terminal colors (`theme.rs`), the terminal and its keys (`term.rs`), the interactive session (`repl.rs`, `repl/`: line editor, dock, Markdown, text wrapping, transcript presenter). |
-| `experiments/` | Grammar probes and raw results behind `SPEC.md` Appendix B; not part of the product. |
 | `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
+| `../agl-lite-tasks/` | AGL-XXX task specs, archived outside the repository (not tracked). |
 
 Update this map when adding top-level paths.
 
@@ -24,8 +23,10 @@ human explicitly asks for them in the current task.
 The human is the sole authority for project decisions. A recommendation, an
 inferred preference, or an LLM's engineering judgment is not a decision.
 
-- Record decisions in `SPEC.md`. Do not ask again for choices already
-  recorded there.
+- Record decisions in the AGL-XXX spec of the task, archived outside the
+  repository (sibling `agl-lite-tasks/`). The long-term decision record
+  will be the memory feature; until it exists, the archived specs are
+  the reference. Do not ask again for choices recorded there.
 - Do not implement a material product, architecture, naming, API, workflow,
   scope, security, data-format, or compatibility choice while it is open.
 - Do not start implementation until the human states that the spec for that
@@ -34,9 +35,10 @@ inferred preference, or an LLM's engineering judgment is not a decision.
 ## Engineering output discipline
 
 Every normative statement in the spec or a review must be traceable to current
-code, tests, or configuration; an accepted decision in `SPEC.md`; or an
-explicit human decision in the current work. Otherwise state it as an open
-question. Never turn an inference into a requirement, default, or invariant.
+code, tests, or configuration; an accepted decision in an archived AGL-XXX
+spec; or an explicit human decision in the current work. Otherwise state it
+as an open question. Never turn an inference into a requirement, default, or
+invariant.
 
 Ask only questions whose answers change code, stored data, security, or
 observable behavior, and state them with concrete files, types and
