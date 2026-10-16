@@ -146,7 +146,7 @@ struct Dir(PathBuf);
 impl Dir {
     fn new(name: &str) -> Dir {
         let dir =
-            std::env::temp_dir().join(format!("agl-lite-agent-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("agentLIBRE-agent-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Dir(dir)

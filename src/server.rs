@@ -1,4 +1,4 @@
-//! `agl server start|stop|status`: llama-server as a transient systemd user
+//! `agentLIBRE server start|stop|status`: llama-server as a transient systemd user
 //! unit (D146-D150).
 
 use std::ffi::OsString;
@@ -14,7 +14,7 @@ use crate::i18n::{Lang, server as texts};
 use crate::settings::UserFile;
 
 /// The systemd user unit (D147).
-pub const UNIT: &str = "agl-llama-server";
+pub const UNIT: &str = "agentLIBRE-llama-server";
 
 /// `context` when `[server]` does not set it (D148).
 const DEFAULT_CONTEXT: u32 = 16384;
@@ -201,7 +201,7 @@ fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
 }
 
 /// The arguments of `systemd-run`: the unit, then llama-server with the
-/// arguments agl needs and those of `[server] args` (D147, D148).
+/// arguments agentLIBRE needs and those of `[server] args` (D147, D148).
 fn systemd_run_args(
     program: &Path,
     model: &Path,
@@ -256,12 +256,12 @@ mod tests {
                 Health::Loading,
                 Lang::En
             ),
-            "unit: agl-llama-server (active)\nurl: http://127.0.0.1:18080\nmodel: not set\n\
+            "unit: agentLIBRE-llama-server (active)\nurl: http://127.0.0.1:18080\nmodel: not set\n\
              health: loading"
         );
         assert_eq!(
             texts::status(false, "http://x", Some("q.gguf"), Health::Down, Lang::Uk),
-            "unit: agl-llama-server (неактивний)\nадреса: http://x\nмодель: q.gguf\n\
+            "unit: agentLIBRE-llama-server (неактивний)\nадреса: http://x\nмодель: q.gguf\n\
              стан: не відповідає"
         );
     }
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn llama_server_is_found_in_path() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("agl-lite-server-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-server-{}", std::process::id()));
         let (plain, bin) = (dir.join("plain"), dir.join("bin"));
         fs::create_dir_all(&plain).unwrap();
         fs::create_dir_all(&bin).unwrap();
@@ -320,7 +320,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agl-llama-server",
+                "--unit=agentLIBRE-llama-server",
                 "--collect",
                 "--quiet",
                 "--",

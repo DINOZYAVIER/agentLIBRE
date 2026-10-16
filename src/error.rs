@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::grammar::pattern::PatternError;
 use crate::theme::StyleError;
 
-/// An error that stops `agl`.
+/// An error that stops `agentLIBRE`.
 #[derive(Debug)]
 pub enum Error {
     /// An argument is not valid UTF-8.
@@ -85,7 +85,7 @@ pub enum Error {
         status: u16,
         message: String,
     },
-    /// llama-server answered something agl-lite does not understand.
+    /// llama-server answered something agentLIBRE does not understand.
     ServerReply { url: String, detail: String },
     /// No session in `dir` has an id that is or starts with `id`.
     SessionNotFound { id: String, dir: PathBuf },
@@ -107,11 +107,11 @@ pub enum Error {
     Interrupted,
     /// The server generated text the grammar does not allow.
     OutsideGrammar(String),
-    /// `agl server start` without `[server] model` (D148).
+    /// `agentLIBRE server start` without `[server] model` (D148).
     MissingModel { user_path: PathBuf, models: PathBuf },
     /// `[server] model` names no file in the models directory.
     ModelNotFound { path: PathBuf },
-    /// `agl server start` with a `url` whose host is not local (D148).
+    /// `agentLIBRE server start` with a `url` whose host is not local (D148).
     NotLocalServer { url: String },
     /// No `llama-server` in `PATH` (D147).
     LlamaServerNotFound,

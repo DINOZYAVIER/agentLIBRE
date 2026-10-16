@@ -6,7 +6,7 @@ struct Dir(PathBuf);
 impl Dir {
     fn new(name: &str) -> Dir {
         let dir =
-            std::env::temp_dir().join(format!("agl-lite-session-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("agentLIBRE-session-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         Dir(dir)
     }

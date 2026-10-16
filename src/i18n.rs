@@ -46,10 +46,10 @@ pub fn help(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
             "\
-Usage: agl [-p <message>] [--resume <id>] [--function <name>]
-       agl server start|stop|status
+Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
+       agentLIBRE server start|stop|status
 
-Without -p, agl starts an interactive session.
+Without -p, agentLIBRE starts an interactive session.
 
 Options:
   -p <message>        send one message, print the answer and exit
@@ -57,17 +57,17 @@ Options:
   --function <name>   use Function <name>
   -h, --help          print this help
 
-Server (systemd user unit agl-llama-server, [server] in agentLIBRE.toml):
+Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
   server start        start llama-server and wait until it is ready
   server stop         stop it
   server status       show whether it runs and is ready"
         }
         Lang::Uk => {
             "\
-Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>]
-              agl server start|stop|status
+Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
+              agentLIBRE server start|stop|status
 
-Без -p agl запускає інтерактивну сесію.
+Без -p agentLIBRE запускає інтерактивну сесію.
 
 Параметри:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
@@ -75,7 +75,7 @@ Server (systemd user unit agl-llama-server, [server] in agentLIBRE.toml):
   --function <назва>  використати Function <назва>
   -h, --help          показати цю довідку
 
-Сервер (user-unit systemd agl-llama-server, [server] в agentLIBRE.toml):
+Сервер (user-unit systemd agentLIBRE-llama-server, [server] в agentLIBRE.toml):
   server start        запустити llama-server і дочекатися готовності
   server stop         зупинити його
   server status       показати, чи він працює і чи готовий"
@@ -92,8 +92,8 @@ impl Error {
             return message;
         }
         match lang {
-            Lang::En => format!("{message}\nRun `agl --help` for usage."),
-            Lang::Uk => format!("{message}\nДив. `agl --help`."),
+            Lang::En => format!("{message}\nRun `agentLIBRE --help` for usage."),
+            Lang::Uk => format!("{message}\nДив. `agentLIBRE --help`."),
         }
     }
 
@@ -303,11 +303,11 @@ impl Error {
                 }
             }
             (Error::ServerUnreachable { url, detail }, En) => format!(
-                "cannot reach llama-server at {url}: {detail}\nTo start it: agl server start"
+                "cannot reach llama-server at {url}: {detail}\nTo start it: agentLIBRE server start"
             ),
             (Error::ServerUnreachable { url, detail }, Uk) => format!(
                 "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\n\
-                 Щоб запустити: agl server start"
+                 Щоб запустити: agentLIBRE server start"
             ),
             (Error::MissingModel { user_path, models }, En) => format!(
                 "the model is not set; add the name of a file in {} to {}:\n\n[server]\nmodel = \"NAME.gguf\"",
@@ -322,10 +322,10 @@ impl Error {
             (Error::ModelNotFound { path }, En) => format!("no model file {}", path.display()),
             (Error::ModelNotFound { path }, Uk) => format!("немає файлу моделі {}", path.display()),
             (Error::NotLocalServer { url }, En) => format!(
-                "agl server start runs llama-server only on 127.0.0.1 or localhost, not at {url}"
+                "agentLIBRE server start runs llama-server only on 127.0.0.1 or localhost, not at {url}"
             ),
             (Error::NotLocalServer { url }, Uk) => format!(
-                "agl server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}"
+                "agentLIBRE server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}"
             ),
             (Error::LlamaServerNotFound, En) => "llama-server is not in PATH".into(),
             (Error::LlamaServerNotFound, Uk) => "llama-server немає в PATH".into(),
@@ -341,12 +341,12 @@ impl Error {
             ),
             (Error::ServerTimeout { seconds }, En) => format!(
                 "llama-server was not ready after {seconds} s; it keeps loading in the background \
-                 (agl server status, journalctl --user -u {})",
+                 (agentLIBRE server status, journalctl --user -u {})",
                 crate::server::UNIT
             ),
             (Error::ServerTimeout { seconds }, Uk) => format!(
                 "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні \
-                 (agl server status, journalctl --user -u {})",
+                 (agentLIBRE server status, journalctl --user -u {})",
                 crate::server::UNIT
             ),
             (
@@ -498,7 +498,7 @@ pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) ->
     };
     format!(
         "{why}
-{next}: agl --resume {id} -p \"...\""
+{next}: agentLIBRE --resume {id} -p \"...\""
     )
 }
 
@@ -661,11 +661,11 @@ mod tests {
         let error = Error::UnknownOption("--url".into());
         assert_eq!(
             error.message(Lang::En),
-            "unknown option `--url`\nRun `agl --help` for usage."
+            "unknown option `--url`\nRun `agentLIBRE --help` for usage."
         );
         assert_eq!(
             error.message(Lang::Uk),
-            "невідомий параметр `--url`\nДив. `agl --help`."
+            "невідомий параметр `--url`\nДив. `agentLIBRE --help`."
         );
         assert!(
             !Error::FunctionNotFound {
@@ -710,7 +710,7 @@ mod tests {
     }
 }
 
-/// Texts of `agl server` (D146-D150).
+/// Texts of `agentLIBRE server` (D146-D150).
 pub mod server {
     use super::Lang::{self, En, Uk};
     use crate::server::{Health, UNIT};
@@ -750,7 +750,7 @@ pub mod server {
         }
     }
 
-    /// `agl server status`.
+    /// `agentLIBRE server status`.
     pub fn status(
         active: bool,
         url: &str,
@@ -845,8 +845,8 @@ pub mod repl {
     /// The description of a `/` command in the menu and in `/help`.
     pub fn command(name: &str, lang: Lang) -> &'static str {
         match (name, lang) {
-            ("/quit", En) => "close agl",
-            ("/quit", Uk) => "закрити agl",
+            ("/quit", En) => "close agentLIBRE",
+            ("/quit", Uk) => "закрити agentLIBRE",
             ("/exit", En) => "same as /quit",
             ("/exit", Uk) => "те саме, що /quit",
             ("/help", En) => "show commands and keys",

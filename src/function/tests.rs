@@ -146,7 +146,7 @@ fn spec_example() {
 
 #[test]
 fn files_and_names() {
-    let dir = std::env::temp_dir().join(format!("agl-lite-function-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("agentLIBRE-function-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("default.toml"), CODER).unwrap();
     let none = Path::new("/nonexistent");
@@ -418,7 +418,7 @@ fn graph_errors() {
 
 #[test]
 fn thinking_and_formats() {
-    let dir = std::env::temp_dir().join(format!("agl-lite-plain-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("agentLIBRE-plain-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("plain.toml"),

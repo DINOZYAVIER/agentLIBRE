@@ -11,7 +11,7 @@ pub enum Command {
     Help,
     /// Run the agent.
     Run(Args),
-    /// `agl server start|stop|status` (D146).
+    /// `agentLIBRE server start|stop|status` (D146).
     Server(ServerAction),
 }
 

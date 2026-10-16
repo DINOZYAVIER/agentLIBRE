@@ -2,14 +2,14 @@
 //! with a server that has a model loaded:
 //!
 //! ```sh
-//! AGL_TEST_SERVER=http://127.0.0.1:18080 cargo test -- --ignored
+//! AGENTLIBRE_TEST_SERVER=http://127.0.0.1:18080 cargo test -- --ignored
 //! ```
 
 use serde_json::Value;
 
-/// The server URL from `AGL_TEST_SERVER`.
+/// The server URL from `AGENTLIBRE_TEST_SERVER`.
 pub fn url() -> String {
-    std::env::var("AGL_TEST_SERVER").expect("set AGL_TEST_SERVER")
+    std::env::var("AGENTLIBRE_TEST_SERVER").expect("set AGENTLIBRE_TEST_SERVER")
 }
 
 /// Posts `body` to `path`; returns the status and the response body.

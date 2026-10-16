@@ -8,7 +8,7 @@ struct Dir(std::path::PathBuf);
 impl Dir {
     fn new(name: &str) -> Dir {
         let dir =
-            std::env::temp_dir().join(format!("agl-lite-tools-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("agentLIBRE-tools-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Dir(dir)

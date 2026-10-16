@@ -100,7 +100,7 @@ fn tool_name(action: &Option<Action>) -> Option<&str> {
 }
 
 #[test]
-#[ignore = "needs a llama-server at AGL_TEST_SERVER"]
+#[ignore = "needs a llama-server at AGENTLIBRE_TEST_SERVER"]
 fn live_actions() {
     test_server::with_big_stack(check_actions);
 }

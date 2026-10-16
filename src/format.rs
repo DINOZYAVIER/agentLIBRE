@@ -261,7 +261,7 @@ pub mod tests {
 
     #[test]
     fn user_file_replaces_builtin() {
-        let dir = std::env::temp_dir().join(format!("agl-lite-format-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-format-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("qwen3.8.toml"), CALL).unwrap();
         fs::write(dir.join("mine.toml"), CALL).unwrap();

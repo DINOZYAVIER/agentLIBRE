@@ -671,9 +671,9 @@ pub fn run_lines(setup: Setup) -> Result<ExitCode, Error> {
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
             Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agl: {}", texts::stopped(reason, function, lang));
+                eprintln!("agentLIBRE: {}", texts::stopped(reason, function, lang));
             }
-            Err(error) => eprintln!("agl: {}", error.message(lang)),
+            Err(error) => eprintln!("agentLIBRE: {}", error.message(lang)),
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -745,7 +745,7 @@ mod tests {
             theme: Theme::plain(),
             lang: Lang::En,
             history_file: std::env::temp_dir().join(format!(
-                "agl-lite-repl-{}-{n}/history.jsonl",
+                "agentLIBRE-repl-{}-{n}/history.jsonl",
                 std::process::id()
             )),
             request_stop: {

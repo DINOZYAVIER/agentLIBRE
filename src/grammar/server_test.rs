@@ -99,7 +99,7 @@ fn cases() -> Vec<Case> {
 }
 
 #[test]
-#[ignore = "needs a llama-server at AGL_TEST_SERVER"]
+#[ignore = "needs a llama-server at AGENTLIBRE_TEST_SERVER"]
 fn llama_server_accepts_grammars() {
     test_server::with_big_stack(check_server);
 }

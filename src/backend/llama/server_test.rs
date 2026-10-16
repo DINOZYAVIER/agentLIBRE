@@ -47,7 +47,7 @@ fn history() -> Vec<Message> {
 }
 
 #[test]
-#[ignore = "needs a llama-server at AGL_TEST_SERVER"]
+#[ignore = "needs a llama-server at AGENTLIBRE_TEST_SERVER"]
 fn live_backend() {
     let llama = Llama::new(&test_server::url());
     assert!(llama.context_size().unwrap() >= 4096);

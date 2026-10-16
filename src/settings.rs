@@ -21,7 +21,7 @@ pub struct UserFile {
     pub language: Option<Lang>,
     /// `[server] url`.
     pub server_url: Option<String>,
-    /// What `agl server start` runs (D148).
+    /// What `agentLIBRE server start` runs (D148).
     pub launch: Launch,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
@@ -29,7 +29,7 @@ pub struct UserFile {
     pub repl: ReplFile,
 }
 
-/// `[server]` keys of `agl server start` (D148).
+/// `[server]` keys of `agentLIBRE server start` (D148).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Launch {
     /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
@@ -266,7 +266,7 @@ mod tests {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let dir =
-                std::env::temp_dir().join(format!("agl-lite-test-{}-{n}", std::process::id()));
+                std::env::temp_dir().join(format!("agentLIBRE-test-{}-{n}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
         }

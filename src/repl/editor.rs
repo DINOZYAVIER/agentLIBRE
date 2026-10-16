@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn history_file_round_trip() {
-        let dir = std::env::temp_dir().join(format!("agl-lite-history-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-history-{}", std::process::id()));
         let path = dir.join("state/history.jsonl");
         assert!(load_history(&path).is_empty());
         let entries = vec!["a".to_owned(), "two\nlines \"q\"".to_owned()];
