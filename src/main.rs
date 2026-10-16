@@ -15,7 +15,6 @@ mod paths;
 mod repl;
 mod session;
 mod settings;
-mod term;
 #[cfg(test)]
 mod test_server;
 mod theme;
@@ -125,7 +124,7 @@ fn run(
     };
     let Some(message) = args.prompt else {
         // No `-p`: the interactive session (D136).
-        let interactive = term::is_interactive();
+        let interactive = repl::term::is_interactive();
         let setup = repl::Setup {
             function: &function,
             function_name: &settings.function,

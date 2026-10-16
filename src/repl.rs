@@ -6,6 +6,7 @@ mod editor;
 mod markdown;
 mod transcript;
 mod text;
+pub(crate) mod term;
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead};
@@ -17,6 +18,7 @@ use std::thread;
 
 use dock::Dock;
 use editor::{Editor, MenuItem, Outcome, save_history};
+use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines};
 
 use crate::agent::{Agent, Compaction, Report, TurnEnd};
@@ -28,7 +30,6 @@ use crate::i18n::{self, Lang, repl as texts};
 use crate::interrupt;
 use crate::session::{Session, StopReason};
 use crate::settings::ReplSettings;
-use crate::term::{self, Key, Parser, RawGuard};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 

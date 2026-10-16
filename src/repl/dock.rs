@@ -9,10 +9,10 @@ use std::io::Write;
 use std::sync::{Mutex, MutexGuard};
 
 use super::editor::{Editor, Outcome};
+use super::term::Key;
 use super::transcript::{Activity, Screen};
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::{Lang, repl as texts};
-use crate::term::Key;
 use crate::theme::{Role, Theme};
 
 /// The most input rows the dock shows.

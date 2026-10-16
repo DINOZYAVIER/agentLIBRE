@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::term::Key;
+use super::term::Key;
 
 /// How many entries the history file keeps (D133).
 pub const HISTORY_LIMIT: usize = 1000;
