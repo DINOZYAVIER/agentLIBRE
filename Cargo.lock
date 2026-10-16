@@ -3,8 +3,8 @@
 version = 4
 
 [[package]]
-name = "agl-lite"
-version = "0.1.0"
+name = "agentLIBRE"
+version = "0.0.1"
 dependencies = [
  "libc",
  "pulldown-cmark",
