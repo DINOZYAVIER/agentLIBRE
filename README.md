@@ -1,12 +1,15 @@
-# agl-lite
+# agentLIBRE
+
+agentLIBRE -- free and open-source agentic system.
 
 A simple, concise coding agent for local models. It uses finite-state
 machines to make local models more deterministic, without heavy
 guard rails: the tools it calls keep their own protections.
 
-The command is `agl`. Work in progress: `agl -p "..."` runs one turn
-against an already running llama-server; `agl` alone opens the
-interactive session (a line editor, a dock with the state and the queue,
-streamed thinking and text, tool cards); `agl server start` runs
-llama-server as a systemd user unit from `[server]` in
-`agentLIBRE.toml`. Install with `cargo install --path .`.
+The command is `agentLIBRE`. Work in progress: `agentLIBRE -p "..."`
+runs one turn against an already running llama-server; `agentLIBRE`
+alone opens the interactive session (a line editor, a dock with the
+state and the queue, streamed thinking and text, tool cards);
+`agentLIBRE server start` runs llama-server as a systemd user unit
+from `[server]` in `agentLIBRE.toml`. Install with `cargo install
+--path .`.
