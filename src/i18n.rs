@@ -50,7 +50,6 @@ pub struct Msg {
 
 impl Msg {
     /// The text of this message in `lang`.
-    #[allow(dead_code)] // until the call sites move to tr! (AGL-005)
     pub fn text(self, lang: Lang) -> &'static str {
         match lang {
             Lang::En => self.en,
@@ -70,7 +69,6 @@ pub struct Arg<'a> {
 
 impl<'a> Arg<'a> {
     /// Binds the template field `name` to `value`.
-    #[allow(dead_code)] // until the call sites move to tr! (AGL-005)
     pub fn new<T: std::fmt::Display + std::fmt::Debug>(
         name: &'static str,
         value: &'a T,
@@ -1026,10 +1024,6 @@ Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
         uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nстан: {health}",
     };
 }
-/// The `--help` text.
-pub fn help(lang: Lang) -> &'static str {
-    tr!(lang, m::HELP)
-}
 
 impl Error {
     /// The message for this error in `lang`. Usage errors end with a
@@ -1243,11 +1237,6 @@ impl Error {
     }
 }
 
-/// The label of streamed thinking (D109).
-pub fn thinking(lang: Lang) -> &'static str {
-    tr!(lang, m::THINKING)
-}
-
 /// `n` lines of output.
 pub fn lines(n: usize, lang: Lang) -> String {
     match lang {
@@ -1263,11 +1252,6 @@ pub fn lines(n: usize, lang: Lang) -> String {
             tr!(lang, m::LINES_NOUN, n = n, word = word)
         }
     }
-}
-
-/// The session line at the start of a run (D109).
-pub fn session(id: &str, lang: Lang) -> String {
-    tr!(lang, m::SESSION, id = id)
 }
 
 /// Why a turn stopped (D113).
@@ -1456,18 +1440,6 @@ pub mod server {
         )
     }
 
-    pub fn ready(url: &str, lang: Lang) -> String {
-        tr!(lang, m::SERVER_READY, url = url)
-    }
-
-    pub fn already_running(url: &str, lang: Lang) -> String {
-        tr!(lang, m::SERVER_ALREADY_RUNNING, url = url)
-    }
-
-    pub fn stopped(lang: Lang) -> &'static str {
-        tr!(lang, m::SERVER_STOPPED)
-    }
-
     pub fn not_running(lang: Lang) -> String {
         tr!(lang, m::SERVER_NOT_RUNNING, unit = UNIT)
     }
@@ -1506,32 +1478,6 @@ pub mod repl {
     use super::m;
     use crate::session::StopReason;
 
-    /// The hint of an empty prompt.
-    pub fn hint(lang: Lang) -> &'static str {
-        tr!(lang, m::HINT)
-    }
-
-    /// The dock's state.
-    pub fn ready(lang: Lang) -> &'static str {
-        tr!(lang, m::READY)
-    }
-
-    pub fn generating(lang: Lang) -> &'static str {
-        tr!(lang, m::GENERATING)
-    }
-
-    pub fn running(tool: &str, lang: Lang) -> String {
-        tr!(lang, m::RUNNING, tool = tool)
-    }
-
-    pub fn compacting(lang: Lang) -> &'static str {
-        tr!(lang, m::COMPACTING)
-    }
-
-    pub fn queued(n: usize, lang: Lang) -> String {
-        tr!(lang, m::QUEUED, n = n)
-    }
-
     /// The description of a `/` command in the menu and in `/help`.
     pub fn command(name: &str, lang: Lang) -> &'static str {
         match name {
@@ -1543,18 +1489,6 @@ pub mod repl {
             "/compact" => tr!(lang, m::CMD_COMPACT),
             _ => "",
         }
-    }
-
-    pub fn keys(lang: Lang) -> &'static str {
-        tr!(lang, m::KEYS)
-    }
-
-    pub fn unknown_command(name: &str, lang: Lang) -> String {
-        tr!(lang, m::UNKNOWN_COMMAND, name = name)
-    }
-
-    pub fn busy(name: &str, lang: Lang) -> String {
-        tr!(lang, m::BUSY, name = name)
     }
 
     /// One line of `/status`.
@@ -1571,27 +1505,6 @@ pub mod repl {
         tr!(lang, m::STATUS_LINE, label = label, value = value)
     }
 
-    pub fn tokens(n: usize, lang: Lang) -> String {
-        tr!(lang, m::TOKENS, n = n)
-    }
-
-    pub fn idle(lang: Lang) -> &'static str {
-        tr!(lang, m::IDLE)
-    }
-
-    pub fn unfinished(state: &str, lang: Lang) -> String {
-        tr!(lang, m::UNFINISHED, state = state)
-    }
-
-    /// The note under a cut-short card (D138).
-    pub fn limited(lines: usize, chars: usize, lang: Lang) -> String {
-        tr!(lang, m::LIMITED, lines = lines, chars = chars)
-    }
-
-    pub fn worked_for(time: &str, lang: Lang) -> String {
-        tr!(lang, m::WORKED_FOR, time = time)
-    }
-
     /// Time as `5s`, `2m 3s` or `1h 4m`.
     pub fn duration(seconds: u64) -> String {
         match seconds {
@@ -1602,37 +1515,8 @@ pub mod repl {
         }
     }
 
-    pub fn interrupted_cleared(lang: Lang) -> &'static str {
-        tr!(lang, m::INTERRUPTED_CLEARED)
-    }
-
-    pub fn error_cleared(lang: Lang) -> &'static str {
-        tr!(lang, m::ERROR_CLEARED)
-    }
-
     /// The line that ends a turn that stopped (D127).
     pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {
         super::stop_reason(reason, function, lang)
-    }
-
-    pub fn nothing_to_compact(lang: Lang) -> &'static str {
-        tr!(lang, m::NOTHING_TO_COMPACT)
-    }
-
-    /// `/compact` could not make a summary (D140).
-    pub fn compaction_failed(function: &crate::function::Function, lang: Lang) -> String {
-        tr!(
-            lang,
-            m::COMPACTION_FAILED,
-            limit = function.max_compact_tokens
-        )
-    }
-
-    pub fn new_session(id: &str, lang: Lang) -> String {
-        tr!(lang, m::NEW_SESSION, id = id)
-    }
-
-    pub fn tool_label(lang: Lang) -> &'static str {
-        tr!(lang, m::TOOL_LABEL)
     }
 }

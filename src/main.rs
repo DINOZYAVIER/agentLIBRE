@@ -34,7 +34,7 @@ use cli::args::Command;
 use cli::report::StderrReport;
 use error::Error;
 use function::Function;
-use i18n::Lang;
+use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
@@ -89,7 +89,7 @@ fn run(
     let args = match cli::args::parse(args)? {
         Command::Help => {
             // A closed pipe, as in `agentLIBRE --help | head -1`, is not an error.
-            let _ = writeln!(io::stdout(), "{}", i18n::help(*lang));
+            let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::HELP));
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
@@ -164,7 +164,7 @@ fn run(
             cli::lines::run(setup)
         };
     };
-    eprintln!("{}", i18n::session(&session.id, *lang));
+    eprintln!("{}", tr!(*lang, m::SESSION, id = session.id));
     interrupt::install();
     let id = session.id.clone();
     let mut agent = Agent {

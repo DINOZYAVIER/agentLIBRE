@@ -5,8 +5,9 @@ use std::io::{self, Write};
 use crate::action::Value;
 use crate::agent::Report;
 use crate::backend::ToolCall;
-use crate::i18n::{self, Lang};
+use crate::i18n::{self, Lang, m};
 use crate::tools::ToolResult;
+use crate::tr;
 
 /// How much of a command the progress line shows.
 const COMMAND_WIDTH: usize = 200;
@@ -34,7 +35,7 @@ impl Report for StderrReport {
         let mut err = io::stderr().lock();
         if !self.thinking {
             self.thinking = true;
-            let _ = write!(err, "{}: ", i18n::thinking(self.lang));
+            let _ = write!(err, "{}: ", tr!(self.lang, m::THINKING));
         }
         let _ = write!(err, "{piece}");
         let _ = err.flush();

@@ -25,12 +25,13 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::backend::ToolCall;
 use crate::error::Error;
-use crate::i18n::{self, Lang, repl as texts};
+use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::session::{Session, StopReason};
 use crate::status::{COMMANDS, Facts, Info, compact_notice, display_path, help_text, status_text};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
+use crate::tr;
 
 #[derive(Default)]
 struct Inner {
@@ -124,7 +125,7 @@ impl Input {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&texts::busy(name, self.lang), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
                     return;
                 }
                 if name == "/new" {
@@ -138,7 +139,7 @@ impl Input {
                 self.control.wake.notify_all();
             }
             _ => self.notice(
-                &texts::unknown_command(name, self.lang),
+                &tr!(self.lang, m::UNKNOWN_COMMAND, name = name),
                 Role::StatusPending,
             ),
         }
@@ -180,7 +181,10 @@ impl Input {
             Outcome::Interrupt => self.interrupt(),
             Outcome::Quit => {
                 if self.control.lock().busy() {
-                    self.notice(&texts::busy("Ctrl-D", self.lang), Role::StatusPending);
+                    self.notice(
+                        &tr!(self.lang, m::BUSY, name = "Ctrl-D"),
+                        Role::StatusPending,
+                    );
                 } else {
                     self.end_of_input();
                 }
@@ -373,12 +377,12 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     term::unblock_sigint();
 
     dock.start();
-    presenter.show_notice(&i18n::session(&session.id, lang), Role::Muted);
+    presenter.show_notice(&tr!(lang, m::SESSION, id = session.id), Role::Muted);
     if resumed {
         presenter.replay(&session.events);
         if let Some(state) = session.unfinished().and_then(|turn| turn.state) {
             control.lock().info.unfinished = Some(state.clone());
-            presenter.show_notice(&texts::unfinished(&state, lang), Role::Muted);
+            presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
         }
     }
 
@@ -394,7 +398,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         ..Info::default()
                     };
                     drop(inner);
-                    presenter.show_notice(&texts::new_session(&session.id, lang), Role::Muted);
+                    presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = session.id), Role::Muted);
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
             },
@@ -442,7 +446,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     Ok(TurnEnd::Answer(_)) => {}
                     Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
                         presenter
-                            .show_notice(texts::interrupted_cleared(lang), Role::StatusPending);
+                            .show_notice(tr!(lang, m::INTERRUPTED_CLEARED), Role::StatusPending);
                     }
                     Ok(TurnEnd::Stopped(reason)) => {
                         failed = Some(texts::stopped(reason, function, lang));
@@ -464,7 +468,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 if cleared {
                     dock.set_queued(0);
-                    presenter.show_notice(texts::error_cleared(lang), Role::Muted);
+                    presenter.show_notice(tr!(lang, m::ERROR_CLEARED), Role::Muted);
                 }
                 presenter.set_ready();
             }

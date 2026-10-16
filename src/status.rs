@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::agent::Compaction;
 use crate::error::Error;
 use crate::function::Function;
-use crate::i18n::{Lang, repl as texts};
+use crate::i18n::{Lang, m, repl as texts};
 use crate::session::StopReason;
 use crate::theme::Role;
+use crate::tr;
 
 /// The `/` commands (D118, D139).
 pub const COMMANDS: [&str; 6] = ["/quit", "/exit", "/help", "/status", "/new", "/compact"];
@@ -39,7 +40,7 @@ pub fn help_text(lang: Lang, with_keys: bool) -> String {
         .map(|name| format!("{name:<9} {}", texts::command(name, lang)))
         .collect();
     if with_keys {
-        lines.push(texts::keys(lang).into());
+        lines.push(tr!(lang, m::KEYS).to_string());
     }
     lines.join("\n")
 }
@@ -47,16 +48,16 @@ pub fn help_text(lang: Lang, with_keys: bool) -> String {
 /// `/status` (D134).
 pub fn status_text(facts: &Facts, info: &Info, lang: Lang) -> String {
     let state = match (&info.unfinished, &info.state) {
-        (Some(state), _) => texts::unfinished(state, lang),
+        (Some(state), _) => tr!(lang, m::UNFINISHED, state = state),
         (None, Some(state)) => state.clone(),
-        (None, None) => texts::idle(lang).to_owned(),
+        (None, None) => tr!(lang, m::IDLE).to_string(),
     };
     [
         texts::status_line("session", &info.session, lang),
         texts::status_line("function", &facts.function, lang),
         texts::status_line("workspace", &facts.workspace, lang),
         texts::status_line("server", &facts.server, lang),
-        texts::status_line("context", &texts::tokens(facts.context, lang), lang),
+        texts::status_line("context", &tr!(lang, m::TOKENS, n = facts.context), lang),
         texts::status_line("state", &state, lang),
     ]
     .join("\n")
@@ -82,9 +83,15 @@ pub fn compact_notice(
 ) -> Option<(String, Role)> {
     match result {
         Ok(Compaction::Done) => None,
-        Ok(Compaction::Nothing) => Some((texts::nothing_to_compact(lang).into(), Role::Muted)),
+        Ok(Compaction::Nothing) => {
+            Some((tr!(lang, m::NOTHING_TO_COMPACT).to_string(), Role::Muted))
+        }
         Ok(Compaction::Impossible) => Some((
-            texts::compaction_failed(function, lang),
+            tr!(
+                lang,
+                m::COMPACTION_FAILED,
+                limit = function.max_compact_tokens
+            ),
             Role::StatusFailure,
         )),
         Err(Error::Interrupted) => Some((

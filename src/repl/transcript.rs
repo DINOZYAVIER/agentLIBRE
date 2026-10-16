@@ -10,11 +10,12 @@ use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
-use crate::i18n::{self, Lang, repl as texts};
+use crate::i18n::{Lang, m, repl as texts};
 use crate::session::Event;
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
+use crate::tr;
 
 /// What the dock says the agent is doing (D135).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,7 +130,7 @@ impl Presenter {
 
     pub fn show_thinking(&self, thinking: &str) {
         let mut wrap = StreamWrap::new(self.screen.columns());
-        let mut lines = wrap.push(&format!("{}: {thinking}", i18n::thinking(self.lang)));
+        let mut lines = wrap.push(&format!("{}: {thinking}", tr!(self.lang, m::THINKING)));
         lines.extend(wrap.finish());
         let lines: Vec<String> = lines
             .iter()
@@ -224,7 +225,11 @@ impl Presenter {
                 }
             }
             if let Some(elapsed) = elapsed {
-                let text = texts::worked_for(&texts::duration(elapsed.as_secs()), self.lang);
+                let text = tr!(
+                    self.lang,
+                    m::WORKED_FOR,
+                    time = texts::duration(elapsed.as_secs())
+                );
                 parts.push((text, role));
             }
             parts.push((" ".into(), role));
@@ -257,7 +262,7 @@ impl Presenter {
             "{}  {}",
             self.theme.paint(
                 Role::Tool,
-                &format!("{} {}", texts::tool_label(self.lang), call.name)
+                &format!("{} {}", tr!(self.lang, m::TOOL_LABEL), call.name)
             ),
             self.theme.paint(status_role, status_text)
         ));
@@ -279,10 +284,11 @@ impl Presenter {
         if limited {
             lines.push(self.theme.paint(
                 Role::Muted,
-                &texts::limited(
-                    self.settings.tool_lines,
-                    self.settings.tool_chars,
+                &tr!(
                     self.lang,
+                    m::LIMITED,
+                    lines = self.settings.tool_lines,
+                    chars = self.settings.tool_chars,
                 ),
             ));
         }
@@ -331,7 +337,7 @@ impl Report for Presenter {
             self.close();
             self.screen.activity(Activity::Generating);
             self.thinking = Some(StreamWrap::new(self.screen.columns()));
-            let label = format!("{}: ", i18n::thinking(self.lang));
+            let label = format!("{}: ", tr!(self.lang, m::THINKING));
             let wrap = self.thinking.as_mut().expect("just set");
             let lines = wrap.push(&label);
             debug_assert!(lines.is_empty());

@@ -12,8 +12,9 @@ use super::editor::{Editor, Outcome};
 use super::term::Key;
 use super::transcript::{Activity, Screen};
 use super::text::{hard_wrap, truncate, truncate_start, width};
-use crate::i18n::{Lang, repl as texts};
+use crate::i18n::{Lang, m};
 use crate::theme::{Role, Theme};
+use crate::tr;
 
 /// The most input rows the dock shows.
 const MAX_INPUT_ROWS: usize = 6;
@@ -370,13 +371,13 @@ impl State {
     fn separator(&self) -> String {
         let lang = self.lang;
         let mut label = match &self.activity {
-            Activity::Ready => texts::ready(lang).to_owned(),
-            Activity::Generating => texts::generating(lang).to_owned(),
-            Activity::Running(tool) => texts::running(tool, lang),
-            Activity::Compacting => texts::compacting(lang).to_owned(),
+            Activity::Ready => tr!(lang, m::READY).to_string(),
+            Activity::Generating => tr!(lang, m::GENERATING).to_string(),
+            Activity::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
+            Activity::Compacting => tr!(lang, m::COMPACTING).to_string(),
         };
         if self.queued > 0 {
-            label.push_str(&format!(" · {}", texts::queued(self.queued, lang)));
+            label.push_str(&format!(" · {}", tr!(lang, m::QUEUED, n = self.queued)));
         }
         let label = truncate(&format!(" {label} "), self.columns.saturating_sub(1));
         let fill = self.columns.saturating_sub(1 + width(&label));
@@ -417,7 +418,7 @@ impl State {
     fn input_rows(&self, avail: usize) -> (Vec<(&'static str, String)>, usize, usize) {
         let buffer = self.editor.buffer();
         if buffer.is_empty() {
-            return (vec![("› ", truncate(texts::hint(self.lang), avail))], 0, 2);
+            return (vec![("› ", truncate(tr!(self.lang, m::HINT), avail))], 0, 2);
         }
         let cursor = self.editor.cursor();
         let mut rows: Vec<String> = Vec::new();

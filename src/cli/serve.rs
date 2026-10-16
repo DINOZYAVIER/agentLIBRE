@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
-use crate::i18n::{Lang, server as texts};
+use crate::i18n::{Lang, m, server as texts};
 use crate::settings::UserFile;
+use crate::tr;
 
 /// The systemd user unit (D147).
 pub const UNIT: &str = "agentLIBRE-llama-server";
@@ -57,7 +58,7 @@ pub fn run(
         ServerAction::Stop => {
             if unit_active()? {
                 systemctl(&["stop", UNIT])?;
-                println!("{}", texts::stopped(lang));
+                println!("{}", tr!(lang, m::SERVER_STOPPED));
             } else {
                 println!("{}", texts::not_running(lang));
             }
@@ -87,7 +88,7 @@ fn start(
     lang: Lang,
 ) -> Result<ExitCode, Error> {
     if unit_active()? || health(llama) != Health::Down {
-        println!("{}", texts::already_running(url, lang));
+        println!("{}", tr!(lang, m::SERVER_ALREADY_RUNNING, url = url));
         return Ok(ExitCode::SUCCESS);
     }
     let (host, port) =
@@ -124,7 +125,7 @@ fn start(
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
-            println!("{}", texts::ready(url, lang));
+            println!("{}", tr!(lang, m::SERVER_READY, url = url));
             return Ok(ExitCode::SUCCESS);
         }
         if !unit_active()? {

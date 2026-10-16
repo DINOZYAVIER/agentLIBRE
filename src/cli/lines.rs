@@ -9,10 +9,11 @@ use crate::Setup;
 use crate::agent::{Agent, TurnEnd};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
-use crate::i18n::{self, repl as texts};
+use crate::i18n::{m, repl as texts};
 use crate::interrupt;
 use crate::session::{Session, StopReason};
 use crate::status::{Facts, Info, compact_notice, display_path, help_text, status_text};
+use crate::tr;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
@@ -34,7 +35,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         context,
     };
     interrupt::install();
-    eprintln!("{}", i18n::session(&session.id, lang));
+    eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
     let mut state: Option<String> = None;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -58,7 +59,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 "/new" => {
                     session = Session::create(sessions_dir, function_name, &workspace)?;
                     state = None;
-                    eprintln!("{}", texts::new_session(&session.id, lang));
+                    eprintln!("{}", tr!(lang, m::NEW_SESSION, id = session.id));
                 }
                 "/compact" => {
                     let result = Agent {
@@ -78,7 +79,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
                     }
                 }
-                _ => eprintln!("{}", texts::unknown_command(name, lang)),
+                _ => eprintln!("{}", tr!(lang, m::UNKNOWN_COMMAND, name = name)),
             }
             continue;
         }
