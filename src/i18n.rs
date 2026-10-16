@@ -41,9 +41,7 @@ impl Lang {
     }
 }
 
-
 /// One message: its texts in the supported languages, defined once.
-#[allow(dead_code)] // until the call sites move to tr! (AGL-005)
 #[derive(Clone, Copy)]
 pub struct Msg {
     pub en: &'static str,
@@ -63,7 +61,6 @@ impl Msg {
 
 /// An argument of a `tr!` with placeholders: its name in the template and
 /// the value to show.
-#[allow(dead_code)] // until the call sites move to tr! (AGL-005)
 #[derive(Clone, Copy)]
 pub struct Arg<'a> {
     name: &'static str,
@@ -90,7 +87,6 @@ impl<'a> Arg<'a> {
 /// `{name}` shows the argument named `name`, `{name:?}` its debug form,
 /// `{{` and `}}` a literal brace. `format!` takes only literal strings,
 /// so the catalog templates are rendered here at run time.
-#[allow(dead_code)] // until the call sites move to tr! (AGL-005)
 pub fn render(template: &str, args: &[Arg<'_>]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(template.len() + 16);
@@ -156,7 +152,6 @@ macro_rules! tr {
 }
 
 /// Every CLI message of the program, defined once per language.
-#[allow(dead_code)] // until the call sites move to tr! (AGL-005)
 pub mod m {
     use super::Msg;
 
@@ -1031,47 +1026,9 @@ Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
         uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nстан: {health}",
     };
 }
-
 /// The `--help` text.
 pub fn help(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => {
-            "\
-Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
-       agentLIBRE server start|stop|status
-
-Without -p, agentLIBRE starts an interactive session.
-
-Options:
-  -p <message>        send one message, print the answer and exit
-  --resume <id>       continue session <id>
-  --function <name>   use Function <name>
-  -h, --help          print this help
-
-Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
-  server start        start llama-server and wait until it is ready
-  server stop         stop it
-  server status       show whether it runs and is ready"
-        }
-        Lang::Uk => {
-            "\
-Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
-              agentLIBRE server start|stop|status
-
-Без -p agentLIBRE запускає інтерактивну сесію.
-
-Параметри:
-  -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
-  --resume <id>       продовжити сесію <id>
-  --function <назва>  використати Function <назва>
-  -h, --help          показати цю довідку
-
-Сервер (user-unit systemd agentLIBRE-llama-server, [server] в agentLIBRE.toml):
-  server start        запустити llama-server і дочекатися готовності
-  server stop         зупинити його
-  server status       показати, чи він працює і чи готовий"
-        }
-    }
+    tr!(lang, m::HELP)
 }
 
 impl Error {
@@ -1082,533 +1039,315 @@ impl Error {
         if !self.is_usage() {
             return message;
         }
-        match lang {
-            Lang::En => format!("{message}\nRun `agentLIBRE --help` for usage."),
-            Lang::Uk => format!("{message}\nДив. `agentLIBRE --help`."),
-        }
+        format!("{message}\n{}", tr!(lang, m::USAGE_POINTER))
     }
 
     fn text(&self, lang: Lang) -> String {
-        use Lang::{En, Uk};
-        match (self, lang) {
-            (Error::InvalidUnicode, En) => "arguments must be valid UTF-8".into(),
-            (Error::InvalidUnicode, Uk) => "аргументи мають бути коректним UTF-8".into(),
-            (Error::UnknownOption(arg), En) => format!("unknown option `{arg}`"),
-            (Error::UnknownOption(arg), Uk) => format!("невідомий параметр `{arg}`"),
-            (Error::MissingValue(arg), En) => format!("option `{arg}` needs a value"),
-            (Error::MissingValue(arg), Uk) => format!("параметру `{arg}` потрібне значення"),
-            (Error::RepeatedOption(arg), En) => format!("option `{arg}` is given twice"),
-            (Error::RepeatedOption(arg), Uk) => format!("параметр `{arg}` вказано двічі"),
-            (Error::FunctionWithResume, En) => {
-                "`--function` cannot go with `--resume`: the session keeps its Function".into()
+        match self {
+            Error::InvalidUnicode => tr!(lang, m::INVALID_UNICODE).to_string(),
+            Error::UnknownOption(arg) => tr!(lang, m::UNKNOWN_OPTION, arg = arg),
+            Error::MissingValue(arg) => tr!(lang, m::MISSING_VALUE, arg = arg),
+            Error::RepeatedOption(arg) => tr!(lang, m::REPEATED_OPTION, arg = arg),
+            Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
+            Error::NoHome { var } => tr!(lang, m::NO_HOME, var = var),
+            Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
+            Error::Read { path, source } => {
+                tr!(lang, m::READ, path = path.display(), source = source)
             }
-            (Error::FunctionWithResume, Uk) => {
-                "`--function` не можна разом із `--resume`: сесія має свою Function".into()
+            Error::Parse { path, detail } => {
+                tr!(lang, m::PARSE, path = path.display(), detail = detail)
             }
-            (Error::NoHome { var }, En) => {
-                format!("HOME is not set and {var} is not an absolute path")
+            Error::UnknownKey { path, key, allowed } => {
+                tr!(
+                    lang,
+                    m::UNKNOWN_KEY,
+                    path = path.display(),
+                    key = key,
+                    allowed = allowed.join(", ")
+                )
             }
-            (Error::NoHome { var }, Uk) => {
-                format!("HOME не задано, а {var} не є абсолютним шляхом")
+            Error::MissingKey { path, key } => {
+                tr!(lang, m::MISSING_KEY, path = path.display(), key = key)
             }
-            (Error::CurrentDir(source), En) => {
-                format!("cannot read the current directory: {source}")
-            }
-            (Error::CurrentDir(source), Uk) => {
-                format!("не вдалося визначити поточну теку: {source}")
-            }
-            (Error::Read { path, source }, En) => {
-                format!("cannot read {}: {source}", path.display())
-            }
-            (Error::Read { path, source }, Uk) => {
-                format!("не вдалося прочитати {}: {source}", path.display())
-            }
-            (Error::Parse { path, detail }, En) => {
-                format!("invalid TOML in {}:\n{detail}", path.display())
-            }
-            (Error::Parse { path, detail }, Uk) => {
-                format!("некоректний TOML у {}:\n{detail}", path.display())
-            }
-            (Error::UnknownKey { path, key, allowed }, En) => format!(
-                "unknown key `{key}` in {}; allowed: {}",
-                path.display(),
-                allowed.join(", ")
-            ),
-            (Error::UnknownKey { path, key, allowed }, Uk) => format!(
-                "невідомий ключ `{key}` у {}; дозволені: {}",
-                path.display(),
-                allowed.join(", ")
-            ),
-            (
-                Error::WrongType {
-                    path,
-                    key,
-                    expected,
-                },
-                En,
-            ) => {
-                let expected = match expected {
-                    Expected::String => "a string",
-                    Expected::Table => "a table",
-                    Expected::Bool => "true or false",
-                    Expected::Integer => "an integer",
-                    Expected::Number => "a number",
-                    Expected::Strings => "an array of strings",
-                };
-                format!("`{key}` in {} must be {expected}", path.display())
-            }
-            (
-                Error::WrongType {
-                    path,
-                    key,
-                    expected,
-                },
-                Uk,
-            ) => {
-                let expected = match expected {
-                    Expected::String => "рядком",
-                    Expected::Table => "таблицею",
-                    Expected::Bool => "true або false",
-                    Expected::Integer => "цілим числом",
-                    Expected::Number => "числом",
-                    Expected::Strings => "масивом рядків",
-                };
-                format!("`{key}` у {} має бути {expected}", path.display())
-            }
-            (
-                Error::InvalidStyle {
-                    path,
-                    key,
-                    value,
-                    problem,
-                },
-                lang,
-            ) => {
-                let problem = match (problem, lang) {
-                    (StyleError::Empty, En) => "a style cannot be empty".to_owned(),
-                    (StyleError::Empty, Uk) => "стиль не може бути порожнім".to_owned(),
-                    (StyleError::Color(color), En) => {
-                        format!("`{color}` is not #RRGGBB or oklch(L C H)")
+            Error::WrongType {
+                path,
+                key,
+                expected,
+            } => {
+                tr!(
+                    lang,
+                    m::WRONG_TYPE,
+                    path = path.display(),
+                    key = key,
+                    expected = match expected {
+                        Expected::String => tr!(lang, m::EXPECTED_STRING),
+                        Expected::Table => tr!(lang, m::EXPECTED_TABLE),
+                        Expected::Bool => tr!(lang, m::EXPECTED_BOOL),
+                        Expected::Integer => tr!(lang, m::EXPECTED_INTEGER),
+                        Expected::Number => tr!(lang, m::EXPECTED_NUMBER),
+                        Expected::Strings => tr!(lang, m::EXPECTED_STRINGS),
                     }
-                    (StyleError::Color(color), Uk) => {
-                        format!("`{color}` не є #RRGGBB або oklch(L C H)")
+                )
+            }
+            Error::InvalidStyle {
+                path,
+                key,
+                value,
+                problem,
+            } => {
+                tr!(
+                    lang,
+                    m::INVALID_STYLE,
+                    path = path.display(),
+                    key = key,
+                    value = value,
+                    problem = match problem {
+                        StyleError::Empty => tr!(lang, m::STYLE_EMPTY).to_string(),
+                        StyleError::Color(color) => tr!(lang, m::STYLE_COLOR, color = color),
+                        StyleError::Oklch => tr!(lang, m::STYLE_OKLCH).to_string(),
                     }
-                    (StyleError::Oklch, En) => {
-                        "oklch needs three numbers, lightness 0..1 and chroma >= 0".to_owned()
-                    }
-                    (StyleError::Oklch, Uk) => {
-                        "oklch потребує трьох чисел, яскравість 0..1, насиченість >= 0".to_owned()
-                    }
-                };
-                match lang {
-                    En => format!(
-                        "invalid style `{value}` for `{key}` in {}: {problem}",
-                        path.display()
-                    ),
-                    Uk => format!(
-                        "некоректний стиль `{value}` для `{key}` у {}: {problem}",
-                        path.display()
-                    ),
-                }
+                )
             }
-            (Error::NotPositive { path, key }, En) => {
-                format!("`{key}` in {} must be at least 1", path.display())
+            Error::NotPositive { path, key } => {
+                tr!(lang, m::NOT_POSITIVE, path = path.display(), key = key)
             }
-            (Error::NotPositive { path, key }, Uk) => {
-                format!("`{key}` у {} має бути не менше 1", path.display())
+            Error::UnsupportedLanguage { path, value } => {
+                tr!(
+                    lang,
+                    m::UNSUPPORTED_LANGUAGE,
+                    path = path.display(),
+                    value = value
+                )
             }
-            (Error::UnsupportedLanguage { path, value }, En) => format!(
-                "unsupported language `{value}` in {}; supported: en, uk",
-                path.display()
-            ),
-            (Error::UnsupportedLanguage { path, value }, Uk) => format!(
-                "непідтримувана мова `{value}` у {}; підтримуються: en, uk",
-                path.display()
-            ),
-            (Error::UnsupportedUrl { path, url }, En) => format!(
-                "unsupported server address `{url}` in {}; only http:// is supported",
-                path.display()
-            ),
-            (Error::UnsupportedUrl { path, url }, Uk) => format!(
-                "непідтримувана адреса сервера `{url}` у {}; підтримується лише http://",
-                path.display()
-            ),
-            (Error::ServerInProject { path, user_path }, En) => format!(
-                "{}: a project file cannot set [server]; the server address belongs in {}",
-                path.display(),
-                user_path.display()
-            ),
-            (Error::ServerInProject { path, user_path }, Uk) => format!(
-                "{}: файл проєкту не може задавати [server]; адреса сервера задається в {}",
-                path.display(),
-                user_path.display()
-            ),
-            (Error::MissingServerUrl { user_path }, En) => format!(
-                "the llama-server address is not set; add to {}:\n\n[server]\nurl = \"http://HOST:PORT\"",
-                user_path.display()
-            ),
-            (Error::MissingServerUrl { user_path }, Uk) => format!(
-                "адресу llama-server не задано; додай у {}:\n\n[server]\nurl = \"http://HOST:PORT\"",
-                user_path.display()
-            ),
-            (Error::MissingKey { path, key }, En) => {
-                format!("`{key}` is missing in {}", path.display())
+            Error::UnsupportedUrl { path, url } => {
+                tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
             }
-            (Error::MissingKey { path, key }, Uk) => {
-                format!("у {} немає `{key}`", path.display())
+            Error::ServerInProject { path, user_path } => {
+                tr!(
+                    lang,
+                    m::SERVER_IN_PROJECT,
+                    path = path.display(),
+                    user_path = user_path.display()
+                )
             }
-            (Error::InvalidName(name), En) => format!(
-                "invalid name `{name}`: a name is not empty, has no `/` and does not start with `.`"
-            ),
-            (Error::InvalidName(name), Uk) => format!(
-                "некоректна назва `{name}`: назва непорожня, без `/` і не починається з `.`"
-            ),
-            (Error::FormatNotFound { name, path }, En) => format!(
-                "model format `{name}` not found: no {} and no built-in format of that name",
-                path.display()
-            ),
-            (Error::FormatNotFound { name, path }, Uk) => format!(
-                "формат моделі `{name}` не знайдено: немає {} і вбудованого формату з такою назвою",
-                path.display()
-            ),
-            (Error::Template { path, key, problem }, lang) => {
-                let problem = template_problem(problem, lang);
-                match lang {
-                    En => format!("`{key}` in {}: {problem}", path.display()),
-                    Uk => format!("`{key}` у {}: {problem}", path.display()),
-                }
+            Error::MissingServerUrl { user_path } => {
+                tr!(lang, m::MISSING_SERVER_URL, user_path = user_path.display())
             }
-            (Error::FunctionNotFound { name, path }, En) => format!(
-                "Function `{name}` not found: no {} and no built-in Function of that name",
-                path.display()
-            ),
-            (Error::FunctionNotFound { name, path }, Uk) => format!(
-                "Function `{name}` не знайдено: немає {} і вбудованої Function з такою назвою",
-                path.display()
-            ),
-            (Error::Function { path, key, problem }, lang) => {
-                let problem = function_problem(problem, lang);
-                match lang {
-                    En => format!("`{key}` in {}: {problem}", path.display()),
-                    Uk => format!("`{key}` у {}: {problem}", path.display()),
-                }
+            Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
+            Error::FormatNotFound { name, path } => {
+                tr!(
+                    lang,
+                    m::FORMAT_NOT_FOUND,
+                    name = name,
+                    path = path.display()
+                )
             }
-            (Error::ServerUnreachable { url, detail }, En) => format!(
-                "cannot reach llama-server at {url}: {detail}\nTo start it: agentLIBRE server start"
-            ),
-            (Error::ServerUnreachable { url, detail }, Uk) => format!(
-                "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\n\
-                 Щоб запустити: agentLIBRE server start"
-            ),
-            (Error::MissingModel { user_path, models }, En) => format!(
-                "the model is not set; add the name of a file in {} to {}:\n\n[server]\nmodel = \"NAME.gguf\"",
-                models.display(),
-                user_path.display()
-            ),
-            (Error::MissingModel { user_path, models }, Uk) => format!(
-                "модель не задано; додай назву файлу з {} у {}:\n\n[server]\nmodel = \"NAME.gguf\"",
-                models.display(),
-                user_path.display()
-            ),
-            (Error::ModelNotFound { path }, En) => format!("no model file {}", path.display()),
-            (Error::ModelNotFound { path }, Uk) => format!("немає файлу моделі {}", path.display()),
-            (Error::NotLocalServer { url }, En) => format!(
-                "agentLIBRE server start runs llama-server only on 127.0.0.1 or localhost, not at {url}"
-            ),
-            (Error::NotLocalServer { url }, Uk) => format!(
-                "agentLIBRE server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}"
-            ),
-            (Error::LlamaServerNotFound, En) => "llama-server is not in PATH".into(),
-            (Error::LlamaServerNotFound, Uk) => "llama-server немає в PATH".into(),
-            (Error::Systemd { detail }, En) => format!("systemd failed: {detail}"),
-            (Error::Systemd { detail }, Uk) => format!("помилка systemd: {detail}"),
-            (Error::ServerFailed, En) => format!(
-                "llama-server stopped before it was ready; see journalctl --user -u {}",
-                crate::cli::serve::UNIT
-            ),
-            (Error::ServerFailed, Uk) => format!(
-                "llama-server зупинився, не встигнувши стати готовим; див. journalctl --user -u {}",
-                crate::cli::serve::UNIT
-            ),
-            (Error::ServerTimeout { seconds }, En) => format!(
-                "llama-server was not ready after {seconds} s; it keeps loading in the background \
-                 (agentLIBRE server status, journalctl --user -u {})",
-                crate::cli::serve::UNIT
-            ),
-            (Error::ServerTimeout { seconds }, Uk) => format!(
-                "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні \
-                 (agentLIBRE server status, journalctl --user -u {})",
-                crate::cli::serve::UNIT
-            ),
-            (
-                Error::ServerStatus {
-                    url,
-                    status,
-                    message,
-                },
-                En,
-            ) => {
-                format!("llama-server at {url} answered {status}: {message}")
+            Error::Template { path, key, problem } => {
+                tr!(
+                    lang,
+                    m::PROBLEM_IN_PATH,
+                    path = path.display(),
+                    key = key,
+                    problem = template_problem(problem, lang)
+                )
             }
-            (
-                Error::ServerStatus {
-                    url,
-                    status,
-                    message,
-                },
-                Uk,
-            ) => {
-                format!("llama-server за адресою {url} відповів {status}: {message}")
+            Error::FunctionNotFound { name, path } => {
+                tr!(
+                    lang,
+                    m::FUNCTION_NOT_FOUND,
+                    name = name,
+                    path = path.display()
+                )
             }
-            (Error::ServerReply { url, detail }, En) => {
-                format!("unexpected reply from llama-server at {url}: {detail}")
+            Error::Function { path, key, problem } => {
+                tr!(
+                    lang,
+                    m::PROBLEM_IN_PATH,
+                    path = path.display(),
+                    key = key,
+                    problem = function_problem(problem, lang)
+                )
             }
-            (Error::ServerReply { url, detail }, Uk) => {
-                format!("неочікувана відповідь llama-server за адресою {url}: {detail}")
+            Error::ServerUnreachable { url, detail } => {
+                tr!(lang, m::SERVER_UNREACHABLE, url = url, detail = detail)
             }
-            (Error::SessionNotFound { id, dir }, En) => {
-                format!("no session `{id}` in {}", dir.display())
+            Error::MissingModel { user_path, models } => {
+                tr!(
+                    lang,
+                    m::MISSING_MODEL,
+                    user_path = user_path.display(),
+                    models = models.display()
+                )
             }
-            (Error::SessionNotFound { id, dir }, Uk) => {
-                format!("сесії `{id}` немає в {}", dir.display())
+            Error::ModelNotFound { path } => {
+                tr!(lang, m::MODEL_NOT_FOUND, path = path.display())
             }
-            (Error::SessionAmbiguous { id, count }, En) => {
-                format!("{count} sessions start with `{id}`; give more of the id")
+            Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
+            Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
+            Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
+            Error::ServerFailed => tr!(lang, m::SERVER_FAILED, unit = crate::cli::serve::UNIT),
+            Error::ServerTimeout { seconds } => {
+                tr!(
+                    lang,
+                    m::SERVER_TIMEOUT,
+                    seconds = seconds,
+                    unit = crate::cli::serve::UNIT
+                )
             }
-            (Error::SessionAmbiguous { id, count }, Uk) => {
-                format!("сесій, що починаються з `{id}`: {count}; вкажи довшу частину id")
+            Error::ServerStatus {
+                url,
+                status,
+                message,
+            } => {
+                tr!(
+                    lang,
+                    m::SERVER_STATUS,
+                    url = url,
+                    status = status,
+                    message = message
+                )
             }
-            (Error::SessionLine { path, line, detail }, En) => {
-                format!("line {line} of {}: {detail}", path.display())
+            Error::ServerReply { url, detail } => {
+                tr!(lang, m::SERVER_REPLY, url = url, detail = detail)
             }
-            (Error::SessionLine { path, line, detail }, Uk) => {
-                format!("рядок {line} у {}: {detail}", path.display())
+            Error::SessionNotFound { id, dir } => {
+                tr!(lang, m::SESSION_NOT_FOUND, id = id, dir = dir.display())
             }
-            (Error::SessionWrite { path, source }, En) => {
-                format!("cannot write {}: {source}", path.display())
+            Error::SessionAmbiguous { id, count } => {
+                tr!(lang, m::SESSION_AMBIGUOUS, id = id, count = count)
             }
-            (Error::SessionWrite { path, source }, Uk) => {
-                format!("не вдалося записати {}: {source}", path.display())
+            Error::SessionLine { path, line, detail } => {
+                tr!(
+                    lang,
+                    m::SESSION_LINE,
+                    path = path.display(),
+                    line = line,
+                    detail = detail
+                )
             }
-            (Error::SessionState { state, function }, En) => format!(
-                "the session continues in state `{state}`, which Function `{function}` no longer has"
-            ),
-            (Error::SessionState { state, function }, Uk) => format!(
-                "сесія продовжується в стані `{state}`, якого Function `{function}` вже не має"
-            ),
-            (Error::OutsideGrammar(text), En) => {
-                format!("llama-server generated text outside the grammar: {text:?}")
+            Error::SessionWrite { path, source } => {
+                tr!(
+                    lang,
+                    m::SESSION_WRITE,
+                    path = path.display(),
+                    source = source
+                )
             }
-            (Error::OutsideGrammar(text), Uk) => {
-                format!("llama-server згенерував текст поза граматикою: {text:?}")
+            Error::SessionState { state, function } => {
+                tr!(lang, m::SESSION_STATE, state = state, function = function)
             }
-            (Error::Interrupted, En) => "interrupted".into(),
-            (Error::Interrupted, Uk) => "перервано".into(),
-            (Error::Terminal { source }, En) => {
-                format!("cannot switch the terminal to raw mode: {source}")
-            }
-            (Error::Terminal { source }, Uk) => {
-                format!("не вдалося перемкнути термінал у raw-режим: {source}")
-            }
+            Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
+            Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
+            Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
         }
     }
 }
 
 /// The label of streamed thinking (D109).
 pub fn thinking(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => "thinking",
-        Lang::Uk => "міркування",
-    }
+    tr!(lang, m::THINKING)
 }
 
 /// `n` lines of output.
 pub fn lines(n: usize, lang: Lang) -> String {
     match lang {
-        Lang::En if n == 1 => "1 line".into(),
-        Lang::En => format!("{n} lines"),
+        Lang::En if n == 1 => tr!(lang, m::LINE_ONE).to_string(),
+        Lang::En => tr!(lang, m::LINES, n = n),
         Lang::Uk => {
             let word = match (n % 10, n % 100) {
-                (1, 11) | (2..=4, 12..=14) | (0 | 5..=9, _) => "рядків",
-                (1, _) => "рядок",
-                (2..=4, _) => "рядки",
-                _ => "рядків",
+                (1, 11) | (2..=4, 12..=14) | (0 | 5..=9, _) => tr!(lang, m::LINES_MANY),
+                (1, _) => tr!(lang, m::LINES_ONE),
+                (2..=4, _) => tr!(lang, m::LINES_FEW),
+                _ => tr!(lang, m::LINES_MANY),
             };
-            format!("{n} {word}")
+            tr!(lang, m::LINES_NOUN, n = n, word = word)
         }
     }
 }
 
 /// The session line at the start of a run (D109).
 pub fn session(id: &str, lang: Lang) -> String {
-    match lang {
-        Lang::En => format!("session {id}"),
-        Lang::Uk => format!("сесія {id}"),
-    }
+    tr!(lang, m::SESSION, id = id)
 }
 
 /// Why a turn stopped (D113).
 pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> String {
-    use Lang::{En, Uk};
-    match (reason, lang) {
-        (StopReason::StepLimit, En) => format!(
-            "stopped: the turn took max_steps_total ({}) steps",
-            function.max_steps_total
-        ),
-        (StopReason::StepLimit, Uk) => format!(
-            "зупинено: хід зробив max_steps_total ({}) кроків",
-            function.max_steps_total
-        ),
-        (StopReason::ContextFull, En) => {
-            "stopped: the conversation no longer fits the model context; start a new session".into()
+    match reason {
+        StopReason::StepLimit => {
+            tr!(lang, m::STOP_STEP_LIMIT, steps = function.max_steps_total)
         }
-        (StopReason::ContextFull, Uk) => {
-            "зупинено: розмова вже не вміщується в контекст моделі; почни нову сесію".into()
+        StopReason::ContextFull => tr!(lang, m::STOP_CONTEXT_FULL).to_string(),
+        StopReason::CutOff => {
+            tr!(lang, m::STOP_CUT_OFF, tokens = function.max_action_tokens)
         }
-        (StopReason::CutOff, En) => format!(
-            "stopped: the action hit max_action_tokens ({})",
-            function.max_action_tokens
-        ),
-        (StopReason::CutOff, Uk) => format!(
-            "зупинено: дія дійшла до max_action_tokens ({})",
-            function.max_action_tokens
-        ),
-        (StopReason::ServerError, En) => "stopped: llama-server failed".into(),
-        (StopReason::ServerError, Uk) => "зупинено: помилка llama-server".into(),
-        (StopReason::Interrupted, En) => "interrupted".into(),
-        (StopReason::Interrupted, Uk) => "перервано".into(),
+        StopReason::ServerError => tr!(lang, m::STOP_SERVER).to_string(),
+        StopReason::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
     }
 }
 
 /// Why a turn stopped, and how to go on (D113).
 pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) -> String {
     let why = stop_reason(reason, function, lang);
-    let next = match lang {
-        Lang::En => "to continue",
-        Lang::Uk => "щоб продовжити",
-    };
-    format!(
-        "{why}
-{next}: agentLIBRE --resume {id} -p \"...\""
-    )
+    format!("{why}\n{}", tr!(lang, m::STOPPED_RESUME, id = id))
 }
 
 fn template_problem(problem: &TemplateProblem, lang: Lang) -> String {
-    use Lang::{En, Uk};
-    match (problem, lang) {
-        (TemplateProblem::Missing(p), En) => format!("needs {p}"),
-        (TemplateProblem::Missing(p), Uk) => format!("потрібен {p}"),
-        (TemplateProblem::Repeated(p), En) => format!("{p} appears more than once"),
-        (TemplateProblem::Repeated(p), Uk) => format!("{p} трапляється більше одного разу"),
-        (TemplateProblem::Unexpected(p), En) => format!("{p} does not belong here"),
-        (TemplateProblem::Unexpected(p), Uk) => format!("{p} тут не дозволений"),
-        (TemplateProblem::ValueBeforeName, En) => "{value} comes before {name}".into(),
-        (TemplateProblem::ValueBeforeName, Uk) => "{value} стоїть перед {name}".into(),
-        (TemplateProblem::NothingBeforeName, En) => {
-            "needs text before {name}, or answers cannot be told apart from calls".into()
+    match problem {
+        TemplateProblem::Missing(p) => tr!(lang, m::TEMPLATE_MISSING, p = p),
+        TemplateProblem::Repeated(p) => tr!(lang, m::TEMPLATE_REPEATED, p = p),
+        TemplateProblem::Unexpected(p) => tr!(lang, m::TEMPLATE_UNEXPECTED, p = p),
+        TemplateProblem::ValueBeforeName => tr!(lang, m::TEMPLATE_VALUE_BEFORE_NAME).to_string(),
+        TemplateProblem::NothingBeforeName => {
+            tr!(lang, m::TEMPLATE_NOTHING_BEFORE_NAME).to_string()
         }
-        (TemplateProblem::NothingBeforeName, Uk) => {
-            "потрібен текст перед {name}, інакше відповідь не відрізнити від виклику".into()
+        TemplateProblem::NothingAfterValue => {
+            tr!(lang, m::TEMPLATE_NOTHING_AFTER_VALUE).to_string()
         }
-        (TemplateProblem::NothingAfterValue, En) => {
-            "needs text after {value}, or a value has no end".into()
-        }
-        (TemplateProblem::NothingAfterValue, Uk) => {
-            "потрібен текст після {value}, інакше значення не має кінця".into()
-        }
-        (TemplateProblem::Empty, En) => "must not be empty".into(),
-        (TemplateProblem::Empty, Uk) => "не може бути порожнім".into(),
+        TemplateProblem::Empty => tr!(lang, m::TEMPLATE_EMPTY).to_string(),
     }
 }
 
 fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
     use FunctionProblem as P;
-    use Lang::{En, Uk};
-    match (problem, lang) {
-        (P::UnknownState(name), En) => format!("there is no state `{name}`"),
-        (P::UnknownState(name), Uk) => format!("стану `{name}` немає"),
-        (P::BadTransitionKey, En) => {
-            "a transition key is a tool of the state, `tool.ok`/`.fail`/`.timeout`, or `else`"
-                .into()
-        }
-        (P::BadTransitionKey, Uk) => {
-            "ключ переходу — tool цього стану, `tool.ok`/`.fail`/`.timeout` або `else`".into()
-        }
-        (P::MissingTransition { tool, outcome }, En) => {
-            format!("no transition for `{tool}.{outcome}`; add it, `{tool}` or `else` to `next`")
-        }
-        (P::MissingTransition { tool, outcome }, Uk) => {
-            format!(
-                "немає переходу для `{tool}.{outcome}`; додай його, `{tool}` або `else` у `next`"
+    match problem {
+        P::UnknownState(name) => tr!(lang, m::FUNC_UNKNOWN_STATE, name = name),
+        P::BadTransitionKey => tr!(lang, m::FUNC_BAD_TRANSITION_KEY).to_string(),
+        P::MissingTransition { tool, outcome } => {
+            tr!(
+                lang,
+                m::FUNC_MISSING_TRANSITION,
+                tool = tool,
+                outcome = outcome
             )
         }
-        (P::NoActions, En) => "the state has no tools and no `answer = true`".into(),
-        (P::NoActions, Uk) => "стан не має ні tools, ні `answer = true`".into(),
-        (P::NextWithoutTools, En) => "`next` needs tools; an answer ends the turn".into(),
-        (P::NextWithoutTools, Uk) => "`next` потребує tools; відповідь завершує хід".into(),
-        (P::OnLimitWithoutLimit, En) => "`on_limit` needs `max_steps` or `max_visits`".into(),
-        (P::OnLimitWithoutLimit, Uk) => "`on_limit` потребує `max_steps` або `max_visits`".into(),
-        (P::OnLimitCycle, En) => "`on_limit` states lead back to this state".into(),
-        (P::OnLimitCycle, Uk) => "стани `on_limit` ведуть назад у цей стан".into(),
-        (P::Unreachable, En) => "no transition leads to this state".into(),
-        (P::Unreachable, Uk) => "у цей стан не веде жоден перехід".into(),
-        (P::NoThinking { format }, En) => {
-            format!("model format `{format}` has no thinking; remove `think = true`")
-        }
-        (P::NoThinking { format }, Uk) => {
-            format!("формат моделі `{format}` не має thinking; прибери `think = true`")
-        }
-        (P::Pattern(error), lang) => pattern_error(error, lang),
-        (P::PatternMayEndValue { end }, En) => {
-            format!("the pattern may produce {end:?}, which ends a value in this model format")
-        }
-        (P::PatternMayEndValue { end }, Uk) => {
-            format!("шаблон може дати {end:?}, а це кінець значення у форматі моделі")
-        }
-        (P::EmptyEnum, En) => "`enum` needs at least one value".into(),
-        (P::EmptyEnum, Uk) => "`enum` потребує хоча б одного значення".into(),
-        (P::BadRange, En) => "needs `min <= max`, and `min >= 1` for `timeout`".into(),
-        (P::BadRange, Uk) => "потрібно `min <= max`, а для `timeout` ще `min >= 1`".into(),
-        (P::ConstraintKeys, En) => "a constraint has exactly one key".into(),
-        (P::ConstraintKeys, Uk) => "обмеження має рівно один ключ".into(),
-        (P::NotPositive, En) => "must be at least 1".into(),
-        (P::NotPositive, Uk) => "має бути щонайменше 1".into(),
+        P::NoActions => tr!(lang, m::FUNC_NO_ACTIONS).to_string(),
+        P::NextWithoutTools => tr!(lang, m::FUNC_NEXT_WITHOUT_TOOLS).to_string(),
+        P::OnLimitWithoutLimit => tr!(lang, m::FUNC_ON_LIMIT_WITHOUT_LIMIT).to_string(),
+        P::OnLimitCycle => tr!(lang, m::FUNC_ON_LIMIT_CYCLE).to_string(),
+        P::Unreachable => tr!(lang, m::FUNC_UNREACHABLE).to_string(),
+        P::NoThinking { format } => tr!(lang, m::FUNC_NO_THINKING, format = format),
+        P::Pattern(error) => pattern_error(error, lang),
+        P::PatternMayEndValue { end } => tr!(lang, m::FUNC_PATTERN_MAY_END_VALUE, end = end),
+        P::EmptyEnum => tr!(lang, m::FUNC_EMPTY_ENUM).to_string(),
+        P::BadRange => tr!(lang, m::FUNC_BAD_RANGE).to_string(),
+        P::ConstraintKeys => tr!(lang, m::FUNC_CONSTRAINT_KEYS).to_string(),
+        P::NotPositive => tr!(lang, m::FUNC_NOT_POSITIVE).to_string(),
     }
 }
 
 fn pattern_error(error: &PatternError, lang: Lang) -> String {
-    use Lang::{En, Uk};
     use PatternErrorKind as K;
     let at = error.offset;
-    match (&error.kind, lang) {
-        (K::Anchor, En) => {
-            format!("pattern byte {at}: remove `^`/`$`; a pattern covers the whole value")
-        }
-        (K::Anchor, Uk) => {
-            format!("шаблон, байт {at}: прибери `^`/`$`; шаблон і так охоплює все значення")
-        }
-        (K::GroupSyntax, En) => format!("pattern byte {at}: `(?` groups are not supported"),
-        (K::GroupSyntax, Uk) => format!("шаблон, байт {at}: групи `(?` не підтримуються"),
-        (K::Escape(c), En) => format!("pattern byte {at}: `\\{c}` is not supported"),
-        (K::Escape(c), Uk) => format!("шаблон, байт {at}: `\\{c}` не підтримується"),
-        (K::TrailingBackslash, En) => format!("pattern byte {at}: `\\` at the end"),
-        (K::TrailingBackslash, Uk) => format!("шаблон, байт {at}: `\\` у кінці"),
-        (K::NothingToRepeat, En) => format!("pattern byte {at}: nothing to repeat"),
-        (K::NothingToRepeat, Uk) => format!("шаблон, байт {at}: нема чого повторювати"),
-        (K::BadRepetition, En) => {
-            format!("pattern byte {at}: use `{{n}}`, `{{n,}}` or `{{n,m}}` with n <= m")
-        }
-        (K::BadRepetition, Uk) => {
-            format!("шаблон, байт {at}: потрібно `{{n}}`, `{{n,}}` або `{{n,m}}` з n <= m")
-        }
-        (K::UnbalancedGroup, En) => format!("pattern byte {at}: unbalanced parenthesis"),
-        (K::UnbalancedGroup, Uk) => format!("шаблон, байт {at}: незакрита або зайва дужка"),
-        (K::BadClass, En) => format!("pattern byte {at}: bad class; escape `[` and `]` inside it"),
-        (K::BadClass, Uk) => {
-            format!("шаблон, байт {at}: некоректний клас; екрануй `[` і `]` усередині")
-        }
-        (K::BadRange, En) => format!("pattern byte {at}: bad class range"),
-        (K::BadRange, Uk) => format!("шаблон, байт {at}: некоректний діапазон у класі"),
+    match &error.kind {
+        K::Anchor => tr!(lang, m::PATTERN_ANCHOR, at = at),
+        K::GroupSyntax => tr!(lang, m::PATTERN_GROUP_SYNTAX, at = at),
+        K::Escape(c) => tr!(lang, m::PATTERN_ESCAPE, at = at, c = c),
+        K::TrailingBackslash => tr!(lang, m::PATTERN_TRAILING_BACKSLASH, at = at),
+        K::NothingToRepeat => tr!(lang, m::PATTERN_NOTHING_TO_REPEAT, at = at),
+        K::BadRepetition => tr!(lang, m::PATTERN_BAD_REPETITION, at = at),
+        K::UnbalancedGroup => tr!(lang, m::PATTERN_UNBALANCED_GROUP, at = at),
+        K::BadClass => tr!(lang, m::PATTERN_BAD_CLASS, at = at),
+        K::BadRange => tr!(lang, m::PATTERN_BAD_RANGE, at = at),
     }
 }
 
@@ -1703,42 +1442,34 @@ mod tests {
 
 /// Texts of `agentLIBRE server` (D146-D150).
 pub mod server {
-    use super::Lang::{self, En, Uk};
+    use super::Lang;
+    use super::m;
     use crate::cli::serve::{Health, UNIT};
 
     pub fn starting(model: &str, url: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("starting llama-server ({model}) at {url} as unit {UNIT}…"),
-            Uk => format!("запускаю llama-server ({model}) за {url} як unit {UNIT}…"),
-        }
+        tr!(
+            lang,
+            m::SERVER_STARTING,
+            model = model,
+            url = url,
+            unit = UNIT
+        )
     }
 
     pub fn ready(url: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("llama-server is ready at {url}"),
-            Uk => format!("llama-server готовий за {url}"),
-        }
+        tr!(lang, m::SERVER_READY, url = url)
     }
 
     pub fn already_running(url: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("llama-server is already running at {url}"),
-            Uk => format!("llama-server уже працює за {url}"),
-        }
+        tr!(lang, m::SERVER_ALREADY_RUNNING, url = url)
     }
 
     pub fn stopped(lang: Lang) -> &'static str {
-        match lang {
-            En => "llama-server stopped",
-            Uk => "llama-server зупинено",
-        }
+        tr!(lang, m::SERVER_STOPPED)
     }
 
     pub fn not_running(lang: Lang) -> String {
-        match lang {
-            En => format!("unit {UNIT} is not running"),
-            Uk => format!("unit {UNIT} не працює"),
-        }
+        tr!(lang, m::SERVER_NOT_RUNNING, unit = UNIT)
     }
 
     /// `agentLIBRE server status`.
@@ -1749,192 +1480,116 @@ pub mod server {
         health: Health,
         lang: Lang,
     ) -> String {
-        let (unit, model, health) = match lang {
-            En => (
-                if active { "active" } else { "inactive" },
-                model.unwrap_or("not set"),
-                match health {
-                    Health::Ready => "ready",
-                    Health::Loading => "loading",
-                    Health::Down => "not responding",
-                },
-            ),
-            Uk => (
-                if active {
-                    "активний"
-                } else {
-                    "неактивний"
-                },
-                model.unwrap_or("не задано"),
-                match health {
-                    Health::Ready => "готовий",
-                    Health::Loading => "завантажується",
-                    Health::Down => "не відповідає",
-                },
-            ),
-        };
-        let labels = match lang {
-            En => ["unit", "url", "model", "health"],
-            Uk => ["unit", "адреса", "модель", "стан"],
-        };
-        format!(
-            "{}: {UNIT} ({unit})\n{}: {url}\n{}: {model}\n{}: {health}",
-            labels[0], labels[1], labels[2], labels[3]
+        tr!(
+            lang,
+            m::SERVER_STATUS_BLOCK,
+            unit = UNIT,
+            active = if active {
+                tr!(lang, m::SERVER_ACTIVE)
+            } else {
+                tr!(lang, m::SERVER_INACTIVE)
+            },
+            url = url,
+            model = model.unwrap_or_else(|| tr!(lang, m::SERVER_MODEL_NOT_SET)),
+            health = match health {
+                Health::Ready => tr!(lang, m::SERVER_HEALTH_READY),
+                Health::Loading => tr!(lang, m::SERVER_HEALTH_LOADING),
+                Health::Down => tr!(lang, m::SERVER_HEALTH_DOWN),
+            }
         )
     }
 }
 
 /// Texts of the interactive session (D118, D120, D124, D134, D135, D138).
 pub mod repl {
-    use super::Lang::{self, En, Uk};
+    use super::Lang;
+    use super::m;
     use crate::session::StopReason;
 
     /// The hint of an empty prompt.
     pub fn hint(lang: Lang) -> &'static str {
-        match lang {
-            En => "Type a message or / for commands",
-            Uk => "Введіть повідомлення або / для команд",
-        }
+        tr!(lang, m::HINT)
     }
 
     /// The dock's state.
     pub fn ready(lang: Lang) -> &'static str {
-        match lang {
-            En => "Ready",
-            Uk => "Готово",
-        }
+        tr!(lang, m::READY)
     }
 
     pub fn generating(lang: Lang) -> &'static str {
-        match lang {
-            En => "Generating",
-            Uk => "Генерація",
-        }
+        tr!(lang, m::GENERATING)
     }
 
     pub fn running(tool: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("Running {tool}"),
-            Uk => format!("Виконується {tool}"),
-        }
+        tr!(lang, m::RUNNING, tool = tool)
     }
 
     pub fn compacting(lang: Lang) -> &'static str {
-        match lang {
-            En => "Compacting",
-            Uk => "Стиснення",
-        }
+        tr!(lang, m::COMPACTING)
     }
 
     pub fn queued(n: usize, lang: Lang) -> String {
-        match lang {
-            En => format!("queued {n}"),
-            Uk => format!("у черзі {n}"),
-        }
+        tr!(lang, m::QUEUED, n = n)
     }
 
     /// The description of a `/` command in the menu and in `/help`.
     pub fn command(name: &str, lang: Lang) -> &'static str {
-        match (name, lang) {
-            ("/quit", En) => "close agentLIBRE",
-            ("/quit", Uk) => "закрити agentLIBRE",
-            ("/exit", En) => "same as /quit",
-            ("/exit", Uk) => "те саме, що /quit",
-            ("/help", En) => "show commands and keys",
-            ("/help", Uk) => "показати команди й клавіші",
-            ("/status", En) => "show the session",
-            ("/status", Uk) => "показати сесію",
-            ("/new", En) => "start a new session",
-            ("/new", Uk) => "почати нову сесію",
-            ("/compact", En) => "replace the history with a summary",
-            ("/compact", Uk) => "замінити історію резюме",
+        match name {
+            "/quit" => tr!(lang, m::CMD_QUIT),
+            "/exit" => tr!(lang, m::CMD_EXIT),
+            "/help" => tr!(lang, m::CMD_HELP),
+            "/status" => tr!(lang, m::CMD_STATUS),
+            "/new" => tr!(lang, m::CMD_NEW),
+            "/compact" => tr!(lang, m::CMD_COMPACT),
             _ => "",
         }
     }
 
     pub fn keys(lang: Lang) -> &'static str {
-        match lang {
-            En => {
-                "Enter sends; Shift-Enter or Alt-Enter adds a line; Up/Down walk the history; \
-                 Ctrl-C stops the turn (or clears the line, or quits when it is empty); \
-                 Ctrl-D quits"
-            }
-            Uk => {
-                "Enter надсилає; Shift-Enter або Alt-Enter додає рядок; Вгору/Вниз — історія; \
-                 Ctrl-C зупиняє хід (або очищає рядок, або виходить, якщо він порожній); \
-                 Ctrl-D виходить"
-            }
-        }
+        tr!(lang, m::KEYS)
     }
 
     pub fn unknown_command(name: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("unknown command {name}; try /help"),
-            Uk => format!("невідома команда {name}; спробуй /help"),
-        }
+        tr!(lang, m::UNKNOWN_COMMAND, name = name)
     }
 
     pub fn busy(name: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("{name} is not available during a turn; stop it with Ctrl-C first"),
-            Uk => format!("{name} недоступна під час ходу; спершу зупини його Ctrl-C"),
-        }
+        tr!(lang, m::BUSY, name = name)
     }
 
     /// One line of `/status`.
     pub fn status_line(label: &str, value: &str, lang: Lang) -> String {
-        let label = match (label, lang) {
-            ("session", En) => "session",
-            ("session", Uk) => "сесія",
-            ("function", En) => "Function",
-            ("function", Uk) => "Function",
-            ("workspace", En) => "workspace",
-            ("workspace", Uk) => "робоча тека",
-            ("server", En) => "server",
-            ("server", Uk) => "сервер",
-            ("context", En) => "context",
-            ("context", Uk) => "контекст",
-            ("state", En) => "state",
-            ("state", Uk) => "стан",
-            (other, _) => other,
+        let label = match label {
+            "session" => tr!(lang, m::LABEL_SESSION),
+            "function" => tr!(lang, m::LABEL_FUNCTION),
+            "workspace" => tr!(lang, m::LABEL_WORKSPACE),
+            "server" => tr!(lang, m::LABEL_SERVER),
+            "context" => tr!(lang, m::LABEL_CONTEXT),
+            "state" => tr!(lang, m::LABEL_STATE),
+            other => other,
         };
-        format!("{label}: {value}")
+        tr!(lang, m::STATUS_LINE, label = label, value = value)
     }
 
     pub fn tokens(n: usize, lang: Lang) -> String {
-        match lang {
-            En => format!("{n} tokens"),
-            Uk => format!("{n} токенів"),
-        }
+        tr!(lang, m::TOKENS, n = n)
     }
 
     pub fn idle(lang: Lang) -> &'static str {
-        match lang {
-            En => "waiting for a message",
-            Uk => "чекає повідомлення",
-        }
+        tr!(lang, m::IDLE)
     }
 
     pub fn unfinished(state: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("an interrupted turn in state {state}; the next message continues it"),
-            Uk => format!("обірваний хід у стані {state}; наступне повідомлення продовжить його"),
-        }
+        tr!(lang, m::UNFINISHED, state = state)
     }
 
     /// The note under a cut-short card (D138).
     pub fn limited(lines: usize, chars: usize, lang: Lang) -> String {
-        match lang {
-            En => format!("… limited to {lines} lines / {chars} chars"),
-            Uk => format!("… обмежено {lines} рядками / {chars} символами"),
-        }
+        tr!(lang, m::LIMITED, lines = lines, chars = chars)
     }
 
     pub fn worked_for(time: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("Worked for {time}"),
-            Uk => format!("Працював {time}"),
-        }
+        tr!(lang, m::WORKED_FOR, time = time)
     }
 
     /// Time as `5s`, `2m 3s` or `1h 4m`.
@@ -1948,17 +1603,11 @@ pub mod repl {
     }
 
     pub fn interrupted_cleared(lang: Lang) -> &'static str {
-        match lang {
-            En => "interrupted; queued input cleared",
-            Uk => "перервано; чергу введення очищено",
-        }
+        tr!(lang, m::INTERRUPTED_CLEARED)
     }
 
     pub fn error_cleared(lang: Lang) -> &'static str {
-        match lang {
-            En => "queued input cleared",
-            Uk => "чергу введення очищено",
-        }
+        tr!(lang, m::ERROR_CLEARED)
     }
 
     /// The line that ends a turn that stopped (D127).
@@ -1967,39 +1616,23 @@ pub mod repl {
     }
 
     pub fn nothing_to_compact(lang: Lang) -> &'static str {
-        match lang {
-            En => "Nothing to compact.",
-            Uk => "Нічого стискати.",
-        }
+        tr!(lang, m::NOTHING_TO_COMPACT)
     }
 
     /// `/compact` could not make a summary (D140).
     pub fn compaction_failed(function: &crate::function::Function, lang: Lang) -> String {
-        let limit = function.max_compact_tokens;
-        match lang {
-            En => format!(
-                "cannot compact: the history and max_compact_tokens ({limit}) do not fit the \
-                 model context, or the summary was cut off or empty"
-            ),
-            Uk => format!(
-                "не вдалося стиснути: історія й max_compact_tokens ({limit}) не вміщуються в \
-                 контекст моделі, або резюме обрізане чи порожнє"
-            ),
-        }
+        tr!(
+            lang,
+            m::COMPACTION_FAILED,
+            limit = function.max_compact_tokens
+        )
     }
 
     pub fn new_session(id: &str, lang: Lang) -> String {
-        match lang {
-            En => format!("new session {id}"),
-            Uk => format!("нова сесія {id}"),
-        }
+        tr!(lang, m::NEW_SESSION, id = id)
     }
 
     pub fn tool_label(lang: Lang) -> &'static str {
-        match lang {
-            En => "TOOL",
-            Uk => "TOOL",
-        }
+        tr!(lang, m::TOOL_LABEL)
     }
 }
-
