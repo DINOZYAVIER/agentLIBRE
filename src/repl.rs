@@ -21,11 +21,11 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::agent::{Agent, Compaction, Report, TurnEnd};
 use crate::backend::{Backend, ToolCall};
+use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::{self, Lang, repl as texts};
 use crate::interrupt;
-use crate::report::StderrReport;
 use crate::session::{Session, StopReason};
 use crate::settings::ReplSettings;
 use crate::term::{self, Key, Parser, RawGuard};

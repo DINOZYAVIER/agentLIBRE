@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::backend::llama::Llama;
-use crate::cli::ServerAction;
+use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::i18n::{Lang, server as texts};
 use crate::settings::UserFile;

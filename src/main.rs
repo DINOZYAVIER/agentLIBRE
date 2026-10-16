@@ -13,8 +13,6 @@ mod interrupt;
 mod machine;
 mod paths;
 mod repl;
-mod report;
-mod server;
 mod session;
 mod settings;
 mod term;
@@ -31,13 +29,13 @@ use std::process::ExitCode;
 use agent::{Agent, TurnEnd};
 use backend::Backend;
 use backend::llama::Llama;
-use cli::Command;
+use cli::args::Command;
+use cli::report::StderrReport;
 use error::Error;
 use function::Function;
 use i18n::Lang;
 use machine::Machine;
 use paths::Paths;
-use report::StderrReport;
 use session::{Session, StopReason};
 use settings::{ProjectFile, Settings, UserFile};
 use theme::Theme;
@@ -70,7 +68,7 @@ fn run(
     {
         *lang = language;
     }
-    let args = match cli::parse(args)? {
+    let args = match cli::args::parse(args)? {
         Command::Help => {
             // A closed pipe, as in `agentLIBRE --help | head -1`, is not an error.
             let _ = writeln!(io::stdout(), "{}", i18n::help(*lang));
@@ -79,7 +77,7 @@ fn run(
         Command::Run(args) => args,
         Command::Server(action) => {
             let (paths, user) = loaded?;
-            return server::run(
+            return cli::serve::run(
                 action,
                 &user,
                 &paths.settings_file(),

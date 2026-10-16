@@ -333,21 +333,21 @@ impl Error {
             (Error::Systemd { detail }, Uk) => format!("помилка systemd: {detail}"),
             (Error::ServerFailed, En) => format!(
                 "llama-server stopped before it was ready; see journalctl --user -u {}",
-                crate::server::UNIT
+                crate::cli::serve::UNIT
             ),
             (Error::ServerFailed, Uk) => format!(
                 "llama-server зупинився, не встигнувши стати готовим; див. journalctl --user -u {}",
-                crate::server::UNIT
+                crate::cli::serve::UNIT
             ),
             (Error::ServerTimeout { seconds }, En) => format!(
                 "llama-server was not ready after {seconds} s; it keeps loading in the background \
                  (agentLIBRE server status, journalctl --user -u {})",
-                crate::server::UNIT
+                crate::cli::serve::UNIT
             ),
             (Error::ServerTimeout { seconds }, Uk) => format!(
                 "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні \
                  (agentLIBRE server status, journalctl --user -u {})",
-                crate::server::UNIT
+                crate::cli::serve::UNIT
             ),
             (
                 Error::ServerStatus {
@@ -713,7 +713,7 @@ mod tests {
 /// Texts of `agentLIBRE server` (D146-D150).
 pub mod server {
     use super::Lang::{self, En, Uk};
-    use crate::server::{Health, UNIT};
+    use crate::cli::serve::{Health, UNIT};
 
     pub fn starting(model: &str, url: &str, lang: Lang) -> String {
         match lang {
