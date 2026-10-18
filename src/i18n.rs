@@ -1023,6 +1023,162 @@ Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
         en: "unit: {unit} ({active})\nurl: {url}\nmodel: {model}\nhealth: {health}",
         uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nстан: {health}",
     };
+
+    /// `Error::GitSpawn`.
+    pub const GIT_SPAWN: Msg = Msg {
+        en: "cannot run git: {source}",
+        uk: "не вдалося запустити git: {source}",
+    };
+
+    /// `Error::GitFailed`.
+    pub const GIT_FAILED: Msg = Msg {
+        en: "git {args} failed: {detail}",
+        uk: "git {args} завершився з помилкою: {detail}",
+    };
+
+    /// `Error::NotInRepository`.
+    pub const NOT_IN_REPOSITORY: Msg = Msg {
+        en: "{cwd} is not in a git repository; the forge works on the workspace of the current directory",
+        uk: "{cwd} не є git-репозиторієм; forge працює з робочою областю поточної теки",
+    };
+
+    /// `Error::Write`.
+    pub const FORGE_WRITE: Msg = Msg {
+        en: "cannot write {path}: {source}",
+        uk: "не вдалося записати {path}: {source}",
+    };
+
+    /// `Error::MarkerFormat`.
+    pub const MARKER_FORMAT: Msg = Msg {
+        en: "{path}: the marker format is {format}, expected 1",
+        uk: "{path}: формат маркера {format}, очікується 1",
+    };
+
+    /// `Error::MarkerIdentity`.
+    pub const MARKER_IDENTITY: Msg = Msg {
+        en: "{path} lists {value}, which is not a sha256 identity",
+        uk: "{path} містить {value}, а це не sha256-ідентифікатор",
+    };
+
+    /// `Error::WorkspaceAmbiguous`.
+    pub const WORKSPACE_AMBIGUOUS: Msg = Msg {
+        en: "the workspace identity is in the markers of {dirs}; a store was copied by hand, remove the copy",
+        uk: "ідентифікатор робочої області є в маркерах {dirs}; сховище скопійовано вручну, прибери копію",
+    };
+
+    /// `Error::RehomeNoStore`.
+    pub const REHOME_NO_STORE: Msg = Msg {
+        en: "a store cannot be chosen without a terminal; stores: {stores} (run `agentLIBRE forge rehome <store>`)",
+        uk: "без термінала не можна вибрати сховище; сховища: {stores} (запусти `agentLIBRE forge rehome <store>`)",
+    };
+
+    /// `Error::StoreNotFound`.
+    pub const STORE_NOT_FOUND: Msg = Msg {
+        en: "no store is named {name}; stores: {stores}",
+        uk: "немає сховища на ім'я {name}; сховища: {stores}",
+    };
+
+    /// `Error::ArtifactFrontMatter`.
+    pub const ARTIFACT_FRONT_MATTER: Msg = Msg {
+        en: "{path} has no `---` front-matter",
+        uk: "у {path} немає `---` заголовка",
+    };
+
+    /// `Error::ArtifactUnknownSchema`.
+    pub const ARTIFACT_UNKNOWN_SCHEMA: Msg = Msg {
+        en: "{path} has schema {schema}, expected forge/v1",
+        uk: "у {path} схема {schema}, очікується forge/v1",
+    };
+
+    /// `Error::ArtifactTypeTableMissing`.
+    pub const ARTIFACT_TYPE_TABLE_MISSING: Msg = Msg {
+        en: "{path} has no [{type_name}] table",
+        uk: "у {path} немає таблиці [{type_name}]",
+    };
+
+    /// `Error::ArtifactKey`.
+    pub const ARTIFACT_KEY: Msg = Msg {
+        en: "{path} has an unknown key `{key}`",
+        uk: "у {path} невідомий ключ `{key}`",
+    };
+
+    /// `Error::ArtifactDate`.
+    pub const ARTIFACT_DATE: Msg = Msg {
+        en: "{path} has {key} = {value}, not a YYYY-MM-DD date",
+        uk: "у {path} {key} = {value}, а не дата YYYY-MM-DD",
+    };
+
+    /// `Error::ArtifactNotFound`.
+    pub const ARTIFACT_NOT_FOUND: Msg = Msg {
+        en: "no artifact is named {name} in {dir}",
+        uk: "артефакту на ім'я {name} немає в {dir}",
+    };
+
+    /// `Error::BadState`.
+    pub const BAD_STATE: Msg = Msg {
+        en: "{state} is not a task-spec state (open, ready, done, dropped)",
+        uk: "{state} не є станом task-spec (open, ready, done, dropped)",
+    };
+
+    /// `Error::BadTransition`.
+    pub const BAD_TRANSITION: Msg = Msg {
+        en: "a task-spec cannot go from {from} to {to}",
+        uk: "task-spec не може перейти з {from} у {to}",
+    };
+
+    /// `Error::NewType`.
+    pub const NEW_TYPE: Msg = Msg {
+        en: "forge new does not scaffold {type_name}",
+        uk: "forge new не створює {type_name}",
+    };
+
+    /// `Error::CommitNotFound`.
+    pub const COMMIT_NOT_FOUND: Msg = Msg {
+        en: "{id} is not a commit in {repo}",
+        uk: "{id} не є комітом в {repo}",
+    };
+
+    /// `Error::BrokenRange`.
+    pub const BROKEN_RANGE: Msg = Msg {
+        en: "{anchor} is not an ancestor of {last}",
+        uk: "{anchor} не є предком {last}",
+    };
+
+    /// A workspace store was synced to its current home.
+    pub const FORGE_REHOMED: Msg = Msg {
+        en: "workspace store moved: {old} is now {new}",
+        uk: "сховище робочої області переміщено: {old} тепер {new}",
+    };
+
+    /// The unique same-named store was adopted for a new location.
+    pub const FORGE_ADOPTED: Msg = Msg {
+        en: "adopted the store {old} as {new} ([forge] auto-rehome = false asks instead)",
+        uk: "усиновлено сховище {old} як {new} ([forge] auto-rehome = false запитує натомість)",
+    };
+
+    /// A fresh store was created for a new location; the others are named.
+    pub const FORGE_FRESH_STORE: Msg = Msg {
+        en: "created a new store {dir}; the existing stores are {names} (forge rehome reconnects a moved workspace)",
+        uk: "створено нове сховище {dir}; наявні сховища: {names} (forge rehome повертає переміщену робочу область)",
+    };
+
+    /// The new-store choice of the store ask.
+    pub const FORGE_NEW_STORE: Msg = Msg {
+        en: "a new store",
+        uk: "нове сховище",
+    };
+
+    /// `forge rehome --new` created a fresh single-hash store.
+    pub const FORGE_STORE_NEW: Msg = Msg {
+        en: "created a new store {dir}",
+        uk: "створено нове сховище {dir}",
+    };
+
+    /// The marker was written when the workspace store was materialized.
+    pub const FORGE_MARKER_WRITTEN: Msg = Msg {
+        en: "created the workspace store {path}",
+        uk: "створено сховище робочої області {path}",
+    };
 }
 
 impl Error {
@@ -1233,6 +1389,86 @@ impl Error {
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
+            Error::GitSpawn { source } => tr!(lang, m::GIT_SPAWN, source = source),
+            Error::GitFailed { args, detail } => {
+                tr!(lang, m::GIT_FAILED, args = args, detail = detail)
+            }
+            Error::NotInRepository { cwd } => {
+                tr!(lang, m::NOT_IN_REPOSITORY, cwd = cwd.display())
+            }
+            Error::Write { path, source } => {
+                tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
+            }
+            Error::MarkerFormat { path, format } => {
+                tr!(lang, m::MARKER_FORMAT, path = path.display(), format = format)
+            }
+            Error::MarkerIdentity { path, value } => {
+                tr!(lang, m::MARKER_IDENTITY, path = path.display(), value = value)
+            }
+            Error::WorkspaceAmbiguous { dirs } => {
+                tr!(lang, m::WORKSPACE_AMBIGUOUS, dirs = dirs.join(", "))
+            }
+            Error::RehomeNoStore { stores } => {
+                let stores = if stores.is_empty() {
+                    "none".to_string()
+                } else {
+                    stores.join(", ")
+                };
+                tr!(lang, m::REHOME_NO_STORE, stores = stores)
+            }
+            Error::StoreNotFound { name, stores } => {
+                let stores = if stores.is_empty() {
+                    "none".to_string()
+                } else {
+                    stores.join(", ")
+                };
+                tr!(lang, m::STORE_NOT_FOUND, name = name, stores = stores)
+            }
+            Error::ArtifactFrontMatter { path } => {
+                tr!(lang, m::ARTIFACT_FRONT_MATTER, path = path.display())
+            }
+            Error::ArtifactUnknownSchema { path, schema } => {
+                tr!(lang, m::ARTIFACT_UNKNOWN_SCHEMA, path = path.display(), schema = schema)
+            }
+            Error::ArtifactTypeTableMissing { path, type_name } => {
+                tr!(
+                    lang,
+                    m::ARTIFACT_TYPE_TABLE_MISSING,
+                    path = path.display(),
+                    type_name = type_name
+                )
+            }
+            Error::ArtifactKey { path, key } => {
+                tr!(lang, m::ARTIFACT_KEY, path = path.display(), key = key)
+            }
+            Error::ArtifactDate { path, key, value } => {
+                tr!(
+                    lang,
+                    m::ARTIFACT_DATE,
+                    path = path.display(),
+                    key = key,
+                    value = value
+                )
+            }
+            Error::ArtifactNotFound { name, dir } => {
+                tr!(
+                    lang,
+                    m::ARTIFACT_NOT_FOUND,
+                    name = name,
+                    dir = dir.display()
+                )
+            }
+            Error::BadState { state } => tr!(lang, m::BAD_STATE, state = state),
+            Error::BadTransition { from, to } => {
+                tr!(lang, m::BAD_TRANSITION, from = from, to = to)
+            }
+            Error::NewType { type_name } => tr!(lang, m::NEW_TYPE, type_name = type_name),
+            Error::CommitNotFound { id, repo } => {
+                tr!(lang, m::COMMIT_NOT_FOUND, id = id, repo = repo.display())
+            }
+            Error::BrokenRange { anchor, last } => {
+                tr!(lang, m::BROKEN_RANGE, anchor = anchor, last = last)
+            }
         }
     }
 }

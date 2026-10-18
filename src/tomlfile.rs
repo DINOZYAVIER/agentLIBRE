@@ -48,15 +48,31 @@ pub struct Section {
 
 impl Section {
     pub fn new(path: &Path, table: Table) -> Section {
+        Section::at(path, "", table)
+    }
+
+    /// A table read at the location `prefix`, such as `task-spec.`;
+    /// an empty `prefix` is the top level.
+    pub fn at(path: &Path, prefix: &str, table: Table) -> Section {
         Section {
             path: path.into(),
-            prefix: String::new(),
+            prefix: if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}.")
+            },
             table,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Consumes the section into the raw `Value` of its table, for a
+    /// table carried unparsed.
+    pub fn into_value(self) -> Value {
+        Value::Table(self.table)
     }
 
     /// The full name of `key` in the file; with an empty `key`, the name of
@@ -100,6 +116,16 @@ impl Section {
     /// Takes the string `key`, which must be present.
     pub fn required_string(&mut self, key: &str) -> Result<String, Error> {
         self.string(key)?.ok_or_else(|| self.missing(key))
+    }
+
+    /// Takes the integer `key`, which must be present.
+    pub fn required_integer(&mut self, key: &str) -> Result<i64, Error> {
+        self.integer(key)?.ok_or_else(|| self.missing(key))
+    }
+
+    /// Takes the array of strings `key`, which must be present.
+    pub fn required_strings(&mut self, key: &str) -> Result<Vec<String>, Error> {
+        self.strings(key)?.ok_or_else(|| self.missing(key))
     }
 
     /// Takes the boolean `key`, if present.
@@ -167,6 +193,18 @@ impl Section {
                 Ok((key, value))
             })
             .collect()
+    }
+
+    /// Rejects any key left in the table: the known keys were read, so
+    /// a remainder is an unknown key.
+    pub fn check_empty(&self) -> Result<(), Error> {
+        match self.table.keys().next() {
+            Some(key) => Err(Error::ArtifactKey {
+                path: self.path.clone(),
+                key: self.key(key),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Takes the table `key`, if present.

@@ -121,6 +121,50 @@ pub enum Error {
     ServerFailed,
     /// llama-server was not ready in time (D149).
     ServerTimeout { seconds: u64 },
+    /// `git` cannot be run.
+    GitSpawn { source: io::Error },
+    /// `git <args>` exited with a failure.
+    GitFailed { args: String, detail: String },
+    /// The cwd is not in a git repository; the forge works on the
+    /// workspace of the current directory.
+    NotInRepository { cwd: PathBuf },
+    /// A forge file or directory cannot be written.
+    Write { path: PathBuf, source: io::Error },
+    /// The `format` of a workspace marker is not 1.
+    MarkerFormat { path: PathBuf, format: i64 },
+    /// A workspace marker lists a value that is not a `sha256:<hex>`
+    /// identity.
+    MarkerIdentity { path: PathBuf, value: String },
+    /// The current identity is in the markers of two stores: one was
+    /// copied by hand.
+    WorkspaceAmbiguous { dirs: Vec<String> },
+    /// `forge rehome` without a store off a TTY.
+    RehomeNoStore { stores: Vec<String> },
+    /// No store is named `name`.
+    StoreNotFound { name: String, stores: Vec<String> },
+    /// An artifact file has no `---` front-matter delimiters.
+    ArtifactFrontMatter { path: PathBuf },
+    /// An artifact file carries a schema the forge does not parse.
+    ArtifactUnknownSchema { path: PathBuf, schema: String },
+    /// The `[<type>]` table of an artifact is missing.
+    ArtifactTypeTableMissing { path: PathBuf, type_name: String },
+    /// An artifact front-matter key outside the envelope.
+    ArtifactKey { path: PathBuf, key: String },
+    /// An artifact date is not a `YYYY-MM-DD` calendar date.
+    ArtifactDate { path: PathBuf, key: String, value: String },
+    /// No artifact is named `name` in the store.
+    ArtifactNotFound { name: String, dir: PathBuf },
+    /// `forge status` asks for a state outside the lifecycle.
+    BadState { state: String },
+    /// `forge status` asks for a transition the lifecycle does not
+    /// allow.
+    BadTransition { from: String, to: String },
+    /// `forge new` names a type it does not scaffold.
+    NewType { type_name: String },
+    /// A task-spec id does not resolve in the workspace repository.
+    CommitNotFound { id: String, repo: PathBuf },
+    /// The `anchor` of a task-spec is not an ancestor of its `last`.
+    BrokenRange { anchor: String, last: String },
 }
 
 /// TOML type a settings key requires.
@@ -210,5 +254,157 @@ impl Error {
             _ if self.is_usage() => 2,
             _ => 1,
         }
+    }
+}
+
+/// A plain English rendering, for places that keep an error as text
+/// (`forge` list marks the files it cannot parse with it).
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let write = |f: &mut std::fmt::Formatter<'_>, text: String| f.write_str(&text);
+        write(
+            f,
+            match self {
+                Error::InvalidUnicode => "arguments must be valid UTF-8".into(),
+                Error::UnknownOption(arg) => format!("unknown option `{arg}`"),
+                Error::MissingValue(arg) => format!("option `{arg}` needs a value"),
+                Error::RepeatedOption(arg) => format!("option `{arg}` is given twice"),
+                Error::FunctionWithResume => {
+                    "`--function` cannot go with `--resume`".into()
+                }
+                Error::NoHome { var } => format!("HOME is not set and {var} is not absolute"),
+                Error::CurrentDir(source) => format!("cannot read the current directory: {source}"),
+                Error::Read { path, source } => format!("cannot read {}: {source}", path.display()),
+                Error::Parse { path, detail } => {
+                    format!("invalid TOML in {}: {detail}", path.display())
+                }
+                Error::UnknownKey { path, key, .. } => {
+                    format!("unknown key `{key}` in {}", path.display())
+                }
+                Error::MissingKey { path, key } => {
+                    format!("`{key}` is missing in {}", path.display())
+                }
+                Error::WrongType { path, key, .. } => {
+                    format!("`{key}` in {} has the wrong type", path.display())
+                }
+                Error::InvalidStyle { path, key, .. } => {
+                    format!("invalid style for `{key}` in {}", path.display())
+                }
+                Error::NotPositive { path, key } => {
+                    format!("`{key}` in {} must be at least 1", path.display())
+                }
+                Error::UnsupportedLanguage { path, value } => {
+                    format!("unsupported language `{value}` in {}", path.display())
+                }
+                Error::UnsupportedUrl { path, url } => {
+                    format!("unsupported server address `{url}` in {}", path.display())
+                }
+                Error::ServerInProject { path, .. } => {
+                    format!("{}: a project file cannot set [server]", path.display())
+                }
+                Error::MissingServerUrl { .. } => "the llama-server address is not set".into(),
+                Error::InvalidName(name) => format!("invalid name `{name}`"),
+                Error::FormatNotFound { name, .. } => format!("model format `{name}` not found"),
+                Error::Template { path, key, .. } => {
+                    format!("a problem with `{key}` in {}", path.display())
+                }
+                Error::FunctionNotFound { name, .. } => {
+                    format!("Function `{name}` not found")
+                }
+                Error::Function { path, key, .. } => {
+                    format!("a problem with `{key}` in {}", path.display())
+                }
+                Error::ServerUnreachable { url, .. } => {
+                    format!("cannot reach llama-server at {url}")
+                }
+                Error::ServerStatus { url, status, .. } => {
+                    format!("llama-server at {url} answered {status}")
+                }
+                Error::ServerReply { url, .. } => {
+                    format!("unexpected reply from llama-server at {url}")
+                }
+                Error::SessionNotFound { id, dir } => {
+                    format!("no session `{id}` in {}", dir.display())
+                }
+                Error::SessionAmbiguous { id, count } => {
+                    format!("{count} sessions start with `{id}`")
+                }
+                Error::SessionLine { path, line, detail } => {
+                    format!("line {line} of {}: {detail}", path.display())
+                }
+                Error::SessionWrite { path, source } => {
+                    format!("cannot write {}: {source}", path.display())
+                }
+                Error::SessionState { state, function } => {
+                    format!("the session state `{state}` is not in Function `{function}`")
+                }
+                Error::Terminal { source } => format!("cannot switch the terminal to raw mode: {source}"),
+                Error::Interrupted => "interrupted".into(),
+                Error::OutsideGrammar(text) => {
+                    format!("generated text outside the grammar: {text:?}")
+                }
+                Error::MissingModel { .. } => "the model is not set".into(),
+                Error::ModelNotFound { path } => format!("no model file {}", path.display()),
+                Error::NotLocalServer { url } => {
+                    format!("the server address is not local: {url}")
+                }
+                Error::LlamaServerNotFound => "llama-server is not in PATH".into(),
+                Error::Systemd { detail } => format!("systemd failed: {detail}"),
+                Error::ServerFailed => "llama-server stopped before it was ready".into(),
+                Error::ServerTimeout { seconds } => {
+                    format!("llama-server was not ready after {seconds} s")
+                }
+                Error::GitSpawn { source } => format!("cannot run git: {source}"),
+                Error::GitFailed { args, detail } => format!("git {args} failed: {detail}"),
+                Error::NotInRepository { cwd } => {
+                    format!("{} is not in a git repository", cwd.display())
+                }
+                Error::Write { path, source } => {
+                    format!("cannot write {}: {source}", path.display())
+                }
+                Error::MarkerFormat { path, format } => {
+                    format!("{}: the marker format is {format}, expected 1", path.display())
+                }
+                Error::MarkerIdentity { path, value } => {
+                    format!("{} lists {value}, which is not a sha256 identity", path.display())
+                }
+                Error::WorkspaceAmbiguous { dirs } => {
+                    format!("the workspace identity is in the markers of {}", dirs.join(", "))
+                }
+                Error::RehomeNoStore { .. } => "a store cannot be chosen without a terminal".into(),
+                Error::StoreNotFound { name, .. } => format!("no store is named {name}"),
+                Error::ArtifactFrontMatter { path } => {
+                    format!("{} has no `---` front-matter", path.display())
+                }
+                Error::ArtifactUnknownSchema { path, schema } => {
+                    format!("{} has schema {schema}, expected forge/v1", path.display())
+                }
+                Error::ArtifactTypeTableMissing { path, type_name } => {
+                    format!("{} has no [{type_name}] table", path.display())
+                }
+                Error::ArtifactKey { path, key } => {
+                    format!("{} has an unknown key `{key}`", path.display())
+                }
+                Error::ArtifactDate { path, key, value } => {
+                    format!("{} has {key} = {value}, not a YYYY-MM-DD date", path.display())
+                }
+                Error::ArtifactNotFound { name, dir } => {
+                    format!("no artifact is named {name} in {}", dir.display())
+                }
+                Error::BadState { state } => {
+                    format!("{state} is not a task-spec state (open, ready, done, dropped)")
+                }
+                Error::BadTransition { from, to } => {
+                    format!("a task-spec cannot go from {from} to {to}")
+                }
+                Error::NewType { type_name } => format!("forge new does not scaffold {type_name}"),
+                Error::CommitNotFound { id, repo } => {
+                    format!("{id} is not a commit in {}", repo.display())
+                }
+                Error::BrokenRange { anchor, last } => {
+                    format!("{anchor} is not an ancestor of {last}")
+                }
+            },
+        )
     }
 }

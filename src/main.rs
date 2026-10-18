@@ -5,6 +5,7 @@ mod agent;
 mod backend;
 mod cli;
 mod error;
+mod forge;
 mod format;
 mod function;
 mod grammar;
