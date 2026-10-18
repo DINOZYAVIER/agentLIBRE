@@ -158,6 +158,7 @@ pub mod m {
         en: "\
 Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
        agentLIBRE server start|stop|status
+       agentLIBRE forge list|show|new|status|check|rehome
 
 Without -p, agentLIBRE starts an interactive session.
 
@@ -170,10 +171,20 @@ Options:
 Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
   server start        start llama-server and wait until it is ready
   server stop         stop it
-  server status       show whether it runs and is ready",
+  server status       show whether it runs and is ready
+
+Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
+under XDG_DATA_HOME):
+  forge list                      the artifacts of the workspace
+  forge show <name>               the rendered header and the body
+  forge new task-spec --title <t> a new task-spec ([--name <n>])
+  forge status <name> <state>     open, ready, done or dropped
+  forge check <name>              the structural checks and the verification cmds
+  forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
 Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
               agentLIBRE server start|stop|status
+              agentLIBRE forge list|show|new|status|check|rehome
 
 Без -p agentLIBRE запускає інтерактивну сесію.
 
@@ -186,7 +197,16 @@ Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
 Сервер (user-unit systemd agentLIBRE-llama-server, [server] в agentLIBRE.toml):
   server start        запустити llama-server і дочекатися готовності
   server stop         зупинити його
-  server status       показати, чи він працює і чи готовий",
+  server status       показати, чи він працює і чи готовий
+
+Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
+у XDG_DATA_HOME):
+  forge list                      артефакти робочої області
+  forge show <назва>              відтворений заголовок і тіло
+  forge new task-spec --title <t> новий task-spec ([--name <n>])
+  forge status <назва> <стан>     open, ready, done або dropped
+  forge check <назва>             структурні перевірки і команди verification
+  forge rehome [<сховище>] [--new]   перемістити сховище робочої області",
     };
 
     /// The pointer appended to usage errors.
@@ -1179,6 +1199,78 @@ Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
         en: "created the workspace store {path}",
         uk: "створено сховище робочої області {path}",
     };
+
+    /// `Error::NameTaken`.
+    pub const NAME_TAKEN: Msg = Msg {
+        en: "an artifact named {name} is already in {dir}",
+        uk: "артефакт на ім'я {name} вже є в {dir}",
+    };
+
+    /// `Error::NotTaskSpec`.
+    pub const NOT_TASK_SPEC: Msg = Msg {
+        en: "{name} is a {type_name}, not a task-spec; status applies to task-specs only",
+        uk: "{name} — це {type_name}, а не task-spec; status стосується лише task-spec",
+    };
+
+    /// `Error::RehomeInUse`.
+    pub const REHOME_IN_USE: Msg = Msg {
+        en: "the identity is already in the store {current}; it cannot also be in {target}",
+        uk: "ідентичність вже є в сховищі {current}; її не можна ще й в {target}",
+    };
+
+    /// `Error::CmdSpawn`.
+    pub const CMD_SPAWN: Msg = Msg {
+        en: "the check command cannot be run: {source}",
+        uk: "команду перевірки не можна запустити: {source}",
+    };
+
+    /// The store ask of a forge command (a terminal only).
+    pub const FORGE_ASK_STORE: Msg = Msg {
+        en: "which store is this workspace?",
+        uk: "яке сховище належить цій робочій області?",
+    };
+
+    /// The store ask, an answer that is not a number of the list.
+    pub const FORGE_ASK_INVALID: Msg = Msg {
+        en: "enter a number from 1 to {last}",
+        uk: "введи число від 1 до {last}",
+    };
+
+    /// The rehome ask of `forge rehome` without a store (a terminal only).
+    pub const FORGE_ASK_REHOME: Msg = Msg {
+        en: "which store should this workspace rehome to?",
+        uk: "до якого сховища слід повернути цю робочу область?",
+    };
+
+    /// `forge check`: the `name` does not match the file it is in.
+    pub const FORGE_CHECK_NAME_MISMATCH: Msg = Msg {
+        en: "the name {name} does not match the file {file}",
+        uk: "ім'я {name} не збігається з файлом {file}",
+    };
+
+    /// `forge check`: a `deps` or `supersedes` entry is not in the store.
+    pub const FORGE_CHECK_NOT_IN_STORE: Msg = Msg {
+        en: "{kind} {name} is not in the store",
+        uk: "{kind} {name} немає в сховищі",
+    };
+
+    /// `forge check`: a verification cmd failed.
+    pub const FORGE_CHECK_FAILED: Msg = Msg {
+        en: "check failed: {cmd}",
+        uk: "перевірка не пройшла: {cmd}",
+    };
+
+    /// `forge new` wrote the scaffold.
+    pub const FORGE_NEW_CREATED: Msg = Msg {
+        en: "created {path}",
+        uk: "створено {path}",
+    };
+
+    /// `forge status` changed the state.
+    pub const FORGE_STATUS_CHANGED: Msg = Msg {
+        en: "{name}: {from} to {to}",
+        uk: "{name}: з {from} у {to}",
+    };
 }
 
 impl Error {
@@ -1463,6 +1555,16 @@ impl Error {
                 tr!(lang, m::BAD_TRANSITION, from = from, to = to)
             }
             Error::NewType { type_name } => tr!(lang, m::NEW_TYPE, type_name = type_name),
+            Error::NameTaken { name, dir } => {
+                tr!(lang, m::NAME_TAKEN, name = name, dir = dir.display())
+            }
+            Error::NotTaskSpec { name, type_name } => {
+                tr!(lang, m::NOT_TASK_SPEC, name = name, type_name = type_name)
+            }
+            Error::RehomeInUse { current, target } => {
+                tr!(lang, m::REHOME_IN_USE, current = current, target = target)
+            }
+            Error::CmdSpawn { source } => tr!(lang, m::CMD_SPAWN, source = source),
             Error::CommitNotFound { id, repo } => {
                 tr!(lang, m::COMMIT_NOT_FOUND, id = id, repo = repo.display())
             }

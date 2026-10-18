@@ -64,6 +64,17 @@ impl Paths {
         self.data.join("models")
     }
 
+    /// The workspace directory `name` under the data directory (AGL-007);
+    /// the engine picks the name and checks its marker.
+    pub fn workspace_dir(&self, name: &str) -> PathBuf {
+        self.data.join(name)
+    }
+
+    /// The forge of the workspace directory `name` (AGL-007).
+    pub fn forge_dir(&self, name: &str) -> PathBuf {
+        self.workspace_dir(name).join("forge")
+    }
+
     /// User model formats, `formats/*.toml` (D39).
     pub fn formats(&self) -> PathBuf {
         self.config.join("formats")
@@ -102,6 +113,15 @@ mod tests {
         assert_eq!(
             paths.formats(),
             PathBuf::from("/home/u/.config/agentLIBRE/formats")
+        );
+        let name = "agl-lite-60af300abea6";
+        assert_eq!(
+            paths.workspace_dir(name),
+            PathBuf::from("/home/u/.local/share/agentLIBRE/agl-lite-60af300abea6")
+        );
+        assert_eq!(
+            paths.forge_dir(name),
+            PathBuf::from("/home/u/.local/share/agentLIBRE/agl-lite-60af300abea6/forge")
         );
     }
 

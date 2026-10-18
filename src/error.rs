@@ -161,6 +161,15 @@ pub enum Error {
     BadTransition { from: String, to: String },
     /// `forge new` names a type it does not scaffold.
     NewType { type_name: String },
+    /// `forge new` names an artifact that is already in the store.
+    NameTaken { name: String, dir: PathBuf },
+    /// `forge status` on an artifact that is not a `task-spec`.
+    NotTaskSpec { name: String, type_name: String },
+    /// `forge rehome` while the identity is already in a store: putting
+    /// it in a second one is the two-markers trap.
+    RehomeInUse { current: String, target: String },
+    /// A verification cmd of `forge check` cannot be run.
+    CmdSpawn { source: io::Error },
     /// A task-spec id does not resolve in the workspace repository.
     CommitNotFound { id: String, repo: PathBuf },
     /// The `anchor` of a task-spec is not an ancestor of its `last`.
@@ -398,6 +407,20 @@ impl std::fmt::Display for Error {
                     format!("a task-spec cannot go from {from} to {to}")
                 }
                 Error::NewType { type_name } => format!("forge new does not scaffold {type_name}"),
+                Error::NameTaken { name, dir } => {
+                    format!("an artifact named {name} is already in {}", dir.display())
+                }
+                Error::NotTaskSpec { name, type_name } => {
+                    format!("{name} is a {type_name}, not a task-spec")
+                }
+                Error::RehomeInUse { current, target } => {
+                    format!(
+                        "the identity is already in the store {current}; it cannot also be in {target}"
+                    )
+                }
+                Error::CmdSpawn { source } => {
+                    format!("the check command cannot be run: {source}")
+                }
                 Error::CommitNotFound { id, repo } => {
                     format!("{id} is not a commit in {}", repo.display())
                 }

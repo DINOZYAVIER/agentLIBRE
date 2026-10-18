@@ -13,6 +13,9 @@ pub enum Command {
     Run(Args),
     /// `agentLIBRE server start|stop|status` (D146).
     Server(ServerAction),
+    /// `agentLIBRE forge …` (AGL-007); the arguments after the word
+    /// `forge` are parsed in the forge surface.
+    Forge(Vec<OsString>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +42,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
     let mut parsed = Args::default();
     let mut args = args.into_iter().peekable();
     let text = |arg: OsString| arg.into_string().map_err(|_| Error::InvalidUnicode);
+    // The forge surface parses its own arguments (AGL-007).
+    if args.peek().is_some_and(|arg| arg == "forge") {
+        args.next();
+        return Ok(Command::Forge(args.collect()));
+    }
     if args.peek().is_some_and(|arg| arg == "server") {
         args.next();
         let action = match args.next().map(text).transpose()?.as_deref() {
@@ -165,6 +173,23 @@ mod tests {
             parse_strs(&["-p", "server"]).unwrap(),
             Command::Run(Args {
                 prompt: Some("server".into()),
+                ..Args::default()
+            })
+        );
+    }
+
+    #[test]
+    fn forge_keeps_the_rest_of_the_arguments() {
+        assert_eq!(parse_strs(&["forge"]).unwrap(), Command::Forge(Vec::new()));
+        assert_eq!(
+            parse_strs(&["forge", "list", "-h", "x"]).unwrap(),
+            Command::Forge(vec!["list".into(), "-h".into(), "x".into()])
+        );
+        // Only the first word is a command; a message may say "forge".
+        assert_eq!(
+            parse_strs(&["-p", "forge"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("forge".into()),
                 ..Args::default()
             })
         );

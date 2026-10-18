@@ -27,6 +27,8 @@ pub struct UserFile {
     pub colors: Vec<(Role, Style)>,
     /// `[repl]` (D124, D130).
     pub repl: ReplFile,
+    /// `[forge]` (AGL-007).
+    pub forge: ForgeFile,
 }
 
 /// `[server]` keys of `agentLIBRE server start` (D148).
@@ -45,6 +47,14 @@ pub struct ReplFile {
     pub tool_lines: Option<usize>,
     pub tool_chars: Option<usize>,
     pub frame: Option<bool>,
+}
+
+/// `[forge]` (AGL-007).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ForgeFile {
+    /// Adopt the unique same-named store when the workspace is at an
+    /// unregistered location (default on).
+    pub auto_rehome: Option<bool>,
 }
 
 /// `[repl]` with the defaults of the old agl (D130).
@@ -72,7 +82,7 @@ impl UserFile {
             return Ok(UserFile::default());
         };
         let mut file = Section::new(path, table);
-        file.check_keys(&["function", "language", "server", "colors", "repl"])?;
+        file.check_keys(&["function", "language", "server", "colors", "repl", "forge"])?;
         let function = file.string("function")?;
         let language = file
             .string("language")?
@@ -165,6 +175,15 @@ impl UserFile {
                 }
             }
         };
+        let forge = match file.section("forge")? {
+            None => ForgeFile::default(),
+            Some(mut forge) => {
+                forge.check_keys(&["auto_rehome"])?;
+                ForgeFile {
+                    auto_rehome: forge.bool("auto_rehome")?,
+                }
+            }
+        };
         Ok(UserFile {
             function,
             language,
@@ -172,6 +191,7 @@ impl UserFile {
             launch,
             colors,
             repl,
+            forge,
         })
     }
 }
@@ -352,6 +372,33 @@ mod tests {
                 frame: false,
             }
         );
+    }
+
+    #[test]
+    fn the_forge_table() {
+        // Absent: the defaults.
+        assert_eq!(user("").unwrap().forge, ForgeFile::default());
+        assert_eq!(
+            user("[forge]\nauto_rehome = false\n").unwrap().forge,
+            ForgeFile {
+                auto_rehome: Some(false)
+            }
+        );
+        assert_eq!(
+            user("[forge]\nauto_rehome = true\n").unwrap().forge,
+            ForgeFile {
+                auto_rehome: Some(true)
+            }
+        );
+        // Strict: an unknown key and a wrong type are rejected.
+        assert!(matches!(
+            user("[forge]\ndir = \"x\""),
+            Err(Error::UnknownKey { key, .. }) if key == "forge.dir"
+        ));
+        assert!(matches!(
+            user("[forge]\nauto_rehome = \"on\""),
+            Err(Error::WrongType { key, .. }) if key == "forge.auto_rehome"
+        ));
     }
 
     fn loaded_with_server(file: UserFile) -> UserFile {

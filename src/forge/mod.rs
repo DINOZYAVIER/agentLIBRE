@@ -270,8 +270,6 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
 pub struct Workspace {
     /// The canonical git toplevel.
     pub toplevel: PathBuf,
-    /// The name of the toplevel directory.
-    pub basename: String,
     /// The `sha256:<hex>` identity of the toplevel path.
     pub identity: String,
     /// The store directory name: `<basename>-<12 hex>` (the 64-hex
@@ -352,7 +350,6 @@ pub fn resolve(
     let key = store_key(&basename, &identity, &found);
     let workspace = |dir: PathBuf| Workspace {
         toplevel: toplevel.clone(),
-        basename: basename.clone(),
         identity: identity.clone(),
         key: key.clone(),
         dir,
@@ -537,8 +534,8 @@ pub struct Artifact {
 #[derive(Debug)]
 pub enum Header {
     Artifact(Artifact),
-    UnknownSchema { path: PathBuf, schema: String },
-    Broken { path: PathBuf, detail: String },
+    UnknownSchema { schema: String },
+    Broken { detail: String },
 }
 
 /// Splits `text` into the front-matter and the body: the text between
@@ -671,7 +668,6 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         Ok(split) => split,
         Err(error) => {
             return Ok(Header::Broken {
-                path: path.into(),
                 detail: error.to_string(),
             })
         }
@@ -680,7 +676,6 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         Ok(table) => table,
         Err(error) => {
             return Ok(Header::Broken {
-                path: path.into(),
                 detail: error.to_string(),
             })
         }
@@ -691,15 +686,11 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         .unwrap_or_default()
         .to_string();
     if schema != SCHEMA {
-        return Ok(Header::UnknownSchema {
-            path: path.into(),
-            schema,
-        });
+        return Ok(Header::UnknownSchema { schema });
     }
     match parse_artifact(path, &text) {
         Ok(artifact) => Ok(Header::Artifact(artifact)),
         Err(error) => Ok(Header::Broken {
-            path: path.into(),
             detail: error.to_string(),
         }),
     }
@@ -844,8 +835,15 @@ pub fn load_artifact(path: &Path) -> Result<Artifact, Error> {
 }
 
 /// Rewrites the artifact file: a temp file in the same directory plus
-/// a rename, the body byte-identical.
+/// a rename, the body byte-identical; the type directory is created
+/// when it is not there yet (the first write of a type).
 pub fn write_artifact(artifact: &Artifact) -> Result<(), Error> {
+    if let Some(parent) = artifact.path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     write_atomic(&artifact.path, &render(artifact))
 }
 
@@ -1099,7 +1097,6 @@ mod tests {
         let (ws, lines) = auto(&data, &repo);
         assert!(lines.is_empty());
         assert_eq!(ws.toplevel, fs::canonicalize(&repo).unwrap());
-        assert_eq!(ws.basename, "proj");
         assert_eq!(ws.identity, identity_of(&repo));
         assert_eq!(ws.key, format!("proj-{}", short(&repo)));
         assert_eq!(ws.dir, data.join(&ws.key));

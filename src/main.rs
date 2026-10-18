@@ -105,6 +105,13 @@ fn run(
                 *lang,
             );
         }
+        // The forge surface parses its own arguments (AGL-007); it runs
+        // after the settings load, so `[forge]` and `language` apply.
+        Command::Forge(args) => {
+            let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            return cli::forge::run(&args, &user, &paths, &cwd, *lang);
+        }
     };
     let (paths, user) = loaded?;
     let user_path = paths.settings_file();
