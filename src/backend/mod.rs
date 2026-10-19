@@ -42,7 +42,7 @@ pub struct ToolDoc {
 }
 
 /// The built-in tools as the model sees them (D95).
-pub const TOOL_DOCS: [ToolDoc; 2] = [
+pub const TOOL_DOCS: [ToolDoc; 3] = [
     ToolDoc {
         name: "bash",
         description: "Run a shell command with `bash -c` in the workspace and return its \
@@ -60,6 +60,22 @@ pub const TOOL_DOCS: [ToolDoc; 2] = [
             ("path", false, None, true),
             ("old", false, None, true),
             ("new", false, None, true),
+        ],
+    },
+    ToolDoc {
+        name: "forge",
+        description: "The workspace forge: the store of the recorded artifacts of this \
+                      workspace. Actions: list; show name; new title; edit name old new \
+                      (drafts only); append name section text (in-progress specs only); \
+                      remove name (drafts only).",
+        params: &[
+            ("action", false, None, true),
+            ("name", false, None, false),
+            ("title", false, None, false),
+            ("old", false, None, false),
+            ("new", false, None, false),
+            ("section", false, None, false),
+            ("text", false, None, false),
         ],
     },
 ];

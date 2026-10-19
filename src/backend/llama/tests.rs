@@ -86,6 +86,29 @@ fn tool_schemas() {
         edit["function"]["parameters"]["required"],
         json!(["path", "old", "new"])
     );
+    let forge = tool_json(&TOOL_DOCS[2]);
+    assert_eq!(forge["function"]["name"], "forge");
+    let properties = &forge["function"]["parameters"]["properties"];
+    let mut names = properties
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        ["action", "name", "new", "old", "section", "text", "title"]
+    );
+    assert!(
+        names
+            .iter()
+            .all(|name| properties[name] == json!({"type": "string"}))
+    );
+    assert_eq!(
+        forge["function"]["parameters"]["required"],
+        json!(["action"])
+    );
 }
 
 #[test]

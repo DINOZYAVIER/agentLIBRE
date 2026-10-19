@@ -174,6 +174,8 @@ pub enum Error {
     CommitNotFound { id: String, repo: PathBuf },
     /// The `anchor` of a task-spec is not an ancestor of its `last`.
     BrokenRange { anchor: String, last: String },
+    /// An artifact file cannot be removed.
+    Remove { path: PathBuf, source: io::Error },
 }
 
 /// TOML type a settings key requires.
@@ -426,6 +428,9 @@ impl std::fmt::Display for Error {
                 }
                 Error::BrokenRange { anchor, last } => {
                     format!("{anchor} is not an ancestor of {last}")
+                }
+                Error::Remove { path, source } => {
+                    format!("cannot remove {}: {source}", path.display())
                 }
             },
         )

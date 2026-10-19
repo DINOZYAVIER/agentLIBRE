@@ -1218,6 +1218,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "ідентичність вже є в сховищі {current}; її не можна ще й в {target}",
     };
 
+    /// `Error::Remove`.
+    pub const REMOVE: Msg = Msg {
+        en: "cannot remove {path}: {source}",
+        uk: "не вдалося прибрати {path}: {source}",
+    };
+
     /// `Error::CmdSpawn`.
     pub const CMD_SPAWN: Msg = Msg {
         en: "the check command cannot be run: {source}",
@@ -1270,6 +1276,57 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_STATUS_CHANGED: Msg = Msg {
         en: "{name}: {from} to {to}",
         uk: "{name}: з {from} у {to}",
+    };
+
+    // The in-turn `forge` tool (AGL-008): the refusals are the
+    // silly-mistakes protection.
+
+    /// The forge tool: an action outside the six.
+    pub const FORGE_TOOL_UNKNOWN_ACTION: Msg = Msg {
+        en: "unknown action {action}; the actions are list, show, new, edit, append, remove",
+        uk: "невідомий action {action}; action'и: list, show, new, edit, append, remove",
+    };
+
+    /// The forge tool: an action's field is missing.
+    pub const FORGE_TOOL_MISSING_FIELD: Msg = Msg {
+        en: "forge {action}: {field} is missing",
+        uk: "forge {action}: не вказано {field}",
+    };
+
+    /// The forge tool: the write is not on a `task-spec`.
+    pub const FORGE_TOOL_NOT_TASK_SPEC: Msg = Msg {
+        en: "{name} is a {type_name}, not a task-spec; {action} applies to task-specs only",
+        uk: "{name} — це {type_name}, а не task-spec; {action} стосується лише task-spec",
+    };
+
+    /// The forge tool: `edit` is allowed while `open` only.
+    pub const FORGE_TOOL_EDIT_NOT_OPEN: Msg = Msg {
+        en: "{name} is {status}; edit is allowed while open (the draft)",
+        uk: "{name} — {status}; edit дозволено, поки open (чернетка)",
+    };
+
+    /// The forge tool: `append` is allowed while `in-progress` only.
+    pub const FORGE_TOOL_APPEND_NOT_IN_PROGRESS: Msg = Msg {
+        en: "{name} is {status}; append is allowed while in-progress",
+        uk: "{name} — {status}; append дозволено, поки in-progress",
+    };
+
+    /// The forge tool: `remove` is allowed while `open` only.
+    pub const FORGE_TOOL_REMOVE_NOT_OPEN: Msg = Msg {
+        en: "{name} is {status}; remove is allowed while open (a draft)",
+        uk: "{name} — {status}; remove дозволено, поки open (чернетка)",
+    };
+
+    /// The forge tool: `append`'s section is not in the body.
+    pub const FORGE_TOOL_NO_SECTION: Msg = Msg {
+        en: "the body of {name} has no `## {section}` heading",
+        uk: "у тілі {name} немає заголовка `## {section}`",
+    };
+
+    /// The forge tool: the append-only check failed (never expected).
+    pub const FORGE_TOOL_APPEND_VIOLATION: Msg = Msg {
+        en: "append to {name} would change more than the {section} bullet and updated; nothing was written",
+        uk: "append до {name} змінив би більше, ніж bullet {section} і updated; нічого не записано",
     };
 }
 
@@ -1570,6 +1627,9 @@ impl Error {
             }
             Error::BrokenRange { anchor, last } => {
                 tr!(lang, m::BROKEN_RANGE, anchor = anchor, last = last)
+            }
+            Error::Remove { path, source } => {
+                tr!(lang, m::REMOVE, path = path.display(), source = source)
             }
         }
     }

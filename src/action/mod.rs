@@ -48,6 +48,12 @@ pub fn builtin_tools() -> Vec<Tool> {
         required: true,
         constraint: Constraint::Text,
     };
+    let optional = |name: &str| Param {
+        name: name.into(),
+        kind: Kind::Text,
+        required: false,
+        constraint: Constraint::Text,
+    };
     vec![
         Tool {
             name: "bash".into(),
@@ -64,6 +70,20 @@ pub fn builtin_tools() -> Vec<Tool> {
         Tool {
             name: "edit".into(),
             params: vec![text("path"), text("old"), text("new")],
+        },
+        // One tool, an `action` plus the per-action fields (AGL-008);
+        // which fields an action needs is the tool's check.
+        Tool {
+            name: "forge".into(),
+            params: vec![
+                text("action"),
+                optional("name"),
+                optional("title"),
+                optional("old"),
+                optional("new"),
+                optional("section"),
+                optional("text"),
+            ],
         },
     ]
 }

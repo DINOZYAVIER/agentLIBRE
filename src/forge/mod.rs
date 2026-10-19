@@ -427,6 +427,22 @@ pub fn resolve(
     }
 }
 
+/// [`resolve`] for a caller that cannot ask (the in-turn `forge` tool):
+/// the store-choice ask becomes the `RehomeNoStore` error pointing at
+/// `forge rehome`.
+pub fn resolve_store(
+    data: &Path,
+    cwd: &Path,
+    lang: crate::i18n::Lang,
+    auto_rehome: bool,
+) -> Result<(Workspace, Vec<String>), Error> {
+    resolve(data, cwd, lang, auto_rehome, &|options| {
+        Err(Error::RehomeNoStore {
+            stores: options[..options.len() - 1].to_vec(),
+        })
+    })
+}
+
 /// Creates the store directory and its single-hash marker when they
 /// are missing: the workspace is materialized on its first write. A
 /// directory pre-created without a marker is adopted. Returns the line

@@ -78,7 +78,7 @@ fn builtin_default() {
     assert!(
         function
             .system
-            .starts_with("You are a coding agent working in the user's workspace.")
+            .starts_with("You are DinoBot, an AI agent powered by agentLIBRE (agl)")
     );
     assert!(function.preserve_thinking);
     assert_eq!(function.max_steps_total, 50);
