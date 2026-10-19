@@ -1,7 +1,9 @@
-//! `agentLIBRE forge list|show|new|status|check|rehome`: the artifact
-//! store of the workspace of the current directory (AGL-007).
+//! `agentLIBRE forge list|show|new|status|check|log|diff|rehome`:
+//! the artifact store of the workspace of the current directory
+//! (AGL-007, AGL-008).
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
@@ -62,6 +64,22 @@ pub fn run(
             let name = word(args, 1, "check")?.to_string();
             let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
             check(paths, &ws, cwd, lang, &name)
+        }
+        "log" => {
+            no_extra(args, 2)?;
+            let name = word(args, 1, "log")?.to_string();
+            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
+            log(paths, &ws, &name)
+        }
+        "diff" => {
+            no_extra(args, 3)?;
+            let name = word(args, 1, "diff")?.to_string();
+            let commit = args
+                .get(2)
+                .map(|arg| arg.to_str().ok_or(Error::InvalidUnicode))
+                .transpose()?;
+            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
+            diff(paths, &ws, &name, commit)
         }
         "rehome" => {
             let (store, new_store) = rehome_args(args)?;
@@ -516,6 +534,88 @@ fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> 
     Ok(false)
 }
 
+/// `forge log <name>` (AGL-008): the commits of the artifact's file,
+/// `git log --oneline` in the store, streamed.
+fn log(paths: &Paths, ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
+    let artifact = find_artifact(paths, ws, name)?;
+    let mut args = vec!["log".to_string(), "--oneline".to_string()];
+    args.push("--".to_string());
+    args.push(file_of(&artifact, &ws.dir));
+    git_scoped(&ws.dir, &args)
+}
+
+/// `forge diff <name> [commit]` (AGL-008): the diff of the
+/// artifact's file, against `commit` or the index, streamed.
+fn diff(
+    paths: &Paths,
+    ws: &Workspace,
+    name: &str,
+    commit: Option<&str>,
+) -> Result<ExitCode, Error> {
+    let artifact = find_artifact(paths, ws, name)?;
+    let mut args = vec!["diff".to_string()];
+    if let Some(commit) = commit {
+        args.push(commit.to_string());
+    }
+    args.push("--".to_string());
+    args.push(file_of(&artifact, &ws.dir));
+    git_scoped(&ws.dir, &args)
+}
+
+/// The artifact's file as the git pathspec in the store: relative to
+/// the store directory.
+fn file_of(artifact: &Artifact, dir: &Path) -> String {
+    artifact
+        .path
+        .strip_prefix(dir)
+        .unwrap_or(&artifact.path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Runs `git <args>` in the store directory `dir` when it is itself
+/// a git repository — the toplevel, not a checkout inside another
+/// repository — the output on the parent's own streams (streamed, not
+/// captured), as `check`'s cmds are passed. The runtime never writes
+/// to git: these are `log` and `diff` only.
+fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
+    // Not a repository at all, or a checkout inside another one: the
+    // same clean error — the store must be the toplevel.
+    let toplevel = match forge::toplevel(dir) {
+        Ok(toplevel) => toplevel,
+        Err(Error::NotInRepository { .. }) => {
+            return Err(Error::StoreNotRepository {
+                dir: dir.to_path_buf(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let store = fs::canonicalize(dir).map_err(|source| Error::Read {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if toplevel != store {
+        return Err(Error::StoreNotRepository {
+            dir: dir.to_path_buf(),
+        });
+    }
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|source| Error::CmdSpawn { source })?;
+    if !status.success() {
+        return Err(Error::GitFailed {
+            args: args.join(" "),
+            detail: status.to_string(),
+        });
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// The arguments of `forge rehome`: a store name and/or `--new`;
 /// parsed before the workspace, like the arguments of the other
 /// subcommands.
@@ -665,6 +765,20 @@ mod tests {
         repo
     }
 
+    /// Runs `git <args>` in `dir`, failing the test on a failure.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// The store key of `repo` and its `agl-001-first-task.md` file.
     fn key_and_file(data: &Path, repo: &Path) -> (String, PathBuf) {
         let identity = forge::identity_of(&std::fs::canonicalize(repo).unwrap());
@@ -699,11 +813,13 @@ mod tests {
     #[test]
     fn unknown_arguments_are_rejected() {
         let data = TempDir::new();
-        let cases: [(&[&str], &str); 5] = [
+        let cases: [(&[&str], &str); 7] = [
             (&["frobnicate"], "frobnicate"),
             (&["list", "extra"], "extra"),
             (&["show", "a", "b"], "b"),
             (&["check", "a", "b"], "b"),
+            (&["log", "a", "b"], "b"),
+            (&["diff", "a", "b", "c"], "c"),
             (&["rehome", "a", "b"], "b"),
         ];
         for (args, arg) in cases {
@@ -720,9 +836,10 @@ mod tests {
     #[test]
     fn missing_arguments_are_named() {
         let data = TempDir::new();
-        let cases: [(&[&str], &str); 2] = [
+        let cases: [(&[&str], &str); 3] = [
             (&["show"], "show"),
             (&["status", "a"], "status"),
+            (&["log"], "log"),
         ];
         for (args, what) in cases {
             assert!(
@@ -922,6 +1039,94 @@ mod tests {
         assert!(matches!(
             forge(&data, &repo, &["rehome", key.as_str(), "--new"]),
             Err(Error::UnknownOption(opt)) if opt == "--new"
+        ));
+    }
+
+    #[test]
+    fn log_and_diff_are_the_store_git_scoped_to_the_file() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, file) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        // The store directory is the git repository: the human inits
+        // it, the runtime never writes to git.
+        let store = data.join(&key);
+        git_in(&store, &["init", "-q"]);
+        git_in(&store, &["config", "user.email", "test@example.com"]);
+        git_in(&store, &["config", "user.name", "Test"]);
+        git_in(&store, &["add", "-A"]);
+        git_in(&store, &["commit", "-q", "-m", "record the spec"]);
+        assert_eq!(
+            forge(&data, &repo, &["log", "agl-001-first-task"]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        // The streamed lines, as the store carries them.
+        let spec = "forge/task-spec/agl-001-first-task.md";
+        let log = forge::git(&store, &["log", "--oneline", "--", spec]).unwrap();
+        assert!(log.contains("record the spec"), "{log}");
+        // An uncommitted append to the body: the diff shows it,
+        // against the index and against the commit.
+        let mut artifact = forge::load_artifact(&file).unwrap();
+        artifact.body.push_str("- a bullet\n");
+        forge::write_artifact(&artifact).unwrap();
+        assert_eq!(
+            forge(&data, &repo, &["diff", "agl-001-first-task"]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let head = forge::git(&store, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            forge(&data, &repo, &["diff", "agl-001-first-task", &head]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let diff = forge::git(&store, &["diff", "--", spec]).unwrap();
+        assert!(diff.contains("- a bullet"), "{diff}");
+        // A commit that does not resolve is a git failure.
+        assert!(matches!(
+            forge(&data, &repo, &["diff", "agl-001-first-task", "nope"]),
+            Err(Error::GitFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn the_git_helpers_refuse_a_store_that_is_not_a_repository() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, _) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        // The store is materialized but not a git repository: the
+        // clean one-line error, no --help pointer (not a usage error).
+        let store = data.join(&key);
+        for args in [
+            &["log", "agl-001-first-task"][..],
+            &["diff", "agl-001-first-task"][..],
+        ] {
+            let error = forge(&data, &repo, args).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::StoreNotRepository { ref dir } if dir == &store
+            ));
+            assert_eq!(
+                error.message(Lang::En),
+                format!(
+                    "the store directory is not a git repository: {}",
+                    store.display()
+                )
+            );
+        }
+        // A store inside another repository is refused too: it must
+        // be the toplevel.
+        git_in(&data, &["init", "-q"]);
+        let error = forge(&data, &repo, &["log", "agl-001-first-task"]).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::StoreNotRepository { ref dir } if dir == &store
+        ));
+        // An unknown artifact is still a not-found, before the git.
+        assert!(matches!(
+            forge(&data, &repo, &["log", "nope"]),
+            Err(Error::ArtifactNotFound { .. })
         ));
     }
 }

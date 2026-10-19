@@ -128,6 +128,9 @@ pub enum Error {
     /// The cwd is not in a git repository; the forge works on the
     /// workspace of the current directory.
     NotInRepository { cwd: PathBuf },
+    /// The store directory is not itself a git repository (the
+    /// toplevel); `forge log` and `forge diff` need it to be.
+    StoreNotRepository { dir: PathBuf },
     /// A forge file or directory cannot be written.
     Write { path: PathBuf, source: io::Error },
     /// The `format` of a workspace marker is not 1.
@@ -369,6 +372,12 @@ impl std::fmt::Display for Error {
                 Error::GitFailed { args, detail } => format!("git {args} failed: {detail}"),
                 Error::NotInRepository { cwd } => {
                     format!("{} is not in a git repository", cwd.display())
+                }
+                Error::StoreNotRepository { dir } => {
+                    format!(
+                        "the store directory is not a git repository: {}",
+                        dir.display()
+                    )
                 }
                 Error::Write { path, source } => {
                     format!("cannot write {}: {source}", path.display())

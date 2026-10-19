@@ -158,7 +158,7 @@ pub mod m {
         en: "\
 Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
        agentLIBRE server start|stop|status
-       agentLIBRE forge list|show|new|status|check|rehome
+       agentLIBRE forge list|show|new|status|check|log|diff|rehome
 
 Without -p, agentLIBRE starts an interactive session.
 
@@ -180,11 +180,13 @@ under XDG_DATA_HOME):
   forge new task-spec --title <t> a new task-spec ([--name <n>])
   forge status <name> <state>     open, in-progress, done, backlog or canceled
   forge check <name>              the structural checks and the verification cmds
+  forge log <name>                the commits of the artifact's file
+  forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
 Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
               agentLIBRE server start|stop|status
-              agentLIBRE forge list|show|new|status|check|rehome
+              agentLIBRE forge list|show|new|status|check|log|diff|rehome
 
 Без -p agentLIBRE запускає інтерактивну сесію.
 
@@ -206,6 +208,8 @@ Forge (сховище артефактів робочої області, agentL
   forge new task-spec --title <t> новий task-spec ([--name <n>])
   forge status <назва> <стан>     open, in-progress, done, backlog або canceled
   forge check <назва>             структурні перевірки і команди verification
+  forge log <назва>               коміти файлу артефакту
+  forge diff <назва> [коміт]     розбіжності файлу артефакту
   forge rehome [<сховище>] [--new]   перемістити сховище робочої області",
     };
 
@@ -1062,6 +1066,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{cwd} не є git-репозиторієм; forge працює з робочою областю поточної теки",
     };
 
+    /// `Error::StoreNotRepository`.
+    pub const STORE_NOT_REPOSITORY: Msg = Msg {
+        en: "the store directory is not a git repository: {dir}",
+        uk: "каталог сховища не є git-репозиторієм: {dir}",
+    };
+
     /// `Error::Write`.
     pub const FORGE_WRITE: Msg = Msg {
         en: "cannot write {path}: {source}",
@@ -1544,6 +1554,9 @@ impl Error {
             }
             Error::NotInRepository { cwd } => {
                 tr!(lang, m::NOT_IN_REPOSITORY, cwd = cwd.display())
+            }
+            Error::StoreNotRepository { dir } => {
+                tr!(lang, m::STORE_NOT_REPOSITORY, dir = dir.display())
             }
             Error::Write { path, source } => {
                 tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
