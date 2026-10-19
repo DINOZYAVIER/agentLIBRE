@@ -178,7 +178,7 @@ under XDG_DATA_HOME):
   forge list                      the artifacts of the workspace
   forge show <name>               the rendered header and the body
   forge new task-spec --title <t> a new task-spec ([--name <n>])
-  forge status <name> <state>     open, ready, done or dropped
+  forge status <name> <state>     open, in-progress, done, backlog or canceled
   forge check <name>              the structural checks and the verification cmds
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
@@ -204,7 +204,7 @@ Forge (сховище артефактів робочої області, agentL
   forge list                      артефакти робочої області
   forge show <назва>              відтворений заголовок і тіло
   forge new task-spec --title <t> новий task-spec ([--name <n>])
-  forge status <назва> <стан>     open, ready, done або dropped
+  forge status <назва> <стан>     open, in-progress, done, backlog або canceled
   forge check <назва>             структурні перевірки і команди verification
   forge rehome [<сховище>] [--new]   перемістити сховище робочої області",
     };
@@ -1136,8 +1136,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::BadState`.
     pub const BAD_STATE: Msg = Msg {
-        en: "{state} is not a task-spec state (open, ready, done, dropped)",
-        uk: "{state} не є станом task-spec (open, ready, done, dropped)",
+        en: "{state} is not a task-spec state (open, in-progress, done, backlog, canceled)",
+        uk: "{state} не є станом task-spec (open, in-progress, done, backlog, canceled)",
     };
 
     /// `Error::BadTransition`.

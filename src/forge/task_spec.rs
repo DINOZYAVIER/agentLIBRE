@@ -11,13 +11,16 @@ use crate::forge::{self, Artifact};
 /// The name of the type.
 pub const TYPE: &str = "task-spec";
 
-/// The states of the lifecycle: `open → ready → done | dropped`.
+/// The states of the lifecycle (AGL-008):
+/// `open → in-progress → done | canceled`, with `backlog` the parked
+/// state the work may come back from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Open,
-    Ready,
+    InProgress,
     Done,
-    Dropped,
+    Backlog,
+    Canceled,
 }
 
 impl Status {
@@ -25,9 +28,10 @@ impl Status {
     pub fn parse(value: &str) -> Option<Status> {
         Some(match value {
             "open" => Status::Open,
-            "ready" => Status::Ready,
+            "in-progress" => Status::InProgress,
             "done" => Status::Done,
-            "dropped" => Status::Dropped,
+            "backlog" => Status::Backlog,
+            "canceled" => Status::Canceled,
             _ => return None,
         })
     }
@@ -36,22 +40,27 @@ impl Status {
     pub fn name(self) -> &'static str {
         match self {
             Status::Open => "open",
-            Status::Ready => "ready",
+            Status::InProgress => "in-progress",
             Status::Done => "done",
-            Status::Dropped => "dropped",
+            Status::Backlog => "backlog",
+            Status::Canceled => "canceled",
         }
     }
 
-    /// The legal transitions: `open→ready`, `open→dropped`,
-    /// `ready→done`, `ready→dropped`; `done` and `dropped` are
-    /// terminal.
+    /// The legal transitions (AGL-008): `open→in-progress`,
+    /// `open→backlog`, `open→canceled`, `in-progress→done`,
+    /// `in-progress→backlog`, `in-progress→canceled`,
+    /// `backlog→in-progress`; `done` and `canceled` are terminal.
     pub fn allows(self, to: Status) -> bool {
         matches!(
             (self, to),
-            (Status::Open, Status::Ready)
-                | (Status::Open, Status::Dropped)
-                | (Status::Ready, Status::Done)
-                | (Status::Ready, Status::Dropped)
+            (Status::Open, Status::InProgress)
+                | (Status::Open, Status::Backlog)
+                | (Status::Open, Status::Canceled)
+                | (Status::InProgress, Status::Done)
+                | (Status::InProgress, Status::Backlog)
+                | (Status::InProgress, Status::Canceled)
+                | (Status::Backlog, Status::InProgress)
         )
     }
 }
@@ -100,8 +109,10 @@ pub fn check(artifact: &Artifact) -> Result<(), Error> {
 }
 
 /// The scaffold of a new task-spec: `open`, both dates `today`, an
-/// empty range and verification, and the body template. `path` is set
-/// by the caller.
+/// empty range and verification, and the body template (AGL-008):
+/// Objective, Decisions, Open questions, Changes, Progress,
+/// Verification, a one-line HTML-comment hint under each heading.
+/// `path` is set by the caller.
 pub fn scaffold(name: &str, today: &str) -> Artifact {
     let mut table = toml::Table::new();
     table.insert("anchor".into(), Value::String(String::new()));
@@ -117,8 +128,26 @@ pub fn scaffold(name: &str, today: &str) -> Artifact {
         supersedes: Vec::new(),
         cmds: Some(Vec::new()),
         type_table: Value::Table(table),
-        body: "\n## Objective\n\n## Human decisions\n\n## Changes\n\n## Verification\n\n## Commits\n"
-            .into(),
+        body: "\n\
+## Objective
+<!-- What this task changes, and its scope. -->
+
+## Decisions
+<!-- Settled choices: the decision, its date, and who set it. -->
+
+## Open questions
+<!-- Questions whose answers change code, stored data or behavior; none when there are none. -->
+
+## Changes
+<!-- The concrete changes: files, types and behavior. -->
+
+## Progress
+<!-- Append-only, newest last: dated bullets with commit refs. -->
+
+## Verification
+<!-- What proves the task is done. -->
+"
+        .into(),
     }
 }
 
@@ -128,7 +157,7 @@ pub enum GitFlag {
     /// The range is valid and, when it applies, `last` is the HEAD.
     Ok,
     /// `last` is not the repository HEAD: work was committed without
-    /// updating the header (only `open`/`ready` with `last` set).
+    /// updating the header (only `open`/`in-progress` with `last` set).
     Lags,
     /// `anchor` is not an ancestor of `last` (any status, both ids
     /// set).
@@ -164,9 +193,9 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Er
 }
 
 /// The computed git state of `spec` in the repository at `repo`:
-/// `None` when `last` is empty (no range to check). `done` and
-/// `dropped` specs keep `last` as history: the range validity only,
-/// never flagged.
+/// `None` when `last` is empty (no range to check). `done`, `backlog`
+/// and `canceled` specs keep `last` as history: the range validity
+/// only, never flagged.
 pub fn git_flag(
     spec: &TaskSpec,
     status: Status,
@@ -183,7 +212,7 @@ pub fn git_flag(
         }
     }
     let head = forge::git(repo, &["rev-parse", "HEAD"])?;
-    let lags = matches!(status, Status::Open | Status::Ready) && last != head;
+    let lags = matches!(status, Status::Open | Status::InProgress) && last != head;
     Ok(Some(if lags { GitFlag::Lags } else { GitFlag::Ok }))
 }
 
@@ -283,12 +312,16 @@ mod tests {
 
     #[test]
     fn the_transition_table() {
-        let all = [Status::Open, Status::Ready, Status::Done, Status::Dropped];
+        let all =
+            [Status::Open, Status::InProgress, Status::Done, Status::Backlog, Status::Canceled];
         let legal = [
-            (Status::Open, Status::Ready),
-            (Status::Open, Status::Dropped),
-            (Status::Ready, Status::Done),
-            (Status::Ready, Status::Dropped),
+            (Status::Open, Status::InProgress),
+            (Status::Open, Status::Backlog),
+            (Status::Open, Status::Canceled),
+            (Status::InProgress, Status::Done),
+            (Status::InProgress, Status::Backlog),
+            (Status::InProgress, Status::Canceled),
+            (Status::Backlog, Status::InProgress),
         ];
         for from in all {
             for to in all {
@@ -303,9 +336,16 @@ mod tests {
 
     #[test]
     fn the_states_parse() {
-        for state in [Status::Open, Status::Ready, Status::Done, Status::Dropped] {
+        for state in [
+            Status::Open,
+            Status::InProgress,
+            Status::Done,
+            Status::Backlog,
+            Status::Canceled,
+        ] {
             assert_eq!(Status::parse(state.name()), Some(state));
         }
+        assert_eq!(Status::parse("ready"), None);
         assert_eq!(Status::parse("draft"), None);
         assert_eq!(Status::parse("OPEN"), None);
     }
@@ -348,9 +388,16 @@ mod tests {
             take(&artifact).unwrap(),
             TaskSpec { anchor: String::new(), last: String::new() }
         );
-        for heading in ["## Objective", "## Human decisions", "## Changes", "## Verification", "## Commits"] {
-            assert!(artifact.body.contains(heading));
-        }
+        // The body template: the exact headings and hints (AGL-008).
+        assert_eq!(
+            artifact.body,
+            "\n## Objective\n<!-- What this task changes, and its scope. -->\n\n## Decisions\n\
+             <!-- Settled choices: the decision, its date, and who set it. -->\n\n## Open \
+             questions\n<!-- Questions whose answers change code, stored data or behavior; none \
+             when there are none. -->\n\n## Changes\n<!-- The concrete changes: files, types and \
+             behavior. -->\n\n## Progress\n<!-- Append-only, newest last: dated bullets with \
+             commit refs. -->\n\n## Verification\n<!-- What proves the task is done. -->\n"
+        );
         // The scaffold parses as a file.
         let path = Path::new("/s/agl-008-x.md");
         let parsed =
@@ -402,13 +449,17 @@ mod tests {
         let repo = git_repo(&dir.0, 4);
         let head = back(&repo, 0);
         // A valid range that does not reach the HEAD: lags while open
-        // or ready.
+        // or in-progress.
         let spec = TaskSpec { anchor: back(&repo, 2), last: back(&repo, 1) };
         assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Lags));
-        assert_eq!(git_flag(&spec, Status::Ready, &repo).unwrap(), Some(GitFlag::Lags));
-        // done and dropped keep last as history: never lags.
+        assert_eq!(
+            git_flag(&spec, Status::InProgress, &repo).unwrap(),
+            Some(GitFlag::Lags)
+        );
+        // done, backlog and canceled keep last as history: never lags.
         assert_eq!(git_flag(&spec, Status::Done, &repo).unwrap(), Some(GitFlag::Ok));
-        assert_eq!(git_flag(&spec, Status::Dropped, &repo).unwrap(), Some(GitFlag::Ok));
+        assert_eq!(git_flag(&spec, Status::Backlog, &repo).unwrap(), Some(GitFlag::Ok));
+        assert_eq!(git_flag(&spec, Status::Canceled, &repo).unwrap(), Some(GitFlag::Ok));
         // last is the HEAD: ok.
         let spec = TaskSpec { anchor: back(&repo, 1), last: head.clone() };
         assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Ok));

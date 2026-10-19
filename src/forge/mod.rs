@@ -1601,16 +1601,16 @@ a note
         fs::write(&path, task_spec_text()).unwrap();
         let mut artifact = load_artifact(&path).unwrap();
         let body = artifact.body.clone();
-        artifact.status = "ready".into();
+        artifact.status = "in-progress".into();
         artifact.updated = "2026-10-16".into();
         write_artifact(&artifact).unwrap();
         let reread = load_artifact(&path).unwrap();
-        assert_eq!(reread.status, "ready");
+        assert_eq!(reread.status, "in-progress");
         assert_eq!(reread.updated, "2026-10-16");
         assert_eq!(reread.body, body);
         // The file text outside the two lines is untouched.
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("status = \"ready\""));
+        assert!(text.contains("status = \"in-progress\""));
         assert!(text.contains("updated = \"2026-10-16\""));
         assert!(!text.contains("2026-10-15\nupdated"));
     }

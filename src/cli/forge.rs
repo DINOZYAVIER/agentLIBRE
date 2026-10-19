@@ -333,9 +333,9 @@ fn status(
 /// `forge check <name>`: the structural checks (the name matches the
 /// file, the range, the `deps` and `supersedes` resolve), then the
 /// `[verification]` cmds via `sh -c` in the cwd, streamed, the first
-/// failing command stops the run. On a pass of an `open`/`ready` spec
-/// that lags (or has no `last` yet), `last` = HEAD and `updated` are
-/// recorded. Silent on success; the failures are lines.
+/// failing command stops the run. On a pass of an `open`/`in-progress`
+/// spec that lags (or has no `last` yet), `last` = HEAD and `updated`
+/// are recorded. Silent on success; the failures are lines.
 fn check(
     paths: &Paths,
     ws: &Workspace,
@@ -427,12 +427,13 @@ fn check(
     if run_cmds(cwd, lang, &artifact)? {
         return Ok(ExitCode::FAILURE);
     }
-    // A pass of an `open`/`ready` spec records a fresh `last` = HEAD
-    // when the header lags or `last` is empty, and bumps `updated`.
+    // A pass of an `open`/`in-progress` spec records a fresh `last` =
+    // HEAD when the header lags or `last` is empty, and bumps
+    // `updated`.
     if artifact.type_name == task_spec::TYPE
         && let Ok(spec) = task_spec::take(&artifact)
         && let Some(status) = Status::parse(&artifact.status)
-        && matches!(status, Status::Open | Status::Ready)
+        && matches!(status, Status::Open | Status::InProgress)
     {
         let head = forge::git(cwd, &["rev-parse", "HEAD"])?;
         if spec.last.is_empty() || spec.last != head {
@@ -831,7 +832,8 @@ mod tests {
         let (key, file) = key_and_file(&data, &repo);
         forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
         let before = body_of(&std::fs::read_to_string(&file).unwrap());
-        for state in ["ready", "done"] {
+        // The walk includes the parked state and its way back.
+        for state in ["in-progress", "backlog", "in-progress", "done"] {
             assert_eq!(
                 forge(&data, &repo, &["status", "agl-001-first-task", state]).unwrap(),
                 ExitCode::SUCCESS
@@ -856,12 +858,12 @@ mod tests {
         note.path = data.join(&key).join("forge/note/note.md");
         forge::write_artifact(&note).unwrap();
         assert!(matches!(
-            forge(&data, &repo, &["status", "note", "ready"]),
+            forge(&data, &repo, &["status", "note", "in-progress"]),
             Err(Error::NotTaskSpec { name, .. }) if name == "note"
         ));
         // An absent artifact.
         assert!(matches!(
-            forge(&data, &repo, &["status", "ghost", "ready"]),
+            forge(&data, &repo, &["status", "ghost", "in-progress"]),
             Err(Error::ArtifactNotFound { name, .. }) if name == "ghost"
         ));
     }
