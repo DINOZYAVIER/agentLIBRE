@@ -319,6 +319,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         theme,
         repl,
         lang,
+        forge,
         history_file,
     } = setup;
     let workspace = session.workspace.clone();
@@ -413,6 +414,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     session: &mut session,
                     workspace: &workspace,
                     context,
+                    forge,
                 }
                 .compact(&mut Reporter {
                     presenter: &mut presenter,
@@ -435,6 +437,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     session: &mut session,
                     workspace: &workspace,
                     context,
+                    forge,
                 }
                 .turn(
                     &message,

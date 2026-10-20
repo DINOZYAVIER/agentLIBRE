@@ -56,6 +56,8 @@ pub struct Setup<'a> {
     pub theme: Theme,
     pub repl: ReplSettings,
     pub lang: Lang,
+    /// What the agent's `forge` tool takes from the session (AGL-008).
+    pub forge: tools::ForgeEnv,
     pub history_file: PathBuf,
 }
 
@@ -151,6 +153,10 @@ fn run(
     }
 
     let workspace = session.as_ref().map_or(cwd, |s| s.workspace.clone());
+    let forge = tools::ForgeEnv {
+        lang: *lang,
+        auto_rehome: user.forge.auto_rehome.unwrap_or(true),
+    };
     let backend = Llama::new(&settings.server_url);
     let context = backend.context_size()?;
     let resumed = session.is_some();
@@ -173,6 +179,7 @@ fn run(
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
             repl: settings.repl,
             lang: *lang,
+            forge,
             history_file: paths.history_file(),
         };
         return if interactive {
@@ -191,6 +198,7 @@ fn run(
         session: &mut session,
         workspace: &workspace,
         context,
+        forge,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

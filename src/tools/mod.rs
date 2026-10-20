@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::action::{Outcome, Value};
+use crate::i18n::Lang;
 use crate::interrupt::{self, signal_group};
-use crate::session::INTERRUPTED;
+use crate::session::{ForgeKind, INTERRUPTED};
 
 /// How much of a result the model sees (D28, D103).
 const LIMIT: usize = 16 * 1024;
@@ -29,9 +30,33 @@ pub struct ToolResult {
     pub content: String,
 }
 
+/// What the `forge` tool needs from the session (AGL-008): the
+/// language of its refusals and `[forge] auto_rehome`.
+#[derive(Clone, Copy, Debug)]
+pub struct ForgeEnv {
+    pub lang: Lang,
+    pub auto_rehome: bool,
+}
+
+/// A successful write of the `forge` tool: the artifact it touched, as
+/// the tool resolved it, and the kind of the write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForgeWrite {
+    pub name: String,
+    pub kind: ForgeKind,
+    /// The section of an append.
+    pub section: Option<String>,
+}
+
 /// Runs the call of `tool` with `args` in `workspace`. Parsing has
-/// checked the arguments against the tool (task-03).
-pub fn run(workspace: &Path, tool: &str, args: &[(String, Value)]) -> ToolResult {
+/// checked the arguments against the tool (task-03). A successful
+/// `forge` write comes back with the result.
+pub fn run(
+    workspace: &Path,
+    env: ForgeEnv,
+    tool: &str,
+    args: &[(String, Value)],
+) -> (ToolResult, Option<ForgeWrite>) {
     let text = |name: &str| {
         args.iter()
             .find_map(|(n, value)| match value {
@@ -49,22 +74,10 @@ pub fn run(workspace: &Path, tool: &str, args: &[(String, Value)]) -> ToolResult
                     _ => None,
                 })
                 .unwrap_or(DEFAULT_TIMEOUT);
-            bash(workspace, text("command"), Duration::from_secs(timeout))
+            (bash(workspace, text("command"), Duration::from_secs(timeout)), None)
         }
-        "edit" => edit(workspace, text("path"), text("old"), text("new")),
-        "forge" => {
-            let field = |name: &str| (!text(name).is_empty()).then(|| text(name).to_owned());
-            let args = ForgeArgs {
-                action: text("action").to_owned(),
-                name: field("name"),
-                title: field("title"),
-                old: field("old"),
-                new: field("new"),
-                section: field("section"),
-                text: field("text"),
-            };
-            forge(workspace, &args)
-        }
+        "edit" => (edit(workspace, text("path"), text("old"), text("new")), None),
+        "forge" => forge(workspace, env, &forge_args(args)),
         _ => unreachable!("unknown tool {tool}"),
     }
 }
@@ -296,55 +309,115 @@ pub struct ForgeArgs {
     pub text: Option<String>,
 }
 
+/// The `forge` tool's arguments from the parsed call (AGL-008): a field
+/// that is absent or empty is none, except `new`, which may be empty —
+/// an edit then deletes the text of `old`.
+fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
+    let text = |name: &str| {
+        args.iter().find_map(|(n, value)| match value {
+            Value::Text(text) if n == name => Some(text.as_str()),
+            _ => None,
+        })
+    };
+    let field = |name: &str| text(name).filter(|t| !t.is_empty()).map(str::to_owned);
+    ForgeArgs {
+        action: text("action").unwrap_or_default().to_owned(),
+        name: field("name"),
+        title: field("title"),
+        old: field("old"),
+        new: text("new").map(str::to_owned),
+        section: field("section"),
+        text: field("text"),
+    }
+}
+
 /// `forge` (AGL-008): the workspace forge, the store of the recorded
 /// artifacts of the workspace of `workspace`, over the same engine as
-/// the `agentLIBRE forge` CLI. The store is resolved from the
-/// environment; the caller (the agent) cannot be asked, so a needed
-/// store choice is the `RehomeNoStore` error.
-pub fn forge(workspace: &Path, args: &ForgeArgs) -> ToolResult {
-    let lang = crate::i18n::Lang::from_locale(|name| std::env::var_os(name));
-    let fail = |content: String| ToolResult {
-        outcome: Outcome::Fail,
-        content,
-    };
-    let paths = match crate::paths::Paths::from_env(|name| std::env::var_os(name)) {
-        Ok(paths) => paths,
-        Err(error) => return fail(error.message(lang)),
-    };
-    let (ws, lines) = match crate::forge::resolve_store(&paths.data, workspace, lang, true) {
-        Ok(resolved) => resolved,
-        Err(error) => return fail(error.message(lang)),
-    };
-    let mut result = forge_in(&ws, args, lang);
+/// the `agentLIBRE forge` CLI. The store is resolved as the CLI does,
+/// with the session's `[forge] auto_rehome` and language; the caller
+/// (the agent) cannot be asked, so a needed store choice is the
+/// `RehomeNoStore` error.
+pub fn forge(workspace: &Path, env: ForgeEnv, args: &ForgeArgs) -> (ToolResult, Option<ForgeWrite>) {
+    match crate::paths::Paths::from_env(|name| std::env::var_os(name)) {
+        Ok(paths) => forge_in_paths(&paths, workspace, env, args),
+        Err(error) => (forge_fail(error.message(env.lang)), None),
+    }
+}
+
+/// [`forge`] over the data directory of `paths`.
+fn forge_in_paths(
+    paths: &crate::paths::Paths,
+    workspace: &Path,
+    env: ForgeEnv,
+    args: &ForgeArgs,
+) -> (ToolResult, Option<ForgeWrite>) {
+    let lang = env.lang;
+    let (ws, lines) =
+        match crate::forge::resolve_store(&paths.data, workspace, lang, env.auto_rehome) {
+            Ok(resolved) => resolved,
+            Err(error) => return (forge_fail(error.message(lang)), None),
+        };
+    let (mut result, write) = forge_run(&ws, args, lang);
     // A store that moved or was adopted on the way: say so, once.
     if !lines.is_empty() {
         let head = lines.join("\n") + "\n";
         result.content.insert_str(0, &head);
     }
-    result
+    (result, write)
 }
 
 /// The `forge` tool over the resolved workspace `ws` (AGL-008): the
-/// body of [`forge`], and the entry of the tests.
-pub fn forge_in(
+/// result and, for a successful write, the artifact it touched; the
+/// entry of the tests.
+pub fn forge_run(
     ws: &crate::forge::Workspace,
     args: &ForgeArgs,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> (ToolResult, Option<ForgeWrite>) {
     use crate::i18n::m;
     use crate::tr;
-    let fail = |content: String| ToolResult {
-        outcome: Outcome::Fail,
-        content,
+    // A write of `kind` to the artifact the call named: the name matched
+    // an artifact's `name` exactly, so it is the artifact's.
+    let write = |result: ToolResult, kind: ForgeKind, section: Option<String>| {
+        let write = (result.outcome == Outcome::Ok)
+            .then(|| {
+                args.name.clone().map(|name| ForgeWrite {
+                    name,
+                    kind,
+                    section,
+                })
+            })
+            .flatten();
+        (result, write)
     };
     match args.action.as_str() {
-        "list" => forge_list(ws, lang),
-        "show" => forge_show(ws, &args.name, lang),
-        "new" => forge_new(ws, &args.title, lang),
-        "edit" => forge_edit(ws, &args.name, &args.old, &args.new, lang),
-        "append" => forge_append(ws, &args.name, &args.section, &args.text, lang),
-        "remove" => forge_remove(ws, &args.name, lang),
-        other => fail(tr!(lang, m::FORGE_TOOL_UNKNOWN_ACTION, action = other)),
+        "list" => (forge_list(ws, lang), None),
+        "show" => (forge_show(ws, &args.name, lang), None),
+        "new" => {
+            // The name is the one the tool made, not an argument.
+            let (result, name) = forge_new(ws, &args.title, lang);
+            let write = name.map(|name| ForgeWrite {
+                name,
+                kind: ForgeKind::Created,
+                section: None,
+            });
+            (result, write)
+        }
+        "edit" => write(
+            forge_edit(ws, &args.name, &args.old, &args.new, lang),
+            ForgeKind::Edited,
+            None,
+        ),
+        "append" => write(
+            forge_append(ws, &args.name, &args.section, &args.text, lang),
+            ForgeKind::Appended,
+            args.section.clone(),
+        ),
+        "remove" => write(forge_remove(ws, &args.name, lang), ForgeKind::Removed, None),
+        other => (
+            forge_fail(tr!(lang, m::FORGE_TOOL_UNKNOWN_ACTION, action = other)),
+            None,
+        ),
     }
 }
 
@@ -425,16 +498,16 @@ fn forge_new(
     ws: &crate::forge::Workspace,
     title: &Option<String>,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> (ToolResult, Option<String>) {
     use crate::forge::{self, task_spec};
     use crate::i18n::m;
     use crate::tr;
     let Some(title) = title else {
-        return missing_field(lang, "new", "title");
+        return (missing_field(lang, "new", "title"), None);
     };
     let names = match store_names(ws) {
         Ok(names) => names,
-        Err(error) => return forge_fail(error.message(lang)),
+        Err(error) => return (forge_fail(error.message(lang)), None),
     };
     let name = format!(
         "agl-{:03}-{}",
@@ -442,18 +515,21 @@ fn forge_new(
         task_spec::slug(title)
     );
     if names.contains(&name) {
-        return forge_fail(
-            crate::error::Error::NameTaken {
-                name: name.clone(),
-                dir: ws.dir.join("forge"),
-            }
-            .message(lang),
+        return (
+            forge_fail(
+                crate::error::Error::NameTaken {
+                    name: name.clone(),
+                    dir: ws.dir.join("forge"),
+                }
+                .message(lang),
+            ),
+            None,
         );
     }
     // The store is materialized on the first write; the marker line is
     // not tool output.
     if let Err(error) = forge::materialize(ws, lang) {
-        return forge_fail(error.message(lang));
+        return (forge_fail(error.message(lang)), None);
     }
     let path = ws
         .dir
@@ -463,12 +539,13 @@ fn forge_new(
     let mut artifact = task_spec::scaffold(&name, &task_spec::today());
     artifact.path = path.clone();
     if let Err(error) = forge::write_artifact(&artifact) {
-        return forge_fail(error.message(lang));
+        return (forge_fail(error.message(lang)), None);
     }
-    ToolResult {
+    let result = ToolResult {
         outcome: Outcome::Ok,
         content: tr!(lang, m::FORGE_NEW_CREATED, path = path.display()).to_owned(),
-    }
+    };
+    (result, Some(name))
 }
 
 /// `forge edit` (AGL-008): replaces one occurrence in the body, the
@@ -488,7 +565,8 @@ fn forge_edit(
     let Some(name) = name else {
         return missing_field(lang, "edit", "name");
     };
-    let Some(old) = old else {
+    // An empty `old` would match everywhere: it is no `old`.
+    let Some(old) = old.as_ref().filter(|old| !old.is_empty()) else {
         return missing_field(lang, "edit", "old");
     };
     let Some(new) = new else {
@@ -736,17 +814,38 @@ fn store_names(ws: &crate::forge::Workspace) -> Result<Vec<String>, crate::error
     Ok(names)
 }
 
+/// For each of `lines`, whether it is part of a fenced code block (the
+/// fence lines included): a `## ` line there is code, not a heading.
+fn fenced(lines: &[&str]) -> Vec<bool> {
+    let mut inside = false;
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                inside = !inside;
+                return true;
+            }
+            inside
+        })
+        .collect()
+}
+
 /// The body with `- text` as a bullet at the end of the `## section`
-/// (AGL-008): `None` when the section is not there.
+/// (AGL-008): `None` when the section is not there. A `## ` line inside
+/// a fenced code block is not a heading.
 fn append_bullet_lines(body: &str, section: &str, text: &str) -> Option<String> {
     let heading = format!("## {section}");
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
-    let start = lines.iter().position(|line| line.trim_end() == heading)?;
-    // The section ends at the next `## ` heading or the end of the body.
-    let end = lines[start + 1..]
+    let code = fenced(&lines);
+    let start = lines
         .iter()
-        .position(|line| line.starts_with("## "))
-        .map_or(lines.len(), |i| start + 1 + i);
+        .zip(&code)
+        .position(|(line, code)| !code && line.trim_end() == heading)?;
+    // The section ends at the next `## ` heading or the end of the body.
+    let end = (start + 1..lines.len())
+        .find(|&i| !code[i] && lines[i].starts_with("## "))
+        .unwrap_or(lines.len());
     // The bullet goes after the last non-blank line of the section.
     let mut at = end;
     while at > start + 1 && lines[at - 1].trim().is_empty() {
@@ -765,22 +864,28 @@ fn append_bullet_lines(body: &str, section: &str, text: &str) -> Option<String> 
 }
 
 /// Whether `new` is `old` with exactly the one line `line` inserted
-/// (AGL-008): the append-only check.
+/// (AGL-008): the append-only check. A last line of `old` without its
+/// newline gets one when the bullet follows it; that is not a change.
 fn one_line_inserted(old: &str, new: &str, line: &str) -> bool {
     let old: Vec<&str> = old.split_inclusive('\n').collect();
     let new: Vec<&str> = new.split_inclusive('\n').collect();
     if new.len() != old.len() + 1 {
         return false;
     }
-    let first = old
-        .iter()
-        .enumerate()
-        .position(|(i, l)| !new.get(i).is_none_or(|n| n == l));
-    match first {
-        // The insertion is at the end.
-        None => new[old.len()] == line,
-        Some(p) => new[p] == line && old[p..] == new[p + 1..],
-    }
+    (0..new.len()).any(|p| {
+        if new[p] != line || old[p..] != new[p + 1..] {
+            return false;
+        }
+        let same = old[..p] == new[..p];
+        // The insertion at the end, after a last line that lacked its
+        // newline.
+        let terminated = p == old.len()
+            && p > 0
+            && !old[p - 1].ends_with('\n')
+            && old[..p - 1] == new[..p - 1]
+            && new[p - 1] == format!("{}\n", old[p - 1]);
+        same || terminated
+    })
 }
 
 #[cfg(test)]

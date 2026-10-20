@@ -25,6 +25,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         context,
         server_url,
         lang,
+        forge,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -69,6 +70,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         session: &mut session,
                         workspace: &workspace,
                         context,
+                        forge,
                     }
                     .compact(&mut StderrReport::new(lang));
                     let interrupted = matches!(result, Err(Error::Interrupted));
@@ -91,6 +93,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             session: &mut session,
             workspace: &workspace,
             context,
+            forge,
         }
         .turn(message, &mut report);
         state = None;

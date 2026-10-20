@@ -208,8 +208,13 @@ fn edit_results() {
 #[test]
 fn run_dispatches_calls() {
     let dir = Dir::new("run");
-    let result = run(
+    let env = ForgeEnv {
+        lang: Lang::En,
+        auto_rehome: true,
+    };
+    let (result, write) = run(
         &dir.0,
+        env,
         "bash",
         &[
             ("command".into(), Value::Text("echo hi".into())),
@@ -217,9 +222,11 @@ fn run_dispatches_calls() {
         ],
     );
     assert_eq!(result.content, "hi\n");
+    assert_eq!(write, None);
     fs::write(dir.0.join("f"), "x").unwrap();
-    let result = run(
+    let (result, _) = run(
         &dir.0,
+        env,
         "edit",
         &[
             ("path".into(), Value::Text("f".into())),
@@ -231,8 +238,9 @@ fn run_dispatches_calls() {
     // forge: the store of the workspace, resolved from the environment
     // (a fresh store, an empty list; a hint line when other stores exist).
     git_init(&dir.0);
-    let result = run(
+    let (result, write) = run(
         &dir.0,
+        env,
         "forge",
         &[("action".into(), Value::Text("list".into()))],
     );
@@ -242,6 +250,8 @@ fn run_dispatches_calls() {
         "{}",
         result.content
     );
+    // A read is not a write.
+    assert_eq!(write, None);
 }
 
 // The in-turn `forge` tool (AGL-008).
@@ -335,6 +345,15 @@ impl ForgeStore {
     /// A `forge` tool call over the fixture store; `fields` are the
     /// per-action fields.
     fn call(&self, action: &str, fields: &[(&str, &str)]) -> ToolResult {
+        self.call_write(action, fields).0
+    }
+
+    /// Like [`ForgeStore::call`], with the write the tool reports.
+    fn call_write(
+        &self,
+        action: &str,
+        fields: &[(&str, &str)],
+    ) -> (ToolResult, Option<ForgeWrite>) {
         let field = |name: &str| {
             fields
                 .iter()
@@ -350,7 +369,7 @@ impl ForgeStore {
             section: field("section"),
             text: field("text"),
         };
-        forge_in(&self.ws, &args, Lang::En)
+        forge_run(&self.ws, &args, Lang::En)
     }
 }
 
@@ -797,5 +816,259 @@ fn the_store_is_the_workspace_git_repository() {
     assert_eq!(
         forge::git(&f.ws.dir, &["diff", "--", "forge/task-spec/agl-001-g.md"]).unwrap(),
         ""
+    );
+}
+
+#[test]
+fn forge_edit_may_delete_text() {
+    let f = ForgeStore::new("forge-edit-delete");
+    let artifact = f.spec("agl-001-d", "open");
+    f.write(&artifact);
+    // An empty `new` is a deletion, as in the workspace `edit`.
+    let result = f.call(
+        "edit",
+        &[
+            ("name", "agl-001-d"),
+            ("old", "## Objective\n"),
+            ("new", ""),
+        ],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    let edited = forge::load_artifact(&artifact.path).unwrap();
+    assert!(!edited.body.contains("## Objective"));
+    // An empty `old` is still no `old`.
+    assert_eq!(
+        f.call("edit", &[("name", "agl-001-d"), ("old", ""), ("new", "x")])
+            .content,
+        "forge edit: old is missing"
+    );
+}
+
+#[test]
+fn the_forge_arguments_keep_an_empty_new_only() {
+    let text = |name: &str, value: &str| (name.to_string(), Value::Text(value.into()));
+    let args = forge_args(&[
+        text("action", "edit"),
+        text("name", "agl-001-d"),
+        text("old", "x"),
+        text("new", ""),
+        text("section", ""),
+    ]);
+    assert_eq!(
+        args,
+        ForgeArgs {
+            action: "edit".into(),
+            name: Some("agl-001-d".into()),
+            old: Some("x".into()),
+            new: Some(String::new()),
+            ..ForgeArgs::default()
+        }
+    );
+    // Absent, `new` is none.
+    assert_eq!(forge_args(&[text("action", "list")]).new, None);
+}
+
+#[test]
+fn the_forge_writes_come_back_from_the_tool() {
+    let f = ForgeStore::new("forge-writes");
+    // `new`: the name is the one the tool made, whatever the call says.
+    let (result, write) = f.call_write("new", &[("title", "My First Task"), ("name", "evil")]);
+    assert_eq!(result.outcome, Outcome::Ok);
+    assert_eq!(
+        write,
+        Some(ForgeWrite {
+            name: "agl-001-my-first-task".into(),
+            kind: ForgeKind::Created,
+            section: None,
+        })
+    );
+    let (_, write) = f.call_write(
+        "edit",
+        &[
+            ("name", "agl-001-my-first-task"),
+            ("old", "## Objective"),
+            ("new", "## Goal"),
+        ],
+    );
+    assert_eq!(
+        write,
+        Some(ForgeWrite {
+            name: "agl-001-my-first-task".into(),
+            kind: ForgeKind::Edited,
+            section: None,
+        })
+    );
+    let (_, write) = f.call_write("remove", &[("name", "agl-001-my-first-task")]);
+    assert_eq!(
+        write,
+        Some(ForgeWrite {
+            name: "agl-001-my-first-task".into(),
+            kind: ForgeKind::Removed,
+            section: None,
+        })
+    );
+    // An append, with its section.
+    f.write(&f.spec("agl-002-p", "in-progress"));
+    let (_, write) = f.call_write(
+        "append",
+        &[("name", "agl-002-p"), ("section", "Progress"), ("text", "x")],
+    );
+    assert_eq!(
+        write,
+        Some(ForgeWrite {
+            name: "agl-002-p".into(),
+            kind: ForgeKind::Appended,
+            section: Some("Progress".into()),
+        })
+    );
+    // The reads, the refusals and an unknown action leave no write.
+    assert_eq!(f.call_write("list", &[]).1, None);
+    assert_eq!(f.call_write("show", &[("name", "agl-002-p")]).1, None);
+    assert_eq!(f.call_write("new", &[]).1, None);
+    assert_eq!(
+        f.call_write("remove", &[("name", "agl-002-p")]).1,
+        None,
+        "an in-progress spec is not removable"
+    );
+    assert_eq!(f.call_write("frobnicate", &[("name", "agl-002-p")]).1, None);
+}
+
+#[test]
+fn forge_append_survives_a_missing_final_newline_and_fences() {
+    let f = ForgeStore::new("forge-append-edges");
+    // The section's last line has no newline: the bullet is appended
+    // and the check accepts it.
+    let mut spec = f.spec("agl-001-n", "in-progress");
+    spec.body = "## Progress\n- one".into();
+    f.write(&spec);
+    let result = f.call(
+        "append",
+        &[("name", "agl-001-n"), ("section", "Progress"), ("text", "two")],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert_eq!(
+        forge::load_artifact(&spec.path).unwrap().body,
+        "## Progress\n- one\n- two\n"
+    );
+    // The heading itself at the end of the body, no newline.
+    let mut bare = f.spec("agl-002-h", "in-progress");
+    bare.body = "## Progress".into();
+    f.write(&bare);
+    let result = f.call(
+        "append",
+        &[("name", "agl-002-h"), ("section", "Progress"), ("text", "one")],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert_eq!(
+        forge::load_artifact(&bare.path).unwrap().body,
+        "## Progress\n- one\n"
+    );
+    // A `## ` line inside a fenced block is code: it neither ends the
+    // section nor is a heading.
+    let mut fenced = f.spec("agl-003-f", "in-progress");
+    fenced.body = "## Progress\n- one\n```\n## Verification\n```\n\n## Verification\n- v\n".into();
+    f.write(&fenced);
+    let result = f.call(
+        "append",
+        &[("name", "agl-003-f"), ("section", "Progress"), ("text", "two")],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert_eq!(
+        forge::load_artifact(&fenced.path).unwrap().body,
+        "## Progress\n- one\n```\n## Verification\n```\n- two\n\n## Verification\n- v\n"
+    );
+    let result = f.call(
+        "append",
+        &[("name", "agl-003-f"), ("section", "Verification"), ("text", "w")],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert!(
+        forge::load_artifact(&fenced.path)
+            .unwrap()
+            .body
+            .ends_with("\n## Verification\n- v\n- w\n")
+    );
+    // A heading that only appears inside a fence is not there.
+    let mut hidden = f.spec("agl-004-x", "in-progress");
+    hidden.body = "```\n## Progress\n```\n".into();
+    f.write(&hidden);
+    let result = f.call(
+        "append",
+        &[("name", "agl-004-x"), ("section", "Progress"), ("text", "x")],
+    );
+    assert_eq!(result.outcome, Outcome::Fail);
+}
+
+#[test]
+fn the_append_only_check() {
+    let line = "- x\n";
+    assert!(one_line_inserted("a\nb\n", "a\n- x\nb\n", line));
+    assert!(one_line_inserted("a\nb\n", "a\nb\n- x\n", line));
+    assert!(one_line_inserted("", "- x\n", line));
+    // A final newline that only gets added before the bullet.
+    assert!(one_line_inserted("a\nb", "a\nb\n- x\n", line));
+    // Anything else that moved is a violation.
+    assert!(!one_line_inserted("a\nb\n", "a\nc\n- x\n", line));
+    assert!(!one_line_inserted("a\nb", "a\nc\n- x\n", line));
+    assert!(!one_line_inserted("a\nb\n", "a\nb\n", line));
+    assert!(!one_line_inserted("a\nb\n", "a\n- y\nb\n", line));
+}
+
+/// The paths of a temporary data directory.
+fn data_paths(dir: &Path) -> crate::paths::Paths {
+    crate::paths::Paths {
+        config: dir.to_path_buf(),
+        data: dir.to_path_buf(),
+        state: dir.to_path_buf(),
+    }
+}
+
+#[test]
+fn the_forge_tool_honors_auto_rehome_and_the_language() {
+    let data = Dir::new("forge-env-data");
+    let root = Dir::new("forge-env-root");
+    let paths = data_paths(&data.0);
+    let list = ForgeArgs {
+        action: "list".into(),
+        ..ForgeArgs::default()
+    };
+    let env = |lang, auto_rehome| ForgeEnv { lang, auto_rehome };
+    // A project with a store, then moved.
+    let from = root.0.join("a/proj");
+    fs::create_dir_all(&from).unwrap();
+    let new = ForgeArgs {
+        action: "new".into(),
+        title: Some("First".into()),
+        ..ForgeArgs::default()
+    };
+    let (result, _) = forge_in_paths(&paths, &from, env(Lang::En, true), &new);
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    let to = root.0.join("b/proj");
+    fs::create_dir_all(to.parent().unwrap()).unwrap();
+    fs::rename(&from, &to).unwrap();
+    // `auto_rehome = false`: even a read does not adopt the store; the
+    // choice is the human's, so the tool refuses and points at
+    // `forge rehome`.
+    let (result, write) = forge_in_paths(&paths, &to, env(Lang::En, false), &list);
+    assert_eq!(result.outcome, Outcome::Fail, "{}", result.content);
+    assert!(result.content.contains("rehome"), "{}", result.content);
+    assert_eq!(write, None);
+    assert_eq!(forge::stores(&data.0).unwrap().len(), 1);
+    let adopted_name = forge::stores(&data.0).unwrap()[0].name();
+    assert!(!adopted_name.contains(&forge::identity_of(&fs::canonicalize(&to).unwrap())[7..19]));
+    // `auto_rehome = true`: adopted, and the tool says so once.
+    let (result, _) = forge_in_paths(&paths, &to, env(Lang::En, true), &list);
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert!(result.content.starts_with("adopted the store "), "{}", result.content);
+    assert!(result.content.contains("agl-001-first"), "{}", result.content);
+    // The refusals are in the session's language.
+    let fly = ForgeArgs {
+        action: "fly".into(),
+        ..ForgeArgs::default()
+    };
+    let (result, _) = forge_in_paths(&paths, &to, env(Lang::Uk, true), &fly);
+    assert_eq!(
+        result.content,
+        "невідомий action fly; action'и: list, show, new, edit, append, remove"
     );
 }

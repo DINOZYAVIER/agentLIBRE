@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::action::{self, Action, Outcome, ParseError, Value};
+use crate::action::{self, Action, ParseError};
 use crate::backend::{
     Backend, Message, Prompt, RUNTIME_PREFIX, Request, Stop, TOOL_DOCS, ToolCall, ToolDoc,
 };
@@ -14,7 +14,7 @@ use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::session::{Event, ForgeKind, INTERRUPTED, Session, StopReason};
-use crate::tools::{self, ToolResult};
+use crate::tools::{self, ForgeEnv, ToolResult};
 
 /// What the user sees while a turn runs.
 pub trait Report {
@@ -73,6 +73,8 @@ pub struct Agent<'a> {
     pub workspace: &'a Path,
     /// The context size of the server, in tokens.
     pub context: usize,
+    /// What the `forge` tool takes from the session (AGL-008).
+    pub forge: ForgeEnv,
 }
 
 impl Agent<'_> {
@@ -235,23 +237,21 @@ impl Agent<'_> {
                     report.text(text);
                 }
                 report.call(&call);
-                let result = tools::run(self.workspace, &call.name, &call.args);
+                let (result, write) =
+                    tools::run(self.workspace, self.forge, &call.name, &call.args);
                 self.session.append(Event::Result {
                     id: call.id.clone(),
                     outcome: result.outcome,
                     content: result.content.clone(),
                 })?;
                 report.result(&call, &result);
-                if call.name == "forge"
-                    && result.outcome == Outcome::Ok
-                    && let Some((name, kind, section)) = forge_write(&call)
-                {
+                if let Some(write) = write {
                     self.session.append(Event::Forge {
-                        name: name.into(),
-                        kind,
-                        section: section.map(str::to_string),
+                        name: write.name.clone(),
+                        kind: write.kind,
+                        section: write.section.clone(),
                     })?;
-                    report.forge(name, kind, section);
+                    report.forge(&write.name, write.kind, write.section.as_deref());
                 }
                 if interrupt::interrupted() {
                     debug_assert_eq!(result.content, INTERRUPTED);
@@ -409,26 +409,6 @@ fn function_tools(function: &Function) -> Vec<&'static ToolDoc> {
                 .any(|state| state.actions.tools.iter().any(|t| t.name == doc.name))
         })
         .collect()
-}
-
-/// A write of the agent's forge tool (AGL-008): the artifact's name,
-/// the kind of the write and, for an append, the section. The reads
-/// (`list`, `show`) are not writes.
-fn forge_write(call: &ToolCall) -> Option<(&str, ForgeKind, Option<&str>)> {
-    let arg = |name: &str| -> Option<&str> {
-        call.args.iter().find_map(|(key, value)| match value {
-            Value::Text(text) if key == name => Some(text.as_str()),
-            _ => None,
-        })
-    };
-    let (kind, section) = match arg("action")? {
-        "new" => (ForgeKind::Created, None),
-        "edit" => (ForgeKind::Edited, None),
-        "append" => (ForgeKind::Appended, arg("section")),
-        "remove" => (ForgeKind::Removed, None),
-        _ => return None,
-    };
-    Some((arg("name")?, kind, section))
 }
 
 #[cfg(test)]
