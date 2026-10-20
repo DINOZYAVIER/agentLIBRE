@@ -356,14 +356,14 @@ fn recorded_outputs() -> Vec<Recorded> {
         })
     };
     let mut actions = Vec::new();
-    for row in rows(include_str!("../../experiments/results/b2-path-b.jsonl")) {
+    for row in rows(include_str!("fixtures/b2-path-b.jsonl")) {
         actions.push(match &row["call"] {
             Json::Array(call) => args(call[0].as_str().unwrap(), &call[1]),
             _ => Recorded::Action(Action::Answer(row["text"].as_str().unwrap().into())),
         });
     }
-    let b3 = include_str!("../../experiments/results/b3-state-instruction.jsonl");
-    let b4 = include_str!("../../experiments/results/b4-answer-form.jsonl");
+    let b3 = include_str!("fixtures/b3-state-instruction.jsonl");
+    let b4 = include_str!("fixtures/b4-answer-form.jsonl");
     for row in rows(b3).into_iter().chain(rows(b4)) {
         let answer = || row["answer"].as_str().unwrap().to_owned();
         let cut_off = row["stop"] == "limit" && answer().starts_with("<tool_call>");
