@@ -137,6 +137,54 @@ fn edit_arguments_keep_their_order() {
 }
 
 #[test]
+fn the_forge_event_round_trips() {
+    let dir = Dir::new("forge-event");
+    let events = [
+        Event::User("Track it in the forge".into()),
+        Event::Forge {
+            name: "agl-009".into(),
+            kind: ForgeKind::Created,
+            section: None,
+        },
+        Event::Forge {
+            name: "agl-009".into(),
+            kind: ForgeKind::Appended,
+            section: Some("Progress".into()),
+        },
+    ];
+    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    for event in &events {
+        session.append(event.clone()).unwrap();
+    }
+    let text = fs::read_to_string(dir.0.join(format!("{}.jsonl", session.id))).unwrap();
+    let lines: Vec<Json> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines[2],
+        json!({"type": "forge", "name": "agl-009", "kind": "created", "time": lines[2]["time"]})
+    );
+    assert_eq!(
+        lines[3],
+        json!({
+            "type": "forge",
+            "name": "agl-009",
+            "kind": "appended",
+            "section": "Progress",
+            "time": lines[3]["time"]
+        })
+    );
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(reopened.events, events);
+    // The event is a marker, not part of the model's history.
+    assert_eq!(
+        reopened.history(),
+        vec![Message::User("Track it in the forge".into())]
+    );
+}
+
+#[test]
 fn history_for_the_template() {
     let dir = Dir::new("history");
     let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();

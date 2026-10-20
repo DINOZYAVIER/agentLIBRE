@@ -27,7 +27,7 @@ use crate::backend::ToolCall;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
-use crate::session::{Session, StopReason};
+use crate::session::{ForgeKind, Session, StopReason};
 use crate::status::{COMMANDS, Facts, Info, compact_notice, display_path, help_text, status_text};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
@@ -252,6 +252,9 @@ impl Report for Reporter<'_> {
     }
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         self.presenter.result(call, result);
+    }
+    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
+        self.presenter.forge(name, kind, section);
     }
     fn compacting(&mut self) {
         self.presenter.compacting();

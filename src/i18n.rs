@@ -1332,6 +1332,33 @@ Forge (сховище артефактів робочої області, agentL
         en: "append to {name} would change more than the {section} bullet and updated; nothing was written",
         uk: "append до {name} змінив би більше, ніж bullet {section} і updated; нічого не записано",
     };
+
+    // The agent's forge writes (AGL-008): the `[forge: …]` marker
+    // line, muted in the REPL and on stderr in `-p`.
+
+    /// The agent's `forge new` created a task-spec.
+    pub const FORGE_EVENT_CREATED: Msg = Msg {
+        en: "[forge: {name} created]",
+        uk: "[forge: {name} створено]",
+    };
+
+    /// The agent's `forge edit` changed the draft.
+    pub const FORGE_EVENT_EDITED: Msg = Msg {
+        en: "[forge: {name} edited]",
+        uk: "[forge: {name} заредаговано]",
+    };
+
+    /// The agent's `forge append` added a bullet under a section.
+    pub const FORGE_EVENT_APPENDED: Msg = Msg {
+        en: "[forge: {name} +{section}]",
+        uk: "[forge: {name} +{section}]",
+    };
+
+    /// The agent's `forge remove` deleted the draft.
+    pub const FORGE_EVENT_REMOVED: Msg = Msg {
+        en: "[forge: {name} removed]",
+        uk: "[forge: {name} видалено]",
+    };
 }
 
 impl Error {
@@ -1790,6 +1817,54 @@ mod tests {
             }
             .message(Lang::En)
             .contains("--help")
+        );
+    }
+
+    #[test]
+    fn the_forge_marker_lines() {
+        let name = "agl-009";
+        let section = "Progress";
+        assert_eq!(
+            tr!(Lang::En, m::FORGE_EVENT_CREATED, name = name),
+            "[forge: agl-009 created]"
+        );
+        assert_eq!(
+            tr!(Lang::En, m::FORGE_EVENT_EDITED, name = name),
+            "[forge: agl-009 edited]"
+        );
+        assert_eq!(
+            tr!(
+                Lang::En,
+                m::FORGE_EVENT_APPENDED,
+                name = name,
+                section = section
+            ),
+            "[forge: agl-009 +Progress]"
+        );
+        assert_eq!(
+            tr!(Lang::En, m::FORGE_EVENT_REMOVED, name = name),
+            "[forge: agl-009 removed]"
+        );
+        assert_eq!(
+            tr!(Lang::Uk, m::FORGE_EVENT_CREATED, name = name),
+            "[forge: agl-009 створено]"
+        );
+        assert_eq!(
+            tr!(Lang::Uk, m::FORGE_EVENT_EDITED, name = name),
+            "[forge: agl-009 заредаговано]"
+        );
+        assert_eq!(
+            tr!(
+                Lang::Uk,
+                m::FORGE_EVENT_APPENDED,
+                name = name,
+                section = section
+            ),
+            "[forge: agl-009 +Progress]"
+        );
+        assert_eq!(
+            tr!(Lang::Uk, m::FORGE_EVENT_REMOVED, name = name),
+            "[forge: agl-009 видалено]"
         );
     }
 

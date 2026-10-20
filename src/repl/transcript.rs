@@ -11,7 +11,7 @@ use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
-use crate::session::Event;
+use crate::session::{Event, ForgeKind};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
@@ -128,6 +128,23 @@ impl Presenter {
             .print(&[self.theme.paint(Role::Muted, "[compacted]")]);
     }
 
+    /// `[forge: …]` where the agent wrote to the forge (AGL-008).
+    pub fn show_forge(&self, name: &str, kind: ForgeKind, section: Option<&str>) {
+        let message = match kind {
+            ForgeKind::Created => tr!(self.lang, m::FORGE_EVENT_CREATED, name = name),
+            ForgeKind::Edited => tr!(self.lang, m::FORGE_EVENT_EDITED, name = name),
+            ForgeKind::Appended => tr!(
+                self.lang,
+                m::FORGE_EVENT_APPENDED,
+                name = name,
+                section = section.unwrap_or_default()
+            ),
+            ForgeKind::Removed => tr!(self.lang, m::FORGE_EVENT_REMOVED, name = name),
+        };
+        self.screen
+            .print(&[self.theme.paint(Role::Muted, &message)]);
+    }
+
     pub fn show_thinking(&self, thinking: &str) {
         let mut wrap = StreamWrap::new(self.screen.columns());
         let mut lines = wrap.push(&format!("{}: {thinking}", tr!(self.lang, m::THINKING)));
@@ -195,6 +212,11 @@ impl Presenter {
                 Event::Answer(text) => self.show_answer(text, None),
                 Event::Compact(_) => self.show_compacted(),
                 Event::CutOff(_) => self.show_cut_off(),
+                Event::Forge {
+                    name,
+                    kind,
+                    section,
+                } => self.show_forge(name, *kind, section.as_deref()),
                 Event::Stop(_) => {}
             }
         }
@@ -399,6 +421,11 @@ impl Report for Presenter {
         let elapsed = self.call_started.elapsed();
         self.show_card(call, result, Some(elapsed));
         self.screen.activity(Activity::Generating);
+    }
+
+    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
+        self.close();
+        self.show_forge(name, kind, section);
     }
 
     fn compacting(&mut self) {
@@ -721,6 +748,11 @@ mod tests {
                 outcome: Outcome::Ok,
                 content: "a".into(),
             },
+            Event::Forge {
+                name: "agl-009".into(),
+                kind: ForgeKind::Appended,
+                section: Some("Progress".into()),
+            },
             Event::Answer("Done".into()),
         ];
         presenter.replay(&events);
@@ -729,6 +761,7 @@ mod tests {
         assert!(printed.contains(&"thinking: hm".to_owned()));
         assert!(printed.contains(&"Running.".to_owned()));
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
+        assert!(printed.contains(&"[forge: agl-009 +Progress]".to_owned()));
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));

@@ -5,13 +5,13 @@
 
 use std::path::Path;
 
-use crate::action::{self, Action, ParseError};
+use crate::action::{self, Action, Outcome, ParseError, Value};
 use crate::backend::{Backend, Message, Prompt, Request, Stop, TOOL_DOCS, ToolCall, ToolDoc};
 use crate::error::Error;
 use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
-use crate::session::{Event, INTERRUPTED, Session, StopReason};
+use crate::session::{Event, ForgeKind, INTERRUPTED, Session, StopReason};
 use crate::tools::{self, ToolResult};
 
 /// What the user sees while a turn runs.
@@ -31,6 +31,8 @@ pub trait Report {
     fn answer(&mut self, _text: &str) {}
     fn call(&mut self, call: &ToolCall);
     fn result(&mut self, call: &ToolCall, result: &ToolResult);
+    /// A write of the agent's forge tool (AGL-008): the marker line.
+    fn forge(&mut self, _name: &str, _kind: ForgeKind, _section: Option<&str>) {}
     /// The summary is being generated (D140).
     fn compacting(&mut self) {}
     /// A summary replaced the history (D139).
@@ -238,6 +240,17 @@ impl Agent<'_> {
                     content: result.content.clone(),
                 })?;
                 report.result(&call, &result);
+                if call.name == "forge"
+                    && result.outcome == Outcome::Ok
+                    && let Some((name, kind, section)) = forge_write(&call)
+                {
+                    self.session.append(Event::Forge {
+                        name: name.into(),
+                        kind,
+                        section: section.map(str::to_string),
+                    })?;
+                    report.forge(name, kind, section);
+                }
                 if interrupt::interrupted() {
                     debug_assert_eq!(result.content, INTERRUPTED);
                     return Err(Error::Interrupted);
@@ -382,6 +395,26 @@ fn function_tools(function: &Function) -> Vec<&'static ToolDoc> {
                 .any(|state| state.actions.tools.iter().any(|t| t.name == doc.name))
         })
         .collect()
+}
+
+/// A write of the agent's forge tool (AGL-008): the artifact's name,
+/// the kind of the write and, for an append, the section. The reads
+/// (`list`, `show`) are not writes.
+fn forge_write(call: &ToolCall) -> Option<(&str, ForgeKind, Option<&str>)> {
+    let arg = |name: &str| -> Option<&str> {
+        call.args.iter().find_map(|(key, value)| match value {
+            Value::Text(text) if key == name => Some(text.as_str()),
+            _ => None,
+        })
+    };
+    let (kind, section) = match arg("action")? {
+        "new" => (ForgeKind::Created, None),
+        "edit" => (ForgeKind::Edited, None),
+        "append" => (ForgeKind::Appended, arg("section")),
+        "remove" => (ForgeKind::Removed, None),
+        _ => return None,
+    };
+    Some((arg("name")?, kind, section))
 }
 
 #[cfg(test)]

@@ -49,6 +49,38 @@ impl StopReason {
     }
 }
 
+/// The kind of the agent's write to the forge (AGL-008): the word of
+/// the `[forge: …]` marker line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgeKind {
+    /// `forge new` created a task-spec.
+    Created,
+    /// `forge edit` changed the draft.
+    Edited,
+    /// `forge append` added a bullet under a section.
+    Appended,
+    /// `forge remove` deleted the draft.
+    Removed,
+}
+
+impl ForgeKind {
+    const ALL: [ForgeKind; 4] = [
+        ForgeKind::Created,
+        ForgeKind::Edited,
+        ForgeKind::Appended,
+        ForgeKind::Removed,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            ForgeKind::Created => "created",
+            ForgeKind::Edited => "edited",
+            ForgeKind::Appended => "appended",
+            ForgeKind::Removed => "removed",
+        }
+    }
+}
+
 /// A session event (D104). The header line is not an event.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -65,6 +97,13 @@ pub enum Event {
         id: String,
         outcome: Outcome,
         content: String,
+    },
+    /// A write of the agent's forge tool (AGL-008): the artifact's
+    /// name, the kind of the write and, for an append, the section.
+    Forge {
+        name: String,
+        kind: ForgeKind,
+        section: Option<String>,
     },
     Answer(String),
     /// An action hit `max_action_tokens` (the field) and was discarded
@@ -264,7 +303,7 @@ impl Session {
                     thinking = None;
                     messages.push(Message::User(cut_off_notice(*limit)));
                 }
-                Event::State(_) | Event::Stop(_) => {}
+                Event::State(_) | Event::Stop(_) | Event::Forge { .. } => {}
             }
         }
         messages
@@ -401,6 +440,17 @@ fn event_json(event: &Event) -> Json {
             outcome,
             content,
         } => json!({"type": "result", "id": id, "outcome": outcome.name(), "content": content}),
+        Event::Forge {
+            name,
+            kind,
+            section,
+        } => {
+            let mut json = json!({"type": "forge", "name": name, "kind": kind.name()});
+            if let Some(section) = section {
+                json["section"] = section.as_str().into();
+            }
+            json
+        }
         Event::Answer(text) => json!({"type": "answer", "text": text}),
         Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
@@ -445,6 +495,13 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 .into_iter()
                 .find(|o| json["outcome"] == o.name())?,
             content: text("content")?,
+        },
+        "forge" => Event::Forge {
+            name: text("name")?,
+            kind: ForgeKind::ALL
+                .into_iter()
+                .find(|kind| json["kind"] == kind.name())?,
+            section: text("section"),
         },
         "answer" => Event::Answer(text("text")?),
         "cut_off" => Event::CutOff(u32::try_from(json["limit"].as_u64()?).ok()?),

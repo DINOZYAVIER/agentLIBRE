@@ -6,6 +6,7 @@ use crate::action::Value;
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
+use crate::session::ForgeKind;
 use crate::tools::ToolResult;
 use crate::tr;
 
@@ -57,6 +58,21 @@ impl Report for StderrReport {
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         eprintln!("  {}", result_summary(call, result, self.lang));
+    }
+
+    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
+        let message = match kind {
+            ForgeKind::Created => tr!(self.lang, m::FORGE_EVENT_CREATED, name = name),
+            ForgeKind::Edited => tr!(self.lang, m::FORGE_EVENT_EDITED, name = name),
+            ForgeKind::Appended => tr!(
+                self.lang,
+                m::FORGE_EVENT_APPENDED,
+                name = name,
+                section = section.unwrap_or_default()
+            ),
+            ForgeKind::Removed => tr!(self.lang, m::FORGE_EVENT_REMOVED, name = name),
+        };
+        eprintln!("{message}");
     }
 
     fn compacted(&mut self) {

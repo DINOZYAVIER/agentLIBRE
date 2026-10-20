@@ -205,6 +205,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Thinking(_) => "thinking",
             Event::Call { .. } => "call",
             Event::Result { .. } => "result",
+            Event::Forge { .. } => "forge",
             Event::Answer(_) => "answer",
             Event::Stop(_) => "stop",
             Event::Compact(_) => "compact",
@@ -252,6 +253,46 @@ fn a_call_then_an_answer() {
         "[2 messages; -]<think>\nI will list files\n</think>\n\n"
     );
     assert!(prompts[2].starts_with("[4 messages; -]"));
+}
+
+#[test]
+fn the_forge_writes_of_a_call() {
+    let call = |args: &[(&str, Value)]| ToolCall {
+        id: "c1".into(),
+        name: "forge".into(),
+        args: args
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect(),
+    };
+    let text = |value: &str| Value::Text(value.into());
+    let named = |action: &str| call(&[("action", text(action)), ("name", text("agl-009"))]);
+    assert_eq!(
+        forge_write(&named("new")),
+        Some(("agl-009", ForgeKind::Created, None))
+    );
+    assert_eq!(
+        forge_write(&named("edit")),
+        Some(("agl-009", ForgeKind::Edited, None))
+    );
+    assert_eq!(
+        forge_write(&named("remove")),
+        Some(("agl-009", ForgeKind::Removed, None))
+    );
+    let append = call(&[
+        ("action", text("append")),
+        ("name", text("agl-009")),
+        ("section", text("Progress")),
+        ("text", text("a bullet")),
+    ]);
+    assert_eq!(
+        forge_write(&append),
+        Some(("agl-009", ForgeKind::Appended, Some("Progress")))
+    );
+    // The reads are not writes, and neither is an unknown action.
+    assert_eq!(forge_write(&named("list")), None);
+    assert_eq!(forge_write(&named("show")), None);
+    assert_eq!(forge_write(&named("frobnicate")), None);
 }
 
 #[test]
