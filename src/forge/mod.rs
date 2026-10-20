@@ -384,6 +384,42 @@ pub fn resolve(
     resolve_among(data, &projects, lang, auto_rehome, ask)
 }
 
+/// The project for `forge rehome`: the nearest ancestor of `cwd` whose
+/// identity a store carries, else `cwd` itself. It only looks: it never
+/// asks, adopts or renames, because `rehome` is the explicit way to
+/// do those, and it must work where the lookup of [`resolve`] cannot
+/// choose (no terminal, `auto_rehome` off).
+pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
+    let cwd = fs::canonicalize(cwd).map_err(|source| Error::Read {
+        path: cwd.to_path_buf(),
+        source,
+    })?;
+    let found = stores(data)?;
+    for project in cwd.ancestors() {
+        let identity = identity_of(project);
+        let mut mine = found.iter().filter(|store| store.hashes.contains(&identity));
+        if let Some(store) = mine.next() {
+            let key = store_key(&basename_of(project), &identity, &found);
+            return Ok(Workspace {
+                project: project.to_path_buf(),
+                identity,
+                key,
+                dir: store.dir.clone(),
+                function: store.function.clone(),
+            });
+        }
+    }
+    let identity = identity_of(&cwd);
+    let key = store_key(&basename_of(&cwd), &identity, &found);
+    Ok(Workspace {
+        dir: data.join(&key),
+        project: cwd,
+        identity,
+        key,
+        function: None,
+    })
+}
+
 /// [`resolve`] for `agentLIBRE init` (AGL-010): `dir` alone may be the
 /// project, an ancestor is not looked at.
 pub fn resolve_dir(

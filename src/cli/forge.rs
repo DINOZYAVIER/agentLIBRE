@@ -83,7 +83,9 @@ pub fn run(
         }
         "rehome" => {
             let (store, new_store) = rehome_args(args)?;
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
+            // The explicit form of the adoption: it does not go through
+            // the lookup that asks.
+            let ws = forge::locate(&paths.data, cwd)?;
             rehome(paths, &ws, lang, store, new_store)
         }
         other => Err(Error::UnknownOption(other.to_string())),
@@ -1114,6 +1116,47 @@ mod tests {
         assert!(std::fs::read_to_string(&file)
             .unwrap()
             .contains(&format!("last = \"{head}\"")));
+    }
+
+    #[test]
+    fn rehome_works_where_the_lookup_cannot_choose() {
+        // A moved project, `auto_rehome` off, no terminal: the lookup of
+        // the other commands refuses, and the refusal points at `forge
+        // rehome`, which must then work.
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let from = dir.0.join("a/proj");
+        std::fs::create_dir_all(&from).unwrap();
+        forge(&data, &from, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let old_store = std::fs::read_dir(&data).unwrap().flatten().next().unwrap().file_name();
+        let to = dir.0.join("b/proj");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::rename(&from, &to).unwrap();
+        let paths = Paths {
+            config: data.clone(),
+            data: data.clone(),
+            state: data.clone(),
+        };
+        let mut user = UserFile::default();
+        user.forge.auto_rehome = Some(false);
+        let run_with = |args: &[&str]| {
+            run(
+                &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                &user,
+                &paths,
+                &to,
+                Lang::En,
+            )
+        };
+        assert!(matches!(run_with(&["list"]), Err(Error::RehomeNoStore { .. })));
+        let name = old_store.to_string_lossy().into_owned();
+        assert_eq!(run_with(&["rehome", name.as_str()]).unwrap(), ExitCode::SUCCESS);
+        // The store was renamed to the new home and the lookup finds it.
+        assert!(!data.join(&old_store).exists());
+        assert_eq!(run_with(&["list"]).unwrap(), ExitCode::SUCCESS);
+        let stores = forge::stores(&data).unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].hashes.len(), 2);
     }
 
     #[test]
