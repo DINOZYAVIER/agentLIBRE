@@ -73,7 +73,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         buf.push(0);
     }
     buf.extend_from_slice(&len.to_be_bytes());
-    for chunk in buf.chunks_exact(64) {
+    for chunk in buf.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for t in 0..16 {
             w[t] = u32::from_be_bytes([
@@ -653,7 +653,7 @@ pub struct Artifact {
 /// unknown type), an unknown schema (never parsed), or unparseable.
 #[derive(Debug)]
 pub enum Header {
-    Artifact(Artifact),
+    Artifact(Box<Artifact>),
     UnknownSchema { schema: String },
     Broken { detail: String },
 }
@@ -809,7 +809,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         return Ok(Header::UnknownSchema { schema });
     }
     match parse_artifact(path, &text) {
-        Ok(artifact) => Ok(Header::Artifact(artifact)),
+        Ok(artifact) => Ok(Header::Artifact(Box::new(artifact))),
         Err(error) => Ok(Header::Broken {
             detail: error.to_string(),
         }),
@@ -975,10 +975,10 @@ pub fn artifact_files(dir: &Path) -> Result<Vec<PathBuf>, Error> {
     if let Ok(types) = fs::read_dir(&forge) {
         for entry in types.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name() {
-                    type_names.push(name.to_string_lossy().into_owned());
-                }
+            if path.is_dir()
+                && let Some(name) = path.file_name()
+            {
+                type_names.push(name.to_string_lossy().into_owned());
             }
         }
     }
@@ -1396,7 +1396,7 @@ mod tests {
         assert_eq!(seen[0], names);
         // The first store in name order was adopted and re-homed to
         // the current key; the other store is untouched.
-        let mut dirs = vec![ws1.dir.clone(), ws2.dir.clone()];
+        let mut dirs = [ws1.dir.clone(), ws2.dir.clone()];
         dirs.sort();
         assert_eq!(ws.dir, data.join(format!("proj-{}", short(&third))));
         assert!(!dirs[0].exists());
@@ -1505,7 +1505,7 @@ mod tests {
         // A store holds the 12-hex name without this identity: the full
         // 64-hex name.
         assert_eq!(
-            store_key("proj", &mine, &[held.clone()]),
+            store_key("proj", &mine, std::slice::from_ref(&held)),
             format!("proj-{}", &mine["sha256:".len()..]),
         );
         // A store holds the name and the identity: the 12-hex name stays.

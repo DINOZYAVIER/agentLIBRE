@@ -197,8 +197,8 @@ pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result
 /// `forge list`: the table of the artifacts of the workspace.
 fn list(ws: &Workspace) -> Result<ExitCode, Error> {
     println!(
-        "{:<24} {:<10} {:<8} {:<10} {}",
-        "NAME", "TYPE", "STATUS", "UPDATED", "FLAG"
+        "{:<24} {:<10} {:<8} {:<10} FLAG",
+        "NAME", "TYPE", "STATUS", "UPDATED"
     );
     // The git flags read the project directory when it is a git
     // repository (AGL-010); the cell is blank otherwise.
@@ -755,7 +755,7 @@ fn rehome_to(
     current: Option<&forge::Store>,
 ) -> Result<ExitCode, Error> {
     if let Some(store) = current
-        && &store.name() != name
+        && store.name() != name
     {
         return Err(Error::RehomeInUse {
             current: store.name(),
