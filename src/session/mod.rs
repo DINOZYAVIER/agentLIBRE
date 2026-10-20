@@ -27,19 +27,15 @@ pub enum StopReason {
     ContextFull,
     /// llama-server failed (D97).
     ServerError,
-    /// The token limit cut a generation (D18). Older versions stopped the
-    /// turn with it; sessions still hold it (D154).
-    CutOff,
     /// The user interrupted the turn.
     Interrupted,
 }
 
 impl StopReason {
-    const ALL: [StopReason; 5] = [
+    const ALL: [StopReason; 4] = [
         StopReason::StepLimit,
         StopReason::ContextFull,
         StopReason::ServerError,
-        StopReason::CutOff,
         StopReason::Interrupted,
     ];
 
@@ -48,7 +44,6 @@ impl StopReason {
             StopReason::StepLimit => "step_limit",
             StopReason::ContextFull => "context_full",
             StopReason::ServerError => "server_error",
-            StopReason::CutOff => "cut_off",
             StopReason::Interrupted => "interrupted",
         }
     }

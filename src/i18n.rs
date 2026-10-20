@@ -754,12 +754,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "зупинено: розмова вже не вміщується в контекст моделі; почни нову сесію",
     };
 
-    /// `StopReason::CutOff`.
-    pub const STOP_CUT_OFF: Msg = Msg {
-        en: "stopped: the action hit max_action_tokens ({tokens})",
-        uk: "зупинено: дія дійшла до max_action_tokens ({tokens})",
-    };
-
     /// `StopReason::ServerError`.
     pub const STOP_SERVER: Msg = Msg {
         en: "stopped: llama-server failed",
@@ -1672,9 +1666,6 @@ pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> Strin
             tr!(lang, m::STOP_STEP_LIMIT, steps = function.max_steps_total)
         }
         StopReason::ContextFull => tr!(lang, m::STOP_CONTEXT_FULL).to_string(),
-        StopReason::CutOff => {
-            tr!(lang, m::STOP_CUT_OFF, tokens = function.max_action_tokens)
-        }
         StopReason::ServerError => tr!(lang, m::STOP_SERVER).to_string(),
         StopReason::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
     }
