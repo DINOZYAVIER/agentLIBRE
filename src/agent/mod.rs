@@ -6,7 +6,9 @@
 use std::path::Path;
 
 use crate::action::{self, Action, Outcome, ParseError, Value};
-use crate::backend::{Backend, Message, Prompt, Request, Stop, TOOL_DOCS, ToolCall, ToolDoc};
+use crate::backend::{
+    Backend, Message, Prompt, RUNTIME_PREFIX, Request, Stop, TOOL_DOCS, ToolCall, ToolDoc,
+};
 use crate::error::Error;
 use crate::function::Function;
 use crate::interrupt;
@@ -120,7 +122,7 @@ impl Agent<'_> {
         let function = self.function;
         let format = &function.format;
         let state = machine.state();
-        let mut messages = vec![Message::System(function.system.clone())];
+        let mut messages = vec![Message::System(system_prompt(function))];
         messages.extend(self.session.history());
         let tools = function_tools(function);
         let rendered = self.backend.render(&Prompt {
@@ -276,7 +278,7 @@ impl Agent<'_> {
         }
         report.compacting();
         let function = self.function;
-        let mut messages = vec![Message::System(function.system.clone())];
+        let mut messages = vec![Message::System(system_prompt(function))];
         messages.extend(
             self.session
                 .history()
@@ -381,6 +383,18 @@ impl<'a> TextStream<'a> {
         let text = std::mem::take(&mut self.held);
         (!self.in_call && !text.is_empty()).then_some(text)
     }
+}
+
+/// The system message of a step and of a compaction (AGL-009): the
+/// Function's `system`, then the runtime's two sentences — what the
+/// runtime prefix means, and how large one action may be. Stable text,
+/// for the prompt cache (D14, D19).
+fn system_prompt(function: &Function) -> String {
+    format!(
+        "{}\n\nMessages that start with {RUNTIME_PREFIX} come from the agentLIBRE runtime, \
+         not from the human. One action holds at most {} tokens; write a large file in parts.",
+        function.system, function.max_action_tokens
+    )
 }
 
 /// Every tool of any state, for the stable tool list of the prompt (D14,

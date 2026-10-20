@@ -6,11 +6,19 @@ use crate::action::Value;
 use crate::error::Error;
 use crate::function::Sampling;
 
+/// The text that opens every message of the runtime to the model
+/// (AGL-009); English always, outside the i18n catalog.
+pub const RUNTIME_PREFIX: &str = "[agentLIBRE runtime]";
+
 /// A message of the conversation the chat template renders.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     System(String),
     User(String),
+    /// A message of the runtime to the model (AGL-009), rendered as the
+    /// user role behind [`RUNTIME_PREFIX`]. It is not the human's: it
+    /// does not move the thinking boundary of [`kept_thinking`].
+    Runtime(String),
     /// One step of the model: its thinking, its text (an answer, or what
     /// it wrote before a call, D114) and its call.
     Assistant {
@@ -133,7 +141,8 @@ pub trait Backend {
 }
 
 /// Whether the thinking of each message goes to the template. Without
-/// `preserve`, only the thinking after the last user message does (D98).
+/// `preserve`, only the thinking after the last user message does (D98);
+/// a runtime message is not a user message (AGL-009).
 pub fn kept_thinking(messages: &[Message], preserve: bool) -> Vec<bool> {
     let current = messages
         .iter()
@@ -174,6 +183,23 @@ mod tests {
         assert_eq!(
             kept_thinking(&messages, false),
             vec![false, false, false, false, true, true, true]
+        );
+    }
+
+    #[test]
+    fn a_runtime_message_does_not_move_the_thinking_boundary() {
+        let messages = [
+            Message::System("s".into()),
+            Message::User("1".into()),
+            step("t1"),
+            Message::Runtime("notice".into()),
+            step("t2"),
+            Message::Runtime("summary".into()),
+            step("t3"),
+        ];
+        assert_eq!(
+            kept_thinking(&messages, false),
+            vec![false, false, true, true, true, true, true]
         );
     }
 }

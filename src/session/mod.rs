@@ -268,8 +268,9 @@ impl Session {
     }
 
     /// The conversation for the chat template, without the system prompt:
-    /// the last summary as a user message, then what followed it (D139,
-    /// D141). Thinking that no call or answer followed is left out.
+    /// the last summary as a runtime message, then what followed it
+    /// (D139, D141). Thinking that no call or answer followed is left
+    /// out.
     pub fn history(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut thinking = None;
@@ -278,7 +279,7 @@ impl Session {
                 Event::Compact(summary) => {
                     messages.clear();
                     thinking = None;
-                    messages.push(Message::User(summary.clone()));
+                    messages.push(Message::Runtime(summary.clone()));
                 }
                 Event::User(text) => {
                     thinking = None;
@@ -301,7 +302,7 @@ impl Session {
                 }),
                 Event::CutOff(limit) => {
                     thinking = None;
-                    messages.push(Message::User(cut_off_notice(*limit)));
+                    messages.push(Message::Runtime(cut_off_notice(*limit)));
                 }
                 Event::State(_) | Event::Stop(_) | Event::Forge { .. } => {}
             }
@@ -515,11 +516,13 @@ fn event_from_json(json: &Json) -> Option<Event> {
     })
 }
 
-/// What the model reads after an action hit `max_action_tokens` (D154).
+/// What the model reads after an action hit `max_action_tokens` (D154,
+/// AGL-009); the prefix is added where the message is rendered.
 fn cut_off_notice(limit: u32) -> String {
     format!(
-        "The action hit max_action_tokens ({limit}) and was discarded. Split the work into \
-         smaller actions, for example write a large file in parts."
+        "Your last action hit max_action_tokens ({limit}) and was discarded; nothing was \
+         executed or shown. Split the work into smaller actions, for example write a large \
+         file in parts."
     )
 }
 

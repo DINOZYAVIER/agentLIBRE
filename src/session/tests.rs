@@ -244,7 +244,7 @@ fn history_after_a_summary() {
     assert!(session.compactable());
     session.append(Event::Compact("s1".into())).unwrap();
     assert!(!session.compactable());
-    assert_eq!(session.history(), vec![Message::User("s1".into())]);
+    assert_eq!(session.history(), vec![Message::Runtime("s1".into())]);
     // A summary in the middle of a turn keeps the turn going (D140).
     assert_eq!(
         session.unfinished(),
@@ -259,7 +259,7 @@ fn history_after_a_summary() {
     assert_eq!(
         session.history(),
         vec![
-            Message::User("s1".into()),
+            Message::Runtime("s1".into()),
             Message::Assistant {
                 thinking: None,
                 text: Some("a1".into()),
@@ -271,7 +271,7 @@ fn history_after_a_summary() {
     session.append(Event::User("u2".into())).unwrap();
     assert_eq!(
         session.history(),
-        vec![Message::User("s2".into()), Message::User("u2".into())]
+        vec![Message::Runtime("s2".into()), Message::User("u2".into())]
     );
 }
 

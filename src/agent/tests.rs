@@ -17,6 +17,8 @@ struct Script {
     tokens: usize,
     /// Whether each rendered prompt carried any thinking.
     thinking: RefCell<Vec<bool>>,
+    /// The system message of each rendered prompt.
+    systems: RefCell<Vec<String>>,
 }
 
 impl Script {
@@ -39,6 +41,7 @@ impl Script {
             counts: RefCell::new(VecDeque::new()),
             tokens: 100,
             thinking: RefCell::new(Vec::new()),
+            systems: RefCell::new(Vec::new()),
         }
     }
 
@@ -50,6 +53,9 @@ impl Script {
 
 impl Backend for Script {
     fn render(&self, prompt: &Prompt) -> Result<String, Error> {
+        if let Some(Message::System(text)) = prompt.messages.first() {
+            self.systems.borrow_mut().push(text.clone());
+        }
         self.thinking
             .borrow_mut()
             .push(prompt.messages.iter().any(|m| {
@@ -365,9 +371,10 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     assert_eq!(history.len(), 3);
     assert_eq!(
         history[1],
-        Message::User(
-            "The action hit max_action_tokens (8192) and was discarded. Split the work into \
-             smaller actions, for example write a large file in parts."
+        Message::Runtime(
+            "Your last action hit max_action_tokens (8192) and was discarded; nothing was \
+             executed or shown. Split the work into smaller actions, for example write a \
+             large file in parts."
                 .into()
         )
     );
@@ -545,6 +552,38 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
     assert_eq!(*script.thinking.borrow(), [false, true, false, false]);
     // The turn goes on from the summary alone.
     assert!(prompts[3].starts_with("[2 messages; -]"));
+    // The summary is a runtime message, not the human's (AGL-009).
+    assert_eq!(
+        session.history()[0],
+        Message::Runtime("The user said go; true ran.".into())
+    );
+}
+
+#[test]
+fn the_system_message_explains_the_runtime_prefix_and_the_action_size() {
+    let dir = Dir::new("system");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        (" The user said go; true ran. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, FITS]);
+    let (end, _, _) = run(&default, &script, &dir, "go");
+    assert!(end.is_ok());
+    // A step, a step, the compaction, a step: all carry the Function's
+    // system text and the two sentences, the same text each time.
+    let systems = script.systems.borrow();
+    assert_eq!(systems.len(), 4);
+    let expected = format!(
+        "{}\n\nMessages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
+         not from the human. One action holds at most {} tokens; write a large file in parts.",
+        default.system, default.max_action_tokens
+    );
+    assert!(systems.iter().all(|system| *system == expected));
+    assert!(expected.contains("at most 8192 tokens"));
 }
 
 #[test]

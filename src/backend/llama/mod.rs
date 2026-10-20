@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::{Map, Value as Json, json};
 
-use super::{Backend, Generated, Message, Prompt, Request, Stop, ToolDoc, kept_thinking};
+use super::{
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, Request, Stop, ToolDoc, kept_thinking,
+};
 use crate::action::Value;
 use crate::error::Error;
 use crate::function::Sampling;
@@ -200,6 +202,9 @@ fn messages_json(prompt: &Prompt) -> Vec<Json> {
         .map(|(message, keep_thinking)| match message {
             Message::System(text) => json!({"role": "system", "content": text}),
             Message::User(text) => json!({"role": "user", "content": text}),
+            Message::Runtime(text) => {
+                json!({"role": "user", "content": format!("{RUNTIME_PREFIX} {text}")})
+            }
             Message::Assistant {
                 thinking,
                 text,

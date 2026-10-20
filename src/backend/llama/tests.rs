@@ -13,6 +13,27 @@ fn call(id: &str) -> ToolCall {
 }
 
 #[test]
+fn a_runtime_message_is_a_prefixed_user_message() {
+    let messages = [
+        Message::System("s".into()),
+        Message::Runtime("It was cut off.".into()),
+    ];
+    let prompt = Prompt {
+        messages: &messages,
+        instruction: None,
+        tools: &[],
+        preserve_thinking: true,
+    };
+    assert_eq!(
+        Json::Array(messages_json(&prompt)),
+        json!([
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "[agentLIBRE runtime] It was cut off."},
+        ])
+    );
+}
+
+#[test]
 fn messages_in_template_form() {
     let messages = [
         Message::System("s".into()),
