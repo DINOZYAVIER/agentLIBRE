@@ -216,13 +216,15 @@ pub fn git_flag(
     Ok(Some(if lags { GitFlag::Lags } else { GitFlag::Ok }))
 }
 
-/// The slug of a title: lowercase alphanumerics, a run of anything
-/// else as one `-`, trimmed.
+/// The slug of a title: the lowercase letters and digits of any
+/// script; apostrophes are dropped, a run of anything else is one `-`,
+/// trimmed.
 pub fn slug(title: &str) -> String {
     let mapped: String = title
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .filter(|c| !matches!(c, '\'' | '’' | 'ʼ'))
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
     mapped
         .split('-')
@@ -359,6 +361,12 @@ mod tests {
         assert_eq!(slug("AGL 007"), "agl-007");
         assert_eq!(slug("--weird__name--"), "weird-name");
         assert_eq!(slug(""), "");
+        // Any script; the apostrophes of all three kinds are dropped.
+        assert_eq!(slug("Пам'ять агента"), "память-агента");
+        assert_eq!(slug("Пам’ять агента"), "память-агента");
+        assert_eq!(slug("Памʼять агента"), "память-агента");
+        assert_eq!(slug("ЗАДАЧА №7: Café"), "задача-7-café");
+        assert_eq!(slug("it's a title"), "its-a-title");
     }
 
     #[test]
