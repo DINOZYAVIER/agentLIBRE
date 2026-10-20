@@ -62,21 +62,7 @@ LLM agents may prepare patches and draft commit messages, but they are tools,
 not legal contributors.
 
 Only a human may certify the DCO with `Signed-off-by`. LLM agents must not add
-`Signed-off-by` or `Co-authored-by` for themselves.
-
-If an LLM or advanced coding tool meaningfully helped create the patch,
-disclose it with:
-
-```text
-Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL...]
-```
-
-For example: `Assisted-by: Claude-Code:claude-opus-5-5`.
-
-List tools only when they materially found, generated, transformed, or
-validated the patch. Do not list ordinary development tools such as `git`,
-editors, build or test commands, formatters (`cargo fmt`), autocomplete, or
-mechanical renames. Mention `cargo clippy` only when a specific finding
-materially shaped the patch.
+`Signed-off-by` or `Co-authored-by` for themselves, nor any other
+attribution trailer.
 
 A human must review, understand, and take responsibility for the final commit.
