@@ -1,14 +1,14 @@
-//! User and project `agentLIBRE.toml` files (D54-D60, D66, D148).
+//! The user `agentLIBRE.toml` file (D54-D60, D66, D148); the project
+//! settings live in the project's store file (AGL-010, `forge::Marker`).
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Error;
 use crate::i18n::Lang;
 use crate::theme::{COLOR_KEYS, Role, Style};
 use crate::tomlfile::{self, Section};
 
-/// Name of the user and project settings files.
+/// Name of the user settings file and of the project's file in its store.
 pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
 
 /// Function used when no settings name one (D39, D58).
@@ -196,40 +196,6 @@ impl UserFile {
     }
 }
 
-/// A project file, found by [`find_project`].
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct ProjectFile {
-    pub function: Option<String>,
-}
-
-impl ProjectFile {
-    /// Loads `path`. `user_path` names the user file in the error that
-    /// rejects `[server]` (D57).
-    pub fn load(path: &Path, user_path: &Path) -> Result<ProjectFile, Error> {
-        let mut file = Section::new(path, tomlfile::read(path)?.unwrap_or_default());
-        if file.contains("server") {
-            return Err(Error::ServerInProject {
-                path: path.into(),
-                user_path: user_path.into(),
-            });
-        }
-        file.check_keys(&["function"])?;
-        Ok(ProjectFile {
-            function: file.string("function")?,
-        })
-    }
-}
-
-/// The nearest `agentLIBRE.toml` in `cwd` or its ancestors, skipping the
-/// user file (D56).
-pub fn find_project(cwd: &Path, user_path: &Path) -> Option<PathBuf> {
-    let user_path = fs::canonicalize(user_path).ok();
-    cwd.ancestors()
-        .map(|dir| dir.join(SETTINGS_FILE))
-        .filter(|path| path.is_file())
-        .find(|path| user_path.is_none() || fs::canonicalize(path).ok() != user_path)
-}
-
 /// Settings of a run.
 #[derive(Debug)]
 pub struct Settings {
@@ -240,11 +206,12 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Combines the files and `--function` (D58, D59).
+    /// Combines the user file, the project's Function and `--function`
+    /// (D58, D59).
     pub fn resolve(
         user: &UserFile,
         user_path: &Path,
-        project: Option<&ProjectFile>,
+        project_function: Option<&str>,
         cli_function: Option<&str>,
     ) -> Result<Settings, Error> {
         let server_url = user
@@ -254,7 +221,7 @@ impl Settings {
                 user_path: user_path.into(),
             })?;
         let function = cli_function
-            .or(project.and_then(|p| p.function.as_deref()))
+            .or(project_function)
             .or(user.function.as_deref())
             .unwrap_or(DEFAULT_FUNCTION)
             .to_owned();
@@ -276,6 +243,8 @@ impl Settings {
 mod tests {
     use super::*;
     use crate::error::Expected;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A directory removed when dropped.
@@ -497,58 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn project_file_allows_only_function() {
-        let dir = TempDir::new();
-        let user_path = dir.0.join("config").join(SETTINGS_FILE);
-        let path = dir.write("p/agentLIBRE.toml", "function = \"coder\"");
-        assert_eq!(
-            ProjectFile::load(&path, &user_path)
-                .unwrap()
-                .function
-                .as_deref(),
-            Some("coder")
-        );
-        let path = dir.write("p/agentLIBRE.toml", "[server]\nurl = \"http://x\"");
-        assert!(matches!(
-            ProjectFile::load(&path, &user_path),
-            Err(Error::ServerInProject { .. })
-        ));
-        let path = dir.write("p/agentLIBRE.toml", "language = \"uk\"");
-        assert!(matches!(
-            ProjectFile::load(&path, &user_path),
-            Err(Error::UnknownKey { key, .. }) if key == "language"
-        ));
-    }
-
-    #[test]
-    fn project_file_is_found_in_ancestors() {
-        let dir = TempDir::new();
-        let user_path = dir.0.join("config").join(SETTINGS_FILE);
-        let project = dir.write("repo/agentLIBRE.toml", "");
-        fs::create_dir_all(dir.0.join("repo/src/deep")).unwrap();
-        assert_eq!(
-            find_project(&dir.0.join("repo/src/deep"), &user_path),
-            Some(project.clone())
-        );
-        let nearer = dir.write("repo/src/agentLIBRE.toml", "");
-        assert_eq!(
-            find_project(&dir.0.join("repo/src/deep"), &user_path),
-            Some(nearer)
-        );
-    }
-
-    #[test]
-    fn user_file_is_not_a_project_file() {
-        let dir = TempDir::new();
-        let user_path = dir.write("config/agentLIBRE/agentLIBRE.toml", "");
-        let project = dir.write("agentLIBRE.toml", "");
-        assert_eq!(
-            find_project(&dir.0.join("config/agentLIBRE"), &user_path),
-            Some(project)
-        );
-    }
-
-    #[test]
     fn function_precedence() {
         let path = Path::new("/c/agentLIBRE.toml");
         let user = UserFile {
@@ -556,18 +473,13 @@ mod tests {
             server_url: Some("http://x".into()),
             ..UserFile::default()
         };
-        let project = ProjectFile {
-            function: Some("project".into()),
-        };
         let resolve = |user: &UserFile, project, cli| {
             Settings::resolve(user, path, project, cli)
                 .unwrap()
                 .function
         };
-        assert_eq!(resolve(&user, Some(&project), Some("cli")), "cli");
-        assert_eq!(resolve(&user, Some(&project), None), "project");
-        let empty = ProjectFile::default();
-        assert_eq!(resolve(&user, Some(&empty), None), "user");
+        assert_eq!(resolve(&user, Some("project"), Some("cli")), "cli");
+        assert_eq!(resolve(&user, Some("project"), None), "project");
         assert_eq!(resolve(&user, None, None), "user");
         let no_function = UserFile {
             function: None,

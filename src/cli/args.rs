@@ -13,6 +13,9 @@ pub enum Command {
     Run(Args),
     /// `agentLIBRE server start|stop|status` (D146).
     Server(ServerAction),
+    /// `agentLIBRE init` (AGL-010): register the current directory as
+    /// a project.
+    Init,
     /// `agentLIBRE forge …` (AGL-007); the arguments after the word
     /// `forge` are parsed in the forge surface.
     Forge(Vec<OsString>),
@@ -46,6 +49,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
     if args.peek().is_some_and(|arg| arg == "forge") {
         args.next();
         return Ok(Command::Forge(args.collect()));
+    }
+    if args.peek().is_some_and(|arg| arg == "init") {
+        args.next();
+        return match args.next().map(text).transpose()?.as_deref() {
+            None => Ok(Command::Init),
+            Some("-h" | "--help") => Ok(Command::Help),
+            Some(other) => Err(Error::UnknownOption(other.into())),
+        };
     }
     if args.peek().is_some_and(|arg| arg == "server") {
         args.next();
@@ -190,6 +201,24 @@ mod tests {
             parse_strs(&["-p", "forge"]).unwrap(),
             Command::Run(Args {
                 prompt: Some("forge".into()),
+                ..Args::default()
+            })
+        );
+    }
+
+    #[test]
+    fn init_takes_no_arguments() {
+        assert_eq!(parse_strs(&["init"]).unwrap(), Command::Init);
+        assert_eq!(parse_strs(&["init", "--help"]).unwrap(), Command::Help);
+        assert!(matches!(
+            parse_strs(&["init", "x"]),
+            Err(Error::UnknownOption(o)) if o == "x"
+        ));
+        // Only the first word is a command; a message may say "init".
+        assert_eq!(
+            parse_strs(&["-p", "init"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("init".into()),
                 ..Args::default()
             })
         );

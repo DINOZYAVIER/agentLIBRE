@@ -1,12 +1,13 @@
 //! The forge: the per-workspace store of typed artifacts (AGL-007).
 //!
-//! One store per project workspace (the cwd's git toplevel), at
-//! `agentLIBRE/<workspace>/forge/<type>/` under XDG_DATA_HOME: the
-//! `agentLIBRE.toml` marker (the list of the identities the store was
-//! re-homed from, the last one the current home) next to the `forge/`
-//! directory, and one file per artifact (TOML front-matter + Markdown
-//! body). The `forge/v1` envelope lives here; the `task-spec` type is
-//! in [`task_spec`].
+//! One store per project (AGL-010: the nearest registered ancestor of
+//! the cwd), at `agentLIBRE/<project>/forge/<type>/` under
+//! XDG_DATA_HOME: the project's `agentLIBRE.toml` (the list of the
+//! identities the store was re-homed from, the last one the current
+//! home, and the project settings) next to the `forge/` directory, and
+//! one file per artifact (TOML front-matter + Markdown body). The
+//! `forge/v1` envelope lives here; the `task-spec` type is in
+//! [`task_spec`].
 
 pub mod task_spec;
 
@@ -28,10 +29,10 @@ pub const MARKER_FILE: &str = "agentLIBRE.toml";
 /// The schema of the artifact front-matter (the v1 envelope).
 pub const SCHEMA: &str = "forge/v1";
 
-/// The `sha256:<hex>` identity of a workspace: the sha256 of the
-/// canonical toplevel path.
-pub fn identity_of(toplevel: &Path) -> String {
-    let digest = sha256(toplevel.as_os_str().as_bytes());
+/// The `sha256:<hex>` identity of a project: the sha256 of its
+/// canonical directory path.
+pub fn identity_of(project: &Path) -> String {
+    let digest = sha256(project.as_os_str().as_bytes());
     let hex = digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -148,16 +149,17 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// The canonical git toplevel of `cwd`; an error outside a repository.
-pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
+/// Whether `dir` is inside a git work tree (a repository or a
+/// directory of one).
+pub fn in_repository(dir: &Path) -> bool {
     // Outside a repository the check exits with a failure, in a bare
     // repository it answers false.
-    let inside = match git(cwd, &["rev-parse", "--is-inside-work-tree"]) {
-        Ok(answer) => answer == "true",
-        Err(Error::GitFailed { .. }) => false,
-        Err(error) => return Err(error),
-    };
-    if !inside {
+    matches!(git(dir, &["rev-parse", "--is-inside-work-tree"]), Ok(answer) if answer == "true")
+}
+
+/// The canonical git toplevel of `cwd`; an error outside a repository.
+pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
+    if !in_repository(cwd) {
         return Err(Error::NotInRepository { cwd: cwd.to_path_buf() });
     }
     let path = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
@@ -167,20 +169,23 @@ pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-/// The per-workspace `agentLIBRE.toml` marker: the format and the
-/// list of the identities the store carries, the last one the current
-/// home.
+/// The project's `agentLIBRE.toml` (AGL-010): the format and the list
+/// of the identities the store carries, the last one the current home,
+/// and the project settings.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Marker {
     pub hashes: Vec<String>,
+    /// The project's Function (D56, moved here by AGL-010).
+    pub function: Option<String>,
 }
 
 impl Marker {
-    /// Parses `text` (from `path`) strictly: `format = 1` and the
-    /// `workspace_sha256` list of `sha256:<64-hex>` identities.
+    /// Parses `text` (from `path`) strictly: `format = 1`, the
+    /// `workspace_sha256` list of `sha256:<64-hex>` identities and the
+    /// project settings.
     pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
         let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&["format", "workspace_sha256"])?;
+        file.check_keys(&["function", "format", "workspace_sha256"])?;
         let format = file.required_integer("format")?;
         if format != 1 {
             return Err(Error::MarkerFormat {
@@ -197,10 +202,11 @@ impl Marker {
                 });
             }
         }
-        Ok(Marker { hashes })
+        let function = file.string("function")?;
+        Ok(Marker { hashes, function })
     }
 
-    /// Renders the marker the way it is written.
+    /// Renders the marker the way it is written: the settings first.
     pub fn render(&self) -> String {
         let hashes = self
             .hashes
@@ -208,7 +214,12 @@ impl Marker {
             .map(|hash| toml_string(hash))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("format = 1\nworkspace_sha256 = [{hashes}]\n")
+        let function = self
+            .function
+            .as_deref()
+            .map(|function| format!("function = {}\n", toml_string(function)))
+            .unwrap_or_default();
+        format!("{function}format = 1\nworkspace_sha256 = [{hashes}]\n")
     }
 
     /// Writes the marker to `path`: a temp file in the same directory
@@ -218,12 +229,13 @@ impl Marker {
     }
 }
 
-/// A workspace store found under the data directory: its directory
-/// and the identities its marker lists.
+/// A project store found under the data directory: its directory, the
+/// identities its marker lists and its project settings.
 #[derive(Debug, Clone)]
 pub struct Store {
     pub dir: PathBuf,
     pub hashes: Vec<String>,
+    pub function: Option<String>,
 }
 
 impl Store {
@@ -258,19 +270,20 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
         found.push(Store {
             dir,
             hashes: marker.hashes,
+            function: marker.function,
         });
     }
     found.sort_by_key(Store::name);
     Ok(found)
 }
 
-/// The resolved workspace of the cwd: its repository and the store
+/// The resolved project of the cwd: its directory and the store
 /// directory under the data directory.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// The canonical git toplevel.
-    pub toplevel: PathBuf,
-    /// The `sha256:<hex>` identity of the toplevel path.
+    /// The canonical project directory.
+    pub project: PathBuf,
+    /// The `sha256:<hex>` identity of the project path.
     pub identity: String,
     /// The store directory name: `<basename>-<12 hex>` (the 64-hex
     /// identity as the name fallback when that name is held by a
@@ -278,6 +291,9 @@ pub struct Workspace {
     pub key: String,
     /// The store directory under the data directory.
     pub dir: PathBuf,
+    /// The project's Function from the store's `agentLIBRE.toml`; none
+    /// for a store not yet written.
+    pub function: Option<String>,
 }
 
 /// The name of the store of `basename` and `identity`; the 64-hex
@@ -310,7 +326,10 @@ fn rehomed(
     let mut hashes = store.hashes.clone();
     hashes.retain(|h| h != identity);
     hashes.push(identity.to_owned());
-    let marker = Marker { hashes };
+    let marker = Marker {
+        hashes,
+        function: store.function.clone(),
+    };
     if store.dir != new {
         fs::rename(&store.dir, &new)
             .map_err(|source| Error::Write { path: new.clone(), source })?;
@@ -322,11 +341,34 @@ fn rehomed(
     ))
 }
 
-/// Resolves the workspace of `cwd` against the stores under `data`,
-/// syncing the store when it moved or was renamed. Returns the
-/// workspace and the lines to print before the command output.
-/// `ask` is shown the store names plus a new store when the choice is
-/// the human's; it returns the index of the choice.
+/// The final component of `path` as text; empty for the root.
+fn basename_of(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `name` is a store of `basename`: exactly
+/// `<basename>-<12 hex>` or `<basename>-<64 hex>`, the two forms of
+/// [`store_key`].
+fn is_store_name(name: &str, basename: &str) -> bool {
+    let Some(hex) = name
+        .strip_prefix(basename)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    matches!(hex.len(), 12 | 64) && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Resolves the project of `cwd` against the stores under `data`
+/// (AGL-010): the nearest ancestor of `cwd` (itself included) whose
+/// identity a store carries; else the nearest ancestor with a store
+/// named exactly like it (a move or a rename); else `cwd`, registered
+/// at its first write. Syncs the store when it moved or was renamed.
+/// Returns the workspace and the lines to print before the command
+/// output. `ask` is shown the store names plus a new store when the
+/// choice is the human's; it returns the index of the choice.
 pub fn resolve(
     data: &Path,
     cwd: &Path,
@@ -334,97 +376,157 @@ pub fn resolve(
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
+    let cwd = fs::canonicalize(cwd).map_err(|source| Error::Read {
+        path: cwd.to_path_buf(),
+        source,
+    })?;
+    let projects: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
+    resolve_among(data, &projects, lang, auto_rehome, ask)
+}
+
+/// [`resolve`] for `agentLIBRE init` (AGL-010): `dir` alone may be the
+/// project, an ancestor is not looked at.
+pub fn resolve_dir(
+    data: &Path,
+    dir: &Path,
+    lang: crate::i18n::Lang,
+    auto_rehome: bool,
+    ask: &dyn Fn(&[String]) -> Result<usize, Error>,
+) -> Result<(Workspace, Vec<String>), Error> {
+    let dir = fs::canonicalize(dir).map_err(|source| Error::Read {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    resolve_among(data, &[dir], lang, auto_rehome, ask)
+}
+
+/// [`resolve`] over `projects`, nearest first: the directories that may
+/// be the project. The first one is the project when nothing is found.
+fn resolve_among(
+    data: &Path,
+    projects: &[PathBuf],
+    lang: crate::i18n::Lang,
+    auto_rehome: bool,
+    ask: &dyn Fn(&[String]) -> Result<usize, Error>,
+) -> Result<(Workspace, Vec<String>), Error> {
     use crate::i18n::m;
     use crate::tr;
-    let toplevel = toplevel(cwd)?;
-    let basename = toplevel
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let identity = identity_of(&toplevel);
     let found = stores(data)?;
-    let mine: Vec<&Store> = found
-        .iter()
-        .filter(|store| store.hashes.contains(&identity))
-        .collect();
-    let key = store_key(&basename, &identity, &found);
-    let workspace = |dir: PathBuf| Workspace {
-        toplevel: toplevel.clone(),
-        identity: identity.clone(),
-        key: key.clone(),
+    let workspace = |project: &Path, identity: &str, key: &str, dir: PathBuf, function| Workspace {
+        project: project.to_path_buf(),
+        identity: identity.to_owned(),
+        key: key.to_owned(),
         dir,
+        function,
     };
-    match mine.len() {
-        // The identity is the marker's last entry and the name is
-        // current: nothing to sync.
-        1 if mine[0].name() == key && mine[0].hashes.last() == Some(&identity) => {
-            Ok((workspace(mine[0].dir.clone()), Vec::new()))
-        }
-        // A move or a rename, back or forth: the old directory becomes
-        // the new one, the artifacts are untouched.
-        1 => {
-            let (dir, line) = rehomed(data, mine[0], &key, &identity, lang)?;
-            Ok((workspace(dir), vec![line]))
-        }
-        // The identity is new.
-        0 => {
-            let prefix = format!("{basename}-");
-            let candidates: Vec<&Store> = found
+    // A project not registered yet: its store is created at the first
+    // write. A hint at the other stores covers the pure-rename case.
+    let fresh = |project: &Path| {
+        let identity = identity_of(project);
+        let key = store_key(&basename_of(project), &identity, &found);
+        let lines = if found.is_empty() {
+            Vec::new()
+        } else {
+            let names = found
                 .iter()
-                .filter(|store| store.name().starts_with(prefix.as_str()))
-                .collect();
-            let fresh = || {
-                let lines = if found.is_empty() {
-                    Vec::new()
-                } else {
-                    let names = found
-                        .iter()
-                        .map(Store::name)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    vec![tr!(
-                        lang,
-                        m::FORGE_FRESH_STORE,
-                        dir = data.join(&key).display(),
-                        names = names
-                    )]
-                };
-                Ok((workspace(data.join(&key)), lines))
-            };
-            let adopt = |store: &Store| {
-                let (dir, _line) = rehomed(data, store, &key, &identity, lang)?;
-                let line = tr!(
-                    lang,
-                    m::FORGE_ADOPTED,
-                    old = store.dir.display(),
-                    new = dir.display()
-                );
-                Ok((workspace(dir), vec![line]))
-            };
-            match candidates.len() {
-                // No same-named store: a fresh store, with a hint at
-                // the others (the pure-rename case).
-                0 => return fresh(),
-                // The unique same-named store: adopted, notified.
-                1 if auto_rehome => return adopt(candidates[0]),
-                // Several candidates, or auto-rehome off: never a
-                // guess. The human chooses a store or a new one.
-                _ => {}
+                .map(Store::name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            vec![tr!(
+                lang,
+                m::FORGE_FRESH_STORE,
+                dir = data.join(&key).display(),
+                names = names
+            )]
+        };
+        (
+            workspace(project, &identity, &key, data.join(&key), None),
+            lines,
+        )
+    };
+    // By identity over all the ancestors first: the nearest wins.
+    for project in projects {
+        let identity = identity_of(project);
+        let mine: Vec<&Store> = found
+            .iter()
+            .filter(|store| store.hashes.contains(&identity))
+            .collect();
+        let key = store_key(&basename_of(project), &identity, &found);
+        match mine.len() {
+            0 => continue,
+            // The identity is the marker's last entry and the name is
+            // current: nothing to sync.
+            1 if mine[0].name() == key && mine[0].hashes.last() == Some(&identity) => {
+                let store = mine[0];
+                return Ok((
+                    workspace(project, &identity, &key, store.dir.clone(), store.function.clone()),
+                    Vec::new(),
+                ));
             }
-            let mut options: Vec<String> = found.iter().map(Store::name).collect();
-            options.push(tr!(lang, m::FORGE_NEW_STORE).to_string());
-            let choice = ask(&options)?;
-            if choice + 1 == options.len() {
-                fresh()
-            } else {
-                adopt(&found[choice])
+            // A move or a rename, back or forth: the old directory
+            // becomes the new one, the artifacts are untouched.
+            1 => {
+                let (dir, line) = rehomed(data, mine[0], &key, &identity, lang)?;
+                return Ok((
+                    workspace(project, &identity, &key, dir, mine[0].function.clone()),
+                    vec![line],
+                ));
+            }
+            // The identity is in two markers: a store copied by hand.
+            _ => {
+                return Err(Error::WorkspaceAmbiguous {
+                    dirs: mine.iter().map(|store| store.name()).collect(),
+                });
             }
         }
-        // The identity is in two markers: a store copied by hand.
-        _ => Err(Error::WorkspaceAmbiguous {
-            dirs: mine.iter().map(|store| store.name()).collect(),
-        }),
     }
+    // Then by exact name over all of them: the nearest ancestor that
+    // has a same-named store.
+    for project in projects {
+        let basename = basename_of(project);
+        if basename.is_empty() {
+            continue;
+        }
+        let candidates: Vec<&Store> = found
+            .iter()
+            .filter(|store| is_store_name(&store.name(), &basename))
+            .collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let identity = identity_of(project);
+        let key = store_key(&basename, &identity, &found);
+        let adopt = |store: &Store| {
+            let (dir, _line) = rehomed(data, store, &key, &identity, lang)?;
+            let line = tr!(
+                lang,
+                m::FORGE_ADOPTED,
+                old = store.dir.display(),
+                new = dir.display()
+            );
+            Ok((
+                workspace(project, &identity, &key, dir, store.function.clone()),
+                vec![line],
+            ))
+        };
+        // The unique same-named store: adopted, notified.
+        if candidates.len() == 1 && auto_rehome {
+            return adopt(candidates[0]);
+        }
+        // Several candidates, or auto_rehome off: never a guess. The
+        // human chooses a store or a new one.
+        let mut options: Vec<String> = found.iter().map(Store::name).collect();
+        options.push(tr!(lang, m::FORGE_NEW_STORE).to_string());
+        let choice = ask(&options)?;
+        return if choice + 1 == options.len() {
+            Ok(fresh(project))
+        } else {
+            adopt(&found[choice])
+        };
+    }
+    // Nothing registered: the cwd is the project, registered at the
+    // first write.
+    Ok(fresh(&projects[0]))
 }
 
 /// [`resolve`] for a caller that cannot ask (the in-turn `forge` tool):
@@ -458,6 +560,7 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
+        function: None,
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -493,6 +596,7 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
+        function: None,
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -1064,7 +1168,10 @@ mod tests {
     #[test]
     fn the_marker_round_trips_and_is_strict() {
         let path = Path::new("/d/agentLIBRE.toml");
-        let marker = Marker { hashes: vec![identity(1), identity(2)] };
+        let marker = Marker {
+            hashes: vec![identity(1), identity(2)],
+            function: Some("coder".into()),
+        };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
         assert!(matches!(
             Marker::parse(path, "format = 2\nworkspace_sha256 = []\n"),
@@ -1094,7 +1201,9 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)] }.write(&store.join(MARKER_FILE)).unwrap();
+        Marker { hashes: vec![identity(1)], function: None }
+            .write(&store.join(MARKER_FILE))
+            .unwrap();
         let found = stores(&data).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].dir, store);
@@ -1112,7 +1221,7 @@ mod tests {
         let repo = git_repo(dir.path(), "proj", 1);
         let (ws, lines) = auto(&data, &repo);
         assert!(lines.is_empty());
-        assert_eq!(ws.toplevel, fs::canonicalize(&repo).unwrap());
+        assert_eq!(ws.project, fs::canonicalize(&repo).unwrap());
         assert_eq!(ws.identity, identity_of(&repo));
         assert_eq!(ws.key, format!("proj-{}", short(&repo)));
         assert_eq!(ws.dir, data.join(&ws.key));
@@ -1385,6 +1494,7 @@ mod tests {
         let held = Store {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![identity(2)],
+            function: None,
         };
         let mine = format!("sha256:0123456789abcdef{}", "f".repeat(52));
         // No collision: the 12-hex name.
@@ -1402,6 +1512,7 @@ mod tests {
         let mine_store = Store {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![mine.to_string()],
+            function: None,
         };
         assert_eq!(store_key("proj", &mine, &[mine_store]), "proj-0123456789ab");
     }
@@ -1414,20 +1525,170 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)] }.write(&taken.join(MARKER_FILE)).unwrap();
+        Marker { hashes: vec![identity(7)], function: None }
+            .write(&taken.join(MARKER_FILE))
+            .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
         assert_eq!(ws.dir, data.join(format!("proj-{}", &mine["sha256:".len()..])));
         assert_ne!(ws.dir, taken);
     }
 
+    /// A plain directory (no git) `rel` under `root`, canonical.
+    fn plain_dir(root: &Path, rel: &str) -> PathBuf {
+        let dir = root.join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::canonicalize(&dir).unwrap()
+    }
+
     #[test]
-    fn outside_a_repository_the_workspace_is_an_error() {
+    fn a_directory_outside_git_is_a_project() {
         let dir = TempDir::new();
         let data = dir.path().join("data");
-        let plain = dir.path().join("plain");
-        fs::create_dir_all(&plain).unwrap();
-        let error = auto_err(&data, &plain).unwrap_err();
-        assert!(matches!(error, Error::NotInRepository { .. }));
+        let plain = plain_dir(dir.path(), "plain");
+        let ws = fresh_store(&data, &plain);
+        assert_eq!(ws.project, plain);
+        assert!(!in_repository(&plain));
+        assert_eq!(marker(&ws.dir).hashes, vec![identity_of(&plain)]);
+    }
+
+    #[test]
+    fn the_nearest_registered_ancestor_is_the_project() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let root = plain_dir(dir.path(), "root");
+        let outer = fresh_store(&data, &root);
+        let deep = plain_dir(dir.path(), "root/src/deep");
+        // Found from a nested cwd, quietly; nothing is registered for
+        // the cwd.
+        let (ws, lines) = auto(&data, &deep);
+        assert!(lines.is_empty());
+        assert_eq!(ws.dir, outer.dir);
+        assert_eq!(ws.project, root);
+        assert_eq!(stores(&data).unwrap().len(), 1);
+        // A nearer project wins.
+        let inner_dir = plain_dir(dir.path(), "root/src");
+        let (inner, _) = resolve_dir(&data, &inner_dir, EN, true, &|options| {
+            panic!("no store to choose: {options:?}")
+        })
+        .unwrap();
+        materialize(&inner, EN).unwrap();
+        assert_ne!(inner.dir, outer.dir);
+        let (ws, _) = auto(&data, &deep);
+        assert_eq!(ws.dir, inner.dir);
+        assert_eq!(ws.project, inner_dir);
+        let (ws, _) = auto(&data, &root);
+        assert_eq!(ws.dir, outer.dir);
+    }
+
+    #[test]
+    fn an_unregistered_cwd_is_the_project_even_inside_a_repository() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let repo = git_repo(dir.path(), "proj", 1);
+        let sub = plain_dir(dir.path(), "proj/src");
+        let (ws, lines) = auto(&data, &sub);
+        assert!(lines.is_empty());
+        assert_eq!(ws.project, sub);
+        assert_eq!(ws.key, format!("src-{}", short(&sub)));
+        assert!(!ws.dir.exists());
+        // The git toplevel is not the project; git is still readable
+        // from the project directory.
+        assert_ne!(ws.project, fs::canonicalize(&repo).unwrap());
+        assert!(in_repository(&ws.project));
+    }
+
+    #[test]
+    fn a_registered_parent_wins_over_a_same_named_child() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let parent = plain_dir(dir.path(), "a/proj");
+        let ws = fresh_store(&data, &parent);
+        // The child has the parent's basename, so the parent's store
+        // is also a same-named candidate for it: the identity of the
+        // parent is looked up first.
+        let child = plain_dir(dir.path(), "a/proj/inner/proj");
+        let (found, lines) = resolve(&data, &child, EN, false, &|options| {
+            panic!("no store to choose: {options:?}")
+        })
+        .unwrap();
+        assert!(lines.is_empty());
+        assert_eq!(found.dir, ws.dir);
+        assert_eq!(found.project, parent);
+    }
+
+    #[test]
+    fn an_ancestor_is_adopted_by_exact_name_only() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let from = plain_dir(dir.path(), "x/proj");
+        let ws = fresh_store(&data, &from);
+        // The project moved; the cwd is below its new home.
+        let to = dir.path().join("y/proj");
+        move_repo(&from, &to);
+        let to = fs::canonicalize(&to).unwrap();
+        let cwd = plain_dir(dir.path(), "y/proj/src");
+        let (found, lines) = auto(&data, &cwd);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(found.project, to);
+        assert_eq!(found.dir, data.join(format!("proj-{}", short(&to))));
+        assert!(!ws.dir.exists());
+        assert_eq!(marker(&found.dir).hashes, vec![identity_of(&from), identity_of(&to)]);
+        // A longer name that merely starts with the basename is not a
+        // candidate.
+        let other = plain_dir(dir.path(), "z/pro");
+        let (fresh, _) = auto(&data, &other);
+        assert_eq!(fresh.dir, data.join(format!("pro-{}", short(&other))));
+        assert!(!fresh.dir.exists());
+    }
+
+    #[test]
+    fn the_project_function_travels_with_the_store() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let from = plain_dir(dir.path(), "a/proj");
+        let ws = fresh_store(&data, &from);
+        assert_eq!(ws.function, None);
+        // The human sets the Function in the store's file.
+        Marker {
+            hashes: vec![identity_of(&from)],
+            function: Some("coder".into()),
+        }
+        .write(&ws.dir.join(MARKER_FILE))
+        .unwrap();
+        let (found, _) = auto(&data, &from);
+        assert_eq!(found.function.as_deref(), Some("coder"));
+        assert!(
+            fs::read_to_string(found.dir.join(MARKER_FILE))
+                .unwrap()
+                .starts_with("function = \"coder\"\n")
+        );
+        // A move keeps it.
+        let to = dir.path().join("b/proj");
+        move_repo(&from, &to);
+        let (moved, lines) = auto(&data, &to);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(moved.function.as_deref(), Some("coder"));
+        assert_eq!(marker(&moved.dir).function.as_deref(), Some("coder"));
+    }
+
+    #[test]
+    fn resolve_dir_looks_at_the_directory_alone() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let root = plain_dir(dir.path(), "root");
+        let outer = fresh_store(&data, &root);
+        let sub = plain_dir(dir.path(), "root/sub");
+        let (ws, lines) = resolve_dir(&data, &sub, EN, true, &|options| {
+            panic!("no store to choose: {options:?}")
+        })
+        .unwrap();
+        assert!(lines.len() <= 1);
+        assert_eq!(ws.project, sub);
+        assert_ne!(ws.dir, outer.dir);
+        // Registered, it is found from below as the nearer project.
+        materialize(&ws, EN).unwrap();
+        let (below, _) = auto(&data, &plain_dir(dir.path(), "root/sub/deeper"));
+        assert_eq!(below.dir, ws.dir);
     }
 
     fn task_spec_text() -> &'static str {

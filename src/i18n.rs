@@ -157,6 +157,7 @@ pub mod m {
     pub const HELP: Msg = Msg {
         en: "\
 Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
+       agentLIBRE init
        agentLIBRE server start|stop|status
        agentLIBRE forge list|show|new|status|check|log|diff|rehome
 
@@ -167,6 +168,10 @@ Options:
   --resume <id>       continue session <id>
   --function <name>   use Function <name>
   -h, --help          print this help
+
+Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
+  init                register the current directory as a project now; a
+                      directory is registered at its first write otherwise
 
 Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
   server start        start llama-server and wait until it is ready
@@ -185,6 +190,7 @@ under XDG_DATA_HOME):
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
 Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
+              agentLIBRE init
               agentLIBRE server start|stop|status
               agentLIBRE forge list|show|new|status|check|log|diff|rehome
 
@@ -195,6 +201,10 @@ under XDG_DATA_HOME):
   --resume <id>       продовжити сесію <id>
   --function <назва>  використати Function <назва>
   -h, --help          показати цю довідку
+
+Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml):
+  init                зареєструвати поточний каталог як проєкт зараз; інакше
+                      каталог реєструється при першому записі
 
 Сервер (user-unit systemd agentLIBRE-llama-server, [server] в agentLIBRE.toml):
   server start        запустити llama-server і дочекатися готовності
@@ -367,12 +377,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const UNSUPPORTED_URL: Msg = Msg {
         en: "unsupported server address `{url}` in {path}; only http:// is supported",
         uk: "непідтримувана адреса сервера `{url}` у {path}; підтримується лише http://",
-    };
-
-    /// `Error::ServerInProject`.
-    pub const SERVER_IN_PROJECT: Msg = Msg {
-        en: "{path}: a project file cannot set [server]; the server address belongs in {user_path}",
-        uk: "{path}: файл проєкту не може задавати [server]; адреса сервера задається в {user_path}",
     };
 
     /// `Error::MissingServerUrl`.
@@ -1198,6 +1202,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "створено нове сховище {dir}",
     };
 
+    /// `agentLIBRE init` in a directory that is a project already.
+    pub const INIT_REGISTERED: Msg = Msg {
+        en: "{project} is a project already: {dir}",
+        uk: "{project} вже є проєктом: {dir}",
+    };
+
     /// The marker was written when the workspace store was materialized.
     pub const FORGE_MARKER_WRITTEN: Msg = Msg {
         en: "created the workspace store {path}",
@@ -1451,14 +1461,6 @@ impl Error {
             }
             Error::UnsupportedUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
-            }
-            Error::ServerInProject { path, user_path } => {
-                tr!(
-                    lang,
-                    m::SERVER_IN_PROJECT,
-                    path = path.display(),
-                    user_path = user_path.display()
-                )
             }
             Error::MissingServerUrl { user_path } => {
                 tr!(lang, m::MISSING_SERVER_URL, user_path = user_path.display())

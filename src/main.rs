@@ -39,7 +39,7 @@ use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
-use settings::{ProjectFile, ReplSettings, Settings, UserFile};
+use settings::{ReplSettings, Settings, UserFile};
 use theme::Theme;
 
 /// Everything a session needs.
@@ -105,6 +105,11 @@ fn run(
                 *lang,
             );
         }
+        Command::Init => {
+            let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            return cli::init::run(&user, &paths, &cwd, *lang);
+        }
         // The forge surface parses its own arguments (AGL-007); it runs
         // after the settings load, so `[forge]` and `language` apply.
         Command::Forge(args) => {
@@ -116,9 +121,13 @@ fn run(
     let (paths, user) = loaded?;
     let user_path = paths.settings_file();
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-    let project = settings::find_project(&cwd, &user_path)
-        .map(|path| ProjectFile::load(&path, &user_path))
-        .transpose()?;
+    // The project settings come from the store of the project (AGL-010).
+    let project = cli::forge::project_of(
+        &paths,
+        &cwd,
+        user.forge.auto_rehome.unwrap_or(true),
+        *lang,
+    )?;
     if args.resume.is_some() && args.function.is_some() {
         return Err(Error::FunctionWithResume);
     }
@@ -132,7 +141,7 @@ fn run(
     let settings = Settings::resolve(
         &user,
         &user_path,
-        project.as_ref(),
+        project.function.as_deref(),
         function.or(args.function.as_deref()),
     )?;
     let function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;

@@ -84,10 +84,6 @@ impl Section {
         format!("{}{key}", self.prefix)
     }
 
-    pub fn contains(&self, key: &str) -> bool {
-        self.table.contains_key(key)
-    }
-
     /// Rejects a key outside `allowed`.
     pub fn check_keys(&self, allowed: &'static [&'static str]) -> Result<(), Error> {
         match self

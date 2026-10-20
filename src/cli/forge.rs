@@ -136,10 +136,35 @@ fn resolve_workspace(
     Ok(ws)
 }
 
+/// The project of `cwd` for a run of the agent (AGL-010), by the rule
+/// of the forge. The notification lines go to stderr: stdout carries
+/// the answer of `-p`. A project not registered yet says nothing, it
+/// is registered at its first write.
+pub fn project_of(
+    paths: &Paths,
+    cwd: &Path,
+    auto_rehome: bool,
+    lang: Lang,
+) -> Result<Workspace, Error> {
+    let (ws, lines) = forge::resolve(
+        &paths.data,
+        cwd,
+        lang,
+        auto_rehome,
+        &|options| ask_store(m::FORGE_ASK_STORE, options, lang),
+    )?;
+    if ws.dir.is_dir() {
+        for line in lines {
+            eprintln!("{line}");
+        }
+    }
+    Ok(ws)
+}
+
 /// The store ask: the names of the stores plus a new store. On a
 /// terminal the human picks one; off a terminal the error points at
 /// `forge rehome`.
-fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, Error> {
+pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, Error> {
     let stores = options[..options.len() - 1].to_vec();
     if !crate::repl::term::is_interactive() {
         return Err(Error::RehomeNoStore { stores });
@@ -175,6 +200,9 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
         "{:<24} {:<10} {:<8} {:<10} {}",
         "NAME", "TYPE", "STATUS", "UPDATED", "FLAG"
     );
+    // The git flags read the project directory when it is a git
+    // repository (AGL-010); the cell is blank otherwise.
+    let in_repository = forge::in_repository(&ws.project);
     for path in forge::artifact_files(&ws.dir)? {
         let stem = path
             .file_stem()
@@ -182,8 +210,8 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
             .unwrap_or_default();
         match forge::read_header(&path)? {
             Header::Artifact(artifact) => {
-                let flag = if artifact.type_name == task_spec::TYPE {
-                    git_flag_cell(&artifact, &ws.toplevel)?
+                let flag = if in_repository && artifact.type_name == task_spec::TYPE {
+                    git_flag_cell(&artifact, &ws.project)?
                 } else {
                     String::new()
                 };
@@ -212,11 +240,11 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
 /// The git flag cell of the table for a task-spec: blank when `last`
 /// is empty, `ok`, `lags` or `broken` (a range that cannot be
 /// verified is broken too).
-fn git_flag_cell(artifact: &Artifact, toplevel: &Path) -> Result<String, Error> {
+fn git_flag_cell(artifact: &Artifact, project: &Path) -> Result<String, Error> {
     let spec = task_spec::take(artifact)?;
     let status = Status::parse(&artifact.status)
         .ok_or_else(|| Error::BadState { state: artifact.status.clone() })?;
-    match task_spec::git_flag(&spec, status, toplevel) {
+    match task_spec::git_flag(&spec, status, project) {
         Ok(None) => Ok(String::new()),
         Ok(Some(GitFlag::Ok)) => Ok("ok".into()),
         Ok(Some(GitFlag::Lags)) => Ok("lags".into()),
@@ -351,9 +379,11 @@ fn status(
 /// `forge check <name>`: the structural checks (the name matches the
 /// file, the range, the `deps` and `supersedes` resolve), then the
 /// `[verification]` cmds via `sh -c` in the cwd, streamed, the first
-/// failing command stops the run. On a pass of an `open`/`in-progress`
-/// spec that lags (or has no `last` yet), `last` = HEAD and `updated`
-/// are recorded. Silent on success; the failures are lines.
+/// failing command stops the run. The git checks and `last` read the
+/// project directory and are skipped when it is not in a git
+/// repository. On a pass of an `open`/`in-progress` spec that lags (or
+/// has no `last` yet), `last` = HEAD and `updated` are recorded.
+/// Silent on success; the failures are lines.
 fn check(
     paths: &Paths,
     ws: &Workspace,
@@ -377,7 +407,11 @@ fn check(
             file = stem
         ));
     }
-    if artifact.type_name == task_spec::TYPE {
+    // The git checks read the project directory when it is a git
+    // repository (AGL-010).
+    let project = ws.project.as_path();
+    let in_repository = forge::in_repository(project);
+    if in_repository && artifact.type_name == task_spec::TYPE {
         // The range: the set ids resolve, the anchor is an ancestor of
         // the last.
         let spec = task_spec::take(&artifact).unwrap_or_else(|error| {
@@ -387,30 +421,30 @@ fn check(
                 last: String::new(),
             }
         });
-        if !spec.anchor.is_empty() && !id_resolves(cwd, &spec.anchor) {
+        if !spec.anchor.is_empty() && !id_resolves(project, &spec.anchor) {
             failures.push(tr!(
                 lang,
                 m::COMMIT_NOT_FOUND,
                 id = spec.anchor.as_str(),
-                repo = cwd.display()
+                repo = project.display()
             ));
         }
-        if !spec.last.is_empty() && !id_resolves(cwd, &spec.last) {
+        if !spec.last.is_empty() && !id_resolves(project, &spec.last) {
             failures.push(tr!(
                 lang,
                 m::COMMIT_NOT_FOUND,
                 id = spec.last.as_str(),
-                repo = cwd.display()
+                repo = project.display()
             ));
         }
         if !spec.anchor.is_empty()
             && !spec.last.is_empty()
-            && id_resolves(cwd, &spec.anchor)
-            && id_resolves(cwd, &spec.last)
+            && id_resolves(project, &spec.anchor)
+            && id_resolves(project, &spec.last)
         {
             let status =
                 Status::parse(&artifact.status).unwrap_or(Status::Open);
-            if let Ok(Some(GitFlag::Broken)) = task_spec::git_flag(&spec, status, cwd) {
+            if let Ok(Some(GitFlag::Broken)) = task_spec::git_flag(&spec, status, project) {
                 failures.push(tr!(
                     lang,
                     m::BROKEN_RANGE,
@@ -448,12 +482,13 @@ fn check(
     // A pass of an `open`/`in-progress` spec records a fresh `last` =
     // HEAD when the header lags or `last` is empty, and bumps
     // `updated`.
-    if artifact.type_name == task_spec::TYPE
+    if in_repository
+        && artifact.type_name == task_spec::TYPE
         && let Ok(spec) = task_spec::take(&artifact)
         && let Some(status) = Status::parse(&artifact.status)
         && matches!(status, Status::Open | Status::InProgress)
     {
-        let head = forge::git(cwd, &["rev-parse", "HEAD"])?;
+        let head = forge::git(project, &["rev-parse", "HEAD"])?;
         if spec.last.is_empty() || spec.last != head {
             let mut spec = spec;
             spec.last = head;
@@ -1008,6 +1043,63 @@ mod tests {
             forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap(),
             ExitCode::FAILURE
         );
+    }
+
+    #[test]
+    fn a_subdirectory_finds_the_project_and_git_is_optional() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        // A project that is not a git repository, with a subdirectory.
+        let project = dir.0.join("plain");
+        let sub = project.join("src/deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        forge(&data, &project, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let stores: Vec<_> = std::fs::read_dir(&data).unwrap().flatten().collect();
+        assert_eq!(stores.len(), 1);
+        let file = stores[0].path().join("forge/task-spec/agl-001-first-task.md");
+        // From below, the same store: a show finds the spec, a second
+        // new is numbered after it, no store is made for the subdirectory.
+        assert_eq!(
+            forge(&data, &sub, &["show", "agl-001-first-task"]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        forge(&data, &sub, &["new", "task-spec", "--title", "Second"]).unwrap();
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
+        assert!(stores[0].path().join("forge/task-spec/agl-002-second.md").is_file());
+        // Without git the range is not checked and `last` is not
+        // recorded: a made-up `last` passes and stays.
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, text.replace("last = \"\"", "last = \"deadbeef\"")).unwrap();
+        assert_eq!(
+            forge(&data, &sub, &["check", "agl-001-first-task"]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert!(std::fs::read_to_string(&file).unwrap().contains("last = \"deadbeef\""));
+        assert_eq!(forge(&data, &sub, &["list"]).unwrap(), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn a_project_inside_a_repository_reads_git_from_its_directory() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        // The cwd is a subdirectory of the repository: it is the
+        // project, and `check` records HEAD of the repository.
+        let sub = repo.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        forge(&data, &sub, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let identity = forge::identity_of(&std::fs::canonicalize(&sub).unwrap());
+        let file = data
+            .join(format!("src-{}", &identity["sha256:".len()..19]))
+            .join("forge/task-spec/agl-001-first-task.md");
+        assert_eq!(
+            forge(&data, &sub, &["check", "agl-001-first-task"]).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let head = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains(&format!("last = \"{head}\"")));
     }
 
     #[test]

@@ -54,8 +54,6 @@ pub enum Error {
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `[server] url` is not an `http://` URL (D52).
     UnsupportedUrl { path: PathBuf, url: String },
-    /// A project file sets `[server]` (D57).
-    ServerInProject { path: PathBuf, user_path: PathBuf },
     /// No `[server] url` in the user file (D59).
     MissingServerUrl { user_path: PathBuf },
     /// A format or Function name that cannot name a file.
@@ -312,9 +310,6 @@ impl std::fmt::Display for Error {
                 }
                 Error::UnsupportedUrl { path, url } => {
                     format!("unsupported server address `{url}` in {}", path.display())
-                }
-                Error::ServerInProject { path, .. } => {
-                    format!("{}: a project file cannot set [server]", path.display())
                 }
                 Error::MissingServerUrl { .. } => "the llama-server address is not set".into(),
                 Error::InvalidName(name) => format!("invalid name `{name}`"),
