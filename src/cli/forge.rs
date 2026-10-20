@@ -573,10 +573,17 @@ fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> 
 /// `git log --oneline` in the store, streamed.
 fn log(paths: &Paths, ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
     let artifact = find_artifact(paths, ws, name)?;
-    let mut args = vec!["log".to_string(), "--oneline".to_string()];
-    args.push("--".to_string());
-    args.push(file_of(&artifact, &ws.dir));
-    git_scoped(&ws.dir, &args)
+    git_scoped(&ws.dir, &log_args(&artifact, &ws.dir))
+}
+
+/// The arguments of `git` for `forge log`: the file's own history.
+fn log_args(artifact: &Artifact, dir: &Path) -> Vec<String> {
+    vec![
+        "log".to_string(),
+        "--oneline".to_string(),
+        "--".to_string(),
+        file_of(artifact, dir),
+    ]
 }
 
 /// `forge diff <name> [commit]` (AGL-008): the diff of the
@@ -588,13 +595,20 @@ fn diff(
     commit: Option<&str>,
 ) -> Result<ExitCode, Error> {
     let artifact = find_artifact(paths, ws, name)?;
+    git_scoped(&ws.dir, &diff_args(&artifact, &ws.dir, commit))
+}
+
+/// The arguments of `git` for `forge diff`: the file's own diff. A
+/// `commit` that starts with `-` is a revision for git, not an option.
+fn diff_args(artifact: &Artifact, dir: &Path, commit: Option<&str>) -> Vec<String> {
     let mut args = vec!["diff".to_string()];
     if let Some(commit) = commit {
+        args.push("--end-of-options".to_string());
         args.push(commit.to_string());
     }
     args.push("--".to_string());
-    args.push(file_of(&artifact, &ws.dir));
-    git_scoped(&ws.dir, &args)
+    args.push(file_of(artifact, dir));
+    args
 }
 
 /// The artifact's file as the git pathspec in the store: relative to
@@ -1178,6 +1192,67 @@ mod tests {
             forge(&data, &repo, &["diff", "agl-001-first-task", "nope"]),
             Err(Error::GitFailed { .. })
         ));
+    }
+
+    #[test]
+    fn log_and_diff_arguments_are_scoped_to_the_artifact() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, file) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        forge(&data, &repo, &["new", "task-spec", "--title", "Second Task"]).unwrap();
+        let store = data.join(&key);
+        git_in(&store, &["init", "-q"]);
+        git_in(&store, &["config", "user.email", "test@example.com"]);
+        git_in(&store, &["config", "user.name", "Test"]);
+        git_in(&store, &["add", "-A"]);
+        git_in(&store, &["commit", "-q", "-m", "record the specs"]);
+        let second_file = store.join("forge/task-spec/agl-002-second-task.md");
+        let mut second = forge::load_artifact(&second_file).unwrap();
+        second.body.push_str("- second bullet\n");
+        forge::write_artifact(&second).unwrap();
+        git_in(&store, &["commit", "-q", "-am", "touch only the second"]);
+        let mut first = forge::load_artifact(&file).unwrap();
+        first.body.push_str("- first bullet\n");
+        forge::write_artifact(&first).unwrap();
+        let mut second = forge::load_artifact(&second_file).unwrap();
+        second.body.push_str("- later second bullet\n");
+        forge::write_artifact(&second).unwrap();
+        let spec = "forge/task-spec/agl-001-first-task.md";
+        let first = forge::load_artifact(&file).unwrap();
+        // The arguments carry the file's pathspec after `--` ...
+        assert_eq!(
+            log_args(&first, &store),
+            ["log", "--oneline", "--", spec]
+        );
+        assert_eq!(
+            diff_args(&first, &store, None),
+            ["diff", "--", spec]
+        );
+        // ... so git shows this artifact's history and changes only.
+        let log = forge::git(&store, &log_args(&first, &store)[..]
+            .iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+        assert!(log.contains("record the specs"), "{log}");
+        assert!(!log.contains("touch only the second"), "{log}");
+        let args = diff_args(&first, &store, None);
+        let diff = forge::git(&store, &args.iter().map(String::as_str).collect::<Vec<_>>())
+            .unwrap();
+        assert!(diff.contains("- first bullet"), "{diff}");
+        assert!(!diff.contains("second bullet"), "{diff}");
+        // A commit that looks like an option is a revision: git refuses
+        // it as one and writes nothing.
+        let sneaky = dir.0.join("sneaky");
+        let option = format!("--output={}", sneaky.display());
+        assert_eq!(
+            diff_args(&first, &store, Some(&option)),
+            ["diff", "--end-of-options", option.as_str(), "--", spec]
+        );
+        assert!(matches!(
+            forge(&data, &repo, &["diff", "agl-001-first-task", &option]),
+            Err(Error::GitFailed { .. })
+        ));
+        assert!(!sneaky.exists());
     }
 
     #[test]
