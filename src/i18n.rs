@@ -1180,8 +1180,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The unique same-named store was adopted for a new location.
     pub const FORGE_ADOPTED: Msg = Msg {
-        en: "adopted the store {old} as {new} ([forge] auto-rehome = false asks instead)",
-        uk: "усиновлено сховище {old} як {new} ([forge] auto-rehome = false запитує натомість)",
+        en: "adopted the store {old} as {new} ([forge] auto_rehome = false asks instead)",
+        uk: "усиновлено сховище {old} як {new} ([forge] auto_rehome = false запитує натомість)",
     };
 
     /// A fresh store was created for a new location; the others are named.
