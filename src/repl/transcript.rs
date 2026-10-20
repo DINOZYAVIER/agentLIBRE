@@ -2,6 +2,7 @@
 //! text restyled as Markdown, tool cards, answers and stops (D123-D127,
 //! D138). Drawing goes through [`Screen`].
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,9 @@ pub trait Screen: Send + Sync {
     fn activity(&self, activity: Activity);
     /// The tokens of the last prompt (D152).
     fn context(&self, _used: usize) {}
+    /// The decoding speed of the current generation, in tokens per
+    /// second (AGL-012); none when there is no figure to show.
+    fn speed(&self, _speed: Option<f64>) {}
 }
 
 /// The streamed text of one action.
@@ -47,6 +51,14 @@ struct Streamed {
     /// Lines printed so far.
     lines: usize,
     columns: usize,
+}
+
+/// A generation being decoded: its pieces for the live speed (AGL-012).
+struct Generation {
+    /// The times of its recent pieces, within the live window.
+    window: VecDeque<Instant>,
+    /// When its first piece arrived.
+    started: Instant,
 }
 
 pub struct Presenter {
@@ -58,6 +70,12 @@ pub struct Presenter {
     call_started: Instant,
     thinking: Option<StreamWrap>,
     action: Option<Streamed>,
+    /// The generation being decoded, if any (AGL-012).
+    generation: Option<Generation>,
+    /// The exact tokens decoded in the turn (AGL-012).
+    turn_tokens: usize,
+    /// The decoding time of the turn, across its generations (AGL-012).
+    turn_decoding: Duration,
 }
 
 impl Presenter {
@@ -76,6 +94,9 @@ impl Presenter {
             call_started: Instant::now(),
             thinking: None,
             action: None,
+            generation: None,
+            turn_tokens: 0,
+            turn_decoding: Duration::ZERO,
         }
     }
 
@@ -87,6 +108,10 @@ impl Presenter {
     /// A user message starts a turn.
     pub fn begin_turn(&mut self) {
         self.turn_started = Instant::now();
+        self.generation = None;
+        self.turn_tokens = 0;
+        self.turn_decoding = Duration::ZERO;
+        self.screen.speed(None);
     }
 
     /// Ends open streams where they are, as after a stop or an error.
@@ -98,6 +123,7 @@ impl Presenter {
             }
             self.screen.live("");
         }
+        self.generation_done();
     }
 
     // Whole blocks, also used to show a resumed session (D126).
@@ -165,7 +191,7 @@ impl Presenter {
 
     /// The answer between rules, with the time when it is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
-        self.screen.print(&self.answer_lines(text, elapsed));
+        self.screen.print(&self.answer_lines(text, elapsed, None));
     }
 
     pub fn show_card(&self, call: &ToolCall, result: &ToolResult, elapsed: Option<Duration>) {
@@ -224,19 +250,31 @@ impl Presenter {
 
     // Lines.
 
-    fn answer_lines(&self, text: &str, elapsed: Option<Duration>) -> Vec<String> {
+    fn answer_lines(
+        &self,
+        text: &str,
+        elapsed: Option<Duration>,
+        speed: Option<f64>,
+    ) -> Vec<String> {
         let columns = self.screen.columns();
         let rule = self.theme.paint(Role::InputRule, &"─".repeat(columns));
         let mut lines = vec![String::new(), rule];
         lines.push(String::new());
         lines.extend(markdown::render(text.trim(), columns, &self.theme));
-        lines.push(self.edge(elapsed, Role::InputRule, None));
+        lines.push(self.edge(elapsed, speed, Role::InputRule, None));
         lines.push(String::new());
         lines
     }
 
-    /// A rule that carries a status and `Worked for`, when known.
-    fn edge(&self, elapsed: Option<Duration>, role: Role, status: Option<(&str, Role)>) -> String {
+    /// A rule that carries a status, a decoding speed and `Worked for`,
+    /// when known.
+    fn edge(
+        &self,
+        elapsed: Option<Duration>,
+        speed: Option<f64>,
+        role: Role,
+        status: Option<(&str, Role)>,
+    ) -> String {
         let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
         if status.is_some() || elapsed.is_some() {
             parts.push((" ".into(), role));
@@ -253,6 +291,10 @@ impl Presenter {
                     time = texts::duration(elapsed.as_secs())
                 );
                 parts.push((text, role));
+            }
+            if let Some(speed) = speed {
+                parts.push((" · ".into(), role));
+                parts.push((texts::speed(speed, self.lang), role));
             }
             parts.push((" ".into(), role));
         }
@@ -315,12 +357,40 @@ impl Presenter {
             ));
         }
         if self.settings.frame {
-            lines.push(self.edge(elapsed, Role::Rule, Some((status_text, status_role))));
+            lines.push(self.edge(elapsed, None, Role::Rule, Some((status_text, status_role))));
         }
         lines
     }
 
     // Streaming.
+
+    /// A piece of the generation being decoded: the live speed for the
+    /// dock (AGL-012).
+    fn piece(&mut self) {
+        let now = Instant::now();
+        let generation = self.generation.get_or_insert_with(|| Generation {
+            window: VecDeque::new(),
+            started: now,
+        });
+        generation.window.push_back(now);
+        trim_window(&mut generation.window, now);
+        self.screen.speed(window_speed(&generation.window));
+    }
+
+    /// The generation being decoded is done: its time goes to the turn
+    /// total and the live speed clears (AGL-012).
+    fn generation_done(&mut self) {
+        if let Some(generation) = self.generation.take() {
+            self.turn_decoding += generation.started.elapsed();
+        }
+        self.screen.speed(None);
+    }
+
+    /// The whole-turn decoding speed for the answer's rule row (AGL-012).
+    fn turn_speed(&self) -> Option<f64> {
+        let seconds = self.turn_decoding.as_secs_f64();
+        (self.turn_tokens > 0 && seconds > 0.0).then(|| self.turn_tokens as f64 / seconds)
+    }
 
     fn close_thinking(&mut self) {
         if let Some(mut wrap) = self.thinking.take() {
@@ -375,10 +445,12 @@ impl Report for Presenter {
         }
         self.screen
             .live(&self.theme.paint(Role::Muted, wrap.live()));
+        self.piece();
     }
 
     fn thinking_done(&mut self) {
         self.close_thinking();
+        self.generation_done();
     }
 
     fn action_text(&mut self, piece: &str) {
@@ -396,9 +468,11 @@ impl Report for Presenter {
             self.screen.print(&lines);
         }
         self.screen.live(streamed.wrap.live());
+        self.piece();
     }
 
     fn text(&mut self, text: &str) {
+        self.generation_done();
         let mut block = markdown::render(text.trim(), self.screen.columns(), &self.theme);
         block.push(String::new());
         self.replace_streamed(block);
@@ -406,7 +480,8 @@ impl Report for Presenter {
 
     fn answer(&mut self, text: &str) {
         self.close_thinking();
-        let block = self.answer_lines(text, Some(self.turn_started.elapsed()));
+        self.generation_done();
+        let block = self.answer_lines(text, Some(self.turn_started.elapsed()), self.turn_speed());
         self.replace_streamed(block);
         self.screen.activity(Activity::Ready);
     }
@@ -446,6 +521,36 @@ impl Report for Presenter {
     fn context_used(&mut self, tokens: usize) {
         self.screen.context(tokens);
     }
+
+    fn decoded(&mut self, tokens: usize) {
+        self.turn_tokens += tokens;
+    }
+}
+
+/// Keeps in `window` the pieces of the last second (AGL-012).
+fn trim_window(window: &mut VecDeque<Instant>, now: Instant) {
+    while window.len() > 1
+        && now
+            .duration_since(*window.front().expect("checked"))
+            .as_secs_f64()
+            > 1.0
+    {
+        window.pop_front();
+    }
+}
+
+/// The live speed of `window`: pieces per second, none while it holds
+/// fewer than two pieces or no time passed (AGL-012).
+fn window_speed(window: &VecDeque<Instant>) -> Option<f64> {
+    if window.len() < 2 {
+        return None;
+    }
+    let span = window
+        .back()
+        .expect("two or more")
+        .duration_since(*window.front().expect("two or more"))
+        .as_secs_f64();
+    (span > 0.0).then(|| window.len() as f64 / span)
 }
 
 /// `text` as wrapped lines painted with `role`.
@@ -565,6 +670,9 @@ mod tests {
         }
         fn activity(&self, activity: Activity) {
             self.ops.lock().unwrap().push(format!("{activity:?}"));
+        }
+        fn speed(&self, speed: Option<f64>) {
+            self.ops.lock().unwrap().push(format!("speed {speed:?}"));
         }
     }
 
@@ -720,6 +828,100 @@ mod tests {
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
         let ops = mock.ops.lock().unwrap().clone();
         assert!(ops.contains(&"Running(\"bash\")".to_owned()));
+    }
+
+    #[test]
+    fn the_live_speed_needs_two_pieces_apart() {
+        let t0 = Instant::now();
+        assert_eq!(window_speed(&VecDeque::new()), None);
+        let one: VecDeque<Instant> = [t0].into_iter().collect();
+        assert_eq!(window_speed(&one), None);
+        let two: VecDeque<Instant> = [t0, t0 + Duration::from_millis(500)].into_iter().collect();
+        assert!((window_speed(&two).unwrap() - 4.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_window_keeps_the_pieces_of_the_last_second() {
+        let t0 = Instant::now();
+        let mut window: VecDeque<Instant> = [
+            t0,
+            t0 + Duration::from_millis(400),
+            t0 + Duration::from_millis(1200),
+        ]
+        .into_iter()
+        .collect();
+        trim_window(&mut window, t0 + Duration::from_millis(1200));
+        assert_eq!(window.len(), 2);
+        assert_eq!(
+            window.front().copied(),
+            Some(t0 + Duration::from_millis(400))
+        );
+        let mut one: VecDeque<Instant> = [t0].into_iter().collect();
+        trim_window(&mut one, t0 + Duration::from_secs(5));
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn the_live_speed_shows_from_the_second_piece_and_clears() {
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        presenter.thinking("a");
+        assert_eq!(mock.ops.lock().unwrap().last().unwrap(), "speed None");
+        presenter.thinking("b");
+        let ops = mock.ops.lock().unwrap().clone();
+        assert!(
+            ops.iter().any(|op| op.starts_with("speed Some(")),
+            "{ops:?}"
+        );
+        presenter.thinking_done();
+        assert_eq!(mock.ops.lock().unwrap().last().unwrap(), "speed None");
+    }
+
+    #[test]
+    fn the_answer_rule_carries_the_turns_decoding_speed() {
+        let (mut presenter, mock) = presenter(true);
+        let t0 = Instant::now();
+        presenter.begin_turn();
+        presenter.thinking("hmm");
+        presenter.decoded(30);
+        presenter.thinking_done();
+        presenter.action_text("Done.");
+        presenter.decoded(20);
+        presenter.answer("Done.");
+        let measured = t0.elapsed().as_secs_f64();
+        let printed = mock.printed.lock().unwrap().clone();
+        let rule = printed
+            .iter()
+            .find(|line| line.contains("Worked for"))
+            .expect("the answer rule")
+            .clone();
+        assert!(rule.contains("tok/s"), "{rule:?}");
+        let figure: f64 = rule
+            .split('·')
+            .nth(1)
+            .expect("the speed part")
+            .split_whitespace()
+            .next()
+            .expect("the figure")
+            .parse()
+            .expect("a number");
+        // The whole turn decoded 50 tokens; the figure is at least
+        // those over everything the turn could have taken.
+        if measured > 0.0 {
+            assert!(figure >= 50.0 / measured - 1e-9);
+        }
+        // What is replayed carries no speed.
+        mock.printed.lock().unwrap().clear();
+        presenter.show_answer("old", Some(Duration::from_secs(5)));
+        let rule = mock
+            .printed
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|line| line.contains("Worked for"))
+            .expect("the replay rule")
+            .clone();
+        assert!(!rule.contains("tok/s"), "{rule:?}");
     }
 
     #[test]

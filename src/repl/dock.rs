@@ -12,7 +12,7 @@ use super::editor::{Editor, Outcome};
 use super::term::Key;
 use super::transcript::{Activity, Screen};
 use super::text::{hard_wrap, truncate, truncate_start, width};
-use crate::i18n::{Lang, m};
+use crate::i18n::{Lang, m, repl as texts};
 use crate::theme::{Role, Theme};
 use crate::tr;
 
@@ -72,6 +72,8 @@ struct State {
     /// The context size and the tokens of the last prompt (D152).
     context: usize,
     context_used: Option<usize>,
+    /// The decoding speed of the current generation (AGL-012).
+    speed: Option<f64>,
     editor: Editor,
     activity: Activity,
     queued: usize,
@@ -107,6 +109,7 @@ impl Dock {
                 workspace,
                 context: 0,
                 context_used: None,
+                speed: None,
                 editor,
                 activity: Activity::Ready,
                 queued: 0,
@@ -215,6 +218,14 @@ impl Screen for Dock {
         let mut state = self.lock();
         state.context_used = Some(used);
         state.redraw("");
+    }
+
+    fn speed(&self, speed: Option<f64>) {
+        let mut state = self.lock();
+        if state.speed != speed {
+            state.speed = speed;
+            state.redraw("");
+        }
     }
 
     fn live(&self, text: &str) {
@@ -378,6 +389,9 @@ impl State {
         };
         if self.queued > 0 {
             label.push_str(&format!(" · {}", tr!(lang, m::QUEUED, n = self.queued)));
+        }
+        if let Some(speed) = self.speed {
+            label.push_str(&format!(" · {}", texts::speed(speed, lang)));
         }
         let label = truncate(&format!(" {label} "), self.columns.saturating_sub(1));
         let fill = self.columns.saturating_sub(1 + width(&label));
@@ -569,6 +583,25 @@ mod tests {
         assert_eq!(layout.rows[2], pad("› hello", 30));
         assert_eq!(layout.rows[3], pad("  ab", 30));
         assert_eq!((layout.cursor_row, layout.cursor_column), (3, 4));
+    }
+
+    #[test]
+    fn the_separator_row_carries_the_decoding_speed() {
+        let (dock, _) = dock(40, 20);
+        dock.activity(Activity::Generating);
+        let layout = dock.lock().layout();
+        assert_eq!(layout.rows[0], format!("─ Generating {}", "─".repeat(27)));
+        drop(layout);
+        dock.speed(Some(46.3));
+        let layout = dock.lock().layout();
+        assert_eq!(
+            layout.rows[0],
+            format!("─ Generating · 46.3 tok/s {}", "─".repeat(14))
+        );
+        drop(layout);
+        dock.speed(None);
+        let layout = dock.lock().layout();
+        assert_eq!(layout.rows[0], format!("─ Generating {}", "─".repeat(27)));
     }
 
     #[test]

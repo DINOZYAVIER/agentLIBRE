@@ -268,6 +268,9 @@ impl Report for Reporter<'_> {
     fn context_used(&mut self, tokens: usize) {
         self.presenter.context_used(tokens);
     }
+    fn decoded(&mut self, tokens: usize) {
+        self.presenter.decoded(tokens);
+    }
 }
 
 /// What the main thread waits for.
@@ -495,6 +498,7 @@ mod tests {
     use super::*;
     use crate::agent::Compaction;
     use crate::function::Function;
+    use crate::settings::ReplSettings;
 
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -738,5 +742,50 @@ mod tests {
         assert!(control.lock().running);
         control.lock().quit = true;
         assert!(matches!(wait_for_next(&control), Next::Quit));
+    }
+
+    #[derive(Default)]
+    struct Lines(Arc<Mutex<Vec<String>>>);
+
+    impl Screen for Lines {
+        fn columns(&self) -> usize {
+            40
+        }
+        fn print(&self, lines: &[String]) {
+            self.0.lock().unwrap().extend_from_slice(lines);
+        }
+        fn live(&self, _text: &str) {}
+        fn erase(&self, _count: usize) -> bool {
+            true
+        }
+        fn activity(&self, _activity: transcript::Activity) {}
+    }
+
+    #[test]
+    fn the_reporter_forwards_the_decoded_tokens() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let screen: Arc<dyn Screen> = Arc::new(Lines(lines.clone()));
+        let settings = ReplSettings {
+            tool_lines: 2,
+            tool_chars: 20,
+            frame: true,
+        };
+        let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
+        presenter.begin_turn();
+        let control = Control::new(Info::default());
+        let mut reporter = Reporter {
+            presenter: &mut presenter,
+            control: &control,
+        };
+        reporter.decoded(30);
+        reporter.action_text("Done.");
+        reporter.answer("Done.");
+        assert!(
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("tok/s"))
+        );
     }
 }

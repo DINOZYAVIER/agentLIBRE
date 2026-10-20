@@ -43,6 +43,8 @@ pub trait Report {
     fn cut_off(&mut self) {}
     /// The prompt of the next step has this many tokens (D152).
     fn context_used(&mut self, _tokens: usize) {}
+    /// A generation decoded this many tokens (AGL-012).
+    fn decoded(&mut self, _tokens: usize) {}
 }
 
 /// How a turn ended.
@@ -166,6 +168,9 @@ impl Agent<'_> {
                 &mut |piece| report.thinking(piece),
             )?;
             report.thinking_done();
+            if !thinking.text.is_empty() {
+                report.decoded(self.backend.count_tokens(&thinking.text)?);
+            }
             let text = thinking.text.trim_end();
             if !text.is_empty() {
                 self.session.append(Event::Thinking(text.into()))?;
@@ -192,6 +197,9 @@ impl Agent<'_> {
                 }
             },
         )?;
+        if !generated.text.is_empty() {
+            report.decoded(self.backend.count_tokens(&generated.text)?);
+        }
         if let Some(text) = stream.finish() {
             report.action_text(&text);
         }

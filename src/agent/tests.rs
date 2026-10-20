@@ -11,6 +11,8 @@ use crate::session::Event;
 /// A backend that replays scripted generations.
 struct Script {
     outputs: RefCell<VecDeque<Generated>>,
+    /// The texts that are generations, for `count_tokens` (AGL-012).
+    generated: Vec<String>,
     prompts: RefCell<Vec<String>>,
     /// Token counts to give in turn, then `tokens`.
     counts: RefCell<VecDeque<usize>>,
@@ -37,6 +39,7 @@ impl Script {
                     })
                     .collect(),
             ),
+            generated: outputs.iter().map(|(text, _)| text.to_string()).collect(),
             prompts: RefCell::new(Vec::new()),
             counts: RefCell::new(VecDeque::new()),
             tokens: 100,
@@ -91,7 +94,11 @@ impl Backend for Script {
         Ok(generated)
     }
 
-    fn count_tokens(&self, _: &str) -> Result<usize, Error> {
+    fn count_tokens(&self, text: &str) -> Result<usize, Error> {
+        if self.generated.iter().any(|generated| generated == text) {
+            // A generation counts as its characters (AGL-012).
+            return Ok(text.chars().count());
+        }
         Ok(self.counts.borrow_mut().pop_front().unwrap_or(self.tokens))
     }
 
@@ -101,8 +108,9 @@ impl Backend for Script {
 }
 
 #[derive(Default)]
-/// The lines of the report, and the prompt sizes it was told (D152).
-struct Log(Vec<String>, Vec<usize>);
+/// The lines of the report, the prompt sizes it was told (D152) and the
+/// tokens each generation decoded (AGL-012).
+struct Log(Vec<String>, Vec<usize>, Vec<usize>);
 
 impl Report for Log {
     fn state(&mut self, state: &str) {
@@ -144,6 +152,9 @@ impl Report for Log {
     }
     fn context_used(&mut self, tokens: usize) {
         self.1.push(tokens);
+    }
+    fn decoded(&mut self, tokens: usize) {
+        self.2.push(tokens);
     }
 }
 
@@ -263,6 +274,32 @@ fn a_call_then_an_answer() {
         "[2 messages; -]<think>\nI will list files\n</think>\n\n"
     );
     assert!(prompts[2].starts_with("[4 messages; -]"));
+}
+
+#[test]
+fn every_generation_reports_its_decoded_tokens() {
+    let dir = Dir::new("decoded");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let outputs: [(&str, Stop); 4] = [
+        ("I will list files", THOUGHT),
+        (&bash_call("echo hello"), Stop::End),
+        ("Done.", THOUGHT),
+        ("It printed hello.", Stop::End),
+    ];
+    let script = Script::new(&outputs);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    agent(&default, &script, &mut session, &dir)
+        .turn("Say hello", &mut log)
+        .unwrap();
+    // A generation counts as its characters, in the order decoded.
+    assert_eq!(
+        log.2,
+        outputs
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

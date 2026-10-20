@@ -942,6 +942,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Працював {time}",
     };
 
+    /// The decoding speed (AGL-012).
+    pub const SPEED: Msg = Msg {
+        en: "{speed} tok/s",
+        uk: "{speed} ток/с",
+    };
+
     /// Ctrl-C on an empty line (D120).
     pub const INTERRUPTED_CLEARED: Msg = Msg {
         en: "interrupted; queued input cleared",
@@ -1908,6 +1914,14 @@ mod tests {
         assert_eq!(Lang::from_code("uk"), Some(Lang::Uk));
         assert_eq!(Lang::from_code("uk_UA"), None);
     }
+
+    #[test]
+    fn the_decoding_speed_is_formatted_per_language() {
+        assert_eq!(repl::speed(46.3, Lang::En), "46.3 tok/s");
+        assert_eq!(repl::speed(46.26, Lang::En), "46.3 tok/s");
+        assert_eq!(repl::speed(46.3, Lang::Uk), "46,3 ток/с");
+        assert_eq!(repl::speed(120.0, Lang::Uk), "120,0 ток/с");
+    }
 }
 
 /// Texts of `agentLIBRE server` (D146-D150).
@@ -1999,6 +2013,18 @@ pub mod repl {
             60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
             _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
         }
+    }
+
+    /// The decoding speed (AGL-012): `46.3 tok/s` in English and
+    /// `46,3 ток/с` in Ukrainian.
+    pub fn speed(tokens_per_second: f64, lang: Lang) -> String {
+        let number = format!("{tokens_per_second:.1}");
+        let number = if lang == Lang::Uk {
+            number.replace('.', ",")
+        } else {
+            number
+        };
+        tr!(lang, m::SPEED, speed = number)
     }
 
     /// The line that ends a turn that stopped (D127).
