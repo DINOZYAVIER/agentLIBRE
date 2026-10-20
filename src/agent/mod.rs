@@ -385,16 +385,29 @@ impl<'a> TextStream<'a> {
     }
 }
 
-/// The system message of a step and of a compaction (AGL-009): the
-/// Function's `system`, then the runtime's two sentences — what the
-/// runtime prefix means, and how large one action may be. Stable text,
-/// for the prompt cache (D14, D19).
+/// The system message of a step and of a compaction (AGL-009, AGL-011):
+/// the Function's `system`, then the runtime's two sentences — what the
+/// runtime prefix means, and how large one action may be — and, when the
+/// Function has the forge on, the paragraph about the forge. Stable
+/// text, in the code and in English, outside the i18n catalog (AGL-009
+/// Q1, AGL-011 Q5), for the prompt cache (D14, D19).
 fn system_prompt(function: &Function) -> String {
-    format!(
+    let mut prompt = format!(
         "{}\n\nMessages that start with {RUNTIME_PREFIX} come from the agentLIBRE runtime, \
          not from the human. One action holds at most {} tokens; write a large file in parts.",
         function.system, function.max_action_tokens
-    )
+    );
+    if function.forge {
+        prompt.push_str(
+            "\n\nThe forge is this workspace's record of decisions, plans and progress: \
+             task-spec artifacts, each with a status. Read it with the forge tool (list, \
+             show). Shape an open (draft) spec with new, edit and remove; to an in-progress \
+             spec only append bullets, under its Decisions, Open questions or Progress; a \
+             done, backlog or canceled spec is read-only. Record a decision only when the \
+             human has made it.",
+        );
+    }
+    prompt
 }
 
 /// Every tool of any state, for the stable tool list of the prompt (D14,
