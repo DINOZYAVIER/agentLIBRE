@@ -772,11 +772,20 @@ fn not_task_spec(
 fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResult {
     use crate::i18n::m;
     use crate::tr;
+    // The fields the action takes: the model that sent a wrong one
+    // learns the right ones.
+    let fields = match action {
+        "new" => "title",
+        "edit" => "name, old, new",
+        "append" => "name, section, text",
+        _ => "name",
+    };
     forge_fail(tr!(
         lang,
         m::FORGE_TOOL_MISSING_FIELD,
         action = action,
-        field = field
+        field = field,
+        fields = fields
     ))
 }
 

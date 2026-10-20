@@ -1303,8 +1303,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The forge tool: an action's field is missing.
     pub const FORGE_TOOL_MISSING_FIELD: Msg = Msg {
-        en: "forge {action}: {field} is missing",
-        uk: "forge {action}: не вказано {field}",
+        en: "forge {action}: {field} is missing; {action} takes {fields}",
+        uk: "forge {action}: не вказано {field}; {action} приймає {fields}",
     };
 
     /// The forge tool: the write is not on a `task-spec`.

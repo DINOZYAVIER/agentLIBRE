@@ -397,3 +397,24 @@ fn recorded_experiment_actions() {
         assert_eq!(cut_off, 1);
     });
 }
+
+#[test]
+fn a_tool_with_optional_parameters_is_in_the_order_the_model_reads_them() {
+    // The template shows the parameters ordered by key, and the grammar
+    // lets an optional parameter be skipped: a call in another order
+    // than the model reads loses the parameter that comes "too late".
+    for tool in builtin_tools() {
+        let names: Vec<&str> = tool.params.iter().map(|p| p.name.as_str()).collect();
+        let doc = crate::backend::TOOL_DOCS
+            .iter()
+            .find(|doc| doc.name == tool.name)
+            .expect("every tool has its doc");
+        let documented: Vec<&str> = doc.params.iter().map(|p| p.0).collect();
+        assert_eq!(names, documented, "{}", tool.name);
+        if tool.params.iter().any(|p| !p.required) {
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(names, sorted, "{}", tool.name);
+        }
+    }
+}

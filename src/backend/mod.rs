@@ -73,17 +73,49 @@ pub const TOOL_DOCS: [ToolDoc; 3] = [
     ToolDoc {
         name: "forge",
         description: "The workspace forge: the store of the recorded artifacts of this \
-                      workspace. Actions: list; show name; new title; edit name old new \
-                      (drafts only); append name section text (in-progress specs only); \
-                      remove name (drafts only).",
+                      workspace. Each action takes only its own fields: list (none); show \
+                      (name); new (title); edit (name, old, new; drafts only); append \
+                      (name, section, text; in-progress specs only); remove (name; drafts \
+                      only).",
         params: &[
-            ("action", false, None, true),
-            ("name", false, None, false),
-            ("title", false, None, false),
-            ("old", false, None, false),
-            ("new", false, None, false),
-            ("section", false, None, false),
-            ("text", false, None, false),
+            ("action", false, Some("list, show, new, edit, append or remove."), true),
+            (
+                "name",
+                false,
+                Some(
+                    "The artifact's name as `list` shows it, like agl-001-my-task; not its \
+                     title. For show, edit, append and remove.",
+                ),
+                false,
+            ),
+            (
+                "new",
+                false,
+                Some("For edit: the replacement text; empty deletes `old`."),
+                false,
+            ),
+            (
+                "old",
+                false,
+                Some("For edit: the exact text to replace in the body; it must appear once."),
+                false,
+            ),
+            (
+                "section",
+                false,
+                Some(
+                    "For append: the heading to append under, without the `## `, like \
+                     Progress. Not for edit.",
+                ),
+                false,
+            ),
+            ("text", false, Some("For append: the text of the new bullet."), false),
+            (
+                "title",
+                false,
+                Some("For new: the title of the new spec; its name is made from it."),
+                false,
+            ),
         ],
     },
 ];

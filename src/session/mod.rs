@@ -531,7 +531,7 @@ fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Val
     let order: &[&str] = match tool {
         "bash" => &["command", "timeout"],
         "edit" => &["path", "old", "new"],
-        "forge" => &["action", "name", "title", "old", "new", "section", "text"],
+        "forge" => &["action", "name", "new", "old", "section", "text", "title"],
         _ => &[],
     };
     args.sort_by_key(|(name, _)| order.iter().position(|o| o == name).unwrap_or(usize::MAX));

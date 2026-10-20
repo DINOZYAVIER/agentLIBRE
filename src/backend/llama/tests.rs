@@ -121,11 +121,16 @@ fn tool_schemas() {
         names,
         ["action", "name", "new", "old", "section", "text", "title"]
     );
-    assert!(
-        names
-            .iter()
-            .all(|name| properties[name] == json!({"type": "string"}))
-    );
+    // Every field is a string with a description that says which action
+    // it is for.
+    for name in &names {
+        assert_eq!(properties[name]["type"], "string", "{name}");
+        assert!(properties[name]["description"].is_string(), "{name}");
+    }
+    let description = |name: &str| properties[name]["description"].as_str().unwrap();
+    assert!(description("name").contains("not its title"));
+    assert!(description("new").contains("empty deletes"));
+    assert!(description("section").contains("Not for edit"));
     assert_eq!(
         forge["function"]["parameters"]["required"],
         json!(["action"])

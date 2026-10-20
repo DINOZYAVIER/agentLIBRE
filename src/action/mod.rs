@@ -72,17 +72,21 @@ pub fn builtin_tools() -> Vec<Tool> {
             params: vec![text("path"), text("old"), text("new")],
         },
         // One tool, an `action` plus the per-action fields (AGL-008);
-        // which fields an action needs is the tool's check.
+        // which fields an action needs is the tool's check. The fields
+        // are in alphabetical order: the template shows the parameters
+        // ordered by key, and the grammar lets an optional parameter be
+        // skipped, so a call in the order the model reads them (`new`
+        // before `old`) would lose the parameter that comes "too late".
         Tool {
             name: "forge".into(),
             params: vec![
                 text("action"),
                 optional("name"),
-                optional("title"),
-                optional("old"),
                 optional("new"),
+                optional("old"),
                 optional("section"),
                 optional("text"),
+                optional("title"),
             ],
         },
     ]

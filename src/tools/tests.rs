@@ -415,7 +415,7 @@ fn forge_new_is_the_engine_scaffold() {
         f.call("new", &[]),
         ToolResult {
             outcome: Outcome::Fail,
-            content: "forge new: title is missing".into()
+            content: "forge new: title is missing; new takes title".into()
         }
     );
 }
@@ -452,7 +452,7 @@ fn forge_show_is_the_rendered_artifact() {
     assert_eq!(result.outcome, Outcome::Ok);
     assert_eq!(result.content, forge::render(&artifact));
     // The name is required.
-    assert_eq!(f.call("show", &[]).content, "forge show: name is missing");
+    assert_eq!(f.call("show", &[]).content, "forge show: name is missing; show takes name");
     // A name without an artifact.
     assert_eq!(
         f.call("show", &[("name", "nope")]).content,
@@ -622,17 +622,17 @@ fn forge_edit_is_the_workspace_edit_on_the_body() {
     // The per-action fields are checked.
     assert_eq!(
         f.call("edit", &[("old", "a"), ("new", "b")]).content,
-        "forge edit: name is missing"
+        "forge edit: name is missing; edit takes name, old, new"
     );
     assert_eq!(
         f.call("edit", &[("name", "agl-001-d"), ("new", "b")])
             .content,
-        "forge edit: old is missing"
+        "forge edit: old is missing; edit takes name, old, new"
     );
     assert_eq!(
         f.call("edit", &[("name", "agl-001-d"), ("old", "a")])
             .content,
-        "forge edit: new is missing"
+        "forge edit: new is missing; edit takes name, old, new"
     );
 }
 
@@ -723,17 +723,17 @@ fn forge_append_is_a_bullet_under_the_section() {
     assert_eq!(
         f.call("append", &[("section", "Progress"), ("text", "x")])
             .content,
-        "forge append: name is missing"
+        "forge append: name is missing; append takes name, section, text"
     );
     assert_eq!(
         f.call("append", &[("name", "agl-001-p"), ("text", "x")])
             .content,
-        "forge append: section is missing"
+        "forge append: section is missing; append takes name, section, text"
     );
     assert_eq!(
         f.call("append", &[("name", "agl-001-p"), ("section", "Progress")])
             .content,
-        "forge append: text is missing"
+        "forge append: text is missing; append takes name, section, text"
     );
 }
 
@@ -777,7 +777,7 @@ fn forge_writes_are_task_spec_only_and_reads_are_generic() {
     // A missing name, on a write that has one.
     assert_eq!(
         f.call("remove", &[]).content,
-        "forge remove: name is missing"
+        "forge remove: name is missing; remove takes name"
     );
 }
 
@@ -840,7 +840,7 @@ fn forge_edit_may_delete_text() {
     assert_eq!(
         f.call("edit", &[("name", "agl-001-d"), ("old", ""), ("new", "x")])
             .content,
-        "forge edit: old is missing"
+        "forge edit: old is missing; edit takes name, old, new"
     );
 }
 
