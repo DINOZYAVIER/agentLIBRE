@@ -61,8 +61,4 @@ consequences. Keep output concise and exact.
 LLM agents may prepare patches and draft commit messages, but they are tools,
 not legal contributors.
 
-Only a human may certify the DCO with `Signed-off-by`. LLM agents must not add
-`Signed-off-by` or `Co-authored-by` for themselves, nor any other
-attribution trailer.
-
 A human must review, understand, and take responsibility for the final commit.
