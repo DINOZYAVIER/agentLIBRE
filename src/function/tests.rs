@@ -134,7 +134,12 @@ fn spec_example() {
     assert_eq!(explore.next("bash", Outcome::Ok), index("explore"));
     assert_eq!(verify.next("bash", Outcome::Ok), index("answer"));
     assert_eq!(verify.next("bash", Outcome::Fail), index("explore"));
-    assert_eq!(verify.actions.tools.len(), 1);
+    // The implicit forge (AGL-011): a tool of the tool states, keeping
+    // the state on any outcome.
+    assert_eq!(verify.actions.tools.len(), 2);
+    assert!(verify.actions.tools.iter().any(|t| t.name == "forge"));
+    assert_eq!(verify.next("forge", Outcome::Ok), index("verify"));
+    assert_eq!(verify.next("forge", Outcome::Fail), index("verify"));
     let bash = &verify.actions.tools[0];
     assert!(matches!(bash.params[0].constraint, Constraint::Pattern(_)));
     assert_eq!(
@@ -142,6 +147,88 @@ fn spec_example() {
         Constraint::Int { min: 1, max: 600 }
     );
     assert!(answer.actions.tools.is_empty());
+}
+
+#[test]
+fn the_forge_key_parses() {
+    // Off, and a non-bool is an error.
+    let off = function(
+        "format = \"qwen3.8\"\nforge = false\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
+         tools.bash = {}\nnext = { else = \"a\" }\n",
+    )
+    .unwrap();
+    assert!(!off.forge);
+    let bad = function(
+        "format = \"qwen3.8\"\nforge = \"on\"\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
+         answer = true\n",
+    );
+    assert!(bad.is_err());
+    // The default is on.
+    let on = one_state("tools.bash = {}\nnext = { else = \"a\" }").unwrap();
+    assert!(on.forge);
+}
+
+#[test]
+fn the_forge_tool_follows_the_states() {
+    // Off: nowhere.
+    let off = function(&format!("forge = false\n{CODER}")).unwrap();
+    for s in &off.states {
+        assert!(!s.actions.tools.iter().any(|t| t.name == "forge"));
+    }
+    // On (the default): every state that allows a tool allows the forge;
+    // an answer-only state stays answer-only.
+    let function = function(CODER).unwrap();
+    assert!(function.forge);
+    for name in ["explore", "verify"] {
+        assert!(
+            state(&function, name)
+                .actions
+                .tools
+                .iter()
+                .any(|t| t.name == "forge"),
+            "{name}"
+        );
+    }
+    assert!(state(&function, "answer").actions.tools.is_empty());
+}
+
+#[test]
+fn the_implicit_forge_keeps_the_state() {
+    // A `next` without `else` loads: the forge's outcomes are covered by
+    // the loop, a step in the same visit (Q2).
+    let one = one_state("tools.bash = {}\nnext = { bash = \"a\" }").unwrap();
+    let a = state(&one, "a");
+    assert_eq!(a.next("forge", Outcome::Ok), 0);
+    assert_eq!(a.next("forge", Outcome::Fail), 0);
+    // A named forge key applies like any tool's; the unnamed outcomes
+    // keep the state.
+    let two = with_states(
+        "[state.a]\ntools.bash = {}\nnext = { bash = \"a\", \"forge.ok\" = \"b\", else = \"a\" }\n\
+         [state.b]\nanswer = true\n",
+    )
+    .unwrap();
+    let a = state(&two, "a");
+    assert_eq!(a.next("forge", Outcome::Ok), 1);
+    assert_eq!(a.next("forge", Outcome::Fail), 0);
+}
+
+#[test]
+fn the_explicit_forge_tool() {
+    // With the switch off, an error that names both keys.
+    let off = function(
+        "format = \"qwen3.8\"\nforge = false\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
+         tools.forge = {}\nnext = { else = \"a\" }\n",
+    );
+    let (key, problem) = problem_of(off);
+    assert_eq!(key, "state.a.tools.forge");
+    assert!(matches!(problem, FunctionProblem::ForgeOff));
+    // With the forge on, an explicit `tools.forge` is accepted: it is
+    // the way to give forge its own transitions (Q3).
+    let function = one_state("tools.forge = {}\nnext = { forge = \"a\", else = \"a\" }").unwrap();
+    let a = state(&function, "a");
+    assert_eq!(a.actions.tools.len(), 1);
+    assert_eq!(a.actions.tools[0].name, "forge");
+    assert_eq!(a.next("forge", Outcome::Ok), 0);
 }
 
 #[test]

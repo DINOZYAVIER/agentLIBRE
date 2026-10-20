@@ -232,6 +232,8 @@ pub enum FunctionProblem {
     Unreachable,
     /// `think = true` with a format without thinking (D78).
     NoThinking { format: String },
+    /// `tools.forge` with the forge switch off (AGL-011, Q3).
+    ForgeOff,
     /// The pattern is not in the supported subset (D69, D75).
     Pattern(PatternError),
     /// The pattern may produce `end`, which ends values (D72).

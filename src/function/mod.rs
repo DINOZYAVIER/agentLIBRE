@@ -37,6 +37,8 @@ const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can
 pub struct Function {
     pub format: Format,
     pub system: String,
+    /// The forge tool and its sentence, on by default (AGL-011).
+    pub forge: bool,
     pub preserve_thinking: bool,
     pub max_steps_total: u32,
     pub max_think_tokens: u32,
@@ -128,6 +130,7 @@ impl Function {
         file.check_keys(&[
             "format",
             "system",
+            "forge",
             "preserve_thinking",
             "max_steps_total",
             "max_think_tokens",
@@ -141,6 +144,7 @@ impl Function {
         let format_name = file.required_string("format")?;
         let format = Format::load(formats_dir, &format_name)?;
         let system = file.required_string("system")?;
+        let forge = file.bool("forge")?.unwrap_or(true);
         let preserve_thinking = file.bool("preserve_thinking")?.unwrap_or(true);
         let max_steps_total =
             positive(&mut file, "max_steps_total")?.unwrap_or(DEFAULT_MAX_STEPS_TOTAL);
@@ -171,16 +175,19 @@ impl Function {
         let context = Context {
             format: &format,
             format_name: &format_name,
+            forge,
             index: &index,
         };
         let states = sections
             .iter_mut()
-            .map(|(name, section)| read_state(name, section, &context))
+            .enumerate()
+            .map(|(i, (name, section))| read_state(name, section, &context, i))
             .collect::<Result<Vec<_>, _>>()?;
         check_graph(path, &states, initial)?;
         Ok(Function {
             format,
             system,
+            forge,
             preserve_thinking,
             max_steps_total,
             max_think_tokens,
@@ -198,8 +205,18 @@ impl Function {
 struct Context<'a> {
     format: &'a Format,
     format_name: &'a str,
+    /// The forge switch of the Function (AGL-011).
+    forge: bool,
     /// Resolves a state name read at `key` of a section.
     index: &'a dyn Fn(&Section, &str, &str) -> Result<usize, Error>,
+}
+
+/// The built-in forge tool with unconstrained parameters (AGL-011).
+fn builtin_forge() -> Tool {
+    action::builtin_tools()
+        .into_iter()
+        .find(|tool| tool.name == "forge")
+        .expect("the built-in forge tool")
 }
 
 fn problem(section: &Section, key: &str, problem: FunctionProblem) -> Error {
@@ -238,7 +255,12 @@ fn read_sampling(mut section: Section) -> Result<Sampling, Error> {
     })
 }
 
-fn read_state(name: &str, section: &mut Section, context: &Context) -> Result<State, Error> {
+fn read_state(
+    name: &str,
+    section: &mut Section,
+    context: &Context,
+    index: usize,
+) -> Result<State, Error> {
     section.check_keys(&[
         "instruction",
         "tools",
@@ -250,10 +272,21 @@ fn read_state(name: &str, section: &mut Section, context: &Context) -> Result<St
         "next",
     ])?;
     let instruction = section.string("instruction")?;
-    let tools = match section.section("tools")? {
+    let mut tools = match section.section("tools")? {
         None => Vec::new(),
         Some(tools) => read_tools(tools, context.format)?,
     };
+    let mut forge_tool = tools.iter().any(|tool| tool.name == "forge");
+    if forge_tool && !context.forge {
+        // An explicit `tools.forge` with the switch off (AGL-011, Q3).
+        return Err(problem(section, "tools.forge", FunctionProblem::ForgeOff));
+    }
+    if context.forge && !forge_tool && !tools.is_empty() {
+        // The runtime's tool: every state that allows a tool allows the
+        // forge too (AGL-011, Q1); an answer-only state stays answer-only.
+        tools.push(builtin_forge());
+        forge_tool = true;
+    }
     let answer = section.bool("answer")?.unwrap_or(false);
     let think = match section.bool("think")? {
         None => context.format.think.is_some(),
@@ -317,6 +350,15 @@ fn read_state(name: &str, section: &mut Section, context: &Context) -> Result<St
             }
             transitions.push((tool.to_owned(), outcome, target));
         }
+    }
+    // The forge keeps the state unless `next` says otherwise: a step in
+    // the same visit, the fallback for its outcomes (AGL-011, Q2).
+    if forge_tool
+        && !transitions
+            .iter()
+            .any(|(tool, outcome, _)| tool == "forge" && outcome.is_none())
+    {
+        transitions.push(("forge".into(), None, index));
     }
     // Every tool and outcome needs a transition (D21).
     for tool in &tools {
