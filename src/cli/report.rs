@@ -108,6 +108,12 @@ pub fn call_summary(call: &ToolCall) -> String {
         let summary = format!("{}: {}", text("source"), text("query"));
         return summary.chars().take(COMMAND_WIDTH).collect();
     }
+    if call.name == "memory" {
+        // The action and what it is about: the title of an add, else the name.
+        let about = [text("title"), text("name")].into_iter().find(|t| !t.is_empty());
+        let summary = format!("{} {}", text("action"), about.unwrap_or_default());
+        return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
+    }
     if call.name != "bash" {
         return text("path").to_owned();
     }
@@ -236,5 +242,22 @@ mod search_tests {
         // A failure says why.
         let fail = ToolResult { outcome: Outcome::Fail, content: "The search timed out.".into() };
         assert_eq!(result_summary(&call(&[]), &fail, Lang::En), "fail: The search timed out.");
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn a_memory_call_shows_the_action_and_what_it_is_about() {
+        let call = |args: &[(&str, &str)]| ToolCall {
+            id: "c".into(),
+            name: "memory".into(),
+            args: args.iter().map(|(n, v)| (n.to_string(), Value::Text(v.to_string()))).collect(),
+        };
+        assert_eq!(call_summary(&call(&[("action", "add"), ("title", "Build"), ("text", "x")])), "add Build");
+        assert_eq!(call_summary(&call(&[("action", "show"), ("name", "build")])), "show build");
+        assert_eq!(call_summary(&call(&[("action", "show")])), "show");
     }
 }

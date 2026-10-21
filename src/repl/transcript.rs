@@ -629,6 +629,9 @@ fn call_input(call: &ToolCall) -> String {
     if call.name == "search" {
         return search_input(call);
     }
+    if call.name == "memory" {
+        return crate::cli::report::call_summary(call);
+    }
     text("command").to_owned()
 }
 
