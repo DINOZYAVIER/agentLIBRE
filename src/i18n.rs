@@ -989,6 +989,23 @@ Forge (сховище артефактів робочої області, agentL
         uk: "у буфері обміну нема чого вставити (для зображення потрібен wl-paste)",
     };
 
+    pub const CMD_REMEMBER: Msg = Msg {
+        en: "keep a note in the workspace memory: <name> | <text>",
+        uk: "зберегти нотатку в пам'яті робочої області: <назва> | <текст>",
+    };
+
+    /// `/remember` without a text, or with an empty name or text.
+    pub const REMEMBER_USAGE: Msg = Msg {
+        en: "usage: /remember <name> | <text> (the entry is written at once), or /remember <text> (the model names it)",
+        uk: "використання: /remember <назва> | <текст> (запис одразу), або /remember <текст> (назву дає модель)",
+    };
+
+    /// A `/remember` that could not write the entry.
+    pub const REMEMBER_FAILED: Msg = Msg {
+        en: "not remembered: {reason}",
+        uk: "не збережено: {reason}",
+    };
+
     pub const CMD_THINK: Msg = Msg {
         en: "the reasoning level: off, low, medium or xhigh",
         uk: "рівень міркувань: off, low, medium або xhigh",
@@ -2242,6 +2259,7 @@ pub mod repl {
             "/status" => tr!(lang, m::CMD_STATUS),
             "/think" => tr!(lang, m::CMD_THINK),
             "/attach" => tr!(lang, m::CMD_ATTACH),
+            "/remember" => tr!(lang, m::CMD_REMEMBER),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             _ => "",

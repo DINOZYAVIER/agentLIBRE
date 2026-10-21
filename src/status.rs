@@ -13,9 +13,44 @@ use crate::theme::Role;
 use crate::tr;
 
 /// The `/` commands (D118, D139, AGL-013).
-pub const COMMANDS: [&str; 8] = [
-    "/quit", "/exit", "/help", "/status", "/think", "/attach", "/new", "/compact",
+pub const COMMANDS: [&str; 9] = [
+    "/quit", "/exit", "/help", "/status", "/think", "/attach", "/remember", "/new", "/compact",
 ];
+
+/// What `/remember` asked for (AGL-006, M34, M37).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Remember {
+    /// Nothing after the command.
+    Usage,
+    /// `/remember name | text`: the program writes the entry itself.
+    Entry { name: String, text: String },
+    /// `/remember text`: an ordinary turn with this message; the model
+    /// names the entry.
+    Turn(String),
+}
+
+/// Reads what follows `/remember`: with a `|` the name is before it and
+/// the text after (M37); an empty name or text is the usage.
+pub fn parse_remember(rest: &str) -> Remember {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Remember::Usage;
+    }
+    match rest.split_once('|') {
+        None => Remember::Turn(format!("remember: {rest}")),
+        Some((name, text)) => {
+            let (name, text) = (name.trim(), text.trim());
+            if name.is_empty() || text.is_empty() {
+                Remember::Usage
+            } else {
+                Remember::Entry {
+                    name: name.to_owned(),
+                    text: text.to_owned(),
+                }
+            }
+        }
+    }
+}
 
 /// What `/status` tells besides the session (D134).
 #[derive(Clone)]
@@ -122,6 +157,35 @@ pub fn compact_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remember_reads_a_name_before_the_bar_and_a_text_after_it() {
+        assert_eq!(parse_remember(""), Remember::Usage);
+        assert_eq!(parse_remember("  "), Remember::Usage);
+        assert_eq!(
+            parse_remember(" Build and test | cargo build / cargo test "),
+            Remember::Entry {
+                name: "Build and test".into(),
+                text: "cargo build / cargo test".into(),
+            }
+        );
+        // Only the first bar divides; the text may hold more.
+        assert_eq!(
+            parse_remember("Pipes | a | b"),
+            Remember::Entry {
+                name: "Pipes".into(),
+                text: "a | b".into(),
+            }
+        );
+        // No name or no text: the usage.
+        assert_eq!(parse_remember("| text"), Remember::Usage);
+        assert_eq!(parse_remember("name |"), Remember::Usage);
+        // No bar: an ordinary turn, the model names the entry (M37).
+        assert_eq!(
+            parse_remember("cargo build / cargo test"),
+            Remember::Turn("remember: cargo build / cargo test".into())
+        );
+    }
 
     fn facts() -> Facts {
         Facts {

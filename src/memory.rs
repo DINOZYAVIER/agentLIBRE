@@ -260,6 +260,27 @@ pub fn add(dir: &Path, title: &str, hook: &str, text: &str) -> (ToolResult, Opti
     )
 }
 
+/// The most of the text that goes into the index line of `/remember` (M37:
+/// the hook is the text).
+const HOOK_LIMIT: usize = 120;
+
+/// The index hook of a `/remember` text: the text on one line, cut with
+/// `…` when long.
+pub fn hook_of(text: &str) -> String {
+    let line = one_line(text);
+    if line.chars().count() <= HOOK_LIMIT {
+        return line;
+    }
+    let cut: String = line.chars().take(HOOK_LIMIT - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// `/remember name | text` (M34, M37): the program writes the entry,
+/// its index hook being the text.
+pub fn remember(dir: &Path, name: &str, text: &str) -> (ToolResult, Option<Write>) {
+    add(dir, name, &hook_of(text), text)
+}
+
 /// `show name` (M32): the entry's full text, the end kept when it is long.
 pub fn show(dir: &Path, name: &str) -> ToolResult {
     let missing = || ToolResult {
@@ -575,6 +596,28 @@ mod tests {
         assert!(cut.ends_with("— xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
         assert!(cut.contains("Entry 199"));
         assert!(!cut.contains("Entry 0]"));
+    }
+
+    #[test]
+    fn remember_writes_an_entry_whose_hook_is_the_text() {
+        let dir = Dir::new("remember");
+        let (result, write) = remember(&dir.0, "Build and test", "cargo build / cargo test");
+        assert_eq!(result.outcome, Outcome::Ok);
+        assert_eq!(write.unwrap().name, "build-and-test");
+        assert_eq!(
+            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
+            "- [Build and test](build-and-test.md) — cargo build / cargo test\n"
+        );
+        // A long text is cut in the index and whole in the entry.
+        let long = "word ".repeat(100);
+        remember(&dir.0, "Long one", &long);
+        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        let line = index.lines().last().unwrap();
+        assert!(line.ends_with('…'));
+        assert!(line.chars().count() < 160);
+        assert!(show(&dir.0, "long-one").content.contains(long.trim_end()));
+        assert_eq!(hook_of("a\nb  c"), "a b c");
+        assert_eq!(remember(&dir.0, "", "t").0.outcome, Outcome::Fail);
     }
 
     #[test]
