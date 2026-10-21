@@ -6,10 +6,12 @@
 use std::path::Path;
 
 use crate::action::{self, Action, ParseError};
+use crate::attach::Transcriber;
 use crate::backend::{
     Backend, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
     ToolDoc,
 };
+use crate::action::{Outcome, Value};
 use crate::error::Error;
 use crate::function::Function;
 use crate::interrupt;
@@ -85,6 +87,9 @@ pub struct Agent<'a> {
     /// The most tokens one picture takes: what the context check counts
     /// for every image and frame (AGL-014, D10).
     pub image_tokens: usize,
+    /// Turns an audio the `view` tool opens into text when the model does
+    /// not hear it (AGL-014, D22, D24).
+    pub whisper: &'a dyn Transcriber,
 }
 
 impl Agent<'_> {
@@ -269,8 +274,11 @@ impl Agent<'_> {
                     report.text(text);
                 }
                 report.call(&call);
-                let (result, write) =
-                    tools::run(self.workspace, self.forge, &call.name, &call.args);
+                let (result, write) = if call.name == "view" {
+                    (self.view(&call.args), None)
+                } else {
+                    tools::run(self.workspace, self.forge, &call.name, &call.args)
+                };
                 self.session.append(Event::Result {
                     id: call.id.clone(),
                     outcome: result.outcome,
@@ -298,6 +306,57 @@ impl Agent<'_> {
                     Progress::StepLimit => self.stop(StopReason::StepLimit),
                 }
             }
+        }
+    }
+
+    /// The `view` tool (AGL-014, D24): keeps the file as a medium of the
+    /// session, as `/attach` does, and answers with its placeholder, which
+    /// becomes the marker, the frames or the transcript at the next step.
+    fn view(&mut self, args: &[(String, Value)]) -> ToolResult {
+        let fail = |content: String| ToolResult {
+            outcome: Outcome::Fail,
+            content,
+        };
+        let Some(path) = args.iter().find_map(|(name, value)| match value {
+            Value::Text(text) if name == "path" => Some(text.as_str()),
+            _ => None,
+        }) else {
+            return fail("view needs a path.".into());
+        };
+        let path = self.workspace.join(path);
+        let source = match media::Source::from_file(&path) {
+            Ok(source) => source,
+            Err(Error::MediaKind { .. }) => {
+                return fail(format!(
+                    "{} is not an image, a video or an audio.",
+                    path.display()
+                ));
+            }
+            Err(error) => return fail(error.message(crate::i18n::Lang::En)),
+        };
+        // The picture needs the projector; ask before the file is kept.
+        if source.kind != media::Kind::Audio && self.backend.media_marker().is_err() {
+            return fail("The server has no multimodal projector, so it cannot take images.".into());
+        }
+        let transcript = if source.kind == media::Kind::Audio {
+            match self.backend.hears_audio() {
+                Ok(true) => None,
+                Ok(false) => match self.whisper.transcribe(&source, &mut |_| {}) {
+                    Ok(text) => Some(text),
+                    Err(error) => return fail(error.message(crate::i18n::Lang::En)),
+                },
+                Err(error) => return fail(error.message(crate::i18n::Lang::En)),
+            }
+        } else {
+            None
+        };
+        let number = self.session.next_media_number(source.kind);
+        match self.session.store_media(&source, number, transcript) {
+            Ok(kept) => ToolResult {
+                outcome: Outcome::Ok,
+                content: format!("{} {}", kept.placeholder(), kept.name),
+            },
+            Err(error) => fail(error.message(crate::i18n::Lang::En)),
         }
     }
 

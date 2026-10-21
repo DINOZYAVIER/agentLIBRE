@@ -275,6 +275,7 @@ fn run(
         forge,
         reasoning: args.reasoning,
         image_tokens,
+        whisper: &autostart,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

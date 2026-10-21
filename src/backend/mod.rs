@@ -50,7 +50,7 @@ pub struct ToolDoc {
 }
 
 /// The built-in tools as the model sees them (D95).
-pub const TOOL_DOCS: [ToolDoc; 3] = [
+pub const TOOL_DOCS: [ToolDoc; 4] = [
     ToolDoc {
         name: "bash",
         description: "Run a shell command with `bash -c` in the workspace and return its \
@@ -117,6 +117,14 @@ pub const TOOL_DOCS: [ToolDoc; 3] = [
                 false,
             ),
         ],
+    },
+    ToolDoc {
+        name: "view",
+        description: "Look at a file: an image, a video or an audio, for example a \
+                      screenshot you made. It enters the conversation as a placeholder like \
+                      [Image#1] and you see it (or read what is said in it) in your next \
+                      step.",
+        params: &[("path", false, None, true)],
     },
 ];
 

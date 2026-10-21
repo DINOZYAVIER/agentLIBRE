@@ -640,6 +640,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         forge,
                         reasoning,
                         image_tokens,
+                        whisper: autostart,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -697,6 +698,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         forge,
                         reasoning,
                         image_tokens,
+                        whisper: autostart,
                     }
                     .turn(
                         &message,

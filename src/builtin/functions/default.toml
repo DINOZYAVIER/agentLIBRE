@@ -17,5 +17,6 @@ top_k = 20
 [state.work]
 tools.bash = {}
 tools.edit = {}
+tools.view = {}
 answer = true
 next = { else = "work" }

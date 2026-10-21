@@ -256,6 +256,16 @@ fn agent<'a>(
         },
         reasoning,
         image_tokens: 1000,
+        whisper: &NoWhisper,
+    }
+}
+
+/// Whisper that is not there.
+struct NoWhisper;
+
+impl crate::attach::Transcriber for NoWhisper {
+    fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+        Err(Error::WhisperServerNotFound)
     }
 }
 
@@ -927,4 +937,117 @@ fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
     fs::write(kept.path(&session.media_dir()), b"other").unwrap();
     let end = turn_in(&mut session, &script, &dir, "[Image#1]");
     assert!(matches!(end, Err(Error::MediaChanged { .. })));
+}
+
+fn view_call(path: &str) -> String {
+    format!(
+        "<tool_call>\n<function=view>\n<parameter=path>\n{path}\n</parameter>\n</function>\n</tool_call>"
+    )
+}
+
+#[test]
+fn view_keeps_the_file_and_the_next_step_sees_it() {
+    let dir = Dir::new("view");
+    fs::write(dir.0.join("shot.png"), b"SHOT").unwrap();
+    let script = Script::new(&[
+        ("Let me look.", THOUGHT),
+        (&view_call("shot.png"), Stop::End),
+        ("It is a screenshot.", THOUGHT),
+        ("A screenshot.", Stop::End),
+    ]);
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let (end, log, session) = run(&default, &script, &dir, "what is in shot.png?");
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{log:?}");
+    // The call, the medium, then the result, in the log of the session.
+    assert_eq!(
+        kinds(&session),
+        ["user", "state", "thinking", "call", "media", "result", "thinking", "answer"]
+    );
+    let Event::Result { content, outcome, .. } = &session.events[5] else {
+        panic!("not a result");
+    };
+    assert_eq!(*outcome, Outcome::Ok);
+    assert_eq!(content, "[Image#1] shot.png");
+    // The first step had no media; the second has the result as the marker
+    // with the picture's bytes.
+    let uploads = script.uploads.borrow();
+    assert!(uploads[0].is_empty() && uploads[1].is_empty());
+    assert_eq!(*uploads.last().unwrap(), [media::base64(b"SHOT")]);
+    assert!(script.users.borrow().last().unwrap().contains("<__media_TEST__> shot.png"));
+}
+
+#[test]
+fn view_of_something_else_is_a_failed_call_the_model_reads() {
+    let dir = Dir::new("viewbad");
+    fs::write(dir.0.join("notes.txt"), b"x").unwrap();
+    let script = Script::new(&[
+        ("Look.", THOUGHT),
+        (&view_call("notes.txt"), Stop::End),
+        ("Hm.", THOUGHT),
+        (&view_call("missing.png"), Stop::End),
+        ("Hm.", THOUGHT),
+        ("Cannot.", Stop::End),
+    ]);
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let (end, _, session) = run(&default, &script, &dir, "see");
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))));
+    let results: Vec<(Outcome, &str)> = session
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Result { outcome, content, .. } => Some((*outcome, content.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results[0].0, Outcome::Fail);
+    assert!(results[0].1.contains("not an image, a video or an audio"));
+    assert_eq!(results[1].0, Outcome::Fail);
+    assert!(results[1].1.contains("cannot read"));
+    assert!(session.media().is_empty());
+}
+
+#[test]
+fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
+    let dir = Dir::new("viewnoproj");
+    fs::write(dir.0.join("shot.png"), b"SHOT").unwrap();
+    let mut script = Script::new(&[
+        ("Look.", THOUGHT),
+        (&view_call("shot.png"), Stop::End),
+        ("Hm.", THOUGHT),
+        ("No.", Stop::End),
+    ]);
+    script.marker = None;
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let (_, _, session) = run(&default, &script, &dir, "see");
+    assert!(session.media().is_empty());
+    assert!(matches!(
+        session.events.iter().find(|e| matches!(e, Event::Result { .. })),
+        Some(Event::Result { outcome: Outcome::Fail, content, .. }) if content.contains("no multimodal projector")
+    ));
+}
+
+#[test]
+fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
+    struct Words;
+    impl crate::attach::Transcriber for Words {
+        fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+            Ok("good morning".into())
+        }
+    }
+    let dir = Dir::new("viewaudio");
+    fs::write(dir.0.join("v.wav"), b"WAV").unwrap();
+    let script = Script::new(&[
+        ("Listen.", THOUGHT),
+        (&view_call("v.wav"), Stop::End),
+        ("Ok.", THOUGHT),
+        ("It says good morning.", Stop::End),
+    ]);
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut agent = agent(&default, &script, &mut session, &dir, None);
+    agent.whisper = &Words;
+    let end = agent.turn("what is said in v.wav?", &mut Log::default());
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))));
+    assert_eq!(session.media()[0].transcript.as_deref(), Some("good morning"));
+    assert!(script.users.borrow().last().unwrap().contains("[Audio#1: \"good morning\"] v.wav"));
 }

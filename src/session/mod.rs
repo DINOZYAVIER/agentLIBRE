@@ -636,6 +636,7 @@ fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Val
     let order: &[&str] = match tool {
         "bash" => &["command", "timeout"],
         "edit" => &["path", "old", "new"],
+        "view" => &["path"],
         "forge" => &["action", "name", "new", "old", "section", "text", "title"],
         _ => &[],
     };

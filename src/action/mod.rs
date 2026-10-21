@@ -71,6 +71,11 @@ pub fn builtin_tools() -> Vec<Tool> {
             name: "edit".into(),
             params: vec![text("path"), text("old"), text("new")],
         },
+        // A medium into the conversation (AGL-014, D24).
+        Tool {
+            name: "view".into(),
+            params: vec![text("path")],
+        },
         // One tool, an `action` plus the per-action fields (AGL-008);
         // which fields an action needs is the tool's check. The fields
         // are in alphabetical order: the template shows the parameters
