@@ -12,5 +12,7 @@ llama-server; `agl` alone opens the interactive session (a line editor, a dock w
 state and the queue, streamed thinking and text, tool cards);
 `agl server start` runs the project's llama-server as a systemd user unit
 from `[server]` in the project's `agentLIBRE.toml` (the user's file holds
-the defaults). Install with `cargo install
---path .`.
+the defaults). Images, video and audio go with a message: Ctrl-V or `/attach
+<path>` in a session, `--attach <path>` with `-p`; an audio the model does not
+hear goes through whisper.cpp (`[whisper]`), the images through `mmproj` of
+`[server]`. Install with `cargo install --path .`.
