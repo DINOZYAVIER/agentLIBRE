@@ -14,6 +14,7 @@ mod i18n;
 mod interrupt;
 mod machine;
 mod media;
+mod memory;
 mod paths;
 mod record;
 mod repl;
