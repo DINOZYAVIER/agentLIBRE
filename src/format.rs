@@ -130,13 +130,17 @@ impl Format {
     /// Ends a rendered `prompt` so that the model thinks or not (D94):
     /// with thinking, the prompt ends in `think.open`; without, in an empty
     /// block `think.open` + `think.close`. A `think.open` the template
-    /// already added is replaced. Formats without `think` leave the prompt
-    /// as it is.
+    /// already added, or an empty block the template prefilled for
+    /// `enable_thinking = false` (AGL-013), is replaced. Formats without
+    /// `think` leave the prompt as it is.
     pub fn start_step(&self, mut prompt: String, think: bool) -> String {
         let Some(Think { open, close }) = &self.think else {
             return prompt;
         };
-        if prompt.ends_with(open.as_str()) {
+        let empty_block = format!("{open}{close}");
+        if prompt.ends_with(empty_block.as_str()) {
+            prompt.truncate(prompt.len() - empty_block.len());
+        } else if prompt.ends_with(open.as_str()) {
             prompt.truncate(prompt.len() - open.len());
         }
         prompt.push_str(open);
@@ -257,6 +261,16 @@ pub mod tests {
         assert_eq!(format.start_step(base.into(), true), rendered);
         let plain = parse(CALL).unwrap();
         assert_eq!(plain.start_step(base.into(), true), base);
+        // A render with `enable_thinking = false` ends in an empty
+        // block; the state's own block replaces it (AGL-013).
+        let think = format.think.as_ref().unwrap();
+        let empty_block = format!("{}{}", think.open, think.close);
+        let off_rendered = format!("{base}{empty_block}");
+        assert_eq!(format.start_step(off_rendered.clone(), true), rendered);
+        assert_eq!(
+            format.start_step(off_rendered, false),
+            format.start_step(rendered.into(), false)
+        );
     }
 
     #[test]

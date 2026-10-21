@@ -134,6 +134,7 @@ impl Agent<'_> {
             instruction: state.instruction.as_deref(),
             tools: &tools,
             preserve_thinking: function.preserve_thinking,
+            reasoning: None,
         })?;
         let mut prompt = format.start_step(rendered, state.think);
 
@@ -306,6 +307,7 @@ impl Agent<'_> {
             instruction: Some(&function.compact),
             tools: &tools,
             preserve_thinking: false,
+            reasoning: None,
         })?;
         let prompt = function.format.start_step(rendered, false);
         let needed = self.backend.count_tokens(&prompt)? + function.max_compact_tokens as usize;

@@ -120,6 +120,41 @@ pub const TOOL_DOCS: [ToolDoc; 3] = [
     },
 ];
 
+/// The model's reasoning level (AGL-013): the values of the template's
+/// `reasoning_effort`. `Off` silences the thinking with the template's
+/// `enable_thinking = false` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningLevel {
+    Off,
+    Low,
+    Medium,
+    Xhigh,
+}
+
+impl ReasoningLevel {
+    /// The four values, as the human sets them.
+    pub fn parse(value: &str) -> Option<ReasoningLevel> {
+        match value {
+            "off" => Some(ReasoningLevel::Off),
+            "low" => Some(ReasoningLevel::Low),
+            "medium" => Some(ReasoningLevel::Medium),
+            "xhigh" => Some(ReasoningLevel::Xhigh),
+            _ => None,
+        }
+    }
+
+    /// The level's name: how the human sets it, what the template's
+    /// `reasoning_effort` takes and what the surfaces show.
+    pub fn name(self) -> &'static str {
+        match self {
+            ReasoningLevel::Off => "off",
+            ReasoningLevel::Low => "low",
+            ReasoningLevel::Medium => "medium",
+            ReasoningLevel::Xhigh => "xhigh",
+        }
+    }
+}
+
 /// What to render: the conversation, then the state instruction as a
 /// last user message for this generation only (D14, D19).
 pub struct Prompt<'a> {
@@ -127,6 +162,9 @@ pub struct Prompt<'a> {
     pub instruction: Option<&'a str>,
     pub tools: &'a [&'a ToolDoc],
     pub preserve_thinking: bool,
+    /// The model's reasoning level; `None` is the template's default
+    /// (AGL-013).
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 /// One generation.

@@ -7,7 +7,8 @@ use std::time::Duration;
 use serde_json::{Map, Value as Json, json};
 
 use super::{
-    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, Request, Stop, ToolDoc, kept_thinking,
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, ToolDoc,
+    kept_thinking,
 };
 use crate::action::Value;
 use crate::error::Error;
@@ -104,10 +105,7 @@ impl Llama {
 
 impl Backend for Llama {
     fn render(&self, prompt: &Prompt) -> Result<String, Error> {
-        let body = json!({
-            "messages": messages_json(prompt),
-            "tools": prompt.tools.iter().map(|doc| tool_json(doc)).collect::<Vec<_>>(),
-        });
+        let body = apply_template_body(prompt);
         let reply = self.json("/apply-template", Some(&body))?;
         reply["prompt"]
             .as_str()
@@ -188,6 +186,31 @@ impl Backend for Llama {
             .as_u64()
             .map(|n| n as usize)
             .ok_or_else(|| self.bad_reply("no `n_ctx` in the /props reply"))
+    }
+}
+
+/// The body of a render: the messages and tools, plus the reasoning
+/// level's `chat_template_kwargs` when it is set (AGL-013).
+fn apply_template_body(prompt: &Prompt) -> Json {
+    let mut body = json!({
+        "messages": messages_json(prompt),
+        "tools": prompt.tools.iter().map(|doc| tool_json(doc)).collect::<Vec<_>>(),
+    });
+    if let Some(kwargs) = reasoning_kwargs(prompt.reasoning) {
+        body["chat_template_kwargs"] = kwargs;
+    }
+    body
+}
+
+/// The `chat_template_kwargs` of a reasoning level (AGL-013): `Off`
+/// silences the thinking, a level sets the template's
+/// `reasoning_effort`. None when the level is unset, so the template
+/// keeps its default.
+fn reasoning_kwargs(level: Option<ReasoningLevel>) -> Option<Json> {
+    match level {
+        None => None,
+        Some(ReasoningLevel::Off) => Some(json!({"enable_thinking": false})),
+        Some(level) => Some(json!({"reasoning_effort": level.name()})),
     }
 }
 

@@ -63,6 +63,7 @@ fn live_backend() {
                 instruction: Some(instruction),
                 tools: &tools,
                 preserve_thinking,
+                reasoning: None,
             })
             .unwrap()
     };
@@ -85,6 +86,7 @@ fn live_backend() {
             instruction: None,
             tools: &tools,
             preserve_thinking: true,
+            reasoning: None,
         })
         .unwrap();
     let template = |thinking: bool| {

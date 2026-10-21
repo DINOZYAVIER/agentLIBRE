@@ -23,6 +23,7 @@ fn a_runtime_message_is_a_prefixed_user_message() {
         instruction: None,
         tools: &[],
         preserve_thinking: true,
+        reasoning: None,
     };
     assert_eq!(
         Json::Array(messages_json(&prompt)),
@@ -58,6 +59,7 @@ fn messages_in_template_form() {
         instruction: Some("Answer now."),
         tools: &[],
         preserve_thinking: true,
+        reasoning: None,
     };
     assert_eq!(
         Json::Array(messages_json(&prompt)),
@@ -149,6 +151,41 @@ fn only_set_sampling_is_sent() {
         },
     );
     assert_eq!(body, json!({"temperature": 0.6, "top_k": 20}));
+}
+
+#[test]
+fn the_reasoning_level_sets_the_template_kwargs() {
+    let messages = [Message::System("s".into())];
+    let body = |reasoning| {
+        apply_template_body(&Prompt {
+            messages: &messages,
+            instruction: None,
+            tools: &[],
+            preserve_thinking: true,
+            reasoning,
+        })
+    };
+    // Unset: no `chat_template_kwargs`, the template keeps its default.
+    assert_eq!(
+        body(None),
+        json!({"messages": [{"role": "system", "content": "s"}], "tools": []})
+    );
+    // `Off` silences the thinking with the template kwarg.
+    assert_eq!(
+        body(Some(ReasoningLevel::Off))["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+    // A level sets the template's `reasoning_effort`.
+    for (level, effort) in [
+        (ReasoningLevel::Low, "low"),
+        (ReasoningLevel::Medium, "medium"),
+        (ReasoningLevel::Xhigh, "xhigh"),
+    ] {
+        assert_eq!(
+            body(Some(level))["chat_template_kwargs"],
+            json!({"reasoning_effort": effort})
+        );
+    }
 }
 
 #[test]
