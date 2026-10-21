@@ -1003,11 +1003,33 @@ Forge (сховище артефактів робочої області, agentL
     /// The keys of the interactive session (D120).
     pub const KEYS: Msg = Msg {
         en: "Enter sends; Shift-Enter or Alt-Enter adds a line; Up/Down walk the history; \
+             Ctrl-V attaches the clipboard; Ctrl-R records the voice and writes what is said \
+             (Ctrl-R again stops, Escape cancels); \
              Ctrl-C stops the turn (or clears the line, or quits when it is empty); \
              Ctrl-D quits",
         uk: "Enter надсилає; Shift-Enter або Alt-Enter додає рядок; Вгору/Вниз — історія; \
+             Ctrl-V прикріплює буфер обміну; Ctrl-R записує голос і вписує сказане \
+             (ще раз Ctrl-R зупиняє, Escape скасовує); \
              Ctrl-C зупиняє хід (або очищає рядок, або виходить, якщо він порожній); \
              Ctrl-D виходить",
+    };
+
+    /// The separator row while the voice is recorded (AGL-016, D9).
+    pub const VOICE_RECORDING: Msg = Msg {
+        en: "Recording {time} · Ctrl-R to stop",
+        uk: "Запис {time} · Ctrl-R, щоб зупинити",
+    };
+
+    /// The separator row while the recording is turned into text.
+    pub const VOICE_TRANSCRIBING: Msg = Msg {
+        en: "Transcribing…",
+        uk: "Розпізнаю…",
+    };
+
+    /// The recording had no words.
+    pub const VOICE_NOTHING_HEARD: Msg = Msg {
+        en: "nothing was heard in the recording",
+        uk: "у записі нічого не почути",
     };
 
     /// A `/` command that is not known.

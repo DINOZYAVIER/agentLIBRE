@@ -59,6 +59,14 @@ fn grouped(n: usize) -> String {
     out
 }
 
+/// The state of the voice input, shown after the activity (AGL-016, D9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceLabel {
+    /// Seconds recorded so far.
+    Recording(u64),
+    Transcribing,
+}
+
 /// What the dock looks like: its rows and where the cursor is.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -76,6 +84,8 @@ struct State {
     /// The context size and the tokens of the last prompt (D152).
     context: usize,
     context_used: Option<usize>,
+    /// The voice input, in the separator row (AGL-016).
+    voice: Option<VoiceLabel>,
     /// A yes/no question to the human, one row above the separator
     /// (AGL-015, D17).
     question: Option<String>,
@@ -117,6 +127,7 @@ impl Dock {
                 context: 0,
                 context_used: None,
                 question: None,
+                voice: None,
                 speed: None,
                 editor,
                 activity: Activity::Ready,
@@ -151,6 +162,16 @@ impl Dock {
         let mut state = self.lock();
         if state.context != size {
             state.context = size;
+            state.redraw("");
+        }
+    }
+
+    /// Shows the state of the voice input in the separator row, or
+    /// removes it (AGL-016).
+    pub fn set_voice(&self, voice: Option<VoiceLabel>) {
+        let mut state = self.lock();
+        if state.voice != voice {
+            state.voice = voice;
             state.redraw("");
         }
     }
@@ -427,6 +448,16 @@ impl State {
         }
         if let Some(speed) = self.speed {
             label.push_str(&format!(" · {}", texts::speed(speed, lang)));
+        }
+        match self.voice {
+            Some(VoiceLabel::Recording(seconds)) => {
+                let time = format!("{}:{:02}", seconds / 60, seconds % 60);
+                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_RECORDING, time = time)));
+            }
+            Some(VoiceLabel::Transcribing) => {
+                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_TRANSCRIBING)));
+            }
+            None => {}
         }
         let label = truncate(&format!(" {label} "), self.columns.saturating_sub(1));
         let fill = self.columns.saturating_sub(1 + width(&label));
@@ -750,6 +781,28 @@ mod tests {
         assert!(layout.rows[1].starts_with('─'));
         dock.set_question(None);
         assert_eq!(dock.lock().layout().rows.len(), before);
+    }
+
+    #[test]
+    fn the_separator_shows_the_voice_input_after_the_activity() {
+        let (dock, _) = dock(80, 20);
+        let separator = |dock: &Dock| dock.lock().separator();
+        dock.set_voice(Some(VoiceLabel::Recording(7)));
+        assert!(
+            separator(&dock).contains("Ready · Recording 0:07 · Ctrl-R to stop"),
+            "{}",
+            separator(&dock)
+        );
+        dock.set_voice(Some(VoiceLabel::Recording(61)));
+        assert!(separator(&dock).contains("Recording 1:01"));
+        dock.set_voice(Some(VoiceLabel::Transcribing));
+        assert!(separator(&dock).contains("Ready · Transcribing…"));
+        // A turn runs beside it (AGL-016, D7): both are shown.
+        dock.activity(Activity::Generating);
+        assert!(separator(&dock).contains("Generating · Transcribing…"));
+        dock.set_voice(None);
+        assert!(!separator(&dock).contains("Transcribing"));
+        assert!(separator(&dock).contains("Generating"));
     }
 
     #[test]

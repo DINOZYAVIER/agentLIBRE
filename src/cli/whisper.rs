@@ -3,7 +3,7 @@
 //! is `agentLIBRE-whisper-server-<key>`, started the way llama-server is.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::attach::Transcriber;
@@ -194,6 +194,63 @@ pub fn transcribe(url: &str, wav: &[u8]) -> Result<String, Error> {
         .ok_or_else(|| fail("no `text` in the reply".into()))
 }
 
+/// What the REPL's voice input needs of whisper (AGL-016).
+pub trait Dictation: Send + Sync {
+    /// Whether whisper is set up for this project; the error says what is
+    /// missing, before the human speaks.
+    fn ready(&self) -> Result<(), Error>;
+    /// Brings the server up; returns when it answers (D6).
+    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error>;
+    /// The text of a 16 kHz mono WAV.
+    fn transcribe(&self, wav: &[u8], say: &mut dyn FnMut(&str)) -> Result<String, Error>;
+}
+
+/// The whisper server of a project, owned so that the REPL's input thread
+/// can hold it (AGL-016).
+pub struct Voice {
+    project: Workspace,
+    settings: WhisperFile,
+    user_path: PathBuf,
+    models: PathBuf,
+    path_var: Option<OsString>,
+    lang: Lang,
+}
+
+impl Voice {
+    /// The server `autostart` brings up for audio, as an owned value.
+    pub fn of(autostart: &Autostart) -> Voice {
+        Voice {
+            project: autostart.project.clone(),
+            settings: autostart.whisper.clone(),
+            user_path: autostart.user_path.clone(),
+            models: autostart.models.clone(),
+            path_var: autostart.path_var.clone(),
+            lang: autostart.lang,
+        }
+    }
+
+    fn server(&self) -> Result<WhisperServer, Error> {
+        WhisperServer::of(&self.project, &self.settings, &self.user_path)
+    }
+}
+
+impl Dictation for Voice {
+    fn ready(&self) -> Result<(), Error> {
+        self.server().map(|_| ())
+    }
+
+    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        let server = self.server()?;
+        ensure(&server, &self.models, self.path_var.clone(), say, self.lang)
+    }
+
+    fn transcribe(&self, wav: &[u8], say: &mut dyn FnMut(&str)) -> Result<String, Error> {
+        let server = self.server()?;
+        ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
+        transcribe(&server.url, wav)
+    }
+}
+
 impl Transcriber for Autostart<'_> {
     fn transcribe(&self, source: &Source, say: &mut dyn FnMut(&str)) -> Result<String, Error> {
         let server = WhisperServer::of(self.project, self.whisper, &self.user_path)?;
@@ -207,7 +264,6 @@ impl Transcriber for Autostart<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn registered(whisper: WhisperFile) -> (Workspace, WhisperFile) {
         let origin = format!("sha256:60af300abea6{}", "0".repeat(52));
@@ -251,6 +307,26 @@ mod tests {
             WhisperServer::of(&ws, &settings, Path::new("/c/agentLIBRE.toml")),
             Err(Error::ProjectNotRegistered { .. })
         ));
+    }
+
+    #[test]
+    fn the_voice_input_is_ready_only_when_whisper_is_set() {
+        let (ws, settings) = registered(WhisperFile::default());
+        let mut voice = Voice {
+            project: ws,
+            settings,
+            user_path: PathBuf::from("/c/agentLIBRE.toml"),
+            models: PathBuf::from("/m"),
+            path_var: None,
+            lang: Lang::En,
+        };
+        assert!(matches!(voice.ready(), Err(Error::WhisperNotSet { .. })));
+        voice.settings = WhisperFile {
+            url: Some("http://127.0.0.1:18081".into()),
+            model: Some("w.bin".into()),
+            args: None,
+        };
+        assert!(voice.ready().is_ok());
     }
 
     #[test]

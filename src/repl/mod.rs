@@ -7,6 +7,7 @@ mod markdown;
 mod transcript;
 mod text;
 pub(crate) mod term;
+mod voice;
 
 use std::collections::VecDeque;
 use std::io;
@@ -18,6 +19,7 @@ use std::thread;
 
 use dock::Dock;
 use editor::{Editor, MenuItem, Outcome, save_history};
+use voice::VoiceInput;
 use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines};
 
@@ -174,6 +176,8 @@ struct Input {
     exit_now: Box<dyn Fn() + Send + Sync>,
     /// What Ctrl-V reads (AGL-014, D21).
     clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
+    /// Ctrl-R records the voice (AGL-016).
+    voice: Arc<VoiceInput>,
 }
 
 impl Input {
@@ -378,6 +382,15 @@ impl Input {
         if self.answer_question(&key) {
             return;
         }
+        if self.voice.recording() && matches!(key, Key::Escape | Key::Ctrl('c')) {
+            // Not a stop of the turn: only the recording is cancelled (D2).
+            self.voice.cancel();
+            return;
+        }
+        if key == Key::Ctrl('r') {
+            self.voice.toggle();
+            return;
+        }
         if key == Key::Ctrl('v') {
             self.paste();
             return;
@@ -572,6 +585,14 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         reasoning,
     ));
     control.set_media_counts(&session);
+    let voice = Arc::new(VoiceInput::new(
+        dock.clone(),
+        Arc::new(crate::cli::whisper::Voice::of(autostart)),
+        Box::new(crate::record::start),
+        function.max_record_seconds,
+        lang,
+        theme.clone(),
+    ));
     let screen: Arc<dyn Screen> = dock.clone();
     let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
 
@@ -592,6 +613,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             unsafe { libc::_exit(i32::from(interrupt::EXIT_CODE)) }
         }),
         clipboard: Box::new(media::clipboard),
+        voice: voice.clone(),
     };
     let reader = {
         let done = done.clone();
@@ -745,6 +767,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
 
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
+    // A recording that goes keeps nothing, and ffmpeg is stopped (AGL-016).
+    voice.cancel();
     dock.finish();
     Ok(ExitCode::SUCCESS)
 }
@@ -778,6 +802,70 @@ mod tests {
         stops: Arc<AtomicUsize>,
         exits: Arc<AtomicUsize>,
         clip: Arc<Mutex<Clip>>,
+        fake: Arc<Fake>,
+    }
+
+    /// The recorder and whisper of the tests (AGL-016).
+    #[derive(Default)]
+    struct Fake {
+        log: Mutex<Vec<String>>,
+        /// The recording ended by itself, as at the limit.
+        ended: std::sync::atomic::AtomicBool,
+        record_error: Mutex<Option<String>>,
+        not_ready: std::sync::atomic::AtomicBool,
+        text: Mutex<String>,
+        /// While true the transcription waits.
+        hold: std::sync::atomic::AtomicBool,
+    }
+
+    impl Fake {
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    struct FakeRecording(Arc<Fake>);
+
+    impl crate::record::Recording for FakeRecording {
+        fn finished(&mut self) -> bool {
+            self.0.ended.load(Ordering::SeqCst)
+        }
+        fn stop(self: Box<Self>) -> Result<Vec<u8>, Error> {
+            self.0.log.lock().unwrap().push("stop".into());
+            Ok(b"WAV".to_vec())
+        }
+        fn cancel(self: Box<Self>) {
+            self.0.log.lock().unwrap().push("cancel".into());
+        }
+    }
+
+    struct FakeDictation(Arc<Fake>);
+
+    impl crate::cli::whisper::Dictation for FakeDictation {
+        fn ready(&self) -> Result<(), Error> {
+            if self.0.not_ready.load(Ordering::SeqCst) {
+                return Err(Error::WhisperNotSet {
+                    user_path: "/c/agentLIBRE.toml".into(),
+                    project_path: "/d/agentLIBRE.toml".into(),
+                });
+            }
+            Ok(())
+        }
+        fn warm_up(&self, _: &mut dyn FnMut(&str)) -> Result<(), Error> {
+            self.0.log.lock().unwrap().push("warm".into());
+            Ok(())
+        }
+        fn transcribe(&self, wav: &[u8], _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+            while self.0.hold.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("transcribe {} bytes", wav.len()));
+            Ok(self.0.text.lock().unwrap().clone())
+        }
     }
 
     fn fixture() -> Fixture {
@@ -806,6 +894,25 @@ mod tests {
         let stops = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(AtomicUsize::new(0));
         let clip = Arc::new(Mutex::new(Clip::Empty));
+        let fake = Arc::new(Fake::default());
+        *fake.text.lock().unwrap() = "hello world".into();
+        let voice = Arc::new(VoiceInput::new(
+            dock.clone(),
+            Arc::new(FakeDictation(fake.clone())),
+            {
+                let fake = fake.clone();
+                Box::new(move |limit| {
+                    if let Some(detail) = fake.record_error.lock().unwrap().clone() {
+                        return Err(Error::Ffmpeg { detail });
+                    }
+                    fake.log.lock().unwrap().push(format!("start {limit}"));
+                    Ok(Box::new(FakeRecording(fake.clone())))
+                })
+            },
+            60,
+            Lang::En,
+            Theme::plain(),
+        ));
         let input = Input {
             dock,
             control: Arc::new(Control::new(
@@ -841,6 +948,7 @@ mod tests {
                 let clip = clip.clone();
                 Box::new(move || clip.lock().unwrap().clone())
             },
+            voice,
         };
         Fixture {
             input,
@@ -848,6 +956,7 @@ mod tests {
             stops,
             exits,
             clip,
+            fake,
         }
     }
 
@@ -1057,6 +1166,138 @@ mod tests {
         f.input.key(Key::Enter);
         assert!(f.inner().new_session);
         assert!(f.inner().pending.is_empty());
+    }
+
+    /// Waits until `condition` holds, for the threads of the voice input.
+    fn eventually(what: &str, condition: impl Fn() -> bool) {
+        let started = std::time::Instant::now();
+        while !condition() {
+            assert!(started.elapsed().as_secs() < 5, "{what}");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn ctrl_r_records_and_the_second_press_puts_the_text_in_the_line() {
+        let f = fixture();
+        f.type_text("say ");
+        f.input.key(Key::Ctrl('r'));
+        // The limit is the Function's (D5); the whisper unit is started
+        // while the human speaks (D6); the dock says so (D9).
+        assert_eq!(f.fake.log()[0], "start 60");
+        eventually("warm up", || f.fake.log().contains(&"warm".to_string()));
+        // The test dock is 40 columns wide: the label is cut at its end.
+        assert!(f.output().contains("Recording 0:00"), "{}", f.output());
+        assert!(f.input.voice.recording());
+        f.input.key(Key::Ctrl('r'));
+        eventually("the text", || f.input.dock.input_text() == "say hello world ");
+        assert_eq!(f.fake.log().last().unwrap(), "transcribe 3 bytes");
+        assert!(f.fake.log().contains(&"stop".to_string()));
+        assert!(f.output().contains("Transcribing…"));
+        assert!(!f.input.voice.recording());
+        // Nothing was queued: the human sends the line when it is read.
+        assert!(f.inner().queue.is_empty());
+        // And it can be done again.
+        f.input.key(Key::Ctrl('r'));
+        assert!(f.input.voice.recording());
+    }
+
+    #[test]
+    fn escape_and_ctrl_c_cancel_the_recording_and_keep_nothing() {
+        let f = fixture();
+        for key in [Key::Escape, Key::Ctrl('c')] {
+            f.input.key(Key::Ctrl('r'));
+            f.input.key(key);
+            assert!(!f.input.voice.recording());
+        }
+        let log = f.fake.log();
+        assert_eq!(log.iter().filter(|l| *l == "cancel").count(), 2);
+        assert!(!log.iter().any(|l| l.starts_with("transcribe")));
+        assert!(f.input.dock.input_is_empty());
+        // Ctrl-C at a recording is not a stop of the turn (D2).
+        assert_eq!(f.stops.load(Ordering::SeqCst), 0);
+        // Without a recording, Escape does nothing to the voice.
+        f.input.key(Key::Escape);
+        assert_eq!(f.fake.log().iter().filter(|l| *l == "cancel").count(), 2);
+    }
+
+    #[test]
+    fn the_shortcut_works_while_a_turn_runs() {
+        let f = fixture();
+        f.inner().running = true;
+        f.input.key(Key::Ctrl('r'));
+        f.input.key(Key::Ctrl('r'));
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        // The turn went on: it was not interrupted, nothing was queued.
+        assert!(f.inner().running);
+        assert_eq!(f.stops.load(Ordering::SeqCst), 0);
+        // Ctrl-C with no recording is the usual stop of the turn.
+        f.input.key(Key::Ctrl('c'));
+        assert_eq!(f.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn whisper_that_is_not_set_is_told_before_the_human_speaks() {
+        let f = fixture();
+        f.fake.not_ready.store(true, Ordering::SeqCst);
+        f.input.key(Key::Ctrl('r'));
+        assert!(!f.input.voice.recording());
+        assert!(f.fake.log().is_empty());
+        assert!(f.output().contains("whisper"), "{}", f.output());
+        // A recorder that fails (no microphone) is told too, and the next
+        // press tries again.
+        f.fake.not_ready.store(false, Ordering::SeqCst);
+        *f.fake.record_error.lock().unwrap() = Some("default: Connection refused".into());
+        f.input.key(Key::Ctrl('r'));
+        assert!(!f.input.voice.recording());
+        assert!(f.output().contains("Connection"), "{}", f.output());
+        *f.fake.record_error.lock().unwrap() = None;
+        f.input.key(Key::Ctrl('r'));
+        assert!(f.input.voice.recording());
+    }
+
+    #[test]
+    fn a_recording_that_ends_at_the_limit_is_transcribed_by_itself() {
+        let f = fixture();
+        f.input.key(Key::Ctrl('r'));
+        f.fake.ended.store(true, Ordering::SeqCst);
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        assert!(!f.input.voice.recording());
+        assert!(f.fake.log().contains(&"stop".to_string()));
+    }
+
+    #[test]
+    fn silence_is_told_and_writes_nothing() {
+        let f = fixture();
+        *f.fake.text.lock().unwrap() = "  ".into();
+        f.input.key(Key::Ctrl('r'));
+        f.input.key(Key::Ctrl('r'));
+        eventually("the notice", || f.output().contains("nothing was heard"));
+        assert!(f.input.dock.input_is_empty());
+    }
+
+    #[test]
+    fn a_press_while_the_text_is_made_does_nothing_and_the_end_keeps_the_recording_apart() {
+        let f = fixture();
+        f.fake.hold.store(true, Ordering::SeqCst);
+        f.input.key(Key::Ctrl('r'));
+        f.input.key(Key::Ctrl('r'));
+        eventually("stop", || f.fake.log().contains(&"stop".to_string()));
+        // Transcribing: another press starts nothing.
+        f.input.key(Key::Ctrl('r'));
+        assert_eq!(f.fake.log().iter().filter(|l| l.starts_with("start")).count(), 1);
+        f.input.voice.cancel();
+        f.fake.hold.store(false, Ordering::SeqCst);
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+    }
+
+    #[test]
+    fn the_end_of_the_session_cancels_a_recording() {
+        let f = fixture();
+        f.input.key(Key::Ctrl('r'));
+        f.input.voice.cancel();
+        assert_eq!(f.fake.log().last().unwrap(), "cancel");
+        assert!(!f.input.voice.recording());
     }
 
     #[test]
