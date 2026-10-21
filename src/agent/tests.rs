@@ -637,7 +637,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 #[test]
 fn the_system_message_is_the_functions_system_and_nothing_more() {
     let dir = Dir::new("system");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -646,21 +646,21 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
         ("Done.", Stop::End),
     ])
     .with_counts(&[100, OVERFLOW, FITS]);
-    let (end, _, _) = run(&default, &script, &dir, "go");
+    let (end, _, _) = run(&minimal, &script, &dir, "go");
     assert!(end.is_ok());
     // A step, a step, the compaction, a step: all carry the Function's
     // `system`, the same text each time (AGL-017, D4, D8): the persona and
-    // the runtime part of `default`, no paragraph about the forge.
+    // the runtime part of `minimal`, no paragraph about the forge.
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 4);
-    assert!(systems.iter().all(|system| *system == default.system));
-    assert!(default.system.contains("Messages that start with [agentLIBRE runtime]"));
-    assert!(default.system.contains("at most 8192 tokens"));
-    assert!(!default.system.contains("forge"));
+    assert!(systems.iter().all(|system| *system == minimal.system));
+    assert!(minimal.system.contains("Messages that start with [agentLIBRE runtime]"));
+    assert!(minimal.system.contains("at most 8192 tokens"));
+    assert!(!minimal.system.contains("forge"));
 }
 
 #[test]
-fn the_minimal_function_sends_the_persona_alone() {
+fn the_minimal_function_sends_the_persona_and_the_runtime_part() {
     let dir = Dir::new("minimal");
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
@@ -670,7 +670,22 @@ fn the_minimal_function_sends_the_persona_alone() {
     assert_eq!(systems.len(), 1);
     assert_eq!(systems[0], minimal.system);
     assert!(systems[0].starts_with("You are DinoBot"));
-    assert!(!systems[0].contains("runtime"));
+    assert!(systems[0].contains("Messages that start with [agentLIBRE runtime]"));
+}
+
+#[test]
+fn the_default_function_sends_the_one_line_system() {
+    let dir = Dir::new("default");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
+    let (end, _, _) = run(&default, &script, &dir, "hi");
+    assert!(end.is_ok());
+    let systems = script.systems.borrow();
+    assert_eq!(systems.len(), 1);
+    assert_eq!(
+        systems[0],
+        "You are an AI agent running on agentLIBRE (agl), an agentic system."
+    );
 }
 
 #[test]

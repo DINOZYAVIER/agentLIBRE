@@ -75,10 +75,9 @@ fn state<'f>(function: &'f Function, name: &str) -> &'f State {
 fn builtin_default() {
     let none = Path::new("/nonexistent");
     let function = Function::load(none, none, "default").unwrap();
-    assert!(
-        function
-            .system
-            .starts_with("You are DinoBot, an AI agent powered by agentLIBRE (agl)")
+    assert_eq!(
+        function.system,
+        "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
     assert!(function.preserve_thinking);
     assert_eq!(function.max_steps_total, 50);
@@ -563,20 +562,23 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 }
 
 #[test]
-fn the_built_in_functions_differ_in_the_runtime_part_only() {
+fn the_built_in_functions_differ_in_the_system_only() {
     let none = Path::new("/nonexistent");
     let default = Function::load(none, none, "default").unwrap();
     let minimal = Function::load(none, none, "minimal").unwrap();
-    // `default` explains the prefix and the size of an action (AGL-009);
-    // `minimal` is the persona alone (AGL-017, D6, D9).
-    assert!(default.system.contains(
+    // `default` is laconic and nameless (AGL-018, D1); `minimal` is the
+    // persona and the runtime part: the prefix and the size of an action
+    // (AGL-009, AGL-018, D2).
+    assert_eq!(
+        default.system,
+        "You are an AI agent running on agentLIBRE (agl), an agentic system."
+    );
+    assert!(minimal.system.starts_with("You are DinoBot"));
+    assert!(minimal.system.contains(
         "Messages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
          not from the human. One action holds at most 8192 tokens; write a large file in parts."
     ));
-    assert!(!default.system.contains('{'));
-    assert!(!minimal.system.contains("runtime"));
-    assert!(default.system.starts_with(&minimal.system));
-    assert!(minimal.system.starts_with("You are DinoBot"));
+    assert!(!minimal.system.contains('{'));
     // The rest is the same: the states and the tools.
     assert_eq!(default.states.len(), minimal.states.len());
     let tools = |f: &Function| -> Vec<String> {
