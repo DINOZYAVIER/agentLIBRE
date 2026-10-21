@@ -193,6 +193,12 @@ fn run(
         path_var: env("PATH"),
         lang: *lang,
     };
+    // The files of `--attach` are read before anything is started.
+    let sources = args
+        .attach
+        .iter()
+        .map(|path| media::Source::from_file(Path::new(path)))
+        .collect::<Result<Vec<_>, _>>()?;
     // `-p` has one request, so the server is brought up now; the
     // interactive and the stdin session do it at their first request
     // (AGL-015, D10) and take the context size if the server answers.
@@ -243,6 +249,22 @@ fn run(
     eprintln!("{}", tr!(*lang, m::SESSION, id = session.id));
     interrupt::install();
     let id = session.id.clone();
+    // The attached files get their placeholders before the message and are
+    // stored with the session; an audio is transcribed here (AGL-014).
+    let mut pending = Vec::new();
+    let placeholders: Vec<String> = sources
+        .into_iter()
+        .map(|source| attach::add(&session, &mut pending, source))
+        .collect();
+    let message = attach::with_placeholders(&placeholders, &message);
+    attach::store(
+        &mut session,
+        pending,
+        &message,
+        &backend,
+        &autostart,
+        &mut |line| eprintln!("{line}"),
+    )?;
     let mut agent = Agent {
         function: &function,
         function_name: &settings.function,

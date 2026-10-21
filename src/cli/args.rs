@@ -44,6 +44,9 @@ pub struct Args {
     /// `--yes`: start the server of the project even when another
     /// project's server runs, without asking (AGL-015, D13, D16).
     pub yes: bool,
+    /// `--attach <path>`, repeatable: files that go with the `-p` message
+    /// (AGL-014, D21).
+    pub attach: Vec<String>,
 }
 
 /// Parses the arguments after the program name. Each option takes the
@@ -100,6 +103,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
                 parsed.yes = true;
                 continue;
             }
+            "--attach" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| Error::MissingValue(arg.clone()))?;
+                parsed.attach.push(text(value)?);
+                continue;
+            }
             "-p" => &mut parsed.prompt,
             "--resume" => &mut parsed.resume,
             "--function" => &mut parsed.function,
@@ -117,6 +127,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
     if let Some(value) = think {
         parsed.reasoning =
             Some(ReasoningLevel::parse(&value).ok_or(Error::BadReasoningLevel { value })?);
+    }
+    if !parsed.attach.is_empty() && parsed.prompt.is_none() {
+        return Err(Error::AttachWithoutPrompt);
     }
     Ok(Command::Run(parsed))
 }
@@ -145,6 +158,36 @@ mod tests {
                 function: Some("coder".into()),
                 reasoning: None,
                 yes: false,
+                attach: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn attach_is_repeatable_and_needs_a_message() {
+        assert_eq!(
+            parse_strs(&["-p", "look", "--attach", "a.png", "--attach", "b.wav"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("look".into()),
+                attach: vec!["a.png".into(), "b.wav".into()],
+                ..Args::default()
+            })
+        );
+        assert!(matches!(
+            parse_strs(&["--attach", "a.png"]),
+            Err(Error::AttachWithoutPrompt)
+        ));
+        assert!(matches!(
+            parse_strs(&["-p", "x", "--attach"]),
+            Err(Error::MissingValue(o)) if o == "--attach"
+        ));
+        // A value that starts with `-` is still the value.
+        assert_eq!(
+            parse_strs(&["-p", "x", "--attach", "-odd.png"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("x".into()),
+                attach: vec!["-odd.png".into()],
+                ..Args::default()
             })
         );
     }

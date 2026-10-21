@@ -111,6 +111,8 @@ pub enum Error {
     Interrupted,
     /// The server generated text the grammar does not allow.
     OutsideGrammar(String),
+    /// `--attach` without `-p` (AGL-014, D21).
+    AttachWithoutPrompt,
     /// `agl server start` without `[server] model` (D148).
     MissingModel {
         user_path: PathBuf,
@@ -299,6 +301,7 @@ impl Error {
                 | Error::RepeatedOption(_)
                 | Error::FunctionWithResume
                 | Error::BadReasoningLevel { .. }
+                | Error::AttachWithoutPrompt
         )
     }
 
@@ -418,6 +421,7 @@ impl std::fmt::Display for Error {
                 Error::ServerTimeout { seconds, .. } => {
                     format!("the server was not ready after {seconds} s")
                 }
+                Error::AttachWithoutPrompt => "--attach goes with -p".into(),
                 Error::NoMultimodal => "the server has no multimodal projector".into(),
                 Error::WhisperNotSet { .. } => "the whisper server is not set".into(),
                 Error::WhisperServerNotFound => "whisper-server is not in PATH".into(),

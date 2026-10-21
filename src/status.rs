@@ -13,8 +13,8 @@ use crate::theme::Role;
 use crate::tr;
 
 /// The `/` commands (D118, D139, AGL-013).
-pub const COMMANDS: [&str; 7] = [
-    "/quit", "/exit", "/help", "/status", "/think", "/new", "/compact",
+pub const COMMANDS: [&str; 8] = [
+    "/quit", "/exit", "/help", "/status", "/think", "/attach", "/new", "/compact",
 ];
 
 /// What `/status` tells besides the session (D134).

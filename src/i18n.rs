@@ -156,7 +156,8 @@ pub mod m {
     /// The `--help` text.
     pub const HELP: Msg = Msg {
         en: "\
-Usage: agl [-p <message>] [--resume <id>] [--function <name>] [--think <level>] [--yes]
+Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name>]
+           [--think <level>] [--yes]
        agl init
        agl server start [--yes]|stop|status
        agl forge list|show|new|status|check|log|diff|rehome
@@ -168,6 +169,7 @@ Options:
   --resume <id>       continue session <id>
   --function <name>   use Function <name>
   --think <level>     the model's reasoning level: off, low, medium or xhigh
+  --attach <path>     with -p: attach an image, a video or an audio; repeatable
   --yes               start the llama-server of the project without asking
                       when the server of another project runs
   -h, --help          print this help
@@ -193,7 +195,8 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>] [--yes]
+Використання: agl [-p <повідомлення> [--attach <шлях>]...] [--resume <id>] [--function <назва>]
+              [--think <level>] [--yes]
               agl init
               agl server start [--yes]|stop|status
               agl forge list|show|new|status|check|log|diff|rehome
@@ -205,6 +208,8 @@ under XDG_DATA_HOME):
   --resume <id>       продовжити сесію <id>
   --function <назва>  використати Function <назва>
   --think <level>     рівень міркувань моделі: off, low, medium або xhigh
+  --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
+                      повторювати
   --yes               запустити llama-server проєкту без питання, коли працює
                       сервер іншого проєкту
   -h, --help          показати цю довідку
@@ -594,6 +599,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "розпізнаю {name}…",
     };
 
+    /// `Error::AttachWithoutPrompt`.
+    pub const ATTACH_WITHOUT_PROMPT: Msg = Msg {
+        en: "--attach goes with -p; in a session use /attach <path>",
+        uk: "--attach працює разом з -p; у сесії використовуй /attach <шлях>",
+    };
+
     /// `Error::NoMultimodal` (AGL-014).
     pub const NO_MULTIMODAL: Msg = Msg {
         en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in [server] of the project and restart it (agl server stop)",
@@ -961,6 +972,29 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// The description of a `/` command (AGL-013).
+    pub const CMD_ATTACH: Msg = Msg {
+        en: "attach an image, a video or an audio to the next message",
+        uk: "прикріпити зображення, відео чи аудіо до наступного повідомлення",
+    };
+
+    /// `/attach` without a path.
+    pub const ATTACH_USAGE: Msg = Msg {
+        en: "usage: /attach <path of an image, a video or an audio>",
+        uk: "використання: /attach <шлях до зображення, відео чи аудіо>",
+    };
+
+    /// `/attach` took a file.
+    pub const ATTACHED: Msg = Msg {
+        en: "attached {placeholder} ({name})",
+        uk: "прикріплено {placeholder} ({name})",
+    };
+
+    /// Ctrl-V found nothing to attach or paste.
+    pub const CLIPBOARD_EMPTY: Msg = Msg {
+        en: "the clipboard holds nothing to paste (an image needs wl-paste)",
+        uk: "у буфері обміну нема чого вставити (для зображення потрібен wl-paste)",
+    };
+
     pub const CMD_THINK: Msg = Msg {
         en: "the reasoning level: off, low, medium or xhigh",
         uk: "рівень міркувань: off, low, medium або xhigh",
@@ -1687,6 +1721,7 @@ impl Error {
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
+            Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
             Error::WhisperNotSet {
                 user_path,
@@ -2178,6 +2213,7 @@ pub mod repl {
             "/help" => tr!(lang, m::CMD_HELP),
             "/status" => tr!(lang, m::CMD_STATUS),
             "/think" => tr!(lang, m::CMD_THINK),
+            "/attach" => tr!(lang, m::CMD_ATTACH),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             _ => "",
