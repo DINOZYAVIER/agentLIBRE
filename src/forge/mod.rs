@@ -20,7 +20,7 @@ use std::process::Command as Process;
 use toml::{Table, Value};
 
 use crate::error::Error;
-use crate::settings::{ServerFile, WhisperFile};
+use crate::settings::{SearchFile, ServerFile, WhisperFile};
 use crate::tomlfile::quote as toml_string;
 use crate::tomlfile::Section;
 
@@ -184,6 +184,8 @@ pub struct Marker {
     pub server: ServerFile,
     /// The project's `[whisper]` (AGL-014, D22).
     pub whisper: WhisperFile,
+    /// The project's `[search]` (AGL-019, D3).
+    pub search: SearchFile,
 }
 
 impl Marker {
@@ -192,7 +194,14 @@ impl Marker {
     /// project settings.
     pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
         let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&["function", "format", "workspace_sha256", "server", "whisper"])?;
+        file.check_keys(&[
+            "function",
+            "format",
+            "workspace_sha256",
+            "server",
+            "whisper",
+            "search",
+        ])?;
         let format = file.required_integer("format")?;
         if format != 1 {
             return Err(Error::MarkerFormat {
@@ -212,11 +221,13 @@ impl Marker {
         let function = file.string("function")?;
         let server = ServerFile::parse(file.section("server")?, path)?;
         let whisper = WhisperFile::parse(file.section("whisper")?, path)?;
+        let search = SearchFile::parse(file.section("search")?, path)?;
         Ok(Marker {
             hashes,
             function,
             server,
             whisper,
+            search,
         })
     }
 
@@ -234,9 +245,10 @@ impl Marker {
             .map(|function| format!("function = {}\n", toml_string(function)))
             .unwrap_or_default();
         format!(
-            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}{}",
+            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}{}{}",
             self.server.render(),
-            self.whisper.render()
+            self.whisper.render(),
+            self.search.render()
         )
     }
 
@@ -256,6 +268,7 @@ pub struct Store {
     pub function: Option<String>,
     pub server: ServerFile,
     pub whisper: WhisperFile,
+    pub search: SearchFile,
 }
 
 impl Store {
@@ -293,6 +306,7 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
             function: marker.function,
             server: marker.server,
             whisper: marker.whisper,
+            search: marker.search,
         });
     }
     found.sort_by_key(Store::name);
@@ -321,6 +335,8 @@ pub struct Workspace {
     pub server: ServerFile,
     /// The project's `[whisper]` from the same file (AGL-014).
     pub whisper: WhisperFile,
+    /// The project's `[search]` from the same file (AGL-019).
+    pub search: SearchFile,
     /// The first identity of the store's marker, the one the project had
     /// at its start; `None` for a project that is not registered. The
     /// name of the project's llama-server unit is built from it
@@ -374,6 +390,7 @@ fn rehomed(
         function: store.function.clone(),
         server: store.server.clone(),
         whisper: store.whisper.clone(),
+        search: store.search.clone(),
     };
     if store.dir != new {
         fs::rename(&store.dir, &new)
@@ -453,6 +470,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
                 function: store.function.clone(),
                 server: store.server.clone(),
                 whisper: store.whisper.clone(),
+                search: store.search.clone(),
                 origin: store.hashes.first().cloned(),
             });
         }
@@ -467,6 +485,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
         function: None,
         server: ServerFile::default(),
         whisper: WhisperFile::default(),
+        search: SearchFile::default(),
         origin: None,
     })
 }
@@ -511,6 +530,7 @@ fn resolve_among(
         function: store.and_then(|store| store.function.clone()),
         server: store.map(|store| store.server.clone()).unwrap_or_default(),
         whisper: store.map(|store| store.whisper.clone()).unwrap_or_default(),
+        search: store.map(|store| store.search.clone()).unwrap_or_default(),
         origin: store.and_then(|store| store.hashes.first().cloned()),
     };
     // A project not registered yet: its store is created at the first
@@ -657,6 +677,7 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
         function: None,
         server: ServerFile::default(),
         whisper: WhisperFile::default(),
+        search: SearchFile::default(),
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -695,6 +716,7 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
         function: None,
         server: ServerFile::default(),
         whisper: WhisperFile::default(),
+        search: SearchFile::default(),
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -1264,6 +1286,12 @@ mod tests {
                 model: Some("w.bin".into()),
                 args: Some(vec!["-t".into(), "12".into()]),
             },
+            search: SearchFile {
+                url: Some("https://search.example/v1/search".into()),
+                client_certificate: Some("/c/client.crt".into()),
+                client_private_key: Some("/c/client.pk8".into()),
+                private_ca: Some("/c/ca.crt".into()),
+            },
         };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
         // The table comes after the top-level keys, so the file parses.
@@ -1311,7 +1339,7 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default(), whisper: WhisperFile::default() }
+        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default(), whisper: WhisperFile::default(), search: SearchFile::default() }
             .write(&store.join(MARKER_FILE))
             .unwrap();
         let found = stores(&data).unwrap();
@@ -1607,6 +1635,7 @@ mod tests {
             function: None,
             server: ServerFile::default(),
             whisper: WhisperFile::default(),
+            search: SearchFile::default(),
         };
         let mine = format!("sha256:0123456789abcdef{}", "f".repeat(52));
         // No collision: the 12-hex name.
@@ -1627,6 +1656,7 @@ mod tests {
             function: None,
             server: ServerFile::default(),
             whisper: WhisperFile::default(),
+            search: SearchFile::default(),
         };
         assert_eq!(store_key("proj", &mine, &[mine_store]), "proj-0123456789ab");
     }
@@ -1639,7 +1669,7 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default(), whisper: WhisperFile::default() }
+        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default(), whisper: WhisperFile::default(), search: SearchFile::default() }
             .write(&taken.join(MARKER_FILE))
             .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
@@ -1768,6 +1798,7 @@ mod tests {
             function: Some("coder".into()),
             server: ServerFile::default(),
             whisper: WhisperFile::default(),
+            search: SearchFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
@@ -1808,6 +1839,7 @@ mod tests {
             function: None,
             server: server.clone(),
             whisper: WhisperFile::default(),
+            search: SearchFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();

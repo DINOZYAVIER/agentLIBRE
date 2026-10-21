@@ -56,6 +56,20 @@ pub enum Error {
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `[server] url` is not an `http://` URL (D52).
     UnsupportedUrl { path: PathBuf, url: String },
+    /// `[search] url` is not an `https://` URL (AGL-019, D3).
+    UnsupportedSearchUrl { path: PathBuf, url: String },
+    /// A file path of `[search]` is not absolute (AGL-019, D3).
+    SearchPathNotAbsolute {
+        path: PathBuf,
+        key: String,
+        value: String,
+    },
+    /// A credential file of `[search]` that the policy refuses
+    /// (AGL-019, D4).
+    SearchCredential {
+        file: PathBuf,
+        problem: CredentialProblem,
+    },
     /// No `[server] url` in the project's file nor in the user file (D59,
     /// AGL-015).
     MissingServerUrl {
@@ -221,6 +235,27 @@ pub enum Error {
     Remove { path: PathBuf, source: io::Error },
 }
 
+/// What the credential policy of `[search]` finds wrong with a file
+/// (AGL-019, D4).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CredentialProblem {
+    /// The file cannot be inspected or read; `detail` is the system's.
+    Unreadable(String),
+    /// Not a regular file (a link to one counts as not).
+    NotRegular,
+    /// Not owned by the user who runs `agl`.
+    NotOwn,
+    /// Readable or writable by the group or others.
+    OthersAccess,
+    /// More than one hard link.
+    OtherLinks,
+    Empty,
+    /// Over 1 MiB.
+    TooLarge,
+    /// Not a PEM of the type the key needs (`expected`).
+    WrongType { expected: &'static str },
+}
+
 /// TOML type a settings key requires.
 #[derive(Debug)]
 pub enum Expected {
@@ -358,6 +393,15 @@ impl std::fmt::Display for Error {
                 }
                 Error::UnsupportedUrl { path, url } => {
                     format!("unsupported server address `{url}` in {}", path.display())
+                }
+                Error::UnsupportedSearchUrl { path, url } => {
+                    format!("unsupported search address `{url}` in {}", path.display())
+                }
+                Error::SearchPathNotAbsolute { path, key, .. } => {
+                    format!("`{key}` in {} must be an absolute path", path.display())
+                }
+                Error::SearchCredential { file, .. } => {
+                    format!("the search credential {} is refused", file.display())
                 }
                 Error::MissingServerUrl { .. } => "the llama-server address is not set".into(),
                 Error::InvalidName(name) => format!("invalid name `{name}`"),

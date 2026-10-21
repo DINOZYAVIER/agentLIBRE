@@ -1,7 +1,7 @@
 //! The user `agentLIBRE.toml` file (D54-D60, D66, D148); the project
 //! settings live in the project's store file (AGL-010, `forge::Marker`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::i18n::Lang;
@@ -24,6 +24,8 @@ pub struct UserFile {
     pub server: ServerFile,
     /// `[whisper]`: the defaults of the whisper server (AGL-014, D22).
     pub whisper: WhisperFile,
+    /// `[search]`: the human's search service (AGL-019, D3).
+    pub search: SearchFile,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
     /// `[repl]` (D124, D130).
@@ -123,6 +125,132 @@ impl WhisperFile {
         if let Some(args) = &self.args {
             let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
             out.push_str(&format!("args = [{}]\n", items.join(", ")));
+        }
+        out
+    }
+}
+
+/// `[search]` of a settings file, the user's or the project's
+/// (AGL-019, D3): the search service and the credentials of its mutual
+/// TLS. A key that is not set is `None`; the table is usable when the
+/// merged one sets all four (D5).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchFile {
+    /// An `https://` address (D3).
+    pub url: Option<String>,
+    /// Absolute paths of the client certificate, its private key (PKCS#8
+    /// PEM) and the private CA bundle (D3, D4).
+    pub client_certificate: Option<String>,
+    pub client_private_key: Option<String>,
+    pub private_ca: Option<String>,
+}
+
+/// A complete `[search]`: the search is set up (AGL-019, D5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Search {
+    pub url: String,
+    pub client_certificate: PathBuf,
+    pub client_private_key: PathBuf,
+    pub private_ca: PathBuf,
+}
+
+impl SearchFile {
+    const KEYS: &'static [&'static str] =
+        &["url", "client_certificate", "client_private_key", "private_ca"];
+
+    pub fn parse(section: Option<Section>, path: &Path) -> Result<SearchFile, Error> {
+        let Some(mut search) = section else {
+            return Ok(SearchFile::default());
+        };
+        search.check_keys(Self::KEYS)?;
+        let url = search.string("url")?;
+        if let Some(url) = &url
+            && !url.starts_with("https://")
+        {
+            return Err(Error::UnsupportedSearchUrl {
+                path: path.into(),
+                url: url.clone(),
+            });
+        }
+        let mut file = |key: &str| -> Result<Option<String>, Error> {
+            let value = search.string(key)?;
+            if let Some(value) = &value
+                && !Path::new(value).is_absolute()
+            {
+                return Err(Error::SearchPathNotAbsolute {
+                    path: path.into(),
+                    key: search.key(key),
+                    value: value.clone(),
+                });
+            }
+            Ok(value)
+        };
+        Ok(SearchFile {
+            url,
+            client_certificate: file("client_certificate")?,
+            client_private_key: file("client_private_key")?,
+            private_ca: file("private_ca")?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == SearchFile::default()
+    }
+
+    /// The keys set here, the others from `defaults`.
+    pub fn over(&self, defaults: &SearchFile) -> SearchFile {
+        SearchFile {
+            url: self.url.clone().or_else(|| defaults.url.clone()),
+            client_certificate: self
+                .client_certificate
+                .clone()
+                .or_else(|| defaults.client_certificate.clone()),
+            client_private_key: self
+                .client_private_key
+                .clone()
+                .or_else(|| defaults.client_private_key.clone()),
+            private_ca: self.private_ca.clone().or_else(|| defaults.private_ca.clone()),
+        }
+    }
+
+    /// The search when all four keys are set; `Ok(None)` when none is
+    /// (no search); the first missing key's name when some are (D5).
+    pub fn complete(&self) -> Result<Option<Search>, &'static str> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Search {
+            url: self.url.clone().ok_or("url")?,
+            client_certificate: self
+                .client_certificate
+                .clone()
+                .ok_or("client_certificate")?
+                .into(),
+            client_private_key: self
+                .client_private_key
+                .clone()
+                .ok_or("client_private_key")?
+                .into(),
+            private_ca: self.private_ca.clone().ok_or("private_ca")?.into(),
+        }))
+    }
+
+    /// The `[search]` table as written to a file; empty when no key is
+    /// set.
+    pub fn render(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n[search]\n");
+        for (key, value) in [
+            ("url", &self.url),
+            ("client_certificate", &self.client_certificate),
+            ("client_private_key", &self.client_private_key),
+            ("private_ca", &self.private_ca),
+        ] {
+            if let Some(value) = value {
+                out.push_str(&format!("{key} = {}\n", tomlfile::quote(value)));
+            }
         }
         out
     }
@@ -297,7 +425,7 @@ impl UserFile {
         };
         let mut file = Section::new(path, table);
         file.check_keys(&[
-            "function", "language", "server", "whisper", "colors", "repl", "forge",
+            "function", "language", "server", "whisper", "search", "colors", "repl", "forge",
         ])?;
         let function = file.string("function")?;
         let language = file
@@ -311,6 +439,7 @@ impl UserFile {
             .transpose()?;
         let server = ServerFile::parse(file.section("server")?, path)?;
         let whisper = WhisperFile::parse(file.section("whisper")?, path)?;
+        let search = SearchFile::parse(file.section("search")?, path)?;
         let colors = match file.section("colors")? {
             None => Vec::new(),
             Some(mut colors) => {
@@ -368,6 +497,7 @@ impl UserFile {
             language,
             server,
             whisper,
+            search,
             colors,
             repl,
             forge,
@@ -384,6 +514,9 @@ pub struct Settings {
     pub server: ServerFile,
     /// The `[whisper]` of the project over the user's.
     pub whisper: WhisperFile,
+    /// The `[search]` of the project over the user's, when it is
+    /// complete; the tool `search` exists only then (AGL-019, D5).
+    pub search: Option<Search>,
     pub function: String,
     pub colors: Vec<(Role, Style)>,
     pub repl: ReplSettings,
@@ -396,12 +529,23 @@ impl Settings {
     pub fn resolve(
         user: &UserFile,
         user_path: &Path,
-        project: (&Path, Option<&str>, &ServerFile, &WhisperFile),
+        project: (&Path, Option<&str>, &ServerFile, &WhisperFile, &SearchFile),
         cli_function: Option<&str>,
     ) -> Result<Settings, Error> {
-        let (project_path, project_function, project_server, project_whisper) = project;
+        let (project_path, project_function, project_server, project_whisper, project_search) =
+            project;
         let server = project_server.over(&user.server);
         let whisper = project_whisper.over(&user.whisper);
+        let search_file = project_search.over(&user.search);
+        let search = search_file.complete().map_err(|key| Error::MissingKey {
+            // The file that has a `[search]`, the project's first.
+            path: if project_search.is_empty() {
+                user_path.into()
+            } else {
+                project_path.into()
+            },
+            key: format!("search.{key}"),
+        })?;
         let server_url = server.url.clone().ok_or_else(|| Error::MissingServerUrl {
             user_path: user_path.into(),
             project_path: project_path.into(),
@@ -416,6 +560,7 @@ impl Settings {
             server_url,
             server,
             whisper,
+            search,
             function,
             colors: user.colors.clone(),
             repl: ReplSettings {
@@ -554,11 +699,113 @@ mod tests {
                 None,
                 &ServerFile::default(),
                 &project,
+                &SearchFile::default(),
             ),
             None,
         )
         .unwrap();
         assert_eq!(settings.whisper, merged);
+    }
+
+    fn full_search() -> SearchFile {
+        SearchFile {
+            url: Some("https://search.example/v1/search".into()),
+            client_certificate: Some("/c/client.crt".into()),
+            client_private_key: Some("/c/client.pk8".into()),
+            private_ca: Some("/c/ca.crt".into()),
+        }
+    }
+
+    #[test]
+    fn the_search_table() {
+        let loaded = user(
+            "[search]\nurl = \"https://search.example/v1/search\"\n\
+             client_certificate = \"/c/client.crt\"\nclient_private_key = \"/c/client.pk8\"\n\
+             private_ca = \"/c/ca.crt\"\n",
+        )
+        .unwrap()
+        .search;
+        assert_eq!(loaded, full_search());
+        // The project wins per key; render and parse back.
+        let project = SearchFile {
+            url: Some("https://other.example/v1/search".into()),
+            ..SearchFile::default()
+        };
+        let merged = project.over(&loaded);
+        assert_eq!(merged.url.as_deref(), Some("https://other.example/v1/search"));
+        assert_eq!(merged.private_ca, loaded.private_ca);
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &merged.render());
+        assert_eq!(UserFile::load(&path).unwrap().search, merged);
+        assert_eq!(SearchFile::default().render(), "");
+        assert!(matches!(
+            user("[search]\nport = 1"),
+            Err(Error::UnknownKey { key, .. }) if key == "search.port"
+        ));
+        assert!(matches!(
+            user("[search]\nurl = \"http://x\""),
+            Err(Error::UnsupportedSearchUrl { url, .. }) if url == "http://x"
+        ));
+        assert!(matches!(
+            user("[search]\nprivate_ca = \"ca.crt\""),
+            Err(Error::SearchPathNotAbsolute { key, value, .. })
+                if key == "search.private_ca" && value == "ca.crt"
+        ));
+    }
+
+    #[test]
+    fn the_search_is_set_up_only_by_a_complete_table() {
+        let resolve = |user_search: SearchFile, project_search: SearchFile| {
+            Settings::resolve(
+                &UserFile {
+                    search: user_search,
+                    server: ServerFile {
+                        url: Some("http://x".into()),
+                        ..ServerFile::default()
+                    },
+                    ..UserFile::default()
+                },
+                Path::new("/c/agentLIBRE.toml"),
+                (
+                    Path::new("/d/agentLIBRE.toml"),
+                    None,
+                    &ServerFile::default(),
+                    &WhisperFile::default(),
+                    &project_search,
+                ),
+                None,
+            )
+        };
+        // None: no search, no error.
+        assert_eq!(resolve(SearchFile::default(), SearchFile::default()).unwrap().search, None);
+        // All four: the search.
+        let search = resolve(full_search(), SearchFile::default()).unwrap().search.unwrap();
+        assert_eq!(search.url, "https://search.example/v1/search");
+        assert_eq!(search.private_ca, Path::new("/c/ca.crt"));
+        // Some, as the user's: the first missing key, in the user's file.
+        let partial = SearchFile {
+            url: full_search().url,
+            client_private_key: full_search().client_private_key,
+            ..SearchFile::default()
+        };
+        assert!(matches!(
+            resolve(partial.clone(), SearchFile::default()),
+            Err(Error::MissingKey { path, key })
+                if key == "search.client_certificate" && path == Path::new("/c/agentLIBRE.toml")
+        ));
+        // The project completes the user's table per key...
+        let rest = SearchFile {
+            client_certificate: full_search().client_certificate,
+            private_ca: full_search().private_ca,
+            ..SearchFile::default()
+        };
+        assert!(resolve(partial, rest).unwrap().search.is_some());
+        // ...and a project's own partial table names its own file.
+        assert!(matches!(
+            resolve(SearchFile::default(), SearchFile { url: full_search().url, ..SearchFile::default() }),
+            Err(Error::MissingKey { path, key })
+                if key == "search.client_certificate" && path == Path::new("/d/agentLIBRE.toml")
+        ));
     }
 
     #[test]
@@ -614,6 +861,7 @@ mod tests {
                 None,
                 project,
                 &WhisperFile::default(),
+                &SearchFile::default(),
             ),
             None,
         )
@@ -716,6 +964,7 @@ mod tests {
                 None,
                 &ServerFile::default(),
                 &WhisperFile::default(),
+                &SearchFile::default(),
             ),
             None,
         )
@@ -875,6 +1124,7 @@ mod tests {
                     project,
                     &ServerFile::default(),
                     &WhisperFile::default(),
+                    &SearchFile::default(),
                 ),
                 cli,
             )

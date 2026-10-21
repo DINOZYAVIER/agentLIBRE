@@ -165,6 +165,7 @@ fn run(
             project.function.as_deref(),
             &project.server,
             &project.whisper,
+            &project.search,
         ),
         function.or(args.function.as_deref()),
     )?;

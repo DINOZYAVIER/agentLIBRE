@@ -655,6 +655,7 @@ mod tests {
             function: None,
             server,
             whisper: Default::default(),
+            search: Default::default(),
             origin: origin.map(str::to_owned),
         }
     }

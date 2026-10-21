@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected, FunctionProblem, TemplateProblem};
+use crate::error::{CredentialProblem, Error, Expected, FunctionProblem, TemplateProblem};
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
@@ -398,6 +398,58 @@ Forge (сховище артефактів робочої області, agentL
     pub const UNSUPPORTED_URL: Msg = Msg {
         en: "unsupported server address `{url}` in {path}; only http:// is supported",
         uk: "непідтримувана адреса сервера `{url}` у {path}; підтримується лише http://",
+    };
+
+    /// `Error::UnsupportedSearchUrl`.
+    pub const UNSUPPORTED_SEARCH_URL: Msg = Msg {
+        en: "unsupported search address `{url}` in {path}; only https:// is supported",
+        uk: "непідтримувана адреса пошуку `{url}` у {path}; підтримується лише https://",
+    };
+
+    /// `Error::SearchPathNotAbsolute`.
+    pub const SEARCH_PATH_NOT_ABSOLUTE: Msg = Msg {
+        en: "`{key}` in {path} must be an absolute path, not `{value}`",
+        uk: "`{key}` у {path} має бути абсолютним шляхом, а не `{value}`",
+    };
+
+    /// `Error::SearchCredential`.
+    pub const SEARCH_CREDENTIAL: Msg = Msg {
+        en: "the search credential {file} is refused: {problem}",
+        uk: "облікові дані пошуку {file} відхилено: {problem}",
+    };
+
+    /// What is wrong with a credential file, for `SEARCH_CREDENTIAL`.
+    pub const CREDENTIAL_UNREADABLE: Msg = Msg {
+        en: "it cannot be read ({detail})",
+        uk: "його не можна прочитати ({detail})",
+    };
+    pub const CREDENTIAL_NOT_REGULAR: Msg = Msg {
+        en: "it is not a regular file (a link does not count)",
+        uk: "це не звичайний файл (посилання не підходить)",
+    };
+    pub const CREDENTIAL_NOT_OWN: Msg = Msg {
+        en: "it is not owned by you",
+        uk: "він вам не належить",
+    };
+    pub const CREDENTIAL_OTHERS_ACCESS: Msg = Msg {
+        en: "the group or others can access it; make it mode 0600",
+        uk: "група або інші мають до нього доступ; зробіть режим 0600",
+    };
+    pub const CREDENTIAL_OTHER_LINKS: Msg = Msg {
+        en: "it has more than one hard link",
+        uk: "він має більше одного жорсткого посилання",
+    };
+    pub const CREDENTIAL_EMPTY: Msg = Msg {
+        en: "it is empty",
+        uk: "він порожній",
+    };
+    pub const CREDENTIAL_TOO_LARGE: Msg = Msg {
+        en: "it is larger than 1 MiB",
+        uk: "він більший за 1 МіБ",
+    };
+    pub const CREDENTIAL_WRONG_TYPE: Msg = Msg {
+        en: "it is not a PEM of the type {expected}",
+        uk: "це не PEM типу {expected}",
     };
 
     /// `Error::MissingServerUrl`.
@@ -1674,6 +1726,39 @@ impl Error {
             }
             Error::UnsupportedUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
+            }
+            Error::UnsupportedSearchUrl { path, url } => {
+                tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)
+            }
+            Error::SearchPathNotAbsolute { path, key, value } => {
+                tr!(
+                    lang,
+                    m::SEARCH_PATH_NOT_ABSOLUTE,
+                    path = path.display(),
+                    key = key,
+                    value = value
+                )
+            }
+            Error::SearchCredential { file, problem } => {
+                let problem = match problem {
+                    CredentialProblem::Unreadable(detail) => {
+                        tr!(lang, m::CREDENTIAL_UNREADABLE, detail = detail)
+                    }
+                    CredentialProblem::NotRegular => tr!(lang, m::CREDENTIAL_NOT_REGULAR).to_string(),
+                    CredentialProblem::NotOwn => tr!(lang, m::CREDENTIAL_NOT_OWN).to_string(),
+                    CredentialProblem::OthersAccess => {
+                        tr!(lang, m::CREDENTIAL_OTHERS_ACCESS).to_string()
+                    }
+                    CredentialProblem::OtherLinks => {
+                        tr!(lang, m::CREDENTIAL_OTHER_LINKS).to_string()
+                    }
+                    CredentialProblem::Empty => tr!(lang, m::CREDENTIAL_EMPTY).to_string(),
+                    CredentialProblem::TooLarge => tr!(lang, m::CREDENTIAL_TOO_LARGE).to_string(),
+                    CredentialProblem::WrongType { expected } => {
+                        tr!(lang, m::CREDENTIAL_WRONG_TYPE, expected = expected)
+                    }
+                };
+                tr!(lang, m::SEARCH_CREDENTIAL, file = file.display(), problem = problem)
             }
             Error::MissingServerUrl {
                 user_path,

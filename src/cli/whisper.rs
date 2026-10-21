@@ -276,6 +276,7 @@ mod tests {
                 function: None,
                 server: Default::default(),
                 whisper: WhisperFile::default(),
+                search: Default::default(),
                 origin: Some(origin),
             },
             whisper,
