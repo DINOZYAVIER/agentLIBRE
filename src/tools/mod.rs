@@ -78,6 +78,15 @@ pub fn run(
         }
         "edit" => (edit(workspace, text("path"), text("old"), text("new")), None),
         "forge" => forge(workspace, env, &forge_args(args)),
+        // The agent keeps the memory of the session, so it runs this one
+        // itself (AGL-006).
+        "memory" => (
+            ToolResult {
+                outcome: Outcome::Fail,
+                content: "The memory tool is run by the agent.".into(),
+            },
+            None,
+        ),
         // The agent keeps the media of the session, so it runs this one
         // itself (AGL-014, D24).
         "view" => (

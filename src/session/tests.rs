@@ -502,3 +502,54 @@ fn a_bad_media_event_is_a_bad_line() {
     fs::write(&path, text).unwrap();
     assert!(matches!(Session::open(&dir.0, &id), Err(Error::SessionLine { .. })));
 }
+
+#[test]
+fn the_memory_event_round_trips_and_is_not_part_of_the_history() {
+    use crate::memory::Kind as MemoryKind;
+    let dir = Dir::new("memory-event");
+    let events = [
+        Event::User("Remember the tests".into()),
+        Event::Memory {
+            name: "build-and-test".into(),
+            kind: MemoryKind::Added,
+            text: Some("Run cargo test.".into()),
+        },
+        Event::Memory {
+            name: "build-and-test".into(),
+            kind: MemoryKind::Edited,
+            text: Some("cargo nextest".into()),
+        },
+        Event::Memory {
+            name: "build-and-test".into(),
+            kind: MemoryKind::Removed,
+            text: None,
+        },
+    ];
+    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    for event in &events {
+        session.append(event.clone()).unwrap();
+    }
+    let text = fs::read_to_string(dir.0.join(format!("{}.jsonl", session.id))).unwrap();
+    let lines: Vec<Json> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines[2],
+        json!({
+            "type": "memory",
+            "name": "build-and-test",
+            "kind": "added",
+            "text": "Run cargo test.",
+            "time": lines[2]["time"]
+        })
+    );
+    // A removal carries no text.
+    assert_eq!(
+        lines[4],
+        json!({"type": "memory", "name": "build-and-test", "kind": "removed", "time": lines[4]["time"]})
+    );
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(reopened.events, events);
+    assert_eq!(reopened.history().len(), 1);
+}

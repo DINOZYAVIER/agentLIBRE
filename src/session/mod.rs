@@ -12,6 +12,7 @@ use crate::action::{Outcome, Value};
 use crate::backend::{Message, ToolCall};
 use crate::error::Error;
 use crate::media::{self, Frame, Kind, Media, Source};
+use crate::memory::Kind as MemoryKind;
 
 /// The session format version (D104).
 const VERSION: u64 = 1;
@@ -111,6 +112,13 @@ pub enum Event {
     /// (D154).
     CutOff(u32),
     Stop(StopReason),
+    /// A write of the `memory` tool or of `/remember` (AGL-006, M36): the
+    /// entry, what was done and the text that was written.
+    Memory {
+        name: String,
+        kind: MemoryKind,
+        text: Option<String>,
+    },
     /// A medium of the session, logged before the message that names it
     /// (AGL-014); its bytes are in the media directory (D7).
     Media(Media),
@@ -308,7 +316,11 @@ impl Session {
                     thinking = None;
                     messages.push(Message::Runtime(cut_off_notice(*limit)));
                 }
-                Event::State(_) | Event::Stop(_) | Event::Forge { .. } | Event::Media(_) => {}
+                Event::State(_)
+                | Event::Stop(_)
+                | Event::Forge { .. }
+                | Event::Media(_)
+                | Event::Memory { .. } => {}
             }
         }
         messages
@@ -517,6 +529,13 @@ fn event_json(event: &Event) -> Json {
         Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
+        Event::Memory { name, kind, text } => {
+            let mut json = json!({"type": "memory", "name": name, "kind": kind.name()});
+            if let Some(text) = text {
+                json["text"] = text.as_str().into();
+            }
+            json
+        }
         Event::Media(media) => {
             let mut json = json!({
                 "type": "media",
@@ -594,6 +613,13 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 .find(|r| json["reason"] == r.name())?,
         ),
         "compact" => Event::Compact(text("summary")?),
+        "memory" => Event::Memory {
+            name: text("name")?,
+            kind: MemoryKind::ALL
+                .into_iter()
+                .find(|kind| json["kind"] == kind.name())?,
+            text: text("text"),
+        },
         "media" => Event::Media(Media {
             kind: Kind::ALL
                 .into_iter()
@@ -638,6 +664,7 @@ fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Val
         "edit" => &["path", "old", "new"],
         "view" => &["path"],
         "search" => &["language", "limit", "query", "source"],
+        "memory" => &["action", "hook", "name", "new", "old", "text", "title"],
         "forge" => &["action", "name", "new", "old", "section", "text", "title"],
         _ => &[],
     };
@@ -668,7 +695,7 @@ fn uuid_v7() -> io::Result<String> {
 }
 
 /// The current UTC time as `YYYY-MM-DDTHH:MM:SSZ`.
-fn utc_now() -> String {
+pub fn utc_now() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

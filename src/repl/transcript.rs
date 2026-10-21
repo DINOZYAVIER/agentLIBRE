@@ -171,6 +171,25 @@ impl Presenter {
             .print(&[self.theme.paint(Role::Muted, &message)]);
     }
 
+    /// `[memory: +name]` where the memory was written, then the text that
+    /// was written, muted (AGL-006, M28).
+    pub fn show_memory(&self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+        let change = format!("{}{name}", kind.sign());
+        let mut lines = vec![self.theme.paint(
+            Role::Muted,
+            &tr!(self.lang, m::MEMORY_EVENT, change = change),
+        )];
+        if let Some(text) = text {
+            lines.extend(notice_lines(
+                &self.theme,
+                text,
+                self.screen.columns(),
+                Role::Muted,
+            ));
+        }
+        self.screen.print(&lines);
+    }
+
     pub fn show_thinking(&self, thinking: &str) {
         let mut wrap = StreamWrap::new(self.screen.columns());
         let mut lines = wrap.push(&format!("{}: {thinking}", tr!(self.lang, m::THINKING)));
@@ -243,6 +262,9 @@ impl Presenter {
                     kind,
                     section,
                 } => self.show_forge(name, *kind, section.as_deref()),
+                Event::Memory { name, kind, text } => {
+                    self.show_memory(name, *kind, text.as_deref());
+                }
                 Event::Stop(_) | Event::Media(_) => {}
             }
         }
@@ -973,11 +995,22 @@ mod tests {
                 kind: ForgeKind::Appended,
                 section: Some("Progress".into()),
             },
+            Event::Memory {
+                name: "build-and-test".into(),
+                kind: crate::memory::Kind::Added,
+                text: Some("Run cargo test.".into()),
+            },
             Event::Answer("Done".into()),
         ];
         presenter.replay(&events);
         let printed = mock.printed.lock().unwrap().clone();
         assert!(printed.contains(&"[work]".to_owned()));
+        // The memory marker, then the text written (AGL-006, M28).
+        let marker = printed
+            .iter()
+            .position(|line| line == "[memory: +build-and-test]")
+            .expect("the memory marker");
+        assert_eq!(printed[marker + 1], "Run cargo test.");
         assert!(printed.contains(&"thinking: hm".to_owned()));
         assert!(printed.contains(&"Running.".to_owned()));
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));

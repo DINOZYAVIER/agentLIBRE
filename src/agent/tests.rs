@@ -29,6 +29,8 @@ struct Script {
     users: RefCell<Vec<String>>,
     /// The media each generation was sent with.
     uploads: RefCell<Vec<Vec<String>>>,
+    /// The texts of the runtime messages of each rendered prompt, in order.
+    runtimes: RefCell<Vec<Vec<String>>>,
 }
 
 impl Script {
@@ -57,6 +59,7 @@ impl Script {
             hears: false,
             users: RefCell::new(Vec::new()),
             uploads: RefCell::new(Vec::new()),
+            runtimes: RefCell::new(Vec::new()),
         }
     }
 
@@ -91,6 +94,16 @@ impl Backend for Script {
             })
             .collect();
         self.users.borrow_mut().push(users.join("\n"));
+        self.runtimes.borrow_mut().push(
+            prompt
+                .messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Runtime(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         let instruction = prompt.instruction.unwrap_or("-");
         Ok(format!(
             "[{} messages; {instruction}]<think>\n",
@@ -176,6 +189,9 @@ impl Report for Log {
     }
     fn compacted(&mut self) {
         self.0.push("[compacted]".into());
+    }
+    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+        self.0.push(format!("memory {}{name} {}", kind.sign(), text.unwrap_or("-")));
     }
     fn cut_off(&mut self) {
         self.0.push("[cut off]".into());
@@ -269,6 +285,32 @@ fn agent_searching<'a>(
         image_tokens: 1000,
         whisper: &NoWhisper,
         search,
+        memory: &NoMemory,
+    }
+}
+
+/// A workspace with no memory store.
+struct NoMemory;
+
+impl crate::memory::Home for NoMemory {
+    fn read(&self) -> Option<PathBuf> {
+        None
+    }
+    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        Err(Error::NotLocalServer { url: "no store".into() })
+    }
+}
+
+/// A memory directory of the test: read when it exists, made on a write.
+struct DirMemory(PathBuf);
+
+impl crate::memory::Home for DirMemory {
+    fn read(&self) -> Option<PathBuf> {
+        self.0.is_dir().then(|| self.0.clone())
+    }
+    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        fs::create_dir_all(&self.0).unwrap();
+        Ok((self.0.clone(), vec!["the store was made".into()]))
     }
 }
 
@@ -423,6 +465,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Compact(_) => "compact",
             Event::CutOff(_) => "cut_off",
             Event::Media(_) => "media",
+            Event::Memory { .. } => "memory",
         })
         .collect()
 }
@@ -1200,4 +1243,191 @@ fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));
     assert_eq!(session.media()[0].transcript.as_deref(), Some("good morning"));
     assert!(script.users.borrow().last().unwrap().contains("[Audio#1: \"good morning\"] v.wav"));
+}
+
+fn memory_call(fields: &[(&str, &str)]) -> String {
+    let params: String = fields
+        .iter()
+        .map(|(name, value)| format!("<parameter={name}>\n{value}\n</parameter>\n"))
+        .collect();
+    format!("<tool_call>\n<function=memory>\n{params}</function>\n</tool_call>")
+}
+
+fn turn_with_memory(
+    memory: &dyn crate::memory::Home,
+    script: &Script,
+    dir: &Dir,
+    message: &str,
+) -> (Result<TurnEnd, Error>, Log, Session) {
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    let mut agent = agent(&default, script, &mut session, dir, None);
+    agent.memory = memory;
+    let end = agent.turn(message, &mut log);
+    (end, log, session)
+}
+
+#[test]
+fn the_memory_index_is_a_runtime_message_each_step_and_not_in_the_history() {
+    let dir = Dir::new("memindex");
+    let memory = dir.0.join("memory");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(
+        memory.join("MEMORY.md"),
+        "- [Build](build.md) — cargo build\n- [Server](server.md) — 127.0.0.1:18080\n",
+    )
+    .unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let (end, _, session) = turn_with_memory(&DirMemory(memory), &script, &dir, "go");
+    assert!(end.is_ok());
+    // Every step carries the index as a runtime message, once.
+    let runtimes = script.runtimes.borrow();
+    assert_eq!(runtimes.len(), 2);
+    for step in runtimes.iter() {
+        assert_eq!(
+            *step,
+            ["workspace memory\n- [Build](build.md) — cargo build\n- [Server](server.md) — 127.0.0.1:18080"]
+        );
+    }
+    // It is not stored: the session has no event for it and the history
+    // holds no such message (M7, M27).
+    assert!(session.history().iter().all(|m| !matches!(m, Message::Runtime(_))));
+    // Without a memory store, or with an empty index, there is no message.
+    let script = Script::new(&[("t1", THOUGHT), ("Done.", Stop::End)]);
+    let (_, _, _) = turn_with_memory(&NoMemory, &script, &dir, "go");
+    assert!(script.runtimes.borrow()[0].is_empty());
+    let empty = dir.0.join("empty-memory");
+    fs::create_dir_all(&empty).unwrap();
+    fs::write(empty.join("MEMORY.md"), "\n").unwrap();
+    let script = Script::new(&[("t1", THOUGHT), ("Done.", Stop::End)]);
+    let (_, _, _) = turn_with_memory(&DirMemory(empty), &script, &dir, "go");
+    assert!(script.runtimes.borrow()[0].is_empty());
+}
+
+#[test]
+fn the_memory_tool_writes_logs_an_event_and_shows_a_marker() {
+    let dir = Dir::new("memtool");
+    let memory = dir.0.join("memory");
+    let script = Script::new(&[
+        ("I will note it.", THOUGHT),
+        (
+            &memory_call(&[
+                ("action", "add"),
+                ("hook", "how to test"),
+                ("text", "Run cargo test."),
+                ("title", "Build and test"),
+            ]),
+            Stop::End,
+        ),
+        ("Noted.", THOUGHT),
+        (
+            &memory_call(&[("action", "show"), ("name", "build-and-test")]),
+            Stop::End,
+        ),
+        ("Read.", THOUGHT),
+        ("Remembered.", Stop::End),
+    ]);
+    let (end, log, session) = turn_with_memory(&DirMemory(memory.clone()), &script, &dir, "note the tests");
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{:?}", log.0);
+    assert_eq!(
+        fs::read_to_string(memory.join("build-and-test.md")).unwrap(),
+        "# Build and test\n\nRun cargo test.\n"
+    );
+    assert_eq!(
+        fs::read_to_string(memory.join("MEMORY.md")).unwrap(),
+        "- [Build and test](build-and-test.md) — how to test\n"
+    );
+    // The event comes after the call's result; the marker and the text
+    // are reported once; a show writes nothing.
+    let kinds = kinds(&session);
+    assert_eq!(kinds.iter().filter(|k| **k == "memory").count(), 1);
+    let call = kinds.iter().position(|k| *k == "call").unwrap();
+    assert_eq!(&kinds[call..call + 3], ["call", "result", "memory"]);
+    assert!(log.0.contains(&"memory +build-and-test Run cargo test.".to_string()));
+    assert_eq!(log.0.iter().filter(|l| l.starts_with("memory ")).count(), 1);
+    // The result tells that the store was made (the lines of the home).
+    let Event::Result { content, .. } = &session.events[call + 1] else {
+        panic!("not a result");
+    };
+    assert!(content.starts_with("the store was made\nRemembered `build-and-test`."));
+    // The next step sees the entry in the index.
+    assert_eq!(
+        script.runtimes.borrow()[1],
+        ["workspace memory\n- [Build and test](build-and-test.md) — how to test"]
+    );
+}
+
+#[test]
+fn a_memory_call_without_a_store_fails_for_everything_but_add() {
+    let dir = Dir::new("memnone");
+    let script = Script::new(&[
+        ("t", THOUGHT),
+        (&memory_call(&[("action", "show"), ("name", "x")]), Stop::End),
+        ("t", THOUGHT),
+        (
+            &memory_call(&[
+                ("action", "add"),
+                ("hook", "h"),
+                ("text", "x"),
+                ("title", "T"),
+            ]),
+            Stop::End,
+        ),
+        ("t", THOUGHT),
+        ("Cannot.", Stop::End),
+    ]);
+    let (end, log, session) = turn_with_memory(&NoMemory, &script, &dir, "go");
+    assert!(end.is_ok(), "{:?}", log.0);
+    let results: Vec<(Outcome, &str)> = session
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Result { outcome, content, .. } => Some((*outcome, content.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results[0].0, Outcome::Fail);
+    assert!(results[0].1.contains("has no entries yet"));
+    // `add` registers the store; here there is none to register: a failure.
+    assert_eq!(results[1].0, Outcome::Fail);
+    assert!(!kinds(&session).contains(&"memory"));
+}
+
+#[test]
+fn a_compaction_summary_is_kept_in_the_memory_directory_and_not_in_the_index() {
+    let dir = Dir::new("memsummary");
+    let memory = dir.0.join("memory");
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        (" The user said go; true ran. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, FITS]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    let mut agent = agent(&default, &script, &mut session, &dir, None);
+    let home = DirMemory(memory.clone());
+    agent.memory = &home;
+    assert!(agent.turn("go", &mut log).is_ok());
+    let id = session.id.clone();
+    let summaries: Vec<_> = fs::read_dir(memory.join("summaries")).unwrap().flatten().collect();
+    assert_eq!(summaries.len(), 1);
+    let name = summaries[0].file_name().to_string_lossy().into_owned();
+    assert!(name.ends_with(&format!("-{id}.md")), "{name}");
+    assert_eq!(name.len(), "2026-10-21-".len() + id.len() + 3);
+    assert_eq!(
+        fs::read_to_string(summaries[0].path()).unwrap(),
+        "The user said go; true ran.\n"
+    );
+    // Not in the index (M16): the prompt does not carry it.
+    assert!(!memory.join("MEMORY.md").exists());
 }

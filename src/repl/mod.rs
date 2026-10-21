@@ -32,8 +32,11 @@ use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
-use crate::session::{ForgeKind, Session, StopReason};
-use crate::status::{COMMANDS, Facts, Info, compact_notice, display_path, help_text, status_text};
+use crate::session::{Event, ForgeKind, Session, StopReason};
+use crate::status::{
+    COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
+    status_text,
+};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 use crate::tr;
@@ -60,6 +63,8 @@ struct Inner {
     quit: bool,
     new_session: bool,
     compact: bool,
+    /// `/remember name | text`, for the main thread to write (AGL-006).
+    remember: Option<(String, String)>,
     info: Info,
     /// The model's reasoning level (AGL-013); it survives `/new`.
     reasoning: Option<ReasoningLevel>,
@@ -257,6 +262,29 @@ impl Input {
                     self.attach_files(&[std::path::PathBuf::from(path)]);
                 }
             }
+            "/remember" => match parse_remember(trimmed["/remember".len()..].trim()) {
+                Remember::Usage => {
+                    self.notice(tr!(self.lang, m::REMEMBER_USAGE), Role::StatusPending);
+                }
+                // The entry is written by the main thread, which holds the
+                // session: not while a turn runs (as `/new`).
+                Remember::Entry { name, text } => {
+                    let mut inner = self.control.lock();
+                    if inner.busy() {
+                        drop(inner);
+                        self.notice(
+                            &tr!(self.lang, m::BUSY, name = "/remember"),
+                            Role::StatusPending,
+                        );
+                    } else {
+                        inner.remember = Some((name, text));
+                        drop(inner);
+                        self.control.wake.notify_all();
+                    }
+                }
+                // An ordinary message: the model names the entry (M37).
+                Remember::Turn(message) => self.submitted(message),
+            },
             "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
                 if inner.busy() {
@@ -476,6 +504,9 @@ impl Report for Reporter<'_> {
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
         self.presenter.forge(name, kind, section);
     }
+    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+        self.presenter.show_memory(name, kind, text);
+    }
     fn compacting(&mut self) {
         self.presenter.compacting();
     }
@@ -498,6 +529,7 @@ enum Next {
     Message(Queued),
     New,
     Compact,
+    Remember(String, String),
     Quit,
 }
 
@@ -510,6 +542,9 @@ fn wait_for_next(control: &Control) -> Next {
         if inner.new_session {
             inner.new_session = false;
             return Next::New;
+        }
+        if let Some((name, text)) = inner.remember.take() {
+            return Next::Remember(name, text);
         }
         if inner.compact {
             inner.compact = false;
@@ -548,6 +583,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         autostart,
         search,
         image_tokens,
+        memory,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -650,6 +686,38 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
             },
+            Next::Remember(name, text) => {
+                // `/remember name | text` (AGL-006, M34, M37): the program
+                // writes the entry, no turn.
+                match memory.write() {
+                    Ok((dir, lines)) => {
+                        for line in lines {
+                            presenter.show_notice(&line, Role::Muted);
+                        }
+                        let (result, write) = crate::memory::remember(&dir, &name, &text);
+                        match write {
+                            Some(write) => {
+                                if let Err(error) = session.append(Event::Memory {
+                                    name: write.name.clone(),
+                                    kind: write.kind,
+                                    text: write.text.clone(),
+                                }) {
+                                    presenter.show_notice(&error.message(lang), Role::StatusFailure);
+                                }
+                                presenter.show_memory(&write.name, write.kind, write.text.as_deref());
+                            }
+                            None => presenter.show_notice(
+                                &tr!(lang, m::REMEMBER_FAILED, reason = result.content),
+                                Role::StatusFailure,
+                            ),
+                        }
+                    }
+                    Err(error) => presenter.show_notice(
+                        &tr!(lang, m::REMEMBER_FAILED, reason = error.message(lang)),
+                        Role::StatusFailure,
+                    ),
+                }
+            }
             Next::Compact => {
                 let reasoning = control.lock().reasoning;
                 let result = backend.context_size().and_then(|context| {
@@ -665,6 +733,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         image_tokens,
                         whisper: autostart,
                         search,
+                        memory,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -724,6 +793,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         image_tokens,
                         whisper: autostart,
                         search,
+                        memory,
                     }
                     .turn(
                         &message,
@@ -1301,6 +1371,53 @@ mod tests {
         f.input.voice.cancel();
         assert_eq!(f.fake.log().last().unwrap(), "cancel");
         assert!(!f.input.voice.recording());
+    }
+
+    #[test]
+    fn remember_with_a_name_is_for_the_main_thread_and_waits_for_no_turn() {
+        let f = fixture();
+        f.type_text("/remember Build and test | cargo build / cargo test");
+        f.input.key(Key::Enter);
+        assert_eq!(
+            f.inner().remember,
+            Some(("Build and test".into(), "cargo build / cargo test".into()))
+        );
+        assert!(f.inner().queue.is_empty());
+        // The main thread takes it before any message.
+        f.inner().queue.push_back("later".into());
+        assert!(matches!(
+            wait_for_next(&f.input.control),
+            Next::Remember(name, text) if name == "Build and test" && text == "cargo build / cargo test"
+        ));
+        assert!(f.inner().remember.is_none());
+        // During a turn it is refused, as `/new` is, and nothing is kept.
+        f.inner().running = true;
+        f.type_text("/remember Name | text");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("/remember is not available during a turn"));
+        assert!(f.inner().remember.is_none());
+    }
+
+    #[test]
+    fn remember_without_a_name_is_an_ordinary_message_even_during_a_turn() {
+        let f = fixture();
+        f.inner().running = true;
+        f.type_text("/remember cargo build / cargo test");
+        f.input.key(Key::Enter);
+        assert_eq!(f.inner().texts(), ["remember: cargo build / cargo test"]);
+        assert!(f.inner().remember.is_none());
+    }
+
+    #[test]
+    fn remember_alone_or_with_an_empty_name_or_text_tells_the_usage() {
+        let f = fixture();
+        for line in ["/remember", "/remember | text", "/remember name |"] {
+            f.type_text(line);
+            f.input.key(Key::Enter);
+        }
+        assert!(f.output().contains("usage: /remember"));
+        assert!(f.inner().remember.is_none());
+        assert!(f.inner().queue.is_empty());
     }
 
     #[test]

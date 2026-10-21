@@ -14,6 +14,7 @@ mod i18n;
 mod interrupt;
 mod machine;
 mod media;
+mod memory;
 mod paths;
 mod record;
 mod repl;
@@ -77,6 +78,8 @@ pub struct Setup<'a> {
     pub image_tokens: usize,
     /// Runs the `search` tool (AGL-019).
     pub search: &'a dyn search::Searcher,
+    /// Where the memory of the workspace is (AGL-006).
+    pub memory: &'a dyn memory::Home,
 }
 
 pub fn cli() -> ExitCode {
@@ -201,6 +204,11 @@ fn run(
         .server
         .image_max_tokens
         .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
+    let memory = memory::StoreHome {
+        workspace: workspace.clone(),
+        auto_rehome: user.forge.auto_rehome.unwrap_or(true),
+        lang: *lang,
+    };
     let backend = Llama::new(&settings.server_url);
     let autostart = cli::serve::Autostart {
         llama: &backend,
@@ -259,6 +267,7 @@ fn run(
             reasoning: args.reasoning,
             image_tokens,
             search,
+            memory: &memory,
         };
         return if interactive {
             repl::run(setup)
@@ -297,6 +306,7 @@ fn run(
         image_tokens,
         whisper: &autostart,
         search,
+        memory: &memory,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

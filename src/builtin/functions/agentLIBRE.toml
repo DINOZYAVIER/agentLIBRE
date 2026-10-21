@@ -29,5 +29,6 @@ tools.bash = {}
 tools.edit = {}
 tools.view = {}
 tools.search = {}
+tools.memory = {}
 answer = true
 next = { else = "work" }

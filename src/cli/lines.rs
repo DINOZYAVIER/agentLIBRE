@@ -6,7 +6,7 @@ use std::io::{self, BufRead};
 use std::process::ExitCode;
 
 use crate::Setup;
-use crate::agent::{Agent, TurnEnd};
+use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::cli::report::StderrReport;
 use crate::cli::serve::Others;
@@ -14,8 +14,10 @@ use crate::error::Error;
 use crate::i18n::{m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
-use crate::session::{Session, StopReason};
-use crate::status::{Facts, Info, compact_notice, display_path, help_text, status_text};
+use crate::session::{Event, Session, StopReason};
+use crate::status::{
+    Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
+};
 use crate::tr;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
@@ -34,6 +36,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         search,
         yes,
         image_tokens,
+        memory,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -53,7 +56,16 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let mut placeholders: Vec<String> = Vec::new();
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let message = line.trim();
+        let mut message = line.trim();
+        // `/remember text` without a name is an ordinary message: the
+        // model names the entry (AGL-006, M37).
+        let remembered;
+        if message.split_whitespace().next() == Some("/remember")
+            && let Remember::Turn(text) = parse_remember(&message["/remember".len()..])
+        {
+            remembered = text;
+            message = &remembered;
+        }
         if message.is_empty() {
             continue;
         }
@@ -71,6 +83,41 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     };
                     println!("{}", status_text(&facts, &info, reasoning, lang));
                 }
+                "/remember" => match parse_remember(&message["/remember".len()..]) {
+                    Remember::Entry { name, text } => match memory.write() {
+                        Ok((dir, lines)) => {
+                            for line in lines {
+                                eprintln!("{line}");
+                            }
+                            match crate::memory::remember(&dir, &name, &text) {
+                                (_, Some(write)) => {
+                                    session.append(Event::Memory {
+                                        name: write.name.clone(),
+                                        kind: write.kind,
+                                        text: write.text.clone(),
+                                    })?;
+                                    StderrReport::new(lang).memory(
+                                        &write.name,
+                                        write.kind,
+                                        write.text.as_deref(),
+                                    );
+                                }
+                                (result, None) => eprintln!(
+                                    "{}",
+                                    tr!(lang, m::REMEMBER_FAILED, reason = result.content)
+                                ),
+                            }
+                        }
+                        Err(error) => eprintln!(
+                            "{}",
+                            tr!(lang, m::REMEMBER_FAILED, reason = error.message(lang))
+                        ),
+                    },
+                    // The turn form was made a message above.
+                    Remember::Usage | Remember::Turn(_) => {
+                        eprintln!("{}", tr!(lang, m::REMEMBER_USAGE));
+                    }
+                },
                 "/attach" => {
                     let path = unquote(message["/attach".len()..].trim());
                     if path.is_empty() {
@@ -111,6 +158,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             image_tokens,
                             whisper: autostart,
                             search,
+                            memory,
                         }
                         .compact(&mut StderrReport::new(lang))
                     });
@@ -159,6 +207,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 image_tokens,
                 whisper: autostart,
                 search,
+                memory,
             }
             .turn(&text, &mut report)
         });

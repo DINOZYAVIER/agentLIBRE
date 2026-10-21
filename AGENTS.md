@@ -26,9 +26,10 @@ inferred preference, or an LLM's engineering judgment is not a decision.
 
 - Record decisions in the AGL-XXX task-spec of the task, in the
   workspace forge (the XDG data directory, `agl forge`). The
-  long-term decision record will be the memory feature; until it
-  exists, the task-specs are the reference. Do not ask again for
-  choices recorded there.
+  task-specs are the reference for decisions; the workspace memory
+  (`agl`'s `memory` tool and `/remember`, AGL-006) holds facts about
+  the project, its environment and the human's preferences, not
+  decisions. Do not ask again for choices recorded there.
 - Do not implement a material product, architecture, naming, API, workflow,
   scope, security, data-format, or compatibility choice while it is open.
 - Do not start implementation until the human states that the spec for that

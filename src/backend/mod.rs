@@ -50,7 +50,7 @@ pub struct ToolDoc {
 }
 
 /// The built-in tools as the model sees them (D95).
-pub const TOOL_DOCS: [ToolDoc; 5] = [
+pub const TOOL_DOCS: [ToolDoc; 6] = [
     ToolDoc {
         name: "bash",
         description: "Run a shell command with `bash -c` in the workspace and return its \
@@ -138,6 +138,50 @@ pub const TOOL_DOCS: [ToolDoc; 5] = [
                 false,
                 Some("web, or wikipedia for an article."),
                 true,
+            ),
+        ],
+    },
+    ToolDoc {
+        name: "memory",
+        description: "The memory of this workspace: entries kept across sessions. Keep the \
+                      project's setup and conventions, the environment and the human's \
+                      preferences — not decisions, they are recorded in the forge. Actions: \
+                      add title hook text; show name; edit name old new; remove name.",
+        params: &[
+            ("action", false, Some("add, show, edit or remove."), true),
+            (
+                "hook",
+                false,
+                Some("For add: one line that says what the entry holds, for the index."),
+                false,
+            ),
+            (
+                "name",
+                false,
+                Some(
+                    "For show, edit and remove: the entry's name as the memory index shows \
+                     it (the file name without .md).",
+                ),
+                false,
+            ),
+            (
+                "new",
+                false,
+                Some("For edit: the replacement text; empty deletes `old`."),
+                false,
+            ),
+            (
+                "old",
+                false,
+                Some("For edit: the exact text to replace in the entry; it must appear once."),
+                false,
+            ),
+            ("text", false, Some("For add: the full text of the entry."), false),
+            (
+                "title",
+                false,
+                Some("For add: the title of the entry; its file name is made from it."),
+                false,
             ),
         ],
     },
