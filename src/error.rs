@@ -140,6 +140,16 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// An audio needs whisper and `[whisper]` lacks `url` or `model`
+    /// (AGL-014, D22).
+    WhisperNotSet {
+        user_path: PathBuf,
+        project_path: PathBuf,
+    },
+    /// No `whisper-server` in `PATH`.
+    WhisperServerNotFound,
+    /// The whisper server answered an error or nothing.
+    Transcribe { url: String, detail: String },
     /// The prompt names a medium but the server has no multimodal
     /// projector (AGL-014).
     NoMultimodal,
@@ -396,7 +406,7 @@ impl std::fmt::Display for Error {
                 }
                 Error::LlamaServerNotFound => "llama-server is not in PATH".into(),
                 Error::Systemd { detail } => format!("systemd failed: {detail}"),
-                Error::ServerFailed { .. } => "llama-server stopped before it was ready".into(),
+                Error::ServerFailed { .. } => "the server stopped before it was ready".into(),
                 Error::ProjectNotRegistered { project } => {
                     format!("{} is not a registered project", project.display())
                 }
@@ -406,9 +416,14 @@ impl std::fmt::Display for Error {
                 }
                 Error::StartDeclined => "llama-server was not started".into(),
                 Error::ServerTimeout { seconds, .. } => {
-                    format!("llama-server was not ready after {seconds} s")
+                    format!("the server was not ready after {seconds} s")
                 }
                 Error::NoMultimodal => "the server has no multimodal projector".into(),
+                Error::WhisperNotSet { .. } => "the whisper server is not set".into(),
+                Error::WhisperServerNotFound => "whisper-server is not in PATH".into(),
+                Error::Transcribe { url, detail } => {
+                    format!("the whisper server at {url} could not transcribe: {detail}")
+                }
                 Error::MediaChanged { path } => {
                     format!("{} is not what its name says", path.display())
                 }

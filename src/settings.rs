@@ -22,6 +22,8 @@ pub struct UserFile {
     /// `[server]`: the defaults of the llama server; a project's own
     /// `[server]` wins per key (AGL-015, D4, D11).
     pub server: ServerFile,
+    /// `[whisper]`: the defaults of the whisper server (AGL-014, D22).
+    pub whisper: WhisperFile,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
     /// `[repl]` (D124, D130).
@@ -49,6 +51,81 @@ pub struct ServerFile {
     /// The most tokens one image takes: passed to llama-server and the
     /// bound of the context check (D10, D23).
     pub image_max_tokens: Option<u32>,
+}
+
+/// `[whisper]` of a settings file, the user's or the project's
+/// (AGL-014, D22): the whisper.cpp server that turns an audio into text
+/// when the model does not hear it. A key that is not set is `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WhisperFile {
+    pub url: Option<String>,
+    /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/`.
+    pub model: Option<String>,
+    /// More whisper-server arguments.
+    pub args: Option<Vec<String>>,
+}
+
+impl WhisperFile {
+    const KEYS: &'static [&'static str] = &["url", "model", "args"];
+
+    pub fn parse(section: Option<Section>, path: &Path) -> Result<WhisperFile, Error> {
+        let Some(mut whisper) = section else {
+            return Ok(WhisperFile::default());
+        };
+        whisper.check_keys(Self::KEYS)?;
+        let url = whisper.string("url")?;
+        if let Some(url) = &url
+            && !url.starts_with("http://")
+        {
+            return Err(Error::UnsupportedUrl {
+                path: path.into(),
+                url: url.clone(),
+            });
+        }
+        let model = whisper.string("model")?;
+        if let Some(model) = &model {
+            tomlfile::check_name(model)?;
+        }
+        Ok(WhisperFile {
+            url,
+            model,
+            args: whisper.strings("args")?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == WhisperFile::default()
+    }
+
+    /// The keys set here, the others from `defaults`; `args` is replaced
+    /// as a whole (AGL-015, D11).
+    pub fn over(&self, defaults: &WhisperFile) -> WhisperFile {
+        WhisperFile {
+            url: self.url.clone().or_else(|| defaults.url.clone()),
+            model: self.model.clone().or_else(|| defaults.model.clone()),
+            args: self.args.clone().or_else(|| defaults.args.clone()),
+        }
+    }
+
+    /// The `[whisper]` table as written to a file; empty when no key is
+    /// set.
+    pub fn render(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n[whisper]\n");
+        if let Some(url) = &self.url {
+            out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+        }
+        if let Some(model) = &self.model {
+            out.push_str(&format!("model = {}\n", tomlfile::quote(model)));
+        }
+        if let Some(args) = &self.args {
+            let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
+            out.push_str(&format!("args = [{}]\n", items.join(", ")));
+        }
+        out
+    }
 }
 
 /// `image_max_tokens` when `[server]` does not set it (AGL-014, D23).
@@ -219,7 +296,9 @@ impl UserFile {
             return Ok(UserFile::default());
         };
         let mut file = Section::new(path, table);
-        file.check_keys(&["function", "language", "server", "colors", "repl", "forge"])?;
+        file.check_keys(&[
+            "function", "language", "server", "whisper", "colors", "repl", "forge",
+        ])?;
         let function = file.string("function")?;
         let language = file
             .string("language")?
@@ -231,6 +310,7 @@ impl UserFile {
             })
             .transpose()?;
         let server = ServerFile::parse(file.section("server")?, path)?;
+        let whisper = WhisperFile::parse(file.section("whisper")?, path)?;
         let colors = match file.section("colors")? {
             None => Vec::new(),
             Some(mut colors) => {
@@ -287,6 +367,7 @@ impl UserFile {
             function,
             language,
             server,
+            whisper,
             colors,
             repl,
             forge,
@@ -301,6 +382,8 @@ pub struct Settings {
     /// The `[server]` of the project over the user's defaults
     /// (AGL-015).
     pub server: ServerFile,
+    /// The `[whisper]` of the project over the user's.
+    pub whisper: WhisperFile,
     pub function: String,
     pub colors: Vec<(Role, Style)>,
     pub repl: ReplSettings,
@@ -313,11 +396,12 @@ impl Settings {
     pub fn resolve(
         user: &UserFile,
         user_path: &Path,
-        project: (&Path, Option<&str>, &ServerFile),
+        project: (&Path, Option<&str>, &ServerFile, &WhisperFile),
         cli_function: Option<&str>,
     ) -> Result<Settings, Error> {
-        let (project_path, project_function, project_server) = project;
+        let (project_path, project_function, project_server, project_whisper) = project;
         let server = project_server.over(&user.server);
+        let whisper = project_whisper.over(&user.whisper);
         let server_url = server.url.clone().ok_or_else(|| Error::MissingServerUrl {
             user_path: user_path.into(),
             project_path: project_path.into(),
@@ -331,6 +415,7 @@ impl Settings {
         Ok(Settings {
             server_url,
             server,
+            whisper,
             function,
             colors: user.colors.clone(),
             repl: ReplSettings {
@@ -417,6 +502,66 @@ mod tests {
     }
 
     #[test]
+    fn the_whisper_table() {
+        let loaded = user(
+            "[whisper]\nurl = \"http://127.0.0.1:18082\"\nmodel = \"w.bin\"\nargs = [\"-t\", \"12\"]\n",
+        )
+        .unwrap()
+        .whisper;
+        assert_eq!(
+            loaded,
+            WhisperFile {
+                url: Some("http://127.0.0.1:18082".into()),
+                model: Some("w.bin".into()),
+                args: Some(vec!["-t".into(), "12".into()]),
+            }
+        );
+        // The project wins per key, `args` as a whole; render and parse back.
+        let project = WhisperFile {
+            model: Some("small.bin".into()),
+            args: Some(Vec::new()),
+            ..WhisperFile::default()
+        };
+        let merged = project.over(&loaded);
+        assert_eq!(merged.url, loaded.url);
+        assert_eq!(merged.model.as_deref(), Some("small.bin"));
+        assert_eq!(merged.args, Some(Vec::new()));
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &merged.render());
+        assert_eq!(UserFile::load(&path).unwrap().whisper, merged);
+        assert_eq!(WhisperFile::default().render(), "");
+        assert!(matches!(
+            user("[whisper]\nport = 1"),
+            Err(Error::UnknownKey { key, .. }) if key == "whisper.port"
+        ));
+        assert!(matches!(
+            user("[whisper]\nurl = \"https://x\""),
+            Err(Error::UnsupportedUrl { .. })
+        ));
+        // `resolve` hands the merged table over.
+        let settings = Settings::resolve(
+            &UserFile {
+                whisper: loaded,
+                server: ServerFile {
+                    url: Some("http://x".into()),
+                    ..ServerFile::default()
+                },
+                ..UserFile::default()
+            },
+            Path::new("/c/agentLIBRE.toml"),
+            (
+                Path::new("/d/agentLIBRE.toml"),
+                None,
+                &ServerFile::default(),
+                &project,
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(settings.whisper, merged);
+    }
+
+    #[test]
     fn the_projector_keys() {
         let file = user(
             "[server]\nurl = \"http://x\"\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
@@ -464,7 +609,12 @@ mod tests {
         Settings::resolve(
             user,
             Path::new("/c/agentLIBRE.toml"),
-            (Path::new("/d/agentLIBRE.toml"), None, project),
+            (
+                Path::new("/d/agentLIBRE.toml"),
+                None,
+                project,
+                &WhisperFile::default(),
+            ),
             None,
         )
     }
@@ -561,7 +711,12 @@ mod tests {
         let settings = Settings::resolve(
             &loaded_with_server(loaded),
             Path::new("/c/x.toml"),
-            (Path::new("/d/x.toml"), None, &ServerFile::default()),
+            (
+                Path::new("/d/x.toml"),
+                None,
+                &ServerFile::default(),
+                &WhisperFile::default(),
+            ),
             None,
         )
         .unwrap();
@@ -715,7 +870,12 @@ mod tests {
             Settings::resolve(
                 user,
                 path,
-                (Path::new("/d/agentLIBRE.toml"), project, &ServerFile::default()),
+                (
+                    Path::new("/d/agentLIBRE.toml"),
+                    project,
+                    &ServerFile::default(),
+                    &WhisperFile::default(),
+                ),
                 cli,
             )
             .unwrap()

@@ -8,3 +8,4 @@ pub mod init;
 pub mod lines;
 pub mod report;
 pub mod serve;
+pub mod whisper;

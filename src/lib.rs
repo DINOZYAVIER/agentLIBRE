@@ -2,6 +2,7 @@
 
 mod action;
 mod agent;
+mod attach;
 mod backend;
 mod cli;
 mod error;
@@ -162,6 +163,7 @@ fn run(
             &project.dir.join(forge::MARKER_FILE),
             project.function.as_deref(),
             &project.server,
+            &project.whisper,
         ),
         function.or(args.function.as_deref()),
     )?;
@@ -185,6 +187,7 @@ fn run(
         llama: &backend,
         project: &project,
         settings: &settings.server,
+        whisper: &settings.whisper,
         user_path: user_path.clone(),
         models: paths.models(),
         path_var: env("PATH"),

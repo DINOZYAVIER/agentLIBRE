@@ -13,7 +13,7 @@ use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, m, server as texts};
+use crate::i18n::{Lang, Msg, m, server as texts};
 use crate::settings::ServerFile;
 use crate::tr;
 
@@ -236,21 +236,22 @@ pub fn start(
     }
     let name = model.file_name().unwrap_or_default().to_string_lossy();
     say(&texts::starting(&name, url, &server.unit, lang));
-    wait_ready(llama, Some(&server.unit), say, lang)
+    wait_ready(llama, Some(&server.unit), &m::SERVER_READY, say, lang)
 }
 
 /// Waits until `/health` answers ready (D149). `unit` is the unit that
 /// loads the model, when it is ours: it stopping is a failure.
-fn wait_ready(
+pub(super) fn wait_ready(
     llama: &Llama,
     unit: Option<&str>,
+    ready: &Msg,
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
-            say(&tr!(lang, m::SERVER_READY, url = llama.url()));
+            say(&tr!(lang, ready, url = llama.url()));
             return Ok(());
         }
         if let Some(unit) = unit
@@ -275,6 +276,8 @@ pub struct Autostart<'a> {
     pub project: &'a Workspace,
     /// The project's `[server]` over the user's.
     pub settings: &'a ServerFile,
+    /// The project's `[whisper]` over the user's (AGL-014, D22).
+    pub whisper: &'a crate::settings::WhisperFile,
     pub user_path: PathBuf,
     pub models: PathBuf,
     pub path_var: Option<OsString>,
@@ -291,7 +294,7 @@ impl Autostart<'_> {
         match health(llama) {
             Health::Ready => Ok(()),
             // Someone loads it now: wait for it, as `start` does.
-            Health::Loading => wait_ready(llama, None, say, self.lang),
+            Health::Loading => wait_ready(llama, None, &m::SERVER_READY, say, self.lang),
             Health::Down => {
                 let server = Server::of(self.project, self.settings, &self.user_path)?;
                 start(
@@ -339,7 +342,7 @@ pub fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-fn health(llama: &Llama) -> Health {
+pub(super) fn health(llama: &Llama) -> Health {
     match llama.health() {
         Some(200) => Health::Ready,
         Some(_) => Health::Loading,
@@ -348,7 +351,7 @@ fn health(llama: &Llama) -> Health {
 }
 
 /// Whether something accepts connections at `host:port`.
-fn port_open(host: &str, port: u16) -> bool {
+pub(super) fn port_open(host: &str, port: u16) -> bool {
     (host, port)
         .to_socket_addrs()
         .into_iter()
@@ -359,7 +362,7 @@ fn port_open(host: &str, port: u16) -> bool {
 }
 
 /// Whether the unit runs.
-fn unit_active(unit: &str) -> Result<bool, Error> {
+pub(super) fn unit_active(unit: &str) -> Result<bool, Error> {
     let status = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", unit])
         .stdin(Stdio::null())
@@ -425,7 +428,7 @@ fn systemctl(args: &[&str]) -> Result<(), Error> {
 }
 
 /// The host and port of an `http://` URL whose host is local (D148).
-fn local_address(url: &str) -> Option<(String, u16)> {
+pub(super) fn local_address(url: &str) -> Option<(String, u16)> {
     let rest = url.strip_prefix("http://")?;
     let authority = rest.split('/').next().unwrap_or_default();
     let (host, port) = match authority.rsplit_once(':') {
@@ -436,7 +439,7 @@ fn local_address(url: &str) -> Option<(String, u16)> {
 }
 
 /// The first executable `name` in `path_var` (D147).
-fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
+pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(&path_var?)
         .filter(|dir| dir.is_absolute())
@@ -638,6 +641,7 @@ mod tests {
             dir: PathBuf::from("/d/agl-lite-60af300abea6"),
             function: None,
             server,
+            whisper: Default::default(),
             origin: origin.map(str::to_owned),
         }
     }
@@ -772,10 +776,16 @@ mod tests {
         project: &'a Workspace,
         settings: &'a ServerFile,
     ) -> Autostart<'a> {
+        static NO_WHISPER: crate::settings::WhisperFile = crate::settings::WhisperFile {
+            url: None,
+            model: None,
+            args: None,
+        };
         Autostart {
             llama,
             project,
             settings,
+            whisper: &NO_WHISPER,
             user_path: PathBuf::from("/c/agentLIBRE.toml"),
             models: PathBuf::from("/m"),
             path_var: None,

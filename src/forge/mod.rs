@@ -20,7 +20,7 @@ use std::process::Command as Process;
 use toml::{Table, Value};
 
 use crate::error::Error;
-use crate::settings::ServerFile;
+use crate::settings::{ServerFile, WhisperFile};
 use crate::tomlfile::quote as toml_string;
 use crate::tomlfile::Section;
 
@@ -182,6 +182,8 @@ pub struct Marker {
     /// The project's `[server]` (AGL-015); wins per key over the user
     /// file's.
     pub server: ServerFile,
+    /// The project's `[whisper]` (AGL-014, D22).
+    pub whisper: WhisperFile,
 }
 
 impl Marker {
@@ -190,7 +192,7 @@ impl Marker {
     /// project settings.
     pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
         let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&["function", "format", "workspace_sha256", "server"])?;
+        file.check_keys(&["function", "format", "workspace_sha256", "server", "whisper"])?;
         let format = file.required_integer("format")?;
         if format != 1 {
             return Err(Error::MarkerFormat {
@@ -209,10 +211,12 @@ impl Marker {
         }
         let function = file.string("function")?;
         let server = ServerFile::parse(file.section("server")?, path)?;
+        let whisper = WhisperFile::parse(file.section("whisper")?, path)?;
         Ok(Marker {
             hashes,
             function,
             server,
+            whisper,
         })
     }
 
@@ -230,8 +234,9 @@ impl Marker {
             .map(|function| format!("function = {}\n", toml_string(function)))
             .unwrap_or_default();
         format!(
-            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}",
-            self.server.render()
+            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}{}",
+            self.server.render(),
+            self.whisper.render()
         )
     }
 
@@ -250,6 +255,7 @@ pub struct Store {
     pub hashes: Vec<String>,
     pub function: Option<String>,
     pub server: ServerFile,
+    pub whisper: WhisperFile,
 }
 
 impl Store {
@@ -286,6 +292,7 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
             hashes: marker.hashes,
             function: marker.function,
             server: marker.server,
+            whisper: marker.whisper,
         });
     }
     found.sort_by_key(Store::name);
@@ -312,6 +319,8 @@ pub struct Workspace {
     /// The project's `[server]` from the same file (AGL-015); empty for
     /// a store not yet written.
     pub server: ServerFile,
+    /// The project's `[whisper]` from the same file (AGL-014).
+    pub whisper: WhisperFile,
     /// The first identity of the store's marker, the one the project had
     /// at its start; `None` for a project that is not registered. The
     /// name of the project's llama-server unit is built from it
@@ -364,6 +373,7 @@ fn rehomed(
         hashes,
         function: store.function.clone(),
         server: store.server.clone(),
+        whisper: store.whisper.clone(),
     };
     if store.dir != new {
         fs::rename(&store.dir, &new)
@@ -442,6 +452,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
                 dir: store.dir.clone(),
                 function: store.function.clone(),
                 server: store.server.clone(),
+                whisper: store.whisper.clone(),
                 origin: store.hashes.first().cloned(),
             });
         }
@@ -455,6 +466,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
         key,
         function: None,
         server: ServerFile::default(),
+        whisper: WhisperFile::default(),
         origin: None,
     })
 }
@@ -498,6 +510,7 @@ fn resolve_among(
         dir,
         function: store.and_then(|store| store.function.clone()),
         server: store.map(|store| store.server.clone()).unwrap_or_default(),
+        whisper: store.map(|store| store.whisper.clone()).unwrap_or_default(),
         origin: store.and_then(|store| store.hashes.first().cloned()),
     };
     // A project not registered yet: its store is created at the first
@@ -643,6 +656,7 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
         hashes: vec![ws.identity.clone()],
         function: None,
         server: ServerFile::default(),
+        whisper: WhisperFile::default(),
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -680,6 +694,7 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
         hashes: vec![ws.identity.clone()],
         function: None,
         server: ServerFile::default(),
+        whisper: WhisperFile::default(),
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -1244,6 +1259,11 @@ mod tests {
                 mmproj_offload: Some(true),
                 image_max_tokens: Some(2048),
             },
+            whisper: WhisperFile {
+                url: Some("http://127.0.0.1:18082".into()),
+                model: Some("w.bin".into()),
+                args: Some(vec!["-t".into(), "12".into()]),
+            },
         };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
         // The table comes after the top-level keys, so the file parses.
@@ -1291,7 +1311,7 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default() }
+        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default(), whisper: WhisperFile::default() }
             .write(&store.join(MARKER_FILE))
             .unwrap();
         let found = stores(&data).unwrap();
@@ -1586,6 +1606,7 @@ mod tests {
             hashes: vec![identity(2)],
             function: None,
             server: ServerFile::default(),
+            whisper: WhisperFile::default(),
         };
         let mine = format!("sha256:0123456789abcdef{}", "f".repeat(52));
         // No collision: the 12-hex name.
@@ -1605,6 +1626,7 @@ mod tests {
             hashes: vec![mine.to_string()],
             function: None,
             server: ServerFile::default(),
+            whisper: WhisperFile::default(),
         };
         assert_eq!(store_key("proj", &mine, &[mine_store]), "proj-0123456789ab");
     }
@@ -1617,7 +1639,7 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default() }
+        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default(), whisper: WhisperFile::default() }
             .write(&taken.join(MARKER_FILE))
             .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
@@ -1745,6 +1767,7 @@ mod tests {
             hashes: vec![identity_of(&from)],
             function: Some("coder".into()),
             server: ServerFile::default(),
+            whisper: WhisperFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
@@ -1784,6 +1807,7 @@ mod tests {
             hashes: vec![origin.clone()],
             function: None,
             server: server.clone(),
+            whisper: WhisperFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();

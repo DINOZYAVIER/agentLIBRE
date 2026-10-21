@@ -558,6 +558,42 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server уже працює ({units}). Запустити ще один? [y/N]",
     };
 
+    /// `Error::WhisperNotSet` (AGL-014, D22).
+    pub const WHISPER_NOT_SET: Msg = Msg {
+        en: "an audio needs the whisper server, and `url` and `model` of [whisper] are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[whisper]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"ggml-large-v3-q8_0.bin\"",
+        uk: "аудіо потребує whisper-сервера, а `url` і `model` у [whisper] задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[whisper]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"ggml-large-v3-q8_0.bin\"",
+    };
+
+    /// `Error::WhisperServerNotFound`.
+    pub const WHISPER_SERVER_NOT_FOUND: Msg = Msg {
+        en: "whisper-server is not in PATH (build whisper.cpp and put its whisper-server in PATH)",
+        uk: "whisper-server немає в PATH (збери whisper.cpp і поклади його whisper-server у PATH)",
+    };
+
+    /// `Error::Transcribe`.
+    pub const TRANSCRIBE: Msg = Msg {
+        en: "the whisper server at {url} could not transcribe: {detail}",
+        uk: "whisper-сервер за {url} не зміг розпізнати: {detail}",
+    };
+
+    /// whisper-server begins (AGL-014).
+    pub const WHISPER_STARTING: Msg = Msg {
+        en: "starting whisper-server ({model}) at {url} as unit {unit}…",
+        uk: "запускаю whisper-server ({model}) за {url} як unit {unit}…",
+    };
+
+    /// whisper-server is ready.
+    pub const WHISPER_READY: Msg = Msg {
+        en: "whisper-server is ready at {url}",
+        uk: "whisper-server готовий за {url}",
+    };
+
+    /// An audio goes to whisper.
+    pub const TRANSCRIBING: Msg = Msg {
+        en: "transcribing {name}…",
+        uk: "розпізнаю {name}…",
+    };
+
     /// `Error::NoMultimodal` (AGL-014).
     pub const NO_MULTIMODAL: Msg = Msg {
         en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in [server] of the project and restart it (agl server stop)",
@@ -584,14 +620,14 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ServerFailed`.
     pub const SERVER_FAILED: Msg = Msg {
-        en: "llama-server stopped before it was ready; see journalctl --user -u {unit}",
-        uk: "llama-server зупинився, не встигнувши стати готовим; див. journalctl --user -u {unit}",
+        en: "the server stopped before it was ready; see journalctl --user -u {unit}",
+        uk: "сервер зупинився, не встигнувши стати готовим; див. journalctl --user -u {unit}",
     };
 
     /// `Error::ServerTimeout`.
     pub const SERVER_TIMEOUT: Msg = Msg {
-        en: "llama-server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
-        uk: "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
+        en: "the server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
+        uk: "сервер не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
     };
 
     /// `TemplateProblem::Missing`.
@@ -1652,6 +1688,19 @@ impl Error {
             Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
+            Error::WhisperNotSet {
+                user_path,
+                project_path,
+            } => tr!(
+                lang,
+                m::WHISPER_NOT_SET,
+                user_path = user_path.display(),
+                project_path = project_path.display()
+            ),
+            Error::WhisperServerNotFound => tr!(lang, m::WHISPER_SERVER_NOT_FOUND).to_string(),
+            Error::Transcribe { url, detail } => {
+                tr!(lang, m::TRANSCRIBE, url = url, detail = detail)
+            }
             Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
             Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
             Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),
