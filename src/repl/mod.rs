@@ -418,6 +418,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     workspace: &workspace,
                     context,
                     forge,
+                    reasoning: None,
                 }
                 .compact(&mut Reporter {
                     presenter: &mut presenter,
@@ -441,6 +442,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     workspace: &workspace,
                     context,
                     forge,
+                    reasoning: None,
                 }
                 .turn(
                     &message,

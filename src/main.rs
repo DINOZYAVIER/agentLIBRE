@@ -199,6 +199,7 @@ fn run(
         workspace: &workspace,
         context,
         forge,
+        reasoning: None,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

@@ -71,6 +71,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         workspace: &workspace,
                         context,
                         forge,
+                        reasoning: None,
                     }
                     .compact(&mut StderrReport::new(lang));
                     let interrupted = matches!(result, Err(Error::Interrupted));
@@ -94,6 +95,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             workspace: &workspace,
             context,
             forge,
+            reasoning: None,
         }
         .turn(message, &mut report);
         state = None;

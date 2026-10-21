@@ -7,7 +7,8 @@ use std::path::Path;
 
 use crate::action::{self, Action, ParseError};
 use crate::backend::{
-    Backend, Message, Prompt, RUNTIME_PREFIX, Request, Stop, TOOL_DOCS, ToolCall, ToolDoc,
+    Backend, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
+    ToolDoc,
 };
 use crate::error::Error;
 use crate::function::Function;
@@ -77,6 +78,9 @@ pub struct Agent<'a> {
     pub context: usize,
     /// What the `forge` tool takes from the session (AGL-008).
     pub forge: ForgeEnv,
+    /// The model's reasoning level (AGL-013); `None` is the template's
+    /// default. `Off` silences the thinking states.
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 impl Agent<'_> {
@@ -129,17 +133,20 @@ impl Agent<'_> {
         let mut messages = vec![Message::System(system_prompt(function))];
         messages.extend(self.session.history());
         let tools = function_tools(function);
+        // `Off` silences the thinking states (AGL-013, Q4): the level and
+        // the state decide the thinking together.
+        let think = state.think && self.reasoning != Some(ReasoningLevel::Off);
         let rendered = self.backend.render(&Prompt {
             messages: &messages,
             instruction: state.instruction.as_deref(),
             tools: &tools,
             preserve_thinking: function.preserve_thinking,
-            reasoning: None,
+            reasoning: self.reasoning,
         })?;
-        let mut prompt = format.start_step(rendered, state.think);
+        let mut prompt = format.start_step(rendered, think);
 
         // The step must fit the context with its full generation (D32).
-        let think_budget = if state.think {
+        let think_budget = if think {
             function.max_think_tokens as usize
         } else {
             0
@@ -155,8 +162,8 @@ impl Agent<'_> {
             };
         }
 
-        if let Some(think) = format.think.as_ref().filter(|_| state.think) {
-            let close = think.close.trim();
+        if let Some(markers) = format.think.as_ref().filter(|_| think) {
+            let close = markers.close.trim();
             let call_start = format.call.begin_before.trim();
             let thinking = self.backend.generate(
                 &Request {
@@ -179,7 +186,7 @@ impl Agent<'_> {
             // A cut-off thinking or a call started inside it ends the
             // thinking too (D110, D113).
             prompt.push_str(text);
-            prompt.push_str(&think.close);
+            prompt.push_str(&markers.close);
         }
 
         let (grammar, root) = action::grammar(format, &state.actions);
@@ -307,7 +314,7 @@ impl Agent<'_> {
             instruction: Some(&function.compact),
             tools: &tools,
             preserve_thinking: false,
-            reasoning: None,
+            reasoning: self.reasoning,
         })?;
         let prompt = function.format.start_step(rendered, false);
         let needed = self.backend.count_tokens(&prompt)? + function.max_compact_tokens as usize;

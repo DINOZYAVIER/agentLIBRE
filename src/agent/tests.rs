@@ -190,9 +190,19 @@ fn run(
     dir: &Dir,
     message: &str,
 ) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
+    run_level(function, script, dir, message, None)
+}
+
+fn run_level(
+    function: &Function,
+    script: &Script,
+    dir: &Dir,
+    message: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    let end = agent(function, script, &mut session, dir).turn(message, &mut log);
+    let end = agent(function, script, &mut session, dir, reasoning).turn(message, &mut log);
     (end, log.0, session)
 }
 
@@ -201,6 +211,7 @@ fn agent<'a>(
     script: &'a Script,
     session: &'a mut Session,
     dir: &'a Dir,
+    reasoning: Option<ReasoningLevel>,
 ) -> Agent<'a> {
     Agent {
         function,
@@ -213,6 +224,7 @@ fn agent<'a>(
             lang: crate::i18n::Lang::En,
             auto_rehome: true,
         },
+        reasoning,
     }
 }
 
@@ -277,6 +289,25 @@ fn a_call_then_an_answer() {
 }
 
 #[test]
+fn the_off_level_silences_the_thinking() {
+    let function = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    // A level keeps the thinking: two generations.
+    let dir = Dir::new("think-level");
+    let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
+    let (end, log, session) = run_level(&function, &script, &dir, "hi", Some(ReasoningLevel::Low));
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
+    assert!(log.iter().any(|line| line.starts_with("thinking: ")));
+    assert_eq!(kinds(&session), ["user", "state", "thinking", "answer"]);
+    // `Off` silences it: the one action generation, no thinking.
+    let dir = Dir::new("off");
+    let script = Script::new(&[("Answer.", Stop::End)]);
+    let (end, log, session) = run_level(&function, &script, &dir, "hi", Some(ReasoningLevel::Off));
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
+    assert!(!log.iter().any(|line| line.starts_with("thinking: ")));
+    assert_eq!(kinds(&session), ["user", "state", "answer"]);
+}
+
+#[test]
 fn every_generation_reports_its_decoded_tokens() {
     let dir = Dir::new("decoded");
     let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
@@ -289,7 +320,7 @@ fn every_generation_reports_its_decoded_tokens() {
     let script = Script::new(&outputs);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut session, &dir)
+    agent(&default, &script, &mut session, &dir, None)
         .turn("Say hello", &mut log)
         .unwrap();
     // A generation counts as its characters, in the order decoded.
@@ -619,7 +650,7 @@ fn the_prompt_size_of_every_step_is_reported() {
     .with_counts(&[100, OVERFLOW, FITS, 200]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut session, &dir)
+    agent(&default, &script, &mut session, &dir, None)
         .turn("go", &mut log)
         .unwrap();
     // The summary prompt (the third count) is not a step.
@@ -660,16 +691,16 @@ fn compaction_on_request() {
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
     assert_eq!(
-        agent(&default, &script, &mut session, &dir)
+        agent(&default, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Nothing
     );
-    agent(&default, &script, &mut session, &dir)
+    agent(&default, &script, &mut session, &dir, None)
         .turn("hello", &mut log)
         .unwrap();
     assert_eq!(
-        agent(&default, &script, &mut session, &dir)
+        agent(&default, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Done
@@ -679,7 +710,7 @@ fn compaction_on_request() {
         Some(&Event::Compact("Greeted.".into()))
     );
     assert_eq!(
-        agent(&default, &script, &mut session, &dir)
+        agent(&default, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Nothing
