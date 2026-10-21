@@ -72,9 +72,9 @@ fn state<'f>(function: &'f Function, name: &str) -> &'f State {
 }
 
 #[test]
-fn builtin_default() {
+fn builtin_minimal() {
     let none = Path::new("/nonexistent");
-    let function = Function::load(none, none, "default").unwrap();
+    let function = Function::load(none, none, "minimal").unwrap();
     assert_eq!(
         function.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -226,9 +226,9 @@ fn the_explicit_forge_tool() {
 fn files_and_names() {
     let dir = std::env::temp_dir().join(format!("agentLIBRE-function-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("default.toml"), CODER).unwrap();
+    fs::write(dir.join("minimal.toml"), CODER).unwrap();
     let none = Path::new("/nonexistent");
-    let replaced = Function::load(&dir, none, "default");
+    let replaced = Function::load(&dir, none, "minimal");
     let missing = Function::load(&dir, none, "coder");
     fs::remove_dir_all(&dir).unwrap();
     assert_eq!(replaced.unwrap().states.len(), 3);
@@ -564,23 +564,23 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 #[test]
 fn the_built_in_functions_differ_in_the_system_only() {
     let none = Path::new("/nonexistent");
-    let default = Function::load(none, none, "default").unwrap();
     let minimal = Function::load(none, none, "minimal").unwrap();
-    // `default` is laconic and nameless (AGL-018, D1); `minimal` is the
-    // persona and the runtime part: the prefix and the size of an action
-    // (AGL-009, AGL-018, D2).
+    let agentlibre = Function::load(none, none, "agentLIBRE").unwrap();
+    // `minimal` is laconic and nameless (AGL-018, D1, AGL-020, D1).
+    // `agentLIBRE` is the persona and the runtime part: the prefix and the
+    // size of an action (AGL-009, AGL-018, D2, AGL-020, D2).
     assert_eq!(
-        default.system,
+        minimal.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
-    assert!(minimal.system.starts_with("You are DinoBot"));
-    assert!(minimal.system.contains(
+    assert!(agentlibre.system.starts_with("You are DinoBot"));
+    assert!(agentlibre.system.contains(
         "Messages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
          not from the human. One action holds at most 8192 tokens; write a large file in parts."
     ));
-    assert!(!minimal.system.contains('{'));
+    assert!(!agentlibre.system.contains('{'));
     // The rest is the same: the states and the tools.
-    assert_eq!(default.states.len(), minimal.states.len());
+    assert_eq!(minimal.states.len(), agentlibre.states.len());
     let tools = |f: &Function| -> Vec<String> {
         f.states[f.initial]
             .actions
@@ -589,6 +589,6 @@ fn the_built_in_functions_differ_in_the_system_only() {
             .map(|t| t.name.clone())
             .collect()
     };
-    assert_eq!(tools(&default), tools(&minimal));
-    assert_eq!(default.sampling, minimal.sampling);
+    assert_eq!(tools(&minimal), tools(&agentlibre));
+    assert_eq!(minimal.sampling, agentlibre.sampling);
 }

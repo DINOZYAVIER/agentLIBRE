@@ -884,7 +884,7 @@ mod tests {
                 Box::new(sink.clone()),
                 Theme::plain(),
                 Lang::En,
-                "default".into(),
+                "minimal".into(),
                 "~/project".into(),
                 Editor::new(Vec::new(), commands),
                 (40, 20),
@@ -924,7 +924,7 @@ mod tests {
                 None,
             )),
             facts: Facts {
-                function: "default".into(),
+                function: "minimal".into(),
                 workspace: "~/project".into(),
                 server: "http://127.0.0.1:18080".into(),
             },
@@ -1424,7 +1424,7 @@ mod tests {
     #[test]
     fn what_compact_tells() {
         let none = Path::new("/none");
-        let function = Function::load(none, none, "default").unwrap();
+        let function = Function::load(none, none, "minimal").unwrap();
         let notice = |result| compact_notice(result, &function, Lang::En);
         assert_eq!(notice(Ok(Compaction::Done)), None);
         assert_eq!(

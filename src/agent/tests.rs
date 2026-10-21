@@ -292,14 +292,14 @@ fn kinds(session: &Session) -> Vec<&'static str> {
 #[test]
 fn a_call_then_an_answer() {
     let dir = Dir::new("answer");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
         ("Done.", THOUGHT),
         ("It printed hello.", Stop::End),
     ]);
-    let (end, log, session) = run(&default, &script, &dir, "Say hello");
+    let (end, log, session) = run(&minimal, &script, &dir, "Say hello");
     assert_eq!(end.unwrap(), TurnEnd::Answer("It printed hello.".into()));
     assert_eq!(
         log,
@@ -332,7 +332,7 @@ fn a_call_then_an_answer() {
 
 #[test]
 fn the_off_level_silences_the_thinking() {
-    let function = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let function = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     // A level keeps the thinking: two generations.
     let dir = Dir::new("think-level");
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
@@ -352,7 +352,7 @@ fn the_off_level_silences_the_thinking() {
 #[test]
 fn every_generation_reports_its_decoded_tokens() {
     let dir = Dir::new("decoded");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let outputs: [(&str, Stop); 4] = [
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
@@ -362,7 +362,7 @@ fn every_generation_reports_its_decoded_tokens() {
     let script = Script::new(&outputs);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut session, &dir, None)
+    agent(&minimal, &script, &mut session, &dir, None)
         .turn("Say hello", &mut log)
         .unwrap();
     // A generation counts as its characters, in the order decoded.
@@ -422,7 +422,7 @@ fn states_and_instructions() {
 #[test]
 fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     let dir = Dir::new("cut-off");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (
@@ -432,7 +432,7 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
         ("t2", THOUGHT),
         ("Done.", Stop::End),
     ]);
-    let (end, log, session) = run(&default, &script, &dir, "go");
+    let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
     assert_eq!(
         kinds(&session),
@@ -501,9 +501,9 @@ fn stops() {
 #[test]
 fn thinking_at_the_limit_is_closed() {
     let dir = Dir::new("limit");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("a long thought ", Stop::Limit), ("ok", Stop::End)]);
-    let (end, _, _) = run(&default, &script, &dir, "hi");
+    let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert_eq!(end.unwrap(), TurnEnd::Answer("ok".into()));
     assert_eq!(
         script.prompts.borrow()[1],
@@ -551,14 +551,14 @@ fn text_stream_cuts_out_the_call() {
 #[test]
 fn text_before_a_call_streams_and_is_reported_whole() {
     let dir = Dir::new("stream");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
         (&format!("I will run it.\n{}", bash_call("true")), Stop::End),
         ("t", THOUGHT),
         ("Done.", Stop::End),
     ]);
-    let (end, log, _) = run(&default, &script, &dir, "go");
+    let (end, log, _) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
     assert_eq!(
         log,
@@ -585,7 +585,7 @@ const FITS: usize = 5_000;
 #[test]
 fn a_full_context_is_compacted_and_the_turn_goes_on() {
     let dir = Dir::new("compact");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -594,7 +594,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
         ("Done.", Stop::End),
     ])
     .with_counts(&[100, OVERFLOW, FITS]);
-    let (end, log, session) = run(&default, &script, &dir, "go");
+    let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
     assert_eq!(
         log,
@@ -637,7 +637,8 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 #[test]
 fn the_system_message_is_the_functions_system_and_nothing_more() {
     let dir = Dir::new("system");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let agentlibre =
+        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -646,39 +647,40 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
         ("Done.", Stop::End),
     ])
     .with_counts(&[100, OVERFLOW, FITS]);
-    let (end, _, _) = run(&minimal, &script, &dir, "go");
+    let (end, _, _) = run(&agentlibre, &script, &dir, "go");
     assert!(end.is_ok());
     // A step, a step, the compaction, a step: all carry the Function's
     // `system`, the same text each time (AGL-017, D4, D8): the persona and
-    // the runtime part of `minimal`, no paragraph about the forge.
+    // the runtime part of `agentLIBRE`, no paragraph about the forge.
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 4);
-    assert!(systems.iter().all(|system| *system == minimal.system));
-    assert!(minimal.system.contains("Messages that start with [agentLIBRE runtime]"));
-    assert!(minimal.system.contains("at most 8192 tokens"));
-    assert!(!minimal.system.contains("forge"));
+    assert!(systems.iter().all(|system| *system == agentlibre.system));
+    assert!(agentlibre.system.contains("Messages that start with [agentLIBRE runtime]"));
+    assert!(agentlibre.system.contains("at most 8192 tokens"));
+    assert!(!agentlibre.system.contains("forge"));
 }
 
 #[test]
-fn the_minimal_function_sends_the_persona_and_the_runtime_part() {
-    let dir = Dir::new("minimal");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
+    let dir = Dir::new("agentLIBRE");
+    let agentlibre =
+        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
-    let (end, _, _) = run(&minimal, &script, &dir, "hi");
+    let (end, _, _) = run(&agentlibre, &script, &dir, "hi");
     assert!(end.is_ok());
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 1);
-    assert_eq!(systems[0], minimal.system);
+    assert_eq!(systems[0], agentlibre.system);
     assert!(systems[0].starts_with("You are DinoBot"));
     assert!(systems[0].contains("Messages that start with [agentLIBRE runtime]"));
 }
 
 #[test]
-fn the_default_function_sends_the_one_line_system() {
-    let dir = Dir::new("default");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+fn the_minimal_function_sends_the_one_line_system() {
+    let dir = Dir::new("minimal");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
-    let (end, _, _) = run(&default, &script, &dir, "hi");
+    let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert!(end.is_ok());
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 1);
@@ -691,7 +693,7 @@ fn the_default_function_sends_the_one_line_system() {
 #[test]
 fn the_prompt_size_of_every_step_is_reported() {
     let dir = Dir::new("used");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -702,7 +704,7 @@ fn the_prompt_size_of_every_step_is_reported() {
     .with_counts(&[100, OVERFLOW, FITS, 200]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut session, &dir, None)
+    agent(&minimal, &script, &mut session, &dir, None)
         .turn("go", &mut log)
         .unwrap();
     // The summary prompt (the third count) is not a step.
@@ -712,10 +714,10 @@ fn the_prompt_size_of_every_step_is_reported() {
 #[test]
 fn a_context_that_compaction_cannot_free_stops_the_turn() {
     let dir = Dir::new("no-room");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     // The compaction prompt itself does not fit.
     let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
-    let (end, log, session) = run(&default, &script, &dir, "go");
+    let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
     assert_eq!(log, ["[work]", "compacting"]);
     assert_eq!(kinds(&session), ["user", "state", "stop"]);
@@ -723,14 +725,14 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
     // A summary cut off by max_compact_tokens or an empty one is dropped.
     for summary in [("a long summary", Stop::Limit), (" \n", Stop::End)] {
         let script = Script::new(&[summary]).with_counts(&[OVERFLOW, FITS]);
-        let (end, _, session) = run(&default, &script, &dir, "go");
+        let (end, _, session) = run(&minimal, &script, &dir, "go");
         assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
         assert_eq!(kinds(&session), ["user", "state", "stop"]);
     }
 
     // Still too long after a summary: nothing is left to compact.
     let script = Script::new(&[("s", Stop::End)]).with_counts(&[OVERFLOW, FITS, OVERFLOW]);
-    let (end, _, session) = run(&default, &script, &dir, "go");
+    let (end, _, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
     assert_eq!(kinds(&session), ["user", "state", "compact", "stop"]);
 }
@@ -738,21 +740,21 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
 #[test]
 fn compaction_on_request() {
     let dir = Dir::new("on-request");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("t", THOUGHT), ("Hi.", Stop::End), ("Greeted.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
     assert_eq!(
-        agent(&default, &script, &mut session, &dir, None)
+        agent(&minimal, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Nothing
     );
-    agent(&default, &script, &mut session, &dir, None)
+    agent(&minimal, &script, &mut session, &dir, None)
         .turn("hello", &mut log)
         .unwrap();
     assert_eq!(
-        agent(&default, &script, &mut session, &dir, None)
+        agent(&minimal, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Done
@@ -762,7 +764,7 @@ fn compaction_on_request() {
         Some(&Event::Compact("Greeted.".into()))
     );
     assert_eq!(
-        agent(&default, &script, &mut session, &dir, None)
+        agent(&minimal, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Nothing
@@ -785,8 +787,8 @@ fn turn_in(
     dir: &Dir,
     message: &str,
 ) -> Result<TurnEnd, Error> {
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
-    agent(&default, script, session, dir, None).turn(message, &mut Log::default())
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    agent(&minimal, script, session, dir, None).turn(message, &mut Log::default())
 }
 
 #[test]
@@ -820,9 +822,9 @@ fn a_picture_is_counted_by_its_bound() {
     session
         .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut session, &dir, None)
+    agent(&minimal, &script, &mut session, &dir, None)
         .turn("see [Image#1]", &mut log)
         .unwrap();
     // 100 tokens of text, 1000 for the image (`image_tokens`, D10).
@@ -831,7 +833,7 @@ fn a_picture_is_counted_by_its_bound() {
     let script = Script::new(&[("Hm.", THOUGHT), ("Fine.", Stop::End)]);
     let mut other = Session::create(&dir.0.join("sessions2"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    agent(&default, &script, &mut other, &dir, None)
+    agent(&minimal, &script, &mut other, &dir, None)
         .turn("no media", &mut log)
         .unwrap();
     assert_eq!(log.1[0], 100);
@@ -965,8 +967,8 @@ fn view_keeps_the_file_and_the_next_step_sees_it() {
         ("It is a screenshot.", THOUGHT),
         ("A screenshot.", Stop::End),
     ]);
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
-    let (end, log, session) = run(&default, &script, &dir, "what is in shot.png?");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let (end, log, session) = run(&minimal, &script, &dir, "what is in shot.png?");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{log:?}");
     // The call, the medium, then the result, in the log of the session.
     assert_eq!(
@@ -998,8 +1000,8 @@ fn view_of_something_else_is_a_failed_call_the_model_reads() {
         ("Hm.", THOUGHT),
         ("Cannot.", Stop::End),
     ]);
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
-    let (end, _, session) = run(&default, &script, &dir, "see");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let (end, _, session) = run(&minimal, &script, &dir, "see");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));
     let results: Vec<(Outcome, &str)> = session
         .events
@@ -1027,8 +1029,8 @@ fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
         ("No.", Stop::End),
     ]);
     script.marker = None;
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
-    let (_, _, session) = run(&default, &script, &dir, "see");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let (_, _, session) = run(&minimal, &script, &dir, "see");
     assert!(session.media().is_empty());
     assert!(matches!(
         session.events.iter().find(|e| matches!(e, Event::Result { .. })),
@@ -1052,9 +1054,9 @@ fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
         ("Ok.", THOUGHT),
         ("It says good morning.", Stop::End),
     ]);
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
-    let mut agent = agent(&default, &script, &mut session, &dir, None);
+    let mut agent = agent(&minimal, &script, &mut session, &dir, None);
     agent.whisper = &Words;
     let end = agent.turn("what is said in v.wav?", &mut Log::default());
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));

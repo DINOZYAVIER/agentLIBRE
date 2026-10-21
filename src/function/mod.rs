@@ -17,8 +17,8 @@ use crate::tomlfile::{self, Section};
 /// Functions built into the binary; a user file of the same name replaces
 /// one (D39).
 const BUILTIN: &[(&str, &str)] = &[
-    ("default", include_str!("../builtin/functions/default.toml")),
     ("minimal", include_str!("../builtin/functions/minimal.toml")),
+    ("agentLIBRE", include_str!("../builtin/functions/agentLIBRE.toml")),
 ];
 
 /// `max_steps_total` when the Function does not set it (D40).

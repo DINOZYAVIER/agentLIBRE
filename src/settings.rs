@@ -11,8 +11,8 @@ use crate::tomlfile::{self, Section};
 /// Name of the user settings file and of the project's file in its store.
 pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
 
-/// Function used when no settings name one (D39, D58).
-const DEFAULT_FUNCTION: &str = "default";
+/// Function used when no settings name one (D39, D58, AGL-020, D3).
+const DEFAULT_FUNCTION: &str = "minimal";
 
 /// The user file, `$XDG_CONFIG_HOME/agentLIBRE/agentLIBRE.toml`.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -888,7 +888,7 @@ mod tests {
             function: None,
             ..user
         };
-        assert_eq!(resolve(&no_function, None, None), "default");
+        assert_eq!(resolve(&no_function, None, None), "minimal");
     }
 
     #[test]

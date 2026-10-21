@@ -489,7 +489,7 @@ impl<'a> TextStream<'a> {
 /// The system message of a step and of a compaction: the Function's
 /// `system` and nothing the runtime adds (AGL-017, D3, D4). What the
 /// runtime prefix means and how large an action may be (AGL-009) is in the
-/// `system` of the built-in `default` Function, not here. Stable text, for
+/// `system` of the built-in `agentLIBRE` Function, not here. Stable text, for
 /// the prompt cache (D14, D19).
 fn system_prompt(function: &Function) -> String {
     function.system.clone()

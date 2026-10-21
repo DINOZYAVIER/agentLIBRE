@@ -125,7 +125,7 @@ mod tests {
 
     fn facts() -> Facts {
         Facts {
-            function: "default".into(),
+            function: "minimal".into(),
             workspace: "~/project".into(),
             server: "http://127.0.0.1:18080".into(),
         }

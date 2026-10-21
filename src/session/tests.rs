@@ -130,7 +130,7 @@ fn edit_arguments_keep_their_order() {
                 .collect(),
         },
     };
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     session.append(edit.clone()).unwrap();
     session.append(result("c1", Outcome::Ok)).unwrap();
     assert_eq!(Session::open(&dir.0, &session.id).unwrap().events[0], edit);
@@ -152,7 +152,7 @@ fn the_forge_event_round_trips() {
             section: Some("Progress".into()),
         },
     ];
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     for event in &events {
         session.append(event.clone()).unwrap();
     }
@@ -187,7 +187,7 @@ fn the_forge_event_round_trips() {
 #[test]
 fn history_for_the_template() {
     let dir = Dir::new("history");
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     for event in [
         Event::User("u1".into()),
         Event::State("work".into()),
@@ -230,7 +230,7 @@ fn history_for_the_template() {
 #[test]
 fn history_after_a_summary() {
     let dir = Dir::new("compact");
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     assert!(!session.compactable());
     for event in [
         Event::User("u1".into()),
@@ -324,7 +324,7 @@ fn unfinished_turns() {
 #[test]
 fn opening_repairs_an_interrupted_end() {
     let dir = Dir::new("repair");
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     session.append(Event::User("u".into())).unwrap();
     session.append(call("c1", "sleep 100")).unwrap();
     let path = dir.0.join(format!("{}.jsonl", session.id));
@@ -356,7 +356,7 @@ fn finding_sessions() {
         Err(Error::SessionNotFound { .. })
     ));
     fs::create_dir_all(&dir.0).unwrap();
-    let header = "{\"type\":\"session\",\"version\":1,\"function\":\"default\",\"workspace\":\"/w\",\"time\":\"t\"}\n";
+    let header = "{\"type\":\"session\",\"version\":1,\"function\":\"minimal\",\"workspace\":\"/w\",\"time\":\"t\"}\n";
     fs::write(
         dir.0.join("0199aaaa-0000-7000-8000-000000000001.jsonl"),
         header,
@@ -423,7 +423,7 @@ fn source(kind: Kind, bytes: &[u8], ext: &str, name: &str) -> Source {
 #[test]
 fn the_media_of_a_session_are_kept_numbered_by_kind_and_read_back() {
     let dir = Dir::new("media");
-    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     assert_eq!(session.media_dir(), dir.0.join("media"));
     assert_eq!(session.next_media_number(Kind::Image), 1);
     let shot = source(Kind::Image, b"png-bytes", "png", "shot.png");
@@ -475,7 +475,7 @@ fn the_frames_of_a_video_are_kept_with_their_times() {
         .status()
         .unwrap();
     assert!(made.success());
-    let mut session = Session::create(&dir.0.join("s"), "default", Path::new("/w")).unwrap();
+    let mut session = Session::create(&dir.0.join("s"), "minimal", Path::new("/w")).unwrap();
     let kept = session
         .store_media(&Source::from_file(&clip).unwrap(), 1, None)
         .unwrap();
@@ -493,7 +493,7 @@ fn the_frames_of_a_video_are_kept_with_their_times() {
 #[test]
 fn a_bad_media_event_is_a_bad_line() {
     let dir = Dir::new("badmedia");
-    let session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     let id = session.id.clone();
     drop(session);
     let path = dir.0.join(format!("{id}.jsonl"));

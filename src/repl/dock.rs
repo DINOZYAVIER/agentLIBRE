@@ -597,7 +597,7 @@ mod tests {
             Box::new(sink.clone()),
             Theme::plain(),
             Lang::En,
-            "default".into(),
+            "minimal".into(),
             "/home/u/project".into(),
             Editor::new(Vec::new(), commands),
             (columns, rows),
@@ -623,7 +623,7 @@ mod tests {
                 " ".repeat(40),
                 format!("› {}", pad("Type a message or / for commands", 38)),
                 " ".repeat(40),
-                "  default    — / 131\u{a0}072  …e/u/project  ".to_string(),
+                "  minimal    — / 131\u{a0}072  …e/u/project  ".to_string(),
             ]
         );
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
