@@ -476,6 +476,9 @@ impl Report for Reporter<'_> {
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
         self.presenter.forge(name, kind, section);
     }
+    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+        self.presenter.show_memory(name, kind, text);
+    }
     fn compacting(&mut self) {
         self.presenter.compacting();
     }
@@ -547,6 +550,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         reasoning,
         autostart,
         image_tokens,
+        memory,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -663,6 +667,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         reasoning,
                         image_tokens,
                         whisper: autostart,
+                        memory,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -721,6 +726,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         reasoning,
                         image_tokens,
                         whisper: autostart,
+                        memory,
                     }
                     .turn(
                         &message,

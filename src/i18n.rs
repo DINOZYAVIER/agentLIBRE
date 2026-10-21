@@ -1556,6 +1556,13 @@ Forge (сховище артефактів робочої області, agentL
     // The agent's forge writes (AGL-008): the `[forge: …]` marker
     // line, muted in the REPL and on stderr in `-p`.
 
+    /// The `memory` tool or `/remember` wrote an entry: `+name` added,
+    /// `~name` edited, `-name` removed (AGL-006, M28, M36).
+    pub const MEMORY_EVENT: Msg = Msg {
+        en: "[memory: {change}]",
+        uk: "[memory: {change}]",
+    };
+
     /// The agent's `forge new` created a task-spec.
     pub const FORGE_EVENT_CREATED: Msg = Msg {
         en: "[forge: {name} created]",

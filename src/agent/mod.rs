@@ -39,6 +39,9 @@ pub trait Report {
     fn result(&mut self, call: &ToolCall, result: &ToolResult);
     /// A write of the agent's forge tool (AGL-008): the marker line.
     fn forge(&mut self, _name: &str, _kind: ForgeKind, _section: Option<&str>) {}
+    /// A write of the memory tool (AGL-006): the marker line, then the text
+    /// that was written.
+    fn memory(&mut self, _name: &str, _kind: crate::memory::Kind, _text: Option<&str>) {}
     /// The summary is being generated (D140).
     fn compacting(&mut self) {}
     /// A summary replaced the history (D139).
@@ -90,6 +93,8 @@ pub struct Agent<'a> {
     /// Turns an audio the `view` tool opens into text when the model does
     /// not hear it (AGL-014, D22, D24).
     pub whisper: &'a dyn Transcriber,
+    /// Where the memory of the workspace is (AGL-006).
+    pub memory: &'a dyn crate::memory::Home,
 }
 
 impl Agent<'_> {
@@ -141,6 +146,15 @@ impl Agent<'_> {
         let state = machine.state();
         let mut messages = vec![Message::System(system_prompt(function))];
         messages.extend(self.session.history());
+        // The index of the workspace's memory, after the history and before
+        // the state instruction; not stored (AGL-006, M27, M33).
+        if let Some(index) = self
+            .memory
+            .read()
+            .and_then(|dir| crate::memory::index_text(&dir))
+        {
+            messages.push(Message::Runtime(format!("workspace memory\n{index}")));
+        }
         // The media the messages name become the server's marker, the
         // frames and the transcripts (AGL-014, D6).
         let expanded = media::expand(
@@ -274,10 +288,17 @@ impl Agent<'_> {
                     report.text(text);
                 }
                 report.call(&call);
-                let (result, write) = if call.name == "view" {
-                    (self.view(&call.args), None)
-                } else {
-                    tools::run(self.workspace, self.forge, &call.name, &call.args)
+                let (result, write, memory_write) = match call.name.as_str() {
+                    "view" => (self.view(&call.args), None, None),
+                    "memory" => {
+                        let (result, write) = self.memory_tool(&call.args);
+                        (result, None, write)
+                    }
+                    _ => {
+                        let (result, write) =
+                            tools::run(self.workspace, self.forge, &call.name, &call.args);
+                        (result, write, None)
+                    }
                 };
                 self.session.append(Event::Result {
                     id: call.id.clone(),
@@ -285,6 +306,14 @@ impl Agent<'_> {
                     content: result.content.clone(),
                 })?;
                 report.result(&call, &result);
+                if let Some(write) = memory_write {
+                    self.session.append(Event::Memory {
+                        name: write.name.clone(),
+                        kind: write.kind,
+                        text: write.text.clone(),
+                    })?;
+                    report.memory(&write.name, write.kind, write.text.as_deref());
+                }
                 if let Some(write) = write {
                     self.session.append(Event::Forge {
                         name: write.name.clone(),
@@ -307,6 +336,39 @@ impl Agent<'_> {
                 }
             }
         }
+    }
+
+    /// The `memory` tool (AGL-006, M32): `add` registers the workspace's
+    /// store when it is not yet (M23); the other actions need the memory
+    /// that is there.
+    fn memory_tool(&mut self, args: &[(String, Value)]) -> (ToolResult, Option<crate::memory::Write>) {
+        let args = crate::memory::Args::from_call(args);
+        let fail = |content: String| {
+            (
+                ToolResult {
+                    outcome: Outcome::Fail,
+                    content,
+                },
+                None,
+            )
+        };
+        let (dir, lines) = if args.action == "add" {
+            match self.memory.write() {
+                Ok(found) => found,
+                Err(error) => return fail(error.message(crate::i18n::Lang::En)),
+            }
+        } else {
+            match self.memory.read() {
+                Some(dir) => (dir, Vec::new()),
+                None => return fail("The memory of this workspace has no entries yet.".into()),
+            }
+        };
+        let (mut result, write) = crate::memory::run(&dir, &args);
+        // A store that moved or was adopted on the way: said once.
+        if !lines.is_empty() {
+            result.content.insert_str(0, &(lines.join("\n") + "\n"));
+        }
+        (result, write)
     }
 
     /// The `view` tool (AGL-014, D24): keeps the file as a medium of the
@@ -420,6 +482,18 @@ impl Agent<'_> {
             return Ok(Compaction::Impossible);
         }
         self.session.append(Event::Compact(summary.into()))?;
+        // The summary is kept in the memory directory too, not in the
+        // index and not in the prompt (AGL-006, M9, M16); a failure to
+        // write it does not undo the compaction.
+        if let Ok((dir, _)) = self.memory.write() {
+            let date = crate::session::utc_now();
+            let _ = crate::memory::write_summary(
+                &dir,
+                &date[..10.min(date.len())],
+                &self.session.id,
+                summary,
+            );
+        }
         report.compacted();
         Ok(Compaction::Done)
     }

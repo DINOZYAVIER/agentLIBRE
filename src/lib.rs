@@ -75,6 +75,8 @@ pub struct Setup<'a> {
     pub reasoning: Option<ReasoningLevel>,
     /// The most tokens one picture takes (AGL-014, D10).
     pub image_tokens: usize,
+    /// Where the memory of the workspace is (AGL-006).
+    pub memory: &'a dyn memory::Home,
 }
 
 pub fn cli() -> ExitCode {
@@ -184,6 +186,11 @@ fn run(
         .server
         .image_max_tokens
         .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
+    let memory = memory::StoreHome {
+        workspace: workspace.clone(),
+        auto_rehome: user.forge.auto_rehome.unwrap_or(true),
+        lang: *lang,
+    };
     let backend = Llama::new(&settings.server_url);
     let autostart = cli::serve::Autostart {
         llama: &backend,
@@ -241,6 +248,7 @@ fn run(
             history_file: paths.history_file(),
             reasoning: args.reasoning,
             image_tokens,
+            memory: &memory,
         };
         return if interactive {
             repl::run(setup)
@@ -278,6 +286,7 @@ fn run(
         reasoning: args.reasoning,
         image_tokens,
         whisper: &autostart,
+        memory: &memory,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

@@ -8,8 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::action::Outcome;
+use crate::error::Error;
 use crate::forge::task_spec::slug;
 use crate::forge::write_atomic;
+use crate::i18n::Lang;
 use crate::tools::{ToolResult, edit};
 
 /// The index file of the memory directory (M31).
@@ -26,6 +28,50 @@ const SHOW_LIMIT: usize = 16 * 1024;
 
 /// The longest file name of an entry, without `.md`.
 const NAME_LIMIT: usize = 64;
+
+/// Where the memory of the workspace is (AGL-006): the agent asks it at
+/// each step and for each write; the interactive session asks it for
+/// `/remember`.
+pub trait Home: Send + Sync {
+    /// The memory directory when the workspace has a store; nothing is
+    /// created.
+    fn read(&self) -> Option<PathBuf>;
+    /// The memory directory, the store registered first when it is not
+    /// yet (M23); the lines say what the resolution did (a move, an
+    /// adoption, the store made).
+    fn write(&self) -> Result<(PathBuf, Vec<String>), Error>;
+}
+
+/// The memory in the store of the project of `workspace`, found the way
+/// the forge finds it (M17, M24).
+pub struct StoreHome {
+    pub workspace: PathBuf,
+    pub auto_rehome: bool,
+    pub lang: Lang,
+}
+
+impl StoreHome {
+    fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), Error> {
+        let paths = crate::paths::Paths::from_env(|name| std::env::var_os(name))?;
+        crate::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
+    }
+}
+
+impl Home for StoreHome {
+    fn read(&self) -> Option<PathBuf> {
+        let (ws, _) = self.resolved().ok()?;
+        ws.dir
+            .join(crate::forge::MARKER_FILE)
+            .is_file()
+            .then(|| ws.dir.join("memory"))
+    }
+
+    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        let (ws, mut lines) = self.resolved()?;
+        lines.extend(crate::forge::materialize(&ws, self.lang)?);
+        Ok((ws.dir.join("memory"), lines))
+    }
+}
 
 /// What the memory tool did, for the event and the marker (M28, M36).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +123,30 @@ pub struct Args {
     pub text: String,
     pub old: String,
     pub new: String,
+}
+
+impl Args {
+    /// The tool's arguments from a parsed call: a field that is absent is
+    /// empty.
+    pub fn from_call(args: &[(String, crate::action::Value)]) -> Args {
+        let text = |name: &str| {
+            args.iter()
+                .find_map(|(n, value)| match value {
+                    crate::action::Value::Text(text) if n == name => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        Args {
+            action: text("action"),
+            name: text("name"),
+            title: text("title"),
+            hook: text("hook"),
+            text: text("text"),
+            old: text("old"),
+            new: text("new"),
+        }
+    }
 }
 
 fn fail(content: impl Into<String>) -> (ToolResult, Option<Write>) {

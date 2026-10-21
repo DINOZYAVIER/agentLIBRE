@@ -60,6 +60,14 @@ impl Report for StderrReport {
         eprintln!("  {}", result_summary(call, result, self.lang));
     }
 
+    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+        let change = format!("{}{name}", kind.sign());
+        eprintln!("{}", tr!(self.lang, m::MEMORY_EVENT, change = change));
+        if let Some(text) = text {
+            eprintln!("{text}");
+        }
+    }
+
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
         let message = match kind {
             ForgeKind::Created => tr!(self.lang, m::FORGE_EVENT_CREATED, name = name),

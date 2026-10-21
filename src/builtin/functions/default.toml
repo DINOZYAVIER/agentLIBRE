@@ -17,5 +17,6 @@ top_k = 20
 tools.bash = {}
 tools.edit = {}
 tools.view = {}
+tools.memory = {}
 answer = true
 next = { else = "work" }

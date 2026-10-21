@@ -76,6 +76,20 @@ pub fn builtin_tools() -> Vec<Tool> {
             name: "view".into(),
             params: vec![text("path")],
         },
+        // The memory of the workspace (AGL-006): one tool, an `action` plus
+        // the fields, in alphabetical order as `forge`'s are.
+        Tool {
+            name: "memory".into(),
+            params: vec![
+                text("action"),
+                optional("hook"),
+                optional("name"),
+                optional("new"),
+                optional("old"),
+                optional("text"),
+                optional("title"),
+            ],
+        },
         // One tool, an `action` plus the per-action fields (AGL-008);
         // which fields an action needs is the tool's check. The fields
         // are in alphabetical order: the template shows the parameters
