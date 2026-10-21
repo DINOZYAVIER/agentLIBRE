@@ -102,10 +102,18 @@ fn run(
         Command::Run(args) => args,
         Command::Server(action) => {
             let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            let project = cli::forge::project_of(
+                &paths,
+                &cwd,
+                user.forge.auto_rehome.unwrap_or(true),
+                *lang,
+            )?;
             return cli::serve::run(
                 action,
-                &user,
+                &project.server.over(&user.server),
                 &paths.settings_file(),
+                &project.dir.join(forge::MARKER_FILE),
                 &paths.models(),
                 env("PATH"),
                 *lang,
@@ -147,7 +155,11 @@ fn run(
     let settings = Settings::resolve(
         &user,
         &user_path,
-        project.function.as_deref(),
+        (
+            &project.dir.join(forge::MARKER_FILE),
+            project.function.as_deref(),
+            &project.server,
+        ),
         function.or(args.function.as_deref()),
     )?;
     let function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;

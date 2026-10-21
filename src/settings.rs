@@ -19,10 +19,9 @@ const DEFAULT_FUNCTION: &str = "default";
 pub struct UserFile {
     pub function: Option<String>,
     pub language: Option<Lang>,
-    /// `[server] url`.
-    pub server_url: Option<String>,
-    /// What `agl server start` runs (D148).
-    pub launch: Launch,
+    /// `[server]`: the defaults of the llama server; a project's own
+    /// `[server]` wins per key (AGL-015, D4, D11).
+    pub server: ServerFile,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
     /// `[repl]` (D124, D130).
@@ -31,14 +30,101 @@ pub struct UserFile {
     pub forge: ForgeFile,
 }
 
-/// `[server]` keys of `agl server start` (D148).
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Launch {
+/// `[server]` of a settings file, the user's or the project's (AGL-015):
+/// where the llama server listens and what `agl server start` runs
+/// (D148). A key that is not set is `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerFile {
+    pub url: Option<String>,
     /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
     pub model: Option<String>,
     pub context: Option<u32>,
     /// More llama-server arguments.
-    pub args: Vec<String>,
+    pub args: Option<Vec<String>>,
+}
+
+impl ServerFile {
+    const KEYS: &'static [&'static str] = &["url", "model", "context", "args"];
+
+    /// Reads the `[server]` table of the file `path`; `section` is what
+    /// `Section::section("server")` returned.
+    pub fn parse(section: Option<Section>, path: &Path) -> Result<ServerFile, Error> {
+        let Some(mut server) = section else {
+            return Ok(ServerFile::default());
+        };
+        server.check_keys(Self::KEYS)?;
+        let url = server.string("url")?;
+        if let Some(url) = &url
+            && !url.starts_with("http://")
+        {
+            return Err(Error::UnsupportedUrl {
+                path: path.into(),
+                url: url.clone(),
+            });
+        }
+        let model = server.string("model")?;
+        if let Some(model) = &model {
+            tomlfile::check_name(model)?;
+        }
+        let context = server
+            .integer("context")?
+            .map(|n| {
+                u32::try_from(n)
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .ok_or_else(|| Error::NotPositive {
+                        path: path.into(),
+                        key: server.key("context"),
+                    })
+            })
+            .transpose()?;
+        let args = server.strings("args")?;
+        Ok(ServerFile {
+            url,
+            model,
+            context,
+            args,
+        })
+    }
+
+    /// Whether no key is set.
+    pub fn is_empty(&self) -> bool {
+        *self == ServerFile::default()
+    }
+
+    /// The keys set here, the others from `defaults`; `args` is replaced
+    /// as a whole, not merged (AGL-015, D11).
+    pub fn over(&self, defaults: &ServerFile) -> ServerFile {
+        ServerFile {
+            url: self.url.clone().or_else(|| defaults.url.clone()),
+            model: self.model.clone().or_else(|| defaults.model.clone()),
+            context: self.context.or(defaults.context),
+            args: self.args.clone().or_else(|| defaults.args.clone()),
+        }
+    }
+
+    /// The `[server]` table as written to a file; empty when no key is
+    /// set.
+    pub fn render(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("\n[server]\n");
+        if let Some(url) = &self.url {
+            out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+        }
+        if let Some(model) = &self.model {
+            out.push_str(&format!("model = {}\n", tomlfile::quote(model)));
+        }
+        if let Some(context) = self.context {
+            out.push_str(&format!("context = {context}\n"));
+        }
+        if let Some(args) = &self.args {
+            let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
+            out.push_str(&format!("args = [{}]\n", items.join(", ")));
+        }
+        out
+    }
 }
 
 /// `[repl]`: the limits of tool cards and their frame (D130).
@@ -93,45 +179,7 @@ impl UserFile {
                 })
             })
             .transpose()?;
-        let (server_url, launch) = match file.section("server")? {
-            None => (None, Launch::default()),
-            Some(mut server) => {
-                server.check_keys(&["url", "model", "context", "args"])?;
-                let url = server.string("url")?;
-                let model = server.string("model")?;
-                if let Some(model) = &model {
-                    tomlfile::check_name(model)?;
-                }
-                let context = server
-                    .integer("context")?
-                    .map(|n| {
-                        u32::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
-                            Error::NotPositive {
-                                path: path.into(),
-                                key: server.key("context"),
-                            }
-                        })
-                    })
-                    .transpose()?;
-                let args = server.strings("args")?.unwrap_or_default();
-                (
-                    url,
-                    Launch {
-                        model,
-                        context,
-                        args,
-                    },
-                )
-            }
-        };
-        if let Some(url) = &server_url
-            && !url.starts_with("http://")
-        {
-            return Err(Error::UnsupportedUrl {
-                path: path.into(),
-                url: url.clone(),
-            });
-        }
+        let server = ServerFile::parse(file.section("server")?, path)?;
         let colors = match file.section("colors")? {
             None => Vec::new(),
             Some(mut colors) => {
@@ -187,8 +235,7 @@ impl UserFile {
         Ok(UserFile {
             function,
             language,
-            server_url,
-            launch,
+            server,
             colors,
             repl,
             forge,
@@ -200,26 +247,30 @@ impl UserFile {
 #[derive(Debug)]
 pub struct Settings {
     pub server_url: String,
+    /// The `[server]` of the project over the user's defaults
+    /// (AGL-015).
+    pub server: ServerFile,
     pub function: String,
     pub colors: Vec<(Role, Style)>,
     pub repl: ReplSettings,
 }
 
 impl Settings {
-    /// Combines the user file, the project's Function and `--function`
-    /// (D58, D59).
+    /// Combines the user file, the project's Function and `[server]`
+    /// (`project_path` is its file, for hints) and `--function` (D58, D59,
+    /// AGL-015).
     pub fn resolve(
         user: &UserFile,
         user_path: &Path,
-        project_function: Option<&str>,
+        project: (&Path, Option<&str>, &ServerFile),
         cli_function: Option<&str>,
     ) -> Result<Settings, Error> {
-        let server_url = user
-            .server_url
-            .clone()
-            .ok_or_else(|| Error::MissingServerUrl {
-                user_path: user_path.into(),
-            })?;
+        let (project_path, project_function, project_server) = project;
+        let server = project_server.over(&user.server);
+        let server_url = server.url.clone().ok_or_else(|| Error::MissingServerUrl {
+            user_path: user_path.into(),
+            project_path: project_path.into(),
+        })?;
         let function = cli_function
             .or(project_function)
             .or(user.function.as_deref())
@@ -228,6 +279,7 @@ impl Settings {
         let defaults = ReplSettings::default();
         Ok(Settings {
             server_url,
+            server,
             function,
             colors: user.colors.clone(),
             repl: ReplSettings {
@@ -288,24 +340,108 @@ mod tests {
             UserFile {
                 function: Some("coder".into()),
                 language: Some(Lang::Uk),
-                server_url: Some("http://127.0.0.1:18080".into()),
+                server: ServerFile {
+                    url: Some("http://127.0.0.1:18080".into()),
+                    ..ServerFile::default()
+                },
                 ..UserFile::default()
             }
         );
-        let launch = user(
+        let server = user(
             "[server]\nurl = \"http://127.0.0.1:18080\"\nmodel = \"m.gguf\"\ncontext = 8192\n\
              args = [\"-ngl\", \"999\"]\n",
         )
         .unwrap()
-        .launch;
+        .server;
         assert_eq!(
-            launch,
-            Launch {
+            server,
+            ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
                 model: Some("m.gguf".into()),
                 context: Some(8192),
-                args: vec!["-ngl".into(), "999".into()],
+                args: Some(vec!["-ngl".into(), "999".into()]),
             }
         );
+    }
+
+    /// `Settings::resolve` of a user file and a project's `[server]`.
+    fn resolved(user: &UserFile, project: &ServerFile) -> Result<Settings, Error> {
+        Settings::resolve(
+            user,
+            Path::new("/c/agentLIBRE.toml"),
+            (Path::new("/d/agentLIBRE.toml"), None, project),
+            None,
+        )
+    }
+
+    fn server(url: &str, model: &str, context: u32, args: &[&str]) -> ServerFile {
+        ServerFile {
+            url: Some(url.into()),
+            model: Some(model.into()),
+            context: Some(context),
+            args: Some(args.iter().map(|arg| (*arg).into()).collect()),
+        }
+    }
+
+    #[test]
+    fn the_project_server_wins_per_key() {
+        let user = UserFile {
+            server: server("http://127.0.0.1:18080", "big.gguf", 131072, &["-ngl", "999"]),
+            ..UserFile::default()
+        };
+        // Nothing set in the project: the user's defaults.
+        let settings = resolved(&user, &ServerFile::default()).unwrap();
+        assert_eq!(settings.server, user.server);
+        assert_eq!(settings.server_url, "http://127.0.0.1:18080");
+        // Some keys set: those win, the others come from the user file.
+        let project = ServerFile {
+            url: Some("http://127.0.0.1:18081".into()),
+            context: Some(65536),
+            ..ServerFile::default()
+        };
+        let settings = resolved(&user, &project).unwrap();
+        assert_eq!(settings.server_url, "http://127.0.0.1:18081");
+        assert_eq!(
+            settings.server,
+            server("http://127.0.0.1:18081", "big.gguf", 65536, &["-ngl", "999"])
+        );
+    }
+
+    #[test]
+    fn the_project_args_replace_the_user_args_as_a_whole() {
+        let user = UserFile {
+            server: server("http://x", "m.gguf", 8192, &["-ngl", "999", "-fa", "on"]),
+            ..UserFile::default()
+        };
+        let project = ServerFile {
+            args: Some(vec!["-ngl".into(), "10".into()]),
+            ..ServerFile::default()
+        };
+        let args = resolved(&user, &project).unwrap().server.args;
+        assert_eq!(args, Some(vec!["-ngl".into(), "10".into()]));
+        // An empty list is a value too: it replaces, it is not "unset".
+        let empty = ServerFile {
+            args: Some(Vec::new()),
+            ..ServerFile::default()
+        };
+        assert_eq!(resolved(&user, &empty).unwrap().server.args, Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_server_table_renders_and_parses_back() {
+        let file = server("http://127.0.0.1:18081", "q.gguf", 65536, &["-ngl", "99\"x"]);
+        let text = file.render();
+        assert_eq!(
+            text,
+            "\n[server]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"q.gguf\"\ncontext = 65536\n\
+             args = [\"-ngl\", \"99\\\"x\"]\n"
+        );
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &text);
+        let parsed = UserFile::load(&path).unwrap();
+        assert_eq!(parsed.server, file);
+        // Nothing set: no table at all.
+        assert_eq!(ServerFile::default().render(), "");
     }
 
     #[test]
@@ -329,7 +465,7 @@ mod tests {
         let settings = Settings::resolve(
             &loaded_with_server(loaded),
             Path::new("/c/x.toml"),
-            None,
+            (Path::new("/d/x.toml"), None, &ServerFile::default()),
             None,
         )
         .unwrap();
@@ -372,7 +508,10 @@ mod tests {
 
     fn loaded_with_server(file: UserFile) -> UserFile {
         UserFile {
-            server_url: Some("http://x".into()),
+            server: ServerFile {
+                url: Some("http://x".into()),
+                ..ServerFile::default()
+            },
             ..file
         }
     }
@@ -470,13 +609,21 @@ mod tests {
         let path = Path::new("/c/agentLIBRE.toml");
         let user = UserFile {
             function: Some("user".into()),
-            server_url: Some("http://x".into()),
+            server: ServerFile {
+                url: Some("http://x".into()),
+                ..ServerFile::default()
+            },
             ..UserFile::default()
         };
         let resolve = |user: &UserFile, project, cli| {
-            Settings::resolve(user, path, project, cli)
-                .unwrap()
-                .function
+            Settings::resolve(
+                user,
+                path,
+                (Path::new("/d/agentLIBRE.toml"), project, &ServerFile::default()),
+                cli,
+            )
+            .unwrap()
+            .function
         };
         assert_eq!(resolve(&user, Some("project"), Some("cli")), "cli");
         assert_eq!(resolve(&user, Some("project"), None), "project");
@@ -491,18 +638,20 @@ mod tests {
     #[test]
     fn server_url_comes_from_the_user_file() {
         let user = UserFile {
-            server_url: Some("http://127.0.0.1:18080".into()),
+            server: ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
+                ..ServerFile::default()
+            },
             ..UserFile::default()
         };
-        let settings = Settings::resolve(&user, Path::new("/c/agentLIBRE.toml"), None, None);
+        let settings = resolved(&user, &ServerFile::default());
         assert_eq!(settings.unwrap().server_url, "http://127.0.0.1:18080");
     }
 
     #[test]
     fn missing_server_url_is_an_error() {
-        let path = Path::new("/c/agentLIBRE.toml");
         assert!(matches!(
-            Settings::resolve(&UserFile::default(), path, None, None),
+            resolved(&UserFile::default(), &ServerFile::default()),
             Err(Error::MissingServerUrl { .. })
         ));
     }

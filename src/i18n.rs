@@ -391,8 +391,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingServerUrl`.
     pub const MISSING_SERVER_URL: Msg = Msg {
-        en: "the llama-server address is not set; add to {user_path}:\n\n[server]\nurl = \"http://HOST:PORT\"",
-        uk: "адресу llama-server не задано; додай у {user_path}:\n\n[server]\nurl = \"http://HOST:PORT\"",
+        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nurl = \"http://HOST:PORT\"",
+        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nurl = \"http://HOST:PORT\"",
     };
 
     /// `Error::InvalidName`.
@@ -488,8 +488,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingModel`.
     pub const MISSING_MODEL: Msg = Msg {
-        en: "the model is not set; add the name of a file in {models} to {user_path}:\n\n[server]\nmodel = \"NAME.gguf\"",
-        uk: "модель не задано; додай назву файлу з {models} у {user_path}:\n\n[server]\nmodel = \"NAME.gguf\"",
+        en: "the model is not set; add the name of a file in {models} to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nmodel = \"NAME.gguf\"",
+        uk: "модель не задано; додай назву файлу з {models} у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nmodel = \"NAME.gguf\"",
     };
 
     /// `Error::ModelNotFound`.
@@ -1517,8 +1517,16 @@ impl Error {
             Error::UnsupportedUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
             }
-            Error::MissingServerUrl { user_path } => {
-                tr!(lang, m::MISSING_SERVER_URL, user_path = user_path.display())
+            Error::MissingServerUrl {
+                user_path,
+                project_path,
+            } => {
+                tr!(
+                    lang,
+                    m::MISSING_SERVER_URL,
+                    user_path = user_path.display(),
+                    project_path = project_path.display()
+                )
             }
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::FormatNotFound { name, path } => {
@@ -1558,11 +1566,16 @@ impl Error {
             Error::ServerUnreachable { url, detail } => {
                 tr!(lang, m::SERVER_UNREACHABLE, url = url, detail = detail)
             }
-            Error::MissingModel { user_path, models } => {
+            Error::MissingModel {
+                user_path,
+                project_path,
+                models,
+            } => {
                 tr!(
                     lang,
                     m::MISSING_MODEL,
                     user_path = user_path.display(),
+                    project_path = project_path.display(),
                     models = models.display()
                 )
             }

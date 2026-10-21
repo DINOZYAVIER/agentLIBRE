@@ -29,6 +29,25 @@ pub fn parse(path: &Path, text: &str) -> Result<Table, Error> {
     })
 }
 
+/// A TOML basic string, escaped.
+pub fn quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Rejects a Function or format name that cannot name a file in its
 /// directory.
 pub fn check_name(name: &str) -> Result<(), Error> {

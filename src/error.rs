@@ -56,8 +56,12 @@ pub enum Error {
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `[server] url` is not an `http://` URL (D52).
     UnsupportedUrl { path: PathBuf, url: String },
-    /// No `[server] url` in the user file (D59).
-    MissingServerUrl { user_path: PathBuf },
+    /// No `[server] url` in the project's file nor in the user file (D59,
+    /// AGL-015).
+    MissingServerUrl {
+        user_path: PathBuf,
+        project_path: PathBuf,
+    },
     /// A format or Function name that cannot name a file.
     InvalidName(String),
     /// Neither `path` nor a built-in format is called `name`.
@@ -108,7 +112,11 @@ pub enum Error {
     /// The server generated text the grammar does not allow.
     OutsideGrammar(String),
     /// `agl server start` without `[server] model` (D148).
-    MissingModel { user_path: PathBuf, models: PathBuf },
+    MissingModel {
+        user_path: PathBuf,
+        project_path: PathBuf,
+        models: PathBuf,
+    },
     /// `[server] model` names no file in the models directory.
     ModelNotFound { path: PathBuf },
     /// `agl server start` with a `url` whose host is not local (D148).

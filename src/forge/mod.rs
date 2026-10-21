@@ -20,6 +20,8 @@ use std::process::Command as Process;
 use toml::{Table, Value};
 
 use crate::error::Error;
+use crate::settings::ServerFile;
+use crate::tomlfile::quote as toml_string;
 use crate::tomlfile::Section;
 
 /// The name of the per-workspace marker file, in the data directory
@@ -177,6 +179,9 @@ pub struct Marker {
     pub hashes: Vec<String>,
     /// The project's Function (D56, moved here by AGL-010).
     pub function: Option<String>,
+    /// The project's `[server]` (AGL-015); wins per key over the user
+    /// file's.
+    pub server: ServerFile,
 }
 
 impl Marker {
@@ -185,7 +190,7 @@ impl Marker {
     /// project settings.
     pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
         let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&["function", "format", "workspace_sha256"])?;
+        file.check_keys(&["function", "format", "workspace_sha256", "server"])?;
         let format = file.required_integer("format")?;
         if format != 1 {
             return Err(Error::MarkerFormat {
@@ -203,7 +208,12 @@ impl Marker {
             }
         }
         let function = file.string("function")?;
-        Ok(Marker { hashes, function })
+        let server = ServerFile::parse(file.section("server")?, path)?;
+        Ok(Marker {
+            hashes,
+            function,
+            server,
+        })
     }
 
     /// Renders the marker the way it is written: the settings first.
@@ -219,7 +229,10 @@ impl Marker {
             .as_deref()
             .map(|function| format!("function = {}\n", toml_string(function)))
             .unwrap_or_default();
-        format!("{function}format = 1\nworkspace_sha256 = [{hashes}]\n")
+        format!(
+            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}",
+            self.server.render()
+        )
     }
 
     /// Writes the marker to `path`: a temp file in the same directory
@@ -236,6 +249,7 @@ pub struct Store {
     pub dir: PathBuf,
     pub hashes: Vec<String>,
     pub function: Option<String>,
+    pub server: ServerFile,
 }
 
 impl Store {
@@ -271,6 +285,7 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
             dir,
             hashes: marker.hashes,
             function: marker.function,
+            server: marker.server,
         });
     }
     found.sort_by_key(Store::name);
@@ -294,6 +309,25 @@ pub struct Workspace {
     /// The project's Function from the store's `agentLIBRE.toml`; none
     /// for a store not yet written.
     pub function: Option<String>,
+    /// The project's `[server]` from the same file (AGL-015); empty for
+    /// a store not yet written.
+    pub server: ServerFile,
+    /// The first identity of the store's marker, the one the project had
+    /// at its start; `None` for a project that is not registered. The
+    /// name of the project's llama-server unit is built from it
+    /// (AGL-015, D12).
+    pub origin: Option<String>,
+}
+
+impl Workspace {
+    /// The part of the unit name that names the project: the first 12 hex
+    /// of [`Workspace::origin`].
+    pub fn unit_key(&self) -> Option<String> {
+        self.origin
+            .as_deref()
+            .and_then(|origin| origin.strip_prefix("sha256:"))
+            .map(|hex| hex[..12].to_owned())
+    }
 }
 
 /// The name of the store of `basename` and `identity`; the 64-hex
@@ -329,6 +363,7 @@ fn rehomed(
     let marker = Marker {
         hashes,
         function: store.function.clone(),
+        server: store.server.clone(),
     };
     if store.dir != new {
         fs::rename(&store.dir, &new)
@@ -406,6 +441,8 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
                 key,
                 dir: store.dir.clone(),
                 function: store.function.clone(),
+                server: store.server.clone(),
+                origin: store.hashes.first().cloned(),
             });
         }
     }
@@ -417,6 +454,8 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
         identity,
         key,
         function: None,
+        server: ServerFile::default(),
+        origin: None,
     })
 }
 
@@ -448,12 +487,18 @@ fn resolve_among(
     use crate::i18n::m;
     use crate::tr;
     let found = stores(data)?;
-    let workspace = |project: &Path, identity: &str, key: &str, dir: PathBuf, function| Workspace {
+    let workspace = |project: &Path,
+                     identity: &str,
+                     key: &str,
+                     dir: PathBuf,
+                     store: Option<&Store>| Workspace {
         project: project.to_path_buf(),
         identity: identity.to_owned(),
         key: key.to_owned(),
         dir,
-        function,
+        function: store.and_then(|store| store.function.clone()),
+        server: store.map(|store| store.server.clone()).unwrap_or_default(),
+        origin: store.and_then(|store| store.hashes.first().cloned()),
     };
     // A project not registered yet: its store is created at the first
     // write. A hint at the other stores covers the pure-rename case.
@@ -495,7 +540,7 @@ fn resolve_among(
             1 if mine[0].name() == key && mine[0].hashes.last() == Some(&identity) => {
                 let store = mine[0];
                 return Ok((
-                    workspace(project, &identity, &key, store.dir.clone(), store.function.clone()),
+                    workspace(project, &identity, &key, store.dir.clone(), Some(store)),
                     Vec::new(),
                 ));
             }
@@ -504,7 +549,7 @@ fn resolve_among(
             1 => {
                 let (dir, line) = rehomed(data, mine[0], &key, &identity, lang)?;
                 return Ok((
-                    workspace(project, &identity, &key, dir, mine[0].function.clone()),
+                    workspace(project, &identity, &key, dir, Some(mine[0])),
                     vec![line],
                 ));
             }
@@ -541,7 +586,7 @@ fn resolve_among(
                 new = dir.display()
             );
             Ok((
-                workspace(project, &identity, &key, dir, store.function.clone()),
+                workspace(project, &identity, &key, dir, Some(store)),
                 vec![line],
             ))
         };
@@ -597,6 +642,7 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
     Marker {
         hashes: vec![ws.identity.clone()],
         function: None,
+        server: ServerFile::default(),
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -633,6 +679,7 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
     Marker {
         hashes: vec![ws.identity.clone()],
         function: None,
+        server: ServerFile::default(),
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -925,25 +972,6 @@ fn toml_table(out: &mut String, prefix: &str, table: &Table) {
     }
 }
 
-/// A TOML basic string, escaped.
-fn toml_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Renders an artifact: the front-matter in the envelope key order,
 /// `---`, and the body, the way the file is written.
 pub fn render(artifact: &Artifact) -> String {
@@ -1207,8 +1235,31 @@ mod tests {
         let marker = Marker {
             hashes: vec![identity(1), identity(2)],
             function: Some("coder".into()),
+            server: ServerFile {
+                url: Some("http://127.0.0.1:18081".into()),
+                model: Some("q.gguf".into()),
+                context: Some(65536),
+                args: Some(vec!["-ngl".into(), "999".into()]),
+            },
         };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
+        // The table comes after the top-level keys, so the file parses.
+        assert!(marker.render().contains("workspace_sha256 = ["));
+        assert!(marker.render().find("[server]") > marker.render().find("workspace_sha256"));
+        // A marker without it has an empty one, and renders none.
+        let plain = Marker {
+            server: ServerFile::default(),
+            ..marker
+        };
+        assert!(!plain.render().contains("[server]"));
+        assert_eq!(Marker::parse(path, &plain.render()).unwrap(), plain);
+        assert!(matches!(
+            Marker::parse(
+                path,
+                "format = 1\nworkspace_sha256 = []\n[server]\nport = 1\n"
+            ),
+            Err(Error::UnknownKey { key, .. }) if key == "server.port"
+        ));
         assert!(matches!(
             Marker::parse(path, "format = 2\nworkspace_sha256 = []\n"),
             Err(Error::MarkerFormat { format: 2, .. })
@@ -1237,7 +1288,7 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)], function: None }
+        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default() }
             .write(&store.join(MARKER_FILE))
             .unwrap();
         let found = stores(&data).unwrap();
@@ -1531,6 +1582,7 @@ mod tests {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![identity(2)],
             function: None,
+            server: ServerFile::default(),
         };
         let mine = format!("sha256:0123456789abcdef{}", "f".repeat(52));
         // No collision: the 12-hex name.
@@ -1549,6 +1601,7 @@ mod tests {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![mine.to_string()],
             function: None,
+            server: ServerFile::default(),
         };
         assert_eq!(store_key("proj", &mine, &[mine_store]), "proj-0123456789ab");
     }
@@ -1561,7 +1614,7 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)], function: None }
+        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default() }
             .write(&taken.join(MARKER_FILE))
             .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
@@ -1688,6 +1741,7 @@ mod tests {
         Marker {
             hashes: vec![identity_of(&from)],
             function: Some("coder".into()),
+            server: ServerFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
@@ -1705,6 +1759,50 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(moved.function.as_deref(), Some("coder"));
         assert_eq!(marker(&moved.dir).function.as_deref(), Some("coder"));
+    }
+
+    #[test]
+    fn the_project_server_and_its_unit_key_travel_with_the_store() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let from = plain_dir(dir.path(), "a/proj");
+        let ws = fresh_store(&data, &from);
+        // Not registered yet: no settings, no unit key.
+        assert_eq!(ws.server, ServerFile::default());
+        assert_eq!(ws.origin, None);
+        assert_eq!(ws.unit_key(), None);
+        let server = ServerFile {
+            url: Some("http://127.0.0.1:18081".into()),
+            context: Some(65536),
+            ..ServerFile::default()
+        };
+        let origin = identity_of(&from);
+        Marker {
+            hashes: vec![origin.clone()],
+            function: None,
+            server: server.clone(),
+        }
+        .write(&ws.dir.join(MARKER_FILE))
+        .unwrap();
+        let (found, _) = auto(&data, &from);
+        assert_eq!(found.server, server);
+        assert_eq!(found.origin.as_deref(), Some(origin.as_str()));
+        let key = found.unit_key().unwrap();
+        assert_eq!(key, origin["sha256:".len()..][..12]);
+        // A move renames the store and appends the new identity, but keeps
+        // the settings and the first identity, so the unit name stays.
+        let to = dir.path().join("b/proj");
+        move_repo(&from, &to);
+        let (moved, lines) = auto(&data, &to);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(moved.server, server);
+        assert_eq!(marker(&moved.dir).server, server);
+        assert_eq!(moved.origin.as_deref(), Some(origin.as_str()));
+        assert_eq!(moved.unit_key(), Some(key));
+        // `locate` (for `forge rehome`) reads the same.
+        let located = locate(&data, &to).unwrap();
+        assert_eq!(located.server, server);
+        assert_eq!(located.origin.as_deref(), Some(origin.as_str()));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::i18n::{Lang, m, server as texts};
-use crate::settings::UserFile;
+use crate::settings::ServerFile;
 use crate::tr;
 
 /// The systemd user unit (D147).
@@ -36,25 +36,36 @@ pub enum Health {
     Down,
 }
 
-/// Runs a server command. `models` is the models directory and
-/// `user_path` the user settings file, for hints.
+/// Runs a server command. `server` is the project's `[server]` over the
+/// user's; `models` is the models directory, `user_path` and
+/// `project_path` the settings files, for hints.
 pub fn run(
     action: ServerAction,
-    user: &UserFile,
+    server: &ServerFile,
     user_path: &Path,
+    project_path: &Path,
     models: &Path,
     path_var: Option<OsString>,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    let url = user
-        .server_url
+    let url = server
+        .url
         .clone()
         .ok_or_else(|| Error::MissingServerUrl {
             user_path: user_path.into(),
+            project_path: project_path.into(),
         })?;
     let llama = Llama::new(&url);
     match action {
-        ServerAction::Start => start(user, user_path, models, path_var, &url, &llama, lang),
+        ServerAction::Start => start(
+            server,
+            (user_path, project_path),
+            models,
+            path_var,
+            &url,
+            &llama,
+            lang,
+        ),
         ServerAction::Stop => {
             if unit_active()? {
                 systemctl(&["stop", UNIT])?;
@@ -67,7 +78,7 @@ pub fn run(
         ServerAction::Status => {
             let active = unit_active()?;
             let health = health(&llama);
-            let model = user.launch.model.as_deref();
+            let model = server.model.as_deref();
             println!("{}", texts::status(active, &url, model, health, lang));
             Ok(if health == Health::Ready {
                 ExitCode::SUCCESS
@@ -79,8 +90,8 @@ pub fn run(
 }
 
 fn start(
-    user: &UserFile,
-    user_path: &Path,
+    server: &ServerFile,
+    (user_path, project_path): (&Path, &Path),
     models: &Path,
     path_var: Option<OsString>,
     url: &str,
@@ -93,12 +104,12 @@ fn start(
     }
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
-    let model = user
-        .launch
+    let model = server
         .model
         .as_deref()
         .ok_or_else(|| Error::MissingModel {
             user_path: user_path.into(),
+            project_path: project_path.into(),
             models: models.into(),
         })?;
     let model = models.join(model);
@@ -106,8 +117,9 @@ fn start(
         return Err(Error::ModelNotFound { path: model });
     }
     let program = find_program("llama-server", path_var).ok_or(Error::LlamaServerNotFound)?;
-    let context = user.launch.context.unwrap_or(DEFAULT_CONTEXT);
-    let args = systemd_run_args(&program, &model, context, &host, port, &user.launch.args);
+    let context = server.context.unwrap_or(DEFAULT_CONTEXT);
+    let extra = server.args.clone().unwrap_or_default();
+    let args = systemd_run_args(&program, &model, context, &host, port, &extra);
     let output = Command::new("systemd-run")
         .args(&args)
         .stdin(Stdio::null())
