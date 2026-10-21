@@ -93,6 +93,7 @@ fn builtin_default() {
     );
     assert!(function.compact.ends_with("Write only the summary."));
     assert_eq!(function.max_compact_tokens, 4096);
+    assert_eq!(function.max_record_seconds, 60);
     assert_eq!(
         function.sampling,
         Sampling {
@@ -312,6 +313,21 @@ fn top_level_errors() {
              [state.a]\nanswer = true"
         )),
         ("max_compact_tokens".into(), FunctionProblem::NotPositive)
+    );
+    // The longest voice recording (AGL-016, D5, D8): 60 s unless set.
+    assert_eq!(function(CODER).unwrap().max_record_seconds, 60);
+    let recording = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_record_seconds = 15\ninitial = \"a\"\n\
+         [state.a]\nanswer = true",
+    )
+    .unwrap();
+    assert_eq!(recording.max_record_seconds, 15);
+    assert_eq!(
+        problem_of(function(
+            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_record_seconds = 0\ninitial = \"a\"\n\
+             [state.a]\nanswer = true"
+        )),
+        ("max_record_seconds".into(), FunctionProblem::NotPositive)
     );
 }
 

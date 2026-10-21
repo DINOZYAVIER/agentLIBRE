@@ -26,6 +26,10 @@ const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
 const DEFAULT_MAX_ACTION_TOKENS: u32 = 8192;
 const DEFAULT_MAX_COMPACT_TOKENS: u32 = 4096;
 
+/// The longest voice recording of the REPL's Ctrl-R, in seconds, when the
+/// Function does not set it (AGL-016, D5, D8).
+const DEFAULT_MAX_RECORD_SECONDS: u32 = 60;
+
 /// The summary instruction when the Function does not set `compact`
 /// (D140).
 const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can continue the \
@@ -46,6 +50,8 @@ pub struct Function {
     /// The instruction that asks for a summary of the history (D139).
     pub compact: String,
     pub max_compact_tokens: u32,
+    /// The longest voice recording, in seconds (AGL-016).
+    pub max_record_seconds: u32,
     pub sampling: Sampling,
     pub initial: usize,
     pub states: Vec<State>,
@@ -137,6 +143,7 @@ impl Function {
             "max_action_tokens",
             "compact",
             "max_compact_tokens",
+            "max_record_seconds",
             "sampling",
             "initial",
             "state",
@@ -157,6 +164,8 @@ impl Function {
             .unwrap_or_else(|| DEFAULT_COMPACT.into());
         let max_compact_tokens =
             positive(&mut file, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
+        let max_record_seconds =
+            positive(&mut file, "max_record_seconds")?.unwrap_or(DEFAULT_MAX_RECORD_SECONDS);
         let sampling = match file.section("sampling")? {
             None => Sampling::default(),
             Some(sampling) => read_sampling(sampling)?,
@@ -194,6 +203,7 @@ impl Function {
             max_action_tokens,
             compact,
             max_compact_tokens,
+            max_record_seconds,
             sampling,
             initial,
             states,

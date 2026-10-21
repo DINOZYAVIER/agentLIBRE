@@ -15,6 +15,7 @@ mod interrupt;
 mod machine;
 mod media;
 mod paths;
+mod record;
 mod repl;
 mod session;
 mod settings;
