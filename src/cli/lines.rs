@@ -110,9 +110,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
             Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agentLIBRE: {}", texts::stopped(reason, function, lang));
+                eprintln!("agl: {}", texts::stopped(reason, function, lang));
             }
-            Err(error) => eprintln!("agentLIBRE: {}", error.message(lang)),
+            Err(error) => eprintln!("agl: {}", error.message(lang)),
         }
     }
     Ok(ExitCode::SUCCESS)

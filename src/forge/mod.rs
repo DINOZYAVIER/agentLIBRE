@@ -420,7 +420,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
     })
 }
 
-/// [`resolve`] for `agentLIBRE init` (AGL-010): `dir` alone may be the
+/// [`resolve`] for `agl init` (AGL-010): `dir` alone may be the
 /// project, an ancestor is not looked at.
 pub fn resolve_dir(
     data: &Path,

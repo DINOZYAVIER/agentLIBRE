@@ -12,12 +12,12 @@ pub enum Command {
     Help,
     /// Run the agent.
     Run(Args),
-    /// `agentLIBRE server start|stop|status` (D146).
+    /// `agl server start|stop|status` (D146).
     Server(ServerAction),
-    /// `agentLIBRE init` (AGL-010): register the current directory as
+    /// `agl init` (AGL-010): register the current directory as
     /// a project.
     Init,
-    /// `agentLIBRE forge …` (AGL-007); the arguments after the word
+    /// `agl forge …` (AGL-007); the arguments after the word
     /// `forge` are parsed in the forge surface.
     Forge(Vec<OsString>),
 }

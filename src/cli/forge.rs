@@ -1,4 +1,4 @@
-//! `agentLIBRE forge list|show|new|status|check|log|diff|rehome`:
+//! `agl forge list|show|new|status|check|log|diff|rehome`:
 //! the artifact store of the workspace of the current directory
 //! (AGL-007, AGL-008).
 
@@ -94,7 +94,7 @@ pub fn run(
 
 /// The `--help` of a `forge` command: the help of the program.
 fn help(lang: Lang) -> Result<ExitCode, Error> {
-    // A closed pipe, as in `agentLIBRE forge --help | head`, is not an
+    // A closed pipe, as in `agl forge --help | head`, is not an
     // error.
     let _ = writeln!(io::stdout(), "{}", tr!(lang, m::HELP));
     Ok(ExitCode::SUCCESS)

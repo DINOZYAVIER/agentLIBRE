@@ -6,10 +6,18 @@ license = "LGPL-3.0-or-later"
 description = "agentLIBRE -- free and open-source agentic system"
 publish = false
 
-# The command is `agentLIBRE` (bf27187).
+[lib]
+name = "agentlibre"
+
+# The commands are `agl` and `agentLIBRE` (bf27187); both run the
+# `agentlibre` library.
+[[bin]]
+name = "agl"
+path = "src/bin/agl.rs"
+
 [[bin]]
 name = "agentLIBRE"
-path = "src/main.rs"
+path = "src/bin/agentLIBRE.rs"
 
 [dependencies]
 libc = "0.2"

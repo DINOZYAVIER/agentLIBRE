@@ -156,12 +156,12 @@ pub mod m {
     /// The `--help` text.
     pub const HELP: Msg = Msg {
         en: "\
-Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>] [--think <level>]
-       agentLIBRE init
-       agentLIBRE server start|stop|status
-       agentLIBRE forge list|show|new|status|check|log|diff|rehome
+Usage: agl [-p <message>] [--resume <id>] [--function <name>] [--think <level>]
+       agl init
+       agl server start|stop|status
+       agl forge list|show|new|status|check|log|diff|rehome
 
-Without -p, agentLIBRE starts an interactive session.
+Without -p, agl starts an interactive session.
 
 Options:
   -p <message>        send one message, print the answer and exit
@@ -190,12 +190,12 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>]
-              agentLIBRE init
-              agentLIBRE server start|stop|status
-              agentLIBRE forge list|show|new|status|check|log|diff|rehome
+Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>]
+              agl init
+              agl server start|stop|status
+              agl forge list|show|new|status|check|log|diff|rehome
 
-Без -p agentLIBRE запускає інтерактивну сесію.
+Без -p agl запускає інтерактивну сесію.
 
 Параметри:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
@@ -227,8 +227,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The pointer appended to usage errors.
     pub const USAGE_POINTER: Msg = Msg {
-        en: "Run `agentLIBRE --help` for usage.",
-        uk: "Див. `agentLIBRE --help`.",
+        en: "Run `agl --help` for usage.",
+        uk: "Див. `agl --help`.",
     };
 
     /// `Error::InvalidUnicode`.
@@ -422,8 +422,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ServerUnreachable`.
     pub const SERVER_UNREACHABLE: Msg = Msg {
-        en: "cannot reach llama-server at {url}: {detail}\nTo start it: agentLIBRE server start",
-        uk: "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\nЩоб запустити: agentLIBRE server start",
+        en: "cannot reach llama-server at {url}: {detail}\nTo start it: agl server start",
+        uk: "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\nЩоб запустити: agl server start",
     };
 
     /// `Error::ServerStatus`.
@@ -500,8 +500,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::NotLocalServer`.
     pub const NOT_LOCAL_SERVER: Msg = Msg {
-        en: "agentLIBRE server start runs llama-server only on 127.0.0.1 or localhost, not at {url}",
-        uk: "agentLIBRE server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}",
+        en: "agl server start runs llama-server only on 127.0.0.1 or localhost, not at {url}",
+        uk: "agl server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}",
     };
 
     /// `Error::LlamaServerNotFound`.
@@ -524,8 +524,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ServerTimeout`.
     pub const SERVER_TIMEOUT: Msg = Msg {
-        en: "llama-server was not ready after {seconds} s; it keeps loading in the background (agentLIBRE server status, journalctl --user -u {unit})",
-        uk: "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні (agentLIBRE server status, journalctl --user -u {unit})",
+        en: "llama-server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
+        uk: "llama-server не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
     };
 
     /// `TemplateProblem::Missing`.
@@ -782,8 +782,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The second line of `stopped`: how to go on (D113).
     pub const STOPPED_RESUME: Msg = Msg {
-        en: "to continue: agentLIBRE --resume {id} -p \"...\"",
-        uk: "щоб продовжити: agentLIBRE --resume {id} -p \"...\"",
+        en: "to continue: agl --resume {id} -p \"...\"",
+        uk: "щоб продовжити: agl --resume {id} -p \"...\"",
     };
 
     /// The hint of an empty prompt.
@@ -824,8 +824,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The description of a `/` command (D118).
     pub const CMD_QUIT: Msg = Msg {
-        en: "close agentLIBRE",
-        uk: "закрити agentLIBRE",
+        en: "close agl",
+        uk: "закрити agl",
     };
 
     /// The description of a `/` command (D118).
@@ -1026,73 +1026,73 @@ Forge (сховище артефактів робочої області, agentL
         uk: "TOOL",
     };
 
-    /// `agentLIBRE server start` begins (D146).
+    /// `agl server start` begins (D146).
     pub const SERVER_STARTING: Msg = Msg {
         en: "starting llama-server ({model}) at {url} as unit {unit}…",
         uk: "запускаю llama-server ({model}) за {url} як unit {unit}…",
     };
 
-    /// `agentLIBRE server start` is ready (D149).
+    /// `agl server start` is ready (D149).
     pub const SERVER_READY: Msg = Msg {
         en: "llama-server is ready at {url}",
         uk: "llama-server готовий за {url}",
     };
 
-    /// `agentLIBRE server start` finds the server up (D146).
+    /// `agl server start` finds the server up (D146).
     pub const SERVER_ALREADY_RUNNING: Msg = Msg {
         en: "llama-server is already running at {url}",
         uk: "llama-server уже працює за {url}",
     };
 
-    /// `agentLIBRE server stop` stopped it (D146).
+    /// `agl server stop` stopped it (D146).
     pub const SERVER_STOPPED: Msg = Msg {
         en: "llama-server stopped",
         uk: "llama-server зупинено",
     };
 
-    /// `agentLIBRE server stop` finds it down (D146).
+    /// `agl server stop` finds it down (D146).
     pub const SERVER_NOT_RUNNING: Msg = Msg {
         en: "unit {unit} is not running",
         uk: "unit {unit} не працює",
     };
 
-    /// `agentLIBRE server status`: the unit is active.
+    /// `agl server status`: the unit is active.
     pub const SERVER_ACTIVE: Msg = Msg {
         en: "active",
         uk: "активний",
     };
 
-    /// `agentLIBRE server status`: the unit is not active.
+    /// `agl server status`: the unit is not active.
     pub const SERVER_INACTIVE: Msg = Msg {
         en: "inactive",
         uk: "неактивний",
     };
 
-    /// `agentLIBRE server status`: `[server] model` is not set.
+    /// `agl server status`: `[server] model` is not set.
     pub const SERVER_MODEL_NOT_SET: Msg = Msg {
         en: "not set",
         uk: "не задано",
     };
 
-    /// `agentLIBRE server status`: `/health` is ready.
+    /// `agl server status`: `/health` is ready.
     pub const SERVER_HEALTH_READY: Msg = Msg {
         en: "ready",
         uk: "готовий",
     };
 
-    /// `agentLIBRE server status`: `/health` answers while loading.
+    /// `agl server status`: `/health` answers while loading.
     pub const SERVER_HEALTH_LOADING: Msg = Msg {
         en: "loading",
         uk: "завантажується",
     };
 
-    /// `agentLIBRE server status`: `/health` does not answer.
+    /// `agl server status`: `/health` does not answer.
     pub const SERVER_HEALTH_DOWN: Msg = Msg {
         en: "not responding",
         uk: "не відповідає",
     };
 
-    /// `agentLIBRE server status` (D150).
+    /// `agl server status` (D150).
     pub const SERVER_STATUS_BLOCK: Msg = Msg {
         en: "unit: {unit} ({active})\nurl: {url}\nmodel: {model}\nhealth: {health}",
         uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nстан: {health}",
@@ -1148,8 +1148,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::RehomeNoStore`.
     pub const REHOME_NO_STORE: Msg = Msg {
-        en: "a store cannot be chosen without a terminal; stores: {stores} (run `agentLIBRE forge rehome <store>`)",
-        uk: "без термінала не можна вибрати сховище; сховища: {stores} (запусти `agentLIBRE forge rehome <store>`)",
+        en: "a store cannot be chosen without a terminal; stores: {stores} (run `agl forge rehome <store>`)",
+        uk: "без термінала не можна вибрати сховище; сховища: {stores} (запусти `agl forge rehome <store>`)",
     };
 
     /// `Error::StoreNotFound`.
@@ -1254,7 +1254,7 @@ Forge (сховище артефактів робочої області, agentL
         uk: "створено нове сховище {dir}",
     };
 
-    /// `agentLIBRE init` in a directory that is a project already.
+    /// `agl init` in a directory that is a project already.
     pub const INIT_REGISTERED: Msg = Msg {
         en: "{project} is a project already: {dir}",
         uk: "{project} вже є проєктом: {dir}",
@@ -1862,11 +1862,11 @@ mod tests {
         let error = Error::UnknownOption("--url".into());
         assert_eq!(
             error.message(Lang::En),
-            "unknown option `--url`\nRun `agentLIBRE --help` for usage."
+            "unknown option `--url`\nRun `agl --help` for usage."
         );
         assert_eq!(
             error.message(Lang::Uk),
-            "невідомий параметр `--url`\nДив. `agentLIBRE --help`."
+            "невідомий параметр `--url`\nДив. `agl --help`."
         );
         assert!(
             !Error::FunctionNotFound {
@@ -1967,7 +1967,7 @@ mod tests {
     }
 }
 
-/// Texts of `agentLIBRE server` (D146-D150).
+/// Texts of `agl server` (D146-D150).
 pub mod server {
     use super::Lang;
     use super::m;
@@ -1987,7 +1987,7 @@ pub mod server {
         tr!(lang, m::SERVER_NOT_RUNNING, unit = UNIT)
     }
 
-    /// `agentLIBRE server status`.
+    /// `agl server status`.
     pub fn status(
         active: bool,
         url: &str,

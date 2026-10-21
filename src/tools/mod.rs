@@ -333,7 +333,7 @@ fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
 
 /// `forge` (AGL-008): the workspace forge, the store of the recorded
 /// artifacts of the workspace of `workspace`, over the same engine as
-/// the `agentLIBRE forge` CLI. The store is resolved as the CLI does,
+/// the `agl forge` CLI. The store is resolved as the CLI does,
 /// with the session's `[forge] auto_rehome` and language; the caller
 /// (the agent) cannot be asked, so a needed store choice is the
 /// `RehomeNoStore` error.

@@ -21,7 +21,7 @@ pub struct UserFile {
     pub language: Option<Lang>,
     /// `[server] url`.
     pub server_url: Option<String>,
-    /// What `agentLIBRE server start` runs (D148).
+    /// What `agl server start` runs (D148).
     pub launch: Launch,
     /// `[colors]` (D121).
     pub colors: Vec<(Role, Style)>,
@@ -31,7 +31,7 @@ pub struct UserFile {
     pub forge: ForgeFile,
 }
 
-/// `[server]` keys of `agentLIBRE server start` (D148).
+/// `[server]` keys of `agl server start` (D148).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Launch {
     /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).

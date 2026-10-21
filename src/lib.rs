@@ -65,19 +65,19 @@ pub struct Setup<'a> {
     pub reasoning: Option<ReasoningLevel>,
 }
 
-fn main() -> ExitCode {
+pub fn cli() -> ExitCode {
     let env = |name: &str| std::env::var_os(name);
     let mut lang = Lang::from_locale(env);
     match run(env, std::env::args_os().skip(1), &mut lang) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("agentLIBRE: {}", error.message(lang));
+            eprintln!("agl: {}", error.message(lang));
             ExitCode::from(error.exit_code())
         }
     }
 }
 
-/// Runs `agentLIBRE`. Switches `lang` to the user file's `language` as soon
+/// Runs `agl`. Switches `lang` to the user file's `language` as soon
 /// as that file loads, so later errors and `--help` use it (D66).
 fn run(
     env: impl Fn(&str) -> Option<OsString>,
@@ -95,7 +95,7 @@ fn run(
     }
     let args = match cli::args::parse(args)? {
         Command::Help => {
-            // A closed pipe, as in `agentLIBRE --help | head -1`, is not an error.
+            // A closed pipe, as in `agl --help | head -1`, is not an error.
             let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::HELP));
             return Ok(ExitCode::SUCCESS);
         }
@@ -212,7 +212,7 @@ fn run(
             Ok(ExitCode::SUCCESS)
         }
         TurnEnd::Stopped(reason) => {
-            eprintln!("agentLIBRE: {}", i18n::stopped(reason, &function, &id, *lang));
+            eprintln!("agl: {}", i18n::stopped(reason, &function, &id, *lang));
             Ok(ExitCode::from(match reason {
                 StopReason::Interrupted => interrupt::EXIT_CODE,
                 _ => 1,

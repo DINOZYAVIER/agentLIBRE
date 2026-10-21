@@ -1,4 +1,4 @@
-//! `agentLIBRE server start|stop|status`: llama-server as a transient systemd user
+//! `agl server start|stop|status`: llama-server as a transient systemd user
 //! unit (D146-D150).
 
 use std::ffi::OsString;
@@ -202,7 +202,7 @@ fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
 }
 
 /// The arguments of `systemd-run`: the unit, then llama-server with the
-/// arguments agentLIBRE needs and those of `[server] args` (D147, D148).
+/// arguments agl needs and those of `[server] args` (D147, D148).
 fn systemd_run_args(
     program: &Path,
     model: &Path,

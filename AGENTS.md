@@ -6,9 +6,9 @@
 | --- | --- |
 | `README.md` | Short project description. |
 | `Cargo.toml`, `Cargo.lock` | Crate manifest and locked dependencies. |
-| `src/` | The `agentLIBRE` binary of the `agentLIBRE` crate: the command-line surfaces (`cli/`: arguments, the stdin line protocol, `-p` progress output, `agentLIBRE server` and its systemd unit, `agentLIBRE init`, the `agentLIBRE forge` store), the artifact store engine (`forge/`: the `forge/v1` envelope, the project identity and its `agentLIBRE.toml`, found among the registered projects from the cwd up, the `task-spec` type), XDG paths (`paths.rs`), the user `agentLIBRE.toml` (`settings.rs`), strict TOML reading (`tomlfile.rs`), errors (`error.rs`) and their English/Ukrainian messages (`i18n.rs`), grammars and GBNF (`grammar/`), model formats (`format.rs`), Functions (`function/`), built-in formats and Functions (`builtin/`), the turn state machine (`machine/`), action grammars and output parsing (`action/`), the inference backend and its llama-server client (`backend/`), the bash and edit tools (`tools/`), session files (`session/`), the agent turn (`agent/`), the vocabulary shared by the interactive and line sessions (`status.rs`), Ctrl-C handling (`interrupt.rs`), terminal colors (`theme.rs`), the interactive session and its terminal (`repl/`: line editor, dock, Markdown, text wrapping, transcript, terminal and its keys). |
+| `src/` | The `agl` and `agentLIBRE` binaries (one `main.rs`) of the `agentLIBRE` crate: the command-line surfaces (`cli/`: arguments, the stdin line protocol, `-p` progress output, `agl server` and its systemd unit, `agl init`, the `agl forge` store), the artifact store engine (`forge/`: the `forge/v1` envelope, the project identity and its `agentLIBRE.toml`, found among the registered projects from the cwd up, the `task-spec` type), XDG paths (`paths.rs`), the user `agentLIBRE.toml` (`settings.rs`), strict TOML reading (`tomlfile.rs`), errors (`error.rs`) and their English/Ukrainian messages (`i18n.rs`), grammars and GBNF (`grammar/`), model formats (`format.rs`), Functions (`function/`), built-in formats and Functions (`builtin/`), the turn state machine (`machine/`), action grammars and output parsing (`action/`), the inference backend and its llama-server client (`backend/`), the bash and edit tools (`tools/`), session files (`session/`), the agent turn (`agent/`), the vocabulary shared by the interactive and line sessions (`status.rs`), Ctrl-C handling (`interrupt.rs`), terminal colors (`theme.rs`), the interactive session and its terminal (`repl/`: line editor, dock, Markdown, text wrapping, transcript, terminal and its keys). |
 | `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
-| `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/forge/` | The workspace forge in XDG_DATA_HOME: the AGL-XXX task specs (`task-spec` artifacts) and the other artifact types, one store per git toplevel, managed by `agentLIBRE forge`. |
+| `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/forge/` | The workspace forge in XDG_DATA_HOME: the AGL-XXX task specs (`task-spec` artifacts) and the other artifact types, one store per git toplevel, managed by `agl forge`. |
 | `../agl-lite-tasks/` | The non-artifact working documents, archived outside the repository (not tracked): MEMORY_SPEC.md, the feedback notes, the README. |
 
 Update this map when adding top-level paths.
@@ -25,7 +25,7 @@ The human is the sole authority for project decisions. A recommendation, an
 inferred preference, or an LLM's engineering judgment is not a decision.
 
 - Record decisions in the AGL-XXX task-spec of the task, in the
-  workspace forge (the XDG data directory, `agentLIBRE forge`). The
+  workspace forge (the XDG data directory, `agl forge`). The
   long-term decision record will be the memory feature; until it
   exists, the task-specs are the reference. Do not ask again for
   choices recorded there.

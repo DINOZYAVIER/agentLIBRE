@@ -1,4 +1,4 @@
-//! `agentLIBRE init`: registers the current directory as a project now
+//! `agl init`: registers the current directory as a project now
 //! (AGL-010), the explicit form of the lazy registration.
 
 use std::path::Path;
