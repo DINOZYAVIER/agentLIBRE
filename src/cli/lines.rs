@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use crate::Setup;
 use crate::agent::{Agent, TurnEnd};
 use crate::cli::report::StderrReport;
+use crate::cli::serve::Others;
 use crate::error::Error;
 use crate::i18n::{m, repl as texts};
 use crate::interrupt;
@@ -22,11 +23,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         backend,
         mut session,
         sessions_dir,
-        context,
+        mut context,
         server_url,
         lang,
         forge,
         reasoning,
+        autostart,
+        yes,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -34,8 +37,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         function: function_name.into(),
         workspace: display_path(&workspace),
         server: server_url.into(),
-        context,
     };
+    // Nobody can be asked on stdin: another project's server running
+    // is a refusal unless `--yes` (AGL-015, D13, D16).
+    let others = if yes { Others::Yes } else { Others::Refuse };
     interrupt::install();
     eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
     let mut state: Option<String> = None;
@@ -55,6 +60,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         session: session.id.clone(),
                         state: state.clone(),
                         unfinished: session.unfinished().and_then(|turn| turn.state),
+                        context,
                     };
                     println!("{}", status_text(&facts, &info, reasoning, lang));
                 }
@@ -64,17 +70,19 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     eprintln!("{}", tr!(lang, m::NEW_SESSION, id = session.id));
                 }
                 "/compact" => {
-                    let result = Agent {
-                        function,
-                        function_name,
-                        backend,
-                        session: &mut session,
-                        workspace: &workspace,
-                        context,
-                        forge,
-                        reasoning,
-                    }
-                    .compact(&mut StderrReport::new(lang));
+                    let result = backend.context_size().and_then(|context| {
+                        Agent {
+                            function,
+                            function_name,
+                            backend,
+                            session: &mut session,
+                            workspace: &workspace,
+                            context,
+                            forge,
+                            reasoning,
+                        }
+                        .compact(&mut StderrReport::new(lang))
+                    });
                     let interrupted = matches!(result, Err(Error::Interrupted));
                     if let Some((text, _)) = compact_notice(result, function, lang) {
                         eprintln!("{text}");
@@ -88,17 +96,25 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             continue;
         }
         let mut report = StderrReport::new(lang);
-        let end = Agent {
-            function,
-            function_name,
-            backend,
-            session: &mut session,
-            workspace: &workspace,
-            context,
-            forge,
-            reasoning,
-        }
-        .turn(message, &mut report);
+        // The server is started here when it does not answer, at the
+        // first request (AGL-015, D10).
+        let ready = autostart
+            .ensure(&others, &mut |line| eprintln!("{line}"))
+            .and_then(|()| backend.context_size());
+        let end = ready.and_then(|size| {
+            context = Some(size);
+            Agent {
+                function,
+                function_name,
+                backend,
+                session: &mut session,
+                workspace: &workspace,
+                context: size,
+                forge,
+                reasoning,
+            }
+            .turn(message, &mut report)
+        });
         state = None;
         match end {
             Ok(TurnEnd::Answer(text)) => println!("{text}"),

@@ -14,7 +14,7 @@ use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
-use crate::settings::{ServerFile, UserFile};
+use crate::settings::ServerFile;
 use crate::tr;
 
 /// The name every unit of a llama-server starts with (D8); the project's
@@ -54,21 +54,25 @@ pub struct Server {
 }
 
 impl Server {
-    /// The server of `project`. A project that is not registered has no
-    /// unit: an error (D14).
-    pub fn of(project: &Workspace, user: &UserFile, user_path: &Path) -> Result<Server, Error> {
+    /// The server of `project`, with `settings` the project's `[server]`
+    /// over the user's. A project that is not registered has no unit: an
+    /// error (D14).
+    pub fn of(
+        project: &Workspace,
+        settings: &ServerFile,
+        user_path: &Path,
+    ) -> Result<Server, Error> {
         let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
             project: project.project.clone(),
         })?;
         let project_path = project.dir.join(crate::forge::MARKER_FILE);
-        let settings = project.server.over(&user.server);
         let url = settings.url.clone().ok_or_else(|| Error::MissingServerUrl {
             user_path: user_path.into(),
             project_path: project_path.clone(),
         })?;
         Ok(Server {
             unit: unit_name(&key),
-            settings,
+            settings: settings.clone(),
             url,
             user_path: user_path.into(),
             project_path,
@@ -111,7 +115,16 @@ pub fn run(
             } else {
                 Others::Refuse
             };
-            start(server, models, path_var, &llama, &others, lang)
+            start(
+                server,
+                models,
+                path_var,
+                &llama,
+                &others,
+                &mut |line| println!("{line}"),
+                lang,
+            )
+            .map(|()| ExitCode::SUCCESS)
         }
         ServerAction::Stop => {
             if unit_active(&server.unit)? {
@@ -147,12 +160,13 @@ pub fn start(
     path_var: Option<OsString>,
     llama: &Llama,
     others: &Others,
+    say: &mut dyn FnMut(&str),
     lang: Lang,
-) -> Result<ExitCode, Error> {
+) -> Result<(), Error> {
     let url = &server.url;
     if unit_active(&server.unit)? {
-        println!("{}", tr!(lang, m::SERVER_ALREADY_RUNNING, url = url));
-        return Ok(ExitCode::SUCCESS);
+        say(&tr!(lang, m::SERVER_ALREADY_RUNNING, url = url));
+        return Ok(());
     }
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
@@ -196,25 +210,76 @@ pub fn start(
         });
     }
     let name = model.file_name().unwrap_or_default().to_string_lossy();
-    println!("{}", texts::starting(&name, url, &server.unit, lang));
+    say(&texts::starting(&name, url, &server.unit, lang));
+    wait_ready(llama, Some(&server.unit), say, lang)
+}
+
+/// Waits until `/health` answers ready (D149). `unit` is the unit that
+/// loads the model, when it is ours: it stopping is a failure.
+fn wait_ready(
+    llama: &Llama,
+    unit: Option<&str>,
+    say: &mut dyn FnMut(&str),
+    lang: Lang,
+) -> Result<(), Error> {
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
-            println!("{}", tr!(lang, m::SERVER_READY, url = url));
-            return Ok(ExitCode::SUCCESS);
+            say(&tr!(lang, m::SERVER_READY, url = llama.url()));
+            return Ok(());
         }
-        if !unit_active(&server.unit)? {
-            return Err(Error::ServerFailed {
-                unit: server.unit.clone(),
-            });
+        if let Some(unit) = unit
+            && !unit_active(unit)?
+        {
+            return Err(Error::ServerFailed { unit: unit.into() });
         }
         if started.elapsed() >= READY_TIMEOUT {
             return Err(Error::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
-                unit: server.unit.clone(),
+                unit: unit.unwrap_or(UNIT_PREFIX).into(),
             });
         }
         thread::sleep(POLL);
+    }
+}
+
+/// Brings the project's server up when a request finds none (AGL-015,
+/// D6, D10); the same code as `agl server start`.
+pub struct Autostart<'a> {
+    pub llama: &'a Llama,
+    pub project: &'a Workspace,
+    /// The project's `[server]` over the user's.
+    pub settings: &'a ServerFile,
+    pub user_path: PathBuf,
+    pub models: PathBuf,
+    pub path_var: Option<OsString>,
+    pub lang: Lang,
+}
+
+impl Autostart<'_> {
+    /// Returns when the server answers: it did, it was loading and is
+    /// ready now, or it is started. `say` takes the progress lines.
+    /// Outside a registered project, with no server, it is an error
+    /// (D14).
+    pub fn ensure(&self, others: &Others, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        let llama = self.llama;
+        match health(llama) {
+            Health::Ready => Ok(()),
+            // Someone loads it now: wait for it, as `start` does.
+            Health::Loading => wait_ready(llama, None, say, self.lang),
+            Health::Down => {
+                let server = Server::of(self.project, self.settings, &self.user_path)?;
+                start(
+                    &server,
+                    &self.models,
+                    self.path_var.clone(),
+                    llama,
+                    others,
+                    say,
+                    self.lang,
+                )
+            }
+        }
     }
 }
 
@@ -530,14 +595,11 @@ mod tests {
 
     #[test]
     fn the_unit_is_named_by_the_project_and_the_settings_merge() {
-        let user = UserFile {
-            server: ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
-                model: Some("big.gguf".into()),
-                context: Some(131072),
-                args: Some(vec!["-ngl".into(), "999".into()]),
-            },
-            ..UserFile::default()
+        let user = ServerFile {
+            url: Some("http://127.0.0.1:18080".into()),
+            model: Some("big.gguf".into()),
+            context: Some(131072),
+            args: Some(vec!["-ngl".into(), "999".into()]),
         };
         let own = ServerFile {
             url: Some("http://127.0.0.1:18081".into()),
@@ -546,7 +608,8 @@ mod tests {
         };
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), own);
-        let server = Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml")).unwrap();
+        let merged = ws.server.over(&user);
+        let server = Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-llama-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
         assert_eq!(server.settings.model.as_deref(), Some("big.gguf"));
@@ -556,12 +619,9 @@ mod tests {
 
     #[test]
     fn outside_a_registered_project_there_is_no_server() {
-        let user = UserFile {
-            server: ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
-                ..ServerFile::default()
-            },
-            ..UserFile::default()
+        let user = ServerFile {
+            url: Some("http://127.0.0.1:18080".into()),
+            ..ServerFile::default()
         };
         let ws = project(None, ServerFile::default());
         assert!(matches!(
@@ -572,7 +632,7 @@ mod tests {
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &UserFile::default(), Path::new("/c/agentLIBRE.toml")),
+            Server::of(&ws, &ServerFile::default(), Path::new("/c/agentLIBRE.toml")),
             Err(Error::MissingServerUrl { .. })
         ));
     }
@@ -629,5 +689,90 @@ mod tests {
         assert!(port_open("127.0.0.1", port));
         drop(listener);
         assert!(!port_open("127.0.0.1", port));
+    }
+
+    /// A server on a free port that answers every request to `/health`
+    /// with the next of `statuses` (the last one repeats); returns its
+    /// URL.
+    fn health_server(statuses: &'static [u16]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { return };
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let status = statuses[index.min(statuses.len() - 1)];
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        url
+    }
+
+    fn autostart<'a>(
+        llama: &'a Llama,
+        project: &'a Workspace,
+        settings: &'a ServerFile,
+    ) -> Autostart<'a> {
+        Autostart {
+            llama,
+            project,
+            settings,
+            user_path: PathBuf::from("/c/agentLIBRE.toml"),
+            models: PathBuf::from("/m"),
+            path_var: None,
+            lang: Lang::En,
+        }
+    }
+
+    #[test]
+    fn a_server_that_answers_is_not_started_again() {
+        let url = health_server(&[200]);
+        let llama = Llama::new(&url);
+        // Not even a registered project is needed.
+        let ws = project(None, ServerFile::default());
+        let settings = ServerFile::default();
+        let mut said = Vec::new();
+        autostart(&llama, &ws, &settings)
+            .ensure(&Others::Refuse, &mut |line| said.push(line.to_owned()))
+            .unwrap();
+        assert!(said.is_empty());
+    }
+
+    #[test]
+    fn a_server_that_loads_is_waited_for() {
+        let url = health_server(&[503, 503, 200]);
+        let llama = Llama::new(&url);
+        let ws = project(None, ServerFile::default());
+        let settings = ServerFile::default();
+        let mut said = Vec::new();
+        autostart(&llama, &ws, &settings)
+            .ensure(&Others::Refuse, &mut |line| said.push(line.to_owned()))
+            .unwrap();
+        assert_eq!(said, [format!("llama-server is ready at {url}")]);
+    }
+
+    #[test]
+    fn no_server_outside_a_registered_project_is_an_error_and_starts_nothing() {
+        // Nothing listens here: the port was just closed.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let llama = Llama::new(&url);
+        let ws = project(None, ServerFile::default());
+        let settings = ServerFile {
+            url: Some(url),
+            model: Some("m.gguf".into()),
+            ..ServerFile::default()
+        };
+        let mut said = Vec::new();
+        let result = autostart(&llama, &ws, &settings)
+            .ensure(&Others::Yes, &mut |line| said.push(line.to_owned()));
+        assert!(matches!(result, Err(Error::ProjectNotRegistered { .. })));
+        assert!(said.is_empty());
     }
 }

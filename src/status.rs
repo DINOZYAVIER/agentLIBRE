@@ -23,7 +23,6 @@ pub struct Facts {
     pub function: String,
     pub workspace: String,
     pub server: String,
-    pub context: usize,
 }
 
 /// What changes during the session.
@@ -34,6 +33,8 @@ pub struct Info {
     pub state: Option<String>,
     /// The state of an interrupted turn.
     pub unfinished: Option<String>,
+    /// The context size of the server, known once it answers (AGL-015).
+    pub context: Option<usize>,
 }
 
 /// `/help` (D134); the keys only make sense in a terminal.
@@ -65,7 +66,13 @@ pub fn status_text(
         texts::status_line("function", &facts.function, lang),
         texts::status_line("workspace", &facts.workspace, lang),
         texts::status_line("server", &facts.server, lang),
-        texts::status_line("context", &tr!(lang, m::TOKENS, n = facts.context), lang),
+        texts::status_line(
+            "context",
+            &info
+                .context
+                .map_or_else(|| "—".to_owned(), |n| tr!(lang, m::TOKENS, n = n)),
+            lang,
+        ),
         texts::status_line("reasoning", &texts::reasoning_level(reasoning, lang), lang),
         texts::status_line("state", &state, lang),
     ]
@@ -111,3 +118,26 @@ pub fn compact_notice(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts() -> Facts {
+        Facts {
+            function: "default".into(),
+            workspace: "~/project".into(),
+            server: "http://127.0.0.1:18080".into(),
+        }
+    }
+
+    #[test]
+    fn the_context_line_is_a_dash_until_the_server_has_answered() {
+        let mut info = Info::default();
+        let text = status_text(&facts(), &info, None, Lang::En);
+        assert!(text.contains("context: —"), "{text}");
+        info.context = Some(65536);
+        let text = status_text(&facts(), &info, None, Lang::En);
+        assert!(text.contains("context: 65536 tokens"), "{text}");
+    }
+}

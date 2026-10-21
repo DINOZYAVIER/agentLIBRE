@@ -37,6 +37,11 @@ impl Llama {
         }
     }
 
+    /// The address of the server, without a trailing slash.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// The status of `/health`; `None` when the server does not answer
     /// (D149, D150).
     pub fn health(&self) -> Option<u16> {

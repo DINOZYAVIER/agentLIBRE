@@ -27,6 +27,10 @@ const REMEMBERED_LINES: usize = 400;
 /// 131 072 (32%)`, with `—` before the first step; yellow from 70%, red
 /// from 90%.
 fn context_usage(used: Option<usize>, size: usize) -> (String, Role) {
+    // The server has not answered yet (AGL-015).
+    if size == 0 {
+        return ("—".into(), Role::Muted);
+    }
     let Some(used) = used else {
         return (format!("— / {}", grouped(size)), Role::Muted);
     };
@@ -72,6 +76,9 @@ struct State {
     /// The context size and the tokens of the last prompt (D152).
     context: usize,
     context_used: Option<usize>,
+    /// A yes/no question to the human, one row above the separator
+    /// (AGL-015, D17).
+    question: Option<String>,
     /// The decoding speed of the current generation (AGL-012).
     speed: Option<f64>,
     editor: Editor,
@@ -109,6 +116,7 @@ impl Dock {
                 workspace,
                 context: 0,
                 context_used: None,
+                question: None,
                 speed: None,
                 editor,
                 activity: Activity::Ready,
@@ -130,6 +138,23 @@ impl Dock {
             .unwrap_or_else(|e| e.into_inner())
             .context = size;
         self
+    }
+
+    /// The context size, once the server has answered (AGL-015).
+    pub fn set_context_size(&self, size: usize) {
+        let mut state = self.lock();
+        if state.context != size {
+            state.context = size;
+            state.redraw("");
+        }
+    }
+
+    /// Shows `question` in a row of the dock, or removes it (AGL-015,
+    /// D17).
+    pub fn set_question(&self, question: Option<&str>) {
+        let mut state = self.lock();
+        state.question = question.map(str::to_owned);
+        state.redraw("");
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -332,6 +357,10 @@ impl State {
         let mut rows = Vec::new();
         if !self.live.is_empty() {
             rows.push(self.live.clone());
+        }
+        if let Some(question) = &self.question {
+            let text = truncate(question, columns.saturating_sub(1));
+            rows.push(theme.paint(Role::StatusPending, &text));
         }
         rows.push(self.separator());
         rows.push(background_row(theme, &[], columns));
@@ -702,6 +731,37 @@ mod tests {
         assert_eq!(context_usage(Some(699), 1000).1, Role::Muted);
         assert_eq!(grouped(7), "7");
         assert_eq!(grouped(1000), "1\u{a0}000");
+    }
+
+    #[test]
+    fn a_question_is_a_row_above_the_separator_until_it_is_removed() {
+        let (dock, _) = dock(80, 20);
+        let before = dock.lock().layout().rows.len();
+        dock.set_question(Some("A server runs. Start one more? [y/N]"));
+        let layout = dock.lock().layout();
+        assert_eq!(layout.rows.len(), before + 1);
+        assert!(layout.rows[0].contains("Start one more? [y/N]"));
+        assert!(layout.rows[1].starts_with('─'));
+        dock.set_question(None);
+        assert_eq!(dock.lock().layout().rows.len(), before);
+    }
+
+    #[test]
+    fn the_context_is_a_dash_until_the_server_has_answered() {
+        assert_eq!(context_usage(None, 0), ("—".into(), Role::Muted));
+        assert_eq!(context_usage(Some(5), 0), ("—".into(), Role::Muted));
+        let (dock, _) = dock(80, 20);
+        dock.set_context_size(0);
+        assert!(dock.lock().layout().rows.last().unwrap().contains('—'));
+        dock.set_context_size(65_536);
+        assert!(
+            dock.lock()
+                .layout()
+                .rows
+                .last()
+                .unwrap()
+                .contains("— / 65\u{a0}536")
+        );
     }
 
     #[test]

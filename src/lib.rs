@@ -52,8 +52,14 @@ pub struct Setup<'a> {
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
     pub sessions_dir: &'a Path,
-    pub context: usize,
+    /// The context size of the server when it already answered at the
+    /// start; read at the first request otherwise (AGL-015, D10).
+    pub context: Option<usize>,
     pub server_url: &'a str,
+    /// Brings the server up when a request finds none (AGL-015).
+    pub autostart: &'a cli::serve::Autostart<'a>,
+    /// `--yes`: start the project's server without asking (D16).
+    pub yes: bool,
     pub theme: Theme,
     pub repl: ReplSettings,
     pub lang: Lang,
@@ -109,7 +115,8 @@ fn run(
                 user.forge.auto_rehome.unwrap_or(true),
                 *lang,
             )?;
-            let server = cli::serve::Server::of(&project, &user, &paths.settings_file())?;
+            let settings = project.server.over(&user.server);
+            let server = cli::serve::Server::of(&project, &settings, &paths.settings_file())?;
             return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
         }
         Command::Init => {
@@ -167,7 +174,29 @@ fn run(
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
     };
     let backend = Llama::new(&settings.server_url);
-    let context = backend.context_size()?;
+    let autostart = cli::serve::Autostart {
+        llama: &backend,
+        project: &project,
+        settings: &settings.server,
+        user_path: user_path.clone(),
+        models: paths.models(),
+        path_var: env("PATH"),
+        lang: *lang,
+    };
+    // `-p` has one request, so the server is brought up now; the
+    // interactive and the stdin session do it at their first request
+    // (AGL-015, D10) and take the context size if the server answers.
+    let context = if args.prompt.is_some() {
+        let others = if args.yes {
+            cli::serve::Others::Yes
+        } else {
+            cli::serve::Others::Refuse
+        };
+        autostart.ensure(&others, &mut |line| eprintln!("{line}"))?;
+        Some(backend.context_size()?)
+    } else {
+        backend.context_size().ok()
+    };
     let resumed = session.is_some();
     let mut session = match session {
         Some(session) => session,
@@ -185,6 +214,8 @@ fn run(
             sessions_dir: &paths.sessions(),
             context,
             server_url: &settings.server_url,
+            autostart: &autostart,
+            yes: args.yes,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
             repl: settings.repl,
             lang: *lang,
@@ -207,7 +238,7 @@ fn run(
         backend: &backend,
         session: &mut session,
         workspace: &workspace,
-        context,
+        context: context.expect("`-p` read the context size"),
         forge,
         reasoning: args.reasoning,
     };
