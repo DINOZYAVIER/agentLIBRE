@@ -115,7 +115,12 @@ impl<'f> Machine<'f> {
             // Staying would exceed the visit's steps (D42, D93).
             self.enter(state.on_limit.expect("a limit has on_limit"));
         }
-        if self.steps_total >= self.function.max_steps_total {
+        // A `None` limit is the unlimited (AGL-021, D2); it never stops.
+        if self
+            .function
+            .max_steps_total
+            .is_some_and(|max| self.steps_total >= max)
+        {
             Progress::StepLimit
         } else {
             Progress::Continue

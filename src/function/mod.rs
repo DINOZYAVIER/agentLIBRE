@@ -46,7 +46,8 @@ pub struct Function {
     pub format: Format,
     pub system: String,
     pub preserve_thinking: bool,
-    pub max_steps_total: u32,
+    /// The steps of a turn; `None` when unlimited (D40, AGL-021, D2).
+    pub max_steps_total: Option<u32>,
     pub max_think_tokens: u32,
     pub max_action_tokens: u32,
     /// The instruction that asks for a summary of the history (D139).
@@ -153,8 +154,13 @@ impl Function {
         let format = Format::load(formats_dir, &format_name)?;
         let system = file.required_string("system")?;
         let preserve_thinking = file.bool("preserve_thinking")?.unwrap_or(true);
-        let max_steps_total =
-            positive(&mut file, "max_steps_total")?.unwrap_or(DEFAULT_MAX_STEPS_TOTAL);
+        // 0 is the value of the no limit (AGL-021, D2); the absent key keeps
+        // the default (D40).
+        let max_steps_total = match nonneg(&mut file, "max_steps_total")? {
+            None => Some(DEFAULT_MAX_STEPS_TOTAL),
+            Some(0) => None,
+            Some(n) => Some(n),
+        };
         let max_think_tokens =
             positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens =
@@ -243,6 +249,16 @@ fn positive(section: &mut Section, key: &str) -> Result<Option<u32>, Error> {
     match section.integer(key)? {
         None => Ok(None),
         Some(n) if n >= 1 => Ok(Some(u32::try_from(n).unwrap_or(u32::MAX))),
+        Some(_) => Err(problem(section, key, FunctionProblem::NotPositive)),
+    }
+}
+
+/// A non-negative integer: `max_steps_total` alone takes 0, the value of the
+/// no limit (AGL-021, D2).
+fn nonneg(section: &mut Section, key: &str) -> Result<Option<u32>, Error> {
+    match section.integer(key)? {
+        None => Ok(None),
+        Some(n) if n >= 0 => Ok(Some(u32::try_from(n).unwrap_or(u32::MAX))),
         Some(_) => Err(problem(section, key, FunctionProblem::NotPositive)),
     }
 }

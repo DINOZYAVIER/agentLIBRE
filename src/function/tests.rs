@@ -80,7 +80,7 @@ fn builtin_minimal() {
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
     assert!(function.preserve_thinking);
-    assert_eq!(function.max_steps_total, 50);
+    assert_eq!(function.max_steps_total, Some(50));
     assert_eq!(
         (function.max_think_tokens, function.max_action_tokens),
         (4096, 8192)
@@ -281,9 +281,19 @@ fn top_level_errors() {
         sampling("temperature = 1").unwrap().sampling.temperature,
         Some(1.0)
     );
+    // 0 is the no limit (AGL-021, D2); the absent key keeps the 50 (D40).
+    assert_eq!(
+        function(
+            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 0\ninitial = \"a\"\n\
+             [state.a]\nanswer = true"
+        )
+        .unwrap()
+        .max_steps_total,
+        None
+    );
     assert_eq!(
         problem_of(function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 0\ninitial = \"a\"\n\
+            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = -1\ninitial = \"a\"\n\
              [state.a]\nanswer = true"
         )),
         ("max_steps_total".into(), FunctionProblem::NotPositive)
@@ -562,7 +572,7 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 }
 
 #[test]
-fn the_built_in_functions_differ_in_the_system_only() {
+fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
     let none = Path::new("/nonexistent");
     let minimal = Function::load(none, none, "minimal").unwrap();
     let agentlibre = Function::load(none, none, "agentLIBRE").unwrap();
@@ -579,6 +589,10 @@ fn the_built_in_functions_differ_in_the_system_only() {
          not from the human. One action holds at most 8192 tokens; write a large file in parts."
     ));
     assert!(!agentlibre.system.contains('{'));
+    // The step limit differs too: `minimal` keeps the 50 of the absent key
+    // (D40); `agentLIBRE` is unlimited (AGL-021, D1).
+    assert_eq!(minimal.max_steps_total, Some(50));
+    assert_eq!(agentlibre.max_steps_total, None);
     // The rest is the same: the states and the tools.
     assert_eq!(minimal.states.len(), agentlibre.states.len());
     let tools = |f: &Function| -> Vec<String> {

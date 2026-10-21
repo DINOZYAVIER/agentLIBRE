@@ -64,6 +64,21 @@ fn step_limit() {
 }
 
 #[test]
+fn no_step_limit() {
+    // 0 is the no limit (AGL-021, D2): it never stops at the 50 the default
+    // would set.
+    let function = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 0\ninitial = \"a\"\n\
+         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
+    )
+    .unwrap();
+    let mut machine = Machine::new(&function);
+    for _ in 0..51 {
+        assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
+    }
+}
+
+#[test]
 fn on_limit_chain() {
     // b's visits run out, so entering it leads to its on_limit c.
     let function = with_states(

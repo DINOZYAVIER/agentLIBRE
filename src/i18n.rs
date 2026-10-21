@@ -1945,7 +1945,14 @@ pub fn lines(n: usize, lang: Lang) -> String {
 pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> String {
     match reason {
         StopReason::StepLimit => {
-            tr!(lang, m::STOP_STEP_LIMIT, steps = function.max_steps_total)
+            // The machine stops only at a set limit (D33, AGL-021, D3).
+            tr!(
+                lang,
+                m::STOP_STEP_LIMIT,
+                steps = function
+                    .max_steps_total
+                    .expect("a set limit stops the turn")
+            )
         }
         StopReason::ContextFull => tr!(lang, m::STOP_CONTEXT_FULL).to_string(),
         StopReason::ServerError => tr!(lang, m::STOP_SERVER).to_string(),

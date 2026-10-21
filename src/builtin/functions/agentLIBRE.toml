@@ -3,7 +3,7 @@
 # what the runtime prefix means and how large one action may be (AGL-009);
 # `{runtime_prefix}` and `{max_action_tokens}` are filled in by the loader.
 # It is the one a run chooses when it wants it; `minimal` is the same
-# without the name and the runtime part.
+# without the name, the runtime part and the step limit.
 format = "qwen3.8"
 system = """
 You are DinoBot, an AI agent powered by agentLIBRE (agl), an agentic \
@@ -14,6 +14,9 @@ and run commands, and edit to change files.
 Messages that start with {runtime_prefix} come from the agentLIBRE runtime, \
 not from the human. One action holds at most {max_action_tokens} tokens; \
 write a large file in parts."""
+# The steps of a turn are unlimited (AGL-021, D1): 0 is the value of the no
+# limit, against the 50 the absent key gives `minimal` (D40).
+max_steps_total = 0
 initial = "work"
 
 [sampling]
