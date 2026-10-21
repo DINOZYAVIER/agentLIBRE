@@ -3,6 +3,7 @@
 //! and writes 16 kHz mono WAV, which whisper reads as it is (D4).
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -62,15 +63,26 @@ impl Ffmpeg {
             "agentLIBRE-voice-{}-{n}.wav",
             std::process::id()
         ));
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(ffmpeg_args(limit, &path))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| Error::Ffmpeg {
-                detail: source.to_string(),
-            })?;
+            .stderr(Stdio::piped());
+        // The thread that starts it may block SIGINT (the REPL's input
+        // thread does, D131) and a child keeps the mask of the thread:
+        // ffmpeg must get the SIGINT that makes it finish its file.
+        unsafe {
+            command.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let child = command.spawn().map_err(|source| Error::Ffmpeg {
+            detail: source.to_string(),
+        })?;
         let mut recording = Ffmpeg {
             child: Some(child),
             path,
@@ -241,6 +253,32 @@ mod tests {
         let bytes = Box::new(recording).stop().unwrap();
         assert_eq!(bytes.len(), 100);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stop_works_when_the_thread_that_starts_it_blocks_sigint() {
+        // As the input thread of the REPL: SIGINT is blocked in it, and a
+        // child would keep the mask (the live bug of AGL-016).
+        let fake = Fake::new("mask", &format!("trap '{WRITE}; exit 0' INT\nwhile true; do sleep 0.02; done"));
+        let program = fake.0.clone();
+        let handle = thread::spawn(move || {
+            unsafe {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGINT);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            }
+            let fake = Fake(program);
+            let recording = start_fake(&fake, 60).unwrap();
+            std::mem::forget(fake);
+            let started = Instant::now();
+            let bytes = Box::new(recording).stop().unwrap();
+            (bytes.len(), started.elapsed())
+        });
+        let (len, elapsed) = handle.join().unwrap();
+        assert_eq!(len, 100);
+        // Finished by the signal, not by the timeout that kills it.
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     }
 
     #[test]
