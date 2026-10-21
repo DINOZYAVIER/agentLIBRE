@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use crate::action::Value;
+use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
@@ -84,7 +84,8 @@ impl Report for StderrReport {
     }
 }
 
-/// `bash`: the command's first line, shortened; `edit`: the path.
+/// `bash`: the command's first line, shortened; `search`: the source and
+/// the query; `edit`: the path.
 pub fn call_summary(call: &ToolCall) -> String {
     let text = |name: &str| {
         call.args
@@ -95,6 +96,10 @@ pub fn call_summary(call: &ToolCall) -> String {
             })
             .unwrap_or_default()
     };
+    if call.name == "search" {
+        let summary = format!("{}: {}", text("source"), text("query"));
+        return summary.chars().take(COMMAND_WIDTH).collect();
+    }
     if call.name != "bash" {
         return text("path").to_owned();
     }
@@ -107,9 +112,22 @@ pub fn call_summary(call: &ToolCall) -> String {
     summary
 }
 
-/// `edit`: its message; `bash`: the outcome, how it ended and the length.
+/// `edit`: its message; `search`: how many results; `bash`: the outcome,
+/// how it ended and the length.
 pub fn result_summary(call: &ToolCall, result: &ToolResult, lang: Lang) -> String {
     let outcome = result.outcome.name();
+    if call.name == "search" && result.outcome == Outcome::Ok {
+        // The numbered lines of the list, as the tool writes them.
+        let found = result
+            .content
+            .lines()
+            .filter(|line| {
+                line.split_once(". ")
+                    .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            })
+            .count();
+        return format!("{outcome}: {found} results");
+    }
     if call.name != "bash" {
         return format!("{outcome}: {}", result.content);
     }
@@ -177,5 +195,38 @@ mod tests {
             result_summary(&edit, &edited, Lang::En),
             "ok: Replaced 1 occurrence in src/lib.rs."
         );
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn call(args: &[(&str, &str)]) -> ToolCall {
+        ToolCall {
+            id: "c".into(),
+            name: "search".into(),
+            args: args
+                .iter()
+                .map(|(n, v)| (n.to_string(), Value::Text(v.to_string())))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_search_call_shows_the_source_and_the_query() {
+        assert_eq!(call_summary(&call(&[("query", "rust 1.99"), ("source", "web")])), "web: rust 1.99");
+    }
+
+    #[test]
+    fn a_search_result_shows_how_many_results() {
+        let list = "1. A\n   https://a.example/\n   one. two. 3. not a result\n2. B\n   https://b.example/\nSuggestions: x";
+        let ok = ToolResult { outcome: Outcome::Ok, content: list.into() };
+        assert_eq!(result_summary(&call(&[]), &ok, Lang::En), "ok: 2 results");
+        let none = ToolResult { outcome: Outcome::Ok, content: "No results.".into() };
+        assert_eq!(result_summary(&call(&[]), &none, Lang::En), "ok: 0 results");
+        // A failure says why.
+        let fail = ToolResult { outcome: Outcome::Fail, content: "The search timed out.".into() };
+        assert_eq!(result_summary(&call(&[]), &fail, Lang::En), "fail: The search timed out.");
     }
 }

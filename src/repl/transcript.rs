@@ -604,7 +604,25 @@ fn call_input(call: &ToolCall) -> String {
         }
         return out;
     }
+    if call.name == "search" {
+        return search_input(call);
+    }
     text("command").to_owned()
+}
+
+/// What a `search` call shows: the source and the query.
+fn search_input(call: &ToolCall) -> String {
+    let text = |name: &str| {
+        call.args.iter().find_map(|(n, value)| match value {
+            Value::Text(text) if n == name => Some(text.as_str()),
+            _ => None,
+        })
+    };
+    format!(
+        "{}: {}",
+        text("source").unwrap_or_default(),
+        text("query").unwrap_or_default()
+    )
 }
 
 /// The first `lines` lines of `text`, at most `chars` characters in all;
