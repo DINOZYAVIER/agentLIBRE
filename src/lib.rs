@@ -17,6 +17,7 @@ mod media;
 mod paths;
 mod record;
 mod repl;
+mod search;
 mod session;
 mod settings;
 mod status;
