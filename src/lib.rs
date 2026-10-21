@@ -100,7 +100,7 @@ fn run(
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
-        Command::Server(action) => {
+        Command::Server(action, yes) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             let project = cli::forge::project_of(
@@ -109,15 +109,8 @@ fn run(
                 user.forge.auto_rehome.unwrap_or(true),
                 *lang,
             )?;
-            return cli::serve::run(
-                action,
-                &project.server.over(&user.server),
-                &paths.settings_file(),
-                &project.dir.join(forge::MARKER_FILE),
-                &paths.models(),
-                env("PATH"),
-                *lang,
-            );
+            let server = cli::serve::Server::of(&project, &user, &paths.settings_file())?;
+            return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
         }
         Command::Init => {
             let (paths, user) = loaded?;

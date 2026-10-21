@@ -1,7 +1,9 @@
-//! `agl server start|stop|status`: llama-server as a transient systemd user
-//! unit (D146-D150).
+//! `agl server start|stop|status` and the autostart: the project's
+//! llama-server as a transient systemd user unit (D146-D150, AGL-015).
 
 use std::ffi::OsString;
+use std::io::{self, BufRead, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
@@ -10,12 +12,14 @@ use std::time::{Duration, Instant};
 use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
+use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
-use crate::settings::ServerFile;
+use crate::settings::{ServerFile, UserFile};
 use crate::tr;
 
-/// The systemd user unit (D147).
-pub const UNIT: &str = "agentLIBRE-llama-server";
+/// The name every unit of a llama-server starts with (D8); the project's
+/// key follows after a dash.
+pub const UNIT_PREFIX: &str = "agentLIBRE-llama-server";
 
 /// `context` when `[server]` does not set it (D148).
 const DEFAULT_CONTEXT: u32 = 16384;
@@ -36,50 +40,96 @@ pub enum Health {
     Down,
 }
 
-/// Runs a server command. `server` is the project's `[server]` over the
-/// user's; `models` is the models directory, `user_path` and
-/// `project_path` the settings files, for hints.
+/// What a server command works on: the server of the project (AGL-015).
+#[derive(Debug)]
+pub struct Server {
+    /// The unit of the project (D8, D12).
+    pub unit: String,
+    /// The project's `[server]` over the user's.
+    pub settings: ServerFile,
+    pub url: String,
+    /// The user's and the project's settings files, for hints.
+    pub user_path: PathBuf,
+    pub project_path: PathBuf,
+}
+
+impl Server {
+    /// The server of `project`. A project that is not registered has no
+    /// unit: an error (D14).
+    pub fn of(project: &Workspace, user: &UserFile, user_path: &Path) -> Result<Server, Error> {
+        let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
+            project: project.project.clone(),
+        })?;
+        let project_path = project.dir.join(crate::forge::MARKER_FILE);
+        let settings = project.server.over(&user.server);
+        let url = settings.url.clone().ok_or_else(|| Error::MissingServerUrl {
+            user_path: user_path.into(),
+            project_path: project_path.clone(),
+        })?;
+        Ok(Server {
+            unit: unit_name(&key),
+            settings,
+            url,
+            user_path: user_path.into(),
+            project_path,
+        })
+    }
+}
+
+/// The unit of the project whose unit key is `key` (D8).
+pub fn unit_name(key: &str) -> String {
+    format!("{UNIT_PREFIX}-{key}")
+}
+
+/// What `start` does when the server of another project runs (D9, D13).
+pub enum Others<'a> {
+    /// Ask the human; `true` starts.
+    Ask(&'a dyn Fn(&[String]) -> bool),
+    /// `--yes`: start without asking.
+    Yes,
+    /// Nobody can answer and there is no `--yes`: refuse.
+    Refuse,
+}
+
+/// Runs a server command. `models` is the models directory.
 pub fn run(
     action: ServerAction,
-    server: &ServerFile,
-    user_path: &Path,
-    project_path: &Path,
+    server: &Server,
     models: &Path,
     path_var: Option<OsString>,
+    yes: bool,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    let url = server
-        .url
-        .clone()
-        .ok_or_else(|| Error::MissingServerUrl {
-            user_path: user_path.into(),
-            project_path: project_path.into(),
-        })?;
-    let llama = Llama::new(&url);
+    let llama = Llama::new(&server.url);
     match action {
-        ServerAction::Start => start(
-            server,
-            (user_path, project_path),
-            models,
-            path_var,
-            &url,
-            &llama,
-            lang,
-        ),
+        ServerAction::Start => {
+            let ask = |units: &[String]| ask_terminal(units, lang);
+            let others = if yes {
+                Others::Yes
+            } else if crate::repl::term::is_interactive() {
+                Others::Ask(&ask)
+            } else {
+                Others::Refuse
+            };
+            start(server, models, path_var, &llama, &others, lang)
+        }
         ServerAction::Stop => {
-            if unit_active()? {
-                systemctl(&["stop", UNIT])?;
+            if unit_active(&server.unit)? {
+                systemctl(&["stop", &server.unit])?;
                 println!("{}", tr!(lang, m::SERVER_STOPPED));
             } else {
-                println!("{}", texts::not_running(lang));
+                println!("{}", texts::not_running(&server.unit, lang));
             }
             Ok(ExitCode::SUCCESS)
         }
         ServerAction::Status => {
-            let active = unit_active()?;
+            let active = unit_active(&server.unit)?;
             let health = health(&llama);
-            let model = server.model.as_deref();
-            println!("{}", texts::status(active, &url, model, health, lang));
+            let model = server.settings.model.as_deref();
+            println!(
+                "{}",
+                texts::status(&server.unit, active, &server.url, model, health, lang)
+            );
             Ok(if health == Health::Ready {
                 ExitCode::SUCCESS
             } else {
@@ -89,27 +139,40 @@ pub fn run(
     }
 }
 
-fn start(
-    server: &ServerFile,
-    (user_path, project_path): (&Path, &Path),
+/// Starts the unit of the project and waits until the server is ready
+/// (D146, D149); the same code as the autostart (AGL-015, D10).
+pub fn start(
+    server: &Server,
     models: &Path,
     path_var: Option<OsString>,
-    url: &str,
     llama: &Llama,
+    others: &Others,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    if unit_active()? || health(llama) != Health::Down {
+    let url = &server.url;
+    if unit_active(&server.unit)? {
         println!("{}", tr!(lang, m::SERVER_ALREADY_RUNNING, url = url));
         return Ok(ExitCode::SUCCESS);
     }
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+    let running = active_units()?;
+    // The port is held by something that is not this project's unit
+    // (D7): the units that run are named, there may be none.
+    if health(llama) != Health::Down || port_open(&host, port) {
+        return Err(Error::PortBusy {
+            url: url.into(),
+            units: running,
+        });
+    }
+    consent(running, others)?;
     let model = server
+        .settings
         .model
         .as_deref()
         .ok_or_else(|| Error::MissingModel {
-            user_path: user_path.into(),
-            project_path: project_path.into(),
+            user_path: server.user_path.clone(),
+            project_path: server.project_path.clone(),
             models: models.into(),
         })?;
     let model = models.join(model);
@@ -117,9 +180,9 @@ fn start(
         return Err(Error::ModelNotFound { path: model });
     }
     let program = find_program("llama-server", path_var).ok_or(Error::LlamaServerNotFound)?;
-    let context = server.context.unwrap_or(DEFAULT_CONTEXT);
-    let extra = server.args.clone().unwrap_or_default();
-    let args = systemd_run_args(&program, &model, context, &host, port, &extra);
+    let context = server.settings.context.unwrap_or(DEFAULT_CONTEXT);
+    let extra = server.settings.args.clone().unwrap_or_default();
+    let args = systemd_run_args(&server.unit, &program, &model, context, &host, port, &extra);
     let output = Command::new("systemd-run")
         .args(&args)
         .stdin(Stdio::null())
@@ -133,23 +196,57 @@ fn start(
         });
     }
     let name = model.file_name().unwrap_or_default().to_string_lossy();
-    println!("{}", texts::starting(&name, url, lang));
+    println!("{}", texts::starting(&name, url, &server.unit, lang));
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
             println!("{}", tr!(lang, m::SERVER_READY, url = url));
             return Ok(ExitCode::SUCCESS);
         }
-        if !unit_active()? {
-            return Err(Error::ServerFailed);
+        if !unit_active(&server.unit)? {
+            return Err(Error::ServerFailed {
+                unit: server.unit.clone(),
+            });
         }
         if started.elapsed() >= READY_TIMEOUT {
             return Err(Error::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
+                unit: server.unit.clone(),
             });
         }
         thread::sleep(POLL);
     }
+}
+
+/// The server of another project runs: ask, or refuse (D9, D13). With
+/// no other unit nothing is asked.
+fn consent(running: Vec<String>, others: &Others) -> Result<(), Error> {
+    if running.is_empty() {
+        return Ok(());
+    }
+    match others {
+        Others::Yes => Ok(()),
+        Others::Ask(ask) if ask(&running) => Ok(()),
+        Others::Ask(_) => Err(Error::StartDeclined),
+        Others::Refuse => Err(Error::ServerRunning { units: running }),
+    }
+}
+
+/// The question of D9 on a terminal: "a server is running, start one
+/// more?"; the answer is a line of stdin, `y` or `yes` starts.
+fn ask_terminal(units: &[String], lang: Lang) -> bool {
+    print!("{} ", texts::others_running(units, lang));
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        return false;
+    }
+    is_yes(&line)
+}
+
+/// Whether the answer to a yes/no question is yes.
+pub fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 fn health(llama: &Llama) -> Health {
@@ -160,16 +257,63 @@ fn health(llama: &Llama) -> Health {
     }
 }
 
+/// Whether something accepts connections at `host:port`.
+fn port_open(host: &str, port: u16) -> bool {
+    (host, port)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .any(|address: SocketAddr| {
+            TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
+        })
+}
+
 /// Whether the unit runs.
-fn unit_active() -> Result<bool, Error> {
+fn unit_active(unit: &str) -> Result<bool, Error> {
     let status = Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", UNIT])
+        .args(["--user", "is-active", "--quiet", unit])
         .stdin(Stdio::null())
         .status()
         .map_err(|source| Error::Systemd {
             detail: source.to_string(),
         })?;
     Ok(status.success())
+}
+
+/// The active llama-server units of every project, by name (D9).
+pub fn active_units() -> Result<Vec<String>, Error> {
+    let output = Command::new("systemctl")
+        .args([
+            "--user",
+            "list-units",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+            "--state=active",
+            "--type=service",
+            &format!("{UNIT_PREFIX}*"),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|source| Error::Systemd {
+            detail: source.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(Error::Systemd {
+            detail: String::from_utf8_lossy(&output.stderr).trim().into(),
+        });
+    }
+    Ok(parse_units(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The unit names of `systemctl list-units --plain --no-legend`: the
+/// first column of every line, without `.service`.
+fn parse_units(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.strip_suffix(".service").unwrap_or(name).to_owned())
+        .collect()
 }
 
 fn systemctl(args: &[&str]) -> Result<(), Error> {
@@ -213,9 +357,10 @@ fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
         })
 }
 
-/// The arguments of `systemd-run`: the unit, then llama-server with the
+/// The arguments of `systemd-run`: `unit`, then llama-server with the
 /// arguments agl needs and those of `[server] args` (D147, D148).
 fn systemd_run_args(
+    unit: &str,
     program: &Path,
     model: &Path,
     context: u32,
@@ -225,7 +370,7 @@ fn systemd_run_args(
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "--user",
-        &format!("--unit={UNIT}"),
+        &format!("--unit={unit}"),
         "--collect",
         "--quiet",
         "--",
@@ -263,19 +408,27 @@ mod tests {
     fn status_lines() {
         assert_eq!(
             texts::status(
+                "agentLIBRE-llama-server-60af300abea6",
                 true,
                 "http://127.0.0.1:18080",
                 None,
                 Health::Loading,
                 Lang::En
             ),
-            "unit: agentLIBRE-llama-server (active)\nurl: http://127.0.0.1:18080\nmodel: not set\n\
-             health: loading"
+            "unit: agentLIBRE-llama-server-60af300abea6 (active)\nurl: http://127.0.0.1:18080\n\
+             model: not set\nhealth: loading"
         );
         assert_eq!(
-            texts::status(false, "http://x", Some("q.gguf"), Health::Down, Lang::Uk),
-            "unit: agentLIBRE-llama-server (неактивний)\nадреса: http://x\nмодель: q.gguf\n\
-             стан: не відповідає"
+            texts::status(
+                "agentLIBRE-llama-server-60af300abea6",
+                false,
+                "http://x",
+                Some("q.gguf"),
+                Health::Down,
+                Lang::Uk
+            ),
+            "unit: agentLIBRE-llama-server-60af300abea6 (неактивний)\nадреса: http://x\n\
+             модель: q.gguf\nстан: не відповідає"
         );
     }
 
@@ -321,6 +474,7 @@ mod tests {
     #[test]
     fn the_unit_runs_llama_server_with_the_needed_arguments() {
         let args = systemd_run_args(
+            "agentLIBRE-llama-server-60af300abea6",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             8192,
@@ -333,7 +487,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agentLIBRE-llama-server",
+                "--unit=agentLIBRE-llama-server-60af300abea6",
                 "--collect",
                 "--quiet",
                 "--",
@@ -353,5 +507,127 @@ mod tests {
                 "999"
             ]
         );
+    }
+
+    use crate::forge::Workspace;
+
+    /// A project registered under `origin`, with its own `[server]`.
+    fn project(origin: Option<&str>, server: ServerFile) -> Workspace {
+        Workspace {
+            project: PathBuf::from("/p/agl-lite"),
+            identity: "sha256:aa".into(),
+            key: "agl-lite-60af300abea6".into(),
+            dir: PathBuf::from("/d/agl-lite-60af300abea6"),
+            function: None,
+            server,
+            origin: origin.map(str::to_owned),
+        }
+    }
+
+    fn origin(hex12: &str) -> String {
+        format!("sha256:{hex12}{}", "0".repeat(52))
+    }
+
+    #[test]
+    fn the_unit_is_named_by_the_project_and_the_settings_merge() {
+        let user = UserFile {
+            server: ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
+                model: Some("big.gguf".into()),
+                context: Some(131072),
+                args: Some(vec!["-ngl".into(), "999".into()]),
+            },
+            ..UserFile::default()
+        };
+        let own = ServerFile {
+            url: Some("http://127.0.0.1:18081".into()),
+            context: Some(65536),
+            ..ServerFile::default()
+        };
+        let origin = origin("60af300abea6");
+        let ws = project(Some(&origin), own);
+        let server = Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml")).unwrap();
+        assert_eq!(server.unit, "agentLIBRE-llama-server-60af300abea6");
+        assert_eq!(server.url, "http://127.0.0.1:18081");
+        assert_eq!(server.settings.model.as_deref(), Some("big.gguf"));
+        assert_eq!(server.settings.context, Some(65536));
+        assert_eq!(server.project_path, PathBuf::from("/d/agl-lite-60af300abea6/agentLIBRE.toml"));
+    }
+
+    #[test]
+    fn outside_a_registered_project_there_is_no_server() {
+        let user = UserFile {
+            server: ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
+                ..ServerFile::default()
+            },
+            ..UserFile::default()
+        };
+        let ws = project(None, ServerFile::default());
+        assert!(matches!(
+            Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml")),
+            Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
+        ));
+        // A registered project with no url anywhere is the url error.
+        let origin = origin("60af300abea6");
+        let ws = project(Some(&origin), ServerFile::default());
+        assert!(matches!(
+            Server::of(&ws, &UserFile::default(), Path::new("/c/agentLIBRE.toml")),
+            Err(Error::MissingServerUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn systemctl_listing_gives_the_unit_names() {
+        let listing = "agentLIBRE-llama-server-60af300abea6.service loaded active running llama\n\
+                       agentLIBRE-llama-server-0123456789ab.service loaded active running llama\n";
+        assert_eq!(
+            parse_units(listing),
+            ["agentLIBRE-llama-server-60af300abea6", "agentLIBRE-llama-server-0123456789ab"]
+        );
+        assert!(parse_units("").is_empty());
+    }
+
+    #[test]
+    fn another_running_server_is_asked_about_or_refused() {
+        let running = || vec!["agentLIBRE-llama-server-0123456789ab".to_owned()];
+        // Nothing runs: nobody is asked.
+        let never = |_: &[String]| -> bool { panic!("nothing to ask") };
+        assert!(consent(Vec::new(), &Others::Ask(&never)).is_ok());
+        assert!(consent(Vec::new(), &Others::Refuse).is_ok());
+        // `--yes`.
+        assert!(consent(running(), &Others::Yes).is_ok());
+        // The human answers.
+        let yes = |units: &[String]| units == ["agentLIBRE-llama-server-0123456789ab"];
+        assert!(consent(running(), &Others::Ask(&yes)).is_ok());
+        let no = |_: &[String]| false;
+        assert!(matches!(
+            consent(running(), &Others::Ask(&no)),
+            Err(Error::StartDeclined)
+        ));
+        // `-p` and stdin without `--yes`: refused, with the unit named.
+        assert!(matches!(
+            consent(running(), &Others::Refuse),
+            Err(Error::ServerRunning { units }) if units == running()
+        ));
+    }
+
+    #[test]
+    fn the_answer_is_yes_only_for_y_and_yes() {
+        for answer in ["y", "Y\n", " yes ", "YES"] {
+            assert!(is_yes(answer), "{answer:?}");
+        }
+        for answer in ["", "\n", "n", "no", "yep", "ye"] {
+            assert!(!is_yes(answer), "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn an_open_port_is_seen() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_open("127.0.0.1", port));
+        drop(listener);
+        assert!(!port_open("127.0.0.1", port));
     }
 }

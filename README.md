@@ -10,6 +10,7 @@ The command is `agl` (also installed as `agentLIBRE`). Work in
 progress: `agl -p "..."` runs one turn against an already running
 llama-server; `agl` alone opens the interactive session (a line editor, a dock with the
 state and the queue, streamed thinking and text, tool cards);
-`agl server start` runs llama-server as a systemd user unit
-from `[server]` in `agentLIBRE.toml`. Install with `cargo install
+`agl server start` runs the project's llama-server as a systemd user unit
+from `[server]` in the project's `agentLIBRE.toml` (the user's file holds
+the defaults). Install with `cargo install
 --path .`.

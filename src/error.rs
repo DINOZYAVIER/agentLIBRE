@@ -126,9 +126,20 @@ pub enum Error {
     /// `systemd-run` or `systemctl` failed.
     Systemd { detail: String },
     /// The unit stopped before llama-server was ready (D149).
-    ServerFailed,
+    ServerFailed { unit: String },
     /// llama-server was not ready in time (D149).
-    ServerTimeout { seconds: u64 },
+    ServerTimeout { seconds: u64, unit: String },
+    /// A server command or the autostart outside a registered project
+    /// (AGL-015, D14).
+    ProjectNotRegistered { project: PathBuf },
+    /// The port of the project's `url` is held by something that is not
+    /// its unit; `units` are the llama-server units that run (D7).
+    PortBusy { url: String, units: Vec<String> },
+    /// The server of another project runs and nobody can be asked: `-p`
+    /// and the stdin session without `--yes` (D13).
+    ServerRunning { units: Vec<String> },
+    /// The human answered no to "start one more?" (D9).
+    StartDeclined,
     /// `git` cannot be run.
     GitSpawn { source: io::Error },
     /// `git <args>` exited with a failure.
@@ -376,8 +387,16 @@ impl std::fmt::Display for Error {
                 }
                 Error::LlamaServerNotFound => "llama-server is not in PATH".into(),
                 Error::Systemd { detail } => format!("systemd failed: {detail}"),
-                Error::ServerFailed => "llama-server stopped before it was ready".into(),
-                Error::ServerTimeout { seconds } => {
+                Error::ServerFailed { .. } => "llama-server stopped before it was ready".into(),
+                Error::ProjectNotRegistered { project } => {
+                    format!("{} is not a registered project", project.display())
+                }
+                Error::PortBusy { url, .. } => format!("the port of {url} is busy"),
+                Error::ServerRunning { units } => {
+                    format!("a llama-server is running: {}", units.join(", "))
+                }
+                Error::StartDeclined => "llama-server was not started".into(),
+                Error::ServerTimeout { seconds, .. } => {
                     format!("llama-server was not ready after {seconds} s")
                 }
                 Error::GitSpawn { source } => format!("cannot run git: {source}"),

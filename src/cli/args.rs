@@ -12,8 +12,9 @@ pub enum Command {
     Help,
     /// Run the agent.
     Run(Args),
-    /// `agl server start|stop|status` (D146).
-    Server(ServerAction),
+    /// `agl server start|stop|status` (D146); the flag is `--yes` of
+    /// `start` (AGL-015, D16).
+    Server(ServerAction, bool),
     /// `agl init` (AGL-010): register the current directory as
     /// a project.
     Init,
@@ -40,6 +41,9 @@ pub struct Args {
     pub function: Option<String>,
     /// `--think <level>`: the model's reasoning level (AGL-013).
     pub reasoning: Option<ReasoningLevel>,
+    /// `--yes`: start the server of the project even when another
+    /// project's server runs, without asking (AGL-015, D13, D16).
+    pub yes: bool,
 }
 
 /// Parses the arguments after the program name. Each option takes the
@@ -71,10 +75,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Some(other) => return Err(Error::UnknownOption(other.into())),
             None => return Err(Error::MissingValue("server".into())),
         };
-        return match args.next().map(text).transpose()? {
-            None => Ok(Command::Server(action)),
-            Some(extra) => Err(Error::UnknownOption(extra)),
-        };
+        let mut yes = false;
+        for extra in args {
+            match text(extra)?.as_str() {
+                "--yes" if action == ServerAction::Start && !yes => yes = true,
+                "--yes" if action == ServerAction::Start => {
+                    return Err(Error::RepeatedOption("--yes".into()));
+                }
+                other => return Err(Error::UnknownOption(other.into())),
+            }
+        }
+        return Ok(Command::Server(action, yes));
     }
     // `--think` is parsed to its level after the loop (AGL-013).
     let mut think: Option<String> = None;
@@ -82,6 +93,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         let arg = text(arg)?;
         let slot = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
+            "--yes" => {
+                if parsed.yes {
+                    return Err(Error::RepeatedOption(arg));
+                }
+                parsed.yes = true;
+                continue;
+            }
             "-p" => &mut parsed.prompt,
             "--resume" => &mut parsed.resume,
             "--function" => &mut parsed.function,
@@ -126,6 +144,39 @@ mod tests {
                 resume: Some("id".into()),
                 function: Some("coder".into()),
                 reasoning: None,
+                yes: false,
+            })
+        );
+    }
+
+    #[test]
+    fn yes_is_a_flag_without_a_value() {
+        assert_eq!(
+            parse_strs(&["-p", "hi", "--yes"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("hi".into()),
+                yes: true,
+                ..Args::default()
+            })
+        );
+        // Before the message too, and in the stdin session (no `-p`).
+        assert_eq!(
+            parse_strs(&["--yes"]).unwrap(),
+            Command::Run(Args {
+                yes: true,
+                ..Args::default()
+            })
+        );
+        assert!(matches!(
+            parse_strs(&["--yes", "--yes"]),
+            Err(Error::RepeatedOption(o)) if o == "--yes"
+        ));
+        // A message may be "--yes" as the value of `-p`.
+        assert_eq!(
+            parse_strs(&["-p", "--yes"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("--yes".into()),
+                ..Args::default()
             })
         );
     }
@@ -199,9 +250,24 @@ mod tests {
         ] {
             assert_eq!(
                 parse_strs(&["server", word]).unwrap(),
-                Command::Server(action)
+                Command::Server(action, false)
             );
         }
+        // `--yes` belongs to `start` only (AGL-015, D16).
+        assert_eq!(
+            parse_strs(&["server", "start", "--yes"]).unwrap(),
+            Command::Server(ServerAction::Start, true)
+        );
+        for word in ["stop", "status"] {
+            assert!(matches!(
+                parse_strs(&["server", word, "--yes"]),
+                Err(Error::UnknownOption(o)) if o == "--yes"
+            ));
+        }
+        assert!(matches!(
+            parse_strs(&["server", "start", "--yes", "--yes"]),
+            Err(Error::RepeatedOption(o)) if o == "--yes"
+        ));
         assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help);
         assert!(matches!(
             parse_strs(&["server"]),

@@ -156,9 +156,9 @@ pub mod m {
     /// The `--help` text.
     pub const HELP: Msg = Msg {
         en: "\
-Usage: agl [-p <message>] [--resume <id>] [--function <name>] [--think <level>]
+Usage: agl [-p <message>] [--resume <id>] [--function <name>] [--think <level>] [--yes]
        agl init
-       agl server start|stop|status
+       agl server start [--yes]|stop|status
        agl forge list|show|new|status|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
@@ -168,13 +168,16 @@ Options:
   --resume <id>       continue session <id>
   --function <name>   use Function <name>
   --think <level>     the model's reasoning level: off, low, medium or xhigh
+  --yes               start the llama-server of the project without asking
+                      when the server of another project runs
   -h, --help          print this help
 
 Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
   init                register the current directory as a project now; a
                       directory is registered at its first write otherwise
 
-Server (systemd user unit agentLIBRE-llama-server, [server] in agentLIBRE.toml):
+Server (systemd user unit agentLIBRE-llama-server-<project>; [server] in the
+project's agentLIBRE.toml over the one of the user):
   server start        start llama-server and wait until it is ready
   server stop         stop it
   server status       show whether it runs and is ready
@@ -190,9 +193,9 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>]
+Використання: agl [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>] [--yes]
               agl init
-              agl server start|stop|status
+              agl server start [--yes]|stop|status
               agl forge list|show|new|status|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
@@ -202,13 +205,16 @@ under XDG_DATA_HOME):
   --resume <id>       продовжити сесію <id>
   --function <назва>  використати Function <назва>
   --think <level>     рівень міркувань моделі: off, low, medium або xhigh
+  --yes               запустити llama-server проєкту без питання, коли працює
+                      сервер іншого проєкту
   -h, --help          показати цю довідку
 
 Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml):
   init                зареєструвати поточний каталог як проєкт зараз; інакше
                       каталог реєструється при першому записі
 
-Сервер (user-unit systemd agentLIBRE-llama-server, [server] в agentLIBRE.toml):
+Сервер (user-unit systemd agentLIBRE-llama-server-<проєкт>; [server] у
+agentLIBRE.toml проєкту поверх файлу користувача):
   server start        запустити llama-server і дочекатися готовності
   server stop         зупинити його
   server status       показати, чи він працює і чи готовий
@@ -514,6 +520,42 @@ Forge (сховище артефактів робочої області, agentL
     pub const SYSTEMD: Msg = Msg {
         en: "systemd failed: {detail}",
         uk: "помилка systemd: {detail}",
+    };
+
+    /// `Error::ProjectNotRegistered` (AGL-015, D14).
+    pub const PROJECT_NOT_REGISTERED: Msg = Msg {
+        en: "{project} is not a registered project, so it has no llama-server of its own; run `agl init` there first",
+        uk: "{project} не є зареєстрованим проєктом, тож не має власного llama-server; спершу виконай там `agl init`",
+    };
+
+    /// `Error::PortBusy` without a running unit (D7).
+    pub const PORT_BUSY: Msg = Msg {
+        en: "the address {url} is already in use by something that is not a unit of agl; free it or set another `url` in the project's [server]",
+        uk: "адреса {url} уже зайнята чимось, що не є unit-ом agl; звільни її або задай інший `url` у [server] проєкту",
+    };
+
+    /// `Error::PortBusy` with running units (D7).
+    pub const PORT_BUSY_UNITS: Msg = Msg {
+        en: "the address {url} is already in use; the llama-server units that run: {units}. Stop the one that holds it (agl server stop) or set another `url` in the project's [server]",
+        uk: "адреса {url} уже зайнята; працюють unit-и llama-server: {units}. Зупини той, що її тримає (agl server stop), або задай інший `url` у [server] проєкту",
+    };
+
+    /// `Error::ServerRunning` (D13).
+    pub const SERVER_RUNNING: Msg = Msg {
+        en: "a llama-server of another project is running ({units}); to start one more, use --yes",
+        uk: "працює llama-server іншого проєкту ({units}); щоб запустити ще один, додай --yes",
+    };
+
+    /// `Error::StartDeclined` (D9).
+    pub const START_DECLINED: Msg = Msg {
+        en: "llama-server was not started",
+        uk: "llama-server не запущено",
+    };
+
+    /// The question of D9: another server runs, start one more?
+    pub const OTHERS_RUNNING: Msg = Msg {
+        en: "A llama-server is running ({units}). Start one more? [y/N]",
+        uk: "llama-server уже працює ({units}). Запустити ще один? [y/N]",
     };
 
     /// `Error::ServerFailed`.
@@ -1585,15 +1627,24 @@ impl Error {
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
-            Error::ServerFailed => tr!(lang, m::SERVER_FAILED, unit = crate::cli::serve::UNIT),
-            Error::ServerTimeout { seconds } => {
-                tr!(
-                    lang,
-                    m::SERVER_TIMEOUT,
-                    seconds = seconds,
-                    unit = crate::cli::serve::UNIT
-                )
+            Error::ServerFailed { unit } => tr!(lang, m::SERVER_FAILED, unit = unit),
+            Error::ServerTimeout { seconds, unit } => {
+                tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)
             }
+            Error::ProjectNotRegistered { project } => {
+                tr!(lang, m::PROJECT_NOT_REGISTERED, project = project.display())
+            }
+            Error::PortBusy { url, units } => {
+                if units.is_empty() {
+                    tr!(lang, m::PORT_BUSY, url = url)
+                } else {
+                    tr!(lang, m::PORT_BUSY_UNITS, url = url, units = units.join(", "))
+                }
+            }
+            Error::ServerRunning { units } => {
+                tr!(lang, m::SERVER_RUNNING, units = units.join(", "))
+            }
+            Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
             Error::ServerStatus {
                 url,
                 status,
@@ -1984,24 +2035,30 @@ mod tests {
 pub mod server {
     use super::Lang;
     use super::m;
-    use crate::cli::serve::{Health, UNIT};
+    use crate::cli::serve::Health;
 
-    pub fn starting(model: &str, url: &str, lang: Lang) -> String {
+    pub fn starting(model: &str, url: &str, unit: &str, lang: Lang) -> String {
         tr!(
             lang,
             m::SERVER_STARTING,
             model = model,
             url = url,
-            unit = UNIT
+            unit = unit
         )
     }
 
-    pub fn not_running(lang: Lang) -> String {
-        tr!(lang, m::SERVER_NOT_RUNNING, unit = UNIT)
+    pub fn not_running(unit: &str, lang: Lang) -> String {
+        tr!(lang, m::SERVER_NOT_RUNNING, unit = unit)
+    }
+
+    /// The question of D9 with the units that run.
+    pub fn others_running(units: &[String], lang: Lang) -> String {
+        tr!(lang, m::OTHERS_RUNNING, units = units.join(", "))
     }
 
     /// `agl server status`.
     pub fn status(
+        unit: &str,
         active: bool,
         url: &str,
         model: Option<&str>,
@@ -2011,7 +2068,7 @@ pub mod server {
         tr!(
             lang,
             m::SERVER_STATUS_BLOCK,
-            unit = UNIT,
+            unit = unit,
             active = if active {
                 tr!(lang, m::SERVER_ACTIVE)
             } else {
