@@ -410,3 +410,95 @@ fn bad_files() {
         Err(Error::SessionLine { line: 1, .. })
     ));
 }
+
+fn source(kind: Kind, bytes: &[u8], ext: &str, name: &str) -> Source {
+    Source {
+        kind,
+        bytes: bytes.to_vec(),
+        ext: ext.into(),
+        name: name.into(),
+    }
+}
+
+#[test]
+fn the_media_of_a_session_are_kept_numbered_by_kind_and_read_back() {
+    let dir = Dir::new("media");
+    let mut session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    assert_eq!(session.media_dir(), dir.0.join("media"));
+    assert_eq!(session.next_media_number(Kind::Image), 1);
+    let shot = source(Kind::Image, b"png-bytes", "png", "shot.png");
+    let first = session.store_media(&shot, 1, None).unwrap();
+    assert_eq!(first.sha256, media::sha256_hex(b"png-bytes"));
+    assert_eq!(first.placeholder(), "[Image#1]");
+    assert!(first.path(&session.media_dir()).is_file());
+    let voice = source(Kind::Audio, b"wav", "wav", "voice.wav");
+    session
+        .store_media(&voice, 1, Some("hello".into()))
+        .unwrap();
+    // Numbers count by kind.
+    assert_eq!(session.next_media_number(Kind::Image), 2);
+    assert_eq!(session.next_media_number(Kind::Audio), 2);
+    assert_eq!(session.next_media_number(Kind::Video), 1);
+    // The same bytes again are one file.
+    session.store_media(&shot, 2, None).unwrap();
+    let files = fs::read_dir(session.media_dir()).unwrap().count();
+    assert_eq!(files, 2);
+    session.append(Event::User("see [Image#1]".into())).unwrap();
+    // A media event is not a message.
+    assert_eq!(session.history().len(), 1);
+    let id = session.id.clone();
+    drop(session);
+    let reopened = Session::open(&dir.0, &id).unwrap();
+    let media = reopened.media();
+    assert_eq!(media.len(), 3);
+    assert_eq!(media[0], &first);
+    assert_eq!(media[1].transcript.as_deref(), Some("hello"));
+    assert_eq!(media[1].kind, Kind::Audio);
+    assert_eq!(reopened.next_media_number(Kind::Image), 3);
+    // The line names no marker string: the marker is the server's (D6).
+    let text = fs::read_to_string(dir.0.join(format!("{id}.jsonl"))).unwrap();
+    assert!(text.contains("\"type\":\"media\""));
+    assert!(!text.contains("__media"));
+}
+
+#[test]
+fn the_frames_of_a_video_are_kept_with_their_times() {
+    if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+        return;
+    }
+    let dir = Dir::new("video");
+    fs::create_dir_all(&dir.0).unwrap();
+    let clip = dir.0.join("c.mp4");
+    let made = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "2", "-pix_fmt", "yuv420p"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let mut session = Session::create(&dir.0.join("s"), "default", Path::new("/w")).unwrap();
+    let kept = session
+        .store_media(&Source::from_file(&clip).unwrap(), 1, None)
+        .unwrap();
+    assert_eq!(kept.kind, Kind::Video);
+    assert_eq!(kept.frames.iter().map(|f| f.at).collect::<Vec<_>>(), [0.0, 1.0]);
+    for frame in &kept.frames {
+        assert!(media::read(&session.media_dir(), &frame.sha256, "jpg").is_ok());
+    }
+    let id = session.id.clone();
+    drop(session);
+    let reopened = Session::open(&dir.0.join("s"), &id).unwrap();
+    assert_eq!(reopened.media()[0], &kept);
+}
+
+#[test]
+fn a_bad_media_event_is_a_bad_line() {
+    let dir = Dir::new("badmedia");
+    let session = Session::create(&dir.0, "default", Path::new("/w")).unwrap();
+    let id = session.id.clone();
+    drop(session);
+    let path = dir.0.join(format!("{id}.jsonl"));
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("{\"type\":\"media\",\"kind\":\"sound\",\"number\":1}\n");
+    fs::write(&path, text).unwrap();
+    assert!(matches!(Session::open(&dir.0, &id), Err(Error::SessionLine { .. })));
+}

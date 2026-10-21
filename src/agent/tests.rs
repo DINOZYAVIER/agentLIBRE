@@ -243,6 +243,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Stop(_) => "stop",
             Event::Compact(_) => "compact",
             Event::CutOff(_) => "cut_off",
+            Event::Media(_) => "media",
         })
         .collect()
 }

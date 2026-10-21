@@ -11,6 +11,7 @@ use serde_json::{Map, Value as Json, json};
 use crate::action::{Outcome, Value};
 use crate::backend::{Message, ToolCall};
 use crate::error::Error;
+use crate::media::{self, Frame, Kind, Media, Source};
 
 /// The session format version (D104).
 const VERSION: u64 = 1;
@@ -110,6 +111,9 @@ pub enum Event {
     /// (D154).
     CutOff(u32),
     Stop(StopReason),
+    /// A medium of the session, logged before the message that names it
+    /// (AGL-014); its bytes are in the media directory (D7).
+    Media(Media),
     /// A summary that replaces the history before it (D139).
     Compact(String),
 }
@@ -304,10 +308,67 @@ impl Session {
                     thinking = None;
                     messages.push(Message::Runtime(cut_off_notice(*limit)));
                 }
-                Event::State(_) | Event::Stop(_) | Event::Forge { .. } => {}
+                Event::State(_) | Event::Stop(_) | Event::Forge { .. } | Event::Media(_) => {}
             }
         }
         messages
+    }
+
+    /// The directory of the media of the sessions, next to their files
+    /// (AGL-014, D7).
+    pub fn media_dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map_or_else(|| PathBuf::from("media"), |dir| dir.join("media"))
+    }
+
+    /// The media of the session, in the order they were attached.
+    pub fn media(&self) -> Vec<&Media> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Media(media) => Some(media),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The number the next medium of `kind` gets (D21).
+    pub fn next_media_number(&self, kind: Kind) -> u32 {
+        self.media().iter().filter(|m| m.kind == kind).count() as u32 + 1
+    }
+
+    /// Keeps `source` as the medium `number` of its kind: copies its
+    /// bytes (and the frames of a video) to the media directory and logs
+    /// it (AGL-014, D7, D8). `transcript` is what whisper heard (D22).
+    pub fn store_media(
+        &mut self,
+        source: &Source,
+        number: u32,
+        transcript: Option<String>,
+    ) -> Result<Media, Error> {
+        let dir = self.media_dir();
+        let sha256 = media::put(&dir, &source.bytes, &source.ext)?;
+        let mut frames = Vec::new();
+        if source.kind == Kind::Video {
+            for (at, jpeg) in media::video_frames(&dir.join(format!("{sha256}.{}", source.ext)))? {
+                frames.push(Frame {
+                    at,
+                    sha256: media::put(&dir, &jpeg, "jpg")?,
+                });
+            }
+        }
+        let kept = Media {
+            kind: source.kind,
+            number,
+            sha256,
+            ext: source.ext.clone(),
+            name: source.name.clone(),
+            transcript,
+            frames,
+        };
+        self.append(Event::Media(kept.clone()))?;
+        Ok(kept)
     }
 
     /// Whether the history holds more than the last summary.
@@ -456,6 +517,27 @@ fn event_json(event: &Event) -> Json {
         Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
+        Event::Media(media) => {
+            let mut json = json!({
+                "type": "media",
+                "kind": media.kind.label().to_lowercase(),
+                "number": media.number,
+                "sha256": media.sha256,
+                "ext": media.ext,
+                "name": media.name,
+            });
+            if let Some(transcript) = &media.transcript {
+                json["transcript"] = transcript.as_str().into();
+            }
+            if !media.frames.is_empty() {
+                json["frames"] = media
+                    .frames
+                    .iter()
+                    .map(|frame| json!({"at": frame.at, "sha256": frame.sha256}))
+                    .collect();
+            }
+            json
+        }
     }
 }
 
@@ -512,6 +594,29 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 .find(|r| json["reason"] == r.name())?,
         ),
         "compact" => Event::Compact(text("summary")?),
+        "media" => Event::Media(Media {
+            kind: Kind::ALL
+                .into_iter()
+                .find(|kind| json["kind"] == kind.label().to_lowercase())?,
+            number: u32::try_from(json["number"].as_u64()?).ok()?,
+            sha256: text("sha256")?,
+            ext: text("ext")?,
+            name: text("name")?,
+            transcript: text("transcript"),
+            frames: match json.get("frames") {
+                None => Vec::new(),
+                Some(frames) => frames
+                    .as_array()?
+                    .iter()
+                    .map(|frame| {
+                        Some(Frame {
+                            at: frame["at"].as_f64()?,
+                            sha256: frame["sha256"].as_str()?.to_owned(),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            },
+        }),
         _ => return None,
     })
 }

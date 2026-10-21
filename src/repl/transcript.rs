@@ -243,7 +243,7 @@ impl Presenter {
                     kind,
                     section,
                 } => self.show_forge(name, *kind, section.as_deref()),
-                Event::Stop(_) => {}
+                Event::Stop(_) | Event::Media(_) => {}
             }
         }
     }
