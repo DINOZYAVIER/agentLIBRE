@@ -26,6 +26,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         server_url,
         lang,
         forge,
+        reasoning,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -55,7 +56,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         state: state.clone(),
                         unfinished: session.unfinished().and_then(|turn| turn.state),
                     };
-                    println!("{}", status_text(&facts, &info, None, lang));
+                    println!("{}", status_text(&facts, &info, reasoning, lang));
                 }
                 "/new" => {
                     session = Session::create(sessions_dir, function_name, &workspace)?;
@@ -71,7 +72,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         workspace: &workspace,
                         context,
                         forge,
-                        reasoning: None,
+                        reasoning,
                     }
                     .compact(&mut StderrReport::new(lang));
                     let interrupted = matches!(result, Err(Error::Interrupted));
@@ -95,7 +96,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             workspace: &workspace,
             context,
             forge,
-            reasoning: None,
+            reasoning,
         }
         .turn(message, &mut report);
         state = None;

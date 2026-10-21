@@ -185,7 +185,7 @@ fn run(
             lang: *lang,
             forge,
             history_file: paths.history_file(),
-            reasoning: None,
+            reasoning: args.reasoning,
         };
         return if interactive {
             repl::run(setup)
@@ -204,7 +204,7 @@ fn run(
         workspace: &workspace,
         context,
         forge,
-        reasoning: None,
+        reasoning: args.reasoning,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

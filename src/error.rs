@@ -19,6 +19,8 @@ pub enum Error {
     RepeatedOption(String),
     /// `--function` with `--resume`: the session names its Function (D106).
     FunctionWithResume,
+    /// `--think` names a level outside the four (AGL-013).
+    BadReasoningLevel { value: String },
     /// Neither `var` nor `HOME` is an absolute path.
     NoHome { var: &'static str },
     /// The current directory cannot be read.
@@ -258,6 +260,7 @@ impl Error {
                 | Error::MissingValue(_)
                 | Error::RepeatedOption(_)
                 | Error::FunctionWithResume
+                | Error::BadReasoningLevel { .. }
         )
     }
 
@@ -286,6 +289,10 @@ impl std::fmt::Display for Error {
                 Error::FunctionWithResume => {
                     "`--function` cannot go with `--resume`".into()
                 }
+                Error::BadReasoningLevel { value } => format!(
+                    "invalid reasoning level `{value}` for `--think`: \
+                     the levels are off, low, medium and xhigh"
+                ),
                 Error::NoHome { var } => format!("HOME is not set and {var} is not absolute"),
                 Error::CurrentDir(source) => format!("cannot read the current directory: {source}"),
                 Error::Read { path, source } => format!("cannot read {}: {source}", path.display()),

@@ -156,7 +156,7 @@ pub mod m {
     /// The `--help` text.
     pub const HELP: Msg = Msg {
         en: "\
-Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>]
+Usage: agentLIBRE [-p <message>] [--resume <id>] [--function <name>] [--think <level>]
        agentLIBRE init
        agentLIBRE server start|stop|status
        agentLIBRE forge list|show|new|status|check|log|diff|rehome
@@ -167,6 +167,7 @@ Options:
   -p <message>        send one message, print the answer and exit
   --resume <id>       continue session <id>
   --function <name>   use Function <name>
+  --think <level>     the model's reasoning level: off, low, medium or xhigh
   -h, --help          print this help
 
 Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
@@ -189,7 +190,7 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>]
+Використання: agentLIBRE [-p <повідомлення>] [--resume <id>] [--function <назва>] [--think <level>]
               agentLIBRE init
               agentLIBRE server start|stop|status
               agentLIBRE forge list|show|new|status|check|log|diff|rehome
@@ -200,6 +201,7 @@ under XDG_DATA_HOME):
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
   --resume <id>       продовжити сесію <id>
   --function <назва>  використати Function <назва>
+  --think <level>     рівень міркувань моделі: off, low, medium або xhigh
   -h, --help          показати цю довідку
 
 Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml):
@@ -257,6 +259,14 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNCTION_WITH_RESUME: Msg = Msg {
         en: "`--function` cannot go with `--resume`: the session keeps its Function",
         uk: "`--function` не можна разом із `--resume`: сесія має свою Function",
+    };
+
+    /// `Error::BadReasoningLevel`.
+    pub const BAD_REASONING_LEVEL: Msg = Msg {
+        en: "invalid reasoning level `{value}` for `--think`: \
+             the levels are off, low, medium and xhigh",
+        uk: "некоректний рівень міркувань `{value}` для `--think`: \
+             рівні — off, low, medium та xhigh",
     };
 
     /// `Error::NoHome`.
@@ -1431,6 +1441,9 @@ impl Error {
             Error::MissingValue(arg) => tr!(lang, m::MISSING_VALUE, arg = arg),
             Error::RepeatedOption(arg) => tr!(lang, m::REPEATED_OPTION, arg = arg),
             Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
+            Error::BadReasoningLevel { value } => {
+                tr!(lang, m::BAD_REASONING_LEVEL, value = value)
+            }
             Error::NoHome { var } => tr!(lang, m::NO_HOME, var = var),
             Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
             Error::Read { path, source } => {

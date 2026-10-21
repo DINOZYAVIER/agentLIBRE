@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 
+use crate::backend::ReasoningLevel;
 use crate::error::Error;
 
 /// What the command line asks for.
@@ -37,6 +38,8 @@ pub struct Args {
     pub resume: Option<String>,
     /// `--function <name>`.
     pub function: Option<String>,
+    /// `--think <level>`: the model's reasoning level (AGL-013).
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 /// Parses the arguments after the program name. Each option takes the
@@ -73,6 +76,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Some(extra) => Err(Error::UnknownOption(extra)),
         };
     }
+    // `--think` is parsed to its level after the loop (AGL-013).
+    let mut think: Option<String> = None;
     while let Some(arg) = args.next() {
         let arg = text(arg)?;
         let slot = match arg.as_str() {
@@ -80,6 +85,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             "-p" => &mut parsed.prompt,
             "--resume" => &mut parsed.resume,
             "--function" => &mut parsed.function,
+            "--think" => &mut think,
             _ => return Err(Error::UnknownOption(arg)),
         };
         if slot.is_some() {
@@ -89,6 +95,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             .next()
             .ok_or_else(|| Error::MissingValue(arg.clone()))?;
         *slot = Some(text(value)?);
+    }
+    if let Some(value) = think {
+        parsed.reasoning =
+            Some(ReasoningLevel::parse(&value).ok_or(Error::BadReasoningLevel { value })?);
     }
     Ok(Command::Run(parsed))
 }
@@ -115,8 +125,34 @@ mod tests {
                 prompt: Some("hi there".into()),
                 resume: Some("id".into()),
                 function: Some("coder".into()),
+                reasoning: None,
             })
         );
+    }
+
+    #[test]
+    fn think_takes_the_four_levels() {
+        for value in ["off", "low", "medium", "xhigh"] {
+            let command = parse_strs(&["--think", value]).unwrap();
+            let Command::Run(args) = command else {
+                panic!("expected a run");
+            };
+            assert_eq!(args.reasoning, ReasoningLevel::parse(value));
+        }
+        // A value outside the four, a missing value and a repetition are
+        // usage errors (AGL-013).
+        assert!(matches!(
+            parse_strs(&["--think", "high"]),
+            Err(Error::BadReasoningLevel { value }) if value == "high"
+        ));
+        assert!(matches!(
+            parse_strs(&["--think"]),
+            Err(Error::MissingValue(o)) if o == "--think"
+        ));
+        assert!(matches!(
+            parse_strs(&["--think", "off", "--think", "low"]),
+            Err(Error::RepeatedOption(o)) if o == "--think"
+        ));
     }
 
     #[test]
