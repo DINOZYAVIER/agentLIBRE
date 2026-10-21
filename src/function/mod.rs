@@ -134,6 +134,19 @@ impl Function {
         Function::from_table(&path, tomlfile::parse(&path, text)?, formats_dir)
     }
 
+    /// The Function without the tool `name` in every state: the tool list
+    /// and the grammar do not have it, so the model cannot ask for it
+    /// (AGL-019, D5). A state left with no tool and no answer would have no
+    /// action, so it gets the answer.
+    pub fn without_tool(&mut self, name: &str) {
+        for state in &mut self.states {
+            state.actions.tools.retain(|tool| tool.name != name);
+            if state.actions.tools.is_empty() {
+                state.actions.answer = true;
+            }
+        }
+    }
+
     fn from_table(path: &Path, table: Table, formats_dir: &Path) -> Result<Function, Error> {
         let mut file = Section::new(path, table);
         file.check_keys(&[
@@ -418,7 +431,7 @@ fn read_state(
 
 /// Reads `tools`: the built-in tools a state allows and their constraints.
 fn read_tools(mut section: Section, format: &Format) -> Result<Vec<Tool>, Error> {
-    section.check_keys(&["bash", "edit", "forge", "view"])?;
+    section.check_keys(&["bash", "edit", "forge", "search", "view"])?;
     let mut tools = Vec::new();
     for mut tool in action::builtin_tools() {
         let Some(mut constraints) = section.section(&tool.name)? else {
@@ -428,6 +441,7 @@ fn read_tools(mut section: Section, format: &Format) -> Result<Vec<Tool>, Error>
             "bash" => &["command", "timeout"],
             "forge" => &["action", "name", "title", "old", "new", "section", "text"],
             "view" => &["path"],
+            "search" => &["language", "limit", "query", "source"],
             _ => &["path", "old", "new"],
         };
         constraints.check_keys(params)?;

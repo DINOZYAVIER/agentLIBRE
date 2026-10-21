@@ -75,6 +75,8 @@ pub struct Setup<'a> {
     pub reasoning: Option<ReasoningLevel>,
     /// The most tokens one picture takes (AGL-014, D10).
     pub image_tokens: usize,
+    /// Runs the `search` tool (AGL-019).
+    pub search: &'a dyn search::Searcher,
 }
 
 pub fn cli() -> ExitCode {
@@ -170,7 +172,21 @@ fn run(
         ),
         function.or(args.function.as_deref()),
     )?;
-    let function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    let mut function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    // The tool `search` is there only where `[search]` is complete: no tool,
+    // no grammar for it and no word of it in the prompt otherwise
+    // (AGL-019, D5).
+    let curl;
+    let search: &dyn search::Searcher = match &settings.search {
+        Some(config) => {
+            curl = search::Curl::new(config.clone());
+            &curl
+        }
+        None => {
+            function.without_tool("search");
+            &search::NoSearch
+        }
+    };
     // A turn to continue needs its state in the Function (D105).
     if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
         Machine::resume(&function, &settings.function, &turn)?;
@@ -242,6 +258,7 @@ fn run(
             history_file: paths.history_file(),
             reasoning: args.reasoning,
             image_tokens,
+            search,
         };
         return if interactive {
             repl::run(setup)
@@ -279,6 +296,7 @@ fn run(
         reasoning: args.reasoning,
         image_tokens,
         whisper: &autostart,
+        search,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

@@ -243,6 +243,17 @@ fn agent<'a>(
     dir: &'a Dir,
     reasoning: Option<ReasoningLevel>,
 ) -> Agent<'a> {
+    agent_searching(function, script, session, dir, reasoning, &crate::search::NoSearch)
+}
+
+fn agent_searching<'a>(
+    function: &'a Function,
+    script: &'a Script,
+    session: &'a mut Session,
+    dir: &'a Dir,
+    reasoning: Option<ReasoningLevel>,
+    search: &'a dyn crate::search::Searcher,
+) -> Agent<'a> {
     Agent {
         function,
         function_name: "f",
@@ -257,7 +268,134 @@ fn agent<'a>(
         reasoning,
         image_tokens: 1000,
         whisper: &NoWhisper,
+        search,
     }
+}
+
+/// A searcher that records what it is asked and answers with `reply`.
+struct FakeSearch {
+    asked: std::cell::RefCell<Vec<crate::search::Request>>,
+    reply: ToolResult,
+}
+
+impl FakeSearch {
+    fn new(outcome: Outcome, content: &str) -> FakeSearch {
+        FakeSearch {
+            asked: Default::default(),
+            reply: ToolResult {
+                outcome,
+                content: content.into(),
+            },
+        }
+    }
+}
+
+impl crate::search::Searcher for FakeSearch {
+    fn search(&self, request: &crate::search::Request) -> ToolResult {
+        self.asked.borrow_mut().push(crate::search::Request {
+            query: request.query.clone(),
+            source: request.source.clone(),
+            language: request.language.clone(),
+            limit: request.limit,
+        });
+        ToolResult {
+            outcome: self.reply.outcome,
+            content: self.reply.content.clone(),
+        }
+    }
+}
+
+fn search_call(args: &[(&str, &str)]) -> String {
+    let params: String = args
+        .iter()
+        .map(|(name, value)| format!("<parameter={name}>\n{value}\n</parameter>\n"))
+        .collect();
+    format!("<tool_call>\n<function=search>\n{params}</function>\n</tool_call>")
+}
+
+/// The results of the events, with their outcomes.
+fn results(session: &Session) -> Vec<(Outcome, String)> {
+    session
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Result { outcome, content, .. } => Some((*outcome, content.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn search_runs_in_the_agent_and_its_text_is_the_result() {
+    let dir = Dir::new("search");
+    let script = Script::new(&[
+        ("Look it up.", THOUGHT),
+        (&search_call(&[("language", "uk"), ("limit", "3"), ("query", "Київ"), ("source", "wikipedia")]), Stop::End),
+        ("Done.", THOUGHT),
+        ("It is a city.", Stop::End),
+    ]);
+    let search = FakeSearch::new(Outcome::Ok, "1. Київ\n   https://x.example/");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search)
+        .turn("what is Kyiv", &mut Log::default());
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{end:?}");
+    assert_eq!(
+        *search.asked.borrow(),
+        vec![crate::search::Request {
+            query: "Київ".into(),
+            source: "wikipedia".into(),
+            language: "uk".into(),
+            limit: 3,
+        }]
+    );
+    assert_eq!(
+        results(&session),
+        vec![(Outcome::Ok, "1. Київ\n   https://x.example/".to_owned())]
+    );
+}
+
+#[test]
+fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
+    let dir = Dir::new("searchfail");
+    let script = Script::new(&[
+        ("Try.", THOUGHT),
+        (&search_call(&[("query", "rust"), ("source", "web")]), Stop::End),
+        ("Hm.", THOUGHT),
+        // Longer than 512 characters: the check of the arguments refuses it.
+        (&search_call(&[("query", &"a".repeat(513)), ("source", "web")]), Stop::End),
+        ("Hm.", THOUGHT),
+        ("I could not search.", Stop::End),
+    ]);
+    let search = FakeSearch::new(Outcome::Fail, "The search service is rate limited; try again later.");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search)
+        .turn("search", &mut Log::default());
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{end:?}");
+    let results = results(&session);
+    assert_eq!(results[0], (Outcome::Fail, "The search service is rate limited; try again later.".to_owned()));
+    assert_eq!(results[1].0, Outcome::Fail);
+    assert!(results[1].1.contains("512"), "{}", results[1].1);
+    // The service was asked once: the second call never reached it.
+    assert_eq!(search.asked.borrow().len(), 1);
+}
+
+#[test]
+fn without_search_the_tool_is_not_in_the_list_nor_the_grammar() {
+    let mut minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let names = |function: &Function| -> Vec<&'static str> {
+        function_tools(function).iter().map(|doc| doc.name).collect()
+    };
+    assert!(names(&minimal).contains(&"search"));
+    minimal.without_tool("search");
+    assert!(!names(&minimal).contains(&"search"));
+    assert!(names(&minimal).contains(&"bash"));
+    let state = &minimal.states[minimal.initial];
+    let (grammar, root) = action::grammar(&minimal.format, &state.actions);
+    let text = grammar.render(&root);
+    assert!(!text.contains("search"), "{text}");
+    assert!(text.contains("bash"));
 }
 
 /// Whisper that is not there.

@@ -31,6 +31,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         forge,
         reasoning,
         autostart,
+        search,
         yes,
         image_tokens,
         ..
@@ -109,6 +110,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             reasoning,
                             image_tokens,
                             whisper: autostart,
+                            search,
                         }
                         .compact(&mut StderrReport::new(lang))
                     });
@@ -156,6 +158,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 reasoning,
                 image_tokens,
                 whisper: autostart,
+                search,
             }
             .turn(&text, &mut report)
         });

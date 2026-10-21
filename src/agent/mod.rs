@@ -17,6 +17,7 @@ use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::media;
+use crate::search::Searcher;
 use crate::session::{Event, ForgeKind, INTERRUPTED, Session, StopReason};
 use crate::tools::{self, ForgeEnv, ToolResult};
 
@@ -90,6 +91,9 @@ pub struct Agent<'a> {
     /// Turns an audio the `view` tool opens into text when the model does
     /// not hear it (AGL-014, D22, D24).
     pub whisper: &'a dyn Transcriber,
+    /// Runs the `search` tool (AGL-019); a profile without `[search]`
+    /// has no such tool, so its searcher is never asked.
+    pub search: &'a dyn Searcher,
 }
 
 impl Agent<'_> {
@@ -274,10 +278,10 @@ impl Agent<'_> {
                     report.text(text);
                 }
                 report.call(&call);
-                let (result, write) = if call.name == "view" {
-                    (self.view(&call.args), None)
-                } else {
-                    tools::run(self.workspace, self.forge, &call.name, &call.args)
+                let (result, write) = match call.name.as_str() {
+                    "view" => (self.view(&call.args), None),
+                    "search" => (self.search(&call.args), None),
+                    _ => tools::run(self.workspace, self.forge, &call.name, &call.args),
                 };
                 self.session.append(Event::Result {
                     id: call.id.clone(),
@@ -306,6 +310,19 @@ impl Agent<'_> {
                     Progress::StepLimit => self.stop(StopReason::StepLimit),
                 }
             }
+        }
+    }
+
+    /// The `search` tool (AGL-019): a call the service or the check of its
+    /// arguments refuses is a failed result the model reads, not a stop
+    /// (D7).
+    fn search(&self, args: &[(String, Value)]) -> ToolResult {
+        match crate::search::Request::from_args(args) {
+            Ok(request) => self.search.search(&request),
+            Err(sentence) => ToolResult {
+                outcome: Outcome::Fail,
+                content: sentence,
+            },
         }
     }
 

@@ -76,6 +76,40 @@ pub fn builtin_tools() -> Vec<Tool> {
             name: "view".into(),
             params: vec![text("path")],
         },
+        // The human's search service (AGL-019, D6). The parameters are in
+        // alphabetical order, as the template shows them (see `forge`);
+        // the two optional ones come first, the grammar lets them be skipped.
+        Tool {
+            name: "search".into(),
+            params: vec![
+                Param {
+                    name: "language".into(),
+                    kind: Kind::Text,
+                    required: false,
+                    constraint: Constraint::OneOf(
+                        crate::search::LANGUAGES.iter().map(|l| l.to_string()).collect(),
+                    ),
+                },
+                Param {
+                    name: "limit".into(),
+                    kind: Kind::Int,
+                    required: false,
+                    constraint: Constraint::Int {
+                        min: 1,
+                        max: crate::search::MAX_LIMIT,
+                    },
+                },
+                text("query"),
+                Param {
+                    name: "source".into(),
+                    kind: Kind::Text,
+                    required: true,
+                    constraint: Constraint::OneOf(
+                        crate::search::SOURCES.iter().map(|s| s.to_string()).collect(),
+                    ),
+                },
+            ],
+        },
         // One tool, an `action` plus the per-action fields (AGL-008);
         // which fields an action needs is the tool's check. The fields
         // are in alphabetical order: the template shows the parameters

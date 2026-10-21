@@ -606,3 +606,79 @@ fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
     assert_eq!(tools(&minimal), tools(&agentlibre));
     assert_eq!(minimal.sampling, agentlibre.sampling);
 }
+
+#[test]
+fn the_search_tool_is_read_with_its_parameters_and_constraints() {
+    let function = one_state("tools.search = {}\nanswer = true\nnext = { else = \"a\" }").unwrap();
+    let tool = function.states[0]
+        .actions
+        .tools
+        .iter()
+        .find(|tool| tool.name == "search")
+        .unwrap();
+    // The parameters are in the alphabetical order of the template, the
+    // grammar holds the enums and the range (AGL-019, D6).
+    let names: Vec<&str> = tool.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["language", "limit", "query", "source"]);
+    let required: Vec<bool> = tool.params.iter().map(|p| p.required).collect();
+    assert_eq!(required, [false, false, true, true]);
+    assert_eq!(
+        tool.params[0].constraint,
+        Constraint::OneOf(vec!["en".into(), "fr".into(), "ru".into(), "uk".into()])
+    );
+    assert_eq!(tool.params[1].constraint, Constraint::Int { min: 1, max: 10 });
+    assert_eq!(
+        tool.params[3].constraint,
+        Constraint::OneOf(vec!["web".into(), "wikipedia".into()])
+    );
+    // A Function may narrow them, as it narrows the others.
+    let narrowed = one_state(
+        "tools.search = { source = { enum = [\"wikipedia\"] }, limit = { int = { min = 1, max = 3 } } }\nanswer = true\nnext = { else = \"a\" }",
+    )
+    .unwrap();
+    let tool = narrowed.states[0].actions.tools.iter().find(|t| t.name == "search").unwrap();
+    assert_eq!(tool.params[3].constraint, Constraint::OneOf(vec!["wikipedia".into()]));
+    assert_eq!(tool.params[1].constraint, Constraint::Int { min: 1, max: 3 });
+    // A parameter the tool has not is an error, as for the others.
+    assert!(one_state("tools.search = { path = {} }\nanswer = true").is_err());
+}
+
+#[test]
+fn the_built_in_functions_have_the_search_tool() {
+    for name in ["minimal", "agentLIBRE"] {
+        let function = Function::load(Path::new("/none"), Path::new("/none"), name).unwrap();
+        let tools: Vec<&str> = function.states[function.initial]
+            .actions
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(tools.contains(&"search"), "{name}: {tools:?}");
+    }
+}
+
+#[test]
+fn without_a_tool_the_state_loses_it_and_keeps_an_action() {
+    let mut function = with_states(
+        "[state.a]\ntools.search = {}\nnext = { else = \"b\" }\n\
+         [state.b]\ntools.bash = {}\ntools.search = {}\nanswer = true\nnext = { else = \"b\" }\n",
+    )
+    .unwrap();
+    function.without_tool("search");
+    let names = |state: &State| -> Vec<String> {
+        state.actions.tools.iter().map(|t| t.name.clone()).collect()
+    };
+    // `a` had the search and the forge the runtime adds: the forge stays.
+    assert_eq!(names(&function.states[0]), ["forge"]);
+    assert!(names(&function.states[1]).contains(&"bash".to_owned()));
+    assert!(!names(&function.states[1]).contains(&"search".to_owned()));
+    for state in &function.states {
+        assert!(state.actions.answer || !state.actions.tools.is_empty());
+    }
+    // A state whose only tool goes gets the answer in its place.
+    let mut only = with_states("[state.a]\ntools.search = {}\nnext = { else = \"a\" }\n").unwrap();
+    only.states[0].actions.tools.retain(|t| t.name == "search");
+    only.without_tool("search");
+    assert!(only.states[0].actions.tools.is_empty());
+    assert!(only.states[0].actions.answer);
+}

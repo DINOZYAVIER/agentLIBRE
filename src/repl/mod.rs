@@ -546,6 +546,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         history_file,
         reasoning,
         autostart,
+        search,
         image_tokens,
         ..
     } = setup;
@@ -663,6 +664,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         reasoning,
                         image_tokens,
                         whisper: autostart,
+                        search,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -721,6 +723,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         reasoning,
                         image_tokens,
                         whisper: autostart,
+                        search,
                     }
                     .turn(
                         &message,

@@ -87,6 +87,15 @@ pub fn run(
             },
             None,
         ),
+        // The agent holds the searcher, so it runs this one itself
+        // (AGL-019).
+        "search" => (
+            ToolResult {
+                outcome: Outcome::Fail,
+                content: "The search tool is run by the agent.".into(),
+            },
+            None,
+        ),
         _ => unreachable!("unknown tool {tool}"),
     }
 }
