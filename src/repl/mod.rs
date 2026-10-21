@@ -23,7 +23,7 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
-use crate::backend::ToolCall;
+use crate::backend::{ReasoningLevel, ToolCall};
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
@@ -42,6 +42,8 @@ struct Inner {
     new_session: bool,
     compact: bool,
     info: Info,
+    /// The model's reasoning level (AGL-013); it survives `/new`.
+    reasoning: Option<ReasoningLevel>,
 }
 
 /// What the input thread and the turn thread share (D119).
@@ -51,10 +53,11 @@ struct Control {
 }
 
 impl Control {
-    fn new(info: Info) -> Control {
+    fn new(info: Info, reasoning: Option<ReasoningLevel>) -> Control {
         Control {
             inner: Mutex::new(Inner {
                 info,
+                reasoning,
                 ..Inner::default()
             }),
             wake: Condvar::new(),
@@ -118,8 +121,38 @@ impl Input {
         match name {
             "/help" => self.notice(&help_text(self.lang, true), Role::Muted),
             "/status" => {
-                let info = self.control.lock().info.clone();
-                self.notice(&status_text(&self.facts, &info, self.lang), Role::Muted);
+                let (info, reasoning) = {
+                    let inner = self.control.lock();
+                    (inner.info.clone(), inner.reasoning)
+                };
+                self.notice(
+                    &status_text(&self.facts, &info, reasoning, self.lang),
+                    Role::Muted,
+                );
+            }
+            "/think" => {
+                let value = trimmed.split_whitespace().nth(1);
+                match value {
+                    None => {
+                        let level = self.control.lock().reasoning;
+                        let shown = texts::reasoning_level(level, self.lang);
+                        self.notice(&tr!(self.lang, m::THINK_LEVEL, level = shown), Role::Muted);
+                    }
+                    Some(value) => match ReasoningLevel::parse(value) {
+                        Some(level) => {
+                            self.control.lock().reasoning = Some(level);
+                            let shown = texts::reasoning_level(Some(level), self.lang);
+                            self.notice(
+                                &tr!(self.lang, m::THINK_LEVEL, level = shown),
+                                Role::Muted,
+                            );
+                        }
+                        None => self.notice(
+                            &tr!(self.lang, m::REASONING_BAD, value = value),
+                            Role::StatusFailure,
+                        ),
+                    },
+                }
             }
             "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
@@ -324,6 +357,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         lang,
         forge,
         history_file,
+        reasoning,
     } = setup;
     let workspace = session.workspace.clone();
     let facts = Facts {
@@ -353,10 +387,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         )
         .with_context(facts.context),
     );
-    let control = Arc::new(Control::new(Info {
-        session: session.id.clone(),
-        ..Info::default()
-    }));
+    let control = Arc::new(Control::new(
+        Info {
+            session: session.id.clone(),
+            ..Info::default()
+        },
+        reasoning,
+    ));
     let screen: Arc<dyn Screen> = dock.clone();
     let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
 
@@ -410,6 +447,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
             },
             Next::Compact => {
+                let reasoning = control.lock().reasoning;
                 let result = Agent {
                     function,
                     function_name,
@@ -418,7 +456,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     workspace: &workspace,
                     context,
                     forge,
-                    reasoning: None,
+                    reasoning,
                 }
                 .compact(&mut Reporter {
                     presenter: &mut presenter,
@@ -434,6 +472,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 dock.set_queued(control.lock().queue.len());
                 presenter.begin_turn();
                 presenter.show_user(&message);
+                // The running turn keeps the level it started with (AGL-013).
+                let reasoning = control.lock().reasoning;
                 let result = Agent {
                     function,
                     function_name,
@@ -442,7 +482,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     workspace: &workspace,
                     context,
                     forge,
-                    reasoning: None,
+                    reasoning,
                 }
                 .turn(
                     &message,
@@ -549,10 +589,13 @@ mod tests {
         let exits = Arc::new(AtomicUsize::new(0));
         let input = Input {
             dock,
-            control: Arc::new(Control::new(Info {
-                session: "s1".into(),
-                ..Info::default()
-            })),
+            control: Arc::new(Control::new(
+                Info {
+                    session: "s1".into(),
+                    ..Info::default()
+                },
+                None,
+            )),
             facts: Facts {
                 function: "default".into(),
                 workspace: "~/project".into(),
@@ -629,6 +672,7 @@ mod tests {
         f.type_text("/help");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/quit"));
+        assert!(f.output().contains("/think    the reasoning level"));
         assert!(f.output().contains("/compact  replace the history"));
         assert!(f.output().contains("Shift-Enter"));
         f.type_text("/status");
@@ -670,6 +714,39 @@ mod tests {
         f.type_text("/exit");
         f.input.key(Key::Enter);
         assert!(f.inner().quit);
+    }
+
+    #[test]
+    fn think_shows_and_sets_the_reasoning_level() {
+        let f = fixture();
+        // Alone it shows the current level: the template's default
+        // while unset (AGL-013).
+        f.type_text("/think");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("reasoning: default"));
+        // With a value it sets it and tells it.
+        f.type_text("/think low");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("reasoning: low"));
+        assert_eq!(f.inner().reasoning, Some(ReasoningLevel::Low));
+        // A value outside the four is told; the level stays.
+        f.type_text("/think high");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("invalid reasoning level `high`"));
+        assert_eq!(f.inner().reasoning, Some(ReasoningLevel::Low));
+        // /status carries the line (the default when unset).
+        f.type_text("/status");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("reasoning: low"));
+        f.inner().reasoning = None;
+        f.type_text("/status");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("reasoning: default"));
+        // It works during a turn, as /status does.
+        f.inner().running = true;
+        f.type_text("/think off");
+        f.input.key(Key::Enter);
+        assert_eq!(f.inner().reasoning, Some(ReasoningLevel::Off));
     }
 
     #[test]
@@ -731,7 +808,7 @@ mod tests {
 
     #[test]
     fn the_main_thread_takes_what_the_user_sent() {
-        let control = Control::new(Info::default());
+        let control = Control::new(Info::default(), None);
         control.lock().queue.push_back("one".into());
         assert!(matches!(wait_for_next(&control), Next::Message(m) if m == "one"));
         assert!(control.lock().running);
@@ -774,7 +851,7 @@ mod tests {
         };
         let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
         presenter.begin_turn();
-        let control = Control::new(Info::default());
+        let control = Control::new(Info::default(), None);
         let mut reporter = Reporter {
             presenter: &mut presenter,
             control: &control,

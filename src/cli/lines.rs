@@ -55,7 +55,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         state: state.clone(),
                         unfinished: session.unfinished().and_then(|turn| turn.state),
                     };
-                    println!("{}", status_text(&facts, &info, lang));
+                    println!("{}", status_text(&facts, &info, None, lang));
                 }
                 "/new" => {
                     session = Session::create(sessions_dir, function_name, &workspace)?;

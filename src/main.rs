@@ -30,6 +30,7 @@ use std::process::ExitCode;
 
 use agent::{Agent, TurnEnd};
 use backend::Backend;
+use backend::ReasoningLevel;
 use backend::llama::Llama;
 use cli::args::Command;
 use cli::report::StderrReport;
@@ -59,6 +60,9 @@ pub struct Setup<'a> {
     /// What the agent's `forge` tool takes from the session (AGL-008).
     pub forge: tools::ForgeEnv,
     pub history_file: PathBuf,
+    /// The model's reasoning level (AGL-013); the REPL's `/think`
+    /// changes it for the session.
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 fn main() -> ExitCode {
@@ -181,6 +185,7 @@ fn run(
             lang: *lang,
             forge,
             history_file: paths.history_file(),
+            reasoning: None,
         };
         return if interactive {
             repl::run(setup)

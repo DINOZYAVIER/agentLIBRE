@@ -848,6 +848,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "замінити історію резюме",
     };
 
+    /// The description of a `/` command (AGL-013).
+    pub const CMD_THINK: Msg = Msg {
+        en: "the reasoning level: off, low, medium or xhigh",
+        uk: "рівень міркувань: off, low, medium або xhigh",
+    };
+
     /// The keys of the interactive session (D120).
     pub const KEYS: Msg = Msg {
         en: "Enter sends; Shift-Enter or Alt-Enter adds a line; Up/Down walk the history; \
@@ -904,6 +910,30 @@ Forge (сховище артефактів робочої області, agentL
     pub const LABEL_STATE: Msg = Msg {
         en: "state",
         uk: "стан",
+    };
+
+    /// A label of one line of `/status` (AGL-013).
+    pub const LABEL_REASONING: Msg = Msg {
+        en: "reasoning",
+        uk: "міркування",
+    };
+
+    /// The reasoning level of `/status` and `/think` when unset (AGL-013).
+    pub const REASONING_DEFAULT: Msg = Msg {
+        en: "default",
+        uk: "за замовчуванням",
+    };
+
+    /// The reply of `/think` (AGL-013).
+    pub const THINK_LEVEL: Msg = Msg {
+        en: "reasoning: {level}",
+        uk: "міркування: {level}",
+    };
+
+    /// A reasoning level outside the four (AGL-013).
+    pub const REASONING_BAD: Msg = Msg {
+        en: "invalid reasoning level `{value}`; the levels are off, low, medium and xhigh",
+        uk: "некоректний рівень міркувань `{value}`; рівні — off, low, medium та xhigh",
     };
 
     /// One line of `/status`.
@@ -1972,10 +2002,12 @@ pub mod server {
     }
 }
 
-/// Texts of the interactive session (D118, D120, D124, D134, D135, D138).
+/// Texts of the interactive session (D118, D120, D124, D134, D135, D138,
+/// AGL-013).
 pub mod repl {
     use super::Lang;
     use super::m;
+    use crate::backend::ReasoningLevel;
     use crate::session::StopReason;
 
     /// The description of a `/` command in the menu and in `/help`.
@@ -1985,6 +2017,7 @@ pub mod repl {
             "/exit" => tr!(lang, m::CMD_EXIT),
             "/help" => tr!(lang, m::CMD_HELP),
             "/status" => tr!(lang, m::CMD_STATUS),
+            "/think" => tr!(lang, m::CMD_THINK),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             _ => "",
@@ -1999,10 +2032,20 @@ pub mod repl {
             "workspace" => tr!(lang, m::LABEL_WORKSPACE),
             "server" => tr!(lang, m::LABEL_SERVER),
             "context" => tr!(lang, m::LABEL_CONTEXT),
+            "reasoning" => tr!(lang, m::LABEL_REASONING),
             "state" => tr!(lang, m::LABEL_STATE),
             other => other,
         };
         tr!(lang, m::STATUS_LINE, label = label, value = value)
+    }
+
+    /// The reasoning level to show (AGL-013): the level's name, or the
+    /// template default when unset.
+    pub fn reasoning_level(level: Option<ReasoningLevel>, lang: Lang) -> String {
+        match level {
+            None => tr!(lang, m::REASONING_DEFAULT).to_string(),
+            Some(level) => level.name().to_string(),
+        }
     }
 
     /// Time as `5s`, `2m 3s` or `1h 4m`.

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::Compaction;
+use crate::backend::ReasoningLevel;
 use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::{Lang, m, repl as texts};
@@ -11,8 +12,10 @@ use crate::session::StopReason;
 use crate::theme::Role;
 use crate::tr;
 
-/// The `/` commands (D118, D139).
-pub const COMMANDS: [&str; 6] = ["/quit", "/exit", "/help", "/status", "/new", "/compact"];
+/// The `/` commands (D118, D139, AGL-013).
+pub const COMMANDS: [&str; 7] = [
+    "/quit", "/exit", "/help", "/status", "/think", "/new", "/compact",
+];
 
 /// What `/status` tells besides the session (D134).
 #[derive(Clone)]
@@ -45,8 +48,13 @@ pub fn help_text(lang: Lang, with_keys: bool) -> String {
     lines.join("\n")
 }
 
-/// `/status` (D134).
-pub fn status_text(facts: &Facts, info: &Info, lang: Lang) -> String {
+/// `/status` (D134, AGL-013).
+pub fn status_text(
+    facts: &Facts,
+    info: &Info,
+    reasoning: Option<ReasoningLevel>,
+    lang: Lang,
+) -> String {
     let state = match (&info.unfinished, &info.state) {
         (Some(state), _) => tr!(lang, m::UNFINISHED, state = state),
         (None, Some(state)) => state.clone(),
@@ -58,6 +66,7 @@ pub fn status_text(facts: &Facts, info: &Info, lang: Lang) -> String {
         texts::status_line("workspace", &facts.workspace, lang),
         texts::status_line("server", &facts.server, lang),
         texts::status_line("context", &tr!(lang, m::TOKENS, n = facts.context), lang),
+        texts::status_line("reasoning", &texts::reasoning_level(reasoning, lang), lang),
         texts::status_line("state", &state, lang),
     ]
     .join("\n")
