@@ -466,6 +466,41 @@ pub fn clipboard_files() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// What Ctrl-V finds in the clipboard (AGL-014, D21).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Clip {
+    /// Files copied in a file manager.
+    Files(Vec<PathBuf>),
+    /// A picture, as PNG.
+    Image(Vec<u8>),
+    Text(String),
+    Empty,
+}
+
+/// The clipboard: files first, then an image, then text.
+pub fn clipboard() -> Clip {
+    let files = clipboard_files();
+    if !files.is_empty() {
+        return Clip::Files(files);
+    }
+    if let Some(image) = clipboard_image() {
+        return Clip::Image(image);
+    }
+    let Some(types) = wl_paste(&["--list-types"]) else {
+        return Clip::Empty;
+    };
+    let has_text = String::from_utf8_lossy(&types)
+        .lines()
+        .any(|line| line.trim().starts_with("text/plain") || line.trim() == "UTF8_STRING");
+    if !has_text {
+        return Clip::Empty;
+    }
+    match wl_paste(&["--no-newline", "--type", "text/plain"]) {
+        Some(bytes) if !bytes.is_empty() => Clip::Text(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => Clip::Empty,
+    }
+}
+
 fn wl_paste(args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("wl-paste")
         .args(args)

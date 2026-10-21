@@ -3,8 +3,6 @@
 //! the session, and an audio the model does not hear is turned into text,
 //! only when the message that names them is sent.
 
-use std::path::Path;
-
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::media::{self, Kind, Source};
@@ -42,23 +40,6 @@ pub fn add(session: &Session, pending: &mut Vec<Pending>, source: Source) -> Str
     let placeholder = item.placeholder();
     pending.push(item);
     placeholder
-}
-
-/// Reads the files at `paths` and adds them; returns their placeholders.
-pub fn add_files(
-    session: &Session,
-    pending: &mut Vec<Pending>,
-    paths: &[impl AsRef<Path>],
-) -> Result<Vec<String>, Error> {
-    // All are read before one is added: a bad file adds none.
-    let sources = paths
-        .iter()
-        .map(|path| Source::from_file(path.as_ref()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(sources
-        .into_iter()
-        .map(|source| add(session, pending, source))
-        .collect())
 }
 
 /// Stores the media of `pending` that `text` names; the others are
@@ -198,21 +179,6 @@ mod tests {
         assert_eq!(add(&session, &mut more, source(Kind::Image, "c.png")), "[Image#2]");
         assert_eq!(with_placeholders(&["[Image#1]".into(), "[Audio#1]".into()], "hi"), "[Image#1] [Audio#1] hi");
         assert_eq!(with_placeholders(&[], "hi"), "hi");
-    }
-
-    #[test]
-    fn files_are_read_together_and_a_bad_one_adds_none() {
-        let dir = Dir::new("files");
-        let session = session(&dir);
-        fs::write(dir.0.join("a.png"), b"a").unwrap();
-        fs::write(dir.0.join("notes.txt"), b"t").unwrap();
-        let mut pending = Vec::new();
-        let result = add_files(&session, &mut pending, &[dir.0.join("a.png"), dir.0.join("notes.txt")]);
-        assert!(matches!(result, Err(Error::MediaKind { .. })));
-        assert!(pending.is_empty());
-        let placeholders = add_files(&session, &mut pending, &[dir.0.join("a.png")]).unwrap();
-        assert_eq!(placeholders, ["[Image#1]"]);
-        assert_eq!(pending[0].source.name, "a.png");
     }
 
     #[test]

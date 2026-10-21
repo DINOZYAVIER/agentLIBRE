@@ -23,20 +23,36 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
+use crate::attach::{self, Pending};
 use crate::backend::{ReasoningLevel, ToolCall};
 use crate::cli::serve::Others;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
+use crate::media::{self, Clip, Kind, Source};
 use crate::session::{ForgeKind, Session, StopReason};
 use crate::status::{COMMANDS, Facts, Info, compact_notice, display_path, help_text, status_text};
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 use crate::tr;
 
+/// A message that waits for its turn, with the media attached to it
+/// (AGL-014).
+#[derive(Debug)]
+struct Queued {
+    text: String,
+    pending: Vec<Pending>,
+}
+
 #[derive(Default)]
 struct Inner {
-    queue: VecDeque<String>,
+    queue: VecDeque<Queued>,
+    /// Media attached to the line being written (Ctrl-V, `/attach`); they
+    /// go with the message when it is sent (AGL-014, D21).
+    pending: Vec<Pending>,
+    /// How many media of each kind the session holds, in the order of
+    /// [`Kind::ALL`]: the numbers of new placeholders follow them.
+    media_counts: [u32; 3],
     /// A turn is running.
     running: bool,
     quit: bool,
@@ -72,6 +88,30 @@ impl Control {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Attaches `source` to the line being written; returns its
+    /// placeholder (D21).
+    fn attach(&self, source: Source) -> String {
+        let mut inner = self.lock();
+        let index = Kind::ALL.iter().position(|k| *k == source.kind).unwrap_or(0);
+        let waiting = inner
+            .pending
+            .iter()
+            .filter(|p| p.source.kind == source.kind)
+            .count() as u32;
+        let number = inner.media_counts[index] + waiting + 1;
+        let item = Pending { number, source };
+        let placeholder = item.placeholder();
+        inner.pending.push(item);
+        placeholder
+    }
+
+    /// Takes the counts of the media of `session` for the numbers of new
+    /// placeholders.
+    fn set_media_counts(&self, session: &Session) {
+        let mut inner = self.lock();
+        inner.media_counts = Kind::ALL.map(|kind| session.next_media_number(kind) - 1);
+    }
+
     fn set_state(&self, state: Option<String>) {
         self.lock().info.state = state;
     }
@@ -98,7 +138,22 @@ impl Control {
     }
 }
 
+impl From<&str> for Queued {
+    fn from(text: &str) -> Queued {
+        Queued {
+            text: text.into(),
+            pending: Vec::new(),
+        }
+    }
+}
+
 impl Inner {
+    /// The texts of the queued messages.
+    #[cfg(test)]
+    fn texts(&self) -> Vec<&str> {
+        self.queue.iter().map(|q| q.text.as_str()).collect()
+    }
+
     /// A turn runs or messages wait for one.
     fn busy(&self) -> bool {
         self.running || !self.queue.is_empty()
@@ -117,6 +172,8 @@ struct Input {
     request_stop: Box<dyn Fn() -> bool + Send + Sync>,
     /// Leaves at once, after giving the terminal back (D120, D135).
     exit_now: Box<dyn Fn() + Send + Sync>,
+    /// What Ctrl-V reads (AGL-014, D21).
+    clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
 }
 
 impl Input {
@@ -135,7 +192,11 @@ impl Input {
         }
         if !trimmed.starts_with('/') {
             let mut inner = self.control.lock();
-            inner.queue.push_back(message);
+            let pending = std::mem::take(&mut inner.pending);
+            inner.queue.push_back(Queued {
+                text: message,
+                pending,
+            });
             let queued = inner.queue.len();
             drop(inner);
             self.dock.set_queued(queued);
@@ -179,6 +240,19 @@ impl Input {
                     },
                 }
             }
+            "/attach" => {
+                let path = trimmed["/attach".len()..].trim();
+                let path = path
+                    .strip_prefix('"')
+                    .and_then(|p| p.strip_suffix('"'))
+                    .or_else(|| path.strip_prefix('\'').and_then(|p| p.strip_suffix('\'')))
+                    .unwrap_or(path);
+                if path.is_empty() {
+                    self.notice(tr!(self.lang, m::ATTACH_USAGE), Role::StatusPending);
+                } else {
+                    self.attach_files(&[std::path::PathBuf::from(path)]);
+                }
+            }
             "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
                 if inner.busy() {
@@ -188,6 +262,7 @@ impl Input {
                 }
                 if name == "/new" {
                     inner.new_session = true;
+                    inner.pending.clear();
                 } else if name == "/compact" {
                     inner.compact = true;
                 } else {
@@ -200,6 +275,52 @@ impl Input {
                 &tr!(self.lang, m::UNKNOWN_COMMAND, name = name),
                 Role::StatusPending,
             ),
+        }
+    }
+
+    /// Attaches the files and puts their placeholders into the line at
+    /// the cursor (AGL-014, D21); a file that cannot be read is told.
+    fn attach_files(&self, paths: &[std::path::PathBuf]) {
+        let mut placeholders = Vec::new();
+        for path in paths {
+            match Source::from_file(path) {
+                Ok(source) => {
+                    let name = source.name.clone();
+                    let placeholder = self.control.attach(source);
+                    self.notice(
+                        &tr!(self.lang, m::ATTACHED, placeholder = placeholder, name = name),
+                        Role::Muted,
+                    );
+                    placeholders.push(placeholder);
+                }
+                Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
+            }
+        }
+        if !placeholders.is_empty() {
+            self.dock
+                .key(Key::Paste(format!("{} ", placeholders.join(" "))));
+        }
+    }
+
+    /// Ctrl-V: files copied in a file manager, a picture, or text from
+    /// the clipboard (AGL-014, D21).
+    fn paste(&self) {
+        match (self.clipboard)() {
+            Clip::Files(paths) => self.attach_files(&paths),
+            Clip::Image(bytes) => {
+                let source = Source {
+                    kind: Kind::Image,
+                    bytes,
+                    ext: "png".into(),
+                    name: "clipboard.png".into(),
+                };
+                let placeholder = self.control.attach(source);
+                self.dock.key(Key::Paste(format!("{placeholder} ")));
+            }
+            Clip::Text(text) => {
+                self.dock.key(Key::Paste(text));
+            }
+            Clip::Empty => self.notice(tr!(self.lang, m::CLIPBOARD_EMPTY), Role::StatusPending),
         }
     }
 
@@ -255,6 +376,10 @@ impl Input {
 
     fn key(&self, key: Key) {
         if self.answer_question(&key) {
+            return;
+        }
+        if key == Key::Ctrl('v') {
+            self.paste();
             return;
         }
         match self.dock.key(key) {
@@ -357,7 +482,7 @@ impl Report for Reporter<'_> {
 
 /// What the main thread waits for.
 enum Next {
-    Message(String),
+    Message(Queued),
     New,
     Compact,
     Quit,
@@ -446,6 +571,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         },
         reasoning,
     ));
+    control.set_media_counts(&session);
     let screen: Arc<dyn Screen> = dock.clone();
     let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
 
@@ -465,6 +591,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             term::restore();
             unsafe { libc::_exit(i32::from(interrupt::EXIT_CODE)) }
         }),
+        clipboard: Box::new(media::clipboard),
     };
     let reader = {
         let done = done.clone();
@@ -495,6 +622,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         ..Info::default()
                     };
                     drop(inner);
+                    control.set_media_counts(&session);
                     presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = session.id), Role::Muted);
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
@@ -524,7 +652,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 presenter.set_ready();
             }
-            Next::Message(message) => {
+            Next::Message(Queued {
+                text: message,
+                pending,
+            }) => {
                 dock.set_queued(control.lock().queue.len());
                 presenter.begin_turn();
                 presenter.show_user(&message);
@@ -545,6 +676,17 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 let result = ready.and_then(|context| {
                     dock.set_context_size(context);
                     control.lock().info.context = Some(context);
+                    // The media the message names are stored, an audio is
+                    // transcribed (AGL-014).
+                    attach::store(
+                        &mut session,
+                        pending,
+                        &message,
+                        backend,
+                        autostart,
+                        &mut |line| presenter.show_notice(line, Role::Muted),
+                    )?;
+                    control.set_media_counts(&session);
                     Agent {
                         function,
                         function_name,
@@ -633,6 +775,7 @@ mod tests {
         sink: Sink,
         stops: Arc<AtomicUsize>,
         exits: Arc<AtomicUsize>,
+        clip: Arc<Mutex<Clip>>,
     }
 
     fn fixture() -> Fixture {
@@ -660,6 +803,7 @@ mod tests {
         );
         let stops = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(AtomicUsize::new(0));
+        let clip = Arc::new(Mutex::new(Clip::Empty));
         let input = Input {
             dock,
             control: Arc::new(Control::new(
@@ -691,12 +835,17 @@ mod tests {
                     exits.fetch_add(1, Ordering::SeqCst);
                 })
             },
+            clipboard: {
+                let clip = clip.clone();
+                Box::new(move || clip.lock().unwrap().clone())
+            },
         };
         Fixture {
             input,
             sink,
             stops,
             exits,
+            clip,
         }
     }
 
@@ -727,13 +876,13 @@ mod tests {
         let f = fixture();
         f.type_text("hello");
         f.input.key(Key::Enter);
-        assert_eq!(f.inner().queue, ["hello"]);
+        assert_eq!(f.inner().texts(), ["hello"]);
         assert!(f.output().contains("queued 1"));
         // Messages sent during a turn queue up in order.
         f.inner().running = true;
         f.type_text("second");
         f.input.key(Key::Enter);
-        assert_eq!(f.inner().queue, ["hello", "second"]);
+        assert_eq!(f.inner().texts(), ["hello", "second"]);
         // The history file holds what was sent.
         let history = editor::load_history(&f.input.history_file);
         assert_eq!(history, ["hello", "second"]);
@@ -796,6 +945,116 @@ mod tests {
         f.inner().quit = true;
         f.input.control.wake.notify_all();
         assert!(!handle.join().unwrap());
+    }
+
+    /// The text of the line being written.
+    fn line(f: &Fixture) -> String {
+        f.input.dock.input_text()
+    }
+
+    #[test]
+    fn ctrl_v_puts_a_placeholder_for_a_picture_and_text_for_text() {
+        let f = fixture();
+        *f.clip.lock().unwrap() = Clip::Image(b"PNG".to_vec());
+        f.type_text("look ");
+        f.input.key(Key::Ctrl('v'));
+        assert_eq!(line(&f), "look [Image#1] ");
+        // A second one is the second image; the first stays waiting.
+        f.input.key(Key::Ctrl('v'));
+        assert_eq!(line(&f), "look [Image#1] [Image#2] ");
+        assert_eq!(f.inner().pending.len(), 2);
+        assert_eq!(f.inner().pending[1].number, 2);
+        assert_eq!(f.inner().pending[0].source.bytes, b"PNG");
+        // Text from the clipboard is pasted as text.
+        *f.clip.lock().unwrap() = Clip::Text("words".into());
+        f.input.key(Key::Ctrl('v'));
+        assert!(line(&f).ends_with("[Image#2] words"));
+        // Nothing in the clipboard: said so, the line is as it was.
+        *f.clip.lock().unwrap() = Clip::Empty;
+        let before = line(&f);
+        f.input.key(Key::Ctrl('v'));
+        assert_eq!(line(&f), before);
+        assert!(f.output().contains("the clipboard holds nothing to paste"));
+    }
+
+    #[test]
+    fn the_attached_media_go_with_the_message_that_is_sent() {
+        let f = fixture();
+        *f.clip.lock().unwrap() = Clip::Image(b"PNG".to_vec());
+        f.input.key(Key::Ctrl('v'));
+        f.type_text("what is this?");
+        f.input.key(Key::Enter);
+        {
+            let inner = f.inner();
+            assert_eq!(inner.texts(), ["[Image#1] what is this?"]);
+            assert_eq!(inner.queue[0].pending.len(), 1);
+            assert_eq!(inner.queue[0].pending[0].placeholder(), "[Image#1]");
+            assert!(inner.pending.is_empty());
+        }
+        // The next picture is numbered after the one that is queued only
+        // when the session holds it; before that it is #1 again (the
+        // numbers come from the session and the line being written).
+        f.inner().media_counts = [1, 0, 0];
+        f.input.key(Key::Ctrl('v'));
+        assert_eq!(line(&f), "[Image#2] ");
+    }
+
+    #[test]
+    fn a_deleted_placeholder_leaves_its_medium_unsent_but_waiting_in_the_message() {
+        let f = fixture();
+        *f.clip.lock().unwrap() = Clip::Image(b"PNG".to_vec());
+        f.input.key(Key::Ctrl('v'));
+        // Backspace over the space and the placeholder.
+        for _ in 0.."[Image#1] ".len() {
+            f.input.key(Key::Backspace);
+        }
+        f.type_text("plain");
+        f.input.key(Key::Enter);
+        let inner = f.inner();
+        // The medium travels with the message, and `attach::store` drops
+        // it because the text does not name it (D21).
+        assert_eq!(inner.texts(), ["plain"]);
+        assert_eq!(inner.queue[0].pending.len(), 1);
+    }
+
+    #[test]
+    fn attach_takes_a_file_and_puts_its_placeholder_in_the_line() {
+        let f = fixture();
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-attach-repl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("voice note.wav");
+        std::fs::write(&path, b"RIFF").unwrap();
+        f.type_text(&format!("/attach \"{}\"", path.display()));
+        f.input.key(Key::Enter);
+        assert_eq!(line(&f), "[Audio#1] ");
+        assert!(f.output().contains("attached [Audio#1] (voice note.wav)"));
+        assert!(f.inner().queue.is_empty());
+        // A file that is not a medium, and a missing one, are told; the
+        // line is cleared first, the commands are read at its start.
+        f.input.key(Key::Ctrl('u'));
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        f.type_text(&format!("/attach {}", dir.join("a.txt").display()));
+        f.input.key(Key::Enter);
+        // The notice wraps at the width of the dock; its last word is whole.
+        assert!(f.output().contains("audio"), "{}", f.output());
+        f.type_text("/attach");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("usage: /attach"));
+        assert_eq!(f.inner().pending.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_drops_the_waiting_media() {
+        let f = fixture();
+        *f.clip.lock().unwrap() = Clip::Image(b"PNG".to_vec());
+        f.input.key(Key::Ctrl('v'));
+        assert_eq!(f.inner().pending.len(), 1);
+        f.input.key(Key::Ctrl('u'));
+        f.type_text("/new");
+        f.input.key(Key::Enter);
+        assert!(f.inner().new_session);
+        assert!(f.inner().pending.is_empty());
     }
 
     #[test]
@@ -942,7 +1201,7 @@ mod tests {
     fn the_main_thread_takes_what_the_user_sent() {
         let control = Control::new(Info::default(), None);
         control.lock().queue.push_back("one".into());
-        assert!(matches!(wait_for_next(&control), Next::Message(m) if m == "one"));
+        assert!(matches!(wait_for_next(&control), Next::Message(m) if m.text == "one"));
         assert!(control.lock().running);
         control.lock().running = false;
         control.lock().new_session = true;

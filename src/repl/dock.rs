@@ -140,6 +140,12 @@ impl Dock {
         self
     }
 
+    /// The line being written.
+    #[cfg(test)]
+    pub fn input_text(&self) -> String {
+        self.lock().editor.buffer().to_owned()
+    }
+
     /// The context size, once the server has answered (AGL-015).
     pub fn set_context_size(&self, size: usize) {
         let mut state = self.lock();
