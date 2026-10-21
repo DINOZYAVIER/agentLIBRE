@@ -45,6 +45,9 @@ pub enum Health {
 pub struct Server {
     /// The unit of the project (D8, D12).
     pub unit: String,
+    /// The unit of the project's whisper server, which `agl server stop`
+    /// stops too (AGL-014).
+    pub whisper_unit: String,
     /// The project's `[server]` over the user's.
     pub settings: ServerFile,
     pub url: String,
@@ -72,6 +75,7 @@ impl Server {
         })?;
         Ok(Server {
             unit: unit_name(&key),
+            whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
             settings: settings.clone(),
             url,
             user_path: user_path.into(),
@@ -127,11 +131,20 @@ pub fn run(
             .map(|()| ExitCode::SUCCESS)
         }
         ServerAction::Stop => {
+            // The whisper server of the project goes with it (AGL-014);
+            // nothing is said of it when it did not run.
+            let whisper = unit_active(&server.whisper_unit)?;
+            if whisper {
+                systemctl(&["stop", &server.whisper_unit])?;
+            }
             if unit_active(&server.unit)? {
                 systemctl(&["stop", &server.unit])?;
                 println!("{}", tr!(lang, m::SERVER_STOPPED));
-            } else {
+            } else if !whisper {
                 println!("{}", texts::not_running(&server.unit, lang));
+            }
+            if whisper {
+                println!("{}", tr!(lang, m::WHISPER_STOPPED));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -669,6 +682,7 @@ mod tests {
         let merged = ws.server.over(&user);
         let server = Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-llama-server-60af300abea6");
+        assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
         assert_eq!(server.settings.model.as_deref(), Some("big.gguf"));
         assert_eq!(server.settings.context, Some(65536));

@@ -181,7 +181,7 @@ Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
 Server (systemd user unit agentLIBRE-llama-server-<project>; [server] in the
 project's agentLIBRE.toml over the one of the user):
   server start        start llama-server and wait until it is ready
-  server stop         stop it
+  server stop         stop it and the whisper server of the project
   server status       show whether it runs and is ready
 
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
@@ -221,7 +221,7 @@ under XDG_DATA_HOME):
 Сервер (user-unit systemd agentLIBRE-llama-server-<проєкт>; [server] у
 agentLIBRE.toml проєкту поверх файлу користувача):
   server start        запустити llama-server і дочекатися готовності
-  server stop         зупинити його
+  server stop         зупинити його і whisper-сервер проєкту
   server status       показати, чи він працює і чи готовий
 
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
@@ -1184,6 +1184,12 @@ Forge (сховище артефактів робочої області, agentL
     pub const SERVER_STOPPED: Msg = Msg {
         en: "llama-server stopped",
         uk: "llama-server зупинено",
+    };
+
+    /// `agl server stop` stopped the whisper server too (AGL-014).
+    pub const WHISPER_STOPPED: Msg = Msg {
+        en: "whisper-server stopped",
+        uk: "whisper-server зупинено",
     };
 
     /// `agl server stop` finds it down (D146).
