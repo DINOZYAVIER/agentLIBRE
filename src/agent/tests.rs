@@ -521,10 +521,6 @@ fn only_function_tools_are_listed() {
     let names: Vec<&str> = function_tools(&coder).iter().map(|d| d.name).collect();
     // The implicit forge (AGL-011) is a tool of the tool states.
     assert_eq!(names, ["bash", "edit", "forge"]);
-    // With the switch off, the tool schema is absent.
-    let off = function(&format!("forge = false\n{CODER}")).unwrap();
-    let names: Vec<&str> = function_tools(&off).iter().map(|d| d.name).collect();
-    assert_eq!(names, ["bash", "edit"]);
 }
 
 #[test]
@@ -639,7 +635,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 }
 
 #[test]
-fn the_system_message_explains_the_runtime_prefix_and_the_action_size() {
+fn the_system_message_is_the_functions_system_and_nothing_more() {
     let dir = Dir::new("system");
     let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
     let script = Script::new(&[
@@ -653,29 +649,28 @@ fn the_system_message_explains_the_runtime_prefix_and_the_action_size() {
     let (end, _, _) = run(&default, &script, &dir, "go");
     assert!(end.is_ok());
     // A step, a step, the compaction, a step: all carry the Function's
-    // system text and the two sentences, the same text each time.
+    // `system`, the same text each time (AGL-017, D4, D8): the persona and
+    // the runtime part of `default`, no paragraph about the forge.
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 4);
-    // The built-in Function has the forge on: the paragraph follows the
-    // two sentences, for a step and a compaction alike (AGL-011).
-    let expected = format!(
-        "{system}\n\nMessages that start with [agentLIBRE runtime] come from the agentLIBRE \
-         runtime, not from the human. One action holds at most {tokens} tokens; write a \
-         large file in parts.\n\nThe forge is this workspace's record of decisions, plans \
-         and progress: task-spec artifacts, each with a status. Read it with the forge \
-         tool (list, show). Shape an open (draft) spec with new, edit and remove; to an \
-         in-progress spec only append bullets, under its Decisions, Open questions or \
-         Progress; a done, backlog or canceled spec is read-only. Record a decision only \
-         when the human has made it.",
-        system = default.system,
-        tokens = default.max_action_tokens
-    );
-    assert!(systems.iter().all(|system| *system == expected));
-    assert!(expected.contains("at most 8192 tokens"));
-    // The switch off: no paragraph, for a step and a compaction alike.
-    let off = function(&format!("forge = false\n{CODER}")).unwrap();
-    let off_prompt = super::system_prompt(&off);
-    assert!(!off_prompt.contains("The forge is this workspace's record"));
+    assert!(systems.iter().all(|system| *system == default.system));
+    assert!(default.system.contains("Messages that start with [agentLIBRE runtime]"));
+    assert!(default.system.contains("at most 8192 tokens"));
+    assert!(!default.system.contains("forge"));
+}
+
+#[test]
+fn the_minimal_function_sends_the_persona_alone() {
+    let dir = Dir::new("minimal");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
+    let (end, _, _) = run(&minimal, &script, &dir, "hi");
+    assert!(end.is_ok());
+    let systems = script.systems.borrow();
+    assert_eq!(systems.len(), 1);
+    assert_eq!(systems[0], minimal.system);
+    assert!(systems[0].starts_with("You are DinoBot"));
+    assert!(!systems[0].contains("runtime"));
 }
 
 #[test]

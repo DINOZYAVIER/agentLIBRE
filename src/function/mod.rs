@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use toml::Table;
 
 use crate::action::{self, Actions, Constraint, Kind, Outcome, Tool};
+use crate::backend::RUNTIME_PREFIX;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
@@ -15,7 +16,10 @@ use crate::tomlfile::{self, Section};
 
 /// Functions built into the binary; a user file of the same name replaces
 /// one (D39).
-const BUILTIN: &[(&str, &str)] = &[("default", include_str!("../builtin/functions/default.toml"))];
+const BUILTIN: &[(&str, &str)] = &[
+    ("default", include_str!("../builtin/functions/default.toml")),
+    ("minimal", include_str!("../builtin/functions/minimal.toml")),
+];
 
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
@@ -41,8 +45,6 @@ const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can
 pub struct Function {
     pub format: Format,
     pub system: String,
-    /// The forge tool and its sentence, on by default (AGL-011).
-    pub forge: bool,
     pub preserve_thinking: bool,
     pub max_steps_total: u32,
     pub max_think_tokens: u32,
@@ -136,7 +138,6 @@ impl Function {
         file.check_keys(&[
             "format",
             "system",
-            "forge",
             "preserve_thinking",
             "max_steps_total",
             "max_think_tokens",
@@ -151,7 +152,6 @@ impl Function {
         let format_name = file.required_string("format")?;
         let format = Format::load(formats_dir, &format_name)?;
         let system = file.required_string("system")?;
-        let forge = file.bool("forge")?.unwrap_or(true);
         let preserve_thinking = file.bool("preserve_thinking")?.unwrap_or(true);
         let max_steps_total =
             positive(&mut file, "max_steps_total")?.unwrap_or(DEFAULT_MAX_STEPS_TOTAL);
@@ -159,6 +159,11 @@ impl Function {
             positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens =
             positive(&mut file, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
+        // The two words the runtime fills in the Function's own text
+        // (AGL-017, D8); other brace text stays as written.
+        let system = system
+            .replace("{runtime_prefix}", RUNTIME_PREFIX)
+            .replace("{max_action_tokens}", &max_action_tokens.to_string());
         let compact = file
             .string("compact")?
             .unwrap_or_else(|| DEFAULT_COMPACT.into());
@@ -184,7 +189,6 @@ impl Function {
         let context = Context {
             format: &format,
             format_name: &format_name,
-            forge,
             index: &index,
         };
         let states = sections
@@ -196,7 +200,6 @@ impl Function {
         Ok(Function {
             format,
             system,
-            forge,
             preserve_thinking,
             max_steps_total,
             max_think_tokens,
@@ -215,8 +218,6 @@ impl Function {
 struct Context<'a> {
     format: &'a Format,
     format_name: &'a str,
-    /// The forge switch of the Function (AGL-011).
-    forge: bool,
     /// Resolves a state name read at `key` of a section.
     index: &'a dyn Fn(&Section, &str, &str) -> Result<usize, Error>,
 }
@@ -287,13 +288,10 @@ fn read_state(
         Some(tools) => read_tools(tools, context.format)?,
     };
     let mut forge_tool = tools.iter().any(|tool| tool.name == "forge");
-    if forge_tool && !context.forge {
-        // An explicit `tools.forge` with the switch off (AGL-011, Q3).
-        return Err(problem(section, "tools.forge", FunctionProblem::ForgeOff));
-    }
-    if context.forge && !forge_tool && !tools.is_empty() {
+    if !forge_tool && !tools.is_empty() {
         // The runtime's tool: every state that allows a tool allows the
-        // forge too (AGL-011, Q1); an answer-only state stays answer-only.
+        // forge too (AGL-011, Q1; AGL-017, D5); an answer-only state stays
+        // answer-only.
         tools.push(builtin_forge());
         forge_tool = true;
     }

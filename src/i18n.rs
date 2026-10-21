@@ -737,12 +737,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "формат моделі `{format}` не має thinking; прибери `think = true`",
     };
 
-    /// `FunctionProblem::ForgeOff`.
-    pub const FUNC_FORGE_OFF: Msg = Msg {
-        en: "the forge is off (`forge = false`); remove `tools.forge`",
-        uk: "forge вимкнено (`forge = false`); прибери `tools.forge`",
-    };
-
     /// `FunctionProblem::PatternMayEndValue`.
     pub const FUNC_PATTERN_MAY_END_VALUE: Msg = Msg {
         en: "the pattern may produce {end:?}, which ends a value in this model format",
@@ -2000,7 +1994,6 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::OnLimitCycle => tr!(lang, m::FUNC_ON_LIMIT_CYCLE).to_string(),
         P::Unreachable => tr!(lang, m::FUNC_UNREACHABLE).to_string(),
         P::NoThinking { format } => tr!(lang, m::FUNC_NO_THINKING, format = format),
-        P::ForgeOff => tr!(lang, m::FUNC_FORGE_OFF).to_string(),
         P::Pattern(error) => pattern_error(error, lang),
         P::PatternMayEndValue { end } => tr!(lang, m::FUNC_PATTERN_MAY_END_VALUE, end = end),
         P::EmptyEnum => tr!(lang, m::FUNC_EMPTY_ENUM).to_string(),

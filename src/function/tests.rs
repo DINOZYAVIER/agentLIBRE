@@ -151,35 +151,34 @@ fn spec_example() {
 }
 
 #[test]
-fn the_forge_key_parses() {
-    // Off, and a non-bool is an error.
-    let off = function(
-        "format = \"qwen3.8\"\nforge = false\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
-         tools.bash = {}\nnext = { else = \"a\" }\n",
-    )
-    .unwrap();
-    assert!(!off.forge);
-    let bad = function(
-        "format = \"qwen3.8\"\nforge = \"on\"\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
-         answer = true\n",
+fn the_forge_has_no_switch() {
+    // AGL-017, D5: `forge = …` is an unknown key, whatever its value.
+    for value in ["false", "true", "\"on\""] {
+        let result = function(&format!(
+            "format = \"qwen3.8\"\nforge = {value}\nsystem = \"s\"\ninitial = \"a\"\n\
+             [state.a]\ntools.bash = {{}}\nnext = {{ else = \"a\" }}\n"
+        ));
+        assert!(
+            matches!(&result, Err(Error::UnknownKey { key, .. }) if key == "forge"),
+            "{value}: {result:?}"
+        );
+    }
+    // And the forge is there without it.
+    let one = one_state("tools.bash = {}\nnext = { else = \"a\" }").unwrap();
+    assert!(
+        state(&one, "a")
+            .actions
+            .tools
+            .iter()
+            .any(|t| t.name == "forge")
     );
-    assert!(bad.is_err());
-    // The default is on.
-    let on = one_state("tools.bash = {}\nnext = { else = \"a\" }").unwrap();
-    assert!(on.forge);
 }
 
 #[test]
 fn the_forge_tool_follows_the_states() {
-    // Off: nowhere.
-    let off = function(&format!("forge = false\n{CODER}")).unwrap();
-    for s in &off.states {
-        assert!(!s.actions.tools.iter().any(|t| t.name == "forge"));
-    }
-    // On (the default): every state that allows a tool allows the forge;
-    // an answer-only state stays answer-only.
+    // Every state that allows a tool allows the forge; an answer-only state
+    // stays answer-only.
     let function = function(CODER).unwrap();
-    assert!(function.forge);
     for name in ["explore", "verify"] {
         assert!(
             state(&function, name)
@@ -215,16 +214,8 @@ fn the_implicit_forge_keeps_the_state() {
 
 #[test]
 fn the_explicit_forge_tool() {
-    // With the switch off, an error that names both keys.
-    let off = function(
-        "format = \"qwen3.8\"\nforge = false\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\n\
-         tools.forge = {}\nnext = { else = \"a\" }\n",
-    );
-    let (key, problem) = problem_of(off);
-    assert_eq!(key, "state.a.tools.forge");
-    assert!(matches!(problem, FunctionProblem::ForgeOff));
-    // With the forge on, an explicit `tools.forge` is accepted: it is
-    // the way to give forge its own transitions (Q3).
+    // An explicit `tools.forge` is accepted: it is the way to give forge its
+    // own transitions (AGL-011, Q3; AGL-017, D5).
     let function = one_state("tools.forge = {}\nnext = { forge = \"a\", else = \"a\" }").unwrap();
     let a = state(&function, "a");
     assert_eq!(a.actions.tools.len(), 1);
@@ -548,4 +539,54 @@ fn thinking_and_formats() {
             }
         )
     );
+}
+
+#[test]
+fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
+    let f = function(
+        "format = \"qwen3.8\"\nmax_action_tokens = 500\n\
+         system = \"Prefix {runtime_prefix}, at most {max_action_tokens} tokens, keep {x} and {{y}}.\"\n\
+         initial = \"a\"\n[state.a]\nanswer = true",
+    )
+    .unwrap();
+    assert_eq!(
+        f.system,
+        "Prefix [agentLIBRE runtime], at most 500 tokens, keep {x} and {{y}}."
+    );
+    // Without the default limit set, the default is told.
+    let g = function(
+        "format = \"qwen3.8\"\nsystem = \"{max_action_tokens}\"\ninitial = \"a\"\n\
+         [state.a]\nanswer = true",
+    )
+    .unwrap();
+    assert_eq!(g.system, "8192");
+}
+
+#[test]
+fn the_built_in_functions_differ_in_the_runtime_part_only() {
+    let none = Path::new("/nonexistent");
+    let default = Function::load(none, none, "default").unwrap();
+    let minimal = Function::load(none, none, "minimal").unwrap();
+    // `default` explains the prefix and the size of an action (AGL-009);
+    // `minimal` is the persona alone (AGL-017, D6, D9).
+    assert!(default.system.contains(
+        "Messages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
+         not from the human. One action holds at most 8192 tokens; write a large file in parts."
+    ));
+    assert!(!default.system.contains('{'));
+    assert!(!minimal.system.contains("runtime"));
+    assert!(default.system.starts_with(&minimal.system));
+    assert!(minimal.system.starts_with("You are DinoBot"));
+    // The rest is the same: the states and the tools.
+    assert_eq!(default.states.len(), minimal.states.len());
+    let tools = |f: &Function| -> Vec<String> {
+        f.states[f.initial]
+            .actions
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    assert_eq!(tools(&default), tools(&minimal));
+    assert_eq!(default.sampling, minimal.sampling);
 }
