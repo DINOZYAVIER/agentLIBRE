@@ -140,6 +140,12 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// A medium the session keeps is not what its name says (AGL-014, D7).
+    MediaChanged { path: PathBuf },
+    /// A file to attach that is not an image, a video or an audio.
+    MediaKind { path: PathBuf },
+    /// `ffmpeg` or `ffprobe` cannot be run or failed.
+    Ffmpeg { detail: String },
     /// `git` cannot be run.
     GitSpawn { source: io::Error },
     /// `git <args>` exited with a failure.
@@ -399,6 +405,13 @@ impl std::fmt::Display for Error {
                 Error::ServerTimeout { seconds, .. } => {
                     format!("llama-server was not ready after {seconds} s")
                 }
+                Error::MediaChanged { path } => {
+                    format!("{} is not what its name says", path.display())
+                }
+                Error::MediaKind { path } => {
+                    format!("{} is not an image, a video or an audio", path.display())
+                }
+                Error::Ffmpeg { detail } => format!("ffmpeg failed: {detail}"),
                 Error::GitSpawn { source } => format!("cannot run git: {source}"),
                 Error::GitFailed { args, detail } => format!("git {args} failed: {detail}"),
                 Error::NotInRepository { cwd } => {

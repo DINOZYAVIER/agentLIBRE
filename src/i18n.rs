@@ -558,6 +558,24 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server уже працює ({units}). Запустити ще один? [y/N]",
     };
 
+    /// `Error::MediaChanged` (AGL-014, D7).
+    pub const MEDIA_CHANGED: Msg = Msg {
+        en: "{path} is not what its name says (the copy of a medium of the session was changed)",
+        uk: "{path} не те, що в його назві (копію медіа сесії змінено)",
+    };
+
+    /// `Error::MediaKind`.
+    pub const MEDIA_KIND: Msg = Msg {
+        en: "{path} is not an image, a video or an audio",
+        uk: "{path} не є зображенням, відео чи аудіо",
+    };
+
+    /// `Error::Ffmpeg`.
+    pub const FFMPEG: Msg = Msg {
+        en: "ffmpeg failed: {detail}",
+        uk: "помилка ffmpeg: {detail}",
+    };
+
     /// `Error::ServerFailed`.
     pub const SERVER_FAILED: Msg = Msg {
         en: "llama-server stopped before it was ready; see journalctl --user -u {unit}",
@@ -1627,6 +1645,9 @@ impl Error {
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
+            Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
+            Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
+            Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),
             Error::ServerFailed { unit } => tr!(lang, m::SERVER_FAILED, unit = unit),
             Error::ServerTimeout { seconds, unit } => {
                 tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)

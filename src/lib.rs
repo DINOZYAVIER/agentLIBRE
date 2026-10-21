@@ -12,6 +12,7 @@ mod grammar;
 mod i18n;
 mod interrupt;
 mod machine;
+mod media;
 mod paths;
 mod repl;
 mod session;
