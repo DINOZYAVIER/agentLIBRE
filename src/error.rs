@@ -140,6 +140,9 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// The prompt names a medium but the server has no multimodal
+    /// projector (AGL-014).
+    NoMultimodal,
     /// A medium the session keeps is not what its name says (AGL-014, D7).
     MediaChanged { path: PathBuf },
     /// A file to attach that is not an image, a video or an audio.
@@ -405,6 +408,7 @@ impl std::fmt::Display for Error {
                 Error::ServerTimeout { seconds, .. } => {
                     format!("llama-server was not ready after {seconds} s")
                 }
+                Error::NoMultimodal => "the server has no multimodal projector".into(),
                 Error::MediaChanged { path } => {
                     format!("{} is not what its name says", path.display())
                 }

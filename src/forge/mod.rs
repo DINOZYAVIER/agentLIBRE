@@ -1240,6 +1240,9 @@ mod tests {
                 model: Some("q.gguf".into()),
                 context: Some(65536),
                 args: Some(vec!["-ngl".into(), "999".into()]),
+                mmproj: Some("p.gguf".into()),
+                mmproj_offload: Some(true),
+                image_max_tokens: Some(2048),
             },
         };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);

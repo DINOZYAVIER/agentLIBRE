@@ -30,6 +30,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         reasoning,
         autostart,
         yes,
+        image_tokens,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -80,6 +81,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             context,
                             forge,
                             reasoning,
+                            image_tokens,
                         }
                         .compact(&mut StderrReport::new(lang))
                     });
@@ -112,6 +114,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 context: size,
                 forge,
                 reasoning,
+                image_tokens,
             }
             .turn(message, &mut report)
         });

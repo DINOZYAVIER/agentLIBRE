@@ -130,6 +130,12 @@ impl Backend for Llama {
             "stream": true,
             "cache_prompt": true,
         });
+        if !request.media.is_empty() {
+            body["prompt"] = json!({
+                "prompt_string": request.prompt,
+                "multimodal_data": request.media,
+            });
+        }
         if let Some(grammar) = request.grammar {
             body["grammar"] = grammar.into();
         }
@@ -191,6 +197,20 @@ impl Backend for Llama {
             .as_u64()
             .map(|n| n as usize)
             .ok_or_else(|| self.bad_reply("no `n_ctx` in the /props reply"))
+    }
+
+    fn media_marker(&self) -> Result<String, Error> {
+        let reply = self.json("/props", None)?;
+        let vision = reply["modalities"]["vision"].as_bool().unwrap_or(false);
+        match reply["media_marker"].as_str() {
+            Some(marker) if vision => Ok(marker.to_owned()),
+            _ => Err(Error::NoMultimodal),
+        }
+    }
+
+    fn hears_audio(&self) -> Result<bool, Error> {
+        let reply = self.json("/props", None)?;
+        Ok(reply["modalities"]["audio"].as_bool().unwrap_or(false))
     }
 }
 

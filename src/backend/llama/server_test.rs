@@ -129,6 +129,7 @@ fn live_backend() {
                 stop: &[think.close.trim(), format.call.begin_before.trim()],
                 max_tokens: 1024,
                 sampling: &sampling,
+                media: &[],
             },
             &mut |piece| {
                 pieces.push_str(piece);
@@ -156,6 +157,7 @@ fn live_backend() {
                 stop: &[],
                 max_tokens: 512,
                 sampling: &sampling,
+                media: &[],
             },
             &mut |_| {},
         )
@@ -175,6 +177,7 @@ fn live_backend() {
                 stop: &[],
                 max_tokens: 4,
                 sampling: &sampling,
+                media: &[],
             },
             &mut |_| {},
         )

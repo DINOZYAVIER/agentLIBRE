@@ -175,6 +175,9 @@ pub struct Request<'a> {
     pub stop: &'a [&'a str],
     pub max_tokens: u32,
     pub sampling: &'a Sampling,
+    /// The bytes of the media the prompt names with the server's marker,
+    /// base64, in the order of the markers (AGL-014, D6).
+    pub media: &'a [String],
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -208,6 +211,16 @@ pub trait Backend {
     fn count_tokens(&self, text: &str) -> Result<usize, Error>;
     /// The context size of the loaded model, in tokens.
     fn context_size(&self) -> Result<usize, Error>;
+    /// The string that stands for a medium in the prompt: the server has
+    /// it per start, and none without a multimodal projector (AGL-014,
+    /// D6).
+    fn media_marker(&self) -> Result<String, Error> {
+        Err(Error::NoMultimodal)
+    }
+    /// Whether the model hears an audio itself (AGL-014, D19).
+    fn hears_audio(&self) -> Result<bool, Error> {
+        Ok(false)
+    }
 }
 
 /// Whether the thinking of each message goes to the template. Without

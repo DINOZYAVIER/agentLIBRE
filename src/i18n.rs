@@ -558,6 +558,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server уже працює ({units}). Запустити ще один? [y/N]",
     };
 
+    /// `Error::NoMultimodal` (AGL-014).
+    pub const NO_MULTIMODAL: Msg = Msg {
+        en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in [server] of the project and restart it (agl server stop)",
+        uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у [server] проєкту і перезапусти його (agl server stop)",
+    };
+
     /// `Error::MediaChanged` (AGL-014, D7).
     pub const MEDIA_CHANGED: Msg = Msg {
         en: "{path} is not what its name says (the copy of a medium of the session was changed)",
@@ -1645,6 +1651,7 @@ impl Error {
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
+            Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
             Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
             Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
             Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),

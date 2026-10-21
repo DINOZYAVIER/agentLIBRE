@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
+use crate::media;
 use crate::session::{Event, ForgeKind, INTERRUPTED, Session, StopReason};
 use crate::tools::{self, ForgeEnv, ToolResult};
 
@@ -81,6 +82,9 @@ pub struct Agent<'a> {
     /// The model's reasoning level (AGL-013); `None` is the template's
     /// default. `Off` silences the thinking states.
     pub reasoning: Option<ReasoningLevel>,
+    /// The most tokens one picture takes: what the context check counts
+    /// for every image and frame (AGL-014, D10).
+    pub image_tokens: usize,
 }
 
 impl Agent<'_> {
@@ -132,6 +136,14 @@ impl Agent<'_> {
         let state = machine.state();
         let mut messages = vec![Message::System(system_prompt(function))];
         messages.extend(self.session.history());
+        // The media the messages name become the server's marker, the
+        // frames and the transcripts (AGL-014, D6).
+        let expanded = media::expand(
+            &mut messages,
+            &self.session.media(),
+            &self.session.media_dir(),
+            self.backend,
+        )?;
         let tools = function_tools(function);
         // `Off` silences the thinking states (AGL-013, Q4): the level and
         // the state decide the thinking together.
@@ -151,7 +163,9 @@ impl Agent<'_> {
         } else {
             0
         };
-        let prompt_tokens = self.backend.count_tokens(&prompt)?;
+        // A picture is counted by its bound, not by the marker (D10).
+        let prompt_tokens =
+            self.backend.count_tokens(&prompt)? + expanded.pictures * self.image_tokens;
         report.context_used(prompt_tokens);
         let needed = prompt_tokens + think_budget + function.max_action_tokens as usize;
         if needed > self.context {
@@ -172,6 +186,7 @@ impl Agent<'_> {
                     stop: &[close, call_start],
                     max_tokens: function.max_think_tokens,
                     sampling: &function.sampling,
+                    media: &expanded.uploads,
                 },
                 &mut |piece| report.thinking(piece),
             )?;
@@ -198,6 +213,7 @@ impl Agent<'_> {
                 stop: &[],
                 max_tokens: function.max_action_tokens,
                 sampling: &function.sampling,
+                media: &expanded.uploads,
             },
             &mut |piece| {
                 if let Some(text) = stream.push(piece) {
@@ -308,6 +324,12 @@ impl Agent<'_> {
                     other => other,
                 }),
         );
+        let expanded = media::expand(
+            &mut messages,
+            &self.session.media(),
+            &self.session.media_dir(),
+            self.backend,
+        )?;
         let tools = function_tools(function);
         let rendered = self.backend.render(&Prompt {
             messages: &messages,
@@ -317,7 +339,9 @@ impl Agent<'_> {
             reasoning: self.reasoning,
         })?;
         let prompt = function.format.start_step(rendered, false);
-        let needed = self.backend.count_tokens(&prompt)? + function.max_compact_tokens as usize;
+        let needed = self.backend.count_tokens(&prompt)?
+            + expanded.pictures * self.image_tokens
+            + function.max_compact_tokens as usize;
         if needed > self.context {
             return Ok(Compaction::Impossible);
         }
@@ -328,6 +352,7 @@ impl Agent<'_> {
                 stop: &[],
                 max_tokens: function.max_compact_tokens,
                 sampling: &function.sampling,
+                media: &expanded.uploads,
             },
             &mut |_| {},
         )?;

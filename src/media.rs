@@ -12,6 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::backend::{Backend, Message};
 use crate::error::Error;
 use crate::forge::sha256;
 
@@ -164,6 +165,98 @@ pub fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// What the placeholders of the messages of a step became.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Expanded {
+    /// The bytes of the media, base64, in the order of the markers.
+    pub uploads: Vec<String>,
+    /// How many of the markers stand for a picture (an image or a frame
+    /// of a video); their tokens are bounded (D10).
+    pub pictures: usize,
+}
+
+/// Replaces the placeholders in the user messages and the tool results
+/// of `messages` with what the model reads (AGL-014): an image the
+/// server's marker; a video its frames, each after its time; an audio
+/// its transcript, or the marker when the model hears it (D19, D22). A
+/// placeholder the table does not know stays text.
+pub fn expand(
+    messages: &mut [Message],
+    table: &[&Media],
+    dir: &Path,
+    backend: &dyn Backend,
+) -> Result<Expanded, Error> {
+    let mut expanded = Expanded::default();
+    let mut marker: Option<String> = None;
+    let mut hears: Option<bool> = None;
+    for message in messages {
+        let text = match message {
+            Message::User(text) => text,
+            Message::Tool { content, .. } => content,
+            _ => continue,
+        };
+        let found = placeholders(text);
+        if found.is_empty() {
+            continue;
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for item in found {
+            let Some(medium) = table
+                .iter()
+                .find(|m| m.kind == item.kind && m.number == item.number)
+            else {
+                continue;
+            };
+            out.push_str(&text[last..item.start]);
+            last = item.end;
+            let mut stand = |expanded: &mut Expanded, uploads: Vec<String>| -> Result<String, Error> {
+                if marker.is_none() {
+                    marker = Some(backend.media_marker()?);
+                }
+                expanded.uploads.extend(uploads);
+                Ok(marker.clone().unwrap_or_default())
+            };
+            match medium.kind {
+                Kind::Image => {
+                    let bytes = read(dir, &medium.sha256, &medium.ext)?;
+                    out.push_str(&stand(&mut expanded, vec![base64(&bytes)])?);
+                    expanded.pictures += 1;
+                }
+                Kind::Video => {
+                    out.push_str(&format!("[Video#{}: frames", medium.number));
+                    for frame in &medium.frames {
+                        let bytes = read(dir, &frame.sha256, "jpg")?;
+                        let marker = stand(&mut expanded, vec![base64(&bytes)])?;
+                        out.push_str(&format!(" {} {marker}", clock(frame.at)));
+                        expanded.pictures += 1;
+                    }
+                    out.push(']');
+                }
+                Kind::Audio => match &medium.transcript {
+                    Some(transcript) => {
+                        out.push_str(&format!("[Audio#{}: \"{transcript}\"]", medium.number));
+                    }
+                    None => {
+                        if hears.is_none() {
+                            hears = Some(backend.hears_audio()?);
+                        }
+                        if hears == Some(true) {
+                            let bytes = read(dir, &medium.sha256, &medium.ext)?;
+                            out.push_str(&stand(&mut expanded, vec![base64(&bytes)])?);
+                        } else {
+                            out.push_str(&format!("[Audio#{}: not transcribed]", medium.number));
+                        }
+                    }
+                },
+            }
+        }
+        out.push_str(&text[last..]);
+        *text = out;
+    }
+    Ok(expanded)
 }
 
 fn file_in(dir: &Path, sha256: &str, ext: &str) -> PathBuf {

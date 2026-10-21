@@ -21,6 +21,14 @@ struct Script {
     thinking: RefCell<Vec<bool>>,
     /// The system message of each rendered prompt.
     systems: RefCell<Vec<String>>,
+    /// The server's media marker, if it has a projector (AGL-014).
+    marker: Option<String>,
+    /// Whether the model hears an audio itself (AGL-014, D19).
+    hears: bool,
+    /// The user texts of each rendered prompt, joined.
+    users: RefCell<Vec<String>>,
+    /// The media each generation was sent with.
+    uploads: RefCell<Vec<Vec<String>>>,
 }
 
 impl Script {
@@ -45,6 +53,10 @@ impl Script {
             tokens: 100,
             thinking: RefCell::new(Vec::new()),
             systems: RefCell::new(Vec::new()),
+            marker: Some("<__media_TEST__>".into()),
+            hears: false,
+            users: RefCell::new(Vec::new()),
+            uploads: RefCell::new(Vec::new()),
         }
     }
 
@@ -70,6 +82,15 @@ impl Backend for Script {
                     }
                 )
             }));
+        let users: Vec<&str> = prompt
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(text) | Message::Tool { content: text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        self.users.borrow_mut().push(users.join("\n"));
         let instruction = prompt.instruction.unwrap_or("-");
         Ok(format!(
             "[{} messages; {instruction}]<think>\n",
@@ -83,6 +104,7 @@ impl Backend for Script {
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
         self.prompts.borrow_mut().push(request.prompt.to_owned());
+        self.uploads.borrow_mut().push(request.media.to_vec());
         let generated = self
             .outputs
             .borrow_mut()
@@ -104,6 +126,14 @@ impl Backend for Script {
 
     fn context_size(&self) -> Result<usize, Error> {
         Ok(16384)
+    }
+
+    fn media_marker(&self) -> Result<String, Error> {
+        self.marker.clone().ok_or(Error::NoMultimodal)
+    }
+
+    fn hears_audio(&self) -> Result<bool, Error> {
+        Ok(self.hears)
     }
 }
 
@@ -225,6 +255,7 @@ fn agent<'a>(
             auto_rehome: true,
         },
         reasoning,
+        image_tokens: 1000,
     }
 }
 
@@ -716,4 +747,184 @@ fn compaction_on_request() {
             .unwrap(),
         Compaction::Nothing
     );
+}
+
+fn source(kind: media::Kind, bytes: &[u8], ext: &str) -> media::Source {
+    media::Source {
+        kind,
+        bytes: bytes.to_vec(),
+        ext: ext.into(),
+        name: format!("f.{ext}"),
+    }
+}
+
+/// Runs one turn of `message` in `session` against `script`.
+fn turn_in(
+    session: &mut Session,
+    script: &Script,
+    dir: &Dir,
+    message: &str,
+) -> Result<TurnEnd, Error> {
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    agent(&default, script, session, dir, None).turn(message, &mut Log::default())
+}
+
+#[test]
+fn an_image_becomes_the_marker_and_goes_with_the_request() {
+    let dir = Dir::new("image");
+    let script = Script::new(&[("I see it.", THOUGHT), ("A red square.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .unwrap();
+    let end = turn_in(&mut session, &script, &dir, "look at [Image#1] and [Image#9]");
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))));
+    // The known placeholder is the marker, the unknown one stays text, and
+    // the session still has the placeholder (D6).
+    assert_eq!(
+        script.users.borrow()[0],
+        "look at <__media_TEST__> and [Image#9]"
+    );
+    assert!(matches!(&session.events[1], Event::User(text) if text == "look at [Image#1] and [Image#9]"));
+    // Every generation of the step carries the bytes, base64.
+    let uploads = script.uploads.borrow();
+    assert!(uploads.iter().all(|u| *u == [media::base64(b"IMG")]));
+    assert_eq!(uploads.len(), 2);
+}
+
+#[test]
+fn a_picture_is_counted_by_its_bound() {
+    let dir = Dir::new("bound");
+    let script = Script::new(&[("Hm.", THOUGHT), ("Fine.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .unwrap();
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "default").unwrap();
+    let mut log = Log::default();
+    agent(&default, &script, &mut session, &dir, None)
+        .turn("see [Image#1]", &mut log)
+        .unwrap();
+    // 100 tokens of text, 1000 for the image (`image_tokens`, D10).
+    assert_eq!(log.1[0], 1100);
+    // Without media the count is the text's.
+    let script = Script::new(&[("Hm.", THOUGHT), ("Fine.", Stop::End)]);
+    let mut other = Session::create(&dir.0.join("sessions2"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    agent(&default, &script, &mut other, &dir, None)
+        .turn("no media", &mut log)
+        .unwrap();
+    assert_eq!(log.1[0], 100);
+}
+
+#[test]
+fn a_bound_that_does_not_fit_stops_the_turn() {
+    let dir = Dir::new("toolarge");
+    let script = Script::new(&[("Hm.", THOUGHT)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    for number in 1..=20 {
+        session
+            .store_media(&source(media::Kind::Image, &[number as u8], "png"), number, None)
+            .unwrap();
+    }
+    let all: Vec<String> = (1..=20).map(|n| format!("[Image#{n}]")).collect();
+    let end = turn_in(&mut session, &script, &dir, &all.join(" ")).unwrap();
+    assert!(matches!(end, TurnEnd::Stopped(StopReason::ContextFull)));
+}
+
+#[test]
+fn a_video_is_its_frames_each_after_its_time() {
+    let dir = Dir::new("video");
+    let script = Script::new(&[("Hm.", THOUGHT), ("A clip.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let media_dir = session.media_dir();
+    let first = media::put(&media_dir, b"F0", "jpg").unwrap();
+    let second = media::put(&media_dir, b"F1", "jpg").unwrap();
+    let clip = media::put(&media_dir, b"CLIP", "mp4").unwrap();
+    session
+        .append(Event::Media(media::Media {
+            kind: media::Kind::Video,
+            number: 1,
+            sha256: clip,
+            ext: "mp4".into(),
+            name: "c.mp4".into(),
+            transcript: None,
+            frames: vec![
+                media::Frame { at: 0.0, sha256: first },
+                media::Frame { at: 61.0, sha256: second },
+            ],
+        }))
+        .unwrap();
+    turn_in(&mut session, &script, &dir, "what is in [Video#1]?").unwrap();
+    assert_eq!(
+        script.users.borrow()[0],
+        "what is in [Video#1: frames 0:00 <__media_TEST__> 1:01 <__media_TEST__>]?"
+    );
+    assert_eq!(
+        script.uploads.borrow()[0],
+        [media::base64(b"F0"), media::base64(b"F1")]
+    );
+}
+
+#[test]
+fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
+    // With a transcript: text, nothing uploaded (D22).
+    let dir = Dir::new("audio");
+    let script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, Some("hello there".into()))
+        .unwrap();
+    turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
+    assert_eq!(script.users.borrow()[0], "[Audio#1: \"hello there\"]");
+    assert!(script.uploads.borrow()[0].is_empty());
+    // Without one, and the model hears: the marker and the audio (D19).
+    let mut script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    script.hears = true;
+    let mut session = Session::create(&dir.0.join("s2"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, None)
+        .unwrap();
+    turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
+    assert_eq!(script.users.borrow()[0], "<__media_TEST__>");
+    assert_eq!(script.uploads.borrow()[0], [media::base64(b"WAV")]);
+    // Without a transcript and a model that does not hear: said so.
+    let script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("s3"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, None)
+        .unwrap();
+    turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
+    assert_eq!(script.users.borrow()[0], "[Audio#1: not transcribed]");
+}
+
+#[test]
+fn an_image_without_a_projector_is_an_error_that_says_so() {
+    let dir = Dir::new("noproj");
+    let mut script = Script::new(&[]);
+    script.marker = None;
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .unwrap();
+    let end = turn_in(&mut session, &script, &dir, "[Image#1]");
+    assert!(matches!(end, Err(Error::NoMultimodal)));
+    // A text without media never asks for the marker.
+    let mut script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    script.marker = None;
+    let mut session = Session::create(&dir.0.join("s2"), "f", &dir.0).unwrap();
+    assert!(turn_in(&mut session, &script, &dir, "plain").is_ok());
+}
+
+#[test]
+fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
+    let dir = Dir::new("changed");
+    let script = Script::new(&[]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let kept = session
+        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .unwrap();
+    fs::write(kept.path(&session.media_dir()), b"other").unwrap();
+    let end = turn_in(&mut session, &script, &dir, "[Image#1]");
+    assert!(matches!(end, Err(Error::MediaChanged { .. })));
 }

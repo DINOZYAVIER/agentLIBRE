@@ -408,6 +408,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         history_file,
         reasoning,
         autostart,
+        image_tokens,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -510,6 +511,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         context,
                         forge,
                         reasoning,
+                        image_tokens,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -552,6 +554,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         context,
                         forge,
                         reasoning,
+                        image_tokens,
                     }
                     .turn(
                         &message,

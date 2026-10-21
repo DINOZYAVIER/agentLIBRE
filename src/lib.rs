@@ -70,6 +70,8 @@ pub struct Setup<'a> {
     /// The model's reasoning level (AGL-013); the REPL's `/think`
     /// changes it for the session.
     pub reasoning: Option<ReasoningLevel>,
+    /// The most tokens one picture takes (AGL-014, D10).
+    pub image_tokens: usize,
 }
 
 pub fn cli() -> ExitCode {
@@ -174,6 +176,10 @@ fn run(
         lang: *lang,
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
     };
+    let image_tokens = settings
+        .server
+        .image_max_tokens
+        .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
     let backend = Llama::new(&settings.server_url);
     let autostart = cli::serve::Autostart {
         llama: &backend,
@@ -223,6 +229,7 @@ fn run(
             forge,
             history_file: paths.history_file(),
             reasoning: args.reasoning,
+            image_tokens,
         };
         return if interactive {
             repl::run(setup)
@@ -242,6 +249,7 @@ fn run(
         context: context.expect("`-p` read the context size"),
         forge,
         reasoning: args.reasoning,
+        image_tokens,
     };
     match agent.turn(&message, &mut StderrReport::new(*lang))? {
         TurnEnd::Answer(text) => {

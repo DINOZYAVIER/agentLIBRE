@@ -41,10 +41,29 @@ pub struct ServerFile {
     pub context: Option<u32>,
     /// More llama-server arguments.
     pub args: Option<Vec<String>>,
+    /// The multimodal projector, a file name in the models directory
+    /// (AGL-014, D23).
+    pub mmproj: Option<String>,
+    /// Whether the projector runs on the GPU; true when unset (D9, D23).
+    pub mmproj_offload: Option<bool>,
+    /// The most tokens one image takes: passed to llama-server and the
+    /// bound of the context check (D10, D23).
+    pub image_max_tokens: Option<u32>,
 }
 
+/// `image_max_tokens` when `[server]` does not set it (AGL-014, D23).
+pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
+
 impl ServerFile {
-    const KEYS: &'static [&'static str] = &["url", "model", "context", "args"];
+    const KEYS: &'static [&'static str] = &[
+        "url",
+        "model",
+        "context",
+        "args",
+        "mmproj",
+        "mmproj_offload",
+        "image_max_tokens",
+    ];
 
     /// Reads the `[server]` table of the file `path`; `section` is what
     /// `Section::section("server")` returned.
@@ -79,11 +98,31 @@ impl ServerFile {
             })
             .transpose()?;
         let args = server.strings("args")?;
+        let mmproj = server.string("mmproj")?;
+        if let Some(mmproj) = &mmproj {
+            tomlfile::check_name(mmproj)?;
+        }
+        let mmproj_offload = server.bool("mmproj_offload")?;
+        let image_max_tokens = server
+            .integer("image_max_tokens")?
+            .map(|n| {
+                u32::try_from(n)
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .ok_or_else(|| Error::NotPositive {
+                        path: path.into(),
+                        key: server.key("image_max_tokens"),
+                    })
+            })
+            .transpose()?;
         Ok(ServerFile {
             url,
             model,
             context,
             args,
+            mmproj,
+            mmproj_offload,
+            image_max_tokens,
         })
     }
 
@@ -100,6 +139,9 @@ impl ServerFile {
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
             args: self.args.clone().or_else(|| defaults.args.clone()),
+            mmproj: self.mmproj.clone().or_else(|| defaults.mmproj.clone()),
+            mmproj_offload: self.mmproj_offload.or(defaults.mmproj_offload),
+            image_max_tokens: self.image_max_tokens.or(defaults.image_max_tokens),
         }
     }
 
@@ -122,6 +164,15 @@ impl ServerFile {
         if let Some(args) = &self.args {
             let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
             out.push_str(&format!("args = [{}]\n", items.join(", ")));
+        }
+        if let Some(mmproj) = &self.mmproj {
+            out.push_str(&format!("mmproj = {}\n", tomlfile::quote(mmproj)));
+        }
+        if let Some(offload) = self.mmproj_offload {
+            out.push_str(&format!("mmproj_offload = {offload}\n"));
+        }
+        if let Some(tokens) = self.image_max_tokens {
+            out.push_str(&format!("image_max_tokens = {tokens}\n"));
         }
         out
     }
@@ -360,8 +411,52 @@ mod tests {
                 model: Some("m.gguf".into()),
                 context: Some(8192),
                 args: Some(vec!["-ngl".into(), "999".into()]),
+                ..ServerFile::default()
             }
         );
+    }
+
+    #[test]
+    fn the_projector_keys() {
+        let file = user(
+            "[server]\nurl = \"http://x\"\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
+             image_max_tokens = 1024\n",
+        )
+        .unwrap()
+        .server;
+        assert_eq!(file.mmproj.as_deref(), Some("p.gguf"));
+        assert_eq!(file.mmproj_offload, Some(false));
+        assert_eq!(file.image_max_tokens, Some(1024));
+        // The project's keys win per key, and they render and parse back.
+        let defaults = ServerFile {
+            mmproj: Some("d.gguf".into()),
+            mmproj_offload: Some(true),
+            image_max_tokens: Some(512),
+            ..ServerFile::default()
+        };
+        let merged = file.over(&defaults);
+        assert_eq!(merged.mmproj.as_deref(), Some("p.gguf"));
+        assert_eq!(merged.mmproj_offload, Some(false));
+        assert_eq!(merged.image_max_tokens, Some(1024));
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &file.render());
+        assert_eq!(UserFile::load(&path).unwrap().server, file);
+        // Only an unset key falls back.
+        let bare = ServerFile::default().over(&defaults);
+        assert_eq!(bare, defaults);
+        // A name that is not a file name, or a cap below 1, is an error.
+        assert!(matches!(
+            user("[server]\nmmproj = \"a/b.gguf\""),
+            Err(Error::InvalidName(_))
+        ));
+        assert!(matches!(
+            user("[server]\nimage_max_tokens = 0"),
+            Err(Error::NotPositive { key, .. }) if key == "server.image_max_tokens"
+        ));
+        assert!(matches!(
+            user("[server]\nmmproj_offload = \"yes\""),
+            Err(Error::WrongType { key, .. }) if key == "server.mmproj_offload"
+        ));
     }
 
     /// `Settings::resolve` of a user file and a project's `[server]`.
@@ -380,6 +475,7 @@ mod tests {
             model: Some(model.into()),
             context: Some(context),
             args: Some(args.iter().map(|arg| (*arg).into()).collect()),
+            ..ServerFile::default()
         }
     }
 

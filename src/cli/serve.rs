@@ -196,7 +196,32 @@ pub fn start(
     let program = find_program("llama-server", path_var).ok_or(Error::LlamaServerNotFound)?;
     let context = server.settings.context.unwrap_or(DEFAULT_CONTEXT);
     let extra = server.settings.args.clone().unwrap_or_default();
-    let args = systemd_run_args(&server.unit, &program, &model, context, &host, port, &extra);
+    // The projector: its file, where it runs and the most tokens an
+    // image takes (AGL-014, D9, D23).
+    let mut projector: Vec<OsString> = Vec::new();
+    if let Some(name) = &server.settings.mmproj {
+        let file = models.join(name);
+        if !file.is_file() {
+            return Err(Error::ModelNotFound { path: file });
+        }
+        projector.extend(["--mmproj".into(), file.into_os_string()]);
+        if server.settings.mmproj_offload == Some(false) {
+            projector.push("--no-mmproj-offload".into());
+        }
+        let tokens = server
+            .settings
+            .image_max_tokens
+            .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
+        projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
+    }
+    let args = systemd_run_args(
+        &server.unit,
+        &program,
+        &model,
+        (context, &host, port),
+        &projector,
+        &extra,
+    );
     let output = Command::new("systemd-run")
         .args(&args)
         .stdin(Stdio::null())
@@ -428,9 +453,8 @@ fn systemd_run_args(
     unit: &str,
     program: &Path,
     model: &Path,
-    context: u32,
-    host: &str,
-    port: u16,
+    (context, host, port): (u32, &str, u16),
+    projector: &[OsString],
     extra: &[String],
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
@@ -459,6 +483,7 @@ fn systemd_run_args(
     ] {
         args.push(arg.into());
     }
+    args.extend(projector.iter().cloned());
     args.extend(extra.iter().map(OsString::from));
     args
 }
@@ -542,9 +567,8 @@ mod tests {
             "agentLIBRE-llama-server-60af300abea6",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
-            8192,
-            "127.0.0.1",
-            18080,
+            (8192, "127.0.0.1", 18080),
+            &[],
             &["-ngl".into(), "999".into()],
         );
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
@@ -574,6 +598,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_projector_flags_come_before_the_extra_arguments() {
+        let projector: Vec<OsString> = [
+            "--mmproj",
+            "/m/p.gguf",
+            "--no-mmproj-offload",
+            "--image-max-tokens",
+            "2048",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let args = systemd_run_args(
+            "agentLIBRE-llama-server-60af300abea6",
+            Path::new("/bin/llama-server"),
+            Path::new("/m/q.gguf"),
+            (65536, "127.0.0.1", 18080),
+            &projector,
+            &["-ngl".into(), "999".into()],
+        );
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        let tail = &args[args.len() - 7..];
+        assert_eq!(
+            tail,
+            ["--mmproj", "/m/p.gguf", "--no-mmproj-offload", "--image-max-tokens", "2048", "-ngl", "999"]
+        );
+        assert!(args.contains(&"65536"));
+    }
+
     use crate::forge::Workspace;
 
     /// A project registered under `origin`, with its own `[server]`.
@@ -600,6 +653,7 @@ mod tests {
             model: Some("big.gguf".into()),
             context: Some(131072),
             args: Some(vec!["-ngl".into(), "999".into()]),
+            ..ServerFile::default()
         };
         let own = ServerFile {
             url: Some("http://127.0.0.1:18081".into()),
