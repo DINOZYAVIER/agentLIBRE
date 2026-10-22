@@ -79,6 +79,12 @@ impl Report for StderrReport {
                 section = section.unwrap_or_default()
             ),
             ForgeKind::Removed => tr!(self.lang, m::FORGE_EVENT_REMOVED, name = name),
+            ForgeKind::StatusChanged => tr!(
+                self.lang,
+                m::FORGE_EVENT_STATUS,
+                name = name,
+                to = section.unwrap_or_default()
+            ),
         };
         eprintln!("{message}");
     }

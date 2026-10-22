@@ -1574,10 +1574,10 @@ Forge (сховище артефактів робочої області, agentL
     // The in-turn `forge` tool (AGL-008): the refusals are the
     // silly-mistakes protection.
 
-    /// The forge tool: an action outside the six.
+    /// The forge tool: an action outside the seven.
     pub const FORGE_TOOL_UNKNOWN_ACTION: Msg = Msg {
-        en: "unknown action {action}; the actions are list, show, new, edit, append, remove",
-        uk: "невідомий action {action}; action'и: list, show, new, edit, append, remove",
+        en: "unknown action {action}; the actions are list, show, new, edit, append, status, remove",
+        uk: "невідомий action {action}; action'и: list, show, new, edit, append, status, remove",
     };
 
     /// The forge tool: an action's field is missing.
@@ -1654,6 +1654,13 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_EVENT_REMOVED: Msg = Msg {
         en: "[forge: {name} removed]",
         uk: "[forge: {name} видалено]",
+    };
+
+    /// The agent's `forge status` moved a task-spec: the target state
+    /// rides the section slot.
+    pub const FORGE_EVENT_STATUS: Msg = Msg {
+        en: "[forge: {name} status {to}]",
+        uk: "[forge: {name} статус {to}]",
     };
 }
 
@@ -2217,6 +2224,15 @@ mod tests {
             "[forge: agl-009 removed]"
         );
         assert_eq!(
+            tr!(
+                Lang::En,
+                m::FORGE_EVENT_STATUS,
+                name = name,
+                to = "in-progress"
+            ),
+            "[forge: agl-009 status in-progress]"
+        );
+        assert_eq!(
             tr!(Lang::Uk, m::FORGE_EVENT_CREATED, name = name),
             "[forge: agl-009 створено]"
         );
@@ -2236,6 +2252,15 @@ mod tests {
         assert_eq!(
             tr!(Lang::Uk, m::FORGE_EVENT_REMOVED, name = name),
             "[forge: agl-009 видалено]"
+        );
+        assert_eq!(
+            tr!(
+                Lang::Uk,
+                m::FORGE_EVENT_STATUS,
+                name = name,
+                to = "in-progress"
+            ),
+            "[forge: agl-009 статус in-progress]"
         );
     }
 

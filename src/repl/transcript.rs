@@ -166,6 +166,12 @@ impl Presenter {
                 section = section.unwrap_or_default()
             ),
             ForgeKind::Removed => tr!(self.lang, m::FORGE_EVENT_REMOVED, name = name),
+            ForgeKind::StatusChanged => tr!(
+                self.lang,
+                m::FORGE_EVENT_STATUS,
+                name = name,
+                to = section.unwrap_or_default()
+            ),
         };
         self.screen
             .print(&[self.theme.paint(Role::Muted, &message)]);

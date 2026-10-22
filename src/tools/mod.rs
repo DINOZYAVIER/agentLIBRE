@@ -44,7 +44,7 @@ pub struct ForgeEnv {
 pub struct ForgeWrite {
     pub name: String,
     pub kind: ForgeKind,
-    /// The section of an append.
+    /// The section of an append or a status change.
     pub section: Option<String>,
 }
 
@@ -333,6 +333,7 @@ pub struct ForgeArgs {
     pub old: Option<String>,
     pub new: Option<String>,
     pub section: Option<String>,
+    pub state: Option<String>,
     pub text: Option<String>,
 }
 
@@ -354,6 +355,7 @@ fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
         old: field("old"),
         new: text("new").map(str::to_owned),
         section: field("section"),
+        state: field("state"),
         text: field("text"),
     }
 }
@@ -439,6 +441,11 @@ pub fn forge_run(
             forge_append(ws, &args.name, &args.section, &args.text, lang),
             ForgeKind::Appended,
             args.section.clone(),
+        ),
+        "status" => write(
+            forge_status(ws, &args.name, &args.state, lang),
+            ForgeKind::StatusChanged,
+            args.state.clone(),
         ),
         "remove" => write(forge_remove(ws, &args.name, lang), ForgeKind::Removed, None),
         other => (
@@ -729,6 +736,73 @@ fn forge_append(
     }
 }
 
+/// `forge status` (AGL-023): moves the task-spec through the lifecycle,
+/// the CLI's `forge status` in the tool's shape: the same transition
+/// validation, the same `updated` bump; task-specs only.
+fn forge_status(
+    ws: &crate::forge::Workspace,
+    name: &Option<String>,
+    state: &Option<String>,
+    lang: crate::i18n::Lang,
+) -> ToolResult {
+    use crate::error::Error;
+    use crate::forge::{self, task_spec};
+    use crate::forge::task_spec::Status;
+    use crate::i18n::m;
+    use crate::tr;
+    let Some(name) = name else {
+        return missing_field(lang, "status", "name");
+    };
+    let Some(state) = state else {
+        return missing_field(lang, "status", "state");
+    };
+    let mut artifact = match find_artifact(ws, name) {
+        Ok(artifact) => artifact,
+        Err(error) => return forge_fail(error.message(lang)),
+    };
+    if artifact.type_name != task_spec::TYPE {
+        return not_task_spec(lang, name, artifact.type_name.clone(), "status");
+    }
+    let from =
+        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
+    let to = match Status::parse(state) {
+        Some(to) => to,
+        None => {
+            return forge_fail(
+                Error::BadState {
+                    state: state.clone(),
+                }
+                .message(lang),
+            )
+        }
+    };
+    if from == to || !from.allows(to) {
+        return forge_fail(
+            Error::BadTransition {
+                from: from.name().to_string(),
+                to: to.name().to_string(),
+            }
+            .message(lang),
+        );
+    }
+    artifact.status = to.name().to_string();
+    artifact.updated = task_spec::today();
+    if let Err(error) = forge::write_artifact(&artifact) {
+        return forge_fail(error.message(lang));
+    }
+    ToolResult {
+        outcome: Outcome::Ok,
+        content: tr!(
+            lang,
+            m::FORGE_STATUS_CHANGED,
+            name = name,
+            from = from.name(),
+            to = to.name()
+        )
+        .to_owned(),
+    }
+}
+
 /// `forge remove` (AGL-008): deletes the artifact file; allowed while
 /// `open` only (a draft); `canceled` specs stay — they are records.
 fn forge_remove(
@@ -805,6 +879,7 @@ fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResu
         "new" => "title",
         "edit" => "name, old, new",
         "append" => "name, section, text",
+        "status" => "name, state",
         _ => "name",
     };
     forge_fail(tr!(

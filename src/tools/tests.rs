@@ -367,6 +367,7 @@ impl ForgeStore {
             old: field("old"),
             new: field("new"),
             section: field("section"),
+            state: field("state"),
             text: field("text"),
         };
         forge_run(&self.ws, &args, Lang::En)
@@ -431,13 +432,13 @@ fn forge_list_is_one_line_per_artifact() {
         "agl-001-a task-spec open 2026-01-01 deps=[]\n\
          agl-002-b task-spec in-progress 2026-01-01 deps=[]"
     );
-    // An action outside the six is refused.
+    // An action outside the seven is refused.
     assert_eq!(
         f.call("fly", &[]),
         ToolResult {
             outcome: Outcome::Fail,
             content: "unknown action fly; the actions are \
-                      list, show, new, edit, append, remove"
+                      list, show, new, edit, append, status, remove"
                 .into()
         }
     );
@@ -734,6 +735,112 @@ fn forge_append_is_a_bullet_under_the_section() {
         f.call("append", &[("name", "agl-001-p"), ("section", "Progress")])
             .content,
         "forge append: text is missing; append takes name, section, text"
+    );
+}
+
+#[test]
+fn forge_status_walks_the_lifecycle() {
+    let f = ForgeStore::new("forge-status");
+    let artifact = f.spec("agl-001-s", "open");
+    f.write(&artifact);
+    let body_before = forge::load_artifact(&artifact.path).unwrap().body.clone();
+    // The walk includes the parked state and its way back.
+    for (from, to) in [
+        ("open", "in-progress"),
+        ("in-progress", "backlog"),
+        ("backlog", "in-progress"),
+        ("in-progress", "done"),
+    ] {
+        let (result, write) =
+            f.call_write("status", &[("name", "agl-001-s"), ("state", to)]);
+        assert_eq!(
+            result,
+            ToolResult {
+                outcome: Outcome::Ok,
+                content: format!("agl-001-s: {from} to {to}"),
+            }
+        );
+        assert_eq!(
+            write,
+            Some(ForgeWrite {
+                name: "agl-001-s".into(),
+                kind: ForgeKind::StatusChanged,
+                section: Some(to.into()),
+            })
+        );
+        let moved = forge::load_artifact(&artifact.path).unwrap();
+        assert_eq!(moved.status, to);
+        assert_eq!(moved.updated, task_spec::today());
+    }
+    // The body is byte-identical through the walk.
+    assert_eq!(
+        forge::load_artifact(&artifact.path).unwrap().body,
+        body_before
+    );
+}
+
+#[test]
+fn forge_status_refuses_the_rest() {
+    let f = ForgeStore::new("forge-status-refuse");
+    let artifact = f.spec("agl-001-s", "open");
+    f.write(&artifact);
+    // The same state is a refused transition.
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "open")]).content,
+        "a task-spec cannot go from open to open"
+    );
+    // The terminal states refuse the way back.
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "in-progress")])
+            .outcome,
+        Outcome::Ok
+    );
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "done")]).outcome,
+        Outcome::Ok
+    );
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "open")]).content,
+        "a task-spec cannot go from done to open"
+    );
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "in-progress")])
+            .content,
+        "a task-spec cannot go from done to in-progress"
+    );
+    // An invalid state string.
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s"), ("state", "frozen")])
+            .content,
+        "frozen is not a task-spec state (open, in-progress, done, backlog, \
+         canceled)"
+    );
+    // The lifecycle is the task-spec's: a note is refused.
+    let note = f.note("a-note");
+    f.write(&note);
+    assert_eq!(
+        f.call("status", &[("name", "a-note"), ("state", "in-progress")])
+            .content,
+        "a-note is a note, not a task-spec; status applies to task-specs \
+         only"
+    );
+    // An absent artifact.
+    assert_eq!(
+        f.call("status", &[("name", "ghost"), ("state", "in-progress")])
+            .content,
+        format!(
+            "no artifact is named ghost in {}",
+            f.ws.dir.join("forge").display()
+        )
+    );
+    // The per-action fields are checked.
+    assert_eq!(
+        f.call("status", &[("state", "in-progress")]).content,
+        "forge status: name is missing; status takes name, state"
+    );
+    assert_eq!(
+        f.call("status", &[("name", "agl-001-s")]).content,
+        "forge status: state is missing; status takes name, state"
     );
 }
 
@@ -1069,6 +1176,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     let (result, _) = forge_in_paths(&paths, &to, env(Lang::Uk, true), &fly);
     assert_eq!(
         result.content,
-        "невідомий action fly; action'и: list, show, new, edit, append, remove"
+        "невідомий action fly; action'и: list, show, new, edit, append, status, \
+         remove"
     );
 }

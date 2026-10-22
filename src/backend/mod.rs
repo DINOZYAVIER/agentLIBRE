@@ -75,16 +75,21 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
         description: "The workspace forge: the store of the recorded artifacts of this \
                       workspace. Each action takes only its own fields: list (none); show \
                       (name); new (title); edit (name, old, new; drafts only); append \
-                      (name, section, text; in-progress specs only); remove (name; drafts \
-                      only).",
+                      (name, section, text; in-progress specs only); status (name, \
+                      state); remove (name; drafts only).",
         params: &[
-            ("action", false, Some("list, show, new, edit, append or remove."), true),
+            (
+                "action",
+                false,
+                Some("list, show, new, edit, append, status or remove."),
+                true,
+            ),
             (
                 "name",
                 false,
                 Some(
                     "The artifact's name as `list` shows it, like agl-001-my-task; not its \
-                     title. For show, edit, append and remove.",
+                     title. For show, edit, append, status and remove.",
                 ),
                 false,
             ),
@@ -106,6 +111,15 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
                 Some(
                     "For append: the heading to append under, without the `## `, like \
                      Progress. Not for edit.",
+                ),
+                false,
+            ),
+            (
+                "state",
+                false,
+                Some(
+                    "For status: the state to move the spec to (open, in-progress, \
+                     done, backlog, canceled).",
                 ),
                 false,
             ),

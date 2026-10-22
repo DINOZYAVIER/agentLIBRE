@@ -121,7 +121,7 @@ fn tool_schemas() {
     names.sort();
     assert_eq!(
         names,
-        ["action", "name", "new", "old", "section", "text", "title"]
+        ["action", "name", "new", "old", "section", "state", "text", "title"]
     );
     // Every field is a string with a description that says which action
     // it is for.

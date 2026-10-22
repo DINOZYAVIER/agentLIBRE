@@ -138,6 +138,7 @@ pub fn builtin_tools() -> Vec<Tool> {
                 optional("new"),
                 optional("old"),
                 optional("section"),
+                optional("state"),
                 optional("text"),
                 optional("title"),
             ],

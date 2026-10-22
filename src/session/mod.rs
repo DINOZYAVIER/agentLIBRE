@@ -63,14 +63,17 @@ pub enum ForgeKind {
     Appended,
     /// `forge remove` deleted the draft.
     Removed,
+    /// `forge status` moved a task-spec.
+    StatusChanged,
 }
 
 impl ForgeKind {
-    const ALL: [ForgeKind; 4] = [
+    const ALL: [ForgeKind; 5] = [
         ForgeKind::Created,
         ForgeKind::Edited,
         ForgeKind::Appended,
         ForgeKind::Removed,
+        ForgeKind::StatusChanged,
     ];
 
     fn name(self) -> &'static str {
@@ -79,6 +82,7 @@ impl ForgeKind {
             ForgeKind::Edited => "edited",
             ForgeKind::Appended => "appended",
             ForgeKind::Removed => "removed",
+            ForgeKind::StatusChanged => "status-changed",
         }
     }
 }
@@ -101,7 +105,8 @@ pub enum Event {
         content: String,
     },
     /// A write of the agent's forge tool (AGL-008): the artifact's
-    /// name, the kind of the write and, for an append, the section.
+    /// name, the kind of the write and, for an append or a status
+    /// change, the section.
     Forge {
         name: String,
         kind: ForgeKind,
@@ -665,7 +670,7 @@ fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Val
         "view" => &["path"],
         "search" => &["language", "limit", "query", "source"],
         "memory" => &["action", "hook", "name", "new", "old", "text", "title"],
-        "forge" => &["action", "name", "new", "old", "section", "text", "title"],
+        "forge" => &["action", "name", "new", "old", "section", "state", "text", "title"],
         _ => &[],
     };
     args.sort_by_key(|(name, _)| order.iter().position(|o| o == name).unwrap_or(usize::MAX));
