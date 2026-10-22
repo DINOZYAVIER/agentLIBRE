@@ -1274,6 +1274,7 @@ mod tests {
             function: Some("coder".into()),
             server: ServerFile {
                 url: Some("http://127.0.0.1:18081".into()),
+                engine: Some("llama-server".into()),
                 model: Some("q.gguf".into()),
                 context: Some(65536),
                 args: Some(vec!["-ngl".into(), "999".into()]),

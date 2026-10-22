@@ -40,6 +40,9 @@ pub struct UserFile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerFile {
     pub url: Option<String>,
+    /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
+    /// `None` is the default `llama-server`.
+    pub engine: Option<String>,
     /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
     pub model: Option<String>,
     pub context: Option<u32>,
@@ -262,6 +265,7 @@ pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
 impl ServerFile {
     const KEYS: &'static [&'static str] = &[
         "url",
+        "engine",
         "model",
         "context",
         "args",
@@ -286,6 +290,7 @@ impl ServerFile {
                 url: url.clone(),
             });
         }
+        let engine = server.string("engine")?;
         let model = server.string("model")?;
         if let Some(model) = &model {
             tomlfile::check_name(model)?;
@@ -322,6 +327,7 @@ impl ServerFile {
             .transpose()?;
         Ok(ServerFile {
             url,
+            engine,
             model,
             context,
             args,
@@ -341,6 +347,7 @@ impl ServerFile {
     pub fn over(&self, defaults: &ServerFile) -> ServerFile {
         ServerFile {
             url: self.url.clone().or_else(|| defaults.url.clone()),
+            engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
             args: self.args.clone().or_else(|| defaults.args.clone()),
@@ -359,6 +366,9 @@ impl ServerFile {
         let mut out = String::from("\n[server]\n");
         if let Some(url) = &self.url {
             out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+        }
+        if let Some(engine) = &self.engine {
+            out.push_str(&format!("engine = {}\n", tomlfile::quote(engine)));
         }
         if let Some(model) = &self.model {
             out.push_str(&format!("model = {}\n", tomlfile::quote(model)));
@@ -849,6 +859,27 @@ mod tests {
             user("[server]\nmmproj_offload = \"yes\""),
             Err(Error::WrongType { key, .. }) if key == "server.mmproj_offload"
         ));
+    }
+
+    #[test]
+    fn the_engine_key() {
+        let file = user("[server]\nurl = \"http://x\"\nengine = \"vulkan-server\"\n")
+            .unwrap()
+            .server;
+        assert_eq!(file.engine.as_deref(), Some("vulkan-server"));
+        // The project's key wins per key, and it renders and parses back.
+        let defaults = ServerFile {
+            engine: Some("d-engine".into()),
+            ..ServerFile::default()
+        };
+        let merged = file.over(&defaults);
+        assert_eq!(merged.engine.as_deref(), Some("vulkan-server"));
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &file.render());
+        assert_eq!(UserFile::load(&path).unwrap().server, file);
+        // Only an unset key falls back.
+        let bare = ServerFile::default().over(&defaults);
+        assert_eq!(bare.engine.as_deref(), Some("d-engine"));
     }
 
     /// `Settings::resolve` of a user file and a project's `[server]`.
