@@ -86,9 +86,6 @@ struct State {
     context_used: Option<usize>,
     /// The voice input, in the separator row (AGL-016).
     voice: Option<VoiceLabel>,
-    /// A yes/no question to the human, one row above the separator
-    /// (AGL-015, D17).
-    question: Option<String>,
     /// The decoding speed of the current generation (AGL-012).
     speed: Option<f64>,
     editor: Editor,
@@ -126,7 +123,6 @@ impl Dock {
                 workspace,
                 context: 0,
                 context_used: None,
-                question: None,
                 voice: None,
                 speed: None,
                 editor,
@@ -174,14 +170,6 @@ impl Dock {
             state.voice = voice;
             state.redraw("");
         }
-    }
-
-    /// Shows `question` in a row of the dock, or removes it (AGL-015,
-    /// D17).
-    pub fn set_question(&self, question: Option<&str>) {
-        let mut state = self.lock();
-        state.question = question.map(str::to_owned);
-        state.redraw("");
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -384,10 +372,6 @@ impl State {
         let mut rows = Vec::new();
         if !self.live.is_empty() {
             rows.push(self.live.clone());
-        }
-        if let Some(question) = &self.question {
-            let text = truncate(question, columns.saturating_sub(1));
-            rows.push(theme.paint(Role::StatusPending, &text));
         }
         rows.push(self.separator());
         rows.push(background_row(theme, &[], columns));
@@ -768,19 +752,6 @@ mod tests {
         assert_eq!(context_usage(Some(699), 1000).1, Role::Muted);
         assert_eq!(grouped(7), "7");
         assert_eq!(grouped(1000), "1\u{a0}000");
-    }
-
-    #[test]
-    fn a_question_is_a_row_above_the_separator_until_it_is_removed() {
-        let (dock, _) = dock(80, 20);
-        let before = dock.lock().layout().rows.len();
-        dock.set_question(Some("A server runs. Start one more? [y/N]"));
-        let layout = dock.lock().layout();
-        assert_eq!(layout.rows.len(), before + 1);
-        assert!(layout.rows[0].contains("Start one more? [y/N]"));
-        assert!(layout.rows[1].starts_with('─'));
-        dock.set_question(None);
-        assert_eq!(dock.lock().layout().rows.len(), before);
     }
 
     #[test]
