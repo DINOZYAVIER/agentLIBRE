@@ -1,11 +1,15 @@
 //! `agl server start|stop|status` and the autostart: the project's
-//! llama-server as a transient systemd user unit (D146-D150, AGL-015).
+//! llama-server as a transient systemd user unit (D146-D150, AGL-015),
+//! or, on the agent command's path, the inference engine as a background
+//! child of agl (AGL-024).
 
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +34,15 @@ const POLL: Duration = Duration::from_millis(500);
 
 /// Hosts `start` can run llama-server on (D148).
 const LOCAL_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
+
+/// The engine's binary name when `[server] engine` does not set one
+/// (AGL-024, D5).
+const DEFAULT_ENGINE: &str = "llama-server";
+
+/// How long `Engine::shutdown` waits after `SIGTERM` before `SIGKILL`
+/// (AGL-024, D3): the `GRACE` of the bash tool.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 
 /// What `/health` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,27 +219,12 @@ pub fn start(
     if !model.is_file() {
         return Err(Error::ModelNotFound { path: model });
     }
-    let program = find_program("llama-server", path_var).ok_or(Error::LlamaServerNotFound)?;
+    let program = find_program(DEFAULT_ENGINE, path_var).ok_or_else(|| Error::EngineNotFound {
+        engine: DEFAULT_ENGINE.to_owned(),
+    })?;
     let context = server.settings.context.unwrap_or(DEFAULT_CONTEXT);
     let extra = server.settings.args.clone().unwrap_or_default();
-    // The projector: its file, where it runs and the most tokens an
-    // image takes (AGL-014, D9, D23).
-    let mut projector: Vec<OsString> = Vec::new();
-    if let Some(name) = &server.settings.mmproj {
-        let file = models.join(name);
-        if !file.is_file() {
-            return Err(Error::ModelNotFound { path: file });
-        }
-        projector.extend(["--mmproj".into(), file.into_os_string()]);
-        if server.settings.mmproj_offload == Some(false) {
-            projector.push("--no-mmproj-offload".into());
-        }
-        let tokens = server
-            .settings
-            .image_max_tokens
-            .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
-        projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
-    }
+    let projector = projector_args(&server.settings, models)?;
     let args = systemd_run_args(
         &server.unit,
         &program,
@@ -295,32 +293,211 @@ pub struct Autostart<'a> {
     pub models: PathBuf,
     pub path_var: Option<OsString>,
     pub lang: Lang,
+    /// The engine child agl launched itself (AGL-024, D2, D3): `None`
+    /// while agl uses a server it does not own.
+    pub engine: Arc<Mutex<Option<Engine>>>,
 }
 
 impl Autostart<'_> {
     /// Returns when the server answers: it did, it was loading and is
-    /// ready now, or it is started. `say` takes the progress lines.
-    /// Outside a registered project, with no server, it is an error
-    /// (D14).
-    pub fn ensure(&self, others: &Others, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+    /// ready now, or agl launched it itself as a background child
+    /// (AGL-024, D2). `say` takes the progress lines.
+    pub fn ensure(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let llama = self.llama;
         match health(llama) {
             Health::Ready => Ok(()),
             // Someone loads it now: wait for it, as `start` does.
             Health::Loading => wait_ready(llama, None, &m::SERVER_READY, say, self.lang),
+            // Connection refused: launch the engine as a background child
+            // (AGL-024, D2); a foreign process on the port is an error,
+            // not a target.
             Health::Down => {
-                let server = Server::of(self.project, self.settings, &self.user_path)?;
-                start(
-                    &server,
+                let log = self.project.dir.join("server.log");
+                let engine = Engine::launch(
+                    self.settings,
+                    llama.url(),
+                    &self.user_path,
+                    &self.project.dir.join(crate::forge::MARKER_FILE),
                     &self.models,
                     self.path_var.clone(),
-                    llama,
-                    others,
-                    say,
-                    self.lang,
-                )
+                    &log,
+                )?;
+                let mut guard = self.engine.lock().unwrap();
+                *guard = Some(engine);
+                let engine = guard.as_mut().expect("the engine just launched");
+                wait_child_ready(llama, engine, &log, say, self.lang)
             }
         }
+    }
+}
+
+/// The inference engine agl launched itself as a background child
+/// (AGL-024, D2, D6): the child and how to end it (D3).
+pub struct Engine {
+    child: Child,
+    /// Whether the child is already reaped (by `is_alive` or `shutdown`).
+    dead: bool,
+}
+
+impl Engine {
+    /// Launches the engine of `settings` on `url` (AGL-024, D2, D5):
+    /// the binary the `engine` key names (default `llama-server`), found
+    /// on `path_var`; the model in `models`; the arguments of the
+    /// `[server]` settings; the child's output to the log file `log`,
+    /// appended on each launch. A foreign process on the port is an
+    /// error, not a target (D2).
+    pub fn launch(
+        settings: &ServerFile,
+        url: &str,
+        user_path: &Path,
+        project_path: &Path,
+        models: &Path,
+        path_var: Option<OsString>,
+        log: &Path,
+    ) -> Result<Engine, Error> {
+        let (host, port) =
+            local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+        if port_open(&host, port) {
+            return Err(Error::PortBusy {
+                url: url.into(),
+                units: Vec::new(),
+            });
+        }
+        let model = settings
+            .model
+            .as_deref()
+            .ok_or_else(|| Error::MissingModel {
+                user_path: user_path.into(),
+                project_path: project_path.into(),
+                models: models.into(),
+            })?;
+        let model = models.join(model);
+        if !model.is_file() {
+            return Err(Error::ModelNotFound { path: model });
+        }
+        let engine = settings
+            .engine
+            .as_deref()
+            .unwrap_or(DEFAULT_ENGINE)
+            .to_owned();
+        let program = find_program(&engine, path_var)
+            .ok_or_else(|| Error::EngineNotFound { engine: engine.clone() })?;
+        let context = settings.context.unwrap_or(DEFAULT_CONTEXT);
+        let extra = settings.args.clone().unwrap_or_default();
+        let projector = projector_args(settings, models)?;
+        let log_out = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|source| Error::Write {
+                path: log.into(),
+                source,
+            })?;
+        let log_err = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|source| Error::Write {
+                path: log.into(),
+                source,
+            })?;
+        // `engine_args` is the single source of the command (D4): the
+        // program first, then the arguments. `Command::new` takes the
+        // program, the rest are the arguments.
+        let command =
+            engine_args(&program, &model, (context, &host, port), &projector, &extra);
+        let child = Command::new(&command[0])
+            .args(&command[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log_out))
+            .stderr(Stdio::from(log_err))
+            .spawn()
+            .map_err(|source| Error::EngineSpawn {
+                engine,
+                source,
+            })?;
+        Ok(Engine {
+            child,
+            dead: false,
+        })
+    }
+
+    /// The child's process id.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Whether the child runs; a reaped child is not (the exit status is
+    /// taken here, so `shutdown` does not wait on it again).
+    pub fn is_alive(&mut self) -> bool {
+        if self.dead {
+            return false;
+        }
+        match self.child.try_wait() {
+            Ok(Some(_)) => {
+                self.dead = true;
+                false
+            }
+            Ok(None) => true,
+            // The child is gone (as `ECHILD` says): not alive.
+            Err(_) => {
+                self.dead = true;
+                false
+            }
+        }
+    }
+
+    /// Ends the child (AGL-024, D3): `SIGTERM`, the grace of the bash
+    /// tool, then `SIGKILL`.
+    pub fn shutdown(mut self) {
+        if self.dead {
+            return;
+        }
+        let pid = self.child.id() as libc::pid_t;
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while self.is_alive() {
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                let _ = self.child.wait();
+                self.dead = true;
+                return;
+            }
+            thread::sleep(SHUTDOWN_POLL);
+        }
+    }
+}
+
+/// Waits until the engine agl launched answers ready (AGL-024, D2): the
+/// same timeout and polling as `wait_ready`; the engine's own output is
+/// in the log file the errors point at.
+fn wait_child_ready(
+    llama: &Llama,
+    engine: &mut Engine,
+    log: &Path,
+    say: &mut dyn FnMut(&str),
+    lang: Lang,
+) -> Result<(), Error> {
+    let started = Instant::now();
+    loop {
+        if health(llama) == Health::Ready {
+            say(&tr!(lang, m::SERVER_READY, url = llama.url()));
+            return Ok(());
+        }
+        if !engine.is_alive() {
+            return Err(Error::EngineDied { log: log.into() });
+        }
+        if started.elapsed() >= READY_TIMEOUT {
+            return Err(Error::EngineTimeout {
+                seconds: READY_TIMEOUT.as_secs(),
+                log: log.into(),
+            });
+        }
+        thread::sleep(POLL);
     }
 }
 
@@ -451,6 +628,27 @@ pub(super) fn local_address(url: &str) -> Option<(String, u16)> {
     LOCAL_HOSTS.contains(&host).then(|| (host.to_owned(), port))
 }
 
+/// The projector arguments of `[server]`: its file, where it runs and
+/// the most tokens an image takes (AGL-014, D9, D23).
+pub(super) fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec<OsString>, Error> {
+    let mut projector: Vec<OsString> = Vec::new();
+    if let Some(name) = &settings.mmproj {
+        let file = models.join(name);
+        if !file.is_file() {
+            return Err(Error::ModelNotFound { path: file });
+        }
+        projector.extend(["--mmproj".into(), file.into_os_string()]);
+        if settings.mmproj_offload == Some(false) {
+            projector.push("--no-mmproj-offload".into());
+        }
+        let tokens = settings
+            .image_max_tokens
+            .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
+        projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
+    }
+    Ok(projector)
+}
+
 /// The first executable `name` in `path_var` (D147).
 pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -463,27 +661,19 @@ pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<Pat
         })
 }
 
-/// The arguments of `systemd-run`: `unit`, then llama-server with the
-/// arguments agl needs and those of `[server] args` (D147, D148).
-fn systemd_run_args(
-    unit: &str,
-    program: &Path,
+/// The arguments of the inference engine: the program, the model, the
+/// context, the local address, `--jinja`, one process, the projector,
+/// the extra of `[server] args` (AGL-024, D4): the one source of the
+/// launch arguments, the systemd and the child paths alike.
+pub(super) fn engine_args(
+    engine: &Path,
     model: &Path,
     (context, host, port): (u32, &str, u16),
     projector: &[OsString],
     extra: &[String],
 ) -> Vec<OsString> {
-    let mut args: Vec<OsString> = [
-        "--user",
-        &format!("--unit={unit}"),
-        "--collect",
-        "--quiet",
-        "--",
-    ]
-    .iter()
-    .map(OsString::from)
-    .collect();
-    args.push(program.into());
+    let mut args: Vec<OsString> = Vec::new();
+    args.push(engine.into());
     args.push("-m".into());
     args.push(model.into());
     for arg in [
@@ -501,6 +691,32 @@ fn systemd_run_args(
     }
     args.extend(projector.iter().cloned());
     args.extend(extra.iter().map(OsString::from));
+    args
+}
+
+/// The arguments of `systemd-run`: `unit`, then the engine with the
+/// arguments of `engine_args` (D147, D148, AGL-024).
+fn systemd_run_args(
+    unit: &str,
+    engine: &Path,
+    model: &Path,
+    (context, host, port): (u32, &str, u16),
+    projector: &[OsString],
+    extra: &[String],
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "--user",
+        &format!("--unit={unit}"),
+        "--collect",
+        "--quiet",
+        "--",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    args.extend(engine_args(
+        engine, model, (context, host, port), projector, extra,
+    ));
     args
 }
 
@@ -641,6 +857,128 @@ mod tests {
             ["--mmproj", "/m/p.gguf", "--no-mmproj-offload", "--image-max-tokens", "2048", "-ngl", "999"]
         );
         assert!(args.contains(&"65536"));
+    }
+
+    #[test]
+    fn engine_args_are_the_systemd_tail_after_the_prefix() {
+        let systemd = systemd_run_args(
+            "agentLIBRE-llama-server-60af300abea6",
+            Path::new("/bin/llama-server"),
+            Path::new("/m/q.gguf"),
+            (8192, "127.0.0.1", 18080),
+            &[],
+            &["-ngl".into(), "999".into()],
+        );
+        let engine = engine_args(
+            Path::new("/bin/llama-server"),
+            Path::new("/m/q.gguf"),
+            (8192, "127.0.0.1", 18080),
+            &[],
+            &["-ngl".into(), "999".into()],
+        );
+        // The systemd prefix is `--user --unit=… --collect --quiet --`;
+        // the engine arguments are the rest (AGL-024, D4).
+        assert_eq!(systemd.len(), 5 + engine.len());
+        let tail: Vec<&OsString> = systemd.iter().skip(5).collect();
+        let engine: Vec<&OsString> = engine.iter().collect();
+        assert_eq!(tail, engine);
+    }
+
+    /// A free port for a test: bound, then closed.
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    /// A unique tag per call, so the parallel tests do not share a dir.
+    static FAKE_ENGINE_SETUP: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// A `fake-engine` script in a temp `bin`, a model file in a temp
+    /// `models` (AGL-024 tests).
+    fn fake_engine_setup() -> (PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tag = FAKE_ENGINE_SETUP.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "agentLIBRE-engine-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let bin = dir.join("bin");
+        let models = dir.join("models");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&models).unwrap();
+        let engine = bin.join("fake-engine");
+        fs::write(&engine, "#!/bin/sh\nexec sleep 600\n").unwrap();
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(models.join("m.gguf"), "").unwrap();
+        (dir, bin, models)
+    }
+
+    #[test]
+    fn launch_with_a_script_engine_spawns_and_shut_down_ends_it() {
+        let (dir, bin, models) = fake_engine_setup();
+        let url = format!("http://127.0.0.1:{}", free_port());
+        let settings = ServerFile {
+            url: Some(url.clone()),
+            model: Some("m.gguf".into()),
+            engine: Some("fake-engine".into()),
+            ..ServerFile::default()
+        };
+        let log = dir.join("store").join("server.log");
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let mut engine = Engine::launch(
+            &settings,
+            &url,
+            &dir,
+            &dir,
+            &models,
+            Some(bin.into_os_string()),
+            &log,
+        )
+        .unwrap();
+        let pid = engine.pid();
+        assert!(engine.is_alive());
+        engine.shutdown();
+        // The child was reaped: its pid is gone.
+        assert!(!process_alive(pid));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Whether `pid` names a running process the caller may signal.
+    fn process_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[test]
+    fn launch_refuses_a_busy_port() {
+        let (dir, bin, models) = fake_engine_setup();
+        // A foreign process answers on the port.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let settings = ServerFile {
+            url: Some(url.clone()),
+            model: Some("m.gguf".into()),
+            engine: Some("fake-engine".into()),
+            ..ServerFile::default()
+        };
+        let result = Engine::launch(
+            &settings,
+            &url,
+            &dir,
+            &dir,
+            &models,
+            Some(bin.into_os_string()),
+            &dir.join("server.log"),
+        );
+        drop(listener);
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(
+            result,
+            Err(Error::PortBusy { url: busy, .. }) if busy == url
+        ));
     }
 
     use crate::forge::Workspace;
@@ -805,6 +1143,7 @@ mod tests {
             models: PathBuf::from("/m"),
             path_var: None,
             lang: Lang::En,
+            engine: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -817,7 +1156,7 @@ mod tests {
         let settings = ServerFile::default();
         let mut said = Vec::new();
         autostart(&llama, &ws, &settings)
-            .ensure(&Others::Refuse, &mut |line| said.push(line.to_owned()))
+            .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
         assert!(said.is_empty());
     }
@@ -830,14 +1169,15 @@ mod tests {
         let settings = ServerFile::default();
         let mut said = Vec::new();
         autostart(&llama, &ws, &settings)
-            .ensure(&Others::Refuse, &mut |line| said.push(line.to_owned()))
+            .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
         assert_eq!(said, [format!("llama-server is ready at {url}")]);
     }
 
     #[test]
-    fn no_server_outside_a_registered_project_is_an_error_and_starts_nothing() {
-        // Nothing listens here: the port was just closed.
+    fn outside_a_registered_project_the_launch_proceeds_and_fails_on_the_model() {
+        // Nothing listens here: the port was just closed, so the auto path
+        // launches (it needs no unit, AGL-024) and fails on the model file.
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
@@ -850,8 +1190,11 @@ mod tests {
         };
         let mut said = Vec::new();
         let result = autostart(&llama, &ws, &settings)
-            .ensure(&Others::Yes, &mut |line| said.push(line.to_owned()));
-        assert!(matches!(result, Err(Error::ProjectNotRegistered { .. })));
+            .ensure(&mut |line| said.push(line.to_owned()));
+        assert!(matches!(
+            result,
+            Err(Error::ModelNotFound { path }) if path == Path::new("/m/m.gguf")
+        ));
         assert!(said.is_empty());
     }
 }

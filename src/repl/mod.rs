@@ -27,7 +27,6 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::{ReasoningLevel, ToolCall};
-use crate::cli::serve::Others;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
@@ -68,9 +67,6 @@ struct Inner {
     info: Info,
     /// The model's reasoning level (AGL-013); it survives `/new`.
     reasoning: Option<ReasoningLevel>,
-    /// A yes/no question to the human: `Some(None)` is asked, `Some(Some(a))`
-    /// answered (AGL-015, D17).
-    question: Option<Option<bool>>,
 }
 
 /// What the input thread and the turn thread share (D119).
@@ -123,26 +119,6 @@ impl Control {
         self.lock().info.state = state;
     }
 
-    /// Asks the human a yes/no question in the dock and waits for the
-    /// answer (AGL-015, D17); `no` when the session ends meanwhile.
-    fn ask(&self, dock: &Dock, question: &str) -> bool {
-        self.lock().question = Some(None);
-        dock.set_question(Some(question));
-        let mut inner = self.lock();
-        let answer = loop {
-            if let Some(Some(answer)) = inner.question {
-                break answer;
-            }
-            if inner.quit {
-                break false;
-            }
-            inner = self.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
-        };
-        inner.question = None;
-        drop(inner);
-        dock.set_question(None);
-        answer
-    }
 }
 
 impl From<&str> for Queued {
@@ -385,31 +361,7 @@ impl Input {
         self.control.wake.notify_all();
     }
 
-    /// While a question is open the keys answer it: `y` is yes, `n`, Enter,
-    /// Escape, Ctrl-C and Ctrl-D are no, the others are ignored
-    /// (AGL-015, D17). Whether the key was taken.
-    fn answer_question(&self, key: &Key) -> bool {
-        let mut inner = self.control.lock();
-        if !matches!(inner.question, Some(None)) {
-            return false;
-        }
-        let answer = match key {
-            Key::Char('y' | 'Y') => Some(true),
-            Key::Char('n' | 'N') | Key::Enter | Key::Escape | Key::Ctrl('c' | 'd') => Some(false),
-            _ => None,
-        };
-        if answer.is_some() {
-            inner.question = Some(answer);
-            drop(inner);
-            self.control.wake.notify_all();
-        }
-        true
-    }
-
     fn key(&self, key: Key) {
-        if self.answer_question(&key) {
-            return;
-        }
         if self.voice.recording() && matches!(key, Key::Escape | Key::Ctrl('c')) {
             // Not a stop of the turn: only the recording is cancelled (D2).
             self.voice.cancel();
@@ -756,17 +708,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 // The running turn keeps the level it started with (AGL-013).
                 let reasoning = control.lock().reasoning;
                 // The server is started here when it does not answer, at
-                // the first request, and its context size read (AGL-015).
-                let ready = {
-                    let ask = |units: &[String]| {
-                        control.ask(&dock, &crate::i18n::server::others_running(units, lang))
-                    };
-                    autostart
-                        .ensure(&Others::Ask(&ask), &mut |line| {
-                            presenter.show_notice(line, Role::Muted)
-                        })
-                        .and_then(|()| backend.context_size())
-                };
+                // the first request, and its context size read (AGL-015,
+                // AGL-024).
+                let ready = autostart
+                    .ensure(&mut |line| {
+                        presenter.show_notice(line, Role::Muted)
+                    })
+                    .and_then(|()| backend.context_size());
                 let result = ready.and_then(|context| {
                     dock.set_context_size(context);
                     control.lock().info.context = Some(context);
@@ -1070,65 +1018,6 @@ mod tests {
         // The history file holds what was sent.
         let history = editor::load_history(&f.input.history_file);
         assert_eq!(history, ["hello", "second"]);
-    }
-
-    /// Asks `question` on another thread, as the turn thread does, and
-    /// waits until it is open.
-    fn ask_on_a_thread(f: &Fixture, question: &str) -> thread::JoinHandle<bool> {
-        let (control, dock) = (f.input.control.clone(), f.input.dock.clone());
-        let question = question.to_owned();
-        let handle = thread::spawn(move || control.ask(&dock, &question));
-        let started = std::time::Instant::now();
-        while f.inner().question != Some(None) {
-            assert!(started.elapsed().as_secs() < 5, "the question did not open");
-            thread::sleep(std::time::Duration::from_millis(5));
-        }
-        handle
-    }
-
-    #[test]
-    fn a_question_in_the_dock_is_answered_with_y_or_n() {
-        let f = fixture();
-        let handle = ask_on_a_thread(&f, "A server runs. Start one more? [y/N]");
-        // The question is a row of the dock.
-        assert!(f.output().contains("A server runs. Start one more? [y/N]"));
-        // Other keys are ignored and do not reach the editor; Ctrl-C
-        // does not stop a turn but answers no.
-        f.type_text("x");
-        f.input.key(Key::Left);
-        assert!(f.input.dock.input_is_empty());
-        assert_eq!(f.inner().question, Some(None));
-        f.input.key(Key::Char('y'));
-        assert!(handle.join().unwrap());
-        assert_eq!(f.inner().question, None);
-        // The question is gone from the dock, and typing works again.
-        f.type_text("hi");
-        assert!(!f.input.dock.input_is_empty());
-
-        for key in [
-            Key::Char('n'),
-            Key::Char('N'),
-            Key::Enter,
-            Key::Escape,
-            Key::Ctrl('c'),
-            Key::Ctrl('d'),
-        ] {
-            let handle = ask_on_a_thread(&f, "Start one more? [y/N]");
-            f.input.key(key.clone());
-            assert!(!handle.join().unwrap(), "{key:?}");
-        }
-        // Ctrl-C at the question is not an interrupt of a turn.
-        assert_eq!(f.stops.load(Ordering::SeqCst), 0);
-        assert_eq!(f.exits.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn a_question_is_no_when_the_session_ends() {
-        let f = fixture();
-        let handle = ask_on_a_thread(&f, "Start one more? [y/N]");
-        f.inner().quit = true;
-        f.input.control.wake.notify_all();
-        assert!(!handle.join().unwrap());
     }
 
     /// The text of the line being written.

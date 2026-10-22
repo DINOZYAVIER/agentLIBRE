@@ -9,7 +9,6 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::cli::report::StderrReport;
-use crate::cli::serve::Others;
 use crate::error::Error;
 use crate::i18n::{m, repl as texts};
 use crate::interrupt;
@@ -34,7 +33,6 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         reasoning,
         autostart,
         search,
-        yes,
         image_tokens,
         memory,
         ..
@@ -45,9 +43,6 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
-    // Nobody can be asked on stdin: another project's server running
-    // is a refusal unless `--yes` (AGL-015, D13, D16).
-    let others = if yes { Others::Yes } else { Others::Refuse };
     interrupt::install();
     eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
     let mut state: Option<String> = None;
@@ -179,9 +174,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         placeholders.clear();
         let attached = std::mem::take(&mut pending);
         // The server is started here when it does not answer, at the
-        // first request (AGL-015, D10).
+        // first request (AGL-015, D10, AGL-024).
         let ready = autostart
-            .ensure(&others, &mut |line| eprintln!("{line}"))
+            .ensure(&mut |line| eprintln!("{line}"))
             .and_then(|()| backend.context_size());
         let end = ready.and_then(|size| {
             context = Some(size);

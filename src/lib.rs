@@ -32,6 +32,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use agent::{Agent, TurnEnd};
 use backend::Backend;
@@ -48,6 +49,31 @@ use session::{Session, StopReason};
 use settings::{ReplSettings, Settings, UserFile};
 use theme::Theme;
 
+/// Closes the engine agl launched itself (AGL-024, D3): when the guard
+/// drops, the child in the field is shut down. It lives to the end of the
+/// agent command, so every return — normal exit, an error, an interrupted
+/// turn — closes the engine; a pre-existing server is not in the field and
+/// keeps running.
+struct EngineGuard {
+    engine: Arc<Mutex<Option<cli::serve::Engine>>>,
+}
+
+impl EngineGuard {
+    fn new(autostart: &cli::serve::Autostart<'_>) -> Self {
+        EngineGuard {
+            engine: Arc::clone(&autostart.engine),
+        }
+    }
+}
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.lock().unwrap().take() {
+            engine.shutdown();
+        }
+    }
+}
+
 /// Everything a session needs.
 pub struct Setup<'a> {
     pub function: &'a Function,
@@ -63,8 +89,6 @@ pub struct Setup<'a> {
     pub server_url: &'a str,
     /// Brings the server up when a request finds none (AGL-015).
     pub autostart: &'a cli::serve::Autostart<'a>,
-    /// `--yes`: start the project's server without asking (D16).
-    pub yes: bool,
     pub theme: Theme,
     pub repl: ReplSettings,
     pub lang: Lang,
@@ -219,7 +243,14 @@ fn run(
         models: paths.models(),
         path_var: env("PATH"),
         lang: *lang,
+        engine: Arc::new(Mutex::new(None)),
     };
+    // The engine agl launched (when it did) is shut down when this guard
+    // drops, at the end of the command: normal exit, an error, an
+    // interrupted turn (AGL-024, D3). The hard `_exit` of a second Ctrl-C
+    // runs no Rust code and leaves the engine running, the accepted
+    // consequence recorded in the spec.
+    let _engine_guard = EngineGuard::new(&autostart);
     // The files of `--attach` are read before anything is started.
     let sources = args
         .attach
@@ -230,12 +261,7 @@ fn run(
     // interactive and the stdin session do it at their first request
     // (AGL-015, D10) and take the context size if the server answers.
     let context = if args.prompt.is_some() {
-        let others = if args.yes {
-            cli::serve::Others::Yes
-        } else {
-            cli::serve::Others::Refuse
-        };
-        autostart.ensure(&others, &mut |line| eprintln!("{line}"))?;
+        autostart.ensure(&mut |line| eprintln!("{line}"))?;
         Some(backend.context_size()?)
     } else {
         backend.context_size().ok()
@@ -258,7 +284,6 @@ fn run(
             context,
             server_url: &settings.server_url,
             autostart: &autostart,
-            yes: args.yes,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
             repl: settings.repl,
             lang: *lang,

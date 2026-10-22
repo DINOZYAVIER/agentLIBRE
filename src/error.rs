@@ -137,14 +137,22 @@ pub enum Error {
     ModelNotFound { path: PathBuf },
     /// `agl server start` with a `url` whose host is not local (D148).
     NotLocalServer { url: String },
-    /// No `llama-server` in `PATH` (D147).
-    LlamaServerNotFound,
+    /// No engine binary in `PATH` (D147, AGL-024, D5).
+    EngineNotFound { engine: String },
+    /// The engine agl launched cannot be run (AGL-024, D2).
+    EngineSpawn { engine: String, source: io::Error },
     /// `systemd-run` or `systemctl` failed.
     Systemd { detail: String },
     /// The unit stopped before llama-server was ready (D149).
     ServerFailed { unit: String },
     /// llama-server was not ready in time (D149).
     ServerTimeout { seconds: u64, unit: String },
+    /// The engine agl launched exited before it was ready (AGL-024, D2);
+    /// its output is in `log`.
+    EngineDied { log: PathBuf },
+    /// The engine agl launched was not ready in time (AGL-024, D2); its
+    /// output is in `log`.
+    EngineTimeout { seconds: u64, log: PathBuf },
     /// A server command or the autostart outside a registered project
     /// (AGL-015, D14).
     ProjectNotRegistered { project: PathBuf },
@@ -449,9 +457,20 @@ impl std::fmt::Display for Error {
                 Error::NotLocalServer { url } => {
                     format!("the server address is not local: {url}")
                 }
-                Error::LlamaServerNotFound => "llama-server is not in PATH".into(),
+                Error::EngineNotFound { engine } => format!("{engine} is not in PATH"),
+                Error::EngineSpawn { engine, source } => {
+                    format!("cannot run {engine}: {source}")
+                }
                 Error::Systemd { detail } => format!("systemd failed: {detail}"),
                 Error::ServerFailed { .. } => "the server stopped before it was ready".into(),
+                Error::EngineDied { log } => format!(
+                    "the engine stopped before it was ready; see {}",
+                    log.display()
+                ),
+                Error::EngineTimeout { seconds, log } => format!(
+                    "the engine was not ready after {seconds} s; see {}",
+                    log.display()
+                ),
                 Error::ProjectNotRegistered { project } => {
                     format!("{} is not a registered project", project.display())
                 }

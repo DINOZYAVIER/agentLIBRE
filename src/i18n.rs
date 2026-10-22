@@ -567,10 +567,16 @@ Forge (сховище артефактів робочої області, agentL
         uk: "agl server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}",
     };
 
-    /// `Error::LlamaServerNotFound`.
-    pub const LLAMA_SERVER_NOT_FOUND: Msg = Msg {
-        en: "llama-server is not in PATH",
-        uk: "llama-server немає в PATH",
+    /// `Error::EngineNotFound` (AGL-024, D5).
+    pub const ENGINE_NOT_FOUND: Msg = Msg {
+        en: "{engine} is not in PATH",
+        uk: "{engine} немає в PATH",
+    };
+
+    /// `Error::EngineSpawn` (AGL-024, D2).
+    pub const ENGINE_SPAWN: Msg = Msg {
+        en: "cannot run {engine}: {source}",
+        uk: "не вдалося запустити {engine}: {source}",
     };
 
     /// `Error::Systemd`.
@@ -691,6 +697,18 @@ Forge (сховище артефактів робочої області, agentL
     pub const SERVER_TIMEOUT: Msg = Msg {
         en: "the server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
         uk: "сервер не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
+    };
+
+    /// `Error::EngineDied` (AGL-024, D2).
+    pub const ENGINE_DIED: Msg = Msg {
+        en: "the engine stopped before it was ready; see {log}",
+        uk: "движок зупинився, не встигнувши стати готовим; див. {log}",
+    };
+
+    /// `Error::EngineTimeout` (AGL-024, D2).
+    pub const ENGINE_TIMEOUT: Msg = Msg {
+        en: "the engine was not ready after {seconds} s; see {log}",
+        uk: "движок не став готовим за {seconds} с; див. {log}",
     };
 
     /// `TemplateProblem::Missing`.
@@ -1857,7 +1875,12 @@ impl Error {
                 tr!(lang, m::MODEL_NOT_FOUND, path = path.display())
             }
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
-            Error::LlamaServerNotFound => tr!(lang, m::LLAMA_SERVER_NOT_FOUND).to_string(),
+            Error::EngineNotFound { engine } => {
+                tr!(lang, m::ENGINE_NOT_FOUND, engine = engine).to_string()
+            }
+            Error::EngineSpawn { engine, source } => {
+                tr!(lang, m::ENGINE_SPAWN, engine = engine, source = source).to_string()
+            }
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
@@ -1880,6 +1903,18 @@ impl Error {
             Error::ServerFailed { unit } => tr!(lang, m::SERVER_FAILED, unit = unit),
             Error::ServerTimeout { seconds, unit } => {
                 tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)
+            }
+            Error::EngineDied { log } => {
+                tr!(lang, m::ENGINE_DIED, log = log.display()).to_string()
+            }
+            Error::EngineTimeout { seconds, log } => {
+                tr!(
+                    lang,
+                    m::ENGINE_TIMEOUT,
+                    seconds = seconds,
+                    log = log.display()
+                )
+                .to_string()
             }
             Error::ProjectNotRegistered { project } => {
                 tr!(lang, m::PROJECT_NOT_REGISTERED, project = project.display())
