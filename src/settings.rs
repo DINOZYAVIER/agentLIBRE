@@ -15,8 +15,8 @@ pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
 const DEFAULT_FUNCTION: &str = "minimal";
 
 /// Where a Strata server listens when `[server]` does not set `url`
-/// (AGL-030, D1): its own run script binds port 8080.
-pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:8080";
+/// (AGL-030, D1): its own run script binds port 18088 (8080 is held by qBittorrent).
+pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:18088";
 
 /// The kind of inference server (AGL-030, D1): the llama.cpp
 /// `llama-server` with grammar-constrained decoding, or a Strata server
@@ -1267,7 +1267,7 @@ mod tests {
             .unwrap()
             .server;
         assert_eq!(server.kind(), ServerKind::Llama);
-        let server = user("[server]\nkind = \"strata\"\nurl = \"http://127.0.0.1:8080\"\n")
+        let server = user("[server]\nkind = \"strata\"\nurl = \"http://127.0.0.1:18088\"\n")
             .unwrap()
             .server;
         assert_eq!(server.kind(), ServerKind::Strata);
