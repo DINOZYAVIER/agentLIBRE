@@ -56,6 +56,8 @@ pub enum Error {
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `[server] url` is not an `http://` URL (D52).
     UnsupportedUrl { path: PathBuf, url: String },
+    /// `[server] kind` is not `llama` or `strata` (AGL-030, D1).
+    UnknownServerKind { path: PathBuf, value: String },
     /// `[search] url` is not an `https://` URL (AGL-019, D3).
     UnsupportedSearchUrl { path: PathBuf, url: String },
     /// A file path of `[search]` is not absolute (AGL-019, D3).
@@ -401,6 +403,9 @@ impl std::fmt::Display for Error {
                 }
                 Error::UnsupportedUrl { path, url } => {
                     format!("unsupported server address `{url}` in {}", path.display())
+                }
+                Error::UnknownServerKind { path, value } => {
+                    format!("`kind` in {} is not `llama` or `strata`: `{value}`", path.display())
                 }
                 Error::UnsupportedSearchUrl { path, url } => {
                     format!("unsupported search address `{url}` in {}", path.display())

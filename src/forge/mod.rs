@@ -1273,6 +1273,7 @@ mod tests {
             hashes: vec![identity(1), identity(2)],
             function: Some("coder".into()),
             server: ServerFile {
+                kind: None,
                 url: Some("http://127.0.0.1:18081".into()),
                 engine: Some("llama-server".into()),
                 model: Some("q.gguf".into()),

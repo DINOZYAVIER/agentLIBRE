@@ -400,6 +400,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "непідтримувана адреса сервера `{url}` у {path}; підтримується лише http://",
     };
 
+    /// `Error::UnknownServerKind`.
+    pub const UNKNOWN_SERVER_KIND: Msg = Msg {
+        en: "`kind` in {path} is not `llama` or `strata`: `{value}`",
+        uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
+    };
+
     /// `Error::UnsupportedSearchUrl`.
     pub const UNSUPPORTED_SEARCH_URL: Msg = Msg {
         en: "unsupported search address `{url}` in {path}; only https:// is supported",
@@ -955,6 +961,12 @@ Forge (сховище артефактів робочої області, agentL
     pub const STOP_SERVER: Msg = Msg {
         en: "stopped: llama-server failed",
         uk: "зупинено: помилка llama-server",
+    };
+
+    /// `StopReason::StirLimit`.
+    pub const STOP_STIR_LIMIT: Msg = Msg {
+        en: "stopped: the model's output was not an action of the state after the stirs",
+        uk: "зупинено: вихід моделі не був дією стану після перемішувань",
     };
 
     /// The second line of `stopped`: how to go on (D113).
@@ -1776,6 +1788,9 @@ impl Error {
             Error::UnsupportedUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
             }
+            Error::UnknownServerKind { path, value } => {
+                tr!(lang, m::UNKNOWN_SERVER_KIND, path = path.display(), value = value)
+            }
             Error::UnsupportedSearchUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)
             }
@@ -2108,6 +2123,7 @@ pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> Strin
         StopReason::ContextFull => tr!(lang, m::STOP_CONTEXT_FULL).to_string(),
         StopReason::ServerError => tr!(lang, m::STOP_SERVER).to_string(),
         StopReason::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
+        StopReason::StirLimit => tr!(lang, m::STOP_STIR_LIMIT).to_string(),
     }
 }
 

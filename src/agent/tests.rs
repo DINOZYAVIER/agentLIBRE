@@ -148,6 +148,14 @@ impl Backend for Script {
     fn hears_audio(&self) -> Result<bool, Error> {
         Ok(self.hears)
     }
+
+    fn health(&self) -> Option<u16> {
+        None
+    }
+
+    fn url(&self) -> &str {
+        "http://127.0.0.1:0"
+    }
 }
 
 #[derive(Default)]
@@ -246,9 +254,23 @@ fn run_level(
     message: &str,
     reasoning: Option<ReasoningLevel>,
 ) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
+    run_stirred(function, script, dir, message, reasoning, false)
+}
+
+/// A turn in the stirred mode (AGL-030): the action phase is unconstrained
+/// and a parse failure is a corrective retry.
+fn run_stirred(
+    function: &Function,
+    script: &Script,
+    dir: &Dir,
+    message: &str,
+    reasoning: Option<ReasoningLevel>,
+    stirred: bool,
+) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
-    let end = agent(function, script, &mut session, dir, reasoning).turn(message, &mut log);
+    let end = agent_stirred(function, script, &mut session, dir, reasoning, stirred)
+        .turn(message, &mut log);
     (end, log.0, session)
 }
 
@@ -259,7 +281,18 @@ fn agent<'a>(
     dir: &'a Dir,
     reasoning: Option<ReasoningLevel>,
 ) -> Agent<'a> {
-    agent_searching(function, script, session, dir, reasoning, &crate::search::NoSearch)
+    agent_stirred(function, script, session, dir, reasoning, false)
+}
+
+fn agent_stirred<'a>(
+    function: &'a Function,
+    script: &'a Script,
+    session: &'a mut Session,
+    dir: &'a Dir,
+    reasoning: Option<ReasoningLevel>,
+    stirred: bool,
+) -> Agent<'a> {
+    agent_searching(function, script, session, dir, reasoning, &crate::search::NoSearch, stirred)
 }
 
 fn agent_searching<'a>(
@@ -269,11 +302,13 @@ fn agent_searching<'a>(
     dir: &'a Dir,
     reasoning: Option<ReasoningLevel>,
     search: &'a dyn crate::search::Searcher,
+    stirred: bool,
 ) -> Agent<'a> {
     Agent {
         function,
         function_name: "f",
         backend: script,
+        stirred,
         session,
         workspace: &dir.0,
         context: 16384,
@@ -379,7 +414,7 @@ fn search_runs_in_the_agent_and_its_text_is_the_result() {
     let search = FakeSearch::new(Outcome::Ok, "1. Київ\n   https://x.example/");
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
-    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search)
+    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("what is Kyiv", &mut Log::default());
     assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{end:?}");
     assert_eq!(
@@ -412,7 +447,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
     let search = FakeSearch::new(Outcome::Fail, "The search service is rate limited; try again later.");
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
-    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search)
+    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("search", &mut Log::default());
     assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{end:?}");
     let results = results(&session);
@@ -466,6 +501,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::CutOff(_) => "cut_off",
             Event::Media(_) => "media",
             Event::Memory { .. } => "memory",
+            Event::Stir { .. } => "stir",
         })
         .collect()
 }
@@ -676,6 +712,78 @@ fn stops() {
     assert_eq!(
         session.events.last(),
         Some(&Event::Stop(StopReason::ServerError))
+    );
+}
+
+/// A miss of the action phase in the stirred mode: the machine stirs the
+/// model a bounded number of times and the turn completes when it lands
+/// (AGL-030, D4).
+#[test]
+fn stirred_retries_a_failed_action() {
+    let dir = Dir::new("stir-retry");
+    let stirred = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\n\
+         [state.a]\ntools.bash = {}\nthink = false\nanswer = true\nnext = { else = \"a\" }",
+    )
+    .unwrap();
+    let miss = "
+</think>
+
+
+<tool_call>
+\
+<function=nope>";
+    let script = Script::new(&[(miss, Stop::End), (miss, Stop::End), ("done", Stop::End)]);
+    let (end, _, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
+    assert_eq!(end.unwrap(), TurnEnd::Answer("done".into()));
+    let stirs = session
+        .events
+        .iter()
+        .filter(|event| matches!(event, Event::Stir { .. }))
+        .count();
+    assert_eq!(stirs, 2);
+    // The nudge rides in as a runtime message of the rebuilt prompt.
+    let nudges = session
+        .events
+        .iter()
+        .filter(|event| matches!(event, Event::Stir { .. }))
+        .count();
+    assert_eq!(nudges, stirs);
+}
+
+/// A model that never lands in the stirred mode: after `max_stirs` the
+/// turn stops with `StirLimit`, no more stirs (AGL-030, D4, D9).
+#[test]
+fn stirred_stops_at_the_limit() {
+    let dir = Dir::new("stir-limit");
+    let stirred = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\nmax_stirs = 2\n\
+         [state.a]\ntools.bash = {}\nthink = false\nanswer = true\nnext = { else = \"a\" }",
+    )
+    .unwrap();
+    let miss = "
+</think>
+
+
+<tool_call>
+\
+<function=nope>";
+    let script = Script::new(&[
+        (miss, Stop::End),
+        (miss, Stop::End),
+        (miss, Stop::End),
+    ]);
+    let (end, _, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StirLimit));
+    let stirs = session
+        .events
+        .iter()
+        .filter(|event| matches!(event, Event::Stir { .. }))
+        .count();
+    assert_eq!(stirs, 2);
+    assert_eq!(
+        session.events.last(),
+        Some(&Event::Stop(StopReason::StirLimit))
     );
 }
 

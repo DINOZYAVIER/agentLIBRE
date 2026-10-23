@@ -1,6 +1,7 @@
 //! Inference backends behind a minimal interface (D10, D29).
 
 pub mod llama;
+pub mod strata;
 
 use crate::action::Value;
 use crate::error::Error;
@@ -254,6 +255,9 @@ pub struct Prompt<'a> {
     /// The model's reasoning level; `None` is the template's default
     /// (AGL-013).
     pub reasoning: Option<ReasoningLevel>,
+    /// The model's format: the client-side backends render the calls of
+    /// the conversation in it (AGL-030, D2).
+    pub format: &'a crate::format::Format,
 }
 
 /// One generation.
@@ -300,6 +304,11 @@ pub trait Backend {
     fn count_tokens(&self, text: &str) -> Result<usize, Error>;
     /// The context size of the loaded model, in tokens.
     fn context_size(&self) -> Result<usize, Error>;
+    /// The status of `/health`; `None` when the server does not answer
+    /// (D149, D150).
+    fn health(&self) -> Option<u16>;
+    /// The address of the server, without a trailing slash.
+    fn url(&self) -> &str;
     /// The string that stands for a medium in the prompt: the server has
     /// it per start, and none without a multimodal projector (AGL-014,
     /// D6).

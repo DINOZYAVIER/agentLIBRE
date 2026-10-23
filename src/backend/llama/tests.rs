@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::{TOOL_DOCS, ToolCall};
+use crate::format::tests::qwen;
 
 fn call(id: &str) -> ToolCall {
     ToolCall {
@@ -18,12 +19,14 @@ fn a_runtime_message_is_a_prefixed_user_message() {
         Message::System("s".into()),
         Message::Runtime("It was cut off.".into()),
     ];
+    let format = qwen();
     let prompt = Prompt {
         messages: &messages,
         instruction: None,
         tools: &[],
         preserve_thinking: true,
         reasoning: None,
+        format: &format,
     };
     assert_eq!(
         Json::Array(messages_json(&prompt)),
@@ -54,12 +57,14 @@ fn messages_in_template_form() {
             call: None,
         },
     ];
+    let format = qwen();
     let prompt = Prompt {
         messages: &messages,
         instruction: Some("Answer now."),
         tools: &[],
         preserve_thinking: true,
         reasoning: None,
+        format: &format,
     };
     assert_eq!(
         Json::Array(messages_json(&prompt)),
@@ -156,6 +161,7 @@ fn only_set_sampling_is_sent() {
 #[test]
 fn the_reasoning_level_sets_the_template_kwargs() {
     let messages = [Message::System("s".into())];
+    let format = qwen();
     let body = |reasoning| {
         apply_template_body(&Prompt {
             messages: &messages,
@@ -163,6 +169,7 @@ fn the_reasoning_level_sets_the_template_kwargs() {
             tools: &[],
             preserve_thinking: true,
             reasoning,
+            format: &format,
         })
     };
     // Unset: no `chat_template_kwargs`, the template keeps its default.

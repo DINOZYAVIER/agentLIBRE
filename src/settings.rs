@@ -14,6 +14,39 @@ pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
 /// Function used when no settings name one (D39, D58, AGL-020, D3).
 const DEFAULT_FUNCTION: &str = "minimal";
 
+/// Where a Strata server listens when `[server]` does not set `url`
+/// (AGL-030, D1): its own run script binds port 8080.
+pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:8080";
+
+/// The kind of inference server (AGL-030, D1): the llama.cpp
+/// `llama-server` with grammar-constrained decoding, or a Strata server
+/// with no grammar, the state machine stirring the model instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerKind {
+    #[default]
+    Llama,
+    Strata,
+}
+
+impl ServerKind {
+    /// The two kinds, as the human sets them.
+    pub fn parse(value: &str) -> Option<ServerKind> {
+        match value {
+            "llama" => Some(ServerKind::Llama),
+            "strata" => Some(ServerKind::Strata),
+            _ => None,
+        }
+    }
+
+    /// The kind's name: how the human sets it and what the surfaces show.
+    pub fn name(self) -> &'static str {
+        match self {
+            ServerKind::Llama => "llama",
+            ServerKind::Strata => "strata",
+        }
+    }
+}
+
 /// The user file, `$XDG_CONFIG_HOME/agentLIBRE/agentLIBRE.toml`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct UserFile {
@@ -39,6 +72,8 @@ pub struct UserFile {
 /// (D148). A key that is not set is `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerFile {
+    /// The kind of inference server (AGL-030, D1); `None` is `llama`.
+    pub kind: Option<String>,
     pub url: Option<String>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
@@ -264,6 +299,7 @@ pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
 
 impl ServerFile {
     const KEYS: &'static [&'static str] = &[
+        "kind",
         "url",
         "engine",
         "model",
@@ -281,6 +317,15 @@ impl ServerFile {
             return Ok(ServerFile::default());
         };
         server.check_keys(Self::KEYS)?;
+        let kind = server.string("kind")?;
+        if let Some(kind) = &kind
+            && ServerKind::parse(kind).is_none()
+        {
+            return Err(Error::UnknownServerKind {
+                path: path.into(),
+                value: kind.clone(),
+            });
+        }
         let url = server.string("url")?;
         if let Some(url) = &url
             && !url.starts_with("http://")
@@ -326,6 +371,7 @@ impl ServerFile {
             })
             .transpose()?;
         Ok(ServerFile {
+            kind,
             url,
             engine,
             model,
@@ -342,10 +388,17 @@ impl ServerFile {
         *self == ServerFile::default()
     }
 
+    /// The kind of the inference server: `llama` when `kind` is not set
+    /// (AGL-030, D1).
+    pub fn kind(&self) -> ServerKind {
+        self.kind.as_deref().and_then(ServerKind::parse).unwrap_or_default()
+    }
+
     /// The keys set here, the others from `defaults`; `args` is replaced
     /// as a whole, not merged (AGL-015, D11).
     pub fn over(&self, defaults: &ServerFile) -> ServerFile {
         ServerFile {
+            kind: self.kind.clone().or_else(|| defaults.kind.clone()),
             url: self.url.clone().or_else(|| defaults.url.clone()),
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
@@ -364,6 +417,9 @@ impl ServerFile {
             return String::new();
         }
         let mut out = String::from("\n[server]\n");
+        if let Some(kind) = &self.kind {
+            out.push_str(&format!("kind = {}\n", tomlfile::quote(kind)));
+        }
         if let Some(url) = &self.url {
             out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
         }
@@ -556,10 +612,18 @@ impl Settings {
             },
             key: format!("search.{key}"),
         })?;
-        let server_url = server.url.clone().ok_or_else(|| Error::MissingServerUrl {
-            user_path: user_path.into(),
-            project_path: project_path.into(),
-        })?;
+        // A Strata server has a default address (AGL-030, D1); the
+        // llama-server address stays required.
+        let server_url = match &server.url {
+            Some(url) => url.clone(),
+            None if server.kind() == ServerKind::Strata => DEFAULT_STRATA_URL.to_owned(),
+            None => {
+                return Err(Error::MissingServerUrl {
+                    user_path: user_path.into(),
+                    project_path: project_path.into(),
+                })
+            }
+        };
         let function = cli_function
             .or(project_function)
             .or(user.function.as_deref())
@@ -1191,5 +1255,41 @@ mod tests {
             resolved(&UserFile::default(), &ServerFile::default()),
             Err(Error::MissingServerUrl { .. })
         ));
+    }
+
+    #[test]
+    fn the_server_kind() {
+        assert_eq!(ServerKind::parse("llama"), Some(ServerKind::Llama));
+        assert_eq!(ServerKind::parse("strata"), Some(ServerKind::Strata));
+        assert_eq!(ServerKind::parse("mistral"), None);
+        // The absent key is llama (AGL-030, D1).
+        let server = user("[server]\nurl = \"http://127.0.0.1:18080\"\n")
+            .unwrap()
+            .server;
+        assert_eq!(server.kind(), ServerKind::Llama);
+        let server = user("[server]\nkind = \"strata\"\nurl = \"http://127.0.0.1:8080\"\n")
+            .unwrap()
+            .server;
+        assert_eq!(server.kind(), ServerKind::Strata);
+        // An unknown kind is an error that names the value (AGL-030, D1).
+        assert!(matches!(
+            user("[server]\nkind = \"mistral\"\n"),
+            Err(Error::UnknownServerKind { value, .. }) if value == "mistral"
+        ));
+    }
+
+    #[test]
+    fn the_strata_kind_has_a_default_url() {
+        // A Strata server has a default address, so `url` is not required
+        // (AGL-030, D1); the llama-server address stays required.
+        let user = UserFile {
+            server: ServerFile {
+                kind: Some("strata".into()),
+                ..ServerFile::default()
+            },
+            ..UserFile::default()
+        };
+        let settings = resolved(&user, &ServerFile::default());
+        assert_eq!(settings.unwrap().server_url, DEFAULT_STRATA_URL);
     }
 }

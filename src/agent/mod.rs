@@ -53,6 +53,9 @@ pub trait Report {
     fn context_used(&mut self, _tokens: usize) {}
     /// A generation decoded this many tokens (AGL-012).
     fn decoded(&mut self, _tokens: usize) {}
+    /// A stir of the stirred mode: the `attempt`-th corrective retry of the
+    /// step, after the parse error (AGL-030, D4).
+    fn stirred(&mut self, _attempt: u32, _error: &crate::action::ParseError) {}
 }
 
 /// How a turn ended.
@@ -79,6 +82,10 @@ pub struct Agent<'a> {
     /// The Function's name, for errors.
     pub function_name: &'a str,
     pub backend: &'a dyn Backend,
+    /// The stirred mode (AGL-030, D1, D4): the action phase generates
+    /// unconstrained and a parse failure is a bounded corrective retry
+    /// instead of a stop. Set from the settings' `[server] kind`.
+    pub stirred: bool,
     pub session: &'a mut Session,
     pub workspace: &'a Path,
     /// The context size of the server, in tokens.
@@ -177,6 +184,7 @@ impl Agent<'_> {
             tools: &tools,
             preserve_thinking: function.preserve_thinking,
             reasoning: self.reasoning,
+            format,
         })?;
         let mut prompt = format.start_step(rendered, think);
 
@@ -199,6 +207,9 @@ impl Agent<'_> {
             };
         }
 
+        // The thinking of the step, kept on a stir: the action phase is
+        // re-generated, the thinking is not re-drawn (AGL-030, D4).
+        let mut kept_thinking: Option<String> = None;
         if let Some(markers) = format.think.as_ref().filter(|_| think) {
             let close = markers.close.trim();
             let call_start = format.call.begin_before.trim();
@@ -217,59 +228,108 @@ impl Agent<'_> {
             if !thinking.text.is_empty() {
                 report.decoded(self.backend.count_tokens(&thinking.text)?);
             }
-            let text = thinking.text.trim_end();
+            let text = thinking.text.trim_end().to_owned();
             if !text.is_empty() {
-                self.session.append(Event::Thinking(text.into()))?;
+                self.session.append(Event::Thinking(text.clone()))?;
             }
             // A cut-off thinking or a call started inside it ends the
             // thinking too (D110, D113).
-            prompt.push_str(text);
+            prompt.push_str(&text);
             prompt.push_str(&markers.close);
+            kept_thinking = Some(text);
         }
 
-        let (grammar, root) = action::grammar(format, &state.actions);
-        let mut stream = TextStream::new(&format.call.begin_before);
-        let generated = self.backend.generate(
-            &Request {
-                prompt: &prompt,
-                grammar: Some(&grammar.render(&root)),
-                stop: &[],
-                max_tokens: function.max_action_tokens,
-                sampling: &function.sampling,
-                media: &expanded.uploads,
-            },
-            &mut |piece| {
-                if let Some(text) = stream.push(piece) {
-                    report.action_text(&text);
-                }
-            },
-        )?;
-        if !generated.text.is_empty() {
-            report.decoded(self.backend.count_tokens(&generated.text)?);
-        }
-        if let Some(text) = stream.finish() {
-            report.action_text(&text);
-        }
-        // Cut-off text may have been heading for a call: it is discarded
-        // and the model is told to split the work (D154).
-        if generated.stop == Stop::Limit {
-            self.session
-                .append(Event::CutOff(function.max_action_tokens))?;
-            report.cut_off();
-            let progress = machine.after_cut_off();
-            if machine.entered() {
-                self.enter(machine.state().name.as_str(), report)?;
+        // The grammar of the actions (D3): the action phase generates under
+        // it in the grammar mode, unconstrained in the stirred mode
+        // (AGL-030, D3).
+        let grammar_str = if self.stirred {
+            None
+        } else {
+            let (grammar, root) = action::grammar(format, &state.actions);
+            Some(grammar.render(&root))
+        };
+        // The action, the stirs of the stirred mode around it (AGL-030, D4):
+        // a parse failure is a bounded corrective retry, not a stop.
+        let mut stirs = 0u32;
+        let action = loop {
+            let mut stream = TextStream::new(&format.call.begin_before);
+            let generated = self.backend.generate(
+                &Request {
+                    prompt: &prompt,
+                    grammar: grammar_str.as_deref(),
+                    stop: &[],
+                    max_tokens: function.max_action_tokens,
+                    sampling: &function.sampling,
+                    media: &expanded.uploads,
+                },
+                &mut |piece| {
+                    if let Some(text) = stream.push(piece) {
+                        report.action_text(&text);
+                    }
+                },
+            )?;
+            if !generated.text.is_empty() {
+                report.decoded(self.backend.count_tokens(&generated.text)?);
             }
-            return match progress {
-                Progress::Continue => Ok(None),
-                Progress::StepLimit => self.stop(StopReason::StepLimit),
-            };
-        }
-        let action = match action::parse(format, &state.actions, &generated.text) {
-            Ok(action) => action,
-            // The grammar allows nothing else, so the server broke it.
-            Err(ParseError::Incomplete | ParseError::Unexpected { .. }) => {
-                return Err(Error::OutsideGrammar(generated.text));
+            if let Some(text) = stream.finish() {
+                report.action_text(&text);
+            }
+            // Cut-off text may have been heading for a call: it is discarded
+            // and the model is told to split the work (D154).
+            if generated.stop == Stop::Limit {
+                self.session
+                    .append(Event::CutOff(function.max_action_tokens))?;
+                report.cut_off();
+                let progress = machine.after_cut_off();
+                if machine.entered() {
+                    self.enter(machine.state().name.as_str(), report)?;
+                }
+                return match progress {
+                    Progress::Continue => Ok(None),
+                    Progress::StepLimit => self.stop(StopReason::StepLimit),
+                };
+            }
+            match action::parse(format, &state.actions, &generated.text) {
+                Ok(action) => break action,
+                // The grammar allows nothing else, so the server broke it.
+                // In the grammar mode a parse failure is still a server bug.
+                Err(_error) if !self.stirred => {
+                    return Err(Error::OutsideGrammar(generated.text));
+                }
+                // In the stirred mode there is no grammar: a parse failure
+                // is a model miss the machine stirs (AGL-030, D4).
+                Err(error) => {
+                    if stirs >= function.max_stirs {
+                        return self.stop(StopReason::StirLimit);
+                    }
+                    stirs += 1;
+                    self.session.append(Event::Stir {
+                        attempt: stirs,
+                        error: stir_error(&error),
+                    })?;
+                    report.stirred(stirs, &error);
+                    // Rebuild the step prompt with the nudge as a runtime
+                    // message; the thinking of the step is kept, not
+                    // re-drawn (AGL-030, D4).
+                    messages.push(Message::Runtime(stir_nudge(
+                        state.name.as_str(),
+                        &error,
+                    )));
+                    let rendered = self.backend.render(&Prompt {
+                        messages: &messages,
+                        instruction: state.instruction.as_deref(),
+                        tools: &tools,
+                        preserve_thinking: function.preserve_thinking,
+                        reasoning: self.reasoning,
+                        format,
+                    })?;
+                    let mut rebuilt = format.start_step(rendered, think);
+                    if let (Some(markers), Some(kept)) = (&format.think, &kept_thinking) {
+                        rebuilt.push_str(kept);
+                        rebuilt.push_str(&markers.close);
+                    }
+                    prompt = rebuilt;
+                }
             }
         };
         match action {
@@ -476,6 +536,7 @@ impl Agent<'_> {
             tools: &tools,
             preserve_thinking: false,
             reasoning: self.reasoning,
+            format: &function.format,
         })?;
         let prompt = function.format.start_step(rendered, false);
         let needed = self.backend.count_tokens(&prompt)?
@@ -583,6 +644,27 @@ impl<'a> TextStream<'a> {
 /// runtime prefix means and how large an action may be (AGL-009) is in the
 /// `system` of the built-in `agentLIBRE` Function, not here. Stable text, for
 /// the prompt cache (D14, D19).
+/// The parse error of a stir, as the session records it (AGL-030, D4).
+fn stir_error(error: &ParseError) -> String {
+    match error {
+        ParseError::Incomplete => "the output was incomplete".into(),
+        ParseError::Unexpected { offset } => {
+            format!("the output does not fit the actions at byte {offset}")
+        }
+    }
+}
+
+/// The corrective nudge of a stir, as a runtime message (AGL-030, D4, D8):
+/// it names the state, asks for exactly one action in the format, and
+/// includes the parse error; the failed output is not quoted.
+fn stir_nudge(state: &str, error: &ParseError) -> String {
+    format!(
+        "Your last output was not an action of the `{state}` state ({detail}). \
+         Respond with exactly one action in the format.",
+        detail = stir_error(error)
+    )
+}
+
 fn system_prompt(function: &Function) -> String {
     function.system.clone()
 }

@@ -134,6 +134,12 @@ mod tests {
         fn hears_audio(&self) -> Result<bool, Error> {
             Ok(self.0)
         }
+        fn health(&self) -> Option<u16> {
+            None
+        }
+        fn url(&self) -> &str {
+            "http://127.0.0.1:0"
+        }
     }
 
     #[derive(Default)]

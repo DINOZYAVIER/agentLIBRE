@@ -34,6 +34,10 @@ const DEFAULT_MAX_COMPACT_TOKENS: u32 = 4096;
 /// Function does not set it (AGL-016, D5, D8).
 const DEFAULT_MAX_RECORD_SECONDS: u32 = 60;
 
+/// The stirs of one step of the stirred mode when the Function does not set
+/// them (AGL-030, D6): two stirs, three action attempts in all.
+const DEFAULT_MAX_STIRS: u32 = 2;
+
 /// The summary instruction when the Function does not set `compact`
 /// (D140).
 const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can continue the \
@@ -50,6 +54,10 @@ pub struct Function {
     pub max_steps_total: Option<u32>,
     pub max_think_tokens: u32,
     pub max_action_tokens: u32,
+    /// The stirs of one step of the stirred mode (AGL-030, D6); the parse
+    /// of the action is retried at most this many times after a failure.
+    /// `0` means no stirs: a parse failure stops the turn.
+    pub max_stirs: u32,
     /// The instruction that asks for a summary of the history (D139).
     pub compact: String,
     pub max_compact_tokens: u32,
@@ -156,6 +164,7 @@ impl Function {
             "max_steps_total",
             "max_think_tokens",
             "max_action_tokens",
+            "max_stirs",
             "compact",
             "max_compact_tokens",
             "max_record_seconds",
@@ -178,6 +187,9 @@ impl Function {
             positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens =
             positive(&mut file, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
+        // 0 is allowed and means no stirs (AGL-030, D6); the absent key keeps
+        // the default.
+        let max_stirs = nonneg(&mut file, "max_stirs")?.unwrap_or(DEFAULT_MAX_STIRS);
         // The two words the runtime fills in the Function's own text
         // (AGL-017, D8); other brace text stays as written.
         let system = system
@@ -223,6 +235,7 @@ impl Function {
             max_steps_total,
             max_think_tokens,
             max_action_tokens,
+            max_stirs,
             compact,
             max_compact_tokens,
             max_record_seconds,

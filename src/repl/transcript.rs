@@ -271,7 +271,7 @@ impl Presenter {
                 Event::Memory { name, kind, text } => {
                     self.show_memory(name, *kind, text.as_deref());
                 }
-                Event::Stop(_) | Event::Media(_) => {}
+                Event::Stop(_) | Event::Media(_) | Event::Stir { .. } => {}
             }
         }
     }

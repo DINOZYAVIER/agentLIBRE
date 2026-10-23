@@ -14,11 +14,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::backend::llama::Llama;
+use crate::backend::Backend;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, Msg, m, server as texts};
-use crate::settings::ServerFile;
+use crate::settings::{ServerFile, ServerKind};
 use crate::tr;
 
 /// The name every unit of a llama-server starts with (D8); the project's
@@ -253,7 +254,7 @@ pub fn start(
 /// Waits until `/health` answers ready (D149). `unit` is the unit that
 /// loads the model, when it is ours: it stopping is a failure.
 pub(super) fn wait_ready(
-    llama: &Llama,
+    llama: &dyn Backend,
     unit: Option<&str>,
     ready: &Msg,
     say: &mut dyn FnMut(&str),
@@ -283,7 +284,9 @@ pub(super) fn wait_ready(
 /// Brings the project's server up when a request finds none (AGL-015,
 /// D6, D10); the same code as `agl server start`.
 pub struct Autostart<'a> {
-    pub llama: &'a Llama,
+    /// The backend the turn runs on: the `Llama` or the `Strata` backend,
+    /// by the settings' `[server] kind` (AGL-030, D1).
+    pub llama: &'a dyn Backend,
     pub project: &'a Workspace,
     /// The project's `[server]` over the user's.
     pub settings: &'a ServerFile,
@@ -312,6 +315,14 @@ impl Autostart<'_> {
             // (AGL-024, D2); a foreign process on the port is an error,
             // not a target.
             Health::Down => {
+                // The Strata server is started by its own run script, not by
+                // agl (AGL-030, D1); agl talks to an already running one.
+                if self.settings.kind() == ServerKind::Strata {
+                    return Err(Error::ServerUnreachable {
+                        url: self.llama.url().into(),
+                        detail: "the Strata server is not running".into(),
+                    });
+                }
                 let log = self.project.dir.join("server.log");
                 let engine = Engine::launch(
                     self.settings,
@@ -476,7 +487,7 @@ impl Engine {
 /// same timeout and polling as `wait_ready`; the engine's own output is
 /// in the log file the errors point at.
 fn wait_child_ready(
-    llama: &Llama,
+    llama: &dyn Backend,
     engine: &mut Engine,
     log: &Path,
     say: &mut dyn FnMut(&str),
@@ -532,7 +543,7 @@ pub fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
-pub(super) fn health(llama: &Llama) -> Health {
+pub(super) fn health(llama: &dyn Backend) -> Health {
     match llama.health() {
         Some(200) => Health::Ready,
         Some(_) => Health::Loading,

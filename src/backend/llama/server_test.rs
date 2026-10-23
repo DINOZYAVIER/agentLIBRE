@@ -56,6 +56,7 @@ fn live_backend() {
 
     // preserve_thinking (D98).
     let messages = history();
+    let format = qwen();
     let render = |preserve_thinking, instruction| {
         llama
             .render(&Prompt {
@@ -64,6 +65,7 @@ fn live_backend() {
                 tools: &tools,
                 preserve_thinking,
                 reasoning: None,
+                format: &format,
             })
             .unwrap()
     };
@@ -78,7 +80,6 @@ fn live_backend() {
     // Thinking on and off through format strings (D94, D99): with thinking
     // the prompt is the template's own; without, only the end differs, and
     // it matches the template's end for `enable_thinking = false`.
-    let format = qwen();
     let simple = [Message::System("s".into()), Message::User("Say hi.".into())];
     let rendered = llama
         .render(&Prompt {
@@ -87,6 +88,7 @@ fn live_backend() {
             tools: &tools,
             preserve_thinking: true,
             reasoning: None,
+            format: &format,
         })
         .unwrap();
     let template = |thinking: bool| {

@@ -31,14 +31,18 @@ pub enum StopReason {
     ServerError,
     /// The user interrupted the turn.
     Interrupted,
+    /// The model's output was not an action of the state after the stirs
+    /// (AGL-030, D5).
+    StirLimit,
 }
 
 impl StopReason {
-    const ALL: [StopReason; 4] = [
+    const ALL: [StopReason; 5] = [
         StopReason::StepLimit,
         StopReason::ContextFull,
         StopReason::ServerError,
         StopReason::Interrupted,
+        StopReason::StirLimit,
     ];
 
     fn name(self) -> &'static str {
@@ -47,6 +51,7 @@ impl StopReason {
             StopReason::ContextFull => "context_full",
             StopReason::ServerError => "server_error",
             StopReason::Interrupted => "interrupted",
+            StopReason::StirLimit => "stir_limit",
         }
     }
 }
@@ -116,6 +121,13 @@ pub enum Event {
     /// An action hit `max_action_tokens` (the field) and was discarded
     /// (D154).
     CutOff(u32),
+    /// A stir of the stirred mode: the model's output was not an action of
+    /// the state, the machine nudged it and retried (AGL-030, D4). `attempt`
+    /// is the stir number of the step (1-based) and `error` the parse error.
+    Stir {
+        attempt: u32,
+        error: String,
+    },
     Stop(StopReason),
     /// A write of the `memory` tool or of `/remember` (AGL-006, M36): the
     /// entry, what was done and the text that was written.
@@ -325,7 +337,8 @@ impl Session {
                 | Event::Stop(_)
                 | Event::Forge { .. }
                 | Event::Media(_)
-                | Event::Memory { .. } => {}
+                | Event::Memory { .. }
+                | Event::Stir { .. } => {}
             }
         }
         messages
@@ -532,6 +545,7 @@ fn event_json(event: &Event) -> Json {
         }
         Event::Answer(text) => json!({"type": "answer", "text": text}),
         Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
+        Event::Stir { attempt, error } => json!({"type": "stir", "attempt": attempt, "error": error}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
         Event::Memory { name, kind, text } => {

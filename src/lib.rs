@@ -38,6 +38,7 @@ use agent::{Agent, TurnEnd};
 use backend::Backend;
 use backend::ReasoningLevel;
 use backend::llama::Llama;
+use backend::strata::Strata;
 use cli::args::Command;
 use cli::report::StderrReport;
 use error::Error;
@@ -46,7 +47,7 @@ use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
-use settings::{ReplSettings, Settings, UserFile};
+use settings::{ReplSettings, ServerKind, Settings, UserFile};
 use theme::Theme;
 
 /// Closes the engine agl launched itself (AGL-024, D3): when the guard
@@ -79,6 +80,9 @@ pub struct Setup<'a> {
     pub function: &'a Function,
     pub function_name: &'a str,
     pub backend: &'a dyn Backend,
+    /// The stirred mode (AGL-030, D1): the action phase generates
+    /// unconstrained and a parse failure is a bounded corrective retry.
+    pub stirred: bool,
     pub session: Session,
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
@@ -233,9 +237,16 @@ fn run(
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
         lang: *lang,
     };
-    let backend = Llama::new(&settings.server_url);
+    // The backend is the Llama or the Strata backend, by the settings'
+    // `[server] kind` (AGL-030, D1); the stirred mode runs on Strata.
+    let stirred = settings.server.kind() == ServerKind::Strata;
+    let backend: Box<dyn Backend> = if stirred {
+        Box::new(Strata::new(&settings.server_url))
+    } else {
+        Box::new(Llama::new(&settings.server_url))
+    };
     let autostart = cli::serve::Autostart {
-        llama: &backend,
+        llama: backend.as_ref(),
         project: &project,
         settings: &settings.server,
         whisper: &settings.whisper,
@@ -277,7 +288,8 @@ fn run(
         let setup = Setup {
             function: &function,
             function_name: &settings.function,
-            backend: &backend,
+            backend: backend.as_ref(),
+            stirred,
             session,
             resumed,
             sessions_dir: &paths.sessions(),
@@ -315,14 +327,15 @@ fn run(
         &mut session,
         pending,
         &message,
-        &backend,
+        backend.as_ref(),
         &autostart,
         &mut |line| eprintln!("{line}"),
     )?;
     let mut agent = Agent {
         function: &function,
         function_name: &settings.function,
-        backend: &backend,
+        backend: backend.as_ref(),
+        stirred,
         session: &mut session,
         workspace: &workspace,
         context: context.expect("`-p` read the context size"),
