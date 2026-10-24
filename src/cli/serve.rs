@@ -226,12 +226,14 @@ pub fn start(
     let context = server.settings.context.unwrap_or(DEFAULT_CONTEXT);
     let extra = server.settings.args.clone().unwrap_or_default();
     let projector = projector_args(&server.settings, models)?;
+    let spec = spec(&server.settings, models)?;
     let args = systemd_run_args(
         &server.unit,
         &program,
         &model,
         (context, &host, port),
         &projector,
+        &spec,
         &extra,
     );
     let output = Command::new("systemd-run")
@@ -396,6 +398,7 @@ impl Engine {
         let context = settings.context.unwrap_or(DEFAULT_CONTEXT);
         let extra = settings.args.clone().unwrap_or_default();
         let projector = projector_args(settings, models)?;
+        let spec = spec(settings, models)?;
         let log_out = OpenOptions::new()
             .create(true)
             .append(true)
@@ -416,7 +419,7 @@ impl Engine {
         // program first, then the arguments. `Command::new` takes the
         // program, the rest are the arguments.
         let command =
-            engine_args(&program, &model, (context, &host, port), &projector, &extra);
+            engine_args(&program, &model, (context, &host, port), &projector, &spec, &extra);
         let child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
@@ -641,6 +644,40 @@ pub(super) fn local_address(url: &str) -> Option<(String, u16)> {
 
 /// The projector arguments of `[server]`: its file, where it runs and
 /// the most tokens an image takes (AGL-014, D9, D23).
+/// The speculative part of the launch (AGL-025, D2): the type and the
+/// resolved draft model; both `None` when the settings set none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Spec {
+    spec_type: Option<String>,
+    draft: Option<PathBuf>,
+}
+
+/// The speculative decoding of the `[server]` settings (AGL-025, D2, D4):
+/// the `draft` must be a file in the models directory, and it needs a
+/// `spec_type` — the build's `--spec-type` default is `none`, so a draft
+/// model alone would not run.
+pub(super) fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> {
+    let draft = match &settings.draft {
+        Some(name) => {
+            let path = models.join(name);
+            if !path.is_file() {
+                return Err(Error::DraftNotFound { path });
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    if draft.is_some() && settings.spec_type.is_none() {
+        return Err(Error::MissingSpecType {
+            draft: settings.draft.clone().unwrap_or_default(),
+        });
+    }
+    Ok(Spec {
+        spec_type: settings.spec_type.clone(),
+        draft,
+    })
+}
+
 pub(super) fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec<OsString>, Error> {
     let mut projector: Vec<OsString> = Vec::new();
     if let Some(name) = &settings.mmproj {
@@ -674,13 +711,15 @@ pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<Pat
 
 /// The arguments of the inference engine: the program, the model, the
 /// context, the local address, `--jinja`, one process, the projector,
-/// the extra of `[server] args` (AGL-024, D4): the one source of the
-/// launch arguments, the systemd and the child paths alike.
+/// the speculative decoding, the extra of `[server] args` (AGL-024, D4;
+/// AGL-025, D2): the one source of the launch arguments, the systemd
+/// and the child paths alike.
 pub(super) fn engine_args(
     engine: &Path,
     model: &Path,
     (context, host, port): (u32, &str, u16),
     projector: &[OsString],
+    spec: &Spec,
     extra: &[String],
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
@@ -701,6 +740,12 @@ pub(super) fn engine_args(
         args.push(arg.into());
     }
     args.extend(projector.iter().cloned());
+    if let Some(spec_type) = &spec.spec_type {
+        args.extend(["--spec-type".into(), spec_type.as_str().into()]);
+    }
+    if let Some(draft) = &spec.draft {
+        args.extend(["--spec-draft-model".into(), draft.as_os_str().to_os_string()]);
+    }
     args.extend(extra.iter().map(OsString::from));
     args
 }
@@ -713,6 +758,7 @@ fn systemd_run_args(
     model: &Path,
     (context, host, port): (u32, &str, u16),
     projector: &[OsString],
+    spec: &Spec,
     extra: &[String],
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
@@ -726,7 +772,7 @@ fn systemd_run_args(
     .map(OsString::from)
     .collect();
     args.extend(engine_args(
-        engine, model, (context, host, port), projector, extra,
+        engine, model, (context, host, port), projector, spec, extra,
     ));
     args
 }
@@ -812,6 +858,7 @@ mod tests {
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
             &[],
+            &Spec::default(),
             &["-ngl".into(), "999".into()],
         );
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
@@ -859,6 +906,7 @@ mod tests {
             Path::new("/m/q.gguf"),
             (65536, "127.0.0.1", 18080),
             &projector,
+            &Spec::default(),
             &["-ngl".into(), "999".into()],
         );
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
@@ -878,6 +926,7 @@ mod tests {
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
             &[],
+            &Spec::default(),
             &["-ngl".into(), "999".into()],
         );
         let engine = engine_args(
@@ -885,6 +934,7 @@ mod tests {
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
             &[],
+            &Spec::default(),
             &["-ngl".into(), "999".into()],
         );
         // The systemd prefix is `--user --unit=… --collect --quiet --`;
@@ -893,6 +943,78 @@ mod tests {
         let tail: Vec<&OsString> = systemd.iter().skip(5).collect();
         let engine: Vec<&OsString> = engine.iter().collect();
         assert_eq!(tail, engine);
+    }
+
+    #[test]
+    fn the_speculative_flags_come_after_the_projector_before_the_extra() {
+        let projector: Vec<OsString> =
+            ["--mmproj", "/m/p.gguf"].iter().map(OsString::from).collect();
+        let spec = Spec {
+            spec_type: Some("draft-mtp".into()),
+            draft: Some(PathBuf::from("/m/d.gguf")),
+        };
+        let args = engine_args(
+            Path::new("/bin/llama-server"),
+            Path::new("/m/q.gguf"),
+            (8192, "127.0.0.1", 18080),
+            &projector,
+            &spec,
+            &["-ngl".into(), "999".into()],
+        );
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        let tail = &args[args.len() - 8..];
+        assert_eq!(
+            tail,
+            ["--mmproj", "/m/p.gguf", "--spec-type", "draft-mtp", "--spec-draft-model", "/m/d.gguf", "-ngl", "999"]
+        );
+        // `spec_type` alone (the embedded MTP): no draft flag.
+        let spec = Spec {
+            spec_type: Some("draft-mtp".into()),
+            draft: None,
+        };
+        let args = engine_args(
+            Path::new("/bin/llama-server"),
+            Path::new("/m/q.gguf"),
+            (8192, "127.0.0.1", 18080),
+            &[],
+            &spec,
+            &[],
+        );
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|w| w == ["--spec-type", "draft-mtp"]));
+        assert!(!args.contains(&"--spec-draft-model"));
+    }
+
+    #[test]
+    fn the_speculative_settings_resolve() {
+        let models = std::env::temp_dir().join(format!("agentLIBRE-spec-{}", std::process::id()));
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join("d.gguf"), "").unwrap();
+        let settings = |spec_type: Option<&str>, draft: Option<&str>| ServerFile {
+            spec_type: spec_type.map(str::to_owned),
+            draft: draft.map(str::to_owned),
+            ..ServerFile::default()
+        };
+        // Neither key: no speculative decoding.
+        assert_eq!(spec(&settings(None, None), &models).unwrap(), Spec::default());
+        // `spec_type` alone: the embedded MTP.
+        let got = spec(&settings(Some("draft-mtp"), None), &models).unwrap();
+        assert_eq!(got.spec_type.as_deref(), Some("draft-mtp"));
+        assert!(got.draft.is_none());
+        // Both: the draft is resolved against the models directory.
+        let got = spec(&settings(Some("draft-mtp"), Some("d.gguf")), &models).unwrap();
+        assert_eq!(got.draft.as_deref(), Some(models.join("d.gguf").as_path()));
+        // A `draft` that names no file.
+        assert!(matches!(
+            spec(&settings(Some("draft-mtp"), Some("nope.gguf")), &models),
+            Err(Error::DraftNotFound { path }) if path == models.join("nope.gguf")
+        ));
+        // A `draft` without a `spec_type`: the build's default is `none`,
+        // the draft would not run (AGL-025, D4).
+        assert!(matches!(
+            spec(&settings(None, Some("d.gguf")), &models),
+            Err(Error::MissingSpecType { draft }) if draft == "d.gguf"
+        ));
     }
 
     /// A free port for a test: bound, then closed.

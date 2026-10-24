@@ -137,6 +137,10 @@ pub enum Error {
     },
     /// `[server] model` names no file in the models directory.
     ModelNotFound { path: PathBuf },
+    /// `[server] draft` names no file in the models directory (AGL-025, D2).
+    DraftNotFound { path: PathBuf },
+    /// `[server] draft` is set but `spec_type` is not (AGL-025, D4).
+    MissingSpecType { draft: String },
     /// `agl server start` with a `url` whose host is not local (D148).
     NotLocalServer { url: String },
     /// No engine binary in `PATH` (D147, AGL-024, D5).
@@ -459,6 +463,12 @@ impl std::fmt::Display for Error {
                 }
                 Error::MissingModel { .. } => "the model is not set".into(),
                 Error::ModelNotFound { path } => format!("no model file {}", path.display()),
+                Error::DraftNotFound { path } => {
+                    format!("no draft model file {}", path.display())
+                }
+                Error::MissingSpecType { draft } => {
+                    format!("the draft {draft} is set but the spec_type is not: set the spec_type too")
+                }
                 Error::NotLocalServer { url } => {
                     format!("the server address is not local: {url}")
                 }

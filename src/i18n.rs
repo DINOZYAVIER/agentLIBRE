@@ -567,6 +567,18 @@ Forge (сховище артефактів робочої області, agentL
         uk: "немає файлу моделі {path}",
     };
 
+    /// `Error::DraftNotFound`.
+    pub const DRAFT_NOT_FOUND: Msg = Msg {
+        en: "no draft model file {path}",
+        uk: "немає файлу draft-моделі {path}",
+    };
+
+    /// `Error::MissingSpecType`.
+    pub const MISSING_SPEC_TYPE: Msg = Msg {
+        en: "the draft {draft} is set but the spec_type is not: set the spec_type too",
+        uk: "draft {draft} задано, але spec_type ні: задано spec_type теж",
+    };
+
     /// `Error::NotLocalServer`.
     pub const NOT_LOCAL_SERVER: Msg = Msg {
         en: "agl server start runs llama-server only on 127.0.0.1 or localhost, not at {url}",
@@ -1888,6 +1900,12 @@ impl Error {
             }
             Error::ModelNotFound { path } => {
                 tr!(lang, m::MODEL_NOT_FOUND, path = path.display())
+            }
+            Error::DraftNotFound { path } => {
+                tr!(lang, m::DRAFT_NOT_FOUND, path = path.display())
+            }
+            Error::MissingSpecType { draft } => {
+                tr!(lang, m::MISSING_SPEC_TYPE, draft = draft)
             }
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::EngineNotFound { engine } => {
