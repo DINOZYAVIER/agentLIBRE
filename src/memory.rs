@@ -170,9 +170,11 @@ fn ok(content: impl Into<String>, write: Write) -> (ToolResult, Option<Write>) {
 }
 
 /// Runs one action of the tool over the memory directory `dir` (M32).
-pub fn run(dir: &Path, args: &Args) -> (ToolResult, Option<Write>) {
+/// `call_text` is the text of the call that preceded it (AGL-029, D1): the
+/// body of `add` when its `text` field is empty; the other actions ignore it.
+pub fn run(dir: &Path, args: &Args, call_text: Option<&str>) -> (ToolResult, Option<Write>) {
     match args.action.as_str() {
-        "add" => add(dir, &args.title, &args.hook, &args.text),
+        "add" => add(dir, &args.title, &args.hook, &args.text, call_text),
         "show" => (show(dir, &args.name), None),
         "edit" => edit_entry(dir, &args.name, &args.old, &args.new),
         "remove" => remove(dir, &args.name),
@@ -224,12 +226,44 @@ fn free_name(dir: &Path, title: &str) -> Option<String> {
 }
 
 /// `add title hook text` (M32): writes `<slug>.md` and appends its index
-/// line.
-pub fn add(dir: &Path, title: &str, hook: &str, text: &str) -> (ToolResult, Option<Write>) {
+/// line. The body is the `text`; when it is empty, the `call_text` that
+/// preceded the call (AGL-029, D1). A failure names the missing fields
+/// (AGL-029, D2).
+pub fn add(
+    dir: &Path,
+    title: &str,
+    hook: &str,
+    text: &str,
+    call_text: Option<&str>,
+) -> (ToolResult, Option<Write>) {
     let title = clean_title(title);
     let hook = one_line(hook);
-    if title.is_empty() || hook.is_empty() || text.trim().is_empty() {
-        return fail("`add` needs a title, a hook (one line) and a text.");
+    let call_body = call_text.map(str::trim).filter(|text| !text.is_empty());
+    let (body, from_call) = match text.trim() {
+        text if !text.is_empty() => (text.trim_end().to_owned(), false),
+        _ => match call_body {
+            Some(body) => (body.to_owned(), true),
+            None => (String::new(), false),
+        },
+    };
+    let mut missing: Vec<String> = Vec::new();
+    if title.is_empty() {
+        missing.push("a title".into());
+    }
+    if hook.is_empty() {
+        missing.push("a hook (one line)".into());
+    }
+    if body.is_empty() {
+        missing.push("a text".into());
+    }
+    if !missing.is_empty() {
+        let list = if missing.len() > 1 {
+            let last = missing.pop().unwrap();
+            format!("{} and {}", missing.join(", "), last)
+        } else {
+            missing.pop().unwrap()
+        };
+        return fail(format!("`add` needs {list}."));
     }
     let Some(name) = free_name(dir, &title) else {
         return fail("The title needs letters or digits to make a file name.");
@@ -237,8 +271,8 @@ pub fn add(dir: &Path, title: &str, hook: &str, text: &str) -> (ToolResult, Opti
     if let Err(error) = fs::create_dir_all(dir) {
         return fail(format!("Cannot create {}: {error}", dir.display()));
     }
-    let body = format!("# {title}\n\n{}\n", text.trim_end());
-    if let Err(error) = write_atomic(&entry_path(dir, &name), &body) {
+    let entry = format!("# {title}\n\n{body}\n");
+    if let Err(error) = write_atomic(&entry_path(dir, &name), &entry) {
         return fail(format!("Cannot write the entry: {error:?}"));
     }
     let mut index = fs::read_to_string(dir.join(INDEX)).unwrap_or_default();
@@ -250,12 +284,17 @@ pub fn add(dir: &Path, title: &str, hook: &str, text: &str) -> (ToolResult, Opti
         let _ = fs::remove_file(entry_path(dir, &name));
         return fail(format!("Cannot write the index: {error:?}"));
     }
+    let note = if from_call {
+        " (the body was taken from the text of the call)"
+    } else {
+        ""
+    };
     ok(
-        format!("Remembered `{name}`."),
+        format!("Remembered `{name}`{note}."),
         Write {
             name,
             kind: Kind::Added,
-            text: Some(text.trim_end().to_owned()),
+            text: Some(body),
         },
     )
 }
@@ -278,7 +317,7 @@ pub fn hook_of(text: &str) -> String {
 /// `/remember name | text` (M34, M37): the program writes the entry,
 /// its index hook being the text.
 pub fn remember(dir: &Path, name: &str, text: &str) -> (ToolResult, Option<Write>) {
-    add(dir, name, &hook_of(text), text)
+    add(dir, name, &hook_of(text), text, None)
 }
 
 /// `show name` (M32): the entry's full text, the end kept when it is long.
@@ -419,7 +458,7 @@ mod tests {
     }
 
     fn added(dir: &Path, title: &str, hook: &str, text: &str) -> String {
-        let (result, write) = add(dir, title, hook, text);
+        let (result, write) = add(dir, title, hook, text, None);
         assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
         write.unwrap().name
     }
@@ -427,7 +466,7 @@ mod tests {
     #[test]
     fn add_writes_the_entry_and_its_index_line() {
         let dir = Dir::new("add");
-        let (result, write) = add(&dir.0, "Build and test", "cargo build / cargo test", "Run `cargo build`.\nThen `cargo test`.\n");
+        let (result, write) = add(&dir.0, "Build and test", "cargo build / cargo test", "Run `cargo build`.\nThen `cargo test`.\n", None);
         assert_eq!(result.content, "Remembered `build-and-test`.");
         assert_eq!(
             write,
@@ -465,11 +504,61 @@ mod tests {
         let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
         assert!(index.contains("- [A (odd) title](a-odd-title.md) — a hook over lines\n"));
         for (title, hook, text) in [("", "h", "t"), ("t", "", "t"), ("t", "h", "  "), ("!!!", "h", "t")] {
-            let (result, write) = add(&dir.0, title, hook, text);
+            let (result, write) = add(&dir.0, title, hook, text, None);
             assert_eq!(result.outcome, Outcome::Fail, "{title:?}");
             assert!(write.is_none());
         }
         assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 5);
+    }
+
+    #[test]
+    fn add_takes_the_body_from_the_text_of_the_call_when_the_parameter_is_empty() {
+        let dir = Dir::new("call-body");
+        let (result, write) = add(&dir.0, "Note", "the hook", "", Some("The body text.\nMore."));
+        assert_eq!(
+            result.content,
+            "Remembered `note` (the body was taken from the text of the call)."
+        );
+        assert_eq!(
+            write,
+            Some(Write {
+                name: "note".into(),
+                kind: Kind::Added,
+                text: Some("The body text.\nMore.".into()),
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(dir.0.join("note.md")).unwrap(),
+            "# Note\n\nThe body text.\nMore.\n"
+        );
+        // A non-empty parameter wins over the text of the call.
+        let (result, write) = add(&dir.0, "Other", "h", "The parameter body.", Some("ignored"));
+        assert_eq!(result.content, "Remembered `other`.");
+        assert_eq!(write.unwrap().text.as_deref(), Some("The parameter body."));
+        // A whitespace-only text of the call is no body.
+        let (result, write) = add(&dir.0, "Blank", "h", "", Some("   \n "));
+        assert_eq!(result.content, "`add` needs a text.");
+        assert!(write.is_none());
+    }
+
+    #[test]
+    fn add_names_the_missing_fields() {
+        let dir = Dir::new("missing-fields");
+        fs::create_dir_all(&dir.0).unwrap();
+        for (title, hook, text, want) in [
+            ("", "h", "t", "`add` needs a title."),
+            ("t", "", "t", "`add` needs a hook (one line)."),
+            ("t", "h", "", "`add` needs a text."),
+            ("", "h", "", "`add` needs a title and a text."),
+            ("", "", "t", "`add` needs a title and a hook (one line)."),
+            ("", "", "", "`add` needs a title, a hook (one line) and a text."),
+        ] {
+            let (result, write) = add(&dir.0, title, hook, text, None);
+            assert_eq!(result.outcome, Outcome::Fail);
+            assert_eq!(result.content, want, "{title:?} {hook:?} {text:?}");
+            assert!(write.is_none());
+        }
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
     }
 
     #[test]
@@ -552,18 +641,18 @@ mod tests {
             text: "x".into(),
             ..Args::default()
         };
-        assert_eq!(run(&dir.0, &args).0.outcome, Outcome::Ok);
+        assert_eq!(run(&dir.0, &args, None).0.outcome, Outcome::Ok);
         let show_args = Args {
             action: "show".into(),
             name: "t".into(),
             ..Args::default()
         };
-        assert_eq!(run(&dir.0, &show_args).0.content, "# T\n\nx\n");
+        assert_eq!(run(&dir.0, &show_args, None).0.content, "# T\n\nx\n");
         let bad = Args {
             action: "list".into(),
             ..Args::default()
         };
-        let (result, write) = run(&dir.0, &bad);
+        let (result, write) = run(&dir.0, &bad, None);
         assert_eq!(result.outcome, Outcome::Fail);
         assert!(result.content.contains("Unknown action `list`"));
         assert!(write.is_none());

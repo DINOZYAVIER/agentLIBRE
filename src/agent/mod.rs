@@ -356,7 +356,7 @@ impl Agent<'_> {
                     "view" => (self.view(&call.args), None, None),
                     "search" => (self.search(&call.args), None, None),
                     "memory" => {
-                        let (result, write) = self.memory_tool(&call.args);
+                        let (result, write) = self.memory_tool(&call.args, text.as_deref());
                         (result, None, write)
                     }
                     _ => {
@@ -418,8 +418,13 @@ impl Agent<'_> {
 
     /// The `memory` tool (AGL-006, M32): `add` registers the workspace's
     /// store when it is not yet (M23); the other actions need the memory
-    /// that is there.
-    fn memory_tool(&mut self, args: &[(String, Value)]) -> (ToolResult, Option<crate::memory::Write>) {
+    /// that is there. `call_text` is the text of the call that preceded it
+    /// (AGL-029, D1): the body of `add` when its `text` field is empty.
+    fn memory_tool(
+        &mut self,
+        args: &[(String, Value)],
+        call_text: Option<&str>,
+    ) -> (ToolResult, Option<crate::memory::Write>) {
         let args = crate::memory::Args::from_call(args);
         let fail = |content: String| {
             (
@@ -441,7 +446,7 @@ impl Agent<'_> {
                 None => return fail("The memory of this workspace has no entries yet.".into()),
             }
         };
-        let (mut result, write) = crate::memory::run(&dir, &args);
+        let (mut result, write) = crate::memory::run(&dir, &args, call_text);
         // A store that moved or was adopted on the way: said once.
         if !lines.is_empty() {
             result.content.insert_str(0, &(lines.join("\n") + "\n"));
