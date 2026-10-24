@@ -1658,6 +1658,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "у тілі {name} немає заголовка `## {section}`",
     };
 
+    /// The forge tool: the append text is not one line (AGL-031).
+    pub const FORGE_TOOL_APPEND_MULTI_LINE: Msg = Msg {
+        en: "a bullet is one line: the append text of {name} has {n} newlines — split the bullet or describe the content indirectly; nothing was written",
+        uk: "bullet — один рядок: текст append для {name} містить {n} переноси рядків — розбий bullet або опиши зміст непрямо; нічого не записано",
+    };
+
     /// The forge tool: the append-only check failed (never expected).
     pub const FORGE_TOOL_APPEND_VIOLATION: Msg = Msg {
         en: "append to {name} would change more than the {section} bullet and updated; nothing was written",

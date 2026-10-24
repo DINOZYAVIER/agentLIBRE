@@ -705,6 +705,17 @@ fn forge_append(
             status = status.name()
         ));
     }
+    // A bullet is one line (AGL-031): a multi-line text would fail the
+    // append-only check below, so name the rule and the count up front.
+    let newlines = text.matches('\n').count();
+    if newlines > 0 {
+        return forge_fail(tr!(
+            lang,
+            m::FORGE_TOOL_APPEND_MULTI_LINE,
+            name = name,
+            n = newlines
+        ));
+    }
     let bullet = format!("- {text}\n");
     let old_body = artifact.body.clone();
     let Some(new_body) = append_bullet_lines(&old_body, section, text) else {

@@ -739,6 +739,50 @@ fn forge_append_is_a_bullet_under_the_section() {
 }
 
 #[test]
+fn forge_append_refuses_a_multi_line_text() {
+    let f = ForgeStore::new("forge-append-oneline");
+    let artifact = f.spec("agl-001-l", "in-progress");
+    f.write(&artifact);
+    let before = forge::load_artifact(&artifact.path).unwrap();
+    // One newline: the error names the rule and the count.
+    let result = f.call(
+        "append",
+        &[
+            ("name", "agl-001-l"),
+            ("section", "Progress"),
+            ("text", "line one\nline two"),
+        ],
+    );
+    assert_eq!(
+        result,
+        ToolResult {
+            outcome: Outcome::Fail,
+            content: "a bullet is one line: the append text of agl-001-l has 1 \
+                       newlines — split the bullet or describe the content \
+                       indirectly; nothing was written".into()
+        }
+    );
+    // Two newlines: the count follows.
+    let result = f.call(
+        "append",
+        &[
+            ("name", "agl-001-l"),
+            ("section", "Progress"),
+            ("text", "one\ntwo\nthree"),
+        ],
+    );
+    assert!(
+        result.content.contains("has 2 newlines"),
+        "{}",
+        result.content
+    );
+    // Nothing was written: the body and `updated` are untouched.
+    let after = forge::load_artifact(&artifact.path).unwrap();
+    assert_eq!(after.body, before.body);
+    assert_eq!(after.updated, before.updated);
+}
+
+#[test]
 fn forge_status_walks_the_lifecycle() {
     let f = ForgeStore::new("forge-status");
     let artifact = f.spec("agl-001-s", "open");
