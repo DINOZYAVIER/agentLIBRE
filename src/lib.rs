@@ -75,6 +75,23 @@ impl Drop for EngineGuard {
     }
 }
 
+/// The auto-init of the Run path (AGL-026, D2): the workspace the cwd
+/// resolved to is materialized when its marker is missing — the same
+/// code `agl init` runs — so the store (the engine log, the forge, the
+/// memory, the project settings) exists from the first turn, and the
+/// first message in an unregistered directory launches the engine
+/// instead of dying on the engine log's missing parent directory. The
+/// marker's line goes to stderr; the commands keep their own behavior.
+fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
+    if project.dir.join(forge::MARKER_FILE).is_file() {
+        return Ok(());
+    }
+    for line in forge::materialize(project, lang)? {
+        eprintln!("{line}");
+    }
+    Ok(())
+}
+
 /// Everything a session needs.
 pub struct Setup<'a> {
     pub function: &'a Function,
@@ -181,6 +198,7 @@ fn run(
         user.forge.auto_rehome.unwrap_or(true),
         *lang,
     )?;
+    auto_init(&project, *lang)?;
     if args.resume.is_some() && args.function.is_some() {
         return Err(Error::FunctionWithResume);
     }
@@ -358,5 +376,65 @@ fn run(
                 _ => 1,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge::testutil::TempDir;
+
+    /// The workspace of a fresh, unregistered `cwd` under a fresh `data`
+    /// (nothing stored there, so no choice is asked).
+    fn fresh(data: &Path, cwd: &Path) -> forge::Workspace {
+        let (ws, lines) = forge::resolve(
+            data,
+            cwd,
+            Lang::En,
+            true,
+            &|options| Err(Error::RehomeNoStore {
+                stores: options.to_vec(),
+            }),
+        )
+        .unwrap();
+        assert!(lines.is_empty());
+        ws
+    }
+
+    #[test]
+    fn the_auto_init_materializes_a_fresh_workspace() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let cwd = dir.0.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let ws = fresh(&data, &cwd);
+        let marker = ws.dir.join(forge::MARKER_FILE);
+        assert!(!marker.is_file());
+        auto_init(&ws, Lang::En).unwrap();
+        assert!(marker.is_file());
+        let text = std::fs::read_to_string(&marker).unwrap();
+        assert!(text.contains(&ws.identity));
+    }
+
+    #[test]
+    fn the_auto_init_is_a_no_op_on_a_registered_workspace() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let cwd = dir.0.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let ws = fresh(&data, &cwd);
+        auto_init(&ws, Lang::En).unwrap();
+        let marker = ws.dir.join(forge::MARKER_FILE);
+        let before = std::fs::read(&marker).unwrap();
+        // A second run changes nothing.
+        auto_init(&ws, Lang::En).unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+        // The store holds only the marker.
+        let entries: Vec<String> = std::fs::read_dir(&ws.dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![forge::MARKER_FILE.to_string()]);
     }
 }
