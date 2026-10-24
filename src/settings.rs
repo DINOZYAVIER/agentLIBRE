@@ -81,6 +81,12 @@ pub struct ServerFile {
     /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
     pub model: Option<String>,
     pub context: Option<u32>,
+    /// The type of the speculative decoding, the value of `--spec-type`
+    /// (AGL-025, D2); `None` is no speculative decoding.
+    pub spec_type: Option<String>,
+    /// A draft model for the speculative decoding, a file name in the
+    /// models directory (AGL-025, D2).
+    pub draft: Option<String>,
     /// More llama-server arguments.
     pub args: Option<Vec<String>>,
     /// The multimodal projector, a file name in the models directory
@@ -304,6 +310,8 @@ impl ServerFile {
         "engine",
         "model",
         "context",
+        "spec_type",
+        "draft",
         "args",
         "mmproj",
         "mmproj_offload",
@@ -352,6 +360,11 @@ impl ServerFile {
                     })
             })
             .transpose()?;
+        let spec_type = server.string("spec_type")?;
+        let draft = server.string("draft")?;
+        if let Some(draft) = &draft {
+            tomlfile::check_name(draft)?;
+        }
         let args = server.strings("args")?;
         let mmproj = server.string("mmproj")?;
         if let Some(mmproj) = &mmproj {
@@ -376,6 +389,8 @@ impl ServerFile {
             engine,
             model,
             context,
+            spec_type,
+            draft,
             args,
             mmproj,
             mmproj_offload,
@@ -403,6 +418,11 @@ impl ServerFile {
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
+            spec_type: self
+                .spec_type
+                .clone()
+                .or_else(|| defaults.spec_type.clone()),
+            draft: self.draft.clone().or_else(|| defaults.draft.clone()),
             args: self.args.clone().or_else(|| defaults.args.clone()),
             mmproj: self.mmproj.clone().or_else(|| defaults.mmproj.clone()),
             mmproj_offload: self.mmproj_offload.or(defaults.mmproj_offload),
@@ -431,6 +451,12 @@ impl ServerFile {
         }
         if let Some(context) = self.context {
             out.push_str(&format!("context = {context}\n"));
+        }
+        if let Some(spec_type) = &self.spec_type {
+            out.push_str(&format!("spec_type = {}\n", tomlfile::quote(spec_type)));
+        }
+        if let Some(draft) = &self.draft {
+            out.push_str(&format!("draft = {}\n", tomlfile::quote(draft)));
         }
         if let Some(args) = &self.args {
             let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
@@ -1031,6 +1057,46 @@ mod tests {
         assert_eq!(parsed.server, file);
         // Nothing set: no table at all.
         assert_eq!(ServerFile::default().render(), "");
+    }
+
+    #[test]
+    fn the_speculative_keys() {
+        // Parse: the two keys, with the draft name checked like the model.
+        let loaded = user(
+            "[server]\nmodel = \"m.gguf\"\nspec_type = \"draft-mtp\"\n\
+             draft = \"d.gguf\"\n",
+        )
+        .unwrap()
+        .server;
+        assert_eq!(loaded.spec_type.as_deref(), Some("draft-mtp"));
+        assert_eq!(loaded.draft.as_deref(), Some("d.gguf"));
+        assert!(matches!(
+            user("[server]\ndraft = \"../x.gguf\"\n"),
+            Err(Error::InvalidName { .. })
+        ));
+        // The project wins per key, the user's defaults fill the rest.
+        let user = UserFile {
+            server: ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
+                model: Some("m.gguf".into()),
+                spec_type: Some("draft-mtp".into()),
+                ..ServerFile::default()
+            },
+            ..UserFile::default()
+        };
+        let project = ServerFile {
+            draft: Some("d.gguf".into()),
+            ..ServerFile::default()
+        };
+        let merged = project.over(&user.server);
+        assert_eq!(merged.spec_type.as_deref(), Some("draft-mtp"));
+        assert_eq!(merged.draft.as_deref(), Some("d.gguf"));
+        let settings = resolved(&user, &project).unwrap();
+        assert_eq!(settings.server, merged);
+        // Render and parse back.
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &merged.render());
+        assert_eq!(UserFile::load(&path).unwrap().server, merged);
     }
 
     #[test]

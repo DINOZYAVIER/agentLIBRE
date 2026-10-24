@@ -1278,6 +1278,8 @@ mod tests {
                 engine: Some("llama-server".into()),
                 model: Some("q.gguf".into()),
                 context: Some(65536),
+                spec_type: None,
+                draft: None,
                 args: Some(vec!["-ngl".into(), "999".into()]),
                 mmproj: Some("p.gguf".into()),
                 mmproj_offload: Some(true),
