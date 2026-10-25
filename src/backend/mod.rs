@@ -64,7 +64,11 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
     ToolDoc {
         name: "edit",
         description: "Replace the only occurrence of `old` in the file at `path` with \
-                      `new`. Fails when `old` is missing or appears more than once.",
+                      `new`. Fails when `old` is missing or appears more than once. A \
+                      relative path is joined to the workspace; an absolute path is used \
+                      as given — that is a deliberate escape hatch (D7, AGL-032): it \
+                      bypasses the workspace rules, so prefer the forge and memory tools \
+                      for records.",
         params: &[
             ("path", false, None, true),
             ("old", false, None, true),
