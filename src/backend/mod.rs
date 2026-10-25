@@ -75,9 +75,10 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
         name: "forge",
         description: "The workspace forge: the store of the recorded artifacts of this \
                       workspace. Each action takes only its own fields: list (none); show \
-                      (name); new (title); edit (name, old, new; drafts only); append \
-                      (name, section, text; in-progress specs only); status (name, \
-                      state); remove (name; drafts only).",
+                      (name); new (title); edit (name, old, new; while open, in-progress \
+                      or backlog — the Progress section stays append-only); append (name, \
+                      section, text; while open or in-progress); status (name, state); \
+                      remove (name; drafts only).",
         params: &[
             (
                 "action",

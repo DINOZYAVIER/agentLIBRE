@@ -1641,16 +1641,25 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} — це {type_name}, а не task-spec; {action} стосується лише task-spec",
     };
 
-    /// The forge tool: `edit` is allowed while `open` only.
-    pub const FORGE_TOOL_EDIT_NOT_OPEN: Msg = Msg {
-        en: "{name} is {status}; edit is allowed while open (the draft)",
-        uk: "{name} — {status}; edit дозволено, поки open (чернетка)",
+    /// The forge tool: `edit` on a closed record (D4, AGL-032): the
+    /// alive states (`open`, `in-progress`, `backlog`) take the edit.
+    pub const FORGE_TOOL_EDIT_CLOSED: Msg = Msg {
+        en: "{name} is {status}; edit is allowed while open, in-progress or backlog",
+        uk: "{name} — {status}; edit дозволено, поки open, in-progress або backlog",
     };
 
-    /// The forge tool: `append` is allowed while `in-progress` only.
-    pub const FORGE_TOOL_APPEND_NOT_IN_PROGRESS: Msg = Msg {
-        en: "{name} is {status}; append is allowed while in-progress",
-        uk: "{name} — {status}; append дозволено, поки in-progress",
+    /// The forge tool: `edit` touches the append-only `## Progress`
+    /// section (D4, AGL-032).
+    pub const FORGE_TOOL_EDIT_PROGRESS: Msg = Msg {
+        en: "the `## Progress` section of {name} is append-only; use the append action",
+        uk: "секція `## Progress` у {name} — append-only; скористайтеся append",
+    };
+
+    /// The forge tool: `append` outside the working states (`open`,
+    /// `in-progress`) (D4, AGL-032).
+    pub const FORGE_TOOL_APPEND_NOT_ACTIVE: Msg = Msg {
+        en: "{name} is {status}; append is allowed while open or in-progress",
+        uk: "{name} — {status}; append дозволено, поки open або in-progress",
     };
 
     /// The forge tool: `remove` is allowed while `open` only.

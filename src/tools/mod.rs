@@ -583,7 +583,9 @@ fn forge_new(
 }
 
 /// `forge edit` (AGL-008): replaces one occurrence in the body, the
-/// workspace `edit`'s semantics; allowed while `open` only; `updated`
+/// workspace `edit`'s semantics; allowed in the alive states (`open`,
+/// `in-progress`, `backlog`) for any section except `## Progress`,
+/// which stays append-only through `append` (D4, AGL-032); `updated`
 /// is bumped and the file is re-rendered from the parsed form.
 fn forge_edit(
     ws: &crate::forge::Workspace,
@@ -615,10 +617,12 @@ fn forge_edit(
     }
     let status =
         Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
-    if status != Status::Open {
+    // The closed records stay (D4, AGL-032); the alive states take the
+    // edit.
+    if matches!(status, Status::Done | Status::Canceled) {
         return forge_fail(tr!(
             lang,
-            m::FORGE_TOOL_EDIT_NOT_OPEN,
+            m::FORGE_TOOL_EDIT_CLOSED,
             name = name,
             status = status.name()
         ));
@@ -631,6 +635,15 @@ fn forge_edit(
             return forge_fail(content);
         }
         [start] => {
+            // The `## Progress` section stays append-only (D4, AGL-032):
+            // a unique `old` that touches it is refused, in any alive
+            // state.
+            if let Some((p_start, p_end)) = progress_range(body)
+                && *start < p_end
+                && *start + old.len() > p_start
+            {
+                return forge_fail(tr!(lang, m::FORGE_TOOL_EDIT_PROGRESS, name = name));
+            }
             let mut edited = String::with_capacity(body.len() + new.len());
             edited.push_str(&body[..*start]);
             edited.push_str(new);
@@ -665,9 +678,34 @@ fn forge_edit(
     }
 }
 
+/// The range of the `## Progress` section of a task-spec body (D4,
+/// AGL-032): from the start of the heading line to the next `## `
+/// heading line or the end of the body; `None` when the section is
+/// absent.
+fn progress_range(body: &str) -> Option<(usize, usize)> {
+    const MARKER: &str = "## Progress";
+    let mut from = 0;
+    while let Some(rel) = body[from..].find(MARKER) {
+        let at = from + rel;
+        let starts_line = at == 0 || body.as_bytes()[at - 1] == b'\n';
+        let after = at + MARKER.len();
+        if starts_line && body[after..].starts_with('\n') {
+            let rest = &body[after + 1..];
+            let end = rest
+                .find("\n## ")
+                .map(|i| after + 1 + i)
+                .unwrap_or(body.len());
+            return Some((at, end));
+        }
+        from = at + 1;
+    }
+    None
+}
+
 /// `forge append` (AGL-008): appends `text` as a bullet at the end of
 /// the `## section` of the body (newest last); the section must exist;
-/// allowed while `in-progress` only; `updated` is bumped.
+/// allowed while `open` or `in-progress` (D4, AGL-032); `updated` is
+/// bumped.
 fn forge_append(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
@@ -697,10 +735,12 @@ fn forge_append(
     }
     let status =
         Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
-    if status != Status::InProgress {
+    // The working states take the bullet (D4, AGL-032); `backlog` and
+    // the closed records refuse.
+    if !matches!(status, Status::Open | Status::InProgress) {
         return forge_fail(tr!(
             lang,
-            m::FORGE_TOOL_APPEND_NOT_IN_PROGRESS,
+            m::FORGE_TOOL_APPEND_NOT_ACTIVE,
             name = name,
             status = status.name()
         ));

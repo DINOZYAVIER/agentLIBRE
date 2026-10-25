@@ -480,7 +480,8 @@ fn forge_show_is_the_rendered_artifact() {
 #[test]
 fn the_status_keyed_rule() {
     let statuses = ["open", "in-progress", "backlog", "done", "canceled"];
-    // edit is allowed while open only.
+    // edit is allowed in the alive states (D4, AGL-032): open,
+    // in-progress, backlog; the closed records refuse.
     let f = ForgeStore::new("rule-edit");
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
@@ -489,7 +490,7 @@ fn the_status_keyed_rule() {
             "edit",
             &[("name", &name), ("old", "## Objective"), ("new", "## Goal")],
         );
-        if *status == "open" {
+        if matches!(*status, "open" | "in-progress" | "backlog") {
             assert_eq!(
                 result,
                 ToolResult {
@@ -502,12 +503,16 @@ fn the_status_keyed_rule() {
                 result,
                 ToolResult {
                     outcome: Outcome::Fail,
-                    content: format!("{name} is {status}; edit is allowed while open (the draft)")
+                    content: format!(
+                        "{name} is {status}; edit is allowed while open, in-progress \
+                         or backlog"
+                    )
                 }
             );
         }
     }
-    // append is allowed while in-progress only.
+    // append is allowed while the spec works (D4, AGL-032): open or
+    // in-progress; backlog and the closed records refuse.
     let f = ForgeStore::new("rule-append");
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
@@ -520,7 +525,7 @@ fn the_status_keyed_rule() {
                 ("text", "a bullet"),
             ],
         );
-        if *status == "in-progress" {
+        if matches!(*status, "open" | "in-progress") {
             assert_eq!(
                 result,
                 ToolResult {
@@ -533,12 +538,13 @@ fn the_status_keyed_rule() {
                 result,
                 ToolResult {
                     outcome: Outcome::Fail,
-                    content: format!("{name} is {status}; append is allowed while in-progress")
+                    content: format!("{name} is {status}; append is allowed while open or in-progress")
                 }
             );
         }
     }
-    // remove is allowed while open only; a refused file stays.
+    // remove is allowed for open, canceled, backlog (D5, AGL-032); a
+    // refused file stays.
     let f = ForgeStore::new("rule-remove");
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
@@ -568,6 +574,59 @@ fn the_status_keyed_rule() {
             );
             assert!(path.exists());
         }
+    }
+}
+
+#[test]
+fn forge_edit_keeps_progress_append_only() {
+    let f = ForgeStore::new("forge-edit-progress");
+    let artifact = f.spec("agl-001-p", "in-progress");
+    f.write(&artifact);
+    // The body sections take the edit...
+    let result = f.call(
+        "edit",
+        &[("name", "agl-001-p"), ("old", "## Objective"), ("new", "## Goal")],
+    );
+    assert_eq!(
+        result,
+        ToolResult {
+            outcome: Outcome::Ok,
+            content: "Replaced 1 occurrence in agl-001-p.".into(),
+        }
+    );
+    // ...a bullet goes in through append...
+    let result = f.call(
+        "append",
+        &[
+            ("name", "agl-001-p"),
+            ("section", "Progress"),
+            ("text", "a bullet"),
+        ],
+    );
+    assert_eq!(
+        result,
+        ToolResult {
+            outcome: Outcome::Ok,
+            content: "appended a bullet to ## Progress in agl-001-p".into(),
+        }
+    );
+    // ...and the `## Progress` section refuses the edit: the bullet and
+    // the heading itself.
+    for old in ["- a bullet", "## Progress"] {
+        let result = f.call(
+            "edit",
+            &[("name", "agl-001-p"), ("old", old), ("new", "rewritten")],
+        );
+        assert_eq!(
+            result,
+            ToolResult {
+                outcome: Outcome::Fail,
+                content:
+                    "the `## Progress` section of agl-001-p is append-only; use the \
+                     append action"
+                        .into(),
+            }
+        );
     }
 }
 
