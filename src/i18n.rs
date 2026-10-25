@@ -1623,10 +1623,10 @@ Forge (сховище артефактів робочої області, agentL
     // The in-turn `forge` tool (AGL-008): the refusals are the
     // silly-mistakes protection.
 
-    /// The forge tool: an action outside the seven.
+    /// The forge tool: an action outside the eight.
     pub const FORGE_TOOL_UNKNOWN_ACTION: Msg = Msg {
-        en: "unknown action {action}; the actions are list, show, new, edit, append, status, remove",
-        uk: "невідомий action {action}; action'и: list, show, new, edit, append, status, remove",
+        en: "unknown action {action}; the actions are list, show, new, edit, append, status, rename, remove",
+        uk: "невідомий action {action}; action'и: list, show, new, edit, append, status, rename, remove",
     };
 
     /// The forge tool: an action's field is missing.
@@ -1674,6 +1674,20 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_TOOL_REMOVE_DONE: Msg = Msg {
         en: "{name} is done; a finished task is a historical fact and stays",
         uk: "{name} — done; завершена задача — історичний факт і залишається",
+    };
+
+    /// The forge tool: `rename`'s new name is not a name (D6, AGL-032):
+    /// the slug charset — letters, digits and `-`, no leading or
+    /// trailing `-`.
+    pub const FORGE_TOOL_RENAME_INVALID_NAME: Msg = Msg {
+        en: "{new} is not a name: letters, digits and `-`, no leading or trailing `-`",
+        uk: "{new} — не ім'я: літери, цифри та `-`, без `-` на початку або в кінці",
+    };
+
+    /// The forge tool: `rename` to the name the artifact already has.
+    pub const FORGE_TOOL_RENAME_SAME_NAME: Msg = Msg {
+        en: "the name of {name} is already {new}",
+        uk: "ім'я {name} вже {new}",
     };
 
     /// The forge tool: `append`'s section is not in the body.
@@ -1733,6 +1747,13 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_EVENT_STATUS: Msg = Msg {
         en: "[forge: {name} status {to}]",
         uk: "[forge: {name} статус {to}]",
+    };
+
+    /// The agent's `forge rename` renamed a task-spec (D6, AGL-032): the
+    /// old name rides the section slot.
+    pub const FORGE_EVENT_RENAMED: Msg = Msg {
+        en: "[forge: {name} renamed from {old}]",
+        uk: "[forge: {name} перейменовано з {old}]",
     };
 }
 

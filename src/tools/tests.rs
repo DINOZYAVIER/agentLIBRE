@@ -432,13 +432,13 @@ fn forge_list_is_one_line_per_artifact() {
         "agl-001-a task-spec open 2026-01-01 deps=[]\n\
          agl-002-b task-spec in-progress 2026-01-01 deps=[]"
     );
-    // An action outside the seven is refused.
+    // An action outside the eight is refused.
     assert_eq!(
         f.call("fly", &[]),
         ToolResult {
             outcome: Outcome::Fail,
             content: "unknown action fly; the actions are \
-                      list, show, new, edit, append, status, remove"
+                      list, show, new, edit, append, status, rename, remove"
                 .into()
         }
     );
@@ -966,6 +966,198 @@ fn forge_status_refuses_the_rest() {
 }
 
 #[test]
+fn forge_rename_is_identity_in_any_status() {
+    // In every status the rename works (D6, AGL-032): the file and the
+    // front-matter name move, the body stays.
+    let statuses = ["open", "in-progress", "backlog", "done", "canceled"];
+    for (i, status) in statuses.iter().enumerate() {
+        let f = ForgeStore::new(&format!("rename-any-{i}"));
+        let name = format!("agl-{i:03}-x");
+        f.write(&f.spec(&name, status));
+        let (result, write) = f.call_write(
+            "rename",
+            &[("name", &name), ("new", "agl-009-renamed")],
+        );
+        assert_eq!(
+            result,
+            ToolResult {
+                outcome: Outcome::Ok,
+                content: format!("renamed {name} to agl-009-renamed")
+            },
+            "{status}"
+        );
+        assert_eq!(
+            write,
+            Some(ForgeWrite {
+                name: "agl-009-renamed".into(),
+                kind: ForgeKind::Renamed,
+                section: Some(name.clone()),
+            }),
+            "{status}"
+        );
+        let old = f
+            .ws
+            .dir
+            .join("forge")
+            .join(task_spec::TYPE)
+            .join(format!("{name}.md"));
+        let new = f
+            .ws
+            .dir
+            .join("forge")
+            .join(task_spec::TYPE)
+            .join("agl-009-renamed.md");
+        assert!(!old.exists(), "{status}");
+        assert!(new.exists(), "{status}");
+        // The show is the rendered artifact with the new name.
+        let shown = f.call("show", &[("name", "agl-009-renamed")]);
+        assert_eq!(shown.outcome, Outcome::Ok, "{status}");
+        assert!(shown.content.contains("name = \"agl-009-renamed\""), "{status}");
+    }
+}
+
+#[test]
+fn forge_rename_rewrites_the_references_of_the_store() {
+    let f = ForgeStore::new("rename-refs");
+    let mut a = f.spec("agl-001-a", "open");
+    a.deps = vec!["agl-002-b".into(), "agl-003-c".into()];
+    a.supersedes = vec!["agl-002-b".into()];
+    let b = f.spec("agl-002-b", "in-progress");
+    let c = f.spec("agl-003-c", "done");
+    for artifact in [&a, &b, &c] {
+        f.write(artifact);
+    }
+    let (result, write) = f.call_write(
+        "rename",
+        &[("name", "agl-002-b"), ("new", "agl-002-bis")],
+    );
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    assert_eq!(write.unwrap().name, "agl-002-bis");
+    // The referrer's file is rewritten: both the deps and the supersedes
+    // point to the new name, the other reference is untouched.
+    let a_text = fs::read_to_string(
+        f.ws.dir
+            .join("forge")
+            .join(task_spec::TYPE)
+            .join("agl-001-a.md"),
+    )
+    .unwrap();
+    assert!(a_text.contains("deps = [\"agl-002-bis\", \"agl-003-c\"]"), "{a_text}");
+    assert!(a_text.contains("supersedes = [\"agl-002-bis\"]"), "{a_text}");
+    // The un-referenced artifact is untouched, the old file is gone.
+    assert!(!f
+        .ws
+        .dir
+        .join("forge")
+        .join(task_spec::TYPE)
+        .join("agl-002-b.md")
+        .exists());
+    let c_text = fs::read_to_string(
+        f.ws.dir
+            .join("forge")
+            .join(task_spec::TYPE)
+            .join("agl-003-c.md"),
+    )
+    .unwrap();
+    assert!(!c_text.contains("bis"));
+    // The renamed artifact is found by the new name only.
+    assert_eq!(f.call("show", &[("name", "agl-002-bis")]).outcome, Outcome::Ok);
+    assert_eq!(
+        f.call("show", &[("name", "agl-002-b")]).outcome,
+        Outcome::Fail
+    );
+    // The rename works on the other types too: identity is the
+    // envelope's, the lifecycle is not.
+    let note = f.note("note-1");
+    f.write(&note);
+    let mut other = f.spec("agl-004-d", "open");
+    other.deps = vec!["note-1".into()];
+    f.write(&other);
+    assert_eq!(
+        f.call("rename", &[("name", "note-1"), ("new", "note-two")])
+            .outcome,
+        Outcome::Ok
+    );
+    let d_text = fs::read_to_string(
+        f.ws.dir
+            .join("forge")
+            .join(task_spec::TYPE)
+            .join("agl-004-d.md"),
+    )
+    .unwrap();
+    assert!(d_text.contains("deps = [\"note-two\"]"), "{d_text}");
+}
+
+#[test]
+fn forge_rename_refuses_the_misfires() {
+    let f = ForgeStore::new("rename-refusals");
+    let a = f.spec("agl-001-a", "open");
+    let b = f.spec("agl-002-b", "open");
+    f.write(&a);
+    f.write(&b);
+    let forge = f.ws.dir.join("forge");
+    // The per-action fields are checked.
+    assert_eq!(
+        f.call("rename", &[("new", "agl-009-x")]).content,
+        "forge rename: name is missing; rename takes name, new"
+    );
+    assert_eq!(
+        f.call("rename", &[("name", "agl-001-a")]).content,
+        "forge rename: new is missing; rename takes name, new"
+    );
+    // An empty `new` is no name (the field is the `edit`'s).
+    assert_eq!(
+        f.call("rename", &[("name", "agl-001-a"), ("new", "")]).content,
+        "forge rename: new is missing; rename takes name, new"
+    );
+    // The new name is the slug charset: no separators, no spaces, no
+    // leading or trailing `-`.
+    for new in ["a/b", "a b", "-x", "x-"] {
+        let result = f.call("rename", &[("name", "agl-001-a"), ("new", new)]);
+        assert_eq!(result.outcome, Outcome::Fail, "{new}");
+        assert_eq!(
+            result.content,
+            format!("{new} is not a name: letters, digits and `-`, no leading or trailing `-`")
+        );
+    }
+    // The name the artifact already has.
+    assert_eq!(
+        f.call("rename", &[("name", "agl-001-a"), ("new", "agl-001-a")])
+            .content,
+        "the name of agl-001-a is already agl-001-a"
+    );
+    // The name another artifact has: the refusal names the store, the
+    // store is untouched.
+    let result = f.call("rename", &[("name", "agl-001-a"), ("new", "agl-002-b")]);
+    assert_eq!(
+        result,
+        ToolResult {
+            outcome: Outcome::Fail,
+            content: format!("an artifact named agl-002-b is already in {}", forge.display()),
+        }
+    );
+    assert!(f
+        .ws
+        .dir
+        .join("forge")
+        .join(task_spec::TYPE)
+        .join("agl-001-a.md")
+        .exists());
+    assert!(f
+        .ws
+        .dir
+        .join("forge")
+        .join(task_spec::TYPE)
+        .join("agl-002-b.md")
+        .exists());
+    // The absent artifact.
+    assert_eq!(
+        f.call("rename", &[("name", "ghost"), ("new", "agl-009-x")]).content,
+        format!("no artifact is named ghost in {}", forge.display())
+    );
+}
+
+#[test]
 fn forge_writes_are_task_spec_only_and_reads_are_generic() {
     let f = ForgeStore::new("forge-types");
     let note = f.note("note-1");
@@ -1298,6 +1490,6 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     assert_eq!(
         result.content,
         "невідомий action fly; action'и: list, show, new, edit, append, status, \
-         remove"
+         rename, remove"
     );
 }

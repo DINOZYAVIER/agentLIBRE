@@ -70,15 +70,19 @@ pub enum ForgeKind {
     Removed,
     /// `forge status` moved a task-spec.
     StatusChanged,
+    /// `forge rename` renamed a task-spec (D6, AGL-032): the new name
+    /// is the event's, the old one rides the section slot.
+    Renamed,
 }
 
 impl ForgeKind {
-    const ALL: [ForgeKind; 5] = [
+    const ALL: [ForgeKind; 6] = [
         ForgeKind::Created,
         ForgeKind::Edited,
         ForgeKind::Appended,
         ForgeKind::Removed,
         ForgeKind::StatusChanged,
+        ForgeKind::Renamed,
     ];
 
     fn name(self) -> &'static str {
@@ -88,6 +92,7 @@ impl ForgeKind {
             ForgeKind::Appended => "appended",
             ForgeKind::Removed => "removed",
             ForgeKind::StatusChanged => "status-changed",
+            ForgeKind::Renamed => "renamed",
         }
     }
 }

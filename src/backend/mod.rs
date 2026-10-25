@@ -78,12 +78,16 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
                       (name); new (title); edit (name, old, new; while open, in-progress \
                       or backlog — the Progress section stays append-only); append (name, \
                       section, text; while open or in-progress); status (name, state); \
-                      remove (name; while open, canceled or backlog).",
+                      rename (name, new; in any status — the file, the front-matter name \
+                      and every deps/supersedes reference in the store); remove (name; \
+                      while open, canceled or backlog).",
         params: &[
             (
                 "action",
                 false,
-                Some("list, show, new, edit, append, status or remove."),
+                Some(
+                    "list, show, new, edit, append, status, rename or remove.",
+                ),
                 true,
             ),
             (
@@ -91,14 +95,17 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
                 false,
                 Some(
                     "The artifact's name as `list` shows it, like agl-001-my-task; not its \
-                     title. For show, edit, append, status and remove.",
+                     title. For show, edit, append, status, rename and remove.",
                 ),
                 false,
             ),
             (
                 "new",
                 false,
-                Some("For edit: the replacement text; empty deletes `old`."),
+                Some(
+                    "For edit: the replacement text; empty deletes `old`. For rename: the \
+                     new name (letters, digits and `-`).",
+                ),
                 false,
             ),
             (
@@ -162,21 +169,25 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
         description: "The memory of this workspace: entries kept across sessions. Keep the \
                       project's setup and conventions, the environment and the human's \
                       preferences — not decisions, they are recorded in the forge. Actions: \
-                      add title hook text; show name; edit name old new; remove name.",
+                      add title hook text; show name; edit name old new; update name title \
+                      hook; remove name.",
         params: &[
-            ("action", false, Some("add, show, edit or remove."), true),
+            ("action", false, Some("add, show, edit, update or remove."), true),
             (
                 "hook",
                 false,
-                Some("For add: one line that says what the entry holds, for the index."),
+                Some(
+                    "For add: one line that says what the entry holds, for the index. For \
+                     update: the new hook; the other field is kept.",
+                ),
                 false,
             ),
             (
                 "name",
                 false,
                 Some(
-                    "For show, edit and remove: the entry's name as the memory index shows \
-                     it (the file name without .md).",
+                    "For show, edit, update and remove: the entry's name as the memory index \
+                     shows it (the file name without .md).",
                 ),
                 false,
             ),
@@ -196,7 +207,10 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
             (
                 "title",
                 false,
-                Some("For add: the title of the entry; its file name is made from it."),
+                Some(
+                    "For add: the title of the entry; its file name is made from it. For \
+                     update: the new title; the other field is kept.",
+                ),
                 false,
             ),
         ],

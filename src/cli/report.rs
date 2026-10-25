@@ -85,6 +85,12 @@ impl Report for StderrReport {
                 name = name,
                 to = section.unwrap_or_default()
             ),
+            ForgeKind::Renamed => tr!(
+                self.lang,
+                m::FORGE_EVENT_RENAMED,
+                name = name,
+                old = section.unwrap_or_default()
+            ),
         };
         eprintln!("{message}");
     }

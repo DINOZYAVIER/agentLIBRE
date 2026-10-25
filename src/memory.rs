@@ -177,9 +177,10 @@ pub fn run(dir: &Path, args: &Args, call_text: Option<&str>) -> (ToolResult, Opt
         "add" => add(dir, &args.title, &args.hook, &args.text, call_text),
         "show" => (show(dir, &args.name), None),
         "edit" => edit_entry(dir, &args.name, &args.old, &args.new),
+        "update" => update(dir, &args.name, &args.title, &args.hook),
         "remove" => remove(dir, &args.name),
         other => fail(format!(
-            "Unknown action `{other}`; use add, show, edit or remove."
+            "Unknown action `{other}`; use add, show, edit, update or remove."
         )),
     }
 }
@@ -366,6 +367,75 @@ pub fn edit_entry(dir: &Path, name: &str, old: &str, new: &str) -> (ToolResult, 
         text: Some(new.to_owned()),
     };
     (result, Some(write))
+}
+
+/// `update name title hook` (D6, AGL-032): rewrites the entry's first
+/// heading and its index line (title + hook) in one call; at least one
+/// of `title` and `hook` is given, the other is kept. The name is not
+/// touched — the file name is the entry's identity. The entry file is
+/// written before the index, as `add` does it: an index failure leaves
+/// the line stale, never an orphaned entry.
+pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, Option<Write>) {
+    if !valid_name(name) || !entry_path(dir, name).is_file() {
+        return fail(format!("No memory entry `{name}`."));
+    }
+    let mut title = clean_title(title);
+    let hook = one_line(hook);
+    if title.is_empty() && hook.is_empty() {
+        return fail("`update` needs a title and/or a hook.");
+    }
+    let Ok(text) = fs::read_to_string(entry_path(dir, name)) else {
+        return fail(format!("Cannot read the entry `{name}`."));
+    };
+    let Some(first) = text.lines().next() else {
+        return fail(format!("The entry `{name}` is empty."));
+    };
+    let Some(old_title) = first.strip_prefix("# ") else {
+        return fail(format!("The entry `{name}` has no `# ` heading."));
+    };
+    if title.is_empty() {
+        title = old_title.to_string();
+    }
+    // The index line of the entry: `- [title](name.md) — hook`; the
+    // hook is everything after the first ` — ` past the link, so a hook
+    // with ` — ` of its own is kept whole.
+    let index = fs::read_to_string(dir.join(INDEX)).unwrap_or_default();
+    let link = format!("]({name}.md)");
+    let Some(line) = index.lines().find(|line| line.contains(&link)) else {
+        return fail(format!("No index line for `{name}` in {INDEX}."));
+    };
+    let after = &line[line.find(&link).unwrap() + link.len()..];
+    let old_hook = after.strip_prefix(" — ").unwrap_or(after);
+    let hook = if hook.is_empty() {
+        old_hook.to_string()
+    } else {
+        hook
+    };
+    let new_line = format!("- [{title}]({name}.md) — {hook}");
+    if title != old_title {
+        // `first` is the heading without its newline; the rest of the
+        // text keeps it, so no newline is added here.
+        let entry = format!("# {title}{}", &text[first.len()..]);
+        if let Err(error) = write_atomic(&entry_path(dir, name), &entry) {
+            return fail(format!("Cannot write the entry: {error:?}"));
+        }
+    }
+    let mut new_index = String::with_capacity(index.len() + new_line.len());
+    for l in index.lines() {
+        new_index.push_str(if l == line { &new_line } else { l });
+        new_index.push('\n');
+    }
+    if let Err(error) = write_atomic(&dir.join(INDEX), &new_index) {
+        return fail(format!("Cannot write the index: {error:?}"));
+    }
+    ok(
+        format!("Updated `{name}`."),
+        Write {
+            name: name.to_owned(),
+            kind: Kind::Edited,
+            text: Some(new_line),
+        },
+    )
 }
 
 /// `remove name` (M32): deletes the file and its index line.
@@ -610,6 +680,99 @@ mod tests {
         assert_eq!(edit_entry(&dir.0, &name, "absent", "x").0.outcome, Outcome::Fail);
         assert_eq!(edit_entry(&dir.0, "nope", "a", "b").0.outcome, Outcome::Fail);
         assert_eq!(edit_entry(&dir.0, "../x", "a", "b").0.outcome, Outcome::Fail);
+    }
+
+    #[test]
+    fn update_rewrites_the_heading_and_the_index_line() {
+        let dir = Dir::new("update");
+        let name = added(&dir.0, "One", "the old hook", "body text");
+        let other = added(&dir.0, "Two", "second", "2");
+        // Title only: the hook is kept, the other entry's line is untouched.
+        let (result, write) = update(&dir.0, &name, "One, revised", "");
+        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+        assert_eq!(result.content, "Updated `one`.");
+        assert_eq!(
+            write,
+            Some(Write {
+                name: name.clone(),
+                kind: Kind::Edited,
+                text: Some("- [One, revised](one.md) — the old hook".into()),
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(entry_path(&dir.0, &name)).unwrap(),
+            "# One, revised\n\nbody text\n"
+        );
+        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        assert_eq!(
+            index,
+            "- [One, revised](one.md) — the old hook\n- [Two](two.md) — second\n".to_string()
+        );
+        assert_eq!(other, "two");
+        // Hook only: the title is kept, a hook over lines is one line.
+        let (result, write) = update(&dir.0, &name, "", "a hook\nover lines");
+        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+        assert_eq!(
+            write.unwrap().text.as_deref(),
+            Some("- [One, revised](one.md) — a hook over lines")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.0.join(INDEX)).unwrap().lines().next().unwrap(),
+            "- [One, revised](one.md) — a hook over lines"
+        );
+        // Both at once: title and hook.
+        let (result, _) = update(&dir.0, &name, "Final [Title]", "the final hook");
+        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        assert!(index.contains("- [Final (Title)](one.md) — the final hook\n"));
+        assert!(fs::read_to_string(entry_path(&dir.0, &name)).unwrap().starts_with("# Final (Title)\n"));
+        // A hook with ` — ` of its own is kept whole.
+        added(&dir.0, "Dash", "a — b — c", "d");
+        let (result, _) = update(&dir.0, "dash", "", "");
+        assert_eq!(result.outcome, Outcome::Fail, "{}", result.content);
+        let (result, write) = update(&dir.0, "dash", "Dash, v2", "");
+        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+        assert_eq!(write.unwrap().text.as_deref(), Some("- [Dash, v2](dash.md) — a — b — c"));
+    }
+
+    #[test]
+    fn update_refuses_the_misfires() {
+        let dir = Dir::new("update-misfires");
+        let name = added(&dir.0, "One", "the hook", "body");
+        // Neither field: nothing is written.
+        let (result, write) = update(&dir.0, &name, "", "");
+        assert_eq!(result.outcome, Outcome::Fail);
+        assert_eq!(result.content, "`update` needs a title and/or a hook.");
+        assert!(write.is_none());
+        assert_eq!(
+            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
+            "- [One](one.md) — the hook\n"
+        );
+        // No entry, or a bad name: the refusal of the other actions.
+        assert_eq!(update(&dir.0, "nope", "t", "").0.content, "No memory entry `nope`.");
+        assert_eq!(update(&dir.0, "../etc", "t", "").0.content, "No memory entry `../etc`.");
+        // An entry without its index line: the index is the record of the
+        // line, the refusal names the file.
+        let two = added(&dir.0, "Two", "h", "t");
+        fs::write(dir.0.join(INDEX), "- [One](one.md) — the hook\n").unwrap();
+        assert_eq!(
+            update(&dir.0, &two, "t", "").0.content,
+            "No index line for `two` in MEMORY.md."
+        );
+        // An entry without a `# ` heading: the first line is no heading.
+        let three = added(&dir.0, "Three", "h", "t");
+        fs::write(entry_path(&dir.0, &three), "no heading\n").unwrap();
+        assert_eq!(
+            update(&dir.0, &three, "t", "").0.content,
+            "The entry `three` has no `# ` heading."
+        );
+        // An empty entry file: no first line.
+        let four = added(&dir.0, "Four", "h", "t");
+        fs::write(entry_path(&dir.0, &four), "").unwrap();
+        assert_eq!(
+            update(&dir.0, &four, "t", "").0.content,
+            "The entry `four` is empty."
+        );
     }
 
     #[test]

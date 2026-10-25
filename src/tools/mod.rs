@@ -447,6 +447,17 @@ pub fn forge_run(
             ForgeKind::StatusChanged,
             args.state.clone(),
         ),
+        "rename" => {
+            // The event carries the new name; the old one rides the
+            // section slot of the marker line.
+            let (result, new_name) = forge_rename(ws, &args.name, &args.new, lang);
+            let write = new_name.map(|name| ForgeWrite {
+                name,
+                kind: ForgeKind::Renamed,
+                section: args.name.clone(),
+            });
+            (result, write)
+        }
         "remove" => write(forge_remove(ws, &args.name, lang), ForgeKind::Removed, None),
         other => (
             forge_fail(tr!(lang, m::FORGE_TOOL_UNKNOWN_ACTION, action = other)),
@@ -914,6 +925,141 @@ fn forge_remove(
     }
 }
 
+/// A name the agent gives with `forge rename` (D6, AGL-032): the slug
+/// charset — the letters and digits of any script and `-`, not empty,
+/// no leading or trailing `-` — so the file name stays where the store
+/// looks for it.
+fn rename_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_alphanumeric() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+/// `forge rename` (D6, AGL-032): renames the artifact's file and its
+/// front-matter name and rewrites every `deps` and `supersedes`
+/// reference in the store, in any status — identity maintenance, not a
+/// lifecycle change. The new file is written, the references rewritten,
+/// and only then the old file removed, so a failure never leaves a
+/// dangling reference. The success reports the new name for the event.
+fn forge_rename(
+    ws: &crate::forge::Workspace,
+    name: &Option<String>,
+    new: &Option<String>,
+    lang: crate::i18n::Lang,
+) -> (ToolResult, Option<String>) {
+    use crate::error::Error;
+    use crate::forge::{self, task_spec};
+    use crate::i18n::m;
+    use crate::tr;
+    let Some(name) = name else {
+        return (missing_field(lang, "rename", "name"), None);
+    };
+    // `new` may be empty (the `edit` deletion) — empty is no name.
+    let Some(new) = new.as_ref().filter(|new| !new.is_empty()) else {
+        return (missing_field(lang, "rename", "new"), None);
+    };
+    if !rename_valid_name(new) {
+        return (
+            forge_fail(tr!(
+                lang,
+                m::FORGE_TOOL_RENAME_INVALID_NAME,
+                new = new
+            )),
+            None,
+        );
+    }
+    if new == name {
+        return (
+            forge_fail(tr!(
+                lang,
+                m::FORGE_TOOL_RENAME_SAME_NAME,
+                name = name,
+                new = new
+            )),
+            None,
+        );
+    }
+    let artifact = match find_artifact(ws, name) {
+        Ok(artifact) => artifact,
+        Err(error) => return (forge_fail(error.message(lang)), None),
+    };
+    // The name is the front-matter field; a stray file with the new
+    // stem in its type directory would be clobbered by the write.
+    let taken = match store_names(ws) {
+        Ok(names) => names,
+        Err(error) => return (forge_fail(error.message(lang)), None),
+    };
+    let new_path = artifact.path.with_file_name(format!("{new}.md"));
+    if taken.contains(new) || new_path.exists() {
+        return (
+            forge_fail(
+                Error::NameTaken {
+                    name: new.clone(),
+                    dir: ws.dir.join("forge"),
+                }
+                .message(lang),
+            ),
+            None,
+        );
+    }
+    let mut renamed = artifact.clone();
+    renamed.name = new.clone();
+    renamed.path = new_path;
+    renamed.updated = task_spec::today();
+    if let Err(error) = forge::write_artifact(&renamed) {
+        return (forge_fail(error.message(lang)), None);
+    }
+    // Every reference to the old name in the store points to the new
+    // one; an artifact is rewritten only when it changed.
+    let files = match forge::artifact_files(&ws.dir) {
+        Ok(files) => files,
+        Err(error) => return (forge_fail(error.message(lang)), None),
+    };
+    for path in files {
+        if path == artifact.path {
+            continue;
+        }
+        let Ok(mut other) = forge::load_artifact(&path) else {
+            continue;
+        };
+        let mut changed = false;
+        for list in [&mut other.deps, &mut other.supersedes] {
+            for item in list.iter_mut() {
+                if item == name {
+                    *item = new.clone();
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            other.updated = task_spec::today();
+            if let Err(error) = forge::write_artifact(&other) {
+                return (forge_fail(error.message(lang)), None);
+            }
+        }
+    }
+    if let Err(error) = fs::remove_file(&artifact.path) {
+        return (
+            forge_fail(
+                Error::Remove {
+                    path: artifact.path.clone(),
+                    source: error,
+                }
+                .message(lang),
+            ),
+            None,
+        );
+    }
+    (
+        ToolResult {
+            outcome: Outcome::Ok,
+            content: format!("renamed {name} to {new}"),
+        },
+        Some(new.clone()),
+    )
+}
+
 /// The forge tool's refusal of a write on a non-`task-spec` artifact
 /// (AGL-008): the writes apply to the `task-spec` type only.
 fn not_task_spec(
@@ -944,6 +1090,7 @@ fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResu
         "edit" => "name, old, new",
         "append" => "name, section, text",
         "status" => "name, state",
+        "rename" => "name, new",
         _ => "name",
     };
     forge_fail(tr!(
