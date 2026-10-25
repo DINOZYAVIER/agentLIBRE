@@ -78,7 +78,7 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
                       (name); new (title); edit (name, old, new; while open, in-progress \
                       or backlog — the Progress section stays append-only); append (name, \
                       section, text; while open or in-progress); status (name, state); \
-                      remove (name; drafts only).",
+                      remove (name; while open, canceled or backlog).",
         params: &[
             (
                 "action",

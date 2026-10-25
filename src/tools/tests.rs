@@ -555,7 +555,7 @@ fn the_status_keyed_rule() {
                 .join(format!("{name}.md"));
         f.write(&f.spec(&name, status));
         let result = f.call("remove", &[("name", &name)]);
-        if *status == "open" {
+        if matches!(*status, "open" | "canceled" | "backlog") {
             assert_eq!(
                 result,
                 ToolResult {
@@ -565,11 +565,18 @@ fn the_status_keyed_rule() {
             );
             assert!(!path.exists());
         } else {
+            let content = match *status {
+                "in-progress" => format!(
+                    "{name} is in-progress; cancel it first (`status canceled`), then remove"
+                ),
+                "done" => format!("{name} is done; a finished task is a historical fact and stays"),
+                _ => unreachable!("the status is in the loop"),
+            };
             assert_eq!(
                 result,
                 ToolResult {
                     outcome: Outcome::Fail,
-                    content: format!("{name} is {status}; remove is allowed while open (a draft)")
+                    content,
                 }
             );
             assert!(path.exists());

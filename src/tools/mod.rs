@@ -865,8 +865,10 @@ fn forge_status(
     }
 }
 
-/// `forge remove` (AGL-008): deletes the artifact file; allowed while
-/// `open` only (a draft); `canceled` specs stay — they are records.
+/// `forge remove` (AGL-008): deletes the artifact file; allowed for
+/// `open`, `canceled`, `backlog` (D5, AGL-032); `in-progress` refuses,
+/// pointing to `status canceled` first; `done` refuses — a historical
+/// fact.
 fn forge_remove(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
@@ -889,13 +891,13 @@ fn forge_remove(
     }
     let status =
         Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
-    if status != Status::Open {
-        return forge_fail(tr!(
-            lang,
-            m::FORGE_TOOL_REMOVE_NOT_OPEN,
-            name = name,
-            status = status.name()
-        ));
+    // D5, AGL-032: the live work is protected — an in-progress spec is
+    // canceled first, then removed; a done spec is a historical fact.
+    if status == Status::InProgress {
+        return forge_fail(tr!(lang, m::FORGE_TOOL_REMOVE_IN_PROGRESS, name = name));
+    }
+    if status == Status::Done {
+        return forge_fail(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name));
     }
     if let Err(error) = fs::remove_file(&artifact.path) {
         return forge_fail(

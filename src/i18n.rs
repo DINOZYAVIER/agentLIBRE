@@ -1662,10 +1662,18 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} — {status}; append дозволено, поки open або in-progress",
     };
 
-    /// The forge tool: `remove` is allowed while `open` only.
-    pub const FORGE_TOOL_REMOVE_NOT_OPEN: Msg = Msg {
-        en: "{name} is {status}; remove is allowed while open (a draft)",
-        uk: "{name} — {status}; remove дозволено, поки open (чернетка)",
+    /// The forge tool: `remove` on an `in-progress` spec (D5, AGL-032):
+    /// the path is `status canceled` first, then remove.
+    pub const FORGE_TOOL_REMOVE_IN_PROGRESS: Msg = Msg {
+        en: "{name} is in-progress; cancel it first (`status canceled`), then remove",
+        uk: "{name} — in-progress; спочатку скасуйте (`status canceled`), потім remove",
+    };
+
+    /// The forge tool: `remove` on a `done` spec (D5, AGL-032): a
+    /// finished task is a historical fact.
+    pub const FORGE_TOOL_REMOVE_DONE: Msg = Msg {
+        en: "{name} is done; a finished task is a historical fact and stays",
+        uk: "{name} — done; завершена задача — історичний факт і залишається",
     };
 
     /// The forge tool: `append`'s section is not in the body.
