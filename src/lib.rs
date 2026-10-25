@@ -221,7 +221,14 @@ fn run(
         ),
         function.or(args.function.as_deref()),
     )?;
-    let mut function = Function::load(&paths.functions(), &paths.formats(), &settings.function)?;
+    // The Function's tiers (AGL-028, D3): the workspace store's
+    // `functions/` directory, then the user's, then the built-ins.
+    let mut function = Function::load(
+        &paths.functions_dir(&project.key),
+        &paths.functions(),
+        &paths.formats(),
+        &settings.function,
+    )?;
     // The tool `search` is there only where `[search]` is complete: no tool,
     // no grammar for it and no word of it in the prompt otherwise
     // (AGL-019, D5).

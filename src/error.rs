@@ -88,8 +88,9 @@ pub enum Error {
         key: String,
         problem: TemplateProblem,
     },
-    /// Neither `path` nor a built-in Function is called `name`.
-    FunctionNotFound { name: String, path: PathBuf },
+    /// Neither the looked-in `paths` nor a built-in Function is called
+    /// `name`.
+    FunctionNotFound { name: String, paths: Vec<PathBuf> },
     /// A Function is unusable; `key` locates the problem (D21, D42, D72,
     /// D78, D82-D93).
     Function {

@@ -75,6 +75,12 @@ impl Paths {
         self.workspace_dir(name).join("forge")
     }
 
+    /// The functions of the workspace directory `name` (AGL-028, D1): a
+    /// sibling of `forge/` and `memory/`, one function per file.
+    pub fn functions_dir(&self, name: &str) -> PathBuf {
+        self.workspace_dir(name).join("functions")
+    }
+
     /// User model formats, `formats/*.toml` (D39).
     pub fn formats(&self) -> PathBuf {
         self.config.join("formats")
@@ -122,6 +128,10 @@ mod tests {
         assert_eq!(
             paths.forge_dir(name),
             PathBuf::from("/home/u/.local/share/agentLIBRE/agl-lite-60af300abea6/forge")
+        );
+        assert_eq!(
+            paths.functions_dir(name),
+            PathBuf::from("/home/u/.local/share/agentLIBRE/agl-lite-60af300abea6/functions")
         );
     }
 

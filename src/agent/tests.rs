@@ -412,7 +412,7 @@ fn search_runs_in_the_agent_and_its_text_is_the_result() {
         ("It is a city.", Stop::End),
     ]);
     let search = FakeSearch::new(Outcome::Ok, "1. Київ\n   https://x.example/");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("what is Kyiv", &mut Log::default());
@@ -445,7 +445,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
         ("I could not search.", Stop::End),
     ]);
     let search = FakeSearch::new(Outcome::Fail, "The search service is rate limited; try again later.");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("search", &mut Log::default());
@@ -460,7 +460,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
 
 #[test]
 fn without_search_the_tool_is_not_in_the_list_nor_the_grammar() {
-    let mut minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let mut minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let names = |function: &Function| -> Vec<&'static str> {
         function_tools(function).iter().map(|doc| doc.name).collect()
     };
@@ -509,7 +509,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
 #[test]
 fn a_call_then_an_answer() {
     let dir = Dir::new("answer");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
@@ -549,7 +549,7 @@ fn a_call_then_an_answer() {
 
 #[test]
 fn the_off_level_silences_the_thinking() {
-    let function = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let function = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     // A level keeps the thinking: two generations.
     let dir = Dir::new("think-level");
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
@@ -569,7 +569,7 @@ fn the_off_level_silences_the_thinking() {
 #[test]
 fn every_generation_reports_its_decoded_tokens() {
     let dir = Dir::new("decoded");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let outputs: [(&str, Stop); 4] = [
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
@@ -639,7 +639,7 @@ fn states_and_instructions() {
 #[test]
 fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     let dir = Dir::new("cut-off");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (
@@ -790,7 +790,7 @@ fn stirred_stops_at_the_limit() {
 #[test]
 fn thinking_at_the_limit_is_closed() {
     let dir = Dir::new("limit");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("a long thought ", Stop::Limit), ("ok", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert_eq!(end.unwrap(), TurnEnd::Answer("ok".into()));
@@ -840,7 +840,7 @@ fn text_stream_cuts_out_the_call() {
 #[test]
 fn text_before_a_call_streams_and_is_reported_whole() {
     let dir = Dir::new("stream");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
         (&format!("I will run it.\n{}", bash_call("true")), Stop::End),
@@ -874,7 +874,7 @@ const FITS: usize = 5_000;
 #[test]
 fn a_full_context_is_compacted_and_the_turn_goes_on() {
     let dir = Dir::new("compact");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -927,7 +927,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 fn the_system_message_is_the_functions_system_and_nothing_more() {
     let dir = Dir::new("system");
     let agentlibre =
-        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
+        Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -953,7 +953,7 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
 fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
     let dir = Dir::new("agentLIBRE");
     let agentlibre =
-        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
+        Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "agentLIBRE").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
     let (end, _, _) = run(&agentlibre, &script, &dir, "hi");
     assert!(end.is_ok());
@@ -967,7 +967,7 @@ fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
 #[test]
 fn the_minimal_function_sends_the_one_line_system() {
     let dir = Dir::new("minimal");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert!(end.is_ok());
@@ -982,7 +982,7 @@ fn the_minimal_function_sends_the_one_line_system() {
 #[test]
 fn the_prompt_size_of_every_step_is_reported() {
     let dir = Dir::new("used");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -1003,7 +1003,7 @@ fn the_prompt_size_of_every_step_is_reported() {
 #[test]
 fn a_context_that_compaction_cannot_free_stops_the_turn() {
     let dir = Dir::new("no-room");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     // The compaction prompt itself does not fit.
     let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
     let (end, log, session) = run(&minimal, &script, &dir, "go");
@@ -1029,7 +1029,7 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
 #[test]
 fn compaction_on_request() {
     let dir = Dir::new("on-request");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[("t", THOUGHT), ("Hi.", Stop::End), ("Greeted.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
@@ -1076,7 +1076,7 @@ fn turn_in(
     dir: &Dir,
     message: &str,
 ) -> Result<TurnEnd, Error> {
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     agent(&minimal, script, session, dir, None).turn(message, &mut Log::default())
 }
 
@@ -1111,7 +1111,7 @@ fn a_picture_is_counted_by_its_bound() {
     session
         .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut log = Log::default();
     agent(&minimal, &script, &mut session, &dir, None)
         .turn("see [Image#1]", &mut log)
@@ -1256,7 +1256,7 @@ fn view_keeps_the_file_and_the_next_step_sees_it() {
         ("It is a screenshot.", THOUGHT),
         ("A screenshot.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let (end, log, session) = run(&minimal, &script, &dir, "what is in shot.png?");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{log:?}");
     // The call, the medium, then the result, in the log of the session.
@@ -1289,7 +1289,7 @@ fn view_of_something_else_is_a_failed_call_the_model_reads() {
         ("Hm.", THOUGHT),
         ("Cannot.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let (end, _, session) = run(&minimal, &script, &dir, "see");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));
     let results: Vec<(Outcome, &str)> = session
@@ -1318,7 +1318,7 @@ fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
         ("No.", Stop::End),
     ]);
     script.marker = None;
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let (_, _, session) = run(&minimal, &script, &dir, "see");
     assert!(session.media().is_empty());
     assert!(matches!(
@@ -1343,7 +1343,7 @@ fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
         ("Ok.", THOUGHT),
         ("It says good morning.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut agent = agent(&minimal, &script, &mut session, &dir, None);
     agent.whisper = &Words;
@@ -1367,7 +1367,7 @@ fn turn_with_memory(
     dir: &Dir,
     message: &str,
 ) -> (Result<TurnEnd, Error>, Log, Session) {
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let default = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
     let mut agent = agent(&default, script, &mut session, dir, None);
@@ -1511,7 +1511,7 @@ fn a_memory_call_without_a_store_fails_for_everything_but_add() {
 fn a_compaction_summary_is_kept_in_the_memory_directory_and_not_in_the_index() {
     let dir = Dir::new("memsummary");
     let memory = dir.0.join("memory");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let default = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),

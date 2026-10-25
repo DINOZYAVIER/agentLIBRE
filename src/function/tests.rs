@@ -74,7 +74,7 @@ fn state<'f>(function: &'f Function, name: &str) -> &'f State {
 #[test]
 fn builtin_minimal() {
     let none = Path::new("/nonexistent");
-    let function = Function::load(none, none, "minimal").unwrap();
+    let function = Function::load(none, none, none, "minimal").unwrap();
     assert_eq!(
         function.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -228,15 +228,57 @@ fn files_and_names() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("minimal.toml"), CODER).unwrap();
     let none = Path::new("/nonexistent");
-    let replaced = Function::load(&dir, none, "minimal");
-    let missing = Function::load(&dir, none, "coder");
+    let replaced = Function::load(&dir, none, none, "minimal");
+    let missing = Function::load(&dir, none, none, "coder");
     fs::remove_dir_all(&dir).unwrap();
     assert_eq!(replaced.unwrap().states.len(), 3);
     assert!(matches!(missing, Err(Error::FunctionNotFound { name, .. }) if name == "coder"));
     assert!(matches!(
-        Function::load(none, none, "../default"),
+        Function::load(none, none, none, "../default"),
         Err(Error::InvalidName(_))
     ));
+}
+
+#[test]
+fn the_load_tiers() {
+    // AGL-028, D3: the workspace's functions directory, then the user's
+    // directory, then the built-ins; an absent directory is skipped.
+    let workspace = std::env::temp_dir().join(format!(
+        "agentLIBRE-function-tiers-w-{}",
+        std::process::id()
+    ));
+    let user = std::env::temp_dir().join(format!(
+        "agentLIBRE-function-tiers-u-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&user).unwrap();
+    let text = |system: &str| {
+        format!("format = \"qwen3.8\"\nsystem = \"{system}\"\ninitial = \"a\"\n[state.a]\nanswer = true\n")
+    };
+    fs::write(workspace.join("same.toml"), text("workspace")).unwrap();
+    fs::write(user.join("same.toml"), text("user")).unwrap();
+    fs::write(user.join("user-only.toml"), text("user only")).unwrap();
+    let none = Path::new("/nonexistent");
+    let workspace_wins = Function::load(&workspace, &user, none, "same").unwrap();
+    assert_eq!(workspace_wins.system, "workspace");
+    let user_over_builtin = Function::load(&workspace, &user, none, "user-only").unwrap();
+    assert_eq!(user_over_builtin.system, "user only");
+    let built_in = Function::load(&workspace, &user, none, "minimal").unwrap();
+    assert_eq!(
+        built_in.system,
+        "You are an AI agent running on agentLIBRE (agl), an agentic system."
+    );
+    let skipped = Function::load(none, &user, none, "same").unwrap();
+    assert_eq!(skipped.system, "user");
+    let missing = Function::load(&workspace, &user, none, "no-such");
+    assert!(matches!(
+        missing,
+        Err(Error::FunctionNotFound { ref name, ref paths })
+            if name == "no-such" && paths[0] == *workspace && paths[1] == *user
+    ));
+    fs::remove_dir_all(&workspace).unwrap();
+    fs::remove_dir_all(&user).unwrap();
 }
 
 #[test]
@@ -574,8 +616,8 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 #[test]
 fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
     let none = Path::new("/nonexistent");
-    let minimal = Function::load(none, none, "minimal").unwrap();
-    let agentlibre = Function::load(none, none, "agentLIBRE").unwrap();
+    let minimal = Function::load(none, none, none, "minimal").unwrap();
+    let agentlibre = Function::load(none, none, none, "agentLIBRE").unwrap();
     // `minimal` is laconic and nameless (AGL-018, D1, AGL-020, D1).
     // `agentLIBRE` is the persona and the runtime part: the prefix and the
     // size of an action (AGL-009, AGL-018, D2, AGL-020, D2).
@@ -646,7 +688,7 @@ fn the_search_tool_is_read_with_its_parameters_and_constraints() {
 #[test]
 fn the_built_in_functions_have_the_search_tool() {
     for name in ["minimal", "agentLIBRE"] {
-        let function = Function::load(Path::new("/none"), Path::new("/none"), name).unwrap();
+        let function = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), name).unwrap();
         let tools: Vec<&str> = function.states[function.initial]
             .actions
             .tools

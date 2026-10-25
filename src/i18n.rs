@@ -485,8 +485,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::FunctionNotFound`.
     pub const FUNCTION_NOT_FOUND: Msg = Msg {
-        en: "Function `{name}` not found: no {path} and no built-in Function of that name",
-        uk: "Function `{name}` не знайдено: немає {path} і вбудованої Function з такою назвою",
+        en: "Function `{name}` not found: no {paths} and no built-in Function of that name",
+        uk: "Function `{name}` не знайдено: немає {paths} і вбудованої Function з такою назвою",
     };
 
     /// `Error::ServerUnreachable`.
@@ -1916,12 +1916,17 @@ impl Error {
                     problem = template_problem(problem, lang)
                 )
             }
-            Error::FunctionNotFound { name, path } => {
+            Error::FunctionNotFound { name, paths } => {
+                let paths = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 tr!(
                     lang,
                     m::FUNCTION_NOT_FOUND,
                     name = name,
-                    path = path.display()
+                    paths = &paths
                 )
             }
             Error::Function { path, key, problem } => {
@@ -2314,7 +2319,7 @@ mod tests {
         assert!(
             !Error::FunctionNotFound {
                 name: "x".into(),
-                path: "/p".into()
+                paths: vec!["/p".into()]
             }
             .message(Lang::En)
             .contains("--help")

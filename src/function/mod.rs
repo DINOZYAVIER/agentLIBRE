@@ -123,19 +123,30 @@ impl State {
 }
 
 impl Function {
-    /// Loads Function `name` from `functions_dir/<name>.toml` or, when that
-    /// file does not exist, from the built-in Functions. Its model format
-    /// comes from `formats_dir`.
-    pub fn load(functions_dir: &Path, formats_dir: &Path, name: &str) -> Result<Function, Error> {
+    /// Loads Function `name` from the workspace's functions directory
+    /// (`workspace_functions/<name>.toml`), then the user's functions
+    /// directory (`user_functions/<name>.toml`), or, when neither file
+    /// exists, from the built-in Functions (AGL-028, D3). An absent
+    /// directory is simply skipped. Its model format comes from
+    /// `formats_dir`.
+    pub fn load(
+        workspace_functions: &Path,
+        user_functions: &Path,
+        formats_dir: &Path,
+        name: &str,
+    ) -> Result<Function, Error> {
         tomlfile::check_name(name)?;
-        let path = functions_dir.join(format!("{name}.toml"));
-        if let Some(table) = tomlfile::read(&path)? {
-            return Function::from_table(&path, table, formats_dir);
+        let looked = [workspace_functions, user_functions];
+        for dir in looked {
+            let path = dir.join(format!("{name}.toml"));
+            if let Some(table) = tomlfile::read(&path)? {
+                return Function::from_table(&path, table, formats_dir);
+            }
         }
         let Some((_, text)) = BUILTIN.iter().find(|(builtin, _)| *builtin == name) else {
             return Err(Error::FunctionNotFound {
                 name: name.into(),
-                path,
+                paths: looked.iter().map(|dir| dir.to_path_buf()).collect(),
             });
         };
         let path = PathBuf::from(format!("<built-in>/functions/{name}.toml"));
