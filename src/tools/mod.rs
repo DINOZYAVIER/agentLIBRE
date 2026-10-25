@@ -749,7 +749,9 @@ fn forge_append(
 
 /// `forge status` (AGL-023): moves the task-spec through the lifecycle,
 /// the CLI's `forge status` in the tool's shape: the same transition
-/// validation, the same `updated` bump; task-specs only.
+/// validation, the same `updated` bump; task-specs only. The refusal
+/// from a terminal state (`done`, `canceled`) points to the new-spec
+/// convention with a `supersedes` link (D3, AGL-032).
 fn forge_status(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
@@ -788,6 +790,15 @@ fn forge_status(
         }
     };
     if from == to || !from.allows(to) {
+        if matches!(from, Status::Done | Status::Canceled) {
+            return forge_fail(
+                Error::TerminalState {
+                    name: name.to_string(),
+                    from: from.name().to_string(),
+                }
+                .message(lang),
+            );
+        }
         return forge_fail(
             Error::BadTransition {
                 from: from.name().to_string(),

@@ -1475,6 +1475,13 @@ Forge (сховище артефактів робочої області, agentL
         uk: "task-spec не може перейти з {from} у {to}",
     };
 
+    /// `Error::TerminalState` (D3 of AGL-032): the refusal points to the
+    /// new-spec convention with a `supersedes` link.
+    pub const TERMINAL_STATE: Msg = Msg {
+        en: "{name} is {from}; {from} is a terminal state — to continue the work, make a new spec with `supersedes = [{name}]`",
+        uk: "{name} — {from}; {from} — термінальний стан — щоб продовжити роботу, створіть нову спеку з `supersedes = [{name}]`",
+    };
+
     /// `Error::NewType`.
     pub const NEW_TYPE: Msg = Msg {
         en: "forge new does not scaffold {type_name}",
@@ -2089,6 +2096,9 @@ impl Error {
             Error::BadState { state } => tr!(lang, m::BAD_STATE, state = state),
             Error::BadTransition { from, to } => {
                 tr!(lang, m::BAD_TRANSITION, from = from, to = to)
+            }
+            Error::TerminalState { name, from } => {
+                tr!(lang, m::TERMINAL_STATE, name = name, from = from)
             }
             Error::NewType { type_name } => tr!(lang, m::NEW_TYPE, type_name = type_name),
             Error::NameTaken { name, dir } => {

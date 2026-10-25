@@ -230,6 +230,10 @@ pub enum Error {
     /// `forge status` asks for a transition the lifecycle does not
     /// allow.
     BadTransition { from: String, to: String },
+    /// `forge status` from a terminal state (`done`, `canceled`, D3 of
+    /// AGL-032): the refusal points to the new-spec convention with a
+    /// `supersedes` link.
+    TerminalState { name: String, from: String },
     /// `forge new` names a type it does not scaffold.
     NewType { type_name: String },
     /// `forge new` names an artifact that is already in the store.
@@ -555,10 +559,19 @@ impl std::fmt::Display for Error {
                     format!("no artifact is named {name} in {}", dir.display())
                 }
                 Error::BadState { state } => {
-                    format!("{state} is not a task-spec state (open, ready, done, dropped)")
+                    format!(
+                        "{state} is not a task-spec state (open, in-progress, done, \
+                         backlog, canceled)"
+                    )
                 }
                 Error::BadTransition { from, to } => {
                     format!("a task-spec cannot go from {from} to {to}")
+                }
+                Error::TerminalState { name, from } => {
+                    format!(
+                        "{name} is {from}; {from} is a terminal state — to continue the \
+                         work, make a new spec with `supersedes = [{name}]`"
+                    )
                 }
                 Error::NewType { type_name } => format!("forge new does not scaffold {type_name}"),
                 Error::NameTaken { name, dir } => {

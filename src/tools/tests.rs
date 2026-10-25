@@ -845,12 +845,23 @@ fn forge_status_refuses_the_rest() {
     );
     assert_eq!(
         f.call("status", &[("name", "agl-001-s"), ("state", "open")]).content,
-        "a task-spec cannot go from done to open"
+        "agl-001-s is done; done is a terminal state — to continue the work, \
+         make a new spec with `supersedes = [agl-001-s]`"
     );
     assert_eq!(
         f.call("status", &[("name", "agl-001-s"), ("state", "in-progress")])
             .content,
-        "a task-spec cannot go from done to in-progress"
+        "agl-001-s is done; done is a terminal state — to continue the work, \
+         make a new spec with `supersedes = [agl-001-s]`"
+    );
+    // The canceled state refuses the way back the same way.
+    let c = f.spec("agl-002-c", "canceled");
+    f.write(&c);
+    assert_eq!(
+        f.call("status", &[("name", "agl-002-c"), ("state", "in-progress")])
+            .content,
+        "agl-002-c is canceled; canceled is a terminal state — to continue \
+         the work, make a new spec with `supersedes = [agl-002-c]`"
     );
     // An invalid state string.
     assert_eq!(

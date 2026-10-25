@@ -356,6 +356,12 @@ fn status(
         state: state.to_string(),
     })?;
     if from == to || !from.allows(to) {
+        if matches!(from, Status::Done | Status::Canceled) {
+            return Err(Error::TerminalState {
+                name: name.to_string(),
+                from: from.name().to_string(),
+            });
+        }
         return Err(Error::BadTransition {
             from: from.name().to_string(),
             to: to.name().to_string(),
@@ -1012,9 +1018,11 @@ mod tests {
             body_of(&std::fs::read_to_string(&file).unwrap()),
             before
         );
+        // The terminal state refuses the way back, pointing to the
+        // new-spec convention with `supersedes` (D3).
         assert!(matches!(
             forge(&data, &repo, &["status", "agl-001-first-task", "open"]),
-            Err(Error::BadTransition { .. })
+            Err(Error::TerminalState { .. })
         ));
         assert!(matches!(
             forge(&data, &repo, &["status", "agl-001-first-task", "frozen"]),
