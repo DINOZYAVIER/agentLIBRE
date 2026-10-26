@@ -207,14 +207,18 @@ pub fn run(
             let running = (health == Health::Ready)
                 .then(|| llama.models().unwrap_or(None))
                 .flatten();
-            let model = server.settings.model.as_deref();
+            // The model of the effective settings, as the server names
+            // it (AGL-033, D5): the same identity the check of D2
+            // compares — the full path of the llama kind, the config's
+            // model_name of the strata kind.
+            let model = expected_model(&server.effective_settings()?, models)?;
             println!(
                 "{}",
                 texts::status(
                     &server.unit,
                     active,
                     &server.url,
-                    model,
+                    model.as_deref(),
                     running.as_deref(),
                     health,
                     lang
