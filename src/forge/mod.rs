@@ -1284,6 +1284,7 @@ mod tests {
                 mmproj: Some("p.gguf".into()),
                 mmproj_offload: Some(true),
                 image_max_tokens: Some(2048),
+                strata_config: None,
             },
             whisper: WhisperFile {
                 url: Some("http://127.0.0.1:18082".into()),

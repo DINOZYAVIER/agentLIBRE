@@ -12,6 +12,7 @@ use crate::backend::RUNTIME_PREFIX;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
+use crate::settings::ServerFile;
 use crate::tomlfile::{self, Section};
 
 /// Functions built into the binary; a user file of the same name replaces
@@ -47,6 +48,9 @@ const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can
 /// A loaded Function.
 #[derive(Debug)]
 pub struct Function {
+    /// The file the Function came from; a built-in says so (the hints of
+    /// its `[server]` table point at it, AGL-033, D1).
+    pub path: PathBuf,
     pub format: Format,
     pub system: String,
     pub preserve_thinking: bool,
@@ -66,6 +70,10 @@ pub struct Function {
     pub sampling: Sampling,
     pub initial: usize,
     pub states: Vec<State>,
+    /// The model side of `[server]`, when the file declares it (AGL-033,
+    /// D1): self-contained, its keys are the model-side settings; `None`
+    /// and the settings' `[server]` decides (the fallback, D3).
+    pub server: Option<ServerFile>,
 }
 
 /// Sampling settings; `None` leaves the llama-server default (D89).
@@ -182,6 +190,7 @@ impl Function {
             "sampling",
             "initial",
             "state",
+            "server",
         ])?;
         let format_name = file.required_string("format")?;
         let format = Format::load(formats_dir, &format_name)?;
@@ -217,6 +226,12 @@ impl Function {
             None => Sampling::default(),
             Some(sampling) => read_sampling(sampling)?,
         };
+        // The model side of the run, when the file declares it (AGL-033,
+        // D1): the table's keys are the model-side settings.
+        let server = match file.section("server")? {
+            None => None,
+            Some(section) => Some(ServerFile::parse_model_side(section, path)?),
+        };
         let initial = file.required_string("initial")?;
         let mut sections = file.required_section("state")?.sections()?;
         let names: Vec<String> = sections.iter().map(|(name, _)| name.clone()).collect();
@@ -240,6 +255,7 @@ impl Function {
             .collect::<Result<Vec<_>, _>>()?;
         check_graph(path, &states, initial)?;
         Ok(Function {
+            path: path.to_path_buf(),
             format,
             system,
             preserve_thinking,
@@ -253,6 +269,7 @@ impl Function {
             sampling,
             initial,
             states,
+            server,
         })
     }
 }

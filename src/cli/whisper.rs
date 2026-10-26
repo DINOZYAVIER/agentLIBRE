@@ -98,11 +98,11 @@ pub fn ensure(
     let probe = Llama::new(&server.url);
     match health(&probe) {
         Health::Ready => return Ok(()),
-        Health::Loading => return wait_ready(&probe, None, &m::WHISPER_READY, say, lang),
+        Health::Loading => return wait_ready(&probe, None, "whisper-server", say, lang),
         Health::Down => {}
     }
     if unit_active(&server.unit)? {
-        return wait_ready(&probe, Some(&server.unit), &m::WHISPER_READY, say, lang);
+        return wait_ready(&probe, Some(&server.unit), "whisper-server", say, lang);
     }
     let (host, port) = local_address(&server.url).ok_or_else(|| Error::NotLocalServer {
         url: server.url.clone(),
@@ -137,7 +137,7 @@ pub fn ensure(
         url = server.url,
         unit = server.unit
     ));
-    wait_ready(&probe, Some(&server.unit), &m::WHISPER_READY, say, lang)
+    wait_ready(&probe, Some(&server.unit), "whisper-server", say, lang)
 }
 
 /// The text of `wav` (16 kHz mono) from the whisper server at `url`.

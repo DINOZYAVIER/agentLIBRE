@@ -171,6 +171,21 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// The `[server]` of the strata kind names no `strata_config` (AGL-033,
+    /// D2).
+    MissingStrataConfig {
+        user_path: PathBuf,
+        project_path: PathBuf,
+    },
+    /// The Strata config JSON the `strata_config` names cannot be read or
+    /// parsed (AGL-033, D2).
+    StrataConfig { path: PathBuf, detail: String },
+    /// The `.venv/bin/python` beside the Strata config is missing (AGL-033,
+    /// D2).
+    StrataPython { path: PathBuf },
+    /// The `serve/server.py` beside the Strata config is missing (AGL-033,
+    /// D2).
+    StrataServerPy { path: PathBuf },
     /// An audio needs whisper and `[whisper]` lacks `url` or `model`
     /// (AGL-014, D22).
     WhisperNotSet {
@@ -340,6 +355,15 @@ pub enum FunctionProblem {
     ConstraintKeys,
     /// A limit below 1.
     NotPositive,
+    /// The `[server]` table of a Function has no `model`, the key of the
+    /// llama kind (AGL-033, D1).
+    ServerModelMissing,
+    /// The `[server]` table of a Function has no `strata_config`, the key
+    /// of the strata kind (AGL-033, D1).
+    ServerStrataConfigMissing,
+    /// A key of the `[server]` table of a Function that does not apply to
+    /// the kind of the project's `[server]` (AGL-033, D1).
+    ServerKeyOfOtherKind(String),
 }
 
 impl Error {
@@ -499,6 +523,25 @@ impl std::fmt::Display for Error {
                     format!("a llama-server is running: {}", units.join(", "))
                 }
                 Error::StartDeclined => "llama-server was not started".into(),
+                Error::MissingStrataConfig { .. } => {
+                    "the strata kind needs strata_config (the path of the Strata config JSON)"
+                        .into()
+                }
+                Error::StrataConfig { path, detail } => {
+                    format!("the Strata config {} cannot be read: {detail}", path.display())
+                }
+                Error::StrataPython { path } => {
+                    format!(
+                        "no venv python at {} (the .venv beside the Strata config)",
+                        path.display()
+                    )
+                }
+                Error::StrataServerPy { path } => {
+                    format!(
+                        "no serve/server.py at {} (beside the Strata config)",
+                        path.display()
+                    )
+                }
                 Error::ServerTimeout { seconds, .. } => {
                     format!("the server was not ready after {seconds} s")
                 }

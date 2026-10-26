@@ -47,7 +47,7 @@ use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
-use settings::{ReplSettings, ServerKind, Settings, UserFile};
+use settings::{function_name, ReplSettings, ServerKind, Settings, UserFile};
 use theme::Theme;
 
 /// Closes the engine agl launched itself (AGL-024, D3): when the guard
@@ -172,7 +172,31 @@ fn run(
                 *lang,
             )?;
             let settings = project.server.over(&user.server);
-            let server = cli::serve::Server::of(&project, &settings, &paths.settings_file())?;
+            // The Function's `[server]` table, when the file declares it,
+            // is the model side of the settings (AGL-033, D1, D3): the
+            // command works on the project's function (it has no
+            // `--function` of its own).
+            let name = function_name(
+                None,
+                project.function.as_deref(),
+                user.function.as_deref(),
+            );
+            let function = Function::load(
+                &paths.functions_dir(&project.key),
+                &paths.functions(),
+                &paths.formats(),
+                &name,
+            )?;
+            let function_server = function
+                .server
+                .as_ref()
+                .map(|table| (table.clone(), function.path.clone()));
+            let server = cli::serve::Server::of(
+                &project,
+                &settings,
+                &paths.settings_file(),
+                function_server,
+            )?;
             return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
         }
         Command::Init => {
@@ -208,7 +232,23 @@ fn run(
         .map(|id| Session::open(&paths.sessions(), id))
         .transpose()?;
     // A resumed session keeps its Function (D106).
-    let function = session.as_ref().map(|s| s.function.as_str());
+    let resumed = session.as_ref().map(|s| s.function.as_str());
+    // The Function's name (D58, D59, AGL-015); the Function loads before
+    // the settings, because its `[server]` table is the model side of the
+    // settings when the file declares it (AGL-033, D1, D3).
+    let name = function_name(
+        resumed.or(args.function.as_deref()),
+        project.function.as_deref(),
+        user.function.as_deref(),
+    );
+    // The Function's tiers (AGL-028, D3): the workspace store's
+    // `functions/` directory, then the user's, then the built-ins.
+    let mut function = Function::load(
+        &paths.functions_dir(&project.key),
+        &paths.functions(),
+        &paths.formats(),
+        &name,
+    )?;
     let settings = Settings::resolve(
         &user,
         &user_path,
@@ -219,15 +259,8 @@ fn run(
             &project.whisper,
             &project.search,
         ),
-        function.or(args.function.as_deref()),
-    )?;
-    // The Function's tiers (AGL-028, D3): the workspace store's
-    // `functions/` directory, then the user's, then the built-ins.
-    let mut function = Function::load(
-        &paths.functions_dir(&project.key),
-        &paths.functions(),
-        &paths.formats(),
-        &settings.function,
+        resumed.or(args.function.as_deref()),
+        function.server.as_ref().map(|table| (table, function.path.as_path())),
     )?;
     // The tool `search` is there only where `[search]` is complete: no tool,
     // no grammar for it and no word of it in the prompt otherwise

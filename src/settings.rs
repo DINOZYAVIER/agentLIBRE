@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Error;
+use crate::error::{Error, FunctionProblem};
 use crate::i18n::Lang;
 use crate::theme::{COLOR_KEYS, Role, Style};
 use crate::tomlfile::{self, Section};
@@ -97,6 +97,9 @@ pub struct ServerFile {
     /// The most tokens one image takes: passed to llama-server and the
     /// bound of the context check (D10, D23).
     pub image_max_tokens: Option<u32>,
+    /// The path of the Strata config JSON, for the `strata` kind
+    /// (AGL-033, D2): it describes the launch fully.
+    pub strata_config: Option<String>,
 }
 
 /// `[whisper]` of a settings file, the user's or the project's
@@ -303,6 +306,22 @@ impl SearchFile {
 /// `image_max_tokens` when `[server]` does not set it (AGL-014, D23).
 pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
 
+/// A key that is an integer of at least 1; `None` when absent.
+fn positive_u32(section: &mut Section, path: &Path, key: &str) -> Result<Option<u32>, Error> {
+    section
+        .integer(key)?
+        .map(|n| {
+            u32::try_from(n)
+                .ok()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| Error::NotPositive {
+                    path: path.into(),
+                    key: section.key(key),
+                })
+        })
+        .transpose()
+}
+
 impl ServerFile {
     const KEYS: &'static [&'static str] = &[
         "kind",
@@ -316,6 +335,22 @@ impl ServerFile {
         "mmproj",
         "mmproj_offload",
         "image_max_tokens",
+        "strata_config",
+    ];
+
+    /// The keys of the model side: what the `[server]` table of a function
+    /// file may carry (AGL-033, D1). `kind`, `url` and `engine` are facts
+    /// of the settings, not of the table.
+    pub const MODEL_SIDE_KEYS: &'static [&'static str] = &[
+        "model",
+        "context",
+        "spec_type",
+        "draft",
+        "args",
+        "mmproj",
+        "mmproj_offload",
+        "image_max_tokens",
+        "strata_config",
     ];
 
     /// Reads the `[server]` table of the file `path`; `section` is what
@@ -348,18 +383,7 @@ impl ServerFile {
         if let Some(model) = &model {
             tomlfile::check_name(model)?;
         }
-        let context = server
-            .integer("context")?
-            .map(|n| {
-                u32::try_from(n)
-                    .ok()
-                    .filter(|n| *n >= 1)
-                    .ok_or_else(|| Error::NotPositive {
-                        path: path.into(),
-                        key: server.key("context"),
-                    })
-            })
-            .transpose()?;
+        let context = positive_u32(&mut server, path, "context")?;
         let spec_type = server.string("spec_type")?;
         let draft = server.string("draft")?;
         if let Some(draft) = &draft {
@@ -371,18 +395,8 @@ impl ServerFile {
             tomlfile::check_name(mmproj)?;
         }
         let mmproj_offload = server.bool("mmproj_offload")?;
-        let image_max_tokens = server
-            .integer("image_max_tokens")?
-            .map(|n| {
-                u32::try_from(n)
-                    .ok()
-                    .filter(|n| *n >= 1)
-                    .ok_or_else(|| Error::NotPositive {
-                        path: path.into(),
-                        key: server.key("image_max_tokens"),
-                    })
-            })
-            .transpose()?;
+        let image_max_tokens = positive_u32(&mut server, path, "image_max_tokens")?;
+        let strata_config = server.string("strata_config")?;
         Ok(ServerFile {
             kind,
             url,
@@ -395,6 +409,40 @@ impl ServerFile {
             mmproj,
             mmproj_offload,
             image_max_tokens,
+            strata_config,
+        })
+    }
+
+    /// Reads the model side of the `[server]` table of a function file
+    /// (AGL-033, D1): the table's keys are the model-side settings;
+    /// `kind`, `url` and `engine` are not among them (an unknown key).
+    pub fn parse_model_side(mut section: Section, path: &Path) -> Result<ServerFile, Error> {
+        section.check_keys(Self::MODEL_SIDE_KEYS)?;
+        let model = section.string("model")?;
+        if let Some(model) = &model {
+            tomlfile::check_name(model)?;
+        }
+        let draft = section.string("draft")?;
+        if let Some(draft) = &draft {
+            tomlfile::check_name(draft)?;
+        }
+        let mmproj = section.string("mmproj")?;
+        if let Some(mmproj) = &mmproj {
+            tomlfile::check_name(mmproj)?;
+        }
+        Ok(ServerFile {
+            kind: None,
+            url: None,
+            engine: None,
+            model,
+            context: positive_u32(&mut section, path, "context")?,
+            spec_type: section.string("spec_type")?,
+            draft,
+            args: section.strings("args")?,
+            mmproj,
+            mmproj_offload: section.bool("mmproj_offload")?,
+            image_max_tokens: positive_u32(&mut section, path, "image_max_tokens")?,
+            strata_config: section.string("strata_config")?,
         })
     }
 
@@ -407,6 +455,113 @@ impl ServerFile {
     /// (AGL-030, D1).
     pub fn kind(&self) -> ServerKind {
         self.kind.as_deref().and_then(ServerKind::parse).unwrap_or_default()
+    }
+
+    /// The effective `[server]` (AGL-033, D1, D3): `table` (the `[server]`
+    /// of a function file, self-contained) is the model side — its keys are
+    /// the model-side settings, the settings' model keys are not consulted;
+    /// `kind`, `url` and `engine` stay of the settings (`self`). The table
+    /// is validated against the kind: it requires `model` (the llama kind)
+    /// or `strata_config` (the strata kind), and a key that does not apply
+    /// to the kind is an error that names the key; `table_path` (the
+    /// function file) locates it.
+    pub fn effective(&self, table: &ServerFile, table_path: &Path) -> Result<ServerFile, Error> {
+        let key = |name: &str| format!("server.{name}");
+        let wrong_kind = |name: &str| Error::Function {
+            path: table_path.into(),
+            key: key(name),
+            problem: FunctionProblem::ServerKeyOfOtherKind(name.to_owned()),
+        };
+        let (model, context, spec_type, draft, args, mmproj, mmproj_offload, image_max_tokens, strata_config) =
+            match self.kind() {
+                ServerKind::Llama => {
+                    if table.strata_config.is_some() {
+                        return Err(wrong_kind("strata_config"));
+                    }
+                    if table.model.is_none() {
+                        return Err(Error::Function {
+                            path: table_path.into(),
+                            key: key("model"),
+                            problem: FunctionProblem::ServerModelMissing,
+                        });
+                    }
+                    (
+                        table.model.clone(),
+                        table.context,
+                        table.spec_type.clone(),
+                        table.draft.clone(),
+                        table.args.clone(),
+                        table.mmproj.clone(),
+                        table.mmproj_offload,
+                        table.image_max_tokens,
+                        None,
+                    )
+                }
+                ServerKind::Strata => {
+                    for (name, present) in [
+                        ("model", table.model.is_some()),
+                        ("context", table.context.is_some()),
+                        ("spec_type", table.spec_type.is_some()),
+                        ("draft", table.draft.is_some()),
+                        ("args", table.args.is_some()),
+                        ("mmproj", table.mmproj.is_some()),
+                        ("mmproj_offload", table.mmproj_offload.is_some()),
+                        ("image_max_tokens", table.image_max_tokens.is_some()),
+                    ] {
+                        if present {
+                            return Err(wrong_kind(name));
+                        }
+                    }
+                    if table.strata_config.is_none() {
+                        return Err(Error::Function {
+                            path: table_path.into(),
+                            key: key("strata_config"),
+                            problem: FunctionProblem::ServerStrataConfigMissing,
+                        });
+                    }
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        table.strata_config.clone(),
+                    )
+                }
+            };
+        Ok(ServerFile {
+            kind: self.kind.clone(),
+            url: self.url.clone(),
+            engine: self.engine.clone(),
+            model,
+            context,
+            spec_type,
+            draft,
+            args,
+            mmproj,
+            mmproj_offload,
+            image_max_tokens,
+            strata_config,
+        })
+    }
+
+    /// Whether the model side of `self` deviates from the model side of
+    /// `other` (AGL-033, D2): any of the model-side keys. The check of
+    /// D2 uses it: the settings' value is the only known state of a
+    /// running server (the context is not observable).
+    pub fn model_side_differs(&self, other: &ServerFile) -> bool {
+        self.model != other.model
+            || self.context != other.context
+            || self.spec_type != other.spec_type
+            || self.draft != other.draft
+            || self.args != other.args
+            || self.mmproj != other.mmproj
+            || self.mmproj_offload != other.mmproj_offload
+            || self.image_max_tokens != other.image_max_tokens
+            || self.strata_config != other.strata_config
     }
 
     /// The keys set here, the others from `defaults`; `args` is replaced
@@ -427,6 +582,10 @@ impl ServerFile {
             mmproj: self.mmproj.clone().or_else(|| defaults.mmproj.clone()),
             mmproj_offload: self.mmproj_offload.or(defaults.mmproj_offload),
             image_max_tokens: self.image_max_tokens.or(defaults.image_max_tokens),
+            strata_config: self
+                .strata_config
+                .clone()
+                .or_else(|| defaults.strata_config.clone()),
         }
     }
 
@@ -470,6 +629,9 @@ impl ServerFile {
         }
         if let Some(tokens) = self.image_max_tokens {
             out.push_str(&format!("image_max_tokens = {tokens}\n"));
+        }
+        if let Some(config) = &self.strata_config {
+            out.push_str(&format!("strata_config = {}\n", tomlfile::quote(config)));
         }
         out
     }
@@ -597,6 +759,19 @@ impl UserFile {
     }
 }
 
+/// The name of the Function of the run: `--function`, then the project's
+/// file, then the user's, then the default (D58, D59, AGL-015).
+pub fn function_name(
+    cli: Option<&str>,
+    project: Option<&str>,
+    user: Option<&str>,
+) -> String {
+    cli.or(project)
+        .or(user)
+        .unwrap_or(DEFAULT_FUNCTION)
+        .to_owned()
+}
+
 /// Settings of a run.
 #[derive(Debug)]
 pub struct Settings {
@@ -623,10 +798,18 @@ impl Settings {
         user_path: &Path,
         project: (&Path, Option<&str>, &ServerFile, &WhisperFile, &SearchFile),
         cli_function: Option<&str>,
+        function_server: Option<(&ServerFile, &Path)>,
     ) -> Result<Settings, Error> {
         let (project_path, project_function, project_server, project_whisper, project_search) =
             project;
         let server = project_server.over(&user.server);
+        // The `[server]` table of the loaded Function is the model side of
+        // the settings when the file declares it (AGL-033, D1, D3);
+        // without it, the resolved `[server]` decides (the fallback).
+        let server = match function_server {
+            Some((table, table_path)) => server.effective(table, table_path)?,
+            None => server,
+        };
         let whisper = project_whisper.over(&user.whisper);
         let search_file = project_search.over(&user.search);
         let search = search_file.complete().map_err(|key| Error::MissingKey {
@@ -802,6 +985,7 @@ mod tests {
                 &SearchFile::default(),
             ),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(settings.whisper, merged);
@@ -873,6 +1057,7 @@ mod tests {
                     &WhisperFile::default(),
                     &project_search,
                 ),
+                None,
                 None,
             )
         };
@@ -984,6 +1169,7 @@ mod tests {
                 &WhisperFile::default(),
                 &SearchFile::default(),
             ),
+            None,
             None,
         )
     }
@@ -1127,6 +1313,7 @@ mod tests {
                 &WhisperFile::default(),
                 &SearchFile::default(),
             ),
+            None,
             None,
         )
         .unwrap();
@@ -1288,6 +1475,7 @@ mod tests {
                     &SearchFile::default(),
                 ),
                 cli,
+                None,
             )
             .unwrap()
             .function

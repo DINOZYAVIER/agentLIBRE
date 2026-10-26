@@ -633,6 +633,30 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server не запущено",
     };
 
+    /// `Error::MissingStrataConfig` (AGL-033, D2).
+    pub const MISSING_STRATA_CONFIG: Msg = Msg {
+        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nstrata_config = \"/path/to/strata-config.json\"",
+        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nstrata_config = \"/path/to/strata-config.json\"",
+    };
+
+    /// `Error::StrataConfig` (AGL-033, D2).
+    pub const STRATA_CONFIG: Msg = Msg {
+        en: "the Strata config {path} cannot be read or parsed: {detail}",
+        uk: "JSON-конфіг Strata {path} не можна прочитати або розібрати: {detail}",
+    };
+
+    /// `Error::StrataPython` (AGL-033, D2).
+    pub const STRATA_PYTHON: Msg = Msg {
+        en: "no venv python at {path} (the .venv beside the Strata config)",
+        uk: "немає venv python за {path} (.venv поруч з конфігом Strata)",
+    };
+
+    /// `Error::StrataServerPy` (AGL-033, D2).
+    pub const STRATA_SERVER_PY: Msg = Msg {
+        en: "no serve/server.py at {path} (beside the Strata config)",
+        uk: "немає serve/server.py за {path} (поруч з конфігом Strata)",
+    };
+
     /// The question of D9: another server runs, start one more?
     pub const OTHERS_RUNNING: Msg = Msg {
         en: "A llama-server is running ({units}). Start one more? [y/N]",
@@ -661,12 +685,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const WHISPER_STARTING: Msg = Msg {
         en: "starting whisper-server ({model}) at {url} as unit {unit}…",
         uk: "запускаю whisper-server ({model}) за {url} як unit {unit}…",
-    };
-
-    /// whisper-server is ready.
-    pub const WHISPER_READY: Msg = Msg {
-        en: "whisper-server is ready at {url}",
-        uk: "whisper-server готовий за {url}",
     };
 
     /// An audio goes to whisper.
@@ -853,6 +871,24 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNC_NOT_POSITIVE: Msg = Msg {
         en: "must be at least 1",
         uk: "має бути щонайменше 1",
+    };
+    /// The `[server]` table of a Function has no `model`, the key of the
+    /// llama kind (AGL-033, D1).
+    pub const FUNC_SERVER_MODEL_MISSING: Msg = Msg {
+        en: "the Function's [server] table needs model for the llama kind",
+        uk: "у таблиці [server] Функції має бути model для llama-виду",
+    };
+    /// The `[server]` table of a Function has no `strata_config`, the key
+    /// of the strata kind (AGL-033, D1).
+    pub const FUNC_SERVER_STRATA_CONFIG_MISSING: Msg = Msg {
+        en: "the Function's [server] table needs strata_config for the strata kind",
+        uk: "у таблиці [server] Функції має бути strata_config для strata-виду",
+    };
+    /// A key of the `[server]` table of a Function that does not apply to
+    /// the kind of the project's `[server]` (AGL-033, D1).
+    pub const FUNC_SERVER_KEY_OF_OTHER_KIND: Msg = Msg {
+        en: "{key} belongs to the {kind} kind, not to the kind of the project's [server]",
+        uk: "{key} належить до {kind}-виду, не до виду [server] проєкту",
     };
 
     /// `PatternErrorKind::Anchor`.
@@ -1289,22 +1325,25 @@ Forge (сховище артефактів робочої області, agentL
         uk: "TOOL",
     };
 
-    /// `agl server start` begins (D146).
+    /// `agl server start` begins (D146); `what` is the server, in a line
+    /// (AGL-033, D1).
     pub const SERVER_STARTING: Msg = Msg {
-        en: "starting llama-server ({model}) at {url} as unit {unit}…",
-        uk: "запускаю llama-server ({model}) за {url} як unit {unit}…",
+        en: "starting {what} at {url} as unit {unit}…",
+        uk: "запускаю {what} за {url} як unit {unit}…",
     };
 
-    /// `agl server start` is ready (D149).
+    /// `agl server start` is ready (D149); `what` is the server, in a
+    /// line (AGL-033, D1).
     pub const SERVER_READY: Msg = Msg {
-        en: "llama-server is ready at {url}",
-        uk: "llama-server готовий за {url}",
+        en: "the server is ready at {url}: {what}",
+        uk: "сервер готов за {url}: {what}",
     };
 
-    /// `agl server start` finds the server up (D146).
+    /// `agl server start` finds the server up (D146); `what` is the
+    /// server, in a line (AGL-033, D1).
     pub const SERVER_ALREADY_RUNNING: Msg = Msg {
-        en: "llama-server is already running at {url}",
-        uk: "llama-server уже працює за {url}",
+        en: "the server is already running at {url} ({what})",
+        uk: "сервер уже працює за {url} ({what})",
     };
 
     /// `agl server stop` stopped it (D146).
@@ -2019,6 +2058,24 @@ impl Error {
                 tr!(lang, m::SERVER_RUNNING, units = units.join(", "))
             }
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
+            Error::MissingStrataConfig {
+                user_path,
+                project_path,
+            } => tr!(
+                lang,
+                m::MISSING_STRATA_CONFIG,
+                user_path = user_path.display(),
+                project_path = project_path.display()
+            ),
+            Error::StrataConfig { path, detail } => {
+                tr!(lang, m::STRATA_CONFIG, path = path.display(), detail = detail)
+            }
+            Error::StrataPython { path } => {
+                tr!(lang, m::STRATA_PYTHON, path = path.display()).to_string()
+            }
+            Error::StrataServerPy { path } => {
+                tr!(lang, m::STRATA_SERVER_PY, path = path.display()).to_string()
+            }
             Error::ServerStatus {
                 url,
                 status,
@@ -2251,6 +2308,14 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::BadRange => tr!(lang, m::FUNC_BAD_RANGE).to_string(),
         P::ConstraintKeys => tr!(lang, m::FUNC_CONSTRAINT_KEYS).to_string(),
         P::NotPositive => tr!(lang, m::FUNC_NOT_POSITIVE).to_string(),
+        P::ServerModelMissing => tr!(lang, m::FUNC_SERVER_MODEL_MISSING).to_string(),
+        P::ServerStrataConfigMissing => {
+            tr!(lang, m::FUNC_SERVER_STRATA_CONFIG_MISSING).to_string()
+        }
+        P::ServerKeyOfOtherKind(key) => {
+            let kind = if key == "strata_config" { "strata" } else { "llama" };
+            tr!(lang, m::FUNC_SERVER_KEY_OF_OTHER_KIND, key = key, kind = kind)
+        }
     }
 }
 
@@ -2439,14 +2504,10 @@ pub mod server {
     use super::m;
     use crate::cli::serve::Health;
 
-    pub fn starting(model: &str, url: &str, unit: &str, lang: Lang) -> String {
-        tr!(
-            lang,
-            m::SERVER_STARTING,
-            model = model,
-            url = url,
-            unit = unit
-        )
+    /// `agl server start` begins (D146); `what` is the server, in a line
+    /// (AGL-033, D1).
+    pub fn starting(what: &str, url: &str, unit: &str, lang: Lang) -> String {
+        tr!(lang, m::SERVER_STARTING, what = what, url = url, unit = unit)
     }
 
     pub fn not_running(unit: &str, lang: Lang) -> String {
@@ -2458,7 +2519,7 @@ pub mod server {
         tr!(lang, m::OTHERS_RUNNING, units = units.join(", "))
     }
 
-    /// `agl server status`.
+    /// `agl server status` (D150).
     pub fn status(
         unit: &str,
         active: bool,

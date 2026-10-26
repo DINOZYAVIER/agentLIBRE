@@ -4,7 +4,7 @@
 //! child of agl (AGL-024).
 
 use std::ffi::OsString;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -18,8 +18,8 @@ use crate::backend::Backend;
 use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, Msg, m, server as texts};
-use crate::settings::{ServerFile, ServerKind};
+use crate::i18n::{Lang, m, server as texts};
+use crate::settings::{ServerFile, ServerKind, DEFAULT_STRATA_URL};
 use crate::tr;
 
 /// The name every unit of a llama-server starts with (D8); the project's
@@ -68,25 +68,39 @@ pub struct Server {
     /// The user's and the project's settings files, for hints.
     pub user_path: PathBuf,
     pub project_path: PathBuf,
+    /// The `[server]` table of the Function the run loads, with the file
+    /// it came from (AGL-033, D1): when the file declares one, the table
+    /// is the model side of the settings, self-contained.
+    pub function_server: Option<(ServerFile, PathBuf)>,
 }
 
 impl Server {
     /// The server of `project`, with `settings` the project's `[server]`
-    /// over the user's. A project that is not registered has no unit: an
-    /// error (D14).
+    /// over the user's and `function_server` the `[server]` table of the
+    /// run's Function (AGL-033, D1). A project that is not registered has
+    /// no unit: an error (D14).
     pub fn of(
         project: &Workspace,
         settings: &ServerFile,
         user_path: &Path,
+        function_server: Option<(ServerFile, PathBuf)>,
     ) -> Result<Server, Error> {
         let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
             project: project.project.clone(),
         })?;
         let project_path = project.dir.join(crate::forge::MARKER_FILE);
-        let url = settings.url.clone().ok_or_else(|| Error::MissingServerUrl {
-            user_path: user_path.into(),
-            project_path: project_path.clone(),
-        })?;
+        // A Strata server has a default address (AGL-030, D1); the
+        // llama-server address stays required.
+        let url = match &settings.url {
+            Some(url) => url.clone(),
+            None if settings.kind() == ServerKind::Strata => DEFAULT_STRATA_URL.to_owned(),
+            None => {
+                return Err(Error::MissingServerUrl {
+                    user_path: user_path.into(),
+                    project_path: project_path.clone(),
+                })
+            }
+        };
         Ok(Server {
             unit: unit_name(&key),
             whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
@@ -94,7 +108,25 @@ impl Server {
             url,
             user_path: user_path.into(),
             project_path,
+            function_server,
         })
+    }
+
+    /// The settings that actually run (AGL-033, D1, D3): the Function's
+    /// `[server]` table when the file declares it (self-contained), else
+    /// the resolved settings (the fallback).
+    pub fn effective_settings(&self) -> Result<ServerFile, Error> {
+        match &self.function_server {
+            Some((table, path)) => self.settings.effective(table, path),
+            None => Ok(self.settings.clone()),
+        }
+    }
+
+    /// What the server is, in a line (AGL-033, D2): the effective
+    /// settings, by `what_of`.
+    pub fn what(&self) -> Result<String, Error> {
+        let effective = self.effective_settings()?;
+        what_of(&effective)
     }
 }
 
@@ -180,7 +212,10 @@ pub fn run(
 }
 
 /// Starts the unit of the project and waits until the server is ready
-/// (D146, D149); the same code as the autostart (AGL-015, D10).
+/// (D146, D149); the same code as the autostart (AGL-015, D10). The unit
+/// runs the effective settings (AGL-033, D1): the model side of the
+/// Function's `[server]` table when the file declares it, else the
+/// resolved settings.
 pub fn start(
     server: &Server,
     models: &Path,
@@ -191,8 +226,9 @@ pub fn start(
     lang: Lang,
 ) -> Result<(), Error> {
     let url = &server.url;
+    let what = server.what()?;
     if unit_active(&server.unit)? {
-        say(&tr!(lang, m::SERVER_ALREADY_RUNNING, url = url));
+        say(&tr!(lang, m::SERVER_ALREADY_RUNNING, url = url, what = &what));
         return Ok(());
     }
     let (host, port) =
@@ -207,8 +243,8 @@ pub fn start(
         });
     }
     consent(running, others)?;
-    let model = server
-        .settings
+    let effective = server.effective_settings()?;
+    let model = effective
         .model
         .as_deref()
         .ok_or_else(|| Error::MissingModel {
@@ -223,10 +259,10 @@ pub fn start(
     let program = find_program(DEFAULT_ENGINE, path_var).ok_or_else(|| Error::EngineNotFound {
         engine: DEFAULT_ENGINE.to_owned(),
     })?;
-    let context = server.settings.context.unwrap_or(DEFAULT_CONTEXT);
-    let extra = server.settings.args.clone().unwrap_or_default();
-    let projector = projector_args(&server.settings, models)?;
-    let spec = spec(&server.settings, models)?;
+    let context = effective.context.unwrap_or(DEFAULT_CONTEXT);
+    let extra = effective.args.clone().unwrap_or_default();
+    let projector = projector_args(&effective, models)?;
+    let spec = spec(&effective, models)?;
     let args = systemd_run_args(
         &server.unit,
         &program,
@@ -248,24 +284,24 @@ pub fn start(
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
         });
     }
-    let name = model.file_name().unwrap_or_default().to_string_lossy();
-    say(&texts::starting(&name, url, &server.unit, lang));
-    wait_ready(llama, Some(&server.unit), &m::SERVER_READY, say, lang)
+    say(&texts::starting(&what, url, &server.unit, lang));
+    wait_ready(llama, Some(&server.unit), &what, say, lang)
 }
 
 /// Waits until `/health` answers ready (D149). `unit` is the unit that
-/// loads the model, when it is ours: it stopping is a failure.
+/// loads the model, when it is ours: it stopping is a failure. `what` is
+/// the server, in a line (AGL-033, D1).
 pub(super) fn wait_ready(
     llama: &dyn Backend,
     unit: Option<&str>,
-    ready: &Msg,
+    what: &str,
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
-            say(&tr!(lang, ready, url = llama.url()));
+            say(&tr!(lang, m::SERVER_READY, what = what, url = llama.url()));
             return Ok(());
         }
         if let Some(unit) = unit
@@ -284,13 +320,17 @@ pub(super) fn wait_ready(
 }
 
 /// Brings the project's server up when a request finds none (AGL-015,
-/// D6, D10); the same code as `agl server start`.
+/// D6, D10); the same code as `agl server start`: the check of D2
+/// (AGL-033) beside the health check, the launch of both kinds, the
+/// consent of the restart.
 pub struct Autostart<'a> {
     /// The backend the turn runs on: the `Llama` or the `Strata` backend,
     /// by the settings' `[server] kind` (AGL-030, D1).
     pub llama: &'a dyn Backend,
     pub project: &'a Workspace,
-    /// The project's `[server]` over the user's.
+    /// The settings the run runs on (AGL-033, D1): the effective
+    /// `[server]` — the Function's `[server]` table when the file
+    /// declares it, else the project's over the user's.
     pub settings: &'a ServerFile,
     /// The project's `[whisper]` over the user's (AGL-014, D22).
     pub whisper: &'a crate::settings::WhisperFile,
@@ -304,15 +344,21 @@ pub struct Autostart<'a> {
 }
 
 impl Autostart<'_> {
+    /// The server, in a line (AGL-033, D1): the settings, by `what_of`.
+    fn what(&self) -> Result<String, Error> {
+        what_of(self.settings)
+    }
+
     /// Returns when the server answers: it did, it was loading and is
     /// ready now, or agl launched it itself as a background child
     /// (AGL-024, D2). `say` takes the progress lines.
     pub fn ensure(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let llama = self.llama;
+        let what = self.what()?;
         match health(llama) {
             Health::Ready => Ok(()),
             // Someone loads it now: wait for it, as `start` does.
-            Health::Loading => wait_ready(llama, None, &m::SERVER_READY, say, self.lang),
+            Health::Loading => wait_ready(llama, None, &what, say, self.lang),
             // Connection refused: launch the engine as a background child
             // (AGL-024, D2); a foreign process on the port is an error,
             // not a target.
@@ -338,7 +384,7 @@ impl Autostart<'_> {
                 let mut guard = self.engine.lock().unwrap();
                 *guard = Some(engine);
                 let engine = guard.as_mut().expect("the engine just launched");
-                wait_child_ready(llama, engine, &log, say, self.lang)
+                wait_child_ready(llama, engine, &log, &what, say, self.lang)
             }
         }
     }
@@ -486,20 +532,70 @@ impl Engine {
     }
 }
 
+/// What the server is, in a line (AGL-033, D1): `llama-server` with
+/// the model, the Strata server with the config's `model_name`.
+fn what_of(effective: &ServerFile) -> Result<String, Error> {
+    match effective.kind() {
+        ServerKind::Strata => {
+            let name = effective
+                .strata_config
+                .as_deref()
+                .map(|path| strata_config(Path::new(path)))
+                .transpose()?
+                .and_then(|cfg| cfg.model_name);
+            Ok(name
+                .map(|name| format!("the Strata server ({name})"))
+                .unwrap_or_else(|| "the Strata server".to_owned()))
+        }
+        ServerKind::Llama => Ok(match &effective.model {
+            Some(name) => format!("llama-server ({name})"),
+            None => "llama-server".to_owned(),
+        }),
+    }
+}
+
+/// The Strata config JSON the `strata_config` names (AGL-033, D1): the
+/// name the server reports at `/v1/models`; the engine's binary, its
+/// arguments, the HIP libraries and the environment are applied by the
+/// server itself.
+struct StrataConfig {
+    /// The `model_name` the server reports at `/v1/models`.
+    model_name: Option<String>,
+}
+
+/// Reads the Strata config JSON at `path` (AGL-033, D1).
+fn strata_config(path: &Path) -> Result<StrataConfig, Error> {
+    let text = fs::read_to_string(path).map_err(|source| Error::StrataConfig {
+        path: path.into(),
+        detail: source.to_string(),
+    })?;
+    let cfg: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|source| Error::StrataConfig {
+            path: path.into(),
+            detail: source.to_string(),
+        })?;
+    Ok(StrataConfig {
+        model_name: cfg["model_name"].as_str().map(str::to_owned),
+    })
+}
+
+
 /// Waits until the engine agl launched answers ready (AGL-024, D2): the
 /// same timeout and polling as `wait_ready`; the engine's own output is
-/// in the log file the errors point at.
+/// in the log file the errors point at. `what` is the server, in a line
+/// (AGL-033, D2).
 fn wait_child_ready(
     llama: &dyn Backend,
     engine: &mut Engine,
     log: &Path,
+    what: &str,
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
     let started = Instant::now();
     loop {
         if health(llama) == Health::Ready {
-            say(&tr!(lang, m::SERVER_READY, url = llama.url()));
+            say(&tr!(lang, m::SERVER_READY, what = what, url = llama.url()));
             return Ok(());
         }
         if !engine.is_alive() {
@@ -1152,7 +1248,8 @@ mod tests {
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&user);
-        let server = Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml")).unwrap();
+        let server =
+            Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml"), None).unwrap();
         assert_eq!(server.unit, "agentLIBRE-llama-server-60af300abea6");
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
@@ -1169,14 +1266,14 @@ mod tests {
         };
         let ws = project(None, ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml")),
+            Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml"), None),
             Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
         ));
         // A registered project with no url anywhere is the url error.
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &ServerFile::default(), Path::new("/c/agentLIBRE.toml")),
+            Server::of(&ws, &ServerFile::default(), Path::new("/c/agentLIBRE.toml"), None),
             Err(Error::MissingServerUrl { .. })
         ));
     }
@@ -1304,7 +1401,10 @@ mod tests {
         autostart(&llama, &ws, &settings)
             .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
-        assert_eq!(said, [format!("llama-server is ready at {url}")]);
+        assert_eq!(
+            said,
+            [format!("the server is ready at {url}: llama-server")]
+        );
     }
 
     #[test]
@@ -1329,5 +1429,52 @@ mod tests {
             Err(Error::ModelNotFound { path }) if path == Path::new("/m/m.gguf")
         ));
         assert!(said.is_empty());
+    }
+
+    #[test]
+    fn the_function_table_is_the_effective_settings() {
+        // The `[server]` table of the function file is the model side
+        // (AGL-033, D1): self-contained, while `kind`, `url` and `engine`
+        // stay of the settings.
+        let origin = origin("60af300abea6");
+        let own = ServerFile {
+            url: Some("http://127.0.0.1:18080".into()),
+            model: Some("project.gguf".into()),
+            ..ServerFile::default()
+        };
+        let user = ServerFile {
+            context: Some(131072),
+            ..ServerFile::default()
+        };
+        let ws = project(Some(&origin), own);
+        let merged = ws.server.over(&user);
+        let table = ServerFile {
+            model: Some("function.gguf".into()),
+            context: Some(4096),
+            ..ServerFile::default()
+        };
+        let server = Server::of(
+            &ws,
+            &merged,
+            Path::new("/c/agentLIBRE.toml"),
+            Some((
+                table.clone(),
+                Path::new("/f/function.toml").to_path_buf(),
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            server.effective_settings().unwrap(),
+            ServerFile {
+                url: Some("http://127.0.0.1:18080".into()),
+                model: Some("function.gguf".into()),
+                context: Some(4096),
+                ..ServerFile::default()
+            }
+        );
+        // Without the table, the resolved settings are the effective.
+        let server = Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml"), None)
+            .unwrap();
+        assert_eq!(server.effective_settings().unwrap(), merged);
     }
 }
