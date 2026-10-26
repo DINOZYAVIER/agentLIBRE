@@ -295,8 +295,14 @@ fn run(
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
         lang: *lang,
     };
-    // The backend is the Llama or the Strata backend, by the settings'
-    // `[server] kind` (AGL-030, D1); the stirred mode runs on Strata.
+    // The resolved `[server]` (the project's over the user's): the known
+    // state of a running server (AGL-033, D2). The settings' `server` is
+    // the effective one (the function's `[server]` table when the file
+    // declares it, D1, D3), and the backend and the url run on it.
+    let fallback = project.server.over(&user.server);
+    // The backend is the Llama or the Strata backend, by the effective
+    // settings' `[server] kind` (AGL-030, D1); the stirred mode runs on
+    // Strata.
     let stirred = settings.server.kind() == ServerKind::Strata;
     let backend: Box<dyn Backend> = if stirred {
         Box::new(Strata::new(&settings.server_url))
@@ -306,12 +312,23 @@ fn run(
     let autostart = cli::serve::Autostart {
         llama: backend.as_ref(),
         project: &project,
-        settings: &settings.server,
+        settings: &fallback,
+        effective: &settings.server,
         whisper: &settings.whisper,
         user_path: user_path.clone(),
         models: paths.models(),
         path_var: env("PATH"),
         lang: *lang,
+        // The consent of D2 (AGL-033): the restart asks, as the server
+        // commands do — `--yes` skips, the terminal asks, a
+        // non-interactive terminal refuses.
+        others: if args.yes {
+            cli::serve::Others::Yes
+        } else if repl::term::is_interactive() {
+            cli::serve::Others::Ask(&cli::serve::ask_terminal)
+        } else {
+            cli::serve::Others::Refuse
+        },
         engine: Arc::new(Mutex::new(None)),
     };
     // The engine agl launched (when it did) is shut down when this guard

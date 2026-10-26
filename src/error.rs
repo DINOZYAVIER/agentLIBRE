@@ -171,6 +171,8 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// The human answered no to the restart of D2 (AGL-033).
+    RestartDeclined,
     /// The `[server]` of the strata kind names no `strata_config` (AGL-033,
     /// D2).
     MissingStrataConfig {
@@ -523,6 +525,7 @@ impl std::fmt::Display for Error {
                     format!("a llama-server is running: {}", units.join(", "))
                 }
                 Error::StartDeclined => "llama-server was not started".into(),
+                Error::RestartDeclined => "the server was not restarted".into(),
                 Error::MissingStrataConfig { .. } => {
                     "the strata kind needs strata_config (the path of the Strata config JSON)"
                         .into()

@@ -633,6 +633,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server не запущено",
     };
 
+    /// `Error::RestartDeclined` (AGL-033, D2).
+    pub const RESTART_DECLINED: Msg = Msg {
+        en: "the server was not restarted",
+        uk: "сервер не перезапущено",
+    };
+
     /// `Error::MissingStrataConfig` (AGL-033, D2).
     pub const MISSING_STRATA_CONFIG: Msg = Msg {
         en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nstrata_config = \"/path/to/strata-config.json\"",
@@ -1326,24 +1332,32 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// `agl server start` begins (D146); `what` is the server, in a line
-    /// (AGL-033, D1).
+    /// (AGL-033, D2).
     pub const SERVER_STARTING: Msg = Msg {
         en: "starting {what} at {url} as unit {unit}…",
         uk: "запускаю {what} за {url} як unit {unit}…",
     };
 
     /// `agl server start` is ready (D149); `what` is the server, in a
-    /// line (AGL-033, D1).
+    /// line (AGL-033, D2).
     pub const SERVER_READY: Msg = Msg {
         en: "the server is ready at {url}: {what}",
         uk: "сервер готов за {url}: {what}",
     };
 
     /// `agl server start` finds the server up (D146); `what` is the
-    /// server, in a line (AGL-033, D1).
+    /// server, in a line (AGL-033, D2).
     pub const SERVER_ALREADY_RUNNING: Msg = Msg {
         en: "the server is already running at {url} ({what})",
         uk: "сервер уже працює за {url} ({what})",
+    };
+
+    /// The question of the mismatch of D2 (AGL-033): the running server
+    /// does not serve the profile's effective settings; `what` is the
+    /// server, in a line.
+    pub const SERVER_RESTART_QUESTION: Msg = Msg {
+        en: "the running server does not serve this profile ({what}). Restart it? [y/N]",
+        uk: "сервер, що працює, не відповідає цьому профілю ({what}). Перезапустити? [y/N]",
     };
 
     /// `agl server stop` stopped it (D146).
@@ -1400,10 +1414,25 @@ Forge (сховище артефактів робочої області, agentL
         uk: "не відповідає",
     };
 
-    /// `agl server status` (D150).
+    /// `agl server status` (D150); `running` is the actually-running
+    /// model from `/v1/models` (AGL-033, D5).
     pub const SERVER_STATUS_BLOCK: Msg = Msg {
-        en: "unit: {unit} ({active})\nurl: {url}\nmodel: {model}\nhealth: {health}",
-        uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nстан: {health}",
+        en: "unit: {unit} ({active})\nurl: {url}\nmodel: {model}\nrunning: {running}\nhealth: {health}",
+        uk: "unit: {unit} ({active})\nадреса: {url}\nмодель: {model}\nпрацює: {running}\nстан: {health}",
+    };
+
+    /// `agl server status`: the server does not answer, so there is no
+    /// running model (AGL-033, D5).
+    pub const SERVER_RUNNING_NOT_SET: Msg = Msg {
+        en: "not running",
+        uk: "не працює",
+    };
+
+    /// `agl server status`: the running model deviates from the
+    /// settings' model (AGL-033, D5).
+    pub const SERVER_STATUS_MISMATCH: Msg = Msg {
+        en: " (mismatch)",
+        uk: " (незбігається)",
     };
 
     /// `Error::GitSpawn`.
@@ -2058,6 +2087,7 @@ impl Error {
                 tr!(lang, m::SERVER_RUNNING, units = units.join(", "))
             }
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
+            Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
             Error::MissingStrataConfig {
                 user_path,
                 project_path,
@@ -2505,9 +2535,21 @@ pub mod server {
     use crate::cli::serve::Health;
 
     /// `agl server start` begins (D146); `what` is the server, in a line
-    /// (AGL-033, D1).
+    /// (AGL-033, D2).
     pub fn starting(what: &str, url: &str, unit: &str, lang: Lang) -> String {
         tr!(lang, m::SERVER_STARTING, what = what, url = url, unit = unit)
+    }
+
+    /// `agl server start` finds the server up (D146); `what` is the
+    /// server, in a line (AGL-033, D2).
+    pub fn already_running(what: &str, url: &str, lang: Lang) -> String {
+        tr!(lang, m::SERVER_ALREADY_RUNNING, what = what, url = url)
+    }
+
+    /// The question of the mismatch of D2 (AGL-033): the running server
+    /// does not serve the profile's effective settings.
+    pub fn restart_question(what: &str, lang: Lang) -> String {
+        tr!(lang, m::SERVER_RESTART_QUESTION, what = what)
     }
 
     pub fn not_running(unit: &str, lang: Lang) -> String {
@@ -2519,15 +2561,28 @@ pub mod server {
         tr!(lang, m::OTHERS_RUNNING, units = units.join(", "))
     }
 
-    /// `agl server status` (D150).
+    /// `agl server status` (D150); `running` is the actually-running
+    /// model from `/v1/models` (AGL-033, D5), `None` when the server
+    /// does not answer.
     pub fn status(
         unit: &str,
         active: bool,
         url: &str,
         model: Option<&str>,
+        running: Option<&str>,
         health: Health,
         lang: Lang,
     ) -> String {
+        let running = match (model, running) {
+            // The running model deviates from the settings': the marker
+            // makes it visible at a glance (AGL-033, D5).
+            (Some(model), Some(running)) if model != running => {
+                format!("{running}{}", tr!(lang, m::SERVER_STATUS_MISMATCH))
+            }
+            (_, Some(running)) => running.to_owned(),
+            _ => tr!(lang, m::SERVER_RUNNING_NOT_SET).to_string(),
+        };
+        let model = model.unwrap_or_else(|| tr!(lang, m::SERVER_MODEL_NOT_SET));
         tr!(
             lang,
             m::SERVER_STATUS_BLOCK,
@@ -2538,7 +2593,8 @@ pub mod server {
                 tr!(lang, m::SERVER_INACTIVE)
             },
             url = url,
-            model = model.unwrap_or_else(|| tr!(lang, m::SERVER_MODEL_NOT_SET)),
+            model = model,
+            running = running,
             health = match health {
                 Health::Ready => tr!(lang, m::SERVER_HEALTH_READY),
                 Health::Loading => tr!(lang, m::SERVER_HEALTH_LOADING),
