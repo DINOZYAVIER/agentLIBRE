@@ -323,6 +323,11 @@ pub trait Backend {
     fn count_tokens(&self, text: &str) -> Result<usize, Error>;
     /// The context size of the loaded model, in tokens.
     fn context_size(&self) -> Result<usize, Error>;
+    /// The name of the model the server has loaded: the first entry of
+    /// `/v1/models`, or `None` when the server does not say (AGL-033, D2).
+    fn models(&self) -> Result<Option<String>, Error> {
+        Ok(None)
+    }
     /// The status of `/health`; `None` when the server does not answer
     /// (D149, D150).
     fn health(&self) -> Option<u16>;

@@ -192,6 +192,18 @@ impl Backend for Strata {
         }
         Ok(DEFAULT_CONTEXT)
     }
+
+    fn models(&self) -> Result<Option<String>, Error> {
+        let reply = self.json("/v1/models", None)?;
+        // The OpenAI dialect lists under `data`; the `id` is the model
+        // name the server was started with (AGL-033, D2).
+        let entry = reply["data"].as_array().and_then(|a| a.first());
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let name = entry["id"].as_str();
+        Ok(name.filter(|s| !s.is_empty()).map(str::to_owned))
+    }
 }
 
 /// Adds the sampling settings that the Function sets (D89).

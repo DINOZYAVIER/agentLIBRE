@@ -196,6 +196,24 @@ impl Backend for Llama {
             .ok_or_else(|| self.bad_reply("no `n_ctx` in the /props reply"))
     }
 
+    fn models(&self) -> Result<Option<String>, Error> {
+        let reply = self.json("/v1/models", None)?;
+        // The llama-server lists under `models` (its `model`, else its
+        // `name`); the OpenAI dialect lists under `data` (its `id`).
+        let entry = reply["models"]
+            .as_array()
+            .and_then(|a| a.first())
+            .or_else(|| reply["data"].as_array().and_then(|a| a.first()));
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let name = entry["model"]
+            .as_str()
+            .or_else(|| entry["name"].as_str())
+            .or_else(|| entry["id"].as_str());
+        Ok(name.filter(|s| !s.is_empty()).map(str::to_owned))
+    }
+
     fn media_marker(&self) -> Result<String, Error> {
         let reply = self.json("/props", None)?;
         let vision = reply["modalities"]["vision"].as_bool().unwrap_or(false);
