@@ -323,10 +323,12 @@ fn positive_u32(section: &mut Section, path: &Path, key: &str) -> Result<Option<
 }
 
 impl ServerFile {
-    const KEYS: &'static [&'static str] = &[
-        "kind",
-        "url",
-        "engine",
+    /// The keys directly under `[server]` of a settings file (AGL-035,
+    /// D4); the model side of each kind is in its own table.
+    const KEYS: &'static [&'static str] = &["kind", "url", "engine", "llama", "strata"];
+
+    /// The keys of `[server.llama]` (AGL-035, D4).
+    const LLAMA_KEYS: &'static [&'static str] = &[
         "model",
         "context",
         "spec_type",
@@ -335,8 +337,10 @@ impl ServerFile {
         "mmproj",
         "mmproj_offload",
         "image_max_tokens",
-        "strata_config",
     ];
+
+    /// The keys of `[server.strata]` (AGL-035, D4).
+    const STRATA_KEYS: &'static [&'static str] = &["strata_config"];
 
     /// The keys of the model side: what the `[server]` table of a function
     /// file may carry (AGL-033, D1). `kind`, `url` and `engine` are facts
@@ -379,37 +383,28 @@ impl ServerFile {
             });
         }
         let engine = server.string("engine")?;
-        let model = server.string("model")?;
-        if let Some(model) = &model {
-            tomlfile::check_name(model)?;
-        }
-        let context = positive_u32(&mut server, path, "context")?;
-        let spec_type = server.string("spec_type")?;
-        let draft = server.string("draft")?;
-        if let Some(draft) = &draft {
-            tomlfile::check_name(draft)?;
-        }
-        let args = server.strings("args")?;
-        let mmproj = server.string("mmproj")?;
-        if let Some(mmproj) = &mmproj {
-            tomlfile::check_name(mmproj)?;
-        }
-        let mmproj_offload = server.bool("mmproj_offload")?;
-        let image_max_tokens = positive_u32(&mut server, path, "image_max_tokens")?;
-        let strata_config = server.string("strata_config")?;
+        // The model side of each kind has its own table (AGL-035, D4): a
+        // key outside its table is an unknown key.
+        let llama = match server.section("llama")? {
+            Some(mut llama) => {
+                llama.check_keys(Self::LLAMA_KEYS)?;
+                Self::read_model_side(&mut llama, path)?
+            }
+            None => ServerFile::default(),
+        };
+        let strata = match server.section("strata")? {
+            Some(mut strata) => {
+                strata.check_keys(Self::STRATA_KEYS)?;
+                Self::read_model_side(&mut strata, path)?
+            }
+            None => ServerFile::default(),
+        };
         Ok(ServerFile {
             kind,
             url,
             engine,
-            model,
-            context,
-            spec_type,
-            draft,
-            args,
-            mmproj,
-            mmproj_offload,
-            image_max_tokens,
-            strata_config,
+            strata_config: strata.strata_config,
+            ..llama
         })
     }
 
@@ -418,6 +413,12 @@ impl ServerFile {
     /// `kind`, `url` and `engine` are not among them (an unknown key).
     pub fn parse_model_side(mut section: Section, path: &Path) -> Result<ServerFile, Error> {
         section.check_keys(Self::MODEL_SIDE_KEYS)?;
+        Self::read_model_side(&mut section, path)
+    }
+
+    /// Reads the model-side keys present in `section`, whose keys are
+    /// checked by the caller.
+    fn read_model_side(section: &mut Section, path: &Path) -> Result<ServerFile, Error> {
         let model = section.string("model")?;
         if let Some(model) = &model {
             tomlfile::check_name(model)?;
@@ -435,13 +436,13 @@ impl ServerFile {
             url: None,
             engine: None,
             model,
-            context: positive_u32(&mut section, path, "context")?,
+            context: positive_u32(section, path, "context")?,
             spec_type: section.string("spec_type")?,
             draft,
             args: section.strings("args")?,
             mmproj,
             mmproj_offload: section.bool("mmproj_offload")?,
-            image_max_tokens: positive_u32(&mut section, path, "image_max_tokens")?,
+            image_max_tokens: positive_u32(section, path, "image_max_tokens")?,
             strata_config: section.string("strata_config")?,
         })
     }
@@ -455,6 +456,28 @@ impl ServerFile {
     /// (AGL-030, D1).
     pub fn kind(&self) -> ServerKind {
         self.kind.as_deref().and_then(ServerKind::parse).unwrap_or_default()
+    }
+
+    /// The settings of the selected kind only (AGL-035, D4): the keys of
+    /// the other kind's table are not used.
+    pub fn selected(&self) -> ServerFile {
+        match self.kind() {
+            ServerKind::Llama => ServerFile {
+                strata_config: None,
+                ..self.clone()
+            },
+            ServerKind::Strata => ServerFile {
+                model: None,
+                context: None,
+                spec_type: None,
+                draft: None,
+                args: None,
+                mmproj: None,
+                mmproj_offload: None,
+                image_max_tokens: None,
+                ..self.clone()
+            },
+        }
     }
 
     /// The effective `[server]` (AGL-033, D1, D3): `table` (the `[server]`
@@ -589,48 +612,54 @@ impl ServerFile {
         }
     }
 
-    /// The `[server]` table as written to a file; empty when no key is
-    /// set.
+    /// The `[server]` table as written to a file, with `[server.llama]`
+    /// and `[server.strata]` (AGL-035, D4); empty when no key is set.
     pub fn render(&self) -> String {
-        if self.is_empty() {
-            return String::new();
+        let mut out = String::new();
+        if self.kind.is_some() || self.url.is_some() || self.engine.is_some() {
+            out.push_str("\n[server]\n");
+            if let Some(kind) = &self.kind {
+                out.push_str(&format!("kind = {}\n", tomlfile::quote(kind)));
+            }
+            if let Some(url) = &self.url {
+                out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+            }
+            if let Some(engine) = &self.engine {
+                out.push_str(&format!("engine = {}\n", tomlfile::quote(engine)));
+            }
         }
-        let mut out = String::from("\n[server]\n");
-        if let Some(kind) = &self.kind {
-            out.push_str(&format!("kind = {}\n", tomlfile::quote(kind)));
-        }
-        if let Some(url) = &self.url {
-            out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
-        }
-        if let Some(engine) = &self.engine {
-            out.push_str(&format!("engine = {}\n", tomlfile::quote(engine)));
-        }
+        let mut llama = String::new();
         if let Some(model) = &self.model {
-            out.push_str(&format!("model = {}\n", tomlfile::quote(model)));
+            llama.push_str(&format!("model = {}\n", tomlfile::quote(model)));
         }
         if let Some(context) = self.context {
-            out.push_str(&format!("context = {context}\n"));
+            llama.push_str(&format!("context = {context}\n"));
         }
         if let Some(spec_type) = &self.spec_type {
-            out.push_str(&format!("spec_type = {}\n", tomlfile::quote(spec_type)));
+            llama.push_str(&format!("spec_type = {}\n", tomlfile::quote(spec_type)));
         }
         if let Some(draft) = &self.draft {
-            out.push_str(&format!("draft = {}\n", tomlfile::quote(draft)));
+            llama.push_str(&format!("draft = {}\n", tomlfile::quote(draft)));
         }
         if let Some(args) = &self.args {
             let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
-            out.push_str(&format!("args = [{}]\n", items.join(", ")));
+            llama.push_str(&format!("args = [{}]\n", items.join(", ")));
         }
         if let Some(mmproj) = &self.mmproj {
-            out.push_str(&format!("mmproj = {}\n", tomlfile::quote(mmproj)));
+            llama.push_str(&format!("mmproj = {}\n", tomlfile::quote(mmproj)));
         }
         if let Some(offload) = self.mmproj_offload {
-            out.push_str(&format!("mmproj_offload = {offload}\n"));
+            llama.push_str(&format!("mmproj_offload = {offload}\n"));
         }
         if let Some(tokens) = self.image_max_tokens {
-            out.push_str(&format!("image_max_tokens = {tokens}\n"));
+            llama.push_str(&format!("image_max_tokens = {tokens}\n"));
+        }
+        if !llama.is_empty() {
+            out.push_str("\n[server.llama]\n");
+            out.push_str(&llama);
         }
         if let Some(config) = &self.strata_config {
+            out.push_str("\n[server.strata]\n");
             out.push_str(&format!("strata_config = {}\n", tomlfile::quote(config)));
         }
         out
@@ -802,7 +831,7 @@ impl Settings {
     ) -> Result<Settings, Error> {
         let (project_path, project_function, project_server, project_whisper, project_search) =
             project;
-        let server = project_server.over(&user.server);
+        let server = project_server.over(&user.server).selected();
         // The `[server]` table of the loaded Function is the model side of
         // the settings when the file declares it (AGL-033, D1, D3);
         // without it, the resolved `[server]` decides (the fallback).
@@ -912,7 +941,7 @@ mod tests {
             }
         );
         let server = user(
-            "[server]\nurl = \"http://127.0.0.1:18080\"\nmodel = \"m.gguf\"\ncontext = 8192\n\
+            "[server]\nurl = \"http://127.0.0.1:18080\"\n[server.llama]\nmodel = \"m.gguf\"\ncontext = 8192\n\
              args = [\"-ngl\", \"999\"]\n",
         )
         .unwrap()
@@ -1096,7 +1125,7 @@ mod tests {
     #[test]
     fn the_projector_keys() {
         let file = user(
-            "[server]\nurl = \"http://x\"\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
+            "[server]\nurl = \"http://x\"\n[server.llama]\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
              image_max_tokens = 1024\n",
         )
         .unwrap()
@@ -1123,16 +1152,16 @@ mod tests {
         assert_eq!(bare, defaults);
         // A name that is not a file name, or a cap below 1, is an error.
         assert!(matches!(
-            user("[server]\nmmproj = \"a/b.gguf\""),
+            user("[server.llama]\nmmproj = \"a/b.gguf\""),
             Err(Error::InvalidName(_))
         ));
         assert!(matches!(
-            user("[server]\nimage_max_tokens = 0"),
-            Err(Error::NotPositive { key, .. }) if key == "server.image_max_tokens"
+            user("[server.llama]\nimage_max_tokens = 0"),
+            Err(Error::NotPositive { key, .. }) if key == "server.llama.image_max_tokens"
         ));
         assert!(matches!(
-            user("[server]\nmmproj_offload = \"yes\""),
-            Err(Error::WrongType { key, .. }) if key == "server.mmproj_offload"
+            user("[server.llama]\nmmproj_offload = \"yes\""),
+            Err(Error::WrongType { key, .. }) if key == "server.llama.mmproj_offload"
         ));
     }
 
@@ -1234,7 +1263,7 @@ mod tests {
         let text = file.render();
         assert_eq!(
             text,
-            "\n[server]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"q.gguf\"\ncontext = 65536\n\
+            "\n[server]\nurl = \"http://127.0.0.1:18081\"\n\n[server.llama]\nmodel = \"q.gguf\"\ncontext = 65536\n\
              args = [\"-ngl\", \"99\\\"x\"]\n"
         );
         let dir = TempDir::new();
@@ -1246,10 +1275,52 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_of_both_kinds_have_their_own_tables() {
+        // AGL-035, D4: the model side of each kind is in its own table.
+        let both = user(
+            "[server]\nkind = \"strata\"\n[server.llama]\nmodel = \"m.gguf\"\ncontext = 8192\n\
+             [server.strata]\nstrata_config = \"/s/c.json\"\n",
+        )
+        .unwrap()
+        .server;
+        assert_eq!(both.model.as_deref(), Some("m.gguf"));
+        assert_eq!(both.strata_config.as_deref(), Some("/s/c.json"));
+        // Render and parse back, both tables.
+        let dir = TempDir::new();
+        let path = dir.write(SETTINGS_FILE, &both.render());
+        assert_eq!(UserFile::load(&path).unwrap().server, both);
+        // The table of the kind that is not selected is not used.
+        let strata = both.selected();
+        assert_eq!(strata.model, None);
+        assert_eq!(strata.context, None);
+        assert_eq!(strata.strata_config.as_deref(), Some("/s/c.json"));
+        let llama = ServerFile {
+            kind: Some("llama".into()),
+            ..both.clone()
+        }
+        .selected();
+        assert_eq!(llama.model.as_deref(), Some("m.gguf"));
+        assert_eq!(llama.strata_config, None);
+        // A key outside its table is an unknown key: the llama keys
+        // directly under `[server]`, a strata key in `[server.llama]` and
+        // a llama key in `[server.strata]`.
+        for text in [
+            "[server]\nmodel = \"m.gguf\"\n",
+            "[server.llama]\nstrata_config = \"/s/c.json\"\n",
+            "[server.strata]\nmodel = \"m.gguf\"\n",
+        ] {
+            assert!(
+                matches!(user(text), Err(Error::UnknownKey { .. })),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn the_speculative_keys() {
         // Parse: the two keys, with the draft name checked like the model.
         let loaded = user(
-            "[server]\nmodel = \"m.gguf\"\nspec_type = \"draft-mtp\"\n\
+            "[server.llama]\nmodel = \"m.gguf\"\nspec_type = \"draft-mtp\"\n\
              draft = \"d.gguf\"\n",
         )
         .unwrap()
@@ -1257,7 +1328,7 @@ mod tests {
         assert_eq!(loaded.spec_type.as_deref(), Some("draft-mtp"));
         assert_eq!(loaded.draft.as_deref(), Some("d.gguf"));
         assert!(matches!(
-            user("[server]\ndraft = \"../x.gguf\"\n"),
+            user("[server.llama]\ndraft = \"../x.gguf\"\n"),
             Err(Error::InvalidName { .. })
         ));
         // The project wins per key, the user's defaults fill the rest.
@@ -1439,16 +1510,16 @@ mod tests {
         ));
         assert!(matches!(user("function ="), Err(Error::Parse { .. })));
         assert!(matches!(
-            user("[server]\nmodel = \"/tmp/m.gguf\""),
+            user("[server.llama]\nmodel = \"/tmp/m.gguf\""),
             Err(Error::InvalidName(name)) if name == "/tmp/m.gguf"
         ));
         assert!(matches!(
-            user("[server]\ncontext = 0"),
-            Err(Error::NotPositive { key, .. }) if key == "server.context"
+            user("[server.llama]\ncontext = 0"),
+            Err(Error::NotPositive { key, .. }) if key == "server.llama.context"
         ));
         assert!(matches!(
-            user("[server]\nargs = \"-ngl 999\""),
-            Err(Error::WrongType { key, .. }) if key == "server.args"
+            user("[server.llama]\nargs = \"-ngl 999\""),
+            Err(Error::WrongType { key, .. }) if key == "server.llama.args"
         ));
     }
 
