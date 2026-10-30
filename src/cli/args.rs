@@ -13,8 +13,10 @@ pub enum Command {
     /// Run the agent.
     Run(Args),
     /// `agl server start|stop|status` (D146); the flag is `--yes` of
-    /// `start` (AGL-015, D16).
-    Server(ServerAction, bool),
+    /// `start` (AGL-015, D16), and the option `--function <name>` of
+    /// `start` and `status` names the Function whose `[server]` table is
+    /// the model side (AGL-035, D3).
+    Server(ServerAction, bool, Option<String>),
     /// `agl init` (AGL-010): register the current directory as
     /// a project.
     Init,
@@ -79,16 +81,26 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             None => return Err(Error::MissingValue("server".into())),
         };
         let mut yes = false;
-        for extra in args {
+        let mut function = None;
+        while let Some(extra) = args.next() {
             match text(extra)?.as_str() {
                 "--yes" if action == ServerAction::Start && !yes => yes = true,
                 "--yes" if action == ServerAction::Start => {
                     return Err(Error::RepeatedOption("--yes".into()));
                 }
+                "--function" if action != ServerAction::Stop && function.is_none() => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::MissingValue("--function".into()))?;
+                    function = Some(text(value)?);
+                }
+                "--function" if action != ServerAction::Stop => {
+                    return Err(Error::RepeatedOption("--function".into()));
+                }
                 other => return Err(Error::UnknownOption(other.into())),
             }
         }
-        return Ok(Command::Server(action, yes));
+        return Ok(Command::Server(action, yes, function));
     }
     // `--think` is parsed to its level after the loop (AGL-013).
     let mut think: Option<String> = None;
@@ -293,13 +305,13 @@ mod tests {
         ] {
             assert_eq!(
                 parse_strs(&["server", word]).unwrap(),
-                Command::Server(action, false)
+                Command::Server(action, false, None)
             );
         }
         // `--yes` belongs to `start` only (AGL-015, D16).
         assert_eq!(
             parse_strs(&["server", "start", "--yes"]).unwrap(),
-            Command::Server(ServerAction::Start, true)
+            Command::Server(ServerAction::Start, true, None)
         );
         for word in ["stop", "status"] {
             assert!(matches!(
@@ -310,6 +322,30 @@ mod tests {
         assert!(matches!(
             parse_strs(&["server", "start", "--yes", "--yes"]),
             Err(Error::RepeatedOption(o)) if o == "--yes"
+        ));
+        // `--function <name>` of `start` and `status` (AGL-035, D3).
+        for action in [ServerAction::Start, ServerAction::Status] {
+            let word = if action == ServerAction::Start { "start" } else { "status" };
+            assert_eq!(
+                parse_strs(&["server", word, "--function", "p"]).unwrap(),
+                Command::Server(action, false, Some("p".into()))
+            );
+            assert!(matches!(
+                parse_strs(&["server", word, "--function"]),
+                Err(Error::MissingValue(o)) if o == "--function"
+            ));
+            assert!(matches!(
+                parse_strs(&["server", word, "--function", "p", "--function", "q"]),
+                Err(Error::RepeatedOption(o)) if o == "--function"
+            ));
+        }
+        assert_eq!(
+            parse_strs(&["server", "start", "--yes", "--function", "p"]).unwrap(),
+            Command::Server(ServerAction::Start, true, Some("p".into()))
+        );
+        assert!(matches!(
+            parse_strs(&["server", "stop", "--function", "p"]),
+            Err(Error::UnknownOption(o)) if o == "--function"
         ));
         assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help);
         assert!(matches!(

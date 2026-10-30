@@ -57,12 +57,16 @@ use theme::Theme;
 /// keeps running.
 struct EngineGuard {
     engine: Arc<Mutex<Option<cli::serve::Engine>>>,
+    /// The project's store directory, where the record of the launched
+    /// server is (AGL-035, D1).
+    dir: PathBuf,
 }
 
 impl EngineGuard {
     fn new(autostart: &cli::serve::Autostart<'_>) -> Self {
         EngineGuard {
             engine: Arc::clone(&autostart.engine),
+            dir: autostart.project.dir.clone(),
         }
     }
 }
@@ -71,6 +75,7 @@ impl Drop for EngineGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.lock().unwrap().take() {
             engine.shutdown();
+            cli::serve::remove_record(&self.dir);
         }
     }
 }
@@ -162,7 +167,7 @@ fn run(
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
-        Command::Server(action, yes) => {
+        Command::Server(action, yes, function_option) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             let project = cli::forge::project_of(
@@ -171,13 +176,13 @@ fn run(
                 user.forge.auto_rehome.unwrap_or(true),
                 *lang,
             )?;
-            let settings = project.server.over(&user.server);
+            let settings = project.server.over(&user.server).selected();
             // The Function's `[server]` table, when the file declares it,
             // is the model side of the settings (AGL-033, D1, D3): the
-            // command works on the project's function (it has no
-            // `--function` of its own).
+            // command works on `--function`, else the project's function
+            // (AGL-035, D3).
             let name = function_name(
-                None,
+                function_option.as_deref(),
                 project.function.as_deref(),
                 user.function.as_deref(),
             );
@@ -295,11 +300,9 @@ fn run(
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
         lang: *lang,
     };
-    // The resolved `[server]` (the project's over the user's): the known
-    // state of a running server (AGL-033, D2). The settings' `server` is
-    // the effective one (the function's `[server]` table when the file
-    // declares it, D1, D3), and the backend and the url run on it.
-    let fallback = project.server.over(&user.server);
+    // The settings' `server` is the effective one (the function's
+    // `[server]` table when the file declares it, AGL-033, D1, D3), and
+    // the backend and the url run on it.
     // The backend is the Llama or the Strata backend, by the effective
     // settings' `[server] kind` (AGL-030, D1); the stirred mode runs on
     // Strata.
@@ -312,7 +315,6 @@ fn run(
     let autostart = cli::serve::Autostart {
         llama: backend.as_ref(),
         project: &project,
-        settings: &fallback,
         effective: &settings.server,
         whisper: &settings.whisper,
         user_path: user_path.clone(),

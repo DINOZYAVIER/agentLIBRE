@@ -29,6 +29,10 @@ pub const UNIT_PREFIX: &str = "agentLIBRE-llama-server";
 /// `context` when `[server]` does not set it (D148).
 const DEFAULT_CONTEXT: u32 = 16384;
 
+/// The record of what the running server was launched with, beside the
+/// engine log in the project's store directory (AGL-035, D1).
+const STATE_FILE: &str = "server.state";
+
 /// How long `start` waits for `/health` (D149).
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(500);
@@ -68,6 +72,9 @@ pub struct Server {
     /// The user's and the project's settings files, for hints.
     pub user_path: PathBuf,
     pub project_path: PathBuf,
+    /// The project's store directory: the record of the launched server
+    /// is there (AGL-035, D1).
+    pub dir: PathBuf,
     /// The `[server]` table of the Function the run loads, with the file
     /// it came from (AGL-033, D1): when the file declares one, the table
     /// is the model side of the settings, self-contained.
@@ -108,6 +115,7 @@ impl Server {
             url,
             user_path: user_path.into(),
             project_path,
+            dir: project.dir.clone(),
             function_server,
         })
     }
@@ -189,6 +197,7 @@ pub fn run(
             }
             if unit_active(&server.unit)? {
                 systemctl(&["stop", &server.unit])?;
+                remove_record(&server.dir);
                 println!("{}", tr!(lang, m::SERVER_STOPPED));
             } else if !whisper {
                 println!("{}", texts::not_running(&server.unit, lang));
@@ -259,7 +268,7 @@ pub fn start(
     if health(llama) != Health::Down || port_open(&host, port) {
         let ours = unit_active(&server.unit)?;
         wait_ready(llama, ours.then_some(&server.unit), &what, say, lang)?;
-        if serves(llama, &server.settings, &effective, models)? {
+        if serves(llama, read_record(&server.dir).as_ref(), &effective, models)? {
             say(&texts::already_running(&what, url, lang));
             return Ok(());
         }
@@ -281,6 +290,7 @@ pub fn start(
                 systemctl(&["stop", unit])?;
             }
         }
+        remove_record(&server.dir);
         let started = Instant::now();
         while port_open(&host, port) {
             if started.elapsed() >= Duration::from_secs(10) {
@@ -313,7 +323,7 @@ fn launch_unit(
     effective: &ServerFile,
     models: &Path,
     path_var: Option<OsString>,
-    llama: &Llama,
+    llama: &dyn Backend,
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
@@ -377,7 +387,12 @@ fn launch_unit(
         });
     }
     say(&texts::starting(&what, url, &server.unit, lang));
-    wait_ready(llama, Some(&server.unit), &what, say, lang)
+    wait_ready(llama, Some(&server.unit), &what, say, lang)?;
+    // What the unit was launched with (AGL-035, D1).
+    if let Some(pid) = unit_main_pid(&server.unit) {
+        write_record(&server.dir, pid, effective)?;
+    }
+    Ok(())
 }
 
 /// Waits until `/health` answers ready (D149). `unit` is the unit that
@@ -420,9 +435,6 @@ pub struct Autostart<'a> {
     /// by the settings' `[server] kind` (AGL-030, D1).
     pub llama: &'a dyn Backend,
     pub project: &'a Workspace,
-    /// The resolved `[server]` (the project's over the user's): the known
-    /// state of a running server (AGL-033, D2).
-    pub settings: &'a ServerFile,
     /// The settings that actually run (AGL-033, D1): the function's
     /// `[server]` table when the file declares it, else `settings`.
     pub effective: &'a ServerFile,
@@ -459,7 +471,7 @@ impl Autostart<'_> {
             // The server is ready: the check of D2 (AGL-033) decides —
             // it serves the effective settings, or a mismatch restarts.
             Health::Ready => {
-                if serves(llama, self.settings, self.effective, &self.models)? {
+                if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
                     Ok(())
                 } else {
                     self.restart(&what, say)
@@ -469,7 +481,7 @@ impl Autostart<'_> {
             // the check of D2 (AGL-033).
             Health::Loading => {
                 wait_ready(llama, None, &what, say, self.lang)?;
-                if serves(llama, self.settings, self.effective, &self.models)? {
+                if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
                     Ok(())
                 } else {
                     self.restart(&what, say)
@@ -484,29 +496,53 @@ impl Autostart<'_> {
 
     /// The mismatch of D2 (AGL-033): the consent as today (ask / `--yes`
     /// / refuse), then the server agl owns stops and the server of the
-    /// kind starts with the effective settings.
+    /// kind starts with the effective settings, with the owner of the one
+    /// it replaced (AGL-035, D2): the project's unit stays the unit, the
+    /// run's own child stays the child.
     fn restart(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         restart_consent(what, &self.others, self.lang)?;
-        self.stop_ours()?;
-        self.launch(what, say)
+        if self.stop_ours()? {
+            self.launch_as_unit(say)
+        } else {
+            self.launch(what, say)
+        }
+    }
+
+    /// The server of the kind starts as the unit of the project, the code
+    /// of `agl server start` (AGL-035, D2).
+    fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        let server = Server::of(self.project, self.effective, &self.user_path, None)?;
+        launch_unit(
+            &server,
+            self.effective,
+            &self.models,
+            self.path_var.clone(),
+            self.llama,
+            say,
+            self.lang,
+        )
     }
 
     /// The server agl owns stops (AGL-033, D2): the child in the field
     /// (AGL-024, D3), the unit of the project when it is active; then
-    /// the port must be free, or it is busy (D7).
-    fn stop_ours(&self) -> Result<(), Error> {
+    /// the port must be free, or it is busy (D7). Whether it was the unit
+    /// (AGL-035, D2).
+    fn stop_ours(&self) -> Result<bool, Error> {
         if let Some(engine) = self.engine.lock().unwrap().take() {
             engine.shutdown();
         }
+        remove_record(&self.project.dir);
         let unit = self.project.unit_key().map(|key| unit_name(&key));
+        let mut was_unit = false;
         if let Some(unit) = &unit
             && unit_active(unit)?
         {
             systemctl(&["stop", unit])?;
+            was_unit = true;
         }
         let url = self.llama.url();
         let Some((host, port)) = local_address(url) else {
-            return Ok(());
+            return Ok(was_unit);
         };
         let started = Instant::now();
         while port_open(&host, port) {
@@ -518,7 +554,7 @@ impl Autostart<'_> {
             }
             thread::sleep(POLL);
         }
-        Ok(())
+        Ok(was_unit)
     }
 
     /// The server of the kind starts as a background child with the
@@ -558,7 +594,9 @@ impl Autostart<'_> {
         let mut guard = self.engine.lock().unwrap();
         *guard = Some(engine);
         let engine = guard.as_mut().expect("the engine just launched");
-        wait_child_ready(self.llama, engine, &log, what, say, self.lang)
+        wait_child_ready(self.llama, engine, &log, what, say, self.lang)?;
+        // What the child was launched with (AGL-035, D1).
+        write_record(&self.project.dir, engine.pid(), self.effective)
     }
 }
 
@@ -930,16 +968,19 @@ fn expected_model(settings: &ServerFile, models: &Path) -> Result<Option<String>
 /// The check of D2 (AGL-033): whether the server running at the url
 /// serves the effective settings. The model is observed via `/v1/models`
 /// (both servers expose it); a mismatch of the observed model, or a
-/// model-side key of the effective settings that deviates from the
-/// settings' value (the context is not observable, and the settings'
-/// value is the only known state of a running server), is a restart.
+/// model-side key of the effective settings that deviates from `record`
+/// — what the running server was launched with, which is the only way to
+/// know the context (AGL-035, D1) — is a restart. Without a record the
+/// observed model decides alone.
 fn serves(
     llama: &dyn Backend,
-    settings: &ServerFile,
+    record: Option<&ServerFile>,
     effective: &ServerFile,
     models: &Path,
 ) -> Result<bool, Error> {
-    if effective.model_side_differs(settings) {
+    if let Some(record) = record
+        && effective.model_side_differs(record)
+    {
         return Ok(false);
     }
     let expected = expected_model(effective, models)?;
@@ -953,6 +994,48 @@ fn serves(
         Some(observed) => Ok(observed == expected),
         None => Ok(true),
     }
+}
+
+/// The record of what the running server was launched with (AGL-035,
+/// D1): `pid` and the effective `[server]`, in the format of a settings
+/// file.
+fn write_record(dir: &Path, pid: u32, effective: &ServerFile) -> Result<(), Error> {
+    let path = dir.join(STATE_FILE);
+    fs::write(&path, format!("pid = {pid}\n{}", effective.render()))
+        .map_err(|source| Error::Write { path, source })
+}
+
+/// What the running server was launched with (AGL-035, D1): `None` when
+/// there is no record, it cannot be read, or its process is gone.
+fn read_record(dir: &Path) -> Option<ServerFile> {
+    let path = dir.join(STATE_FILE);
+    let table = crate::tomlfile::read(&path).ok()??;
+    let mut file = crate::tomlfile::Section::new(&path, table);
+    file.check_keys(&["pid", "server"]).ok()?;
+    let pid = file.integer("pid").ok()??;
+    if !Path::new(&format!("/proc/{pid}")).exists() {
+        return None;
+    }
+    ServerFile::parse(file.section("server").ok()?, &path).ok()
+}
+
+/// The record goes away with the server it describes (AGL-035, D1).
+pub(crate) fn remove_record(dir: &Path) {
+    let _ = fs::remove_file(dir.join(STATE_FILE));
+}
+
+/// The main process of the unit, while it runs.
+fn unit_main_pid(unit: &str) -> Option<u32> {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", unit])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()
+        .filter(|pid| *pid != 0)
 }
 
 /// Waits until the engine agl launched answers ready (AGL-024, D2): the
@@ -1784,7 +1867,6 @@ mod tests {
     fn autostart<'a>(
         llama: &'a Llama,
         project: &'a Workspace,
-        settings: &'a ServerFile,
         effective: &'a ServerFile,
     ) -> Autostart<'a> {
         static NO_WHISPER: crate::settings::WhisperFile = crate::settings::WhisperFile {
@@ -1795,7 +1877,6 @@ mod tests {
         Autostart {
             llama,
             project,
-            settings,
             effective,
             whisper: &NO_WHISPER,
             user_path: PathBuf::from("/c/agentLIBRE.toml"),
@@ -1815,7 +1896,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings, &settings)
+        autostart(&llama, &ws, &settings)
             .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
         assert!(said.is_empty());
@@ -1828,7 +1909,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings, &settings)
+        autostart(&llama, &ws, &settings)
             .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
         assert_eq!(
@@ -1852,7 +1933,7 @@ mod tests {
             ..ServerFile::default()
         };
         let mut said = Vec::new();
-        let result = autostart(&llama, &ws, &settings, &settings)
+        let result = autostart(&llama, &ws, &settings)
             .ensure(&mut |line| said.push(line.to_owned()));
         assert!(matches!(
             result,
@@ -1874,24 +1955,69 @@ mod tests {
         // The same model: it serves.
         let url = model_server(&[200], Some("/m/m.gguf"));
         let llama = Llama::new(&url);
-        assert!(serves(&llama, &settings, &settings, models).unwrap());
+        assert!(serves(&llama, None, &settings, models).unwrap());
         // Another model: it does not serve.
         let url = model_server(&[200], Some("/m/other.gguf"));
         let llama = Llama::new(&url);
-        assert!(!serves(&llama, &settings, &settings, models).unwrap());
+        assert!(!serves(&llama, None, &settings, models).unwrap());
         // The server answers but does not name a model: nothing to
         // compare, no restart.
         let url = model_server(&[200], None);
         let llama = Llama::new(&url);
-        assert!(serves(&llama, &settings, &settings, models).unwrap());
-        // The model side of the effective settings deviates from the
-        // settings': the settings' value is the only known state of a
-        // running server, so it does not serve.
-        let effective = ServerFile {
-            model: Some("other.gguf".into()),
+        assert!(serves(&llama, None, &settings, models).unwrap());
+    }
+
+    #[test]
+    fn the_record_decides_what_the_running_server_was_launched_with() {
+        // AGL-035, D1: the effective settings are compared with the record
+        // of the launch, not with the settings file.
+        let models = Path::new("/m");
+        let profile = ServerFile {
+            model: Some("m.gguf".into()),
+            context: Some(16384),
             ..ServerFile::default()
         };
-        assert!(!serves(&llama, &settings, &effective, models).unwrap());
+        let url = model_server(&[200], Some("/m/m.gguf"));
+        let llama = Llama::new(&url);
+        // The server runs exactly the profile: it serves.
+        assert!(serves(&llama, Some(&profile), &profile, models).unwrap());
+        // A key that differs from the record: it does not serve, though
+        // the observed model is the same.
+        let wider = ServerFile {
+            context: Some(131072),
+            ..profile.clone()
+        };
+        assert!(!serves(&llama, Some(&profile), &wider, models).unwrap());
+        // Without a record the model alone decides.
+        assert!(serves(&llama, None, &wider, models).unwrap());
+    }
+
+    #[test]
+    fn the_record_is_written_read_and_removed() {
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-record-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let effective = ServerFile {
+            url: Some("http://127.0.0.1:18080".into()),
+            model: Some("m.gguf".into()),
+            context: Some(16384),
+            args: Some(vec!["-ngl".into(), "999".into()]),
+            ..ServerFile::default()
+        };
+        assert_eq!(read_record(&dir), None);
+        // The record of a process that runs reads back as written.
+        write_record(&dir, std::process::id(), &effective).unwrap();
+        assert_eq!(read_record(&dir), Some(effective.clone()));
+        // The record of a process that is gone is no record.
+        write_record(&dir, u32::MAX, &effective).unwrap();
+        assert_eq!(read_record(&dir), None);
+        // A record that cannot be read is no record.
+        fs::write(dir.join(STATE_FILE), "pid = \"x\"\n").unwrap();
+        assert_eq!(read_record(&dir), None);
+        write_record(&dir, std::process::id(), &effective).unwrap();
+        remove_record(&dir);
+        assert_eq!(read_record(&dir), None);
+        assert!(!dir.join(STATE_FILE).exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1907,7 +2033,7 @@ mod tests {
             ..ServerFile::default()
         };
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings, &settings)
+        autostart(&llama, &ws, &settings)
             .ensure(&mut |line| said.push(line.to_owned()))
             .unwrap();
         assert!(said.is_empty());
@@ -1928,7 +2054,7 @@ mod tests {
         };
         let mut said = Vec::new();
         assert!(matches!(
-            autostart(&llama, &ws, &settings, &settings)
+            autostart(&llama, &ws, &settings)
                 .ensure(&mut |line| said.push(line.to_owned())),
             Err(Error::RestartDeclined)
         ));

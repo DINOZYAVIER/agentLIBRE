@@ -159,7 +159,7 @@ pub mod m {
 Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name>]
            [--think <level>] [--yes]
        agl init
-       agl server start [--yes]|stop|status
+       agl server start [--yes] [--function <name>]|stop|status [--function <name>]
        agl forge list|show|new|status|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
@@ -180,9 +180,11 @@ Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
 
 Server (systemd user unit agentLIBRE-llama-server-<project>; [server] in the
 project's agentLIBRE.toml over the one of the user):
-  server start        start llama-server and wait until it is ready
+  server start        start llama-server and wait until it is ready; with
+                      --function, the server of that Function's [server] table
   server stop         stop it and the whisper server of the project
-  server status       show whether it runs and is ready
+  server status       show whether it runs and is ready (--function: the
+                      server of that Function)
 
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
@@ -198,7 +200,7 @@ under XDG_DATA_HOME):
 Використання: agl [-p <повідомлення> [--attach <шлях>]...] [--resume <id>] [--function <назва>]
               [--think <level>] [--yes]
               agl init
-              agl server start [--yes]|stop|status
+              agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
               agl forge list|show|new|status|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
@@ -220,9 +222,11 @@ under XDG_DATA_HOME):
 
 Сервер (user-unit systemd agentLIBRE-llama-server-<проєкт>; [server] у
 agentLIBRE.toml проєкту поверх файлу користувача):
-  server start        запустити llama-server і дочекатися готовності
+  server start        запустити llama-server і дочекатися готовності; з
+                      --function — сервер таблиці [server] цієї Функції
   server stop         зупинити його і whisper-сервер проєкту
-  server status       показати, чи він працює і чи готовий
+  server status       показати, чи він працює і чи готовий (--function:
+                      сервер цієї Функції)
 
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
