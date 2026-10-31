@@ -290,12 +290,48 @@ pub struct Request<'a> {
     /// The bytes of the media the prompt names with the server's marker,
     /// base64, in the order of the markers (AGL-014, D6).
     pub media: &'a [String],
+    /// The structured prompt of the stirred mode (AGL-030, D9): the
+    /// backend that speaks the OpenAI dialect builds its `messages`,
+    /// `tools` and `reasoning_effort` from it instead of sending `prompt`;
+    /// `None` is a flat generation.
+    pub structured: Option<&'a Prompt<'a>>,
+}
+
+/// One call of the structured transport (AGL-030, D9): the function's
+/// name and its arguments, the JSON text the server streamed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructuredCall {
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Generated {
     pub text: String,
     pub stop: Stop,
+    /// The step's thinking, as the server split it from the text
+    /// (AGL-030, D9); `None` on a flat generation.
+    pub thinking: Option<String>,
+    /// The calls the server structured (AGL-030, D9); empty on a flat
+    /// generation.
+    pub tool_calls: Vec<StructuredCall>,
+    /// The exact token counts of the server's `usage` (AGL-030, D11).
+    pub prompt_tokens: Option<usize>,
+    pub completion_tokens: Option<usize>,
+}
+
+impl Generated {
+    /// A flat generation: the text and why it ended.
+    pub fn plain(text: String, stop: Stop) -> Generated {
+        Generated {
+            text,
+            stop,
+            thinking: None,
+            tool_calls: Vec::new(),
+            prompt_tokens: None,
+            completion_tokens: None,
+        }
+    }
 }
 
 /// Why a generation ended.
@@ -313,10 +349,13 @@ pub enum Stop {
 pub trait Backend {
     /// Renders `prompt` with the model's chat template.
     fn render(&self, prompt: &Prompt) -> Result<String, Error>;
-    /// Generates text, passing each piece to `on_text` as it arrives.
+    /// Generates text, passing each piece to `on_text` as it arrives; a
+    /// backend that splits the thinking from the text (AGL-030, D9)
+    /// passes the pieces of the thinking to `on_thinking`.
     fn generate(
         &self,
         request: &Request,
+        on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error>;
     /// The number of tokens of `text`.

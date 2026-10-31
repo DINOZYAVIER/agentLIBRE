@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::*;
-use crate::backend::Generated;
+use crate::backend::{Generated, StructuredCall};
 use crate::function::tests::{CODER, function};
 use crate::session::Event;
 
@@ -31,6 +31,8 @@ struct Script {
     uploads: RefCell<Vec<Vec<String>>>,
     /// The texts of the runtime messages of each rendered prompt, in order.
     runtimes: RefCell<Vec<Vec<String>>>,
+    /// The runtime messages of each structured generation (AGL-030, D9).
+    structured: RefCell<Vec<Vec<String>>>,
 }
 
 impl Script {
@@ -39,13 +41,15 @@ impl Script {
             outputs: RefCell::new(
                 outputs
                     .iter()
-                    .map(|(text, stop)| Generated {
-                        text: text.to_string(),
-                        stop: match stop {
-                            Stop::End => Stop::End,
-                            Stop::Limit => Stop::Limit,
-                            Stop::Word(w) => Stop::Word(w.clone()),
-                        },
+                    .map(|(text, stop)| {
+                        Generated::plain(
+                            text.to_string(),
+                            match stop {
+                                Stop::End => Stop::End,
+                                Stop::Limit => Stop::Limit,
+                                Stop::Word(w) => Stop::Word(w.clone()),
+                            },
+                        )
                     })
                     .collect(),
             ),
@@ -60,7 +64,15 @@ impl Script {
             users: RefCell::new(Vec::new()),
             uploads: RefCell::new(Vec::new()),
             runtimes: RefCell::new(Vec::new()),
+            structured: RefCell::new(Vec::new()),
         }
+    }
+
+    /// A script of structured generations (AGL-030, D9).
+    fn structured(outputs: Vec<Generated>) -> Script {
+        let script = Script::new(&[]);
+        *script.outputs.borrow_mut() = outputs.into_iter().collect();
+        script
     }
 
     fn with_counts(mut self, counts: &[usize]) -> Script {
@@ -114,15 +126,33 @@ impl Backend for Script {
     fn generate(
         &self,
         request: &Request,
+        on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
         self.prompts.borrow_mut().push(request.prompt.to_owned());
+        if let Some(prompt) = request.structured {
+            self.structured.borrow_mut().push(
+                prompt
+                    .messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        Message::Runtime(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
         self.uploads.borrow_mut().push(request.media.to_vec());
         let generated = self
             .outputs
             .borrow_mut()
             .pop_front()
             .expect("a scripted output");
+        if let Some(thinking) = &generated.thinking {
+            for piece in thinking.split_inclusive(' ') {
+                on_thinking(piece);
+            }
+        }
         for piece in generated.text.split_inclusive(' ') {
             on_text(piece);
         }
@@ -715,64 +745,131 @@ fn stops() {
     );
 }
 
-/// A miss of the action phase in the stirred mode: the machine stirs the
-/// model a bounded number of times and the turn completes when it lands
-/// (AGL-030, D4).
+/// A structured generation (AGL-030, D9): the thinking and the text the
+/// server split, the calls it structured and the exact usage.
+fn structured_step(
+    thinking: Option<&str>,
+    text: &str,
+    calls: &[(&str, &str)],
+    stop: Stop,
+) -> Generated {
+    Generated {
+        text: text.into(),
+        stop,
+        thinking: thinking.map(str::to_owned),
+        tool_calls: calls
+            .iter()
+            .map(|(name, arguments)| StructuredCall {
+                name: (*name).into(),
+                arguments: (*arguments).into(),
+            })
+            .collect(),
+        prompt_tokens: Some(312),
+        completion_tokens: Some(20),
+    }
+}
+
+fn stirred_function(extra: &str) -> Function {
+    function(&format!(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\n{extra}\
+         [state.a]\ntools.bash = {{}}\nthink = false\nanswer = true\nnext = {{ else = \"a\" }}"
+    ))
+    .unwrap()
+}
+
+/// The stirred mode runs a step as one structured generation (AGL-030,
+/// D9, D10): a call of the state's tool runs, an answer ends the turn,
+/// the thinking the server split is recorded and streamed, and the exact
+/// usage is what the report is told (D11).
 #[test]
-fn stirred_retries_a_failed_action() {
-    let dir = Dir::new("stir-retry");
-    let stirred = function(
+fn stirred_runs_a_structured_call_and_answers() {
+    let dir = Dir::new("stir-call");
+    let thinking = function(
         "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\n\
-         [state.a]\ntools.bash = {}\nthink = false\nanswer = true\nnext = { else = \"a\" }",
+         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
     )
     .unwrap();
-    let miss = "
-</think>
+    let script = Script::structured(vec![
+        structured_step(
+            Some("Run it."),
+            "Looking.",
+            &[("bash", "{\"command\":\"echo hi\"}")],
+            Stop::End,
+        ),
+        structured_step(None, "done", &[], Stop::End),
+    ]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    let end = agent_stirred(&thinking, &script, &mut session, &dir, None, true)
+        .turn("go", &mut log)
+        .unwrap();
+    assert_eq!(end, TurnEnd::Answer("done".into()));
+    assert!(log.0.contains(&"thinking: Run it.".to_string()), "{:?}", log.0);
+    assert!(log.0.contains(&"> bash".to_string()));
+    assert!(log.0.contains(&"  ok".to_string()));
+    // The estimate before each generation (the context check), then the
+    // exact count of the usage.
+    assert_eq!(log.1, vec![100, 312, 100, 312]);
+    assert_eq!(log.2, vec![20, 20]);
+    assert!(session
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::Thinking(text) if text == "Run it.")));
+    assert!(session.events.iter().any(|event| matches!(
+        event,
+        Event::Call { text: Some(text), call } if text == "Looking." && call.name == "bash"
+    )));
+    // Both generations were structured, the step's own prompt only.
+    assert_eq!(script.structured.borrow().len(), 2);
+}
 
-
-<tool_call>
-\
-<function=nope>";
-    let script = Script::new(&[(miss, Stop::End), (miss, Stop::End), ("done", Stop::End)]);
+/// A malformed structured output in the stirred mode: the step is stirred
+/// a bounded number of times — an unknown tool, a missing parameter, a
+/// bad value — and the turn completes when it lands (AGL-030, D4, D10).
+#[test]
+fn stirred_retries_a_malformed_call() {
+    let dir = Dir::new("stir-retry");
+    let stirred = stirred_function("");
+    let script = Script::structured(vec![
+        structured_step(None, "", &[("nope", "{}")], Stop::End),
+        structured_step(None, "", &[("bash", "{}")], Stop::End),
+        structured_step(None, "done", &[], Stop::End),
+    ]);
     let (end, _, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
     assert_eq!(end.unwrap(), TurnEnd::Answer("done".into()));
-    let stirs = session
+    let errors: Vec<&str> = session
         .events
         .iter()
-        .filter(|event| matches!(event, Event::Stir { .. }))
-        .count();
-    assert_eq!(stirs, 2);
-    // The nudge rides in as a runtime message of the rebuilt prompt.
-    let nudges = session
-        .events
-        .iter()
-        .filter(|event| matches!(event, Event::Stir { .. }))
-        .count();
-    assert_eq!(nudges, stirs);
+        .filter_map(|event| match event {
+            Event::Stir { error, .. } => Some(error.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            "`nope` is not a tool of this state",
+            "`bash` needs the parameter `command`"
+        ]
+    );
+    // The nudge rides in as a runtime message of the retry, and it names
+    // the state and what was wrong; the first attempt has none.
+    let runtimes = script.structured.borrow();
+    assert!(runtimes[0].is_empty());
+    assert_eq!(runtimes[1].len(), 1);
+    assert!(runtimes[1][0].contains("`a` state"));
+    assert!(runtimes[1][0].contains("`nope` is not a tool of this state"));
+    assert_eq!(runtimes[2].len(), 2);
 }
 
 /// A model that never lands in the stirred mode: after `max_stirs` the
-/// turn stops with `StirLimit`, no more stirs (AGL-030, D4, D9).
+/// turn stops with `StirLimit`, no more stirs (AGL-030, D4, D5).
 #[test]
 fn stirred_stops_at_the_limit() {
     let dir = Dir::new("stir-limit");
-    let stirred = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\nmax_stirs = 2\n\
-         [state.a]\ntools.bash = {}\nthink = false\nanswer = true\nnext = { else = \"a\" }",
-    )
-    .unwrap();
-    let miss = "
-</think>
-
-
-<tool_call>
-\
-<function=nope>";
-    let script = Script::new(&[
-        (miss, Stop::End),
-        (miss, Stop::End),
-        (miss, Stop::End),
-    ]);
+    let stirred = stirred_function("max_stirs = 2\n");
+    let bad = || structured_step(None, "", &[("nope", "{}")], Stop::End);
+    let script = Script::structured(vec![bad(), bad(), bad()]);
     let (end, _, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StirLimit));
     let stirs = session
@@ -785,6 +882,85 @@ fn stirred_stops_at_the_limit() {
         session.events.last(),
         Some(&Event::Stop(StopReason::StirLimit))
     );
+}
+
+/// A step that hits its budget in the stirred mode — also in the middle of
+/// a call's arguments — is a cut-off, not a stir (AGL-030, D10, D154).
+#[test]
+fn stirred_cut_off_is_not_a_stir() {
+    let dir = Dir::new("stir-cut");
+    let stirred = stirred_function("max_steps_total = 1\n");
+    let script = Script::structured(vec![structured_step(
+        None,
+        "",
+        &[("bash", "{\"comm")],
+        Stop::Limit,
+    )]);
+    let (end, lines, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
+    assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StepLimit));
+    assert!(lines.contains(&"[cut off]".to_string()), "{lines:?}");
+    assert!(!session
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::Stir { .. })));
+    assert!(session
+        .events
+        .iter()
+        .any(|event| matches!(event, Event::CutOff(_))));
+}
+
+/// The structured mapping (AGL-030, D10): an answer, a call with its
+/// arguments in the tool's order, the types and the allowed values.
+#[test]
+fn structured_output_maps_to_an_action() {
+    let actions = crate::action::Actions {
+        tools: crate::action::builtin_tools(),
+        answer: true,
+    };
+    let call = |name: &str, arguments: &str| StructuredCall {
+        name: name.into(),
+        arguments: arguments.into(),
+    };
+    let map = |content: &str, calls: &[StructuredCall]| {
+        crate::action::from_structured(&actions, content, calls)
+    };
+    assert_eq!(
+        map("  hi \n", &[]).unwrap(),
+        Action::Answer("hi".into())
+    );
+    assert_eq!(
+        map("Now.", &[call("bash", "{\"timeout\": 5, \"command\": \"ls\"}")]).unwrap(),
+        Action::Call {
+            text: Some("Now.".into()),
+            tool: "bash".into(),
+            args: vec![
+                ("command".into(), Value::Text("ls".into())),
+                ("timeout".into(), Value::Int(5)),
+            ],
+        }
+    );
+    // An integer given as a string parses; the range is checked.
+    assert!(matches!(
+        map("", &[call("bash", "{\"command\":\"ls\",\"timeout\":\"7\"}")]).unwrap(),
+        Action::Call { args, .. } if args[1].1 == Value::Int(7)
+    ));
+    for (calls, content) in [
+        (vec![call("bash", "{\"command\":\"ls\",\"timeout\":9999}")], ""),
+        (vec![call("bash", "{\"command\":\"ls\",\"extra\":1}")], ""),
+        (vec![call("bash", "{\"command\":")], ""),
+        (vec![call("bash", "[1]")], ""),
+        (vec![call("bash", "{\"command\":\"ls\",\"timeout\":\"soon\"}")], ""),
+        (vec![call("nope", "{}")], ""),
+        (vec![], ""),
+    ] {
+        assert!(map(content, &calls).is_err(), "{calls:?}");
+    }
+    // A state that takes no answer refuses a text without a call.
+    let only_tools = crate::action::Actions {
+        answer: false,
+        ..actions.clone()
+    };
+    assert!(crate::action::from_structured(&only_tools, "hi", &[]).is_err());
 }
 
 #[test]

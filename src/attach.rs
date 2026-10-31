@@ -122,7 +122,12 @@ mod tests {
         fn render(&self, _: &Prompt) -> Result<String, Error> {
             unreachable!()
         }
-        fn generate(&self, _: &Request, _: &mut dyn FnMut(&str)) -> Result<Generated, Error> {
+        fn generate(
+            &self,
+            _: &Request,
+            _: &mut dyn FnMut(&str),
+            _: &mut dyn FnMut(&str),
+        ) -> Result<Generated, Error> {
             unreachable!()
         }
         fn count_tokens(&self, _: &str) -> Result<usize, Error> {

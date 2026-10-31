@@ -132,7 +132,9 @@ fn live_backend() {
                 max_tokens: 1024,
                 sampling: &sampling,
                 media: &[],
+                structured: None,
             },
+            &mut |_| {},
             &mut |piece| {
                 pieces.push_str(piece);
                 count += 1;
@@ -160,7 +162,9 @@ fn live_backend() {
                 max_tokens: 512,
                 sampling: &sampling,
                 media: &[],
+                structured: None,
             },
+            &mut |_| {},
             &mut |_| {},
         )
         .unwrap();
@@ -180,7 +184,9 @@ fn live_backend() {
                 max_tokens: 4,
                 sampling: &sampling,
                 media: &[],
+                structured: None,
             },
+            &mut |_| {},
             &mut |_| {},
         )
         .unwrap_err();

@@ -272,6 +272,104 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
     (grammar, root)
 }
 
+/// Maps the response of a structured generation to an action by its
+/// structure (AGL-030, D10): the first call of `calls` is a call of the
+/// state's tool, its JSON arguments checked against the tool's parameters
+/// (the names, the required ones, the types, the allowed values and
+/// ranges); no call and some `content` is an answer, where the state has
+/// one. `Err` names what is wrong, for the stir.
+pub fn from_structured(
+    actions: &Actions,
+    content: &str,
+    calls: &[crate::backend::StructuredCall],
+) -> Result<Action, String> {
+    let text = Some(content.trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let Some(call) = calls.first() else {
+        return match text {
+            Some(text) if actions.answer => Ok(Action::Answer(text)),
+            Some(_) => Err("the state takes a call of a tool, not an answer".into()),
+            None => Err("the output was empty".into()),
+        };
+    };
+    let tool = actions
+        .tools
+        .iter()
+        .find(|tool| tool.name == call.name)
+        .ok_or_else(|| format!("`{}` is not a tool of this state", call.name))?;
+    let arguments: serde_json::Value = if call.arguments.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&call.arguments)
+            .map_err(|error| format!("the arguments of `{}` are not JSON ({error})", tool.name))?
+    };
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| format!("the arguments of `{}` are not a JSON object", tool.name))?;
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !tool.params.iter().any(|param| &param.name == *key))
+    {
+        return Err(format!("`{}` has no parameter `{unknown}`", tool.name));
+    }
+    let mut args = Vec::new();
+    for param in &tool.params {
+        let Some(given) = object.get(&param.name) else {
+            if param.required {
+                return Err(format!("`{}` needs the parameter `{}`", tool.name, param.name));
+            }
+            continue;
+        };
+        let wrong = || {
+            format!(
+                "the parameter `{}` of `{}` is not {}",
+                param.name,
+                tool.name,
+                match param.kind {
+                    Kind::Text => "text",
+                    Kind::Int => "an integer",
+                }
+            )
+        };
+        let value = match (param.kind, given) {
+            (Kind::Text, serde_json::Value::String(text)) => Value::Text(text.clone()),
+            (Kind::Text, serde_json::Value::Number(n)) => Value::Text(n.to_string()),
+            (Kind::Text, serde_json::Value::Bool(b)) => Value::Text(b.to_string()),
+            (Kind::Int, serde_json::Value::Number(n)) => {
+                Value::Int(n.as_i64().ok_or_else(wrong)?)
+            }
+            (Kind::Int, serde_json::Value::String(text)) => {
+                Value::Int(text.trim().parse().map_err(|_| wrong())?)
+            }
+            _ => return Err(wrong()),
+        };
+        match (&param.constraint, &value) {
+            (Constraint::OneOf(values), Value::Text(text)) if !values.contains(text) => {
+                return Err(format!(
+                    "the parameter `{}` of `{}` is one of: {}",
+                    param.name,
+                    tool.name,
+                    values.join(", ")
+                ));
+            }
+            (Constraint::Int { min, max }, Value::Int(n)) if n < min || n > max => {
+                return Err(format!(
+                    "the parameter `{}` of `{}` is from {min} to {max}",
+                    param.name, tool.name
+                ));
+            }
+            _ => {}
+        }
+        args.push((param.name.clone(), value));
+    }
+    Ok(Action::Call {
+        text,
+        tool: tool.name.clone(),
+        args,
+    })
+}
+
 /// Parses an output generated under [`grammar`].
 pub fn parse(format: &Format, actions: &Actions, output: &str) -> Result<Action, ParseError> {
     let call = &format.call;

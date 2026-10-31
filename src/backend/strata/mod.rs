@@ -1,15 +1,18 @@
-//! The Strata backend (AGL-030, D1, D2): an already running Strata server
+//! The Strata backend (AGL-030, D1, D9): an already running Strata server
 //! (Qwen3.8-Flash-Next) over its OpenAI-compatible API, with no constrained
-//! decoding. The flat prompt is assembled client-side; one generation per
-//! phase.
+//! decoding. A step is one structured generation: the server renders the
+//! model's template and splits the thinking and the calls from the text;
+//! the flat prompt is the client-side token estimate and the compaction.
 
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 
+use super::llama::{messages_json, tool_json};
 use super::{
-    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, Request, Stop, ToolDoc, kept_thinking,
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
+    StructuredCall, ToolDoc, kept_thinking,
 };
 use crate::action::Value;
 use crate::error::Error;
@@ -124,23 +127,26 @@ impl Backend for Strata {
     fn generate(
         &self,
         request: &Request,
+        on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
-        let mut body = json!({
-            "model": MODEL,
-            // The flat prompt as a single user message: Strata has no
-            // /apply-template, and the model's template wraps it once
-            // (AGL-030, D2, D7).
-            "messages": [{"role": "user", "content": request.prompt}],
-            "stream": true,
-            "max_tokens": request.max_tokens,
-        });
+        let mut body = match request.structured {
+            Some(prompt) => structured_body(prompt, request),
+            // A flat generation (the summary of a compaction): the flat
+            // prompt as a single user message (AGL-030, D2).
+            None => json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": request.prompt}],
+                "stream": true,
+                "max_tokens": request.max_tokens,
+            }),
+        };
         if !request.stop.is_empty() {
             body["stop"] = json!(request.stop);
         }
         add_sampling(&mut body, request.sampling);
         let response = self.send("/v1/chat/completions", Some(&body))?;
-        let mut text = String::new();
+        let mut stream = Accumulator::default();
         let reader = BufReader::new(response.into_body().into_reader());
         for line in reader.lines() {
             // Ctrl-C interrupts the read (D111); dropping the response
@@ -158,21 +164,14 @@ impl Backend for Strata {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
-            let step = sse_line(data).map_err(|detail| self.bad_reply(detail))?;
-            match step {
-                Sse::Piece(piece) => {
-                    if !piece.is_empty() {
-                        on_text(&piece);
-                        text.push_str(&piece);
-                    }
-                }
-                Sse::End(stop) => return Ok(Generated { text, stop }),
-                Sse::Error(message) => return Err(self.bad_reply(message)),
-                // The final marker without a final chunk (AGL-030, D7).
-                Sse::Done => return Err(self.bad_reply("the stream ended")),
+            let done = stream
+                .feed(data, on_thinking, on_text)
+                .map_err(|detail| self.bad_reply(detail))?;
+            if done {
+                break;
             }
         }
-        Err(self.bad_reply("the stream ended without a final chunk"))
+        stream.finish().map_err(|detail| self.bad_reply(detail))
     }
 
     /// An estimate: the server has no /tokenize (AGL-030, D2).
@@ -181,14 +180,18 @@ impl Backend for Strata {
     }
 
     fn context_size(&self) -> Result<usize, Error> {
-        let reply = self.json("/props", None)?;
-        // The context size of the loaded model, under the key the live
-        // server reports; the fallback is the configured maximum
-        // (AGL-030, D2).
-        for key in ["context", "n_ctx", "max_context", "max_tokens", "ctx"] {
-            if let Some(n) = reply.get(key).and_then(Json::as_u64) {
-                return Ok(n as usize);
-            }
+        // The server's `/props` carries the context under
+        // `default_generation_settings`, `/health` as `max_context`
+        // (AGL-030, D2); the fallback is the configured maximum.
+        if let Ok(reply) = self.json("/props", None)
+            && let Some(n) = reply["default_generation_settings"]["n_ctx"].as_u64()
+        {
+            return Ok(n as usize);
+        }
+        if let Ok(reply) = self.json("/health", None)
+            && let Some(n) = reply["max_context"].as_u64()
+        {
+            return Ok(n as usize);
         }
         Ok(DEFAULT_CONTEXT)
     }
@@ -231,43 +234,127 @@ fn estimate_tokens(text: &str) -> usize {
     (chars / CHAR_DENOM).ceil() as usize
 }
 
-/// One parsed line of the SSE stream (AGL-030, D7).
-enum Sse {
-    /// A piece of the text, the stream is not over.
-    Piece(String),
-    /// The end of the stream, with its stop.
-    End(Stop),
-    /// A server error message, in the OpenAI dialect.
-    Error(String),
-    /// The final `[DONE]` marker.
-    Done,
+/// The body of a structured step (AGL-030, D9): clean roles, the tools,
+/// the reasoning effort, one generation with the exact `usage` at the end.
+fn structured_body(prompt: &Prompt, request: &Request) -> Json {
+    let mut body = json!({
+        "model": MODEL,
+        "messages": messages_json(prompt),
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "parallel_tool_calls": false,
+        "max_tokens": request.max_tokens,
+    });
+    if !prompt.tools.is_empty() {
+        body["tools"] = prompt.tools.iter().map(|doc| tool_json(doc)).collect();
+    }
+    if let Some(effort) = reasoning_effort(prompt.reasoning) {
+        body["reasoning_effort"] = effort.into();
+    }
+    body
 }
 
-/// Parses one `data:` line of the SSE stream (AGL-030, D7). The model's own
-/// end and a stop-string hit are not distinguishable on the OpenAI dialect;
-/// both are the end.
-fn sse_line(data: &str) -> Result<Sse, String> {
-    if data == "[DONE]" {
-        return Ok(Sse::Done);
+/// The `reasoning_effort` of a level (AGL-013, AGL-030, D9): `Off` is
+/// `none` — the server then does not think —, a level its own name; none
+/// when the level is unset, so the server keeps its default.
+fn reasoning_effort(level: Option<ReasoningLevel>) -> Option<&'static str> {
+    level.map(|level| match level {
+        ReasoningLevel::Off => "none",
+        level => level.name(),
+    })
+}
+
+/// What the stream of one generation brought so far (AGL-030, D9, D11):
+/// the pieces of the text and of the thinking, the calls by `index`, the
+/// stop and the exact `usage`.
+#[derive(Default)]
+struct Accumulator {
+    text: String,
+    thinking: String,
+    calls: Vec<StructuredCall>,
+    stop: Option<Stop>,
+    prompt_tokens: Option<usize>,
+    completion_tokens: Option<usize>,
+}
+
+impl Accumulator {
+    /// Takes one `data:` payload; `true` at the final `[DONE]`. The
+    /// pieces of the thinking and of the text go to the reporters as they
+    /// arrive. The model's own end and a stop-string hit are not
+    /// distinguishable on the OpenAI dialect; both are the end.
+    fn feed(
+        &mut self,
+        data: &str,
+        on_thinking: &mut dyn FnMut(&str),
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<bool, String> {
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+        let chunk: Json =
+            serde_json::from_str(data).map_err(|error| format!("bad chunk: {error}"))?;
+        if let Some(message) = chunk["error"]["message"].as_str() {
+            return Err(message.to_owned());
+        }
+        let choice = &chunk["choices"][0];
+        let delta = &choice["delta"];
+        if let Some(piece) = delta["reasoning_content"].as_str().filter(|p| !p.is_empty()) {
+            on_thinking(piece);
+            self.thinking.push_str(piece);
+        }
+        if let Some(piece) = delta["content"].as_str().filter(|p| !p.is_empty()) {
+            on_text(piece);
+            self.text.push_str(piece);
+        }
+        for call in delta["tool_calls"].as_array().into_iter().flatten() {
+            let index = call["index"].as_u64().unwrap_or(0) as usize;
+            while self.calls.len() <= index {
+                self.calls.push(StructuredCall {
+                    name: String::new(),
+                    arguments: String::new(),
+                });
+            }
+            let slot = &mut self.calls[index];
+            if let Some(name) = call["function"]["name"].as_str().filter(|n| !n.is_empty()) {
+                slot.name = name.to_owned();
+            }
+            if let Some(arguments) = call["function"]["arguments"].as_str() {
+                slot.arguments.push_str(arguments);
+            }
+        }
+        if let Some(reason) = choice["finish_reason"].as_str() {
+            self.stop = Some(match reason {
+                "length" => Stop::Limit,
+                _ => Stop::End,
+            });
+        }
+        if let Some(n) = chunk["usage"]["prompt_tokens"].as_u64() {
+            self.prompt_tokens = Some(n as usize);
+        }
+        if let Some(n) = chunk["usage"]["completion_tokens"].as_u64() {
+            self.completion_tokens = Some(n as usize);
+        }
+        Ok(false)
     }
-    let chunk: Json =
-        serde_json::from_str(data).map_err(|error| format!("bad chunk: {error}"))?;
-    if let Some(message) = chunk["error"]["message"].as_str() {
-        return Ok(Sse::Error(message.to_owned()));
+
+    /// The generation, when the stream reached its final chunk.
+    fn finish(self) -> Result<Generated, String> {
+        let stop = self
+            .stop
+            .ok_or_else(|| "the stream ended without a final chunk".to_owned())?;
+        Ok(Generated {
+            text: self.text,
+            stop,
+            thinking: Some(self.thinking).filter(|thinking| !thinking.is_empty()),
+            tool_calls: self
+                .calls
+                .into_iter()
+                .filter(|call| !call.name.is_empty())
+                .collect(),
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+        })
     }
-    let choice = &chunk["choices"][0];
-    let piece = choice["delta"]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    if let Some(reason) = choice["finish_reason"].as_str() {
-        let stop = match reason {
-            "length" => Stop::Limit,
-            _ => Stop::End,
-        };
-        return Ok(Sse::End(stop));
-    }
-    Ok(Sse::Piece(piece))
 }
 
 /// The flat prompt the Strata backend sends: the system prompt, the tool
@@ -489,70 +576,180 @@ mod tests {
         assert_eq!(render(&prompt), expected);
     }
 
-    /// The stream the server sends for `generate`, as `data:` payloads
-    /// (AGL-030, D7): the same loop the backend runs over the SSE lines.
-    fn stream(lines: &[&str]) -> Result<crate::backend::Generated, String> {
+    /// The stream of one generation, as `data:` payloads: the backend's own
+    /// accumulator over the SSE lines, with what reached the reporters
+    /// (AGL-030, D9).
+    fn stream(lines: &[&str]) -> (Result<Generated, String>, String, String) {
+        let mut thinking = String::new();
         let mut text = String::new();
+        let mut acc = Accumulator::default();
         for line in lines {
-            match sse_line(line)? {
-                Sse::Piece(piece) => {
-                    if !piece.is_empty() {
-                        text.push_str(&piece);
-                    }
-                }
-                Sse::End(stop) => {
-                    return Ok(crate::backend::Generated { text, stop })
-                }
-                Sse::Error(message) => return Err(message),
-                Sse::Done => return Err("the stream ended".into()),
+            match acc.feed(
+                line,
+                &mut |piece| thinking.push_str(piece),
+                &mut |piece| text.push_str(piece),
+            ) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(message) => return (Err(message), thinking, text),
             }
         }
-        Err("the stream ended without a final chunk".into())
+        (acc.finish(), thinking, text)
     }
 
-    /// A normal stream: the pieces, then the final chunk with a
-    /// `finish_reason` (AGL-030, D7).
+    /// A thinking and a text stream (an answer): the pieces reach the two
+    /// reporters, the final chunk carries the stop and the exact usage
+    /// (AGL-030, D9, D11).
     #[test]
-    fn the_sse_stream_yields_the_text_and_the_stop() {
-        let generated = stream(&[
+    fn the_stream_of_an_answer_yields_the_thinking_the_text_and_the_usage() {
+        let (generated, thinking, text) = stream(&[
+            r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"Hmm"}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"."}}]}"#,
             r#"{"choices":[{"delta":{"content":"He"}}]}"#,
             r#"{"choices":[{"delta":{"content":"llo"}}]}"#,
-            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
-        ])
-        .unwrap();
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":312,"completion_tokens":9}}"#,
+            "[DONE]",
+        ]);
+        let generated = generated.unwrap();
         assert_eq!(generated.text, "Hello");
+        assert_eq!(generated.thinking.as_deref(), Some("Hmm."));
         assert_eq!(generated.stop, Stop::End);
+        assert!(generated.tool_calls.is_empty());
+        assert_eq!(generated.prompt_tokens, Some(312));
+        assert_eq!(generated.completion_tokens, Some(9));
+        assert_eq!((thinking.as_str(), text.as_str()), ("Hmm.", "Hello"));
     }
 
-    /// The stream ends without a final chunk: the action was cut off
-    /// (AGL-030, D7), the error the backend reports.
+    /// The pieces of a call arrive by `index`: the name once, the
+    /// arguments in pieces; a usage chunk after the finish is taken too
+    /// (AGL-030, D9, D11).
     #[test]
-    fn a_stream_that_ends_mid_action_is_an_error() {
+    fn the_stream_of_a_call_accumulates_the_arguments_by_index() {
+        let (generated, _, text) = stream(&[
+            r#"{"choices":[{"delta":{"content":"Let me look."}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":7}}"#,
+            "[DONE]",
+        ]);
+        let generated = generated.unwrap();
+        assert_eq!(text, "Let me look.");
+        assert_eq!(generated.stop, Stop::End);
         assert_eq!(
-            stream(&[
-                r#"{"choices":[{"delta":{"content":"<function="}}]}"#,
-                r#"{"choices":[{"delta":{"content":"bash"}}]}"#,
-            ])
-            .err()
-            .as_deref(),
+            generated.tool_calls,
+            [StructuredCall {
+                name: "bash".into(),
+                arguments: "{\"command\":\"ls\"}".into(),
+            }]
+        );
+        assert_eq!(generated.prompt_tokens, Some(40));
+    }
+
+    /// `length` is the limit (D18), also in the middle of the arguments; an
+    /// error event carries the server's message; a stream without its
+    /// final chunk is an error (AGL-030, D9).
+    #[test]
+    fn the_stream_maps_length_errors_and_a_missing_end() {
+        let (generated, _, _) = stream(&[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{\"comm"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+        ]);
+        let generated = generated.unwrap();
+        assert_eq!(generated.stop, Stop::Limit);
+        assert_eq!(generated.tool_calls[0].arguments, "{\"comm");
+        assert_eq!(
+            stream(&[r#"{"error":{"message":"boom"}}"#]).0.err().as_deref(),
+            Some("boom"),
+        );
+        assert_eq!(
+            stream(&[r#"{"choices":[{"delta":{"content":"x"}}]}"#])
+                .0
+                .err()
+                .as_deref(),
             Some("the stream ended without a final chunk"),
         );
     }
 
-    /// `length` is the limit (D18); an error event carries the server's
-    /// message; `[DONE]` without a final chunk is an error (AGL-030, D7).
+    /// The structured body (AGL-030, D9): the clean roles, the tools, the
+    /// reasoning effort, the usage option and one call at a time.
     #[test]
-    fn the_sse_stream_maps_length_and_errors() {
-        let generated = stream(&[
-            r#"{"choices":[{"delta":{"content":"x"}}]}"#,
-            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
-        ])
-        .unwrap();
-        assert_eq!(generated.stop, Stop::Limit);
+    fn the_structured_body_carries_the_conversation_the_tools_and_the_effort() {
+        let format = qwen();
+        let messages = [
+            Message::System("You are s.".into()),
+            Message::User("hello".into()),
+            Message::Assistant {
+                thinking: Some("think".into()),
+                text: Some("I will.".into()),
+                call: Some(ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    args: vec![("command".into(), Value::Text("ls".into()))],
+                }),
+            },
+            Message::Tool {
+                id: "c1".into(),
+                content: "a.txt".into(),
+            },
+            Message::Runtime("Note.".into()),
+        ];
+        let prompt = Prompt {
+            messages: &messages,
+            instruction: Some("Answer now."),
+            tools: &[&BASH],
+            preserve_thinking: true,
+            reasoning: Some(ReasoningLevel::Xhigh),
+            format: &format,
+        };
+        let sampling = Sampling::default();
+        let request = Request {
+            prompt: "",
+            grammar: None,
+            stop: &[],
+            max_tokens: 700,
+            sampling: &sampling,
+            media: &[],
+            structured: Some(&prompt),
+        };
+        let body = structured_body(&prompt, &request);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["max_tokens"], 700);
+        assert_eq!(body["reasoning_effort"], "xhigh");
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool", "user", "user"]);
+        let assistant = &body["messages"][2];
+        assert_eq!(assistant["reasoning_content"], "think");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "bash");
         assert_eq!(
-            stream(&[r#"{"error":{"message":"boom"}}"#]).err().as_deref(),
-            Some("boom"),
+            assistant["tool_calls"][0]["function"]["arguments"],
+            "{\"command\":\"ls\"}"
         );
-        assert!(matches!(sse_line("[DONE]").unwrap(), Sse::Done));
+        assert_eq!(body["messages"][3]["tool_call_id"], "c1");
+        assert_eq!(body["tools"][0]["function"]["name"], "bash");
+        // The level `Off` is `none`, an unset level omits the field, a
+        // state without tools sends no `tools`.
+        let off = Prompt {
+            reasoning: Some(ReasoningLevel::Off),
+            tools: &[],
+            ..prompt
+        };
+        let body = structured_body(&off, &request);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert!(body.get("tools").is_none());
+        let unset = Prompt {
+            reasoning: None,
+            ..off
+        };
+        assert!(structured_body(&unset, &request).get("reasoning_effort").is_none());
     }
 }

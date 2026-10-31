@@ -118,6 +118,7 @@ impl Backend for Llama {
     fn generate(
         &self,
         request: &Request,
+        _on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
         let mut body = json!({
@@ -174,7 +175,7 @@ impl Backend for Llama {
                     }
                     _ => Stop::End,
                 };
-                return Ok(Generated { text, stop });
+                return Ok(Generated::plain(text, stop));
             }
         }
         Err(self.bad_reply("the stream ended without a final chunk"))
@@ -256,7 +257,7 @@ fn reasoning_kwargs(level: Option<ReasoningLevel>) -> Option<Json> {
 
 /// The messages in the OpenAI-style form of `/apply-template`, then the
 /// state instruction as a last user message (D19).
-fn messages_json(prompt: &Prompt) -> Vec<Json> {
+pub(crate) fn messages_json(prompt: &Prompt) -> Vec<Json> {
     let kept = kept_thinking(prompt.messages, prompt.preserve_thinking);
     let mut out: Vec<Json> = prompt
         .messages
@@ -312,7 +313,7 @@ fn messages_json(prompt: &Prompt) -> Vec<Json> {
 }
 
 /// A tool as a JSON-schema function for the template (D95).
-fn tool_json(doc: &ToolDoc) -> Json {
+pub(crate) fn tool_json(doc: &ToolDoc) -> Json {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for &(name, integer, description, is_required) in doc.params {
