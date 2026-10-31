@@ -360,6 +360,13 @@ pub trait Backend {
     ) -> Result<Generated, Error>;
     /// The number of tokens of `text`.
     fn count_tokens(&self, text: &str) -> Result<usize, Error>;
+    /// The number of tokens of the prompt of a step, for the check that it
+    /// fits the context: `flat` is `prompt` rendered flat (with the start of
+    /// the step); a backend that can count the structured prompt itself
+    /// does (AGL-030, D11).
+    fn count_prompt(&self, _prompt: &Prompt, flat: &str) -> Result<usize, Error> {
+        self.count_tokens(flat)
+    }
     /// The context size of the loaded model, in tokens.
     fn context_size(&self) -> Result<usize, Error>;
     /// The name of the model the server has loaded: the first entry of

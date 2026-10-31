@@ -174,9 +174,35 @@ impl Backend for Strata {
         stream.finish().map_err(|detail| self.bad_reply(detail))
     }
 
-    /// An estimate: the server has no /tokenize (AGL-030, D2).
+    /// The tokens of the structured prompt as the server counts them: the
+    /// system prompt, the conversation and the tools in the Anthropic
+    /// dialect of the same endpoint, which the server renders as it renders
+    /// the request (AGL-030, D11). A server without the endpoint gets the
+    /// count of the flat text.
+    fn count_prompt(&self, prompt: &Prompt, flat: &str) -> Result<usize, Error> {
+        match self.json("/v1/messages/count_tokens", Some(&anthropic_body(prompt))) {
+            Ok(reply) => match reply["input_tokens"].as_u64() {
+                Some(n) => Ok(n as usize),
+                None => self.count_tokens(flat),
+            },
+            Err(Error::ServerStatus { .. }) => self.count_tokens(flat),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The tokens of `text` as the server counts them: it renders and
+    /// tokenizes `text` as one user message (`/v1/messages/count_tokens`, the
+    /// few tokens of the template included, so a slight overcount); a
+    /// server without that endpoint gets the estimate (AGL-030, D11).
     fn count_tokens(&self, text: &str) -> Result<usize, Error> {
-        Ok(estimate_tokens(text))
+        let body = json!({"model": MODEL, "messages": [{"role": "user", "content": text}]});
+        match self.json("/v1/messages/count_tokens", Some(&body)) {
+            Ok(reply) => Ok(reply["input_tokens"]
+                .as_u64()
+                .map_or_else(|| estimate_tokens(text), |n| n as usize)),
+            Err(Error::ServerStatus { .. }) => Ok(estimate_tokens(text)),
+            Err(error) => Err(error),
+        }
     }
 
     fn context_size(&self) -> Result<usize, Error> {
@@ -228,7 +254,8 @@ fn add_sampling(body: &mut Json, sampling: &Sampling) {
     }
 }
 
-/// The estimate of the tokens of `text` (AGL-030, D2): `ceil(chars / 3.5)`.
+/// The estimate of the tokens of `text` (AGL-030, D2), for a server that does
+/// not count them: `ceil(chars / 3.5)`.
 fn estimate_tokens(text: &str) -> usize {
     let chars = text.chars().count() as f64;
     (chars / CHAR_DENOM).ceil() as usize
@@ -250,6 +277,79 @@ fn structured_body(prompt: &Prompt, request: &Request) -> Json {
     }
     if let Some(effort) = reasoning_effort(prompt.reasoning) {
         body["reasoning_effort"] = effort.into();
+    }
+    body
+}
+
+/// The structured prompt in the Anthropic dialect, for the server's token
+/// count (AGL-030, D11): the system prompt, the messages with their calls
+/// and results as blocks, the state instruction last, the tools.
+fn anthropic_body(prompt: &Prompt) -> Json {
+    let kept = kept_thinking(prompt.messages, prompt.preserve_thinking);
+    let mut system = String::new();
+    let mut messages: Vec<Json> = Vec::new();
+    for (message, keep_thinking) in prompt.messages.iter().zip(kept) {
+        match message {
+            Message::System(text) => {
+                if !system.is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(text);
+            }
+            Message::User(text) => messages.push(json!({"role": "user", "content": text})),
+            Message::Runtime(text) => messages
+                .push(json!({"role": "user", "content": format!("{RUNTIME_PREFIX} {text}")})),
+            Message::Assistant {
+                thinking,
+                text,
+                call,
+            } => {
+                let mut blocks = Vec::new();
+                if let Some(thinking) = thinking.as_deref().filter(|_| keep_thinking) {
+                    blocks.push(json!({"type": "thinking", "thinking": thinking, "signature": ""}));
+                }
+                blocks.push(json!({"type": "text", "text": text.as_deref().unwrap_or_default()}));
+                if let Some(call) = call {
+                    let input: serde_json::Map<String, Json> = call
+                        .args
+                        .iter()
+                        .map(|(name, value)| {
+                            let value = match value {
+                                Value::Text(text) => Json::from(text.as_str()),
+                                Value::Int(n) => Json::from(*n),
+                            };
+                            (name.clone(), value)
+                        })
+                        .collect();
+                    blocks.push(
+                        json!({"type": "tool_use", "id": call.id, "name": call.name, "input": input}),
+                    );
+                }
+                messages.push(json!({"role": "assistant", "content": blocks}));
+            }
+            Message::Tool { id, content } => messages.push(json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": id, "content": content}],
+            })),
+        }
+    }
+    if let Some(instruction) = prompt.instruction {
+        messages.push(json!({"role": "user", "content": instruction}));
+    }
+    let mut body = json!({"model": MODEL, "system": system, "messages": messages});
+    if !prompt.tools.is_empty() {
+        body["tools"] = prompt
+            .tools
+            .iter()
+            .map(|doc| {
+                let function = tool_json(doc)["function"].clone();
+                json!({
+                    "name": function["name"],
+                    "description": function["description"],
+                    "input_schema": function["parameters"],
+                })
+            })
+            .collect();
     }
     body
 }
@@ -751,5 +851,102 @@ mod tests {
             ..off
         };
         assert!(structured_body(&unset, &request).get("reasoning_effort").is_none());
+    }
+
+    /// A server that answers one request with `status` and `body`.
+    fn one_reply(status: u16, body: &'static str) -> String {
+        replies(status, body, 1)
+    }
+
+    /// A server that answers `times` requests with `status` and `body`.
+    fn replies(status: u16, body: &'static str, times: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for _ in 0..times {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0);
+            let mut request = vec![0u8; length];
+            stream.read_exact(&mut request).unwrap();
+            let reply = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        url
+    }
+
+    /// The tokens are the server's own count; a server without the endpoint
+    /// gets the estimate (AGL-030, D11).
+    #[test]
+    fn count_tokens_asks_the_server_and_falls_back_to_the_estimate() {
+        let strata = Strata::new(&one_reply(200, r#"{"input_tokens": 1234}"#));
+        assert_eq!(strata.count_tokens("hello").unwrap(), 1234);
+        let strata = Strata::new(&one_reply(404, r#"{"error":{"message":"not found"}}"#));
+        assert_eq!(strata.count_tokens("0123456789").unwrap(), 3);
+    }
+
+    /// The Anthropic body of the structured prompt (AGL-030, D11): the
+    /// system prompt apart, a call and its result as blocks, the tools as
+    /// `input_schema`; the server's answer is the count.
+    #[test]
+    fn count_prompt_sends_the_structured_prompt_in_the_anthropic_dialect() {
+        let format = qwen();
+        let messages = [
+            Message::System("You are s.".into()),
+            Message::User("hello".into()),
+            Message::Assistant {
+                thinking: Some("think".into()),
+                text: None,
+                call: Some(ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    args: vec![("command".into(), Value::Text("ls".into()))],
+                }),
+            },
+            Message::Tool {
+                id: "c1".into(),
+                content: "a.txt".into(),
+            },
+        ];
+        let prompt = Prompt {
+            messages: &messages,
+            instruction: Some("Go."),
+            tools: &[&BASH],
+            preserve_thinking: true,
+            reasoning: None,
+            format: &format,
+        };
+        let body = anthropic_body(&prompt);
+        assert_eq!(body["system"], "You are s.");
+        let blocks = &body["messages"][1]["content"];
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[2]["type"], "tool_use");
+        assert_eq!(blocks[2]["input"]["command"], "ls");
+        assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "c1");
+        assert_eq!(body["messages"][3]["content"], "Go.");
+        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["tools"][0]["input_schema"]["required"][0], "command");
+        let strata = Strata::new(&one_reply(200, r#"{"input_tokens": 4321}"#));
+        assert_eq!(strata.count_prompt(&prompt, "flat").unwrap(), 4321);
+        // A server without the endpoint: the flat text's estimate.
+        let strata = Strata::new(&replies(404, r#"{"error":{"message":"not found"}}"#, 2));
+        assert_eq!(strata.count_prompt(&prompt, "0123456789").unwrap(), 3);
     }
 }

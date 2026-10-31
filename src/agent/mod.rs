@@ -178,14 +178,15 @@ impl Agent<'_> {
         // `Off` silences the thinking states (AGL-013, Q4): the level and
         // the state decide the thinking together.
         let think = state.think && self.reasoning != Some(ReasoningLevel::Off);
-        let rendered = self.backend.render(&Prompt {
+        let step_prompt = Prompt {
             messages: &messages,
             instruction: state.instruction.as_deref(),
             tools: &tools,
             preserve_thinking: function.preserve_thinking,
             reasoning: self.reasoning,
             format,
-        })?;
+        };
+        let rendered = self.backend.render(&step_prompt)?;
         let mut prompt = format.start_step(rendered, think);
 
         // The step must fit the context with its full generation (D32).
@@ -195,8 +196,8 @@ impl Agent<'_> {
             0
         };
         // A picture is counted by its bound, not by the marker (D10).
-        let prompt_tokens =
-            self.backend.count_tokens(&prompt)? + expanded.pictures * self.image_tokens;
+        let prompt_tokens = self.backend.count_prompt(&step_prompt, &prompt)?
+            + expanded.pictures * self.image_tokens;
         report.context_used(prompt_tokens);
         let needed = prompt_tokens + think_budget + function.max_action_tokens as usize;
         if needed > self.context {
@@ -627,16 +628,17 @@ impl Agent<'_> {
             self.backend,
         )?;
         let tools = function_tools(function);
-        let rendered = self.backend.render(&Prompt {
+        let compact_prompt = Prompt {
             messages: &messages,
             instruction: Some(&function.compact),
             tools: &tools,
             preserve_thinking: false,
             reasoning: self.reasoning,
             format: &function.format,
-        })?;
+        };
+        let rendered = self.backend.render(&compact_prompt)?;
         let prompt = function.format.start_step(rendered, false);
-        let needed = self.backend.count_tokens(&prompt)?
+        let needed = self.backend.count_prompt(&compact_prompt, &prompt)?
             + expanded.pictures * self.image_tokens
             + function.max_compact_tokens as usize;
         if needed > self.context {
