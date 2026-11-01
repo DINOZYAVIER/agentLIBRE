@@ -1324,6 +1324,10 @@ mod tests {
     fn the_end_of_the_session_cancels_a_recording() {
         let f = fixture();
         f.input.key(Key::Ctrl('r'));
+        // The warm-up runs on its own thread; it logs before the cancel
+        // is looked at, or it would race with it (seen in the parallel
+        // run of the Nix build, AGL-040).
+        eventually("warm up", || f.fake.log().contains(&"warm".to_string()));
         f.input.voice.cancel();
         assert_eq!(f.fake.log().last().unwrap(), "cancel");
         assert!(!f.input.voice.recording());
