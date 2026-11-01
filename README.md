@@ -23,4 +23,13 @@ project's: where each kind of server listens (`[server.llama]`,
 search service. Images, video and audio go with a message: Ctrl-V or
 `/attach <path>` in a session, `--attach <path>` with `-p`; an audio the
 model does not hear goes through whisper.cpp (`[whisper]`), the images
-through `mmproj` of `[server.llama]`. Install with `cargo install --path .`.
+through `mmproj` of `[server.llama]`.
+
+agl needs Nix. It runs its helper programs (`bash`, `git`, `curl`,
+`ffmpeg`, `ffprobe`, `wl-paste`) from the directory its package names in
+`AGENTLIBRE_TOOLS`; the commands of the agent see your own `PATH`. Build
+with `nix build` (`result/bin/agl`), run with `nix run . -- -p "..."`,
+develop in `nix develop` (`cargo test`, `cargo clippy --all-targets`), and
+check with `nix flake check`. In a NixOS or home-manager flake, add the input
+`agl-lite` (with `inputs.nixpkgs.follows = "nixpkgs"`) and its
+`packages.x86_64-linux.default` to the packages.
