@@ -1274,7 +1274,8 @@ mod tests {
             function: Some("coder".into()),
             server: ServerFile {
                 kind: None,
-                url: Some("http://127.0.0.1:18081".into()),
+                llama_url: Some("http://127.0.0.1:18081".into()),
+                strata_url: Some("http://127.0.0.1:18089".into()),
                 engine: Some("llama-server".into()),
                 model: Some("q.gguf".into()),
                 context: Some(65536),
@@ -1834,7 +1835,7 @@ mod tests {
         assert_eq!(ws.origin, None);
         assert_eq!(ws.unit_key(), None);
         let server = ServerFile {
-            url: Some("http://127.0.0.1:18081".into()),
+            llama_url: Some("http://127.0.0.1:18081".into()),
             context: Some(65536),
             ..ServerFile::default()
         };

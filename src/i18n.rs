@@ -464,8 +464,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingServerUrl`.
     pub const MISSING_SERVER_URL: Msg = Msg {
-        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nurl = \"http://HOST:PORT\"",
-        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nurl = \"http://HOST:PORT\"",
+        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.llama]\nurl = \"http://HOST:PORT\"",
+        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.llama]\nurl = \"http://HOST:PORT\"",
     };
 
     /// `Error::InvalidName`.
@@ -561,8 +561,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingModel`.
     pub const MISSING_MODEL: Msg = Msg {
-        en: "the model is not set; add the name of a file in {models} to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nmodel = \"NAME.gguf\"",
-        uk: "модель не задано; додай назву файлу з {models} у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nmodel = \"NAME.gguf\"",
+        en: "the model is not set; add the name of a file in {models} to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.llama]\nmodel = \"NAME.gguf\"",
+        uk: "модель не задано; додай назву файлу з {models} у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.llama]\nmodel = \"NAME.gguf\"",
     };
 
     /// `Error::ModelNotFound`.
@@ -645,8 +645,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingStrataConfig` (AGL-033, D2).
     pub const MISSING_STRATA_CONFIG: Msg = Msg {
-        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server]\nstrata_config = \"/path/to/strata-config.json\"",
-        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server]\nstrata_config = \"/path/to/strata-config.json\"",
+        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.strata]\nstrata_config = \"/path/to/strata-config.json\"",
+        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.strata]\nstrata_config = \"/path/to/strata-config.json\"",
     };
 
     /// `Error::StrataConfig` (AGL-033, D2).

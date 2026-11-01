@@ -176,7 +176,7 @@ fn run(
                 user.forge.auto_rehome.unwrap_or(true),
                 *lang,
             )?;
-            let settings = project.server.over(&user.server).selected();
+            let settings = project.server.over(&user.server);
             // The Function's `[server]` table, when the file declares it,
             // is the model side of the settings (AGL-033, D1, D3): the
             // command works on `--function`, else the project's function

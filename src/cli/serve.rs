@@ -19,7 +19,7 @@ use crate::cli::args::ServerAction;
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
-use crate::settings::{ServerFile, ServerKind, DEFAULT_STRATA_URL};
+use crate::settings::{ServerFile, ServerKind};
 use crate::tr;
 
 /// The name every unit of a llama-server starts with (D8); the project's
@@ -66,7 +66,8 @@ pub struct Server {
     /// The unit of the project's whisper server, which `agl server stop`
     /// stops too (AGL-014).
     pub whisper_unit: String,
-    /// The project's `[server]` over the user's.
+    /// The project's `[server]` over the user's, both kinds (AGL-036, D1):
+    /// the kind is the Function's when its file declares a `[server]`.
     pub settings: ServerFile,
     pub url: String,
     /// The user's and the project's settings files, for hints.
@@ -96,37 +97,35 @@ impl Server {
             project: project.project.clone(),
         })?;
         let project_path = project.dir.join(crate::forge::MARKER_FILE);
-        // A Strata server has a default address (AGL-030, D1); the
-        // llama-server address stays required.
-        let url = match &settings.url {
-            Some(url) => url.clone(),
-            None if settings.kind() == ServerKind::Strata => DEFAULT_STRATA_URL.to_owned(),
-            None => {
-                return Err(Error::MissingServerUrl {
-                    user_path: user_path.into(),
-                    project_path: project_path.clone(),
-                })
-            }
-        };
-        Ok(Server {
+        let mut server = Server {
             unit: unit_name(&key),
             whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
             settings: settings.clone(),
-            url,
+            url: String::new(),
             user_path: user_path.into(),
             project_path,
             dir: project.dir.clone(),
             function_server,
-        })
+        };
+        // The url of the effective kind (AGL-036, D2, D6).
+        server.url = server
+            .effective_settings()?
+            .url()
+            .ok_or_else(|| Error::MissingServerUrl {
+                user_path: user_path.into(),
+                project_path: server.project_path.clone(),
+            })?;
+        Ok(server)
     }
 
-    /// The settings that actually run (AGL-033, D1, D3): the Function's
-    /// `[server]` table when the file declares it (self-contained), else
-    /// the resolved settings (the fallback).
+    /// The settings that actually run (AGL-033, D1, D3; AGL-036, D1): the
+    /// Function's `[server]` table when the file declares it
+    /// (self-contained, with its kind), else the resolved settings of
+    /// their kind (the fallback).
     pub fn effective_settings(&self) -> Result<ServerFile, Error> {
         match &self.function_server {
             Some((table, path)) => self.settings.effective(table, path),
-            None => Ok(self.settings.clone()),
+            None => Ok(self.settings.selected()),
         }
     }
 
@@ -1624,7 +1623,7 @@ mod tests {
         let (dir, bin, models) = fake_engine_setup();
         let url = format!("http://127.0.0.1:{}", free_port());
         let settings = ServerFile {
-            url: Some(url.clone()),
+            llama_url: Some(url.clone()),
             model: Some("m.gguf".into()),
             engine: Some("fake-engine".into()),
             ..ServerFile::default()
@@ -1661,7 +1660,7 @@ mod tests {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let settings = ServerFile {
-            url: Some(url.clone()),
+            llama_url: Some(url.clone()),
             model: Some("m.gguf".into()),
             engine: Some("fake-engine".into()),
             ..ServerFile::default()
@@ -1707,14 +1706,14 @@ mod tests {
     #[test]
     fn the_unit_is_named_by_the_project_and_the_settings_merge() {
         let user = ServerFile {
-            url: Some("http://127.0.0.1:18080".into()),
+            llama_url: Some("http://127.0.0.1:18080".into()),
             model: Some("big.gguf".into()),
             context: Some(131072),
             args: Some(vec!["-ngl".into(), "999".into()]),
             ..ServerFile::default()
         };
         let own = ServerFile {
-            url: Some("http://127.0.0.1:18081".into()),
+            llama_url: Some("http://127.0.0.1:18081".into()),
             context: Some(65536),
             ..ServerFile::default()
         };
@@ -1734,7 +1733,7 @@ mod tests {
     #[test]
     fn outside_a_registered_project_there_is_no_server() {
         let user = ServerFile {
-            url: Some("http://127.0.0.1:18080".into()),
+            llama_url: Some("http://127.0.0.1:18080".into()),
             ..ServerFile::default()
         };
         let ws = project(None, ServerFile::default());
@@ -1928,7 +1927,7 @@ mod tests {
         let llama = Llama::new(&url);
         let ws = project(None, ServerFile::default());
         let settings = ServerFile {
-            url: Some(url),
+            llama_url: Some(url),
             model: Some("m.gguf".into()),
             ..ServerFile::default()
         };
@@ -1997,7 +1996,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agentLIBRE-record-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let effective = ServerFile {
-            url: Some("http://127.0.0.1:18080".into()),
+            llama_url: Some("http://127.0.0.1:18080".into()),
             model: Some("m.gguf".into()),
             context: Some(16384),
             args: Some(vec!["-ngl".into(), "999".into()]),
@@ -2028,7 +2027,7 @@ mod tests {
         let llama = Llama::new(&url);
         let ws = project(None, ServerFile::default());
         let settings = ServerFile {
-            url: Some(url),
+            llama_url: Some(url),
             model: Some("m.gguf".into()),
             ..ServerFile::default()
         };
@@ -2048,7 +2047,7 @@ mod tests {
         let llama = Llama::new(&url);
         let ws = project(None, ServerFile::default());
         let settings = ServerFile {
-            url: Some(url),
+            llama_url: Some(url),
             model: Some("m.gguf".into()),
             ..ServerFile::default()
         };
@@ -2149,12 +2148,13 @@ mod tests {
 
     #[test]
     fn the_function_table_is_the_effective_settings() {
-        // The `[server]` table of the function file is the model side
-        // (AGL-033, D1): self-contained, while `kind`, `url` and `engine`
-        // stay of the settings.
+        // The `[server]` table of the function file is the kind and the
+        // model side (AGL-033, D1; AGL-036, D1): self-contained — a table
+        // without `kind` is llama (D5) —, while the url of the kind and
+        // `engine` stay of the settings.
         let origin = origin("60af300abea6");
         let own = ServerFile {
-            url: Some("http://127.0.0.1:18080".into()),
+            llama_url: Some("http://127.0.0.1:18080".into()),
             model: Some("project.gguf".into()),
             ..ServerFile::default()
         };
@@ -2182,7 +2182,8 @@ mod tests {
         assert_eq!(
             server.effective_settings().unwrap(),
             ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
+                kind: Some("llama".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
                 model: Some("function.gguf".into()),
                 context: Some(4096),
                 ..ServerFile::default()

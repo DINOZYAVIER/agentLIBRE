@@ -54,9 +54,11 @@ pub enum Error {
     NotPositive { path: PathBuf, key: String },
     /// `language` names a language without translations.
     UnsupportedLanguage { path: PathBuf, value: String },
-    /// `[server] url` is not an `http://` URL (D52).
+    /// The `url` of `[server.llama]` or `[server.strata]` is not an
+    /// `http://` URL (D52; AGL-036, D2).
     UnsupportedUrl { path: PathBuf, url: String },
-    /// `[server] kind` is not `llama` or `strata` (AGL-030, D1).
+    /// The `kind` of `[server]` or of a function file's `[server]` is not
+    /// `llama` or `strata` (AGL-030, D1; AGL-036, D1).
     UnknownServerKind { path: PathBuf, value: String },
     /// `[search] url` is not an `https://` URL (AGL-019, D3).
     UnsupportedSearchUrl { path: PathBuf, url: String },
@@ -72,8 +74,8 @@ pub enum Error {
         file: PathBuf,
         problem: CredentialProblem,
     },
-    /// No `[server] url` in the project's file nor in the user file (D59,
-    /// AGL-015).
+    /// No `[server.llama] url` in the project's file nor in the user file
+    /// (D59, AGL-015; AGL-036, D2, D6).
     MissingServerUrl {
         user_path: PathBuf,
         project_path: PathBuf,

@@ -14,8 +14,9 @@ pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
 /// Function used when no settings name one (D39, D58, AGL-020, D3).
 const DEFAULT_FUNCTION: &str = "minimal";
 
-/// Where a Strata server listens when `[server]` does not set `url`
-/// (AGL-030, D1): its own run script binds port 18088 (8080 is held by qBittorrent).
+/// Where a Strata server listens when `[server.strata]` does not set
+/// `url` (AGL-030, D1; AGL-036, D6): its own run script binds port 18088
+/// (8080 is held by qBittorrent).
 pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:18088";
 
 /// The kind of inference server (AGL-030, D1): the llama.cpp
@@ -74,7 +75,10 @@ pub struct UserFile {
 pub struct ServerFile {
     /// The kind of inference server (AGL-030, D1); `None` is `llama`.
     pub kind: Option<String>,
-    pub url: Option<String>,
+    /// Where the server of each kind listens: `url` of `[server.llama]`
+    /// and of `[server.strata]` (AGL-036, D2).
+    pub llama_url: Option<String>,
+    pub strata_url: Option<String>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
     pub engine: Option<String>,
@@ -322,13 +326,45 @@ fn positive_u32(section: &mut Section, path: &Path, key: &str) -> Result<Option<
         .transpose()
 }
 
+/// The `kind` of a `[server]` table, `llama` or `strata` (AGL-030, D1;
+/// AGL-036, D1); `None` when absent.
+fn read_kind(section: &mut Section, path: &Path) -> Result<Option<String>, Error> {
+    let kind = section.string("kind")?;
+    if let Some(kind) = &kind
+        && ServerKind::parse(kind).is_none()
+    {
+        return Err(Error::UnknownServerKind {
+            path: path.into(),
+            value: kind.clone(),
+        });
+    }
+    Ok(kind)
+}
+
+/// The `url` of the table of a kind, an `http://` URL (AGL-036, D2);
+/// `None` when absent.
+fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error> {
+    let url = section.string("url")?;
+    if let Some(url) = &url
+        && !url.starts_with("http://")
+    {
+        return Err(Error::UnsupportedUrl {
+            path: path.into(),
+            url: url.clone(),
+        });
+    }
+    Ok(url)
+}
+
 impl ServerFile {
     /// The keys directly under `[server]` of a settings file (AGL-035,
-    /// D4); the model side of each kind is in its own table.
-    const KEYS: &'static [&'static str] = &["kind", "url", "engine", "llama", "strata"];
+    /// D4); the url and the model side of each kind are in its own table
+    /// (AGL-036, D2).
+    const KEYS: &'static [&'static str] = &["kind", "engine", "llama", "strata"];
 
-    /// The keys of `[server.llama]` (AGL-035, D4).
+    /// The keys of `[server.llama]` (AGL-035, D4; AGL-036, D2).
     const LLAMA_KEYS: &'static [&'static str] = &[
+        "url",
         "model",
         "context",
         "spec_type",
@@ -339,13 +375,14 @@ impl ServerFile {
         "image_max_tokens",
     ];
 
-    /// The keys of `[server.strata]` (AGL-035, D4).
-    const STRATA_KEYS: &'static [&'static str] = &["strata_config"];
+    /// The keys of `[server.strata]` (AGL-035, D4; AGL-036, D2).
+    const STRATA_KEYS: &'static [&'static str] = &["url", "strata_config"];
 
-    /// The keys of the model side: what the `[server]` table of a function
-    /// file may carry (AGL-033, D1). `kind`, `url` and `engine` are facts
-    /// of the settings, not of the table.
+    /// The keys of the `[server]` table of a function file: the kind and
+    /// the model side (AGL-033, D1; AGL-036, D1). The urls and `engine`
+    /// are facts of the settings, not of the table.
     pub const MODEL_SIDE_KEYS: &'static [&'static str] = &[
+        "kind",
         "model",
         "context",
         "spec_type",
@@ -364,56 +401,45 @@ impl ServerFile {
             return Ok(ServerFile::default());
         };
         server.check_keys(Self::KEYS)?;
-        let kind = server.string("kind")?;
-        if let Some(kind) = &kind
-            && ServerKind::parse(kind).is_none()
-        {
-            return Err(Error::UnknownServerKind {
-                path: path.into(),
-                value: kind.clone(),
-            });
-        }
-        let url = server.string("url")?;
-        if let Some(url) = &url
-            && !url.starts_with("http://")
-        {
-            return Err(Error::UnsupportedUrl {
-                path: path.into(),
-                url: url.clone(),
-            });
-        }
+        let kind = read_kind(&mut server, path)?;
         let engine = server.string("engine")?;
-        // The model side of each kind has its own table (AGL-035, D4): a
-        // key outside its table is an unknown key.
-        let llama = match server.section("llama")? {
+        // The url and the model side of each kind have their own table
+        // (AGL-035, D4; AGL-036, D2): a key outside its table is an
+        // unknown key.
+        let (llama_url, llama) = match server.section("llama")? {
             Some(mut llama) => {
                 llama.check_keys(Self::LLAMA_KEYS)?;
-                Self::read_model_side(&mut llama, path)?
+                (read_url(&mut llama, path)?, Self::read_model_side(&mut llama, path)?)
             }
-            None => ServerFile::default(),
+            None => (None, ServerFile::default()),
         };
-        let strata = match server.section("strata")? {
+        let (strata_url, strata) = match server.section("strata")? {
             Some(mut strata) => {
                 strata.check_keys(Self::STRATA_KEYS)?;
-                Self::read_model_side(&mut strata, path)?
+                (read_url(&mut strata, path)?, Self::read_model_side(&mut strata, path)?)
             }
-            None => ServerFile::default(),
+            None => (None, ServerFile::default()),
         };
         Ok(ServerFile {
             kind,
-            url,
+            llama_url,
+            strata_url,
             engine,
             strata_config: strata.strata_config,
             ..llama
         })
     }
 
-    /// Reads the model side of the `[server]` table of a function file
-    /// (AGL-033, D1): the table's keys are the model-side settings;
-    /// `kind`, `url` and `engine` are not among them (an unknown key).
+    /// Reads the `[server]` table of a function file (AGL-033, D1;
+    /// AGL-036, D1): the kind and the model-side settings; the urls and
+    /// `engine` are not among them (an unknown key).
     pub fn parse_model_side(mut section: Section, path: &Path) -> Result<ServerFile, Error> {
         section.check_keys(Self::MODEL_SIDE_KEYS)?;
-        Self::read_model_side(&mut section, path)
+        let kind = read_kind(&mut section, path)?;
+        Ok(ServerFile {
+            kind,
+            ..Self::read_model_side(&mut section, path)?
+        })
     }
 
     /// Reads the model-side keys present in `section`, whose keys are
@@ -433,7 +459,8 @@ impl ServerFile {
         }
         Ok(ServerFile {
             kind: None,
-            url: None,
+            llama_url: None,
+            strata_url: None,
             engine: None,
             model,
             context: positive_u32(section, path, "context")?,
@@ -458,15 +485,31 @@ impl ServerFile {
         self.kind.as_deref().and_then(ServerKind::parse).unwrap_or_default()
     }
 
+    /// Where the server of the kind listens (AGL-036, D2, D6): the `url` of
+    /// the kind's table; the Strata server has a default address, the
+    /// llama-server's is required (`None`).
+    pub fn url(&self) -> Option<String> {
+        match self.kind() {
+            ServerKind::Llama => self.llama_url.clone(),
+            ServerKind::Strata => Some(
+                self.strata_url
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_STRATA_URL.to_owned()),
+            ),
+        }
+    }
+
     /// The settings of the selected kind only (AGL-035, D4): the keys of
     /// the other kind's table are not used.
     pub fn selected(&self) -> ServerFile {
         match self.kind() {
             ServerKind::Llama => ServerFile {
+                strata_url: None,
                 strata_config: None,
                 ..self.clone()
             },
             ServerKind::Strata => ServerFile {
+                llama_url: None,
                 model: None,
                 context: None,
                 spec_type: None,
@@ -480,14 +523,15 @@ impl ServerFile {
         }
     }
 
-    /// The effective `[server]` (AGL-033, D1, D3): `table` (the `[server]`
-    /// of a function file, self-contained) is the model side — its keys are
-    /// the model-side settings, the settings' model keys are not consulted;
-    /// `kind`, `url` and `engine` stay of the settings (`self`). The table
-    /// is validated against the kind: it requires `model` (the llama kind)
-    /// or `strata_config` (the strata kind), and a key that does not apply
-    /// to the kind is an error that names the key; `table_path` (the
-    /// function file) locates it.
+    /// The effective `[server]` (AGL-033, D1, D3; AGL-036, D1, D5):
+    /// `table` (the `[server]` of a function file, self-contained) is the
+    /// kind and the model side — its `kind`, `llama` when it does not write
+    /// one, and its model-side keys; the settings' kind and model keys are
+    /// not consulted. The url of the table's kind and `engine` stay of the
+    /// settings (`self`). The table is validated against its kind: it
+    /// requires `model` (the llama kind) or `strata_config` (the strata
+    /// kind), and a key that does not apply to the kind is an error that
+    /// names the key; `table_path` (the function file) locates it.
     pub fn effective(&self, table: &ServerFile, table_path: &Path) -> Result<ServerFile, Error> {
         let key = |name: &str| format!("server.{name}");
         let wrong_kind = |name: &str| Error::Function {
@@ -495,8 +539,9 @@ impl ServerFile {
             key: key(name),
             problem: FunctionProblem::ServerKeyOfOtherKind(name.to_owned()),
         };
+        let kind = table.kind();
         let (model, context, spec_type, draft, args, mmproj, mmproj_offload, image_max_tokens, strata_config) =
-            match self.kind() {
+            match kind {
                 ServerKind::Llama => {
                     if table.strata_config.is_some() {
                         return Err(wrong_kind("strata_config"));
@@ -556,8 +601,13 @@ impl ServerFile {
                 }
             };
         Ok(ServerFile {
-            kind: self.kind.clone(),
-            url: self.url.clone(),
+            kind: Some(kind.name().to_owned()),
+            llama_url: (kind == ServerKind::Llama)
+                .then(|| self.llama_url.clone())
+                .flatten(),
+            strata_url: (kind == ServerKind::Strata)
+                .then(|| self.strata_url.clone())
+                .flatten(),
             engine: self.engine.clone(),
             model,
             context,
@@ -592,7 +642,8 @@ impl ServerFile {
     pub fn over(&self, defaults: &ServerFile) -> ServerFile {
         ServerFile {
             kind: self.kind.clone().or_else(|| defaults.kind.clone()),
-            url: self.url.clone().or_else(|| defaults.url.clone()),
+            llama_url: self.llama_url.clone().or_else(|| defaults.llama_url.clone()),
+            strata_url: self.strata_url.clone().or_else(|| defaults.strata_url.clone()),
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
@@ -613,22 +664,23 @@ impl ServerFile {
     }
 
     /// The `[server]` table as written to a file, with `[server.llama]`
-    /// and `[server.strata]` (AGL-035, D4); empty when no key is set.
+    /// and `[server.strata]` (AGL-035, D4), each with its `url` (AGL-036,
+    /// D2); empty when no key is set.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        if self.kind.is_some() || self.url.is_some() || self.engine.is_some() {
+        if self.kind.is_some() || self.engine.is_some() {
             out.push_str("\n[server]\n");
             if let Some(kind) = &self.kind {
                 out.push_str(&format!("kind = {}\n", tomlfile::quote(kind)));
-            }
-            if let Some(url) = &self.url {
-                out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
             }
             if let Some(engine) = &self.engine {
                 out.push_str(&format!("engine = {}\n", tomlfile::quote(engine)));
             }
         }
         let mut llama = String::new();
+        if let Some(url) = &self.llama_url {
+            llama.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+        }
         if let Some(model) = &self.model {
             llama.push_str(&format!("model = {}\n", tomlfile::quote(model)));
         }
@@ -658,9 +710,16 @@ impl ServerFile {
             out.push_str("\n[server.llama]\n");
             out.push_str(&llama);
         }
+        let mut strata = String::new();
+        if let Some(url) = &self.strata_url {
+            strata.push_str(&format!("url = {}\n", tomlfile::quote(url)));
+        }
         if let Some(config) = &self.strata_config {
+            strata.push_str(&format!("strata_config = {}\n", tomlfile::quote(config)));
+        }
+        if !strata.is_empty() {
             out.push_str("\n[server.strata]\n");
-            out.push_str(&format!("strata_config = {}\n", tomlfile::quote(config)));
+            out.push_str(&strata);
         }
         out
     }
@@ -831,13 +890,14 @@ impl Settings {
     ) -> Result<Settings, Error> {
         let (project_path, project_function, project_server, project_whisper, project_search) =
             project;
-        let server = project_server.over(&user.server).selected();
-        // The `[server]` table of the loaded Function is the model side of
-        // the settings when the file declares it (AGL-033, D1, D3);
-        // without it, the resolved `[server]` decides (the fallback).
+        let server = project_server.over(&user.server);
+        // The `[server]` table of the loaded Function is the kind and the
+        // model side of the settings when the file declares it (AGL-033,
+        // D1, D3; AGL-036, D1); without it, the resolved `[server]` of its
+        // kind decides (the fallback).
         let server = match function_server {
             Some((table, table_path)) => server.effective(table, table_path)?,
-            None => server,
+            None => server.selected(),
         };
         let whisper = project_whisper.over(&user.whisper);
         let search_file = project_search.over(&user.search);
@@ -850,18 +910,11 @@ impl Settings {
             },
             key: format!("search.{key}"),
         })?;
-        // A Strata server has a default address (AGL-030, D1); the
-        // llama-server address stays required.
-        let server_url = match &server.url {
-            Some(url) => url.clone(),
-            None if server.kind() == ServerKind::Strata => DEFAULT_STRATA_URL.to_owned(),
-            None => {
-                return Err(Error::MissingServerUrl {
-                    user_path: user_path.into(),
-                    project_path: project_path.into(),
-                })
-            }
-        };
+        // The url of the kind (AGL-036, D2, D6).
+        let server_url = server.url().ok_or_else(|| Error::MissingServerUrl {
+            user_path: user_path.into(),
+            project_path: project_path.into(),
+        })?;
         let function = cli_function
             .or(project_function)
             .or(user.function.as_deref())
@@ -927,21 +980,21 @@ mod tests {
     #[test]
     fn user_file() {
         let text =
-            "function = \"coder\"\nlanguage = \"uk\"\n[server]\nurl = \"http://127.0.0.1:18080\"\n";
+            "function = \"coder\"\nlanguage = \"uk\"\n[server.llama]\nurl = \"http://127.0.0.1:18080\"\n";
         assert_eq!(
             user(text).unwrap(),
             UserFile {
                 function: Some("coder".into()),
                 language: Some(Lang::Uk),
                 server: ServerFile {
-                    url: Some("http://127.0.0.1:18080".into()),
+                    llama_url: Some("http://127.0.0.1:18080".into()),
                     ..ServerFile::default()
                 },
                 ..UserFile::default()
             }
         );
         let server = user(
-            "[server]\nurl = \"http://127.0.0.1:18080\"\n[server.llama]\nmodel = \"m.gguf\"\ncontext = 8192\n\
+            "[server.llama]\nurl = \"http://127.0.0.1:18080\"\nmodel = \"m.gguf\"\ncontext = 8192\n\
              args = [\"-ngl\", \"999\"]\n",
         )
         .unwrap()
@@ -949,7 +1002,7 @@ mod tests {
         assert_eq!(
             server,
             ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
                 model: Some("m.gguf".into()),
                 context: Some(8192),
                 args: Some(vec!["-ngl".into(), "999".into()]),
@@ -1000,7 +1053,7 @@ mod tests {
             &UserFile {
                 whisper: loaded,
                 server: ServerFile {
-                    url: Some("http://x".into()),
+                    llama_url: Some("http://x".into()),
                     ..ServerFile::default()
                 },
                 ..UserFile::default()
@@ -1073,7 +1126,7 @@ mod tests {
                 &UserFile {
                     search: user_search,
                     server: ServerFile {
-                        url: Some("http://x".into()),
+                        llama_url: Some("http://x".into()),
                         ..ServerFile::default()
                     },
                     ..UserFile::default()
@@ -1125,7 +1178,7 @@ mod tests {
     #[test]
     fn the_projector_keys() {
         let file = user(
-            "[server]\nurl = \"http://x\"\n[server.llama]\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
+            "[server.llama]\nurl = \"http://x\"\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
              image_max_tokens = 1024\n",
         )
         .unwrap()
@@ -1167,7 +1220,7 @@ mod tests {
 
     #[test]
     fn the_engine_key() {
-        let file = user("[server]\nurl = \"http://x\"\nengine = \"vulkan-server\"\n")
+        let file = user("[server]\nengine = \"vulkan-server\"\n[server.llama]\nurl = \"http://x\"\n")
             .unwrap()
             .server;
         assert_eq!(file.engine.as_deref(), Some("vulkan-server"));
@@ -1205,7 +1258,7 @@ mod tests {
 
     fn server(url: &str, model: &str, context: u32, args: &[&str]) -> ServerFile {
         ServerFile {
-            url: Some(url.into()),
+            llama_url: Some(url.into()),
             model: Some(model.into()),
             context: Some(context),
             args: Some(args.iter().map(|arg| (*arg).into()).collect()),
@@ -1225,7 +1278,7 @@ mod tests {
         assert_eq!(settings.server_url, "http://127.0.0.1:18080");
         // Some keys set: those win, the others come from the user file.
         let project = ServerFile {
-            url: Some("http://127.0.0.1:18081".into()),
+            llama_url: Some("http://127.0.0.1:18081".into()),
             context: Some(65536),
             ..ServerFile::default()
         };
@@ -1263,7 +1316,7 @@ mod tests {
         let text = file.render();
         assert_eq!(
             text,
-            "\n[server]\nurl = \"http://127.0.0.1:18081\"\n\n[server.llama]\nmodel = \"q.gguf\"\ncontext = 65536\n\
+            "\n[server.llama]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"q.gguf\"\ncontext = 65536\n\
              args = [\"-ngl\", \"99\\\"x\"]\n"
         );
         let dir = TempDir::new();
@@ -1277,14 +1330,19 @@ mod tests {
     #[test]
     fn the_settings_of_both_kinds_have_their_own_tables() {
         // AGL-035, D4: the model side of each kind is in its own table.
+        // AGL-036, D2: each kind has its own url.
         let both = user(
-            "[server]\nkind = \"strata\"\n[server.llama]\nmodel = \"m.gguf\"\ncontext = 8192\n\
-             [server.strata]\nstrata_config = \"/s/c.json\"\n",
+            "[server]\nkind = \"strata\"\n[server.llama]\nurl = \"http://127.0.0.1:18080\"\n\
+             model = \"m.gguf\"\ncontext = 8192\n\
+             [server.strata]\nurl = \"http://127.0.0.1:18089\"\nstrata_config = \"/s/c.json\"\n",
         )
         .unwrap()
         .server;
         assert_eq!(both.model.as_deref(), Some("m.gguf"));
         assert_eq!(both.strata_config.as_deref(), Some("/s/c.json"));
+        assert_eq!(both.llama_url.as_deref(), Some("http://127.0.0.1:18080"));
+        assert_eq!(both.strata_url.as_deref(), Some("http://127.0.0.1:18089"));
+        assert_eq!(both.url().as_deref(), Some("http://127.0.0.1:18089"));
         // Render and parse back, both tables.
         let dir = TempDir::new();
         let path = dir.write(SETTINGS_FILE, &both.render());
@@ -1293,6 +1351,7 @@ mod tests {
         let strata = both.selected();
         assert_eq!(strata.model, None);
         assert_eq!(strata.context, None);
+        assert_eq!(strata.llama_url, None);
         assert_eq!(strata.strata_config.as_deref(), Some("/s/c.json"));
         let llama = ServerFile {
             kind: Some("llama".into()),
@@ -1301,10 +1360,13 @@ mod tests {
         .selected();
         assert_eq!(llama.model.as_deref(), Some("m.gguf"));
         assert_eq!(llama.strata_config, None);
-        // A key outside its table is an unknown key: the llama keys
-        // directly under `[server]`, a strata key in `[server.llama]` and
-        // a llama key in `[server.strata]`.
+        assert_eq!(llama.strata_url, None);
+        assert_eq!(llama.url().as_deref(), Some("http://127.0.0.1:18080"));
+        // A key outside its table is an unknown key: the llama keys and the
+        // shared url directly under `[server]`, a strata key in
+        // `[server.llama]` and a llama key in `[server.strata]`.
         for text in [
+            "[server]\nurl = \"http://127.0.0.1:18080\"\n",
             "[server]\nmodel = \"m.gguf\"\n",
             "[server.llama]\nstrata_config = \"/s/c.json\"\n",
             "[server.strata]\nmodel = \"m.gguf\"\n",
@@ -1334,7 +1396,7 @@ mod tests {
         // The project wins per key, the user's defaults fill the rest.
         let user = UserFile {
             server: ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
                 model: Some("m.gguf".into()),
                 spec_type: Some("draft-mtp".into()),
                 ..ServerFile::default()
@@ -1428,7 +1490,7 @@ mod tests {
     fn loaded_with_server(file: UserFile) -> UserFile {
         UserFile {
             server: ServerFile {
-                url: Some("http://x".into()),
+                llama_url: Some("http://x".into()),
                 ..ServerFile::default()
             },
             ..file
@@ -1477,7 +1539,7 @@ mod tests {
             Err(Error::UnknownKey { key, .. }) if key == "functon"
         ));
         assert!(matches!(
-            user("[server]\nurl = \"http://x\"\nport = 1"),
+            user("[server]\nkind = \"llama\"\nport = 1"),
             Err(Error::UnknownKey { key, .. }) if key == "server.port"
         ));
     }
@@ -1493,8 +1555,8 @@ mod tests {
             Err(Error::WrongType { key, expected: Expected::Table, .. }) if key == "server"
         ));
         assert!(matches!(
-            user("[server]\nurl = 1"),
-            Err(Error::WrongType { key, .. }) if key == "server.url"
+            user("[server.llama]\nurl = 1"),
+            Err(Error::WrongType { key, .. }) if key == "server.llama.url"
         ));
     }
 
@@ -1505,7 +1567,11 @@ mod tests {
             Err(Error::UnsupportedLanguage { value, .. }) if value == "de"
         ));
         assert!(matches!(
-            user("[server]\nurl = \"https://x\""),
+            user("[server.llama]\nurl = \"https://x\""),
+            Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
+        ));
+        assert!(matches!(
+            user("[server.strata]\nurl = \"https://x\""),
             Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
         ));
         assert!(matches!(user("function ="), Err(Error::Parse { .. })));
@@ -1529,7 +1595,7 @@ mod tests {
         let user = UserFile {
             function: Some("user".into()),
             server: ServerFile {
-                url: Some("http://x".into()),
+                llama_url: Some("http://x".into()),
                 ..ServerFile::default()
             },
             ..UserFile::default()
@@ -1565,7 +1631,7 @@ mod tests {
     fn server_url_comes_from_the_user_file() {
         let user = UserFile {
             server: ServerFile {
-                url: Some("http://127.0.0.1:18080".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
                 ..ServerFile::default()
             },
             ..UserFile::default()
@@ -1588,11 +1654,11 @@ mod tests {
         assert_eq!(ServerKind::parse("strata"), Some(ServerKind::Strata));
         assert_eq!(ServerKind::parse("mistral"), None);
         // The absent key is llama (AGL-030, D1).
-        let server = user("[server]\nurl = \"http://127.0.0.1:18080\"\n")
+        let server = user("[server.llama]\nurl = \"http://127.0.0.1:18080\"\n")
             .unwrap()
             .server;
         assert_eq!(server.kind(), ServerKind::Llama);
-        let server = user("[server]\nkind = \"strata\"\nurl = \"http://127.0.0.1:18088\"\n")
+        let server = user("[server]\nkind = \"strata\"\n[server.strata]\nurl = \"http://127.0.0.1:18088\"\n")
             .unwrap()
             .server;
         assert_eq!(server.kind(), ServerKind::Strata);
@@ -1616,5 +1682,111 @@ mod tests {
         };
         let settings = resolved(&user, &ServerFile::default());
         assert_eq!(settings.unwrap().server_url, DEFAULT_STRATA_URL);
+    }
+
+    /// `Settings::resolve` with the `[server]` table of a function file.
+    fn resolved_with(user: &UserFile, table: &ServerFile) -> Result<Settings, Error> {
+        Settings::resolve(
+            user,
+            Path::new("/c/agentLIBRE.toml"),
+            (
+                Path::new("/d/agentLIBRE.toml"),
+                None,
+                &ServerFile::default(),
+                &WhisperFile::default(),
+                &SearchFile::default(),
+            ),
+            None,
+            Some((table, Path::new("/f/profile.toml"))),
+        )
+    }
+
+    #[test]
+    fn the_function_table_selects_the_kind_and_its_url() {
+        // AGL-036, D1, D2: the settings say llama and hold both urls; the
+        // Function's table says strata and the strata url runs.
+        let user = UserFile {
+            server: ServerFile {
+                kind: Some("llama".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
+                strata_url: Some("http://127.0.0.1:18089".into()),
+                model: Some("m.gguf".into()),
+                ..ServerFile::default()
+            },
+            ..UserFile::default()
+        };
+        let strata = ServerFile {
+            kind: Some("strata".into()),
+            strata_config: Some("/s/c.json".into()),
+            ..ServerFile::default()
+        };
+        let settings = resolved_with(&user, &strata).unwrap();
+        assert_eq!(settings.server.kind(), ServerKind::Strata);
+        assert_eq!(settings.server_url, "http://127.0.0.1:18089");
+        assert_eq!(settings.server.llama_url, None);
+        assert_eq!(settings.server.model, None);
+        assert_eq!(settings.server.strata_config.as_deref(), Some("/s/c.json"));
+        // D6: without a strata url, the default.
+        let no_url = UserFile {
+            server: ServerFile {
+                strata_url: None,
+                ..user.server.clone()
+            },
+            ..UserFile::default()
+        };
+        assert_eq!(resolved_with(&no_url, &strata).unwrap().server_url, DEFAULT_STRATA_URL);
+        // D5: a table without `kind` is llama, whatever the settings say.
+        let strata_settings = UserFile {
+            server: ServerFile {
+                kind: Some("strata".into()),
+                ..user.server.clone()
+            },
+            ..UserFile::default()
+        };
+        let llama = ServerFile {
+            model: Some("p.gguf".into()),
+            ..ServerFile::default()
+        };
+        let settings = resolved_with(&strata_settings, &llama).unwrap();
+        assert_eq!(settings.server.kind(), ServerKind::Llama);
+        assert_eq!(settings.server_url, "http://127.0.0.1:18080");
+        assert_eq!(settings.server.model.as_deref(), Some("p.gguf"));
+        assert_eq!(settings.server.strata_url, None);
+        // A table of the llama kind with a strata key is still an error.
+        let mixed = ServerFile {
+            strata_config: Some("/s/c.json".into()),
+            ..llama
+        };
+        assert!(matches!(
+            resolved_with(&user, &mixed),
+            Err(Error::Function { key, .. }) if key == "server.strata_config"
+        ));
+        // The llama url stays required (D6).
+        let no_llama_url = UserFile::default();
+        assert!(matches!(
+            resolved_with(&no_llama_url, &ServerFile { model: Some("p.gguf".into()), ..ServerFile::default() }),
+            Err(Error::MissingServerUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn the_function_table_reads_its_kind() {
+        // AGL-036, D1: `kind` is a key of the table, checked; the urls are
+        // not (facts of the settings).
+        let parse = |text: &str| {
+            let path = Path::new("/f/profile.toml");
+            let table = tomlfile::parse(path, text).unwrap();
+            ServerFile::parse_model_side(Section::new(path, table), path)
+        };
+        let table = parse("kind = \"strata\"\nstrata_config = \"/s/c.json\"\n").unwrap();
+        assert_eq!(table.kind(), ServerKind::Strata);
+        assert!(matches!(
+            parse("kind = \"mistral\"\n"),
+            Err(Error::UnknownServerKind { value, .. }) if value == "mistral"
+        ));
+        assert!(matches!(
+            parse("url = \"http://127.0.0.1:18080\"\n"),
+            Err(Error::UnknownKey { .. })
+        ));
     }
 }
