@@ -92,6 +92,8 @@ fn builtin_minimal() {
     );
     assert!(function.compact.ends_with("Write only the summary."));
     assert_eq!(function.max_compact_tokens, 4096);
+    // The early compaction is off unless set (AGL-038, D9).
+    assert!(!function.compact_early);
     assert_eq!(function.max_record_seconds, 60);
     assert_eq!(
         function.sampling,
@@ -349,6 +351,18 @@ fn top_level_errors() {
         (compaction.compact.as_str(), compaction.max_compact_tokens),
         ("Sum up.", 512)
     );
+    // `compact_early` (AGL-038, D9): a boolean.
+    let early = function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact_early = true\ninitial = \"a\"\n\
+         [state.a]\nanswer = true",
+    )
+    .unwrap();
+    assert!(early.compact_early);
+    assert!(function(
+        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact_early = \"yes\"\ninitial = \"a\"\n\
+         [state.a]\nanswer = true"
+    )
+    .is_err());
     assert_eq!(
         problem_of(function(
             "format = \"qwen3.8\"\nsystem = \"s\"\nmax_compact_tokens = 0\ninitial = \"a\"\n\

@@ -14,8 +14,9 @@ use crate::i18n::Lang;
 use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
 
-/// How much of a result the model sees (D28, D103).
-const LIMIT: usize = 16 * 1024;
+/// How much of a result the model sees (D28, D103); the bound of a result
+/// in the reserve of the early compaction (AGL-038, D6).
+pub const LIMIT: usize = 16 * 1024;
 
 /// `timeout` when the call does not give one (D26).
 const DEFAULT_TIMEOUT: u64 = 60;

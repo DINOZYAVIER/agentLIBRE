@@ -1203,6 +1203,102 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
 }
 
 #[test]
+fn a_summary_request_over_the_context_is_cut_to_fit() {
+    // AGL-038, D5: the summary request of 15000 tokens does not fit with
+    // its 4096; the long tool result is cut to its head and tail, and the
+    // second count fits.
+    let dir = Dir::new("cut-result");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("head -c 5000 /dev/zero | tr '\\0' x"), Stop::End),
+        (" A long output. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, 15_000, FITS]);
+    let (end, log, session) = run(&minimal, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert!(log.contains(&"[compacted]".to_string()), "{log:?}");
+    assert_eq!(session.events[5], Event::Compact("A long output.".into()));
+    let users = script.users.borrow();
+    // The first summary request has the whole result, the second the cut.
+    assert!(users[2].contains(&"x".repeat(5000)));
+    assert!(users[3].contains("characters cut for the summary]"));
+    assert!(!users[3].contains(&"x".repeat(2000)));
+}
+
+#[test]
+fn a_summary_request_without_results_to_cut_drops_the_oldest_turn() {
+    // AGL-038, D5: no tool result to cut — the first turn goes, the latest
+    // is kept.
+    let dir = Dir::new("cut-turn");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    let script = Script::new(&[
+        ("t", THOUGHT),
+        ("Hi.", Stop::End),
+        (" Greeted, then go. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, OVERFLOW, 15_000, FITS]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    agent(&minimal, &script, &mut session, &dir, None)
+        .turn("hello", &mut log)
+        .unwrap();
+    let end = agent(&minimal, &script, &mut session, &dir, None).turn("go", &mut log);
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    let users = script.users.borrow();
+    assert_eq!(users[2], "hello\ngo");
+    assert_eq!(users[3], "go");
+    // The latest turn alone that does not fit is still impossible (the
+    // test `a_context_that_compaction_cannot_free_stops_the_turn`).
+}
+
+#[test]
+fn the_early_compaction_keeps_room_for_the_summary() {
+    // AGL-038, D6, D9: at a 65536 context the reserve is 32768 (8192 +
+    // 4096 + 16384 + 4096); a history of 40000 compacts early with the
+    // setting on, and runs the step with it off.
+    let dir = Dir::new("early");
+    let mut early = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();
+    assert!(!early.compact_early);
+    assert_eq!(super::early_reserve(&early), 32_768);
+    early.compact_early = true;
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        (" Early. ", Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, 40_000, FITS, 200]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    let mut on = agent(&early, &script, &mut session, &dir, None);
+    on.context = 65_536;
+    assert_eq!(on.turn("go", &mut log).unwrap(), TurnEnd::Answer("Done.".into()));
+    assert_eq!(
+        kinds(&session),
+        ["user", "state", "thinking", "call", "result", "compact", "thinking", "answer"]
+    );
+    let late = Function { compact_early: false, ..early };
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[100, 40_000]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut off = agent(&late, &script, &mut session, &dir, None);
+    off.context = 65_536;
+    assert_eq!(off.turn("go", &mut log).unwrap(), TurnEnd::Answer("Done.".into()));
+    assert!(!kinds(&session).contains(&"compact"));
+}
+
+#[test]
 fn compaction_on_request() {
     let dir = Dir::new("on-request");
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), "minimal").unwrap();

@@ -70,6 +70,11 @@ pub struct Function {
     /// The instruction that asks for a summary of the history (D139).
     pub compact: String,
     pub max_compact_tokens: u32,
+    /// Compact early (AGL-038, D6, D9): when the history plus the most a
+    /// step can add and the summary would not fit, so the summary always
+    /// fits at the next step; off, the compaction waits until a step does
+    /// not fit.
+    pub compact_early: bool,
     /// The longest voice recording, in seconds (AGL-016).
     pub max_record_seconds: u32,
     pub sampling: Sampling,
@@ -191,6 +196,7 @@ impl Function {
             "max_stirs",
             "compact",
             "max_compact_tokens",
+            "compact_early",
             "max_record_seconds",
             "sampling",
             "initial",
@@ -225,6 +231,7 @@ impl Function {
             .unwrap_or_else(|| DEFAULT_COMPACT.into());
         let max_compact_tokens =
             positive(&mut file, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
+        let compact_early = file.bool("compact_early")?.unwrap_or(false);
         let max_record_seconds =
             positive(&mut file, "max_record_seconds")?.unwrap_or(DEFAULT_MAX_RECORD_SECONDS);
         let sampling = match file.section("sampling")? {
@@ -270,6 +277,7 @@ impl Function {
             max_stirs,
             compact,
             max_compact_tokens,
+            compact_early,
             max_record_seconds,
             sampling,
             initial,

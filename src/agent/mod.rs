@@ -199,6 +199,16 @@ impl Agent<'_> {
         let prompt_tokens = self.backend.count_prompt(&step_prompt, &prompt)?
             + expanded.pictures * self.image_tokens;
         report.context_used(prompt_tokens);
+        // The early compaction (AGL-038, D6, D9): the history plus the most
+        // a step can add and the summary must fit, so the summary fits at
+        // the next step too; one that makes no room lets the step run when
+        // it fits.
+        if function.compact_early
+            && prompt_tokens + early_reserve(function) > self.context
+            && self.compact(report)? == Compaction::Done
+        {
+            return Ok(None);
+        }
         let needed = prompt_tokens + think_budget + function.max_action_tokens as usize;
         if needed > self.context {
             // A summary of the history may make room (D139, D140).
@@ -600,15 +610,18 @@ impl Agent<'_> {
 
     /// Replaces the history with a summary the model writes without
     /// thinking or a grammar, from the history without thinking (D139,
-    /// D140).
+    /// D140). A history whose summary request does not fit is cut until it
+    /// does (AGL-038, D5): its tool results, the oldest first, to their
+    /// head and tail, then its oldest turns; it is impossible only when the
+    /// latest turn alone does not fit.
     pub fn compact(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
         if !self.session.compactable() {
             return Ok(Compaction::Nothing);
         }
         report.compacting();
         let function = self.function;
-        let mut messages = vec![Message::System(system_prompt(function))];
-        messages.extend(
+        let mut base = vec![Message::System(system_prompt(function))];
+        base.extend(
             self.session
                 .history()
                 .into_iter()
@@ -621,29 +634,35 @@ impl Agent<'_> {
                     other => other,
                 }),
         );
-        let expanded = media::expand(
-            &mut messages,
-            &self.session.media(),
-            &self.session.media_dir(),
-            self.backend,
-        )?;
         let tools = function_tools(function);
-        let compact_prompt = Prompt {
-            messages: &messages,
-            instruction: Some(&function.compact),
-            tools: &tools,
-            preserve_thinking: false,
-            reasoning: self.reasoning,
-            format: &function.format,
+        let (messages, expanded, prompt) = loop {
+            let mut messages = base.clone();
+            let expanded = media::expand(
+                &mut messages,
+                &self.session.media(),
+                &self.session.media_dir(),
+                self.backend,
+            )?;
+            let compact_prompt = Prompt {
+                messages: &messages,
+                instruction: Some(&function.compact),
+                tools: &tools,
+                preserve_thinking: false,
+                reasoning: self.reasoning,
+                format: &function.format,
+            };
+            let rendered = self.backend.render(&compact_prompt)?;
+            let prompt = function.format.start_step(rendered, false);
+            let needed = self.backend.count_prompt(&compact_prompt, &prompt)?
+                + expanded.pictures * self.image_tokens
+                + function.max_compact_tokens as usize;
+            if needed <= self.context {
+                break (messages, expanded, prompt);
+            }
+            if !cut_for_summary(&mut base, needed - self.context) {
+                return Ok(Compaction::Impossible);
+            }
         };
-        let rendered = self.backend.render(&compact_prompt)?;
-        let prompt = function.format.start_step(rendered, false);
-        let needed = self.backend.count_prompt(&compact_prompt, &prompt)?
-            + expanded.pictures * self.image_tokens
-            + function.max_compact_tokens as usize;
-        if needed > self.context {
-            return Ok(Compaction::Impossible);
-        }
         // In the stirred mode the summary is a structured generation too,
         // with the thinking off and no tool to call (AGL-030, D9).
         let structured = Prompt {
@@ -692,6 +711,104 @@ impl Agent<'_> {
     fn stop(&mut self, reason: StopReason) -> Result<Option<TurnEnd>, Error> {
         self.session.append(Event::Stop(reason))?;
         Ok(Some(TurnEnd::Stopped(reason)))
+    }
+}
+
+/// The reserve of the early compaction (AGL-038, D6): the most a step can
+/// add to the history — its action, its thinking, a tool result of
+/// `tools::LIMIT` bytes counted at a token per byte — and the summary.
+fn early_reserve(function: &Function) -> usize {
+    function.max_action_tokens as usize
+        + function.max_think_tokens as usize
+        + crate::tools::LIMIT
+        + function.max_compact_tokens as usize
+}
+
+/// How much of a tool result the summary request keeps at each end
+/// (AGL-038, D5), in characters.
+const SUMMARY_KEEP: usize = 1024;
+
+/// The characters of a token in the estimate of a cut (AGL-038, D5): low,
+/// so a cut removes rather more than it must and the next count fits.
+const CUT_CHARS_PER_TOKEN: usize = 3;
+
+/// Cuts the summary request `messages` (the system prompt first) by about
+/// `over` tokens (AGL-038, D5): the tool results, the oldest first, to
+/// their head and tail with a mark; when none is left to cut, the oldest
+/// turns — from the first message after the previous summary up to the
+/// next user message —, the latest turn kept. `false` when nothing more
+/// can be cut.
+fn cut_for_summary(messages: &mut Vec<Message>, over: usize) -> bool {
+    let goal = over.saturating_mul(CUT_CHARS_PER_TOKEN).max(1);
+    let mut removed = 0;
+    for message in messages.iter_mut() {
+        if removed >= goal {
+            return true;
+        }
+        if let Message::Tool { content, .. } = message
+            && let Some(cut) = cut_result(content)
+        {
+            removed += content.len() - cut.len();
+            *content = cut;
+        }
+    }
+    if removed > 0 {
+        return true;
+    }
+    // The previous summary leads the history (`Session::history`).
+    let first = match messages.get(1) {
+        Some(Message::Runtime(_)) => 2,
+        _ => 1,
+    };
+    let mut dropped = false;
+    while removed < goal {
+        let Some(next) = messages
+            .iter()
+            .skip(first + 1)
+            .position(|m| matches!(m, Message::User(_)))
+            .map(|i| first + 1 + i)
+        else {
+            break;
+        };
+        removed += messages
+            .drain(first..next)
+            .map(|m| message_chars(&m))
+            .sum::<usize>();
+        dropped = true;
+    }
+    dropped
+}
+
+/// The tool result `content` cut to its head and tail with a mark, or
+/// `None` when it is short or already cut (AGL-038, D5).
+fn cut_result(content: &str) -> Option<String> {
+    let chars = content.chars().count();
+    if chars <= 2 * SUMMARY_KEEP + 64 || content.contains("characters cut for the summary]") {
+        return None;
+    }
+    let head: String = content.chars().take(SUMMARY_KEEP).collect();
+    let tail: String = content.chars().skip(chars - SUMMARY_KEEP).collect();
+    Some(format!(
+        "{head}\n[{} characters cut for the summary]\n{tail}",
+        chars - 2 * SUMMARY_KEEP
+    ))
+}
+
+/// The characters of a message, for the estimate of a cut.
+fn message_chars(message: &Message) -> usize {
+    match message {
+        Message::System(text) | Message::User(text) | Message::Runtime(text) => text.len(),
+        Message::Assistant { thinking, text, call } => {
+            thinking.as_deref().map_or(0, str::len)
+                + text.as_deref().map_or(0, str::len)
+                + call.as_ref().map_or(0, |call| {
+                    call.args
+                        .iter()
+                        .map(|(name, value)| name.len() + format!("{value:?}").len())
+                        .sum::<usize>()
+                })
+        }
+        Message::Tool { content, .. } => content.len(),
     }
 }
 
