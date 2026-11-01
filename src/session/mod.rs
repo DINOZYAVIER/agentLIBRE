@@ -144,8 +144,15 @@ pub enum Event {
     /// A medium of the session, logged before the message that names it
     /// (AGL-014); its bytes are in the media directory (D7).
     Media(Media),
-    /// A summary that replaces the history before it (D139).
-    Compact(String),
+    /// A summary that replaces the history before it (D139). `question` is
+    /// the user message that started the turn, kept after the summary so
+    /// the turn goes on from the summary and the question together and the
+    /// summary need not repeat it (F31); absent in sessions written before
+    /// the field.
+    Compact {
+        summary: String,
+        question: Option<String>,
+    },
 }
 
 /// Where an unfinished turn continues (D105).
@@ -310,10 +317,13 @@ impl Session {
         let mut thinking = None;
         for event in &self.events {
             match event {
-                Event::Compact(summary) => {
+                Event::Compact { summary, question } => {
                     messages.clear();
                     thinking = None;
                     messages.push(Message::Runtime(summary.clone()));
+                    if let Some(question) = question {
+                        messages.push(Message::User(question.clone()));
+                    }
                 }
                 Event::User(text) => {
                     thinking = None;
@@ -411,7 +421,7 @@ impl Session {
         self.events
             .iter()
             .rev()
-            .take_while(|e| !matches!(e, Event::Compact(_)))
+            .take_while(|e| !matches!(e, Event::Compact { .. }))
             .any(|e| {
                 matches!(
                     e,
@@ -552,7 +562,13 @@ fn event_json(event: &Event) -> Json {
         Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
         Event::Stir { attempt, error } => json!({"type": "stir", "attempt": attempt, "error": error}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
-        Event::Compact(summary) => json!({"type": "compact", "summary": summary}),
+        Event::Compact { summary, question } => {
+            let mut json = json!({"type": "compact", "summary": summary});
+            if let Some(question) = question {
+                json["question"] = question.as_str().into();
+            }
+            json
+        }
         Event::Memory { name, kind, text } => {
             let mut json = json!({"type": "memory", "name": name, "kind": kind.name()});
             if let Some(text) = text {
@@ -636,7 +652,10 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 .into_iter()
                 .find(|r| json["reason"] == r.name())?,
         ),
-        "compact" => Event::Compact(text("summary")?),
+        "compact" => Event::Compact {
+            summary: text("summary")?,
+            question: text("question"),
+        },
         "memory" => Event::Memory {
             name: text("name")?,
             kind: MemoryKind::ALL

@@ -613,7 +613,9 @@ impl Agent<'_> {
     /// D140). A history whose summary request does not fit is cut until it
     /// does (AGL-038, D5): its tool results, the oldest first, to their
     /// head and tail, then its oldest turns; it is impossible only when the
-    /// latest turn alone does not fit.
+    /// latest turn alone does not fit. The question that started the turn
+    /// is kept after the summary, so the turn goes on from the summary and
+    /// the question together and the summary need not repeat it (F31).
     pub fn compact(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
         if !self.session.compactable() {
             return Ok(Compaction::Nothing);
@@ -690,7 +692,22 @@ impl Agent<'_> {
         if generated.stop == Stop::Limit || summary.is_empty() {
             return Ok(Compaction::Impossible);
         }
-        self.session.append(Event::Compact(summary.into()))?;
+        // The question that started the turn is kept after the summary
+        // (F31): the summary need not repeat it, and the turn goes on from
+        // the summary and the question together.
+        let question = self
+            .session
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                Event::User(text) => Some(text.clone()),
+                _ => None,
+            });
+        self.session.append(Event::Compact {
+            summary: summary.into(),
+            question,
+        })?;
         // The summary is kept in the memory directory too, not in the
         // index and not in the prompt (AGL-006, M9, M16); a failure to
         // write it does not undo the compaction.

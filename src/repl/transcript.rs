@@ -267,7 +267,7 @@ impl Presenter {
                     }
                 }
                 Event::Answer(text) => self.show_answer(text, None),
-                Event::Compact(_) => self.show_compacted(),
+                Event::Compact { .. } => self.show_compacted(),
                 Event::CutOff(_) => self.show_cut_off(),
                 Event::Forge {
                     name,

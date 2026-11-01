@@ -528,7 +528,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Forge { .. } => "forge",
             Event::Answer(_) => "answer",
             Event::Stop(_) => "stop",
-            Event::Compact(_) => "compact",
+            Event::Compact { .. } => "compact",
             Event::CutOff(_) => "cut_off",
             Event::Media(_) => "media",
             Event::Memory { .. } => "memory",
@@ -1086,22 +1086,28 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
             "user", "state", "thinking", "call", "result", "compact", "thinking", "answer"
         ]
     );
+    // The summary keeps the question that started the turn (F31).
     assert_eq!(
         session.events[5],
-        Event::Compact("The user said go; true ran.".into())
+        Event::Compact {
+            summary: "The user said go; true ran.".into(),
+            question: Some("go".into()),
+        }
     );
     let prompts = script.prompts.borrow();
     // The summary is asked for after the history, without thinking.
     assert!(prompts[2].starts_with("[4 messages; Summarize the conversation so far"));
     assert!(prompts[2].ends_with("<think>\n\n</think>\n\n"));
     assert_eq!(*script.thinking.borrow(), [false, true, false, false]);
-    // The turn goes on from the summary alone.
-    assert!(prompts[3].starts_with("[2 messages; -]"));
-    // The summary is a runtime message, not the human's (AGL-009).
+    // The turn goes on from the summary and the kept question (F31).
+    assert!(prompts[3].starts_with("[3 messages; -]"));
+    // The summary is a runtime message, not the human's (AGL-009), and the
+    // kept question follows it (F31).
     assert_eq!(
         session.history()[0],
         Message::Runtime("The user said go; true ran.".into())
     );
+    assert_eq!(session.history()[1], Message::User("go".into()));
 }
 
 #[test]
@@ -1225,7 +1231,13 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
     let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
     assert!(log.contains(&"[compacted]".to_string()), "{log:?}");
-    assert_eq!(session.events[5], Event::Compact("A long output.".into()));
+    assert_eq!(
+        session.events[5],
+        Event::Compact {
+            summary: "A long output.".into(),
+            question: Some("go".into()),
+        }
+    );
     let users = script.users.borrow();
     // The first summary request has the whole result, the second the cut.
     assert!(users[2].contains(&"x".repeat(5000)));
@@ -1327,7 +1339,10 @@ fn compaction_on_request() {
     );
     assert_eq!(
         session.events.last(),
-        Some(&Event::Compact("Greeted.".into()))
+        Some(&Event::Compact {
+            summary: "Greeted.".into(),
+            question: Some("hello".into()),
+        })
     );
     assert_eq!(
         agent(&minimal, &script, &mut session, &dir, None)

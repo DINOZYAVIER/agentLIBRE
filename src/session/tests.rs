@@ -80,8 +80,12 @@ fn write_and_read_back() {
         result("c1", Outcome::Ok),
         Event::Stop(StopReason::StepLimit),
         Event::Answer("Done: `Vec<&str>`\nok".into()),
-        Event::Compact("The test is fixed.".into()),
+        Event::Compact { summary: "The test is fixed.".into(), question: None },
         Event::CutOff(8192),
+        Event::Compact {
+            summary: "It is fixed for good.".into(),
+            question: Some("Fix the test".into()),
+        },
     ];
     let mut session = Session::create(&dir.0, "coder", Path::new("/home/u/repos/a")).unwrap();
     for event in &events {
@@ -92,7 +96,7 @@ fn write_and_read_back() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 10);
+    assert_eq!(lines.len(), 11);
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["version"], 1);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
@@ -102,6 +106,9 @@ fn write_and_read_back() {
         lines[9],
         json!({"type": "cut_off", "limit": 8192, "time": lines[9]["time"]})
     );
+    // The kept question rides the summary and round-trips (F31).
+    assert_eq!(lines[10]["summary"], "It is fixed for good.");
+    assert_eq!(lines[10]["question"], "Fix the test");
     assert!(
         lines
             .iter()
@@ -242,7 +249,12 @@ fn history_after_a_summary() {
         session.append(event).unwrap();
     }
     assert!(session.compactable());
-    session.append(Event::Compact("s1".into())).unwrap();
+    session
+        .append(Event::Compact {
+            summary: "s1".into(),
+            question: None,
+        })
+        .unwrap();
     assert!(!session.compactable());
     assert_eq!(session.history(), vec![Message::Runtime("s1".into())]);
     // A summary in the middle of a turn keeps the turn going (D140).
@@ -267,7 +279,12 @@ fn history_after_a_summary() {
             },
         ]
     );
-    session.append(Event::Compact("s2".into())).unwrap();
+    session
+        .append(Event::Compact {
+            summary: "s2".into(),
+            question: None,
+        })
+        .unwrap();
     session.append(Event::User("u2".into())).unwrap();
     assert_eq!(
         session.history(),
