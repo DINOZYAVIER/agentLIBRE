@@ -1745,25 +1745,36 @@ mod tests {
     #[test]
     fn launch_with_a_script_engine_spawns_and_shut_down_ends_it() {
         let (dir, bin, models) = fake_engine_setup();
-        let url = format!("http://127.0.0.1:{}", free_port());
-        let settings = ServerFile {
-            llama_url: Some(url.clone()),
-            model: Some("m.gguf".into()),
-            engine: Some("fake-engine".into()),
-            ..ServerFile::default()
-        };
         let log = dir.join("store").join("server.log");
         fs::create_dir_all(log.parent().unwrap()).unwrap();
-        let mut engine = Engine::launch(
-            &settings,
-            &url,
-            &dir,
-            &dir,
-            &models,
-            Some(bin.into_os_string()),
-            &log,
-        )
-        .unwrap();
+        // A test beside this one may be handed the port just freed and
+        // listen on it at once (it made the Nix build fail, AGL-041), so
+        // a few freed ports are tried.
+        let mut engine = (0..5)
+            .find_map(|_| {
+                let url = format!("http://127.0.0.1:{}", free_port());
+                let settings = ServerFile {
+                    llama_url: Some(url.clone()),
+                    model: Some("m.gguf".into()),
+                    engine: Some("fake-engine".into()),
+                    ..ServerFile::default()
+                };
+                match Engine::launch(
+                    &settings,
+                    &url,
+                    &dir,
+                    &dir,
+                    &models,
+                    Some(bin.clone().into_os_string()),
+                    &log,
+                ) {
+                    Ok(engine) => Some(engine),
+                    // The port was taken between the free and the check.
+                    Err(Error::PortBusy { .. }) => None,
+                    Err(error) => panic!("the launch failed with {error:?}"),
+                }
+            })
+            .expect("a free port among the tried ones");
         let pid = engine.pid();
         assert!(engine.is_alive());
         engine.shutdown();
