@@ -32,6 +32,7 @@
           ./Cargo.toml
           ./Cargo.lock
           ./src
+          ./nix
         ];
       };
 
@@ -41,23 +42,32 @@
         inherit src;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [ pkgs.makeWrapper ];
-        # The tests make git repositories of their own, and the agent's
-        # bash runs tmux in one of them.
+        # The tests make git repositories of their own, the agent's bash
+        # runs tmux in one of them, and they evaluate Functions and settings
+        # with the evaluator of the system (AGL-039, D38).
         nativeCheckInputs = [
           pkgs.git
           pkgs.tmux
+          pkgs.nix
         ];
         # The build's terminal would page `git log` through a `less` the
-        # sandbox does not have.
+        # sandbox does not have; the evaluations need no store.
         preCheck = ''
           export AGENTLIBRE_TOOLS=${tools}/bin
+          export AGENTLIBRE_NIX=$PWD/nix
           export HOME=$TMPDIR
           export GIT_PAGER=cat
+          export NIX_REMOTE=dummy://
         '';
-        # The wrapper names the tools; it leaves PATH alone (AGL-039, D15).
+        # The built-ins go with the package (AGL-039, D7); the wrapper names
+        # them and the tools, and leaves PATH alone (AGL-039, D15).
         postInstall = ''
+          mkdir -p $out/share/agentLIBRE
+          cp -r nix $out/share/agentLIBRE/nix
           for bin in agl agentLIBRE; do
-            wrapProgram $out/bin/$bin --set AGENTLIBRE_TOOLS ${tools}/bin
+            wrapProgram $out/bin/$bin \
+              --set AGENTLIBRE_TOOLS ${tools}/bin \
+              --set AGENTLIBRE_NIX $out/share/agentLIBRE/nix
           done
         '';
         meta = {
@@ -69,6 +79,10 @@
       };
     in
     {
+      # The `agl` argument of the Functions and the settings: the built-in
+      # policies, formats, models and Functions (AGL-039, D7, D35).
+      lib = import ./nix;
+
       packages.${system} = {
         default = agl;
         inherit tools;
@@ -83,6 +97,11 @@
           pkgs.git
         ];
         AGENTLIBRE_TOOLS = "${tools}/bin";
+        # The checkout's built-ins, so a change of them is seen without a
+        # build (AGL-039, D7).
+        shellHook = ''
+          export AGENTLIBRE_NIX="$(git rev-parse --show-toplevel)/nix"
+        '';
       };
 
       checks.${system} = {

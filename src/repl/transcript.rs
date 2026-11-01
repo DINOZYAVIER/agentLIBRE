@@ -737,6 +737,7 @@ mod tests {
             tool_lines: 2,
             tool_chars: 20,
             frame,
+            max_record_seconds: 60,
         };
         let presenter = Presenter::new(mock.clone(), Theme::plain(), settings, Lang::En);
         (presenter, mock)

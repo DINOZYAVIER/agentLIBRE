@@ -225,6 +225,18 @@ pub enum Error {
     MediaKind { path: PathBuf },
     /// `ffmpeg` or `ffprobe` cannot be run or failed.
     Ffmpeg { detail: String },
+    /// A weights file is in none of the weights folders and nobody named
+    /// its folder (AGL-039, D24c).
+    WeightsNotFound { name: String, folders: Vec<PathBuf> },
+    /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
+    NixDirMissing,
+    /// The system's `nix-instantiate` cannot be run (AGL-039, D38).
+    NixNotFound { source: io::Error },
+    /// The evaluation of a Nix file failed; `detail` is Nix's message.
+    NixEval { path: PathBuf, detail: String },
+    /// A Function or settings file is not a function of `{ agl, ... }`
+    /// (AGL-039, D8).
+    NixNotAFunction { path: PathBuf },
     /// `AGENTLIBRE_TOOLS` is not set to an absolute directory: agl runs
     /// outside its package's wrapper and the dev shell (AGL-040).
     ToolsDirMissing,
@@ -389,6 +401,13 @@ pub enum FunctionProblem {
     /// A key of the `[server]` table of a Function that does not apply to
     /// the kind of the project's `[server]` (AGL-033, D1).
     ServerKeyOfOtherKind(String),
+    /// A path that must be absolute is not (AGL-039, D24e).
+    NotAbsolute,
+    /// A weights file is neither a file name nor an absolute path
+    /// (AGL-039, D24a).
+    BadWeightsName,
+    /// A `source` names a file the model does not set (AGL-039, D5).
+    SourceWithoutFile,
 }
 
 impl Error {
@@ -589,6 +608,22 @@ impl std::fmt::Display for Error {
                     format!("{} is not an image, a video or an audio", path.display())
                 }
                 Error::Ffmpeg { detail } => format!("ffmpeg failed: {detail}"),
+                Error::WeightsNotFound { name, folders } => {
+                    let folders: Vec<String> =
+                        folders.iter().map(|folder| folder.display().to_string()).collect();
+                    format!("{name} is in none of the weights folders: {}", folders.join(", "))
+                }
+                Error::NixDirMissing => format!(
+                    "{} is not set: run agl from its Nix package or `nix develop`",
+                    crate::nix::NIX_VAR
+                ),
+                Error::NixNotFound { source } => format!("cannot run nix-instantiate: {source}"),
+                Error::NixEval { path, detail } => {
+                    format!("{} does not evaluate: {detail}", path.display())
+                }
+                Error::NixNotAFunction { path } => {
+                    format!("{} is not a function of {{ agl, ... }}", path.display())
+                }
                 Error::ToolsDirMissing => format!(
                     "{} is not set: run agl from its Nix package or `nix develop`",
                     crate::programs::TOOLS_VAR

@@ -1,31 +1,17 @@
-//! Functions: the model format, prompt, sampling and state machine of an
-//! agent, checked when loaded (D11, D15, D17, D21, D39, D41-D43, D82-D93,
-//! D139, D140).
+//! Functions: the policy and the model of an agent, written in Nix and
+//! checked when loaded (D11, D15, D17, D21, D39, D41-D43, D82-D93, D139,
+//! D140; AGL-039, D7, D8, D10, D17-D21, D40, D41).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-
-use toml::Table;
 
 use crate::action::{self, Actions, Constraint, Kind, Outcome, Tool};
 use crate::backend::RUNTIME_PREFIX;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
-use crate::settings::ServerFile;
-use crate::tomlfile::{self, Section};
-
-/// Functions built into the binary; a user file of the same name replaces
-/// one (D39).
-const BUILTIN: &[(&str, &str)] = &[
-    ("minimal", include_str!("../builtin/functions/minimal.toml")),
-    ("agentLIBRE", include_str!("../builtin/functions/agentLIBRE.toml")),
-];
-
-/// The names of the built-in Functions (AGL-036, D3).
-pub fn builtin_names() -> impl Iterator<Item = &'static str> {
-    BUILTIN.iter().map(|(name, _)| *name)
-}
+use crate::nix::{self, Section};
+use crate::settings::{ServerFile, ServerKind};
 
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
@@ -35,10 +21,6 @@ const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
 const DEFAULT_MAX_ACTION_TOKENS: u32 = 8192;
 const DEFAULT_MAX_COMPACT_TOKENS: u32 = 4096;
-
-/// The longest voice recording of the REPL's Ctrl-R, in seconds, when the
-/// Function does not set it (AGL-016, D5, D8).
-const DEFAULT_MAX_RECORD_SECONDS: u32 = 60;
 
 /// The stirs of one step of the stirred mode when the Function does not set
 /// them (AGL-030, D6): two stirs, three action attempts in all.
@@ -50,11 +32,58 @@ const DEFAULT_COMPACT: &str = "Summarize the conversation so far so that you can
      work from this summary alone: the user's requests, what has been done and found, files \
      and commands that matter, and what remains to be done. Write only the summary.";
 
+/// The keys of `policy` (AGL-039, D17).
+const POLICY_KEYS: &[&str] = &[
+    "system",
+    "initial",
+    "state",
+    "max_steps_total",
+    "max_think_tokens",
+    "max_action_tokens",
+    "compact",
+    "max_compact_tokens",
+];
+
+/// The keys of `model` (AGL-039, D2, D5, D17, D19).
+const MODEL_KEYS: &[&str] = &[
+    "kind",
+    "format",
+    "weights",
+    "context",
+    "spec_type",
+    "draft",
+    "args",
+    "mmproj",
+    "mmproj_offload",
+    "image_max_tokens",
+    "strata_config",
+    "sampling",
+    "compact_early",
+    "max_stirs",
+    "preserve_thinking",
+    "source",
+];
+
+/// The keys of the `llama` kind's server in `model` (AGL-033, D1).
+const LLAMA_MODEL_KEYS: &[&str] = &[
+    "weights",
+    "context",
+    "spec_type",
+    "draft",
+    "args",
+    "mmproj",
+    "mmproj_offload",
+    "image_max_tokens",
+];
+
+/// The files a `source` may name (AGL-039, D4, D5, D19).
+const SOURCE_KEYS: &[&str] = &["weights", "mmproj", "draft", "strata_config"];
+
 /// A loaded Function.
 #[derive(Debug)]
 pub struct Function {
-    /// The file the Function came from; a built-in says so (the hints of
-    /// its `[server]` table point at it, AGL-033, D1).
+    /// The file the Function came from; a built-in says so
+    /// (`<built-in>/functions/<name>.nix`).
     pub path: PathBuf,
     pub format: Format,
     pub system: String,
@@ -75,15 +104,13 @@ pub struct Function {
     /// fits at the next step; off, the compaction waits until a step does
     /// not fit.
     pub compact_early: bool,
-    /// The longest voice recording, in seconds (AGL-016).
-    pub max_record_seconds: u32,
     pub sampling: Sampling,
     pub initial: usize,
     pub states: Vec<State>,
-    /// The model side of `[server]`, when the file declares it (AGL-033,
-    /// D1): self-contained, its keys are the model-side settings; `None`
-    /// and the settings' `[server]` decides (the fallback, D3).
-    pub server: Option<ServerFile>,
+    /// The server side of `model` (AGL-039, D17, D21): the kind and the
+    /// model keys, checked against the kind; the urls and `engine` are the
+    /// settings'.
+    pub model: ServerFile,
 }
 
 /// Sampling settings; `None` leaves the llama-server default (D89).
@@ -107,16 +134,17 @@ pub struct State {
     pub max_steps: Option<u32>,
     pub max_visits: Option<u32>,
     pub on_limit: Option<usize>,
-    /// `next` entries other than `else`: tool, outcome (`None` for any)
-    /// and target state.
+    /// The transitions other than `otherwise`: tool, outcome (`None` for
+    /// `any`) and target state.
     transitions: Vec<(String, Option<Outcome>, usize)>,
-    /// `next.else`.
+    /// `next.otherwise`.
     otherwise: Option<usize>,
 }
 
 impl State {
     /// The state after `tool` ended with `outcome`; the most specific key
-    /// wins (D43). Loading guarantees an answer (D21).
+    /// wins (D43): the outcome, then `any`, then `otherwise`. Loading
+    /// guarantees an answer (D21).
     pub fn next(&self, tool: &str, outcome: Outcome) -> usize {
         let find = |wanted: Option<Outcome>| {
             self.transitions
@@ -140,35 +168,53 @@ impl State {
     }
 }
 
+/// The names of the built-in Functions (AGL-036, D3; AGL-039, D25, D28):
+/// the attributes of `agl.functions` of agl's `nix/` directory.
+pub fn builtin_names() -> Result<Vec<String>, Error> {
+    let path = Path::new("<built-in>/functions");
+    let value = nix::eval_with_agl(path, "builtins.attrNames agl.functions")?;
+    serde_json::from_value(value).map_err(|error| Error::NixEval {
+        path: path.into(),
+        detail: error.to_string(),
+    })
+}
+
+/// Rejects a Function name that cannot name a file in its directory.
+fn check_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return Err(Error::InvalidName(name.into()));
+    }
+    Ok(())
+}
+
 impl Function {
-    /// Loads Function `name` from the workspace's functions directory
-    /// (`workspace_functions/<name>.toml`), then the user's functions
-    /// directory (`user_functions/<name>.toml`), or, when neither file
-    /// exists, from the built-in Functions (AGL-028, D3). An absent
-    /// directory is simply skipped. Its model format comes from
-    /// `formats_dir`.
+    /// Loads Function `name` (AGL-039, D10): the workspace's
+    /// `<name>.nix` (`workspace_functions`), then the user's
+    /// (`user_functions`), then the built-in `agl.functions.<name>`. An
+    /// absent directory is simply skipped. A file is a function of
+    /// `{ agl, ... }` (D8).
     pub fn load(
         workspace_functions: &Path,
         user_functions: &Path,
-        formats_dir: &Path,
         name: &str,
     ) -> Result<Function, Error> {
-        tomlfile::check_name(name)?;
+        check_name(name)?;
         let looked = [workspace_functions, user_functions];
         for dir in looked {
-            let path = dir.join(format!("{name}.toml"));
-            if let Some(table) = tomlfile::read(&path)? {
-                return Function::from_table(&path, table, formats_dir);
+            let path = dir.join(format!("{name}.nix"));
+            if path.is_file() {
+                return Function::from_value(&path, nix::eval_file(&path)?);
             }
         }
-        let Some((_, text)) = BUILTIN.iter().find(|(builtin, _)| *builtin == name) else {
+        let path = PathBuf::from(format!("<built-in>/functions/{name}.nix"));
+        let value = nix::eval_with_agl(&path, &format!("agl.functions.{} or null", nix::key(name)))?;
+        if value.is_null() {
             return Err(Error::FunctionNotFound {
                 name: name.into(),
                 paths: looked.iter().map(|dir| dir.to_path_buf()).collect(),
             });
-        };
-        let path = PathBuf::from(format!("<built-in>/functions/{name}.toml"));
-        Function::from_table(&path, tomlfile::parse(&path, text)?, formats_dir)
+        }
+        Function::from_value(&path, value)
     }
 
     /// The Function without the tool `name` in every state: the tool list
@@ -184,68 +230,56 @@ impl Function {
         }
     }
 
-    fn from_table(path: &Path, table: Table, formats_dir: &Path) -> Result<Function, Error> {
-        let mut file = Section::new(path, table);
-        file.check_keys(&[
-            "format",
-            "system",
-            "preserve_thinking",
-            "max_steps_total",
-            "max_think_tokens",
-            "max_action_tokens",
-            "max_stirs",
-            "compact",
-            "max_compact_tokens",
-            "compact_early",
-            "max_record_seconds",
-            "sampling",
-            "initial",
-            "state",
-            "server",
-        ])?;
-        let format_name = file.required_string("format")?;
-        let format = Format::load(formats_dir, &format_name)?;
-        let system = file.required_string("system")?;
-        let preserve_thinking = file.bool("preserve_thinking")?.unwrap_or(true);
+    /// Reads the evaluated Function `value` of the file `path` (AGL-039,
+    /// D17): exactly `policy` and `model`, both required (D21).
+    pub fn from_value(path: &Path, value: serde_json::Value) -> Result<Function, Error> {
+        let mut file = Section::top(path, value)?;
+        file.check_keys(&["policy", "model"])?;
+        let mut model = file.required_section("model")?;
+        let mut policy = file.required_section("policy")?;
+
+        model.check_keys(MODEL_KEYS)?;
+        let format = Format::from_section(model.required_section("format")?)?;
+        let preserve_thinking = model.bool("preserve_thinking")?.unwrap_or(true);
+        // 0 is allowed and means no stirs (AGL-030, D6); the absent key keeps
+        // the default.
+        let max_stirs = nonneg(&mut model, "max_stirs")?.unwrap_or(DEFAULT_MAX_STIRS);
+        let compact_early = model.bool("compact_early")?.unwrap_or(false);
+        let sampling = match model.section("sampling")? {
+            None => Sampling::default(),
+            Some(sampling) => read_sampling(sampling)?,
+        };
+        let source = model.section("source")?;
+        let server = read_model(&mut model)?;
+        if let Some(source) = source {
+            check_source(source, &server)?;
+        }
+
+        policy.check_keys(POLICY_KEYS)?;
+        let system = policy.required_string("system")?;
         // 0 is the value of the no limit (AGL-021, D2); the absent key keeps
         // the default (D40).
-        let max_steps_total = match nonneg(&mut file, "max_steps_total")? {
+        let max_steps_total = match nonneg(&mut policy, "max_steps_total")? {
             None => Some(DEFAULT_MAX_STEPS_TOTAL),
             Some(0) => None,
             Some(n) => Some(n),
         };
         let max_think_tokens =
-            positive(&mut file, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
+            positive(&mut policy, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens =
-            positive(&mut file, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
-        // 0 is allowed and means no stirs (AGL-030, D6); the absent key keeps
-        // the default.
-        let max_stirs = nonneg(&mut file, "max_stirs")?.unwrap_or(DEFAULT_MAX_STIRS);
+            positive(&mut policy, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
         // The two words the runtime fills in the Function's own text
         // (AGL-017, D8); other brace text stays as written.
         let system = system
             .replace("{runtime_prefix}", RUNTIME_PREFIX)
             .replace("{max_action_tokens}", &max_action_tokens.to_string());
-        let compact = file
+        let compact = policy
             .string("compact")?
             .unwrap_or_else(|| DEFAULT_COMPACT.into());
         let max_compact_tokens =
-            positive(&mut file, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
-        let compact_early = file.bool("compact_early")?.unwrap_or(false);
-        let max_record_seconds =
-            positive(&mut file, "max_record_seconds")?.unwrap_or(DEFAULT_MAX_RECORD_SECONDS);
-        let sampling = match file.section("sampling")? {
-            None => Sampling::default(),
-            Some(sampling) => read_sampling(sampling)?,
-        };
-        // The model side of the run, when the file declares it (AGL-033,
-        // D1): the table's keys are the model-side settings.
-        let server = match file.section("server")? {
-            None => None,
-            Some(section) => Some(ServerFile::parse_model_side(section, path)?),
-        };
-        let initial = file.required_string("initial")?;
-        let mut sections = file.required_section("state")?.sections()?;
+            positive(&mut policy, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
+        let initial = policy.required_string("initial")?;
+        let mut sections = policy.required_section("state")?.sections()?;
         let names: Vec<String> = sections.iter().map(|(name, _)| name.clone()).collect();
         let index = |section: &Section, key: &str, name: &str| {
             names
@@ -253,11 +287,10 @@ impl Function {
                 .position(|n| n == name)
                 .ok_or_else(|| problem(section, key, FunctionProblem::UnknownState(name.into())))
         };
-        let initial = index(&file, "initial", &initial)?;
+        let initial = index(&policy, "initial", &initial)?;
 
         let context = Context {
             format: &format,
-            format_name: &format_name,
             index: &index,
         };
         let states = sections
@@ -278,19 +311,107 @@ impl Function {
             compact,
             max_compact_tokens,
             compact_early,
-            max_record_seconds,
             sampling,
             initial,
             states,
-            server,
+            model: server,
         })
     }
+}
+
+/// Reads the server side of `model` (AGL-033, D1; AGL-036, D1, D5;
+/// AGL-039, D19, D21, D24): `kind` (`llama` when absent), the weights and
+/// the keys of the kind; a key of the other kind is an error, the llama
+/// kind needs `weights`, the strata kind `strata_config`, an absolute path.
+fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
+    let kind = match model.string("kind")? {
+        None => ServerKind::Llama,
+        Some(kind) => ServerKind::parse(&kind).ok_or_else(|| Error::UnknownServerKind {
+            path: model.path().into(),
+            value: kind,
+        })?,
+    };
+    let other_kind = |key: &str| problem(model, key, FunctionProblem::ServerKeyOfOtherKind(key.into()));
+    match kind {
+        ServerKind::Llama => {
+            if model.has("strata_config") {
+                return Err(other_kind("strata_config"));
+            }
+        }
+        ServerKind::Strata => {
+            if let Some(key) = LLAMA_MODEL_KEYS.iter().find(|key| model.has(key)) {
+                return Err(other_kind(key));
+            }
+        }
+    }
+    let weights = weights_name(model, "weights")?;
+    let draft = weights_name(model, "draft")?;
+    let mmproj = weights_name(model, "mmproj")?;
+    let strata_config = model.string("strata_config")?;
+    if let Some(config) = &strata_config
+        && !Path::new(config).is_absolute()
+    {
+        return Err(problem(model, "strata_config", FunctionProblem::NotAbsolute));
+    }
+    match kind {
+        ServerKind::Llama if weights.is_none() => {
+            return Err(problem(model, "weights", FunctionProblem::ServerModelMissing));
+        }
+        ServerKind::Strata if strata_config.is_none() => {
+            return Err(problem(model, "strata_config", FunctionProblem::ServerStrataConfigMissing));
+        }
+        _ => {}
+    }
+    Ok(ServerFile {
+        kind: Some(kind.name().to_owned()),
+        model: weights,
+        context: positive(model, "context")?,
+        spec_type: model.string("spec_type")?,
+        draft,
+        args: model.strings("args")?,
+        mmproj,
+        mmproj_offload: model.bool("mmproj_offload")?,
+        image_max_tokens: positive(model, "image_max_tokens")?,
+        strata_config,
+        ..ServerFile::default()
+    })
+}
+
+/// A weights file of `model` (AGL-039, D24a): a file name, found in the
+/// weights folders, or an absolute path, taken as it is.
+fn weights_name(model: &mut Section, key: &str) -> Result<Option<String>, Error> {
+    let name = model.string(key)?;
+    if let Some(name) = &name
+        && !Path::new(name).is_absolute()
+        && (name.is_empty() || name.contains('/') || name.starts_with('.'))
+    {
+        return Err(problem(model, key, FunctionProblem::BadWeightsName));
+    }
+    Ok(name)
+}
+
+/// Checks `source` (AGL-039, D4, D5): strings, keyed by a file of the
+/// model that the model sets.
+fn check_source(mut source: Section, server: &ServerFile) -> Result<(), Error> {
+    source.check_keys(SOURCE_KEYS)?;
+    for (key, url) in source.string_entries()? {
+        let set = match key.as_str() {
+            "weights" => server.model.is_some(),
+            "mmproj" => server.mmproj.is_some(),
+            "draft" => server.draft.is_some(),
+            _ => server.strata_config.is_some(),
+        };
+        if !set {
+            return Err(problem(&source, &key, FunctionProblem::SourceWithoutFile));
+        }
+        let _ = url;
+    }
+    Ok(())
 }
 
 /// What reading a state needs from the rest of the Function.
 struct Context<'a> {
     format: &'a Format,
-    format_name: &'a str,
     /// Resolves a state name read at `key` of a section.
     index: &'a dyn Fn(&Section, &str, &str) -> Result<usize, Error>,
 }
@@ -386,7 +507,7 @@ fn read_state(
                 section,
                 "think",
                 FunctionProblem::NoThinking {
-                    format: context.format_name.into(),
+                    format: "model.format".into(),
                 },
             ));
         }
@@ -422,24 +543,31 @@ fn read_state(
         if tools.is_empty() {
             return Err(problem(section, "next", FunctionProblem::NextWithoutTools));
         }
-        for (key, target) in next.string_entries()? {
-            let target = (context.index)(&next, &key, &target)?;
-            if key == "else" {
-                otherwise = Some(target);
+        // `next.<tool>.<outcome>`, `next.<tool>.any` and `next.otherwise`
+        // (AGL-039, D40); `next.<tool>` is always a set (D41).
+        for key in next.keys() {
+            if key == "otherwise" {
+                let target = next.required_string(&key)?;
+                otherwise = Some((context.index)(&next, &key, &target)?);
                 continue;
             }
-            let bad_key = || problem(&next, &key, FunctionProblem::BadTransitionKey);
-            let (tool, outcome) = match key.split_once('.') {
-                None => (key.as_str(), None),
-                Some((tool, name)) => {
-                    let outcome = action::outcomes(tool).iter().find(|o| o.name() == name);
-                    (tool, Some(*outcome.ok_or_else(bad_key)?))
-                }
-            };
-            if !tools.iter().any(|t| t.name == tool) {
-                return Err(bad_key());
+            if !tools.iter().any(|t| t.name == key) {
+                return Err(problem(&next, &key, FunctionProblem::BadTransitionKey));
             }
-            transitions.push((tool.to_owned(), outcome, target));
+            let mut of_tool = next.required_section(&key)?;
+            for name in of_tool.keys() {
+                let target = of_tool.required_string(&name)?;
+                let target = (context.index)(&of_tool, &name, &target)?;
+                if name == "any" {
+                    transitions.push((key.clone(), None, target));
+                    continue;
+                }
+                let outcome = action::outcomes(&key)
+                    .iter()
+                    .find(|o| o.name() == name)
+                    .ok_or_else(|| problem(&of_tool, &name, FunctionProblem::BadTransitionKey))?;
+                transitions.push((key.clone(), Some(*outcome), target));
+            }
         }
     }
     // The forge keeps the state unless `next` says otherwise: a step in
@@ -570,7 +698,7 @@ fn read_constraint(
 fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Error> {
     let error = |state: &State, key: &str, problem| Error::Function {
         path: path.into(),
-        key: format!("state.{}{key}", state.name),
+        key: format!("policy.state.{}{key}", state.name),
         problem,
     };
     for (start, state) in states.iter().enumerate() {

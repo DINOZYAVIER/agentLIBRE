@@ -20,7 +20,7 @@ use std::process::Command as Process;
 use toml::{Table, Value};
 
 use crate::error::Error;
-use crate::settings::{SearchFile, ServerFile, WhisperFile};
+use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
 use crate::tomlfile::quote as toml_string;
 use crate::tomlfile::Section;
 
@@ -177,36 +177,20 @@ pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
 }
 
 /// The project's `agentLIBRE.toml` (AGL-010): the format and the list
-/// of the identities the store carries, the last one the current home,
-/// and the project settings.
+/// of the identities the store carries, the last one the current home.
+/// The project's settings are its `settings.nix` (AGL-039, D11); AGL-041
+/// moves the identity there too.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Marker {
     pub hashes: Vec<String>,
-    /// The project's Function (D56, moved here by AGL-010).
-    pub function: Option<String>,
-    /// The project's `[server]` (AGL-015); wins per key over the user
-    /// file's.
-    pub server: ServerFile,
-    /// The project's `[whisper]` (AGL-014, D22).
-    pub whisper: WhisperFile,
-    /// The project's `[search]` (AGL-019, D3).
-    pub search: SearchFile,
 }
 
 impl Marker {
-    /// Parses `text` (from `path`) strictly: `format = 1`, the
-    /// `workspace_sha256` list of `sha256:<64-hex>` identities and the
-    /// project settings.
+    /// Parses `text` (from `path`) strictly: `format = 1` and the
+    /// `workspace_sha256` list of `sha256:<64-hex>` identities.
     pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
         let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&[
-            "function",
-            "format",
-            "workspace_sha256",
-            "server",
-            "whisper",
-            "search",
-        ])?;
+        file.check_keys(&["format", "workspace_sha256"])?;
         let format = file.required_integer("format")?;
         if format != 1 {
             return Err(Error::MarkerFormat {
@@ -223,20 +207,10 @@ impl Marker {
                 });
             }
         }
-        let function = file.string("function")?;
-        let server = ServerFile::parse(file.section("server")?, path)?;
-        let whisper = WhisperFile::parse(file.section("whisper")?, path)?;
-        let search = SearchFile::parse(file.section("search")?, path)?;
-        Ok(Marker {
-            hashes,
-            function,
-            server,
-            whisper,
-            search,
-        })
+        Ok(Marker { hashes })
     }
 
-    /// Renders the marker the way it is written: the settings first.
+    /// Renders the marker the way it is written.
     pub fn render(&self) -> String {
         let hashes = self
             .hashes
@@ -244,17 +218,7 @@ impl Marker {
             .map(|hash| toml_string(hash))
             .collect::<Vec<_>>()
             .join(", ");
-        let function = self
-            .function
-            .as_deref()
-            .map(|function| format!("function = {}\n", toml_string(function)))
-            .unwrap_or_default();
-        format!(
-            "{function}format = 1\nworkspace_sha256 = [{hashes}]\n{}{}{}",
-            self.server.render(),
-            self.whisper.render(),
-            self.search.render()
-        )
+        format!("format = 1\nworkspace_sha256 = [{hashes}]\n")
     }
 
     /// Writes the marker to `path`: a temp file in the same directory
@@ -305,13 +269,15 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
             Err(source) => return Err(Error::Read { path: marker_path, source }),
         };
         let marker = Marker::parse(&marker_path, &text)?;
+        // The project's settings beside the marker (AGL-039, D11).
+        let settings = ProjectFile::load(&dir.join(crate::settings::SETTINGS_FILE))?;
         found.push(Store {
             dir,
             hashes: marker.hashes,
-            function: marker.function,
-            server: marker.server,
-            whisper: marker.whisper,
-            search: marker.search,
+            function: settings.function,
+            server: settings.server,
+            whisper: settings.whisper,
+            search: settings.search,
         });
     }
     found.sort_by_key(Store::name);
@@ -390,13 +356,9 @@ fn rehomed(
     let mut hashes = store.hashes.clone();
     hashes.retain(|h| h != identity);
     hashes.push(identity.to_owned());
-    let marker = Marker {
-        hashes,
-        function: store.function.clone(),
-        server: store.server.clone(),
-        whisper: store.whisper.clone(),
-        search: store.search.clone(),
-    };
+    // The project's settings are in its `settings.nix`, which moves with
+    // the directory (AGL-039, D11).
+    let marker = Marker { hashes };
     if store.dir != new {
         fs::rename(&store.dir, &new)
             .map_err(|source| Error::Write { path: new.clone(), source })?;
@@ -679,10 +641,6 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
-        function: None,
-        server: ServerFile::default(),
-        whisper: WhisperFile::default(),
-        search: SearchFile::default(),
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -718,10 +676,6 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
-        function: None,
-        server: ServerFile::default(),
-        whisper: WhisperFile::default(),
-        search: SearchFile::default(),
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -1276,52 +1230,17 @@ mod tests {
         let path = Path::new("/d/agentLIBRE.toml");
         let marker = Marker {
             hashes: vec![identity(1), identity(2)],
-            function: Some("coder".into()),
-            server: ServerFile {
-                kind: None,
-                llama_url: Some("http://127.0.0.1:18081".into()),
-                strata_url: Some("http://127.0.0.1:18089".into()),
-                engine: Some("llama-server".into()),
-                model: Some("q.gguf".into()),
-                context: Some(65536),
-                spec_type: None,
-                draft: None,
-                args: Some(vec!["-ngl".into(), "999".into()]),
-                mmproj: Some("p.gguf".into()),
-                mmproj_offload: Some(true),
-                image_max_tokens: Some(2048),
-                strata_config: None,
-            },
-            whisper: WhisperFile {
-                url: Some("http://127.0.0.1:18082".into()),
-                model: Some("w.bin".into()),
-                args: Some(vec!["-t".into(), "12".into()]),
-            },
-            search: SearchFile {
-                url: Some("https://search.example/v1/search".into()),
-                client_certificate: Some("/c/client.crt".into()),
-                client_private_key: Some("/c/client.pk8".into()),
-                private_ca: Some("/c/ca.crt".into()),
-            },
         };
         assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
-        // The table comes after the top-level keys, so the file parses.
-        assert!(marker.render().contains("workspace_sha256 = ["));
-        assert!(marker.render().find("[server]") > marker.render().find("workspace_sha256"));
-        // A marker without it has an empty one, and renders none.
-        let plain = Marker {
-            server: ServerFile::default(),
-            ..marker
-        };
-        assert!(!plain.render().contains("[server]"));
-        assert_eq!(Marker::parse(path, &plain.render()).unwrap(), plain);
-        assert!(matches!(
-            Marker::parse(
-                path,
-                "format = 1\nworkspace_sha256 = []\n[server]\nport = 1\n"
-            ),
-            Err(Error::UnknownKey { key, .. }) if key == "server.port"
-        ));
+        // The project's settings are its `settings.nix` (AGL-039, D11).
+        for old in ["function = \"x\"\n", "[server.llama]\nurl = \"http://x\"\n"] {
+            let text = if old.starts_with('[') {
+                format!("format = 1\nworkspace_sha256 = []\n{old}")
+            } else {
+                format!("{old}format = 1\nworkspace_sha256 = []\n")
+            };
+            assert!(matches!(Marker::parse(path, &text), Err(Error::UnknownKey { .. })), "{old}");
+        }
         assert!(matches!(
             Marker::parse(path, "format = 2\nworkspace_sha256 = []\n"),
             Err(Error::MarkerFormat { format: 2, .. })
@@ -1350,7 +1269,7 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)], function: None, server: ServerFile::default(), whisper: WhisperFile::default(), search: SearchFile::default() }
+        Marker { hashes: vec![identity(1)] }
             .write(&store.join(MARKER_FILE))
             .unwrap();
         let found = stores(&data).unwrap();
@@ -1680,7 +1599,7 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)], function: None, server: ServerFile::default(), whisper: WhisperFile::default(), search: SearchFile::default() }
+        Marker { hashes: vec![identity(7)] }
             .write(&taken.join(MARKER_FILE))
             .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
@@ -1803,30 +1722,27 @@ mod tests {
         let from = plain_dir(dir.path(), "a/proj");
         let ws = fresh_store(&data, &from);
         assert_eq!(ws.function, None);
-        // The human sets the Function in the store's file.
+        // The Function is set in the store's `settings.nix` (AGL-039,
+        // D11) beside the marker.
         Marker {
             hashes: vec![identity_of(&from)],
-            function: Some("coder".into()),
-            server: ServerFile::default(),
-            whisper: WhisperFile::default(),
-            search: SearchFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
+        fs::write(
+            ws.dir.join(crate::settings::SETTINGS_FILE),
+            "{ agl, ... }: { function = \"coder\"; }\n",
+        )
+        .unwrap();
         let (found, _) = auto(&data, &from);
         assert_eq!(found.function.as_deref(), Some("coder"));
-        assert!(
-            fs::read_to_string(found.dir.join(MARKER_FILE))
-                .unwrap()
-                .starts_with("function = \"coder\"\n")
-        );
         // A move keeps it.
         let to = dir.path().join("b/proj");
         move_repo(&from, &to);
         let (moved, lines) = auto(&data, &to);
         assert_eq!(lines.len(), 1);
         assert_eq!(moved.function.as_deref(), Some("coder"));
-        assert_eq!(marker(&moved.dir).function.as_deref(), Some("coder"));
+        assert!(moved.dir.join(crate::settings::SETTINGS_FILE).is_file());
     }
 
     #[test]
@@ -1841,18 +1757,18 @@ mod tests {
         assert_eq!(ws.unit_key(), None);
         let server = ServerFile {
             llama_url: Some("http://127.0.0.1:18081".into()),
-            context: Some(65536),
             ..ServerFile::default()
         };
         let origin = identity_of(&from);
         Marker {
             hashes: vec![origin.clone()],
-            function: None,
-            server: server.clone(),
-            whisper: WhisperFile::default(),
-            search: SearchFile::default(),
         }
         .write(&ws.dir.join(MARKER_FILE))
+        .unwrap();
+        fs::write(
+            ws.dir.join(crate::settings::SETTINGS_FILE),
+            "{ agl, ... }: { server.llama.url = \"http://127.0.0.1:18081\"; }\n",
+        )
         .unwrap();
         let (found, _) = auto(&data, &from);
         assert_eq!(found.server, server);
@@ -1866,7 +1782,6 @@ mod tests {
         let (moved, lines) = auto(&data, &to);
         assert_eq!(lines.len(), 1);
         assert_eq!(moved.server, server);
-        assert_eq!(marker(&moved.dir).server, server);
         assert_eq!(moved.origin.as_deref(), Some(origin.as_str()));
         assert_eq!(moved.unit_key(), Some(key));
         // `locate` (for `forge rehome`) reads the same.

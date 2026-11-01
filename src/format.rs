@@ -1,16 +1,8 @@
 //! Model formats: how a model writes thinking and tool calls (D12, D23,
 //! D77, D78, D81).
 
-use std::path::{Path, PathBuf};
-
-use toml::Table;
-
 use crate::error::{Error, TemplateProblem};
-use crate::tomlfile::{self, Section};
-
-/// Formats built into the binary; a user file of the same name replaces
-/// one (D39).
-const BUILTIN: &[(&str, &str)] = &[("qwen3.8", include_str!("builtin/formats/qwen3.8.toml"))];
+use crate::nix::Section;
 
 const NAME: &str = "{name}";
 const VALUE: &str = "{value}";
@@ -46,26 +38,10 @@ pub struct Call {
 }
 
 impl Format {
-    /// Loads format `name` from `dir/<name>.toml` or, when that file does
-    /// not exist, from the built-in formats.
-    pub fn load(dir: &Path, name: &str) -> Result<Format, Error> {
-        tomlfile::check_name(name)?;
-        let path = dir.join(format!("{name}.toml"));
-        if let Some(table) = tomlfile::read(&path)? {
-            return Format::from_table(&path, table);
-        }
-        let Some((_, text)) = BUILTIN.iter().find(|(builtin, _)| *builtin == name) else {
-            return Err(Error::FormatNotFound {
-                name: name.into(),
-                path,
-            });
-        };
-        let path = PathBuf::from(format!("<built-in>/formats/{name}.toml"));
-        Format::from_table(&path, tomlfile::parse(&path, text)?)
-    }
-
-    fn from_table(path: &Path, table: Table) -> Result<Format, Error> {
-        let mut file = Section::new(path, table);
+    /// Reads the evaluated format `file` (the `model.format` of a
+    /// Function: `agl.formats."qwen3.8"` or a file of its own, AGL-039,
+    /// D18); agl looks no format up by name.
+    pub fn from_section(mut file: Section) -> Result<Format, Error> {
         file.check_keys(&["think", "call"])?;
         let think = match file.section("think")? {
             None => None,
@@ -202,27 +178,47 @@ fn split(
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use std::fs;
+    use serde_json::{Value, json};
+    use std::path::Path;
+
+    /// The Qwen3.8 format, as `nix/formats/qwen3.8.nix` writes it (the
+    /// test `builtin_qwen_is_the_nix_one` keeps the two the same).
+    pub fn qwen_value() -> Value {
+        json!({
+            "think": { "open": "<think>\n", "close": "\n</think>\n\n" },
+            "call": {
+                "begin": "<tool_call>\n<function={name}>\n",
+                "param": "<parameter={name}>\n{value}\n</parameter>\n",
+                "end": "</function>\n</tool_call>",
+            },
+        })
+    }
 
     /// The built-in Qwen3.8 format.
     pub fn qwen() -> Format {
-        Format::load(Path::new("/nonexistent"), "qwen3.8").unwrap()
+        parse(qwen_value()).unwrap()
     }
 
-    fn parse(text: &str) -> Result<Format, Error> {
-        let path = Path::new("f.toml");
-        Format::from_table(path, tomlfile::parse(path, text).unwrap())
+    fn parse(value: Value) -> Result<Format, Error> {
+        Format::from_section(Section::top(Path::new("f.nix"), value).unwrap())
     }
 
-    fn problem(text: &str) -> (String, TemplateProblem) {
-        match parse(text) {
+    fn problem(value: Value) -> (String, TemplateProblem) {
+        match parse(value) {
             Err(Error::Template { key, problem, .. }) => (key, problem),
             other => panic!("expected a template error, got {other:?}"),
         }
     }
 
-    const CALL: &str =
-        "[call]\nbegin = \"<c {name}>\"\nparam = \"<p {name}>{value}</p>\"\nend = \"</c>\"\n";
+    fn call() -> Value {
+        json!({ "begin": "<c {name}>", "param": "<p {name}>{value}</p>", "end": "</c>" })
+    }
+
+    #[test]
+    fn builtin_qwen_is_the_nix_one() {
+        let evaluated = crate::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.\"qwen3.8\"").unwrap();
+        assert_eq!(evaluated, qwen_value());
+    }
 
     #[test]
     fn builtin_qwen() {
@@ -259,7 +255,7 @@ pub mod tests {
             "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         );
         assert_eq!(format.start_step(base.into(), true), rendered);
-        let plain = parse(CALL).unwrap();
+        let plain = parse(json!({ "call": call() })).unwrap();
         assert_eq!(plain.start_step(base.into(), true), base);
         // A render with `enable_thinking = false` ends in an empty
         // block; the state's own block replaces it (AGL-013).
@@ -274,106 +270,79 @@ pub mod tests {
     }
 
     #[test]
-    fn user_file_replaces_builtin() {
-        let dir = std::env::temp_dir().join(format!("agentLIBRE-format-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("qwen3.8.toml"), CALL).unwrap();
-        fs::write(dir.join("mine.toml"), CALL).unwrap();
-        let qwen = Format::load(&dir, "qwen3.8").unwrap();
-        let mine = Format::load(&dir, "mine").unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(qwen.think, None);
-        assert_eq!(qwen.call.begin_before, "<c ");
-        assert_eq!(mine, qwen);
-    }
-
-    #[test]
-    fn missing_and_invalid_names() {
-        assert!(matches!(
-            Format::load(Path::new("/nonexistent"), "gemma"),
-            Err(Error::FormatNotFound { name, .. }) if name == "gemma"
-        ));
-        for name in ["", "../qwen3.8", "a/b", ".hidden"] {
-            assert!(matches!(
-                Format::load(Path::new("/nonexistent"), name),
-                Err(Error::InvalidName(_))
-            ));
-        }
-    }
-
-    #[test]
     fn think_is_optional() {
-        assert_eq!(parse(CALL).unwrap().think, None);
+        assert_eq!(parse(json!({ "call": call() })).unwrap().think, None);
     }
 
     #[test]
     fn keys_are_checked() {
         assert!(matches!(
-            parse(&format!("name = \"x\"\n{CALL}")),
+            parse(json!({ "name": "x", "call": call() })),
             Err(Error::UnknownKey { key, .. }) if key == "name"
         ));
         assert!(matches!(
-            parse("[call]\nbegin = \"<c {name}>\"\nend = \"</c>\""),
+            parse(json!({ "call": { "begin": "<c {name}>", "end": "</c>" } })),
             Err(Error::MissingKey { key, .. }) if key == "call.param"
         ));
         assert!(matches!(
-            parse("think = { open = \"<t>\" }\n"),
+            parse(json!({ "think": { "open": "<t>" }, "call": call() })),
             Err(Error::MissingKey { key, .. }) if key == "think.close"
         ));
-        assert!(matches!(parse(""), Err(Error::MissingKey { key, .. }) if key == "call"));
+        assert!(matches!(parse(json!({})), Err(Error::MissingKey { key, .. }) if key == "call"));
     }
 
     #[test]
     fn templates_are_checked() {
         use TemplateProblem::*;
         let call = |begin: &str, param: &str, end: &str| {
-            format!("[call]\nbegin = {begin:?}\nparam = {param:?}\nend = {end:?}\n")
+            json!({ "call": { "begin": begin, "param": param, "end": end } })
         };
         let ok_param = "<p {name}>{value}</p>";
         assert_eq!(
-            problem(&call("<c>", ok_param, "</c>")),
+            problem(call("<c>", ok_param, "</c>")),
             ("call.begin".into(), Missing("{name}"))
         );
         assert_eq!(
-            problem(&call("<c {name} {name}>", ok_param, "</c>")),
+            problem(call("<c {name} {name}>", ok_param, "</c>")),
             ("call.begin".into(), Repeated("{name}"))
         );
         assert_eq!(
-            problem(&call("<c {name} {value}>", ok_param, "</c>")),
+            problem(call("<c {name} {value}>", ok_param, "</c>")),
             ("call.begin".into(), Unexpected("{value}"))
         );
         assert_eq!(
-            problem(&call("{name}>", ok_param, "</c>")),
+            problem(call("{name}>", ok_param, "</c>")),
             ("call.begin".into(), NothingBeforeName)
         );
         assert_eq!(
-            problem(&call("<c {name}>", "<p {value}>{name}</p>", "</c>")),
+            problem(call("<c {name}>", "<p {value}>{name}</p>", "</c>")),
             ("call.param".into(), ValueBeforeName)
         );
         assert_eq!(
-            problem(&call("<c {name}>", "<p {name}>", "</c>")),
+            problem(call("<c {name}>", "<p {name}>", "</c>")),
             ("call.param".into(), Missing("{value}"))
         );
         assert_eq!(
-            problem(&call("<c {name}>", "<p {name}>{value}", "</c>")),
+            problem(call("<c {name}>", "<p {name}>{value}", "</c>")),
             ("call.param".into(), NothingAfterValue)
         );
         assert_eq!(
-            problem(&call("<c {name}>", ok_param, "</c {name}>")),
+            problem(call("<c {name}>", ok_param, "</c {name}>")),
             ("call.end".into(), Unexpected("{name}"))
         );
         assert_eq!(
-            problem(&format!("think = {{ open = \"\", close = \"x\" }}\n{CALL}")),
+            problem(json!({ "think": { "open": "", "close": "x" }, "call": super::tests::call() })),
             ("think.open".into(), Empty)
         );
     }
 
     #[test]
     fn literal_braces_are_text() {
-        let format = parse(&format!(
-            "[call]\nbegin = {:?}\nparam = {:?}\nend = \"}}}}\"\n",
-            "{\"name\": \"{name}\", \"arguments\": {", "\"{name}\": \"{value}\", "
-        ))
+        let format = parse(json!({ "call": {
+            "begin": "{\"name\": \"{name}\", \"arguments\": {",
+            "param": "\"{name}\": \"{value}\", ",
+            "end": "}}",
+        } }))
         .unwrap();
         assert_eq!(format.call.begin_before, "{\"name\": \"");
         assert_eq!(format.call.end, "}}");

@@ -53,8 +53,7 @@ fn spec_example_success() {
 #[test]
 fn step_limit() {
     let function = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 3\ninitial = \"a\"\n\
-         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
+        r#"{ system = "s"; max_steps_total = 3; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
     let mut machine = Machine::new(&function);
@@ -68,8 +67,7 @@ fn no_step_limit() {
     // 0 is the no limit (AGL-021, D2): it never stops at the 50 the default
     // would set.
     let function = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 0\ninitial = \"a\"\n\
-         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
+        r#"{ system = "s"; max_steps_total = 0; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
     let mut machine = Machine::new(&function);
@@ -82,9 +80,11 @@ fn no_step_limit() {
 fn on_limit_chain() {
     // b's visits run out, so entering it leads to its on_limit c.
     let function = with_states(
-        "[state.a]\ntools.bash = {}\nnext = { else = \"b\" }\n\
-         [state.b]\ntools.bash = {}\nmax_visits = 1\non_limit = \"c\"\nnext = { else = \"a\" }\n\
-         [state.c]\nanswer = true",
+        r#"{
+          a = { tools.bash = { }; next.otherwise = "b"; };
+          b = { tools.bash = { }; max_visits = 1; on_limit = "c"; next.otherwise = "a"; };
+          c.answer = true;
+        }"#,
     )
     .unwrap();
     let mut machine = Machine::new(&function);
@@ -99,10 +99,11 @@ fn on_limit_chain() {
 #[test]
 fn leaving_resets_the_visit_steps() {
     let function = with_states(
-        "[state.a]\ntools.bash = {}\ntools.edit = {}\nmax_steps = 2\non_limit = \"c\"\n\
-         next = { edit = \"b\", else = \"a\" }\n\
-         [state.b]\ntools.bash = {}\nnext = { else = \"a\" }\n\
-         [state.c]\nanswer = true",
+        r#"{
+          a = { tools = { bash = { }; edit = { }; }; max_steps = 2; on_limit = "c"; next = { edit.any = "b"; otherwise = "a"; }; };
+          b = { tools.bash = { }; next.otherwise = "a"; };
+          c.answer = true;
+        }"#,
     )
     .unwrap();
     let mut machine = Machine::new(&function);
@@ -147,8 +148,7 @@ fn resuming_an_unfinished_turn() {
 #[test]
 fn resuming_counts_total_steps_anew() {
     let function = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 2\ninitial = \"a\"\n\
-         [state.a]\ntools.bash = {}\nanswer = true\nnext = { else = \"a\" }",
+        r#"{ system = "s"; max_steps_total = 2; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
     let turn = Unfinished {

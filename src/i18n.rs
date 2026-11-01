@@ -175,24 +175,26 @@ Options:
                       asking when another server runs
   -h, --help          print this help
 
-Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
+Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml and
+settings.nix):
   init                register the current directory as a project now; a
                       directory is registered at its first write otherwise
 
-Server (systemd user unit agentLIBRE-server-<project>; [server] in the
-project's agentLIBRE.toml over the one of the user):
+Server (systemd user unit agentLIBRE-server-<project>; the model of the
+Function, the url of its kind in `server` of settings.nix, the project's over
+the user's):
   server start        start the server and wait until it is ready; with
-                      --function, the server of that Function's [server] table
+                      --function, the server of that Function's model
   server stop         stop it and the whisper server of the project
   server status       show whether it runs and is ready (--function: the
                       server of that Function)
 
-Functions (the workspace's functions/, then the user's, then the built-ins;
-a Function's [server] table names its server kind and model):
+Functions (the workspace's functions/*.nix, then the user's, then the
+built-ins; a Function's model names its server kind and weights):
   function list               the Functions, each with its kind and model;
                               * marks the one the runs here load
   function use <name>         the runs here load <name>: `function` in the
-                              project's agentLIBRE.toml (--user: the user's)
+                              project's settings.nix (--user: the user's)
 
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
@@ -225,24 +227,25 @@ under XDG_DATA_HOME):
                       коли працює інший сервер
   -h, --help          показати цю довідку
 
-Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml):
+Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml і
+settings.nix):
   init                зареєструвати поточний каталог як проєкт зараз; інакше
                       каталог реєструється при першому записі
 
-Сервер (user-unit systemd agentLIBRE-server-<проєкт>; [server] у
-agentLIBRE.toml проєкту поверх файлу користувача):
+Сервер (user-unit systemd agentLIBRE-server-<проєкт>; модель Функції, url її
+виду в `server` у settings.nix, проєкту поверх користувача):
   server start        запустити сервер і дочекатися готовності; з
-                      --function — сервер таблиці [server] цієї Функції
+                      --function — сервер моделі цієї Функції
   server stop         зупинити його і whisper-сервер проєкту
   server status       показати, чи він працює і чи готовий (--function:
                       сервер цієї Функції)
 
-Функції (functions/ робочої області, потім користувача, потім вбудовані;
-таблиця [server] Функції називає вид її сервера і модель):
+Функції (functions/*.nix робочої області, потім користувача, потім
+вбудовані; модель Функції називає вид її сервера і ваги):
   function list               Функції, кожна з видом і моделлю; * позначає
                               ту, яку тут завантажують запуски
   function use <назва>        запуски тут завантажують <назва>: `function` у
-                              agentLIBRE.toml проєкту (--user: користувача)
+                              settings.nix проєкту (--user: користувача)
 
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
@@ -279,13 +282,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNCTION_NO_MODEL: Msg = Msg {
         en: "no model",
         uk: "без моделі",
-    };
-
-    /// `agl function list`: a Function without a `[server]` table runs on
-    /// the server of the settings (AGL-033, D3).
-    pub const FUNCTION_FROM_SETTINGS: Msg = Msg {
-        en: "(the settings' server)",
-        uk: "(сервер із налаштувань)",
     };
 
     /// `agl function list`: the Function hides others of the same name.
@@ -530,8 +526,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingServerUrl`.
     pub const MISSING_SERVER_URL: Msg = Msg {
-        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.llama]\nurl = \"http://HOST:PORT\"",
-        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.llama]\nurl = \"http://HOST:PORT\"",
+        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n{ agl, ... }: {\n  server.llama.url = \"http://HOST:PORT\";\n}",
+        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n{ agl, ... }: {\n  server.llama.url = \"http://HOST:PORT\";\n}",
     };
 
     /// `Error::InvalidName`.
@@ -627,8 +623,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingModel`.
     pub const MISSING_MODEL: Msg = Msg {
-        en: "the model is not set; add the name of a file in {models} to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.llama]\nmodel = \"NAME.gguf\"",
-        uk: "модель не задано; додай назву файлу з {models} у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.llama]\nmodel = \"NAME.gguf\"",
+        en: "the Function's model has no `weights`; name a file in {models} or another weights folder of {user_path} ({project_path} is the project's settings):\n\nmodel.weights = \"NAME.gguf\";",
+        uk: "у моделі Функції немає `weights`; вкажи файл із {models} або іншої теки ваг із {user_path} ({project_path} — налаштування проєкту):\n\nmodel.weights = \"NAME.gguf\";",
     };
 
     /// `Error::ModelNotFound`.
@@ -681,14 +677,14 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::PortBusy` without a running unit (D7).
     pub const PORT_BUSY: Msg = Msg {
-        en: "the address {url} is already in use by something that is not a unit of agl; free it or set another `url` in the project's [server]",
-        uk: "адреса {url} уже зайнята чимось, що не є unit-ом agl; звільни її або задай інший `url` у [server] проєкту",
+        en: "the address {url} is already in use by something that is not a unit of agl; free it or set another `server.llama.url` (or `server.strata.url`) in the project's settings.nix",
+        uk: "адреса {url} уже зайнята чимось, що не є unit-ом agl; звільни її або задай інший `server.llama.url` (чи `server.strata.url`) у settings.nix проєкту",
     };
 
     /// `Error::PortBusy` with running units (D7).
     pub const PORT_BUSY_UNITS: Msg = Msg {
-        en: "the address {url} is already in use; the server units that run: {units}. Stop the one that holds it (agl server stop) or set another `url` in the project's [server]",
-        uk: "адреса {url} уже зайнята; працюють unit-и серверів: {units}. Зупини той, що її тримає (agl server stop), або задай інший `url` у [server] проєкту",
+        en: "the address {url} is already in use; the server units that run: {units}. Stop the one that holds it (agl server stop) or set another `server.llama.url` (or `server.strata.url`) in the project's settings.nix",
+        uk: "адреса {url} уже зайнята; працюють unit-и серверів: {units}. Зупини той, що її тримає (agl server stop), або задай інший `server.llama.url` (чи `server.strata.url`) у settings.nix проєкту",
     };
 
     /// `Error::ServerRunning` (D13).
@@ -723,8 +719,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingStrataConfig` (AGL-033, D2).
     pub const MISSING_STRATA_CONFIG: Msg = Msg {
-        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.strata]\nstrata_config = \"/path/to/strata-config.json\"",
-        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[server.strata]\nstrata_config = \"/path/to/strata-config.json\"",
+        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project), in the Function's model:\n\nmodel.strata_config = \"/path/to/strata-config.json\";",
+        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів), у моделі Функції:\n\nmodel.strata_config = \"/path/to/strata-config.json\";",
     };
 
     /// `Error::StrataConfig` (AGL-033, D2).
@@ -759,8 +755,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::WhisperNotSet` (AGL-014, D22).
     pub const WHISPER_NOT_SET: Msg = Msg {
-        en: "an audio needs the whisper server, and `url` and `model` of [whisper] are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n[whisper]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"ggml-large-v3-q8_0.bin\"",
-        uk: "аудіо потребує whisper-сервера, а `url` і `model` у [whisper] задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n[whisper]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"ggml-large-v3-q8_0.bin\"",
+        en: "an audio needs the whisper server, and `url` and `model` of `whisper` are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
+        uk: "аудіо потребує whisper-сервера, а `url` і `model` у `whisper` задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
     };
 
     /// `Error::WhisperServerNotFound`.
@@ -795,8 +791,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::NoMultimodal` (AGL-014).
     pub const NO_MULTIMODAL: Msg = Msg {
-        en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in [server] of the project and restart it (agl server stop)",
-        uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у [server] проєкту і перезапусти його (agl server stop)",
+        en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in the model of the Function and restart it (agl server stop)",
+        uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у моделі Функції і перезапусти його (agl server stop)",
     };
 
     /// `Error::MediaChanged` (AGL-014, D7).
@@ -891,8 +887,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `FunctionProblem::BadTransitionKey`.
     pub const FUNC_BAD_TRANSITION_KEY: Msg = Msg {
-        en: "a transition key is a tool of the state, `tool.ok`/`.fail`/`.timeout`, or `else`",
-        uk: "ключ переходу — tool цього стану, `tool.ok`/`.fail`/`.timeout` або `else`",
+        en: "a transition is `next.<tool>.ok`/`.fail`/`.timeout`/`.any` of a tool of the state, or `next.otherwise`",
+        uk: "перехід — це `next.<tool>.ok`/`.fail`/`.timeout`/`.any` для tool цього стану або `next.otherwise`",
     };
 
     /// `FunctionProblem::MissingTransition`.
@@ -969,20 +965,35 @@ Forge (сховище артефактів робочої області, agentL
     /// The `[server]` table of a Function has no `model`, the key of the
     /// llama kind (AGL-033, D1).
     pub const FUNC_SERVER_MODEL_MISSING: Msg = Msg {
-        en: "the Function's [server] table needs model for the llama kind",
-        uk: "у таблиці [server] Функції має бути model для llama-виду",
+        en: "the model of the llama kind needs `weights`",
+        uk: "модель llama-виду потребує `weights`",
     };
     /// The `[server]` table of a Function has no `strata_config`, the key
     /// of the strata kind (AGL-033, D1).
     pub const FUNC_SERVER_STRATA_CONFIG_MISSING: Msg = Msg {
-        en: "the Function's [server] table needs strata_config for the strata kind",
-        uk: "у таблиці [server] Функції має бути strata_config для strata-виду",
+        en: "the model of the strata kind needs `strata_config`",
+        uk: "модель strata-виду потребує `strata_config`",
     };
     /// A key of the `[server]` table of a Function that does not apply to
     /// the kind of the project's `[server]` (AGL-033, D1).
+    pub const FUNC_NOT_ABSOLUTE: Msg = Msg {
+        en: "the path must be absolute",
+        uk: "шлях має бути абсолютним",
+    };
+
+    pub const FUNC_BAD_WEIGHTS_NAME: Msg = Msg {
+        en: "a weights file is a file name (looked for in the weights folders) or an absolute path",
+        uk: "файл ваг — це ім'я файлу (шукається в теках ваг) або абсолютний шлях",
+    };
+
+    pub const FUNC_SOURCE_WITHOUT_FILE: Msg = Msg {
+        en: "`source` names a file the model does not set",
+        uk: "`source` називає файл, якого модель не задає",
+    };
+
     pub const FUNC_SERVER_KEY_OF_OTHER_KIND: Msg = Msg {
-        en: "{key} belongs to the {kind} kind, not to the kind of the project's [server]",
-        uk: "{key} належить до {kind}-виду, не до виду [server] проєкту",
+        en: "{key} belongs to the {kind} kind, not to the model's `kind`",
+        uk: "{key} належить до {kind}-виду, не до `kind` цієї моделі",
     };
 
     /// `PatternErrorKind::Anchor`.
@@ -1550,6 +1561,36 @@ Forge (сховище артефактів робочої області, agentL
     pub const SERVER_STATUS_MISMATCH: Msg = Msg {
         en: " (mismatch)",
         uk: " (незбігається)",
+    };
+
+    /// The question of a weights file found nowhere (AGL-039, D24c).
+    pub const WEIGHTS_ASK: Msg = Msg {
+        en: "{name} is in none of the weights folders. In which folder is it? (an absolute path; empty stops)",
+        uk: "{name} немає в жодній теці ваг. У якій теці він? (абсолютний шлях; порожньо — зупинити)",
+    };
+
+    /// `Error::WeightsNotFound` (AGL-039, D24c).
+    pub const WEIGHTS_NOT_FOUND: Msg = Msg {
+        en: "{name} is in none of the weights folders ({folders}); put it in one of them, add its folder to `models` of {user_path}, or name it by an absolute path",
+        uk: "{name} немає в жодній теці ваг ({folders}); поклади його в одну з них, додай його теку до `models` у {user_path} або вкажи його абсолютним шляхом",
+    };
+
+    /// `Error::NixNotFound` (AGL-039, D38).
+    pub const NIX_NOT_FOUND: Msg = Msg {
+        en: "cannot run nix-instantiate: {source} (agl needs Nix)",
+        uk: "не вдалося запустити nix-instantiate: {source} (agl потребує Nix)",
+    };
+
+    /// `Error::NixEval` (AGL-039).
+    pub const NIX_EVAL: Msg = Msg {
+        en: "{path} does not evaluate:\n{detail}",
+        uk: "{path} не обчислюється:\n{detail}",
+    };
+
+    /// `Error::NixNotAFunction` (AGL-039, D8).
+    pub const NIX_NOT_A_FUNCTION: Msg = Msg {
+        en: "{path} is not a function of {{ agl, ... }}: write it as `{{ agl, ... }}: {{ … }}`",
+        uk: "{path} не є функцією від {{ agl, ... }}: пиши його як `{{ agl, ... }}: {{ … }}`",
     };
 
     /// `Error::ToolsDirMissing` (AGL-040).
@@ -2294,6 +2335,30 @@ impl Error {
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
+            Error::WeightsNotFound { name, folders } => {
+                let folders: Vec<String> =
+                    folders.iter().map(|folder| folder.display().to_string()).collect();
+                let user_path = crate::paths::Paths::from_env(|name| std::env::var_os(name))
+                    .map(|paths| paths.settings_file().display().to_string())
+                    .unwrap_or_else(|_| crate::settings::SETTINGS_FILE.into());
+                tr!(
+                    lang,
+                    m::WEIGHTS_NOT_FOUND,
+                    name = name,
+                    folders = folders.join(", "),
+                    user_path = user_path
+                )
+            }
+            Error::NixDirMissing => {
+                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)
+            }
+            Error::NixNotFound { source } => tr!(lang, m::NIX_NOT_FOUND, source = source),
+            Error::NixEval { path, detail } => {
+                tr!(lang, m::NIX_EVAL, path = path.display(), detail = detail)
+            }
+            Error::NixNotAFunction { path } => {
+                tr!(lang, m::NIX_NOT_A_FUNCTION, path = path.display())
+            }
             Error::ToolsDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::programs::TOOLS_VAR)
             }
@@ -2495,6 +2560,9 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
             let kind = if key == "strata_config" { "strata" } else { "llama" };
             tr!(lang, m::FUNC_SERVER_KEY_OF_OTHER_KIND, key = key, kind = kind)
         }
+        P::NotAbsolute => tr!(lang, m::FUNC_NOT_ABSOLUTE).to_string(),
+        P::BadWeightsName => tr!(lang, m::FUNC_BAD_WEIGHTS_NAME).to_string(),
+        P::SourceWithoutFile => tr!(lang, m::FUNC_SOURCE_WITHOUT_FILE).to_string(),
     }
 }
 

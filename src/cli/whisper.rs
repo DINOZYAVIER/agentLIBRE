@@ -45,7 +45,7 @@ impl WhisperServer {
         let (Some(url), Some(model)) = (&settings.url, &settings.model) else {
             return Err(Error::WhisperNotSet {
                 user_path: user_path.into(),
-                project_path: project.dir.join(crate::forge::MARKER_FILE),
+                project_path: project.dir.join(crate::settings::SETTINGS_FILE),
             });
         };
         Ok(WhisperServer {

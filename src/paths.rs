@@ -44,7 +44,7 @@ impl Paths {
         self.config.join(SETTINGS_FILE)
     }
 
-    /// User Functions, `functions/*.toml` (D39).
+    /// User Functions, `functions/*.nix` (D39; AGL-039, D10).
     pub fn functions(&self) -> PathBuf {
         self.config.join("functions")
     }
@@ -80,11 +80,6 @@ impl Paths {
     pub fn functions_dir(&self, name: &str) -> PathBuf {
         self.workspace_dir(name).join("functions")
     }
-
-    /// User model formats, `formats/*.toml` (D39).
-    pub fn formats(&self) -> PathBuf {
-        self.config.join("formats")
-    }
 }
 
 #[cfg(test)]
@@ -110,15 +105,11 @@ mod tests {
         );
         assert_eq!(
             paths.settings_file(),
-            PathBuf::from("/home/u/.config/agentLIBRE/agentLIBRE.toml")
+            PathBuf::from("/home/u/.config/agentLIBRE/settings.nix")
         );
         assert_eq!(
             paths.functions(),
             PathBuf::from("/home/u/.config/agentLIBRE/functions")
-        );
-        assert_eq!(
-            paths.formats(),
-            PathBuf::from("/home/u/.config/agentLIBRE/formats")
         );
         let name = "agl-lite-60af300abea6";
         assert_eq!(

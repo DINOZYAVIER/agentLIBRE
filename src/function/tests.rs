@@ -1,63 +1,71 @@
 use std::fs;
 
 use super::*;
+use crate::forge::testutil::TempDir;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 
-/// A multi-state Function used by the load and transition tests.
-pub const CODER: &str = r#"
-format = "qwen3.8"
-system = "You are a coding agent working in this repository."
-preserve_thinking = true
-max_steps_total = 50
-initial = "explore"
+/// The model of the test Functions: the built-in Qwen3.8 format on the
+/// llama kind (AGL-039, D17, D18).
+pub const MODEL: &str = r#"{ kind = "llama"; format = agl.formats."qwen3.8"; weights = "m.gguf"; }"#;
 
-[sampling]
-temperature = 1.0
-top_p = 0.95
-top_k = 20
+/// A multi-state policy used by the load and transition tests (AGL-039,
+/// D40: the nested transitions).
+pub const CODER: &str = r#"{
+  system = "You are a coding agent working in this repository.";
+  max_steps_total = 50;
+  initial = "explore";
+  state.explore = {
+    instruction = "Explore the code with bash. Call edit once you know what to change.";
+    tools = { bash = { }; edit = { }; };
+    max_steps = 15;
+    max_visits = 3;
+    on_limit = "answer";
+    next = { edit.any = "verify"; otherwise = "explore"; };
+  };
+  state.verify = {
+    instruction = "Only verification is available now: cargo test or cargo check with flags.";
+    tools.bash.command.pattern = "cargo (test|check)( --?[a-z-]+)*";
+    think = false;
+    max_visits = 3;
+    on_limit = "answer";
+    next.bash = { ok = "answer"; fail = "explore"; timeout = "answer"; };
+  };
+  state.answer = {
+    instruction = "Tools are not available. Summarize what was done and the check result.";
+    answer = true;
+  };
+}"#;
 
-[state.explore]
-instruction = "Explore the code with bash. Call edit once you know what to change."
-tools.bash = {}
-tools.edit = {}
-max_steps = 15
-max_visits = 3
-on_limit = "answer"
-next = { edit = "verify", else = "explore" }
-
-[state.verify]
-instruction = "Only verification is available now: cargo test or cargo check with flags."
-tools.bash = { command = { pattern = "cargo (test|check)( --?[a-z-]+)*" } }
-think = false
-max_visits = 3
-on_limit = "answer"
-next = { "bash.ok" = "answer", "bash.fail" = "explore", "bash.timeout" = "answer" }
-
-[state.answer]
-instruction = "Tools are not available. Summarize what was done and the check result."
-answer = true
-"#;
-
-/// Loads `text` as a Function with the built-in formats.
-pub fn function(text: &str) -> Result<Function, Error> {
-    let path = Path::new("f.toml");
-    Function::from_table(
-        path,
-        tomlfile::parse(path, text)?,
-        Path::new("/nonexistent"),
-    )
+/// Evaluates the Nix Function `source`, a function of `{ agl, ... }` (D8).
+pub fn evaluate(source: &str) -> Result<Function, Error> {
+    let path = Path::new("f.nix");
+    let value = nix::eval_with_agl(path, &format!("({source}) {{ inherit agl; }}"))?;
+    Function::from_value(path, value)
 }
 
-/// A Function whose states are `states`, starting in `a`.
+/// A Function whose policy is the Nix set `policy`, on `model`.
+pub fn function_on(policy: &str, model: &str) -> Result<Function, Error> {
+    evaluate(&format!("{{ agl, ... }}: {{ policy = {policy}; model = {model}; }}"))
+}
+
+/// A Function whose policy is the Nix set `policy`, on the test model.
+pub fn function(policy: &str) -> Result<Function, Error> {
+    function_on(policy, MODEL)
+}
+
+/// A Function whose states are the Nix set `states`, starting in `a`.
 pub fn with_states(states: &str) -> Result<Function, Error> {
-    function(&format!(
-        "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\n{states}"
-    ))
+    function(&format!(r#"{{ system = "s"; initial = "a"; state = {states}; }}"#))
 }
 
-/// A one-state Function with `body` in `[state.a]`.
+/// A one-state Function with the attributes `body` in `state.a`.
 fn one_state(body: &str) -> Result<Function, Error> {
-    with_states(&format!("[state.a]\n{body}\n"))
+    with_states(&format!("{{ a = {{ {body} }}; }}"))
+}
+
+/// A one-state answer-only policy with `extra` attributes.
+fn plain(extra: &str) -> String {
+    format!(r#"{{ system = "s"; initial = "a"; state.a.answer = true; {extra} }}"#)
 }
 
 fn problem_of(result: Result<Function, Error>) -> (String, FunctionProblem) {
@@ -71,10 +79,13 @@ fn state<'f>(function: &'f Function, name: &str) -> &'f State {
     function.states.iter().find(|s| s.name == name).unwrap()
 }
 
+fn none() -> &'static Path {
+    Path::new("/nonexistent")
+}
+
 #[test]
-fn builtin_minimal() {
-    let none = Path::new("/nonexistent");
-    let function = Function::load(none, none, none, "minimal").unwrap();
+fn builtin_gpu_high_minimal() {
+    let function = Function::load(none(), none(), "agentLIBRE-gpu-high-minimal").unwrap();
     assert_eq!(
         function.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -94,7 +105,6 @@ fn builtin_minimal() {
     assert_eq!(function.max_compact_tokens, 4096);
     // The early compaction is off unless set (AGL-038, D9).
     assert!(!function.compact_early);
-    assert_eq!(function.max_record_seconds, 60);
     assert_eq!(
         function.sampling,
         Sampling {
@@ -111,6 +121,21 @@ fn builtin_minimal() {
     assert_eq!(work.actions.tools, action::builtin_tools());
     assert!(work.actions.answer && work.think);
     assert_eq!(work.next("bash", Outcome::Timeout), function.initial);
+    // The model of D33 and D44 (AGL-039).
+    assert_eq!(
+        function.model,
+        ServerFile {
+            kind: Some("llama".into()),
+            model: Some("Qwen3.8-27B-UD-IQ4_XS.gguf".into()),
+            context: Some(131072),
+            spec_type: Some("draft-mtp".into()),
+            args: Some(["-ngl", "999", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"].map(String::from).to_vec()),
+            mmproj: Some("mmproj-Qwen3.8-27B-F16.gguf".into()),
+            mmproj_offload: Some(false),
+            ..ServerFile::default()
+        }
+    );
+    assert_eq!(function.path, Path::new("<built-in>/functions/agentLIBRE-gpu-high-minimal.nix"));
 }
 
 #[test]
@@ -152,20 +177,37 @@ fn spec_example() {
 }
 
 #[test]
+fn the_transitions_take_the_outcome_then_any_then_otherwise() {
+    // AGL-039, D40.
+    let function = with_states(
+        r#"{
+          a = { tools = { bash = { }; edit = { }; }; next = { bash = { ok = "b"; any = "c"; }; otherwise = "a"; }; };
+          b.answer = true;
+          c.answer = true;
+        }"#,
+    )
+    .unwrap();
+    let a = state(&function, "a");
+    assert_eq!(a.next("bash", Outcome::Ok), 1);
+    assert_eq!(a.next("bash", Outcome::Fail), 2);
+    assert_eq!(a.next("bash", Outcome::Timeout), 2);
+    assert_eq!(a.next("edit", Outcome::Ok), 0);
+}
+
+#[test]
 fn the_forge_has_no_switch() {
     // AGL-017, D5: `forge = …` is an unknown key, whatever its value.
     for value in ["false", "true", "\"on\""] {
         let result = function(&format!(
-            "format = \"qwen3.8\"\nforge = {value}\nsystem = \"s\"\ninitial = \"a\"\n\
-             [state.a]\ntools.bash = {{}}\nnext = {{ else = \"a\" }}\n"
+            r#"{{ forge = {value}; system = "s"; initial = "a"; state.a = {{ tools.bash = {{ }}; next.otherwise = "a"; }}; }}"#
         ));
         assert!(
-            matches!(&result, Err(Error::UnknownKey { key, .. }) if key == "forge"),
+            matches!(&result, Err(Error::UnknownKey { key, .. }) if key == "policy.forge"),
             "{value}: {result:?}"
         );
     }
     // And the forge is there without it.
-    let one = one_state("tools.bash = {}\nnext = { else = \"a\" }").unwrap();
+    let one = one_state(r#"tools.bash = { }; next.otherwise = "a";"#).unwrap();
     assert!(
         state(&one, "a")
             .actions
@@ -195,17 +237,16 @@ fn the_forge_tool_follows_the_states() {
 
 #[test]
 fn the_implicit_forge_keeps_the_state() {
-    // A `next` without `else` loads: the forge's outcomes are covered by
-    // the loop, a step in the same visit (Q2).
-    let one = one_state("tools.bash = {}\nnext = { bash = \"a\" }").unwrap();
+    // A `next` without `otherwise` loads: the forge's outcomes are covered
+    // by the loop, a step in the same visit (Q2).
+    let one = one_state(r#"tools.bash = { }; next.bash.any = "a";"#).unwrap();
     let a = state(&one, "a");
     assert_eq!(a.next("forge", Outcome::Ok), 0);
     assert_eq!(a.next("forge", Outcome::Fail), 0);
-    // A named forge key applies like any tool's; the unnamed outcomes
+    // A named forge outcome applies like any tool's; the unnamed outcomes
     // keep the state.
     let two = with_states(
-        "[state.a]\ntools.bash = {}\nnext = { bash = \"a\", \"forge.ok\" = \"b\", else = \"a\" }\n\
-         [state.b]\nanswer = true\n",
+        r#"{ a = { tools.bash = { }; next = { bash.any = "a"; forge.ok = "b"; otherwise = "a"; }; }; b.answer = true; }"#,
     )
     .unwrap();
     let a = state(&two, "a");
@@ -217,174 +258,213 @@ fn the_implicit_forge_keeps_the_state() {
 fn the_explicit_forge_tool() {
     // An explicit `tools.forge` is accepted: it is the way to give forge its
     // own transitions (AGL-011, Q3; AGL-017, D5).
-    let function = one_state("tools.forge = {}\nnext = { forge = \"a\", else = \"a\" }").unwrap();
+    let function = one_state(r#"tools.forge = { }; next = { forge.any = "a"; otherwise = "a"; };"#).unwrap();
     let a = state(&function, "a");
     assert_eq!(a.actions.tools.len(), 1);
     assert_eq!(a.actions.tools[0].name, "forge");
     assert_eq!(a.next("forge", Outcome::Ok), 0);
 }
 
+/// A Function file of the policy `policy` on the test model.
+fn file_text(policy: &str) -> String {
+    format!("{{ agl, ... }}: {{ policy = {policy}; model = {MODEL}; }}")
+}
+
 #[test]
 fn files_and_names() {
-    let dir = std::env::temp_dir().join(format!("agentLIBRE-function-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("minimal.toml"), CODER).unwrap();
-    let none = Path::new("/nonexistent");
-    let replaced = Function::load(&dir, none, none, "minimal");
-    let missing = Function::load(&dir, none, none, "coder");
-    fs::remove_dir_all(&dir).unwrap();
+    let dir = TempDir::new();
+    fs::write(dir.0.join("agentLIBRE-gpu-high.nix"), file_text(CODER)).unwrap();
+    let replaced = Function::load(&dir.0, none(), "agentLIBRE-gpu-high");
+    let missing = Function::load(&dir.0, none(), "coder");
     assert_eq!(replaced.unwrap().states.len(), 3);
     assert!(matches!(missing, Err(Error::FunctionNotFound { name, .. }) if name == "coder"));
     assert!(matches!(
-        Function::load(none, none, none, "../default"),
+        Function::load(none(), none(), "../default"),
         Err(Error::InvalidName(_))
+    ));
+    // A file that is not a function of `{ agl, ... }` (AGL-039, D8).
+    fs::write(dir.0.join("plain.nix"), format!("{{ policy = {CODER}; }}")).unwrap();
+    assert!(matches!(
+        Function::load(&dir.0, none(), "plain"),
+        Err(Error::NixNotAFunction { .. })
+    ));
+    // A file that does not evaluate names the file.
+    fs::write(dir.0.join("broken.nix"), "{ agl, ... }: { policy = ; }").unwrap();
+    assert!(matches!(
+        Function::load(&dir.0, none(), "broken"),
+        Err(Error::NixEval { path, .. }) if path == dir.0.join("broken.nix")
     ));
 }
 
 #[test]
 fn the_load_tiers() {
-    // AGL-028, D3: the workspace's functions directory, then the user's
-    // directory, then the built-ins; an absent directory is skipped.
-    let workspace = std::env::temp_dir().join(format!(
-        "agentLIBRE-function-tiers-w-{}",
-        std::process::id()
-    ));
-    let user = std::env::temp_dir().join(format!(
-        "agentLIBRE-function-tiers-u-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&workspace).unwrap();
-    fs::create_dir_all(&user).unwrap();
+    // AGL-028, D3; AGL-039, D10: the workspace's functions directory, then
+    // the user's directory, then the built-ins; an absent directory is
+    // skipped.
+    let workspace = TempDir::new();
+    let user = TempDir::new();
     let text = |system: &str| {
-        format!("format = \"qwen3.8\"\nsystem = \"{system}\"\ninitial = \"a\"\n[state.a]\nanswer = true\n")
+        file_text(&format!(r#"{{ system = "{system}"; initial = "a"; state.a.answer = true; }}"#))
     };
-    fs::write(workspace.join("same.toml"), text("workspace")).unwrap();
-    fs::write(user.join("same.toml"), text("user")).unwrap();
-    fs::write(user.join("user-only.toml"), text("user only")).unwrap();
-    let none = Path::new("/nonexistent");
-    let workspace_wins = Function::load(&workspace, &user, none, "same").unwrap();
+    fs::write(workspace.0.join("same.nix"), text("workspace")).unwrap();
+    fs::write(user.0.join("same.nix"), text("user")).unwrap();
+    fs::write(user.0.join("user-only.nix"), text("user only")).unwrap();
+    let workspace_wins = Function::load(&workspace.0, &user.0, "same").unwrap();
     assert_eq!(workspace_wins.system, "workspace");
-    let user_over_builtin = Function::load(&workspace, &user, none, "user-only").unwrap();
+    let user_over_builtin = Function::load(&workspace.0, &user.0, "user-only").unwrap();
     assert_eq!(user_over_builtin.system, "user only");
-    let built_in = Function::load(&workspace, &user, none, "minimal").unwrap();
+    let built_in = Function::load(&workspace.0, &user.0, "agentLIBRE-gpu-high-minimal").unwrap();
     assert_eq!(
         built_in.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
-    let skipped = Function::load(none, &user, none, "same").unwrap();
+    let skipped = Function::load(none(), &user.0, "same").unwrap();
     assert_eq!(skipped.system, "user");
-    let missing = Function::load(&workspace, &user, none, "no-such");
+    let missing = Function::load(&workspace.0, &user.0, "no-such");
     assert!(matches!(
         missing,
         Err(Error::FunctionNotFound { ref name, ref paths })
-            if name == "no-such" && paths[0] == *workspace && paths[1] == *user
+            if name == "no-such" && paths[0] == workspace.0 && paths[1] == user.0
     ));
-    fs::remove_dir_all(&workspace).unwrap();
-    fs::remove_dir_all(&user).unwrap();
 }
 
 #[test]
 fn top_level_errors() {
+    // Exactly `policy` and `model`, both required (AGL-039, D17, D21).
     assert!(matches!(
-        function("system = \"s\"\ninitial = \"a\"\n[state.a]\nanswer = true"),
-        Err(Error::MissingKey { key, .. }) if key == "format"
+        evaluate(&format!("{{ agl, ... }}: {{ policy = {}; }}", plain(""))),
+        Err(Error::MissingKey { key, .. }) if key == "model"
     ));
     assert!(matches!(
-        function("format = \"qwen3.8\"\ninitial = \"a\"\n[state.a]\nanswer = true"),
-        Err(Error::MissingKey { key, .. }) if key == "system"
+        evaluate(&format!("{{ agl, ... }}: {{ model = {MODEL}; }}")),
+        Err(Error::MissingKey { key, .. }) if key == "policy"
     ));
     assert!(matches!(
-        function("format = \"gemma\"\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\nanswer = true"),
-        Err(Error::FormatNotFound { .. })
+        evaluate(&format!("{{ agl, ... }}: {{ policy = {}; model = {MODEL}; server = {{ }}; }}", plain(""))),
+        Err(Error::UnknownKey { key, .. }) if key == "server"
     ));
     assert!(matches!(
-        one_state("answer = true\nmodel = 1"),
-        Err(Error::UnknownKey { key, .. }) if key == "state.a.model"
+        function(r#"{ initial = "a"; state.a.answer = true; }"#),
+        Err(Error::MissingKey { key, .. }) if key == "policy.system"
+    ));
+    assert!(matches!(
+        function_on(&plain(""), r#"{ kind = "llama"; weights = "m.gguf"; }"#),
+        Err(Error::MissingKey { key, .. }) if key == "model.format"
+    ));
+    assert!(matches!(
+        one_state("answer = true; model = 1;"),
+        Err(Error::UnknownKey { key, .. }) if key == "policy.state.a.model"
     ));
     assert_eq!(
-        problem_of(function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"b\"\n[state.a]\nanswer = true"
-        )),
-        ("initial".into(), FunctionProblem::UnknownState("b".into()))
+        problem_of(function(r#"{ system = "s"; initial = "b"; state.a.answer = true; }"#)),
+        ("policy.initial".into(), FunctionProblem::UnknownState("b".into()))
     );
     let sampling = |body: &str| {
-        function(&format!(
-            "format = \"qwen3.8\"\nsystem = \"s\"\ninitial = \"a\"\n[sampling]\n{body}\n\
-             [state.a]\nanswer = true"
-        ))
+        function_on(
+            &plain(""),
+            &format!(r#"{{ format = agl.formats."qwen3.8"; weights = "m.gguf"; sampling = {{ {body} }}; }}"#),
+        )
     };
     assert!(matches!(
-        sampling("seed = 1"),
-        Err(Error::UnknownKey { key, .. }) if key == "sampling.seed"
+        sampling("seed = 1;"),
+        Err(Error::UnknownKey { key, .. }) if key == "model.sampling.seed"
     ));
     assert!(matches!(
-        sampling("top_k = 2.5"),
-        Err(Error::WrongType { key, .. }) if key == "sampling.top_k"
+        sampling("top_k = 2.5;"),
+        Err(Error::WrongType { key, .. }) if key == "model.sampling.top_k"
     ));
     assert_eq!(
-        sampling("temperature = 1").unwrap().sampling.temperature,
+        sampling("temperature = 1;").unwrap().sampling.temperature,
         Some(1.0)
     );
     // 0 is the no limit (AGL-021, D2); the absent key keeps the 50 (D40).
+    assert_eq!(function(&plain("max_steps_total = 0;")).unwrap().max_steps_total, None);
     assert_eq!(
-        function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = 0\ninitial = \"a\"\n\
-             [state.a]\nanswer = true"
-        )
-        .unwrap()
-        .max_steps_total,
-        None
+        problem_of(function(&plain("max_steps_total = -1;"))),
+        ("policy.max_steps_total".into(), FunctionProblem::NotPositive)
     );
-    assert_eq!(
-        problem_of(function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_steps_total = -1\ninitial = \"a\"\n\
-             [state.a]\nanswer = true"
-        )),
-        ("max_steps_total".into(), FunctionProblem::NotPositive)
-    );
-    let compaction = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact = \"Sum up.\"\nmax_compact_tokens = 512\n\
-         initial = \"a\"\n[state.a]\nanswer = true",
-    )
-    .unwrap();
+    let compaction = function(&plain(r#"compact = "Sum up."; max_compact_tokens = 512;"#)).unwrap();
     assert_eq!(
         (compaction.compact.as_str(), compaction.max_compact_tokens),
         ("Sum up.", 512)
     );
-    // `compact_early` (AGL-038, D9): a boolean.
-    let early = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact_early = true\ninitial = \"a\"\n\
-         [state.a]\nanswer = true",
-    )
-    .unwrap();
-    assert!(early.compact_early);
-    assert!(function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\ncompact_early = \"yes\"\ninitial = \"a\"\n\
-         [state.a]\nanswer = true"
-    )
-    .is_err());
     assert_eq!(
-        problem_of(function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_compact_tokens = 0\ninitial = \"a\"\n\
-             [state.a]\nanswer = true"
-        )),
-        ("max_compact_tokens".into(), FunctionProblem::NotPositive)
+        problem_of(function(&plain("max_compact_tokens = 0;"))),
+        ("policy.max_compact_tokens".into(), FunctionProblem::NotPositive)
     );
-    // The longest voice recording (AGL-016, D5, D8): 60 s unless set.
-    assert_eq!(function(CODER).unwrap().max_record_seconds, 60);
-    let recording = function(
-        "format = \"qwen3.8\"\nsystem = \"s\"\nmax_record_seconds = 15\ninitial = \"a\"\n\
-         [state.a]\nanswer = true",
-    )
-    .unwrap();
-    assert_eq!(recording.max_record_seconds, 15);
+    // The keys of the model (AGL-039, D2): `compact_early` a boolean.
+    let model = |extra: &str| {
+        function_on(
+            &plain(""),
+            &format!(r#"{{ format = agl.formats."qwen3.8"; weights = "m.gguf"; {extra} }}"#),
+        )
+    };
+    assert!(model("compact_early = true;").unwrap().compact_early);
+    assert!(model(r#"compact_early = "yes";"#).is_err());
+    assert_eq!(model("max_stirs = 0;").unwrap().max_stirs, 0);
+    assert!(!model("preserve_thinking = false;").unwrap().preserve_thinking);
+    // The policy has none of them, nor the voice limit (AGL-039, D20).
+    for key in ["compact_early = true;", "max_record_seconds = 15;", "sampling = { };"] {
+        assert!(
+            matches!(function(&plain(key)), Err(Error::UnknownKey { .. })),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn the_model_is_checked_against_its_kind() {
+    // AGL-033, D1; AGL-036, D5; AGL-039, D19, D21, D24.
+    let model = |body: &str| function_on(&plain(""), &format!(r#"{{ format = agl.formats."qwen3.8"; {body} }}"#));
+    let llama = model(r#"weights = "m.gguf"; context = 4096; mmproj = "p.gguf";"#).unwrap();
+    assert_eq!(llama.model.kind(), ServerKind::Llama);
+    assert_eq!(llama.model.model.as_deref(), Some("m.gguf"));
     assert_eq!(
-        problem_of(function(
-            "format = \"qwen3.8\"\nsystem = \"s\"\nmax_record_seconds = 0\ninitial = \"a\"\n\
-             [state.a]\nanswer = true"
-        )),
-        ("max_record_seconds".into(), FunctionProblem::NotPositive)
+        problem_of(model("context = 4096;")),
+        ("model.weights".into(), FunctionProblem::ServerModelMissing)
     );
+    assert_eq!(
+        problem_of(model(r#"weights = "m.gguf"; strata_config = "/s.json";"#)),
+        (
+            "model.strata_config".into(),
+            FunctionProblem::ServerKeyOfOtherKind("strata_config".into())
+        )
+    );
+    let strata = model(r#"kind = "strata"; strata_config = "/s.json"; compact_early = true;"#).unwrap();
+    assert_eq!(strata.model.kind(), ServerKind::Strata);
+    assert_eq!(strata.model.strata_config.as_deref(), Some("/s.json"));
+    assert_eq!(
+        problem_of(model(r#"kind = "strata"; strata_config = "/s.json"; weights = "m.gguf";"#)),
+        ("model.weights".into(), FunctionProblem::ServerKeyOfOtherKind("weights".into()))
+    );
+    assert_eq!(
+        problem_of(model(r#"kind = "strata";"#)),
+        ("model.strata_config".into(), FunctionProblem::ServerStrataConfigMissing)
+    );
+    assert_eq!(
+        problem_of(model(r#"kind = "strata"; strata_config = "s.json";"#)),
+        ("model.strata_config".into(), FunctionProblem::NotAbsolute)
+    );
+    assert!(matches!(model(r#"kind = "gemma"; weights = "m.gguf";"#), Err(Error::UnknownServerKind { .. })));
+    // A weights file is a file name or an absolute path (D24a).
+    assert!(model(r#"weights = "/w/m.gguf";"#).is_ok());
+    for name in ["dir/m.gguf", ".m", ""] {
+        assert_eq!(
+            problem_of(model(&format!(r#"weights = "{name}";"#))),
+            ("model.weights".into(), FunctionProblem::BadWeightsName),
+            "{name}"
+        );
+    }
+    // `source` names the files the model sets (D5).
+    assert!(model(r#"weights = "m.gguf"; mmproj = "p.gguf"; source = { weights = "https://x/m"; mmproj = "https://x/p"; };"#).is_ok());
+    assert_eq!(
+        problem_of(model(r#"weights = "m.gguf"; source.draft = "https://x/d";"#)),
+        ("model.source.draft".into(), FunctionProblem::SourceWithoutFile)
+    );
+    assert!(matches!(
+        model(r#"weights = "m.gguf"; source.model = "https://x/m";"#),
+        Err(Error::UnknownKey { key, .. }) if key == "model.source.model"
+    ));
 }
 
 #[test]
@@ -395,101 +475,101 @@ fn state_errors() {
         kind: PatternErrorKind::Anchor,
     };
     let cases = [
-        ("instruction = \"x\"", "state.a", NoActions),
+        (r#"instruction = "x";"#, "policy.state.a", NoActions),
         (
-            "answer = true\nnext = { else = \"a\" }",
-            "state.a.next",
+            r#"answer = true; next.otherwise = "a";"#,
+            "policy.state.a.next",
             NextWithoutTools,
         ),
         (
-            "tools.bash = {}\nnext = { cat = \"a\" }",
-            "state.a.next.cat",
+            r#"tools.bash = { }; next.cat.any = "a";"#,
+            "policy.state.a.next.cat",
             BadTransitionKey,
         ),
         (
-            "tools.bash = {}\nnext = { \"bash.oops\" = \"a\" }",
-            "state.a.next.bash.oops",
+            r#"tools.bash = { }; next.bash.oops = "a";"#,
+            "policy.state.a.next.bash.oops",
             BadTransitionKey,
         ),
         (
-            "tools.edit = {}\nnext = { \"edit.timeout\" = \"a\" }",
-            "state.a.next.edit.timeout",
+            r#"tools.edit = { }; next.edit.timeout = "a";"#,
+            "policy.state.a.next.edit.timeout",
             BadTransitionKey,
         ),
         (
-            "tools.bash = {}\nnext = { edit = \"a\", else = \"a\" }",
-            "state.a.next.edit",
+            r#"tools.bash = { }; next = { edit.any = "a"; otherwise = "a"; };"#,
+            "policy.state.a.next.edit",
             BadTransitionKey,
         ),
         (
-            "tools.bash = {}\nnext = { \"bash.ok\" = \"a\" }",
-            "state.a.next",
+            r#"tools.bash = { }; next.bash.ok = "a";"#,
+            "policy.state.a.next",
             MissingTransition {
                 tool: "bash".into(),
                 outcome: "fail",
             },
         ),
         (
-            "tools.bash = {}",
-            "state.a.next",
+            "tools.bash = { };",
+            "policy.state.a.next",
             MissingTransition {
                 tool: "bash".into(),
                 outcome: "ok",
             },
         ),
         (
-            "tools.bash = {}\nnext = { else = \"b\" }",
-            "state.a.next.else",
+            r#"tools.bash = { }; next.otherwise = "b";"#,
+            "policy.state.a.next.otherwise",
             UnknownState("b".into()),
         ),
         (
-            "answer = true\nmax_steps = 0\non_limit = \"a\"",
-            "state.a.max_steps",
+            r#"answer = true; max_steps = 0; on_limit = "a";"#,
+            "policy.state.a.max_steps",
             NotPositive,
         ),
         (
-            "answer = true\non_limit = \"a\"",
-            "state.a.on_limit",
+            r#"answer = true; on_limit = "a";"#,
+            "policy.state.a.on_limit",
             OnLimitWithoutLimit,
         ),
         (
-            "answer = true\nmax_visits = 1\non_limit = \"a\"",
-            "state.a.on_limit",
+            r#"answer = true; max_visits = 1; on_limit = "a";"#,
+            "policy.state.a.on_limit",
             OnLimitCycle,
         ),
         (
-            "tools.bash = { command = { pattern = \"^ls\" } }\nnext = { else = \"a\" }",
-            "state.a.tools.bash.command.pattern",
+            r#"tools.bash.command.pattern = "^ls"; next.otherwise = "a";"#,
+            "policy.state.a.tools.bash.command.pattern",
             Pattern(anchor),
         ),
         (
-            "tools.bash = { command = { pattern = \"[^;]*\" } }\nnext = { else = \"a\" }",
-            "state.a.tools.bash.command.pattern",
+            r#"tools.bash.command.pattern = "[^;]*"; next.otherwise = "a";"#,
+            "policy.state.a.tools.bash.command.pattern",
             PatternMayEndValue { end: '\n' },
         ),
         (
-            "tools.edit = { path = { enum = [] } }\nnext = { else = \"a\" }",
-            "state.a.tools.edit.path.enum",
+            r#"tools.edit.path.enum = [ ]; next.otherwise = "a";"#,
+            "policy.state.a.tools.edit.path.enum",
             EmptyEnum,
         ),
         (
-            "tools.edit = { path = { enum = [\"a\"], pattern = \"a\" } }\nnext = { else = \"a\" }",
-            "state.a.tools.edit.path",
+            r#"tools.edit.path = { enum = [ "a" ]; pattern = "a"; }; next.otherwise = "a";"#,
+            "policy.state.a.tools.edit.path",
             ConstraintKeys,
         ),
         (
-            "tools.edit = { path = {} }\nnext = { else = \"a\" }",
-            "state.a.tools.edit.path",
+            r#"tools.edit.path = { }; next.otherwise = "a";"#,
+            "policy.state.a.tools.edit.path",
             ConstraintKeys,
         ),
         (
-            "tools.bash = { timeout = { int = { min = 0, max = 5 } } }\nnext = { else = \"a\" }",
-            "state.a.tools.bash.timeout.int",
+            r#"tools.bash.timeout.int = { min = 0; max = 5; }; next.otherwise = "a";"#,
+            "policy.state.a.tools.bash.timeout.int",
             BadRange,
         ),
         (
-            "tools.bash = { timeout = { int = { min = 9, max = 5 } } }\nnext = { else = \"a\" }",
-            "state.a.tools.bash.timeout.int",
+            r#"tools.bash.timeout.int = { min = 9; max = 5; }; next.otherwise = "a";"#,
+            "policy.state.a.tools.bash.timeout.int",
             BadRange,
         ),
     ];
@@ -500,44 +580,49 @@ fn state_errors() {
             "{body}"
         );
     }
+    // `next.<tool>` is always a set (AGL-039, D41).
+    assert!(matches!(
+        one_state(r#"tools.bash = { }; next.bash = "a";"#),
+        Err(Error::WrongType { key, .. }) if key == "policy.state.a.next.bash"
+    ));
 }
 
 #[test]
 fn key_errors() {
     for (body, key) in [
-        ("tools.cat = {}", "state.a.tools.cat"),
-        ("tools.bash = { cmd = {} }", "state.a.tools.bash.cmd"),
+        ("tools.cat = { };", "policy.state.a.tools.cat"),
+        ("tools.bash.cmd = { };", "policy.state.a.tools.bash.cmd"),
         (
-            "tools.edit = { path = { regex = \"a\" } }",
-            "state.a.tools.edit.path.regex",
+            r#"tools.edit.path.regex = "a";"#,
+            "policy.state.a.tools.edit.path.regex",
         ),
         (
-            "tools.bash = { timeout = { pattern = \"1\" } }",
-            "state.a.tools.bash.timeout.pattern",
+            r#"tools.bash.timeout.pattern = "1";"#,
+            "policy.state.a.tools.bash.timeout.pattern",
         ),
     ] {
-        let result = one_state(&format!("{body}\nnext = {{ else = \"a\" }}"));
+        let result = one_state(&format!(r#"{body} next.otherwise = "a";"#));
         assert!(
             matches!(&result, Err(Error::UnknownKey { key: k, .. }) if k == key),
             "{body}: {result:?}"
         );
     }
     assert!(matches!(
-        one_state("answer = true\nmax_steps = 2"),
-        Err(Error::MissingKey { key, .. }) if key == "state.a.on_limit"
+        one_state("answer = true; max_steps = 2;"),
+        Err(Error::MissingKey { key, .. }) if key == "policy.state.a.on_limit"
     ));
     assert!(matches!(
-        one_state("tools.bash = { timeout = { int = { min = 1 } } }\nnext = { else = \"a\" }"),
-        Err(Error::MissingKey { key, .. }) if key == "state.a.tools.bash.timeout.int.max"
+        one_state(r#"tools.bash.timeout.int.min = 1; next.otherwise = "a";"#),
+        Err(Error::MissingKey { key, .. }) if key == "policy.state.a.tools.bash.timeout.int.max"
     ));
 }
 
 #[test]
 fn constraints_are_read() {
     let function = one_state(
-        "tools.bash = { timeout = { int = { min = 5, max = 3600 } } }\n\
-         tools.edit = { path = { enum = [\"src/lib.rs\"] } }\n\
-         next = { else = \"a\" }",
+        r#"tools.bash.timeout.int = { min = 5; max = 3600; };
+           tools.edit.path.enum = [ "src/lib.rs" ];
+           next.otherwise = "a";"#,
     )
     .unwrap();
     let tools = &function.states[0].actions.tools;
@@ -556,51 +641,38 @@ fn constraints_are_read() {
 fn graph_errors() {
     assert_eq!(
         problem_of(with_states(
-            "[state.a]\nanswer = true\nmax_visits = 1\non_limit = \"b\"\n\
-             [state.b]\nanswer = true\nmax_visits = 1\non_limit = \"a\""
+            r#"{ a = { answer = true; max_visits = 1; on_limit = "b"; }; b = { answer = true; max_visits = 1; on_limit = "a"; }; }"#
         )),
-        ("state.a.on_limit".into(), FunctionProblem::OnLimitCycle)
+        ("policy.state.a.on_limit".into(), FunctionProblem::OnLimitCycle)
     );
     assert_eq!(
-        problem_of(with_states(
-            "[state.a]\nanswer = true\n[state.z]\nanswer = true"
-        )),
-        ("state.z".into(), FunctionProblem::Unreachable)
+        problem_of(with_states("{ a.answer = true; z.answer = true; }")),
+        ("policy.state.z".into(), FunctionProblem::Unreachable)
     );
     // A state reached only through `on_limit` is reachable.
     with_states(
-        "[state.a]\ntools.bash = {}\nmax_steps = 2\non_limit = \"z\"\nnext = { else = \"a\" }\n\
-         [state.z]\nanswer = true",
+        r#"{ a = { tools.bash = { }; max_steps = 2; on_limit = "z"; next.otherwise = "a"; }; z.answer = true; }"#,
     )
     .unwrap();
 }
 
 #[test]
 fn thinking_and_formats() {
-    let dir = std::env::temp_dir().join(format!("agentLIBRE-plain-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("plain.toml"),
-        "[call]\nbegin = \"<c {name}>\"\nparam = \"<p {name}>{value}</p>\"\nend = \"</c>\"\n",
-    )
-    .unwrap();
+    // A format of the Function's own, without thinking (AGL-039, D18).
+    let plain_format = r#"{ call = { begin = "<c {name}>"; param = "<p {name}>{value}</p>"; end = "</c>"; }; }"#;
     let load = |think: &str| {
-        let text = format!(
-            "format = \"plain\"\nsystem = \"s\"\ninitial = \"a\"\n[state.a]\nanswer = true\n{think}"
-        );
-        let path = Path::new("f.toml");
-        Function::from_table(path, tomlfile::parse(path, &text).unwrap(), &dir)
+        function_on(
+            &format!(r#"{{ system = "s"; initial = "a"; state.a = {{ answer = true; {think} }}; }}"#),
+            &format!(r#"{{ format = {plain_format}; weights = "m.gguf"; }}"#),
+        )
     };
-    let default = load("");
-    let explicit = load("think = true");
-    fs::remove_dir_all(&dir).unwrap();
-    assert!(!default.unwrap().states[0].think);
+    assert!(!load("").unwrap().states[0].think);
     assert_eq!(
-        problem_of(explicit),
+        problem_of(load("think = true;")),
         (
-            "state.a.think".into(),
+            "policy.state.a.think".into(),
             FunctionProblem::NoThinking {
-                format: "plain".into()
+                format: "model.format".into()
             }
         )
     );
@@ -608,49 +680,43 @@ fn thinking_and_formats() {
 
 #[test]
 fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
-    let f = function(
-        "format = \"qwen3.8\"\nmax_action_tokens = 500\n\
-         system = \"Prefix {runtime_prefix}, at most {max_action_tokens} tokens, keep {x} and {{y}}.\"\n\
-         initial = \"a\"\n[state.a]\nanswer = true",
-    )
+    let f = function(&format!(
+        "{{ max_action_tokens = 500; system = {}; initial = \"a\"; state.a.answer = true; }}",
+        nix::string("Prefix {runtime_prefix}, at most {max_action_tokens} tokens, keep {x} and {{y}}.")
+    ))
     .unwrap();
     assert_eq!(
         f.system,
         "Prefix [agentLIBRE runtime], at most 500 tokens, keep {x} and {{y}}."
     );
     // Without the default limit set, the default is told.
-    let g = function(
-        "format = \"qwen3.8\"\nsystem = \"{max_action_tokens}\"\ninitial = \"a\"\n\
-         [state.a]\nanswer = true",
-    )
-    .unwrap();
+    let g = function(r#"{ system = "{max_action_tokens}"; initial = "a"; state.a.answer = true; }"#).unwrap();
     assert_eq!(g.system, "8192");
 }
 
 #[test]
 fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
-    let none = Path::new("/nonexistent");
-    let minimal = Function::load(none, none, none, "minimal").unwrap();
-    let agentlibre = Function::load(none, none, none, "agentLIBRE").unwrap();
-    // `minimal` is laconic and nameless (AGL-018, D1, AGL-020, D1).
-    // `agentLIBRE` is the persona and the runtime part: the prefix and the
-    // size of an action (AGL-009, AGL-018, D2, AGL-020, D2).
+    let high = Function::load(none(), none(), "agentLIBRE-gpu-high").unwrap();
+    let minimal = Function::load(none(), none(), "agentLIBRE-gpu-high-minimal").unwrap();
+    // `minimal` is laconic and nameless (AGL-018, D1; AGL-039, D31). The
+    // other is the persona and the runtime part: the prefix and the size
+    // of an action (AGL-009, AGL-018, D2).
     assert_eq!(
         minimal.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
-    assert!(agentlibre.system.starts_with("You are DinoBot"));
-    assert!(agentlibre.system.contains(
+    assert!(high.system.starts_with("You are DinoBot"));
+    assert!(high.system.contains(
         "Messages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
          not from the human. One action holds at most 8192 tokens; write a large file in parts."
     ));
-    assert!(!agentlibre.system.contains('{'));
+    assert!(!high.system.contains('{'));
     // The step limit differs too: `minimal` keeps the 50 of the absent key
-    // (D40); `agentLIBRE` is unlimited (AGL-021, D1).
+    // (D40); the other is unlimited (AGL-021, D1).
     assert_eq!(minimal.max_steps_total, Some(50));
-    assert_eq!(agentlibre.max_steps_total, None);
-    // The rest is the same: the states and the tools.
-    assert_eq!(minimal.states.len(), agentlibre.states.len());
+    assert_eq!(high.max_steps_total, None);
+    // The rest is the same: the states, the tools, the model.
+    assert_eq!(minimal.states.len(), high.states.len());
     let tools = |f: &Function| -> Vec<String> {
         f.states[f.initial]
             .actions
@@ -659,13 +725,19 @@ fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
             .map(|t| t.name.clone())
             .collect()
     };
-    assert_eq!(tools(&minimal), tools(&agentlibre));
-    assert_eq!(minimal.sampling, agentlibre.sampling);
+    assert_eq!(tools(&minimal), tools(&high));
+    assert_eq!(minimal.sampling, high.sampling);
+    assert_eq!(minimal.model, high.model);
+    // They are the built-ins there are (AGL-039, D28).
+    assert_eq!(
+        builtin_names().unwrap(),
+        ["agentLIBRE-gpu-high", "agentLIBRE-gpu-high-minimal"]
+    );
 }
 
 #[test]
 fn the_search_tool_is_read_with_its_parameters_and_constraints() {
-    let function = one_state("tools.search = {}\nanswer = true\nnext = { else = \"a\" }").unwrap();
+    let function = one_state(r#"tools.search = { }; answer = true; next.otherwise = "a";"#).unwrap();
     let tool = function.states[0]
         .actions
         .tools
@@ -689,20 +761,20 @@ fn the_search_tool_is_read_with_its_parameters_and_constraints() {
     );
     // A Function may narrow them, as it narrows the others.
     let narrowed = one_state(
-        "tools.search = { source = { enum = [\"wikipedia\"] }, limit = { int = { min = 1, max = 3 } } }\nanswer = true\nnext = { else = \"a\" }",
+        r#"tools.search = { source.enum = [ "wikipedia" ]; limit.int = { min = 1; max = 3; }; }; answer = true; next.otherwise = "a";"#,
     )
     .unwrap();
     let tool = narrowed.states[0].actions.tools.iter().find(|t| t.name == "search").unwrap();
     assert_eq!(tool.params[3].constraint, Constraint::OneOf(vec!["wikipedia".into()]));
     assert_eq!(tool.params[1].constraint, Constraint::Int { min: 1, max: 3 });
     // A parameter the tool has not is an error, as for the others.
-    assert!(one_state("tools.search = { path = {} }\nanswer = true").is_err());
+    assert!(one_state("tools.search.path = { }; answer = true;").is_err());
 }
 
 #[test]
 fn the_built_in_functions_have_the_search_tool() {
-    for name in ["minimal", "agentLIBRE"] {
-        let function = Function::load(Path::new("/none"), Path::new("/none"), Path::new("/none"), name).unwrap();
+    for name in builtin_names().unwrap() {
+        let function = Function::load(none(), none(), &name).unwrap();
         let tools: Vec<&str> = function.states[function.initial]
             .actions
             .tools
@@ -716,8 +788,10 @@ fn the_built_in_functions_have_the_search_tool() {
 #[test]
 fn without_a_tool_the_state_loses_it_and_keeps_an_action() {
     let mut function = with_states(
-        "[state.a]\ntools.search = {}\nnext = { else = \"b\" }\n\
-         [state.b]\ntools.bash = {}\ntools.search = {}\nanswer = true\nnext = { else = \"b\" }\n",
+        r#"{
+          a = { tools.search = { }; next.otherwise = "b"; };
+          b = { tools = { bash = { }; search = { }; }; answer = true; next.otherwise = "b"; };
+        }"#,
     )
     .unwrap();
     function.without_tool("search");
@@ -732,7 +806,7 @@ fn without_a_tool_the_state_loses_it_and_keeps_an_action() {
         assert!(state.actions.answer || !state.actions.tools.is_empty());
     }
     // A state whose only tool goes gets the answer in its place.
-    let mut only = with_states("[state.a]\ntools.search = {}\nnext = { else = \"a\" }\n").unwrap();
+    let mut only = with_states(r#"{ a = { tools.search = { }; next.otherwise = "a"; }; }"#).unwrap();
     only.states[0].actions.tools.retain(|t| t.name == "search");
     only.without_tool("search");
     assert!(only.states[0].actions.tools.is_empty());

@@ -626,7 +626,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         dock.clone(),
         Arc::new(crate::cli::whisper::Voice::of(autostart)),
         Box::new(crate::record::start),
-        function.max_record_seconds,
+        repl.max_record_seconds,
         lang,
         theme.clone(),
     ));
@@ -1211,7 +1211,7 @@ mod tests {
         let f = fixture();
         f.type_text("say ");
         f.input.key(Key::Ctrl('r'));
-        // The limit is the Function's (D5); the whisper unit is started
+        // The limit is the settings' (D5; AGL-039, D20); the whisper unit is started
         // while the human speaks (D6); the dock says so (D9).
         assert_eq!(f.fake.log()[0], "start 60");
         eventually("warm up", || f.fake.log().contains(&"warm".to_string()));
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn what_compact_tells() {
         let none = Path::new("/none");
-        let function = Function::load(none, none, none, "minimal").unwrap();
+        let function = Function::load(none, none, "agentLIBRE-gpu-high-minimal").unwrap();
         let notice = |result| compact_notice(result, &function, Lang::En);
         assert_eq!(notice(Ok(Compaction::Done)), None);
         assert_eq!(
@@ -1588,6 +1588,7 @@ mod tests {
             tool_lines: 2,
             tool_chars: 20,
             frame: true,
+            max_record_seconds: 60,
         };
         let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
         presenter.begin_turn();

@@ -15,6 +15,7 @@ mod interrupt;
 mod machine;
 mod media;
 mod memory;
+mod nix;
 mod paths;
 mod programs;
 mod record;
@@ -28,6 +29,7 @@ mod test_server;
 mod theme;
 mod tomlfile;
 mod tools;
+mod weights;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -171,31 +173,37 @@ fn run(
                 *lang,
             )?;
             let settings = project.server.over(&user.server);
-            // The Function's `[server]` table, when the file declares it,
-            // is the model side of the settings (AGL-033, D1, D3): the
-            // command works on `--function`, else the project's function
-            // (AGL-035, D3).
+            // The model of the Function is the model of the server
+            // (AGL-039, D21): the command works on `--function`, else the
+            // project's function (AGL-035, D3).
             let name = function_name(
                 function_option.as_deref(),
                 project.function.as_deref(),
                 user.function.as_deref(),
             );
-            let function = Function::load(
-                &paths.functions_dir(&project.key),
-                &paths.functions(),
-                &paths.formats(),
-                &name,
+            let function = Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)?;
+            // The weights: `start` asks for a file it does not find, as a
+            // run does; `status` and `stop` keep the name (AGL-039, D24).
+            let mut model = function.model.clone();
+            let missing = match action {
+                cli::args::ServerAction::Start if repl::term::is_interactive() => {
+                    weights::Missing::Ask(&cli::serve::ask_line)
+                }
+                cli::args::ServerAction::Start => weights::Missing::Fail,
+                _ => weights::Missing::Keep,
+            };
+            weights::resolve(
+                &mut model,
+                &mut settings::WhisperFile::default(),
+                &weights::Folders {
+                    own: paths.models(),
+                    listed: &user.models,
+                    user_path: &paths.settings_file(),
+                },
+                &missing,
+                *lang,
             )?;
-            let function_server = function
-                .server
-                .as_ref()
-                .map(|table| (table.clone(), function.path.clone()));
-            let server = cli::serve::Server::of(
-                &project,
-                &settings,
-                &paths.settings_file(),
-                function_server,
-            )?;
+            let server = cli::serve::Server::of(&project, &settings, &paths.settings_file(), model)?;
             return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
         }
         Command::Init => {
@@ -290,24 +298,37 @@ fn agent_session(
     );
     // The Function's tiers (AGL-028, D3): the workspace store's
     // `functions/` directory, then the user's, then the built-ins.
-    let mut function = Function::load(
-        &paths.functions_dir(&project.key),
-        &paths.functions(),
-        &paths.formats(),
-        &name,
-    )?;
-    let settings = Settings::resolve(
+    let mut function = Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)?;
+    let project_settings = settings::ProjectFile {
+        function: project.function.clone(),
+        server: project.server.clone(),
+        whisper: project.whisper.clone(),
+        search: project.search.clone(),
+    };
+    let mut settings = Settings::resolve(
         user,
         &user_path,
-        (
-            &project.dir.join(forge::MARKER_FILE),
-            project.function.as_deref(),
-            &project.server,
-            &project.whisper,
-            &project.search,
-        ),
+        (&project.dir.join(settings::SETTINGS_FILE), &project_settings),
         resumed.or(args.function.as_deref()),
-        function.server.as_ref().map(|table| (table, function.path.as_path())),
+        &function.model,
+    )?;
+    // The weights files become absolute paths before anything starts; a
+    // file found nowhere is asked for in a terminal (AGL-039, D22-D24).
+    let missing = if repl::term::is_interactive() {
+        weights::Missing::Ask(&cli::serve::ask_line)
+    } else {
+        weights::Missing::Fail
+    };
+    weights::resolve(
+        &mut settings.server,
+        &mut settings.whisper,
+        &weights::Folders {
+            own: paths.models(),
+            listed: &user.models,
+            user_path: &user_path,
+        },
+        &missing,
+        lang,
     )?;
     // The tool `search` is there only where `[search]` is complete: no tool,
     // no grammar for it and no word of it in the prompt otherwise

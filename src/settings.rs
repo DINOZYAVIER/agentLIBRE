@@ -1,23 +1,34 @@
-//! The user `agentLIBRE.toml` file (D54-D60, D66, D148); the project
-//! settings live in the project's store file (AGL-010, `forge::Marker`).
+//! The settings, `settings.nix` of the user and of the project's store
+//! (D54-D60, D66, D148; AGL-039, D11, D12, D20, D21, D24): what the
+//! machine has — where each kind of server listens, the engine, whisper,
+//! the search service, the weights folders — and the human's interface.
+//! The model of a run is its Function's (AGL-039, D21).
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, FunctionProblem};
+use serde_json::{Map, Value, json};
+
+use crate::error::Error;
 use crate::i18n::Lang;
+use crate::nix::{self, Section};
 use crate::theme::{COLOR_KEYS, Role, Style};
-use crate::tomlfile::{self, Section};
 
-/// Name of the user settings file and of the project's file in its store.
-pub const SETTINGS_FILE: &str = "agentLIBRE.toml";
+/// Name of the settings file, the user's and the project store's
+/// (AGL-039, D11).
+pub const SETTINGS_FILE: &str = "settings.nix";
 
-/// Function used when no settings name one (D39, D58, AGL-020, D3).
-const DEFAULT_FUNCTION: &str = "minimal";
+/// Function used when no settings name one (D39, D58; AGL-039, D32).
+const DEFAULT_FUNCTION: &str = "agentLIBRE-gpu-high";
 
-/// Where a Strata server listens when `[server.strata]` does not set
-/// `url` (AGL-030, D1; AGL-036, D6): its own run script binds port 18088
+/// Where a Strata server listens when `server.strata.url` is not set
+/// (AGL-030, D1; AGL-036, D6): its own run script binds port 18088
 /// (8080 is held by qBittorrent).
 pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:18088";
+
+/// The longest voice recording of the REPL's Ctrl-R, in seconds, when the
+/// settings do not set `repl.max_record_seconds` (AGL-016, D5, D8;
+/// AGL-039, D20).
+const DEFAULT_MAX_RECORD_SECONDS: u32 = 60;
 
 /// The kind of inference server (AGL-030, D1): the llama.cpp
 /// `llama-server` with grammar-constrained decoding, or a Strata server
@@ -57,53 +68,127 @@ impl ServerKind {
     }
 }
 
-/// The user file, `$XDG_CONFIG_HOME/agentLIBRE/agentLIBRE.toml`.
+/// The user file, `$XDG_CONFIG_HOME/agentLIBRE/settings.nix`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct UserFile {
     pub function: Option<String>,
     pub language: Option<Lang>,
-    /// `[server]`: the defaults of the llama server; a project's own
-    /// `[server]` wins per key (AGL-015, D4, D11).
+    /// `server`: where each kind listens and the engine; a project's own
+    /// `server` wins per key (AGL-015, D4, D11).
     pub server: ServerFile,
-    /// `[whisper]`: the defaults of the whisper server (AGL-014, D22).
+    /// `whisper`: the defaults of the whisper server (AGL-014, D22).
     pub whisper: WhisperFile,
-    /// `[search]`: the human's search service (AGL-019, D3).
+    /// `search`: the human's search service (AGL-019, D3).
     pub search: SearchFile,
-    /// `[colors]` (D121).
+    /// `colors` (D121).
     pub colors: Vec<(Role, Style)>,
-    /// `[repl]` (D124, D130).
+    /// `repl` (D124, D130; AGL-039, D20).
     pub repl: ReplFile,
-    /// `[forge]` (AGL-007).
+    /// `forge` (AGL-007).
     pub forge: ForgeFile,
+    /// `models`: the weights folders after agl's own (AGL-039, D24b),
+    /// absolute paths, looked in in order.
+    pub models: Vec<PathBuf>,
 }
 
-/// `[server]` of a settings file, the user's or the project's (AGL-015):
-/// where the llama server listens and what `agl server start` runs
-/// (D148). A key that is not set is `None`.
+/// The project's settings, `settings.nix` of its store (AGL-039, D11):
+/// the Function and the per-key overrides of the user's `server`,
+/// `whisper` and `search`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectFile {
+    pub function: Option<String>,
+    pub server: ServerFile,
+    pub whisper: WhisperFile,
+    pub search: SearchFile,
+}
+
+impl ProjectFile {
+    /// Loads the project's `path`; a missing file has no settings.
+    pub fn load(path: &Path) -> Result<ProjectFile, Error> {
+        let Some(mut file) = evaluate(path)? else {
+            return Ok(ProjectFile::default());
+        };
+        // The identity is the marker's until AGL-041 moves it here.
+        file.check_keys(&["function", "server", "whisper", "search"])?;
+        Ok(ProjectFile {
+            function: file.string("function")?,
+            server: ServerFile::parse(file.section("server")?, path)?,
+            whisper: WhisperFile::parse(file.section("whisper")?, path)?,
+            search: SearchFile::parse(file.section("search")?, path)?,
+        })
+    }
+}
+
+/// Evaluates the settings file `path`; `None` when it does not exist.
+fn evaluate(path: &Path) -> Result<Option<Section>, Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Section::top(path, nix::eval_file(path)?).map(Some)
+}
+
+/// Reads the settings file `path` as a value and sets the top-level `key`
+/// to `value`, then writes the file anew (AGL-039, D11, D12): what
+/// `agl function use` and the weights question do. A missing file is
+/// created.
+pub fn set_top(path: &Path, key: &str, value: Value) -> Result<(), Error> {
+    let mut map = if path.exists() {
+        match nix::eval_file(path)? {
+            Value::Object(map) => map,
+            _ => {
+                return Err(Error::WrongType {
+                    path: path.into(),
+                    key: String::new(),
+                    expected: crate::error::Expected::Table,
+                });
+            }
+        }
+    } else {
+        Map::new()
+    };
+    map.insert(key.into(), value);
+    nix::write_settings(path, &map)
+}
+
+/// A weights file of the settings (the whisper model, AGL-039, D24a, D24e):
+/// a file name or an absolute path.
+fn check_weights_name(name: &str) -> Result<(), Error> {
+    if Path::new(name).is_absolute() || !(name.is_empty() || name.contains('/') || name.starts_with('.')) {
+        Ok(())
+    } else {
+        Err(Error::InvalidName(name.into()))
+    }
+}
+
+/// `server` of a settings file, the user's or the project's (AGL-015;
+/// AGL-039, D21): where each kind listens and the engine. The model keys
+/// are the Function's `model` (AGL-039, D17): an effective `ServerFile`
+/// carries both, the run's whole server. A key that is not set is `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerFile {
     /// The kind of inference server (AGL-030, D1); `None` is `llama`.
     pub kind: Option<String>,
-    /// Where the server of each kind listens: `url` of `[server.llama]`
-    /// and of `[server.strata]` (AGL-036, D2).
+    /// Where the server of each kind listens: `server.llama.url` and
+    /// `server.strata.url` (AGL-036, D2).
     pub llama_url: Option<String>,
     pub strata_url: Option<String>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
     pub engine: Option<String>,
-    /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/` (D38).
+    /// The weights, `model.weights` of the Function (AGL-039, D19): a file
+    /// name in the weights folders or an absolute path (D24); after
+    /// `weights::resolve`, the absolute path.
     pub model: Option<String>,
     pub context: Option<u32>,
     /// The type of the speculative decoding, the value of `--spec-type`
     /// (AGL-025, D2); `None` is no speculative decoding.
     pub spec_type: Option<String>,
-    /// A draft model for the speculative decoding, a file name in the
-    /// models directory (AGL-025, D2).
+    /// A draft model for the speculative decoding, a weights file
+    /// (AGL-025, D2).
     pub draft: Option<String>,
     /// More llama-server arguments.
     pub args: Option<Vec<String>>,
-    /// The multimodal projector, a file name in the models directory
-    /// (AGL-014, D23).
+    /// The multimodal projector, a weights file (AGL-014, D23).
     pub mmproj: Option<String>,
     /// Whether the projector runs on the GPU; true when unset (D9, D23).
     pub mmproj_offload: Option<bool>,
@@ -115,13 +200,14 @@ pub struct ServerFile {
     pub strata_config: Option<String>,
 }
 
-/// `[whisper]` of a settings file, the user's or the project's
+/// `whisper` of a settings file, the user's or the project's
 /// (AGL-014, D22): the whisper.cpp server that turns an audio into text
 /// when the model does not hear it. A key that is not set is `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WhisperFile {
     pub url: Option<String>,
-    /// A file name in `$XDG_DATA_HOME/agentLIBRE/models/`.
+    /// A weights file (AGL-039, D24): a file name in the weights folders
+    /// or an absolute path.
     pub model: Option<String>,
     /// More whisper-server arguments.
     pub args: Option<Vec<String>>,
@@ -146,7 +232,7 @@ impl WhisperFile {
         }
         let model = whisper.string("model")?;
         if let Some(model) = &model {
-            tomlfile::check_name(model)?;
+            check_weights_name(model)?;
         }
         Ok(WhisperFile {
             url,
@@ -167,26 +253,6 @@ impl WhisperFile {
             model: self.model.clone().or_else(|| defaults.model.clone()),
             args: self.args.clone().or_else(|| defaults.args.clone()),
         }
-    }
-
-    /// The `[whisper]` table as written to a file; empty when no key is
-    /// set.
-    pub fn render(&self) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("\n[whisper]\n");
-        if let Some(url) = &self.url {
-            out.push_str(&format!("url = {}\n", tomlfile::quote(url)));
-        }
-        if let Some(model) = &self.model {
-            out.push_str(&format!("model = {}\n", tomlfile::quote(model)));
-        }
-        if let Some(args) = &self.args {
-            let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
-            out.push_str(&format!("args = [{}]\n", items.join(", ")));
-        }
-        out
     }
 }
 
@@ -294,63 +360,12 @@ impl SearchFile {
             private_ca: self.private_ca.clone().ok_or("private_ca")?.into(),
         }))
     }
-
-    /// The `[search]` table as written to a file; empty when no key is
-    /// set.
-    pub fn render(&self) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("\n[search]\n");
-        for (key, value) in [
-            ("url", &self.url),
-            ("client_certificate", &self.client_certificate),
-            ("client_private_key", &self.client_private_key),
-            ("private_ca", &self.private_ca),
-        ] {
-            if let Some(value) = value {
-                out.push_str(&format!("{key} = {}\n", tomlfile::quote(value)));
-            }
-        }
-        out
-    }
 }
 
-/// `image_max_tokens` when `[server]` does not set it (AGL-014, D23).
+/// `image_max_tokens` when the model does not set it (AGL-014, D23).
 pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
 
-/// A key that is an integer of at least 1; `None` when absent.
-fn positive_u32(section: &mut Section, path: &Path, key: &str) -> Result<Option<u32>, Error> {
-    section
-        .integer(key)?
-        .map(|n| {
-            u32::try_from(n)
-                .ok()
-                .filter(|n| *n >= 1)
-                .ok_or_else(|| Error::NotPositive {
-                    path: path.into(),
-                    key: section.key(key),
-                })
-        })
-        .transpose()
-}
-
-/// The `kind` of a `[server]` table, `llama` or `strata` (AGL-030, D1;
-/// AGL-036, D1); `None` when absent.
-fn read_kind(section: &mut Section, path: &Path) -> Result<Option<String>, Error> {
-    let kind = section.string("kind")?;
-    if let Some(kind) = &kind
-        && ServerKind::parse(kind).is_none()
-    {
-        return Err(Error::UnknownServerKind {
-            path: path.into(),
-            value: kind.clone(),
-        });
-    }
-    Ok(kind)
-}
-
-/// The `url` of the table of a kind, an `http://` URL (AGL-036, D2);
+/// The `url` of the set of a kind, an `http://` URL (AGL-036, D2);
 /// `None` when absent.
 fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error> {
     let url = section.string("url")?;
@@ -366,120 +381,33 @@ fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error>
 }
 
 impl ServerFile {
-    /// The keys directly under `[server]` of a settings file (AGL-035,
-    /// D4); the url and the model side of each kind are in its own table
-    /// (AGL-036, D2).
-    const KEYS: &'static [&'static str] = &["kind", "engine", "llama", "strata"];
+    /// The keys of `server` of a settings file (AGL-035, D4; AGL-039,
+    /// D21): the engine and the set of each kind, which holds its `url`.
+    const KEYS: &'static [&'static str] = &["engine", "llama", "strata"];
 
-    /// The keys of `[server.llama]` (AGL-035, D4; AGL-036, D2).
-    const LLAMA_KEYS: &'static [&'static str] = &[
-        "url",
-        "model",
-        "context",
-        "spec_type",
-        "draft",
-        "args",
-        "mmproj",
-        "mmproj_offload",
-        "image_max_tokens",
-    ];
-
-    /// The keys of `[server.strata]` (AGL-035, D4; AGL-036, D2).
-    const STRATA_KEYS: &'static [&'static str] = &["url", "strata_config"];
-
-    /// The keys of the `[server]` table of a function file: the kind and
-    /// the model side (AGL-033, D1; AGL-036, D1). The urls and `engine`
-    /// are facts of the settings, not of the table.
-    pub const MODEL_SIDE_KEYS: &'static [&'static str] = &[
-        "kind",
-        "model",
-        "context",
-        "spec_type",
-        "draft",
-        "args",
-        "mmproj",
-        "mmproj_offload",
-        "image_max_tokens",
-        "strata_config",
-    ];
-
-    /// Reads the `[server]` table of the file `path`; `section` is what
-    /// `Section::section("server")` returned.
+    /// Reads `server` of the settings file `path`.
     pub fn parse(section: Option<Section>, path: &Path) -> Result<ServerFile, Error> {
         let Some(mut server) = section else {
             return Ok(ServerFile::default());
         };
         server.check_keys(Self::KEYS)?;
-        let kind = read_kind(&mut server, path)?;
         let engine = server.string("engine")?;
-        // The url and the model side of each kind have their own table
-        // (AGL-035, D4; AGL-036, D2): a key outside its table is an
-        // unknown key.
-        let (llama_url, llama) = match server.section("llama")? {
-            Some(mut llama) => {
-                llama.check_keys(Self::LLAMA_KEYS)?;
-                (read_url(&mut llama, path)?, Self::read_model_side(&mut llama, path)?)
+        let mut url_of = |kind: &str| -> Result<Option<String>, Error> {
+            match server.section(kind)? {
+                Some(mut table) => {
+                    table.check_keys(&["url"])?;
+                    read_url(&mut table, path)
+                }
+                None => Ok(None),
             }
-            None => (None, ServerFile::default()),
         };
-        let (strata_url, strata) = match server.section("strata")? {
-            Some(mut strata) => {
-                strata.check_keys(Self::STRATA_KEYS)?;
-                (read_url(&mut strata, path)?, Self::read_model_side(&mut strata, path)?)
-            }
-            None => (None, ServerFile::default()),
-        };
+        let llama_url = url_of("llama")?;
+        let strata_url = url_of("strata")?;
         Ok(ServerFile {
-            kind,
             llama_url,
             strata_url,
             engine,
-            strata_config: strata.strata_config,
-            ..llama
-        })
-    }
-
-    /// Reads the `[server]` table of a function file (AGL-033, D1;
-    /// AGL-036, D1): the kind and the model-side settings; the urls and
-    /// `engine` are not among them (an unknown key).
-    pub fn parse_model_side(mut section: Section, path: &Path) -> Result<ServerFile, Error> {
-        section.check_keys(Self::MODEL_SIDE_KEYS)?;
-        let kind = read_kind(&mut section, path)?;
-        Ok(ServerFile {
-            kind,
-            ..Self::read_model_side(&mut section, path)?
-        })
-    }
-
-    /// Reads the model-side keys present in `section`, whose keys are
-    /// checked by the caller.
-    fn read_model_side(section: &mut Section, path: &Path) -> Result<ServerFile, Error> {
-        let model = section.string("model")?;
-        if let Some(model) = &model {
-            tomlfile::check_name(model)?;
-        }
-        let draft = section.string("draft")?;
-        if let Some(draft) = &draft {
-            tomlfile::check_name(draft)?;
-        }
-        let mmproj = section.string("mmproj")?;
-        if let Some(mmproj) = &mmproj {
-            tomlfile::check_name(mmproj)?;
-        }
-        Ok(ServerFile {
-            kind: None,
-            llama_url: None,
-            strata_url: None,
-            engine: None,
-            model,
-            context: positive_u32(section, path, "context")?,
-            spec_type: section.string("spec_type")?,
-            draft,
-            args: section.strings("args")?,
-            mmproj,
-            mmproj_offload: section.bool("mmproj_offload")?,
-            image_max_tokens: positive_u32(section, path, "image_max_tokens")?,
-            strata_config: section.string("strata_config")?,
+            ..ServerFile::default()
         })
     }
 
@@ -495,7 +423,7 @@ impl ServerFile {
     }
 
     /// Where the server of the kind listens (AGL-036, D2, D6): the `url` of
-    /// the kind's table; the Strata server has a default address, the
+    /// the kind's set; the Strata server has a default address, the
     /// llama-server's is required (`None`).
     pub fn url(&self) -> Option<String> {
         match self.kind() {
@@ -508,108 +436,13 @@ impl ServerFile {
         }
     }
 
-    /// The settings of the selected kind only (AGL-035, D4): the keys of
-    /// the other kind's table are not used.
-    pub fn selected(&self) -> ServerFile {
-        match self.kind() {
-            ServerKind::Llama => ServerFile {
-                strata_url: None,
-                strata_config: None,
-                ..self.clone()
-            },
-            ServerKind::Strata => ServerFile {
-                llama_url: None,
-                model: None,
-                context: None,
-                spec_type: None,
-                draft: None,
-                args: None,
-                mmproj: None,
-                mmproj_offload: None,
-                image_max_tokens: None,
-                ..self.clone()
-            },
-        }
-    }
-
-    /// The effective `[server]` (AGL-033, D1, D3; AGL-036, D1, D5):
-    /// `table` (the `[server]` of a function file, self-contained) is the
-    /// kind and the model side — its `kind`, `llama` when it does not write
-    /// one, and its model-side keys; the settings' kind and model keys are
-    /// not consulted. The url of the table's kind and `engine` stay of the
-    /// settings (`self`). The table is validated against its kind: it
-    /// requires `model` (the llama kind) or `strata_config` (the strata
-    /// kind), and a key that does not apply to the kind is an error that
-    /// names the key; `table_path` (the function file) locates it.
-    pub fn effective(&self, table: &ServerFile, table_path: &Path) -> Result<ServerFile, Error> {
-        let key = |name: &str| format!("server.{name}");
-        let wrong_kind = |name: &str| Error::Function {
-            path: table_path.into(),
-            key: key(name),
-            problem: FunctionProblem::ServerKeyOfOtherKind(name.to_owned()),
-        };
-        let kind = table.kind();
-        let (model, context, spec_type, draft, args, mmproj, mmproj_offload, image_max_tokens, strata_config) =
-            match kind {
-                ServerKind::Llama => {
-                    if table.strata_config.is_some() {
-                        return Err(wrong_kind("strata_config"));
-                    }
-                    if table.model.is_none() {
-                        return Err(Error::Function {
-                            path: table_path.into(),
-                            key: key("model"),
-                            problem: FunctionProblem::ServerModelMissing,
-                        });
-                    }
-                    (
-                        table.model.clone(),
-                        table.context,
-                        table.spec_type.clone(),
-                        table.draft.clone(),
-                        table.args.clone(),
-                        table.mmproj.clone(),
-                        table.mmproj_offload,
-                        table.image_max_tokens,
-                        None,
-                    )
-                }
-                ServerKind::Strata => {
-                    for (name, present) in [
-                        ("model", table.model.is_some()),
-                        ("context", table.context.is_some()),
-                        ("spec_type", table.spec_type.is_some()),
-                        ("draft", table.draft.is_some()),
-                        ("args", table.args.is_some()),
-                        ("mmproj", table.mmproj.is_some()),
-                        ("mmproj_offload", table.mmproj_offload.is_some()),
-                        ("image_max_tokens", table.image_max_tokens.is_some()),
-                    ] {
-                        if present {
-                            return Err(wrong_kind(name));
-                        }
-                    }
-                    if table.strata_config.is_none() {
-                        return Err(Error::Function {
-                            path: table_path.into(),
-                            key: key("strata_config"),
-                            problem: FunctionProblem::ServerStrataConfigMissing,
-                        });
-                    }
-                    (
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        table.strata_config.clone(),
-                    )
-                }
-            };
-        Ok(ServerFile {
+    /// The effective server (AGL-033, D1; AGL-036, D1; AGL-039, D21): the
+    /// kind and the model keys of `model` (the Function's, checked against
+    /// its kind when it was read), the url of that kind and `engine` of the
+    /// settings (`self`).
+    pub fn effective(&self, model: &ServerFile) -> ServerFile {
+        let kind = model.kind();
+        ServerFile {
             kind: Some(kind.name().to_owned()),
             llama_url: (kind == ServerKind::Llama)
                 .then(|| self.llama_url.clone())
@@ -618,16 +451,8 @@ impl ServerFile {
                 .then(|| self.strata_url.clone())
                 .flatten(),
             engine: self.engine.clone(),
-            model,
-            context,
-            spec_type,
-            draft,
-            args,
-            mmproj,
-            mmproj_offload,
-            image_max_tokens,
-            strata_config,
-        })
+            ..model.clone()
+        }
     }
 
     /// Whether the model side of `self` deviates from the model side of
@@ -672,65 +497,69 @@ impl ServerFile {
         }
     }
 
-    /// The `[server]` table as written to a file, with `[server.llama]`
-    /// and `[server.strata]` (AGL-035, D4), each with its `url` (AGL-036,
-    /// D2); empty when no key is set.
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        if self.kind.is_some() || self.engine.is_some() {
-            out.push_str("\n[server]\n");
-            if let Some(kind) = &self.kind {
-                out.push_str(&format!("kind = {}\n", tomlfile::quote(kind)));
-            }
-            if let Some(engine) = &self.engine {
-                out.push_str(&format!("engine = {}\n", tomlfile::quote(engine)));
-            }
-        }
-        let mut llama = String::new();
-        if let Some(url) = &self.llama_url {
-            llama.push_str(&format!("url = {}\n", tomlfile::quote(url)));
-        }
-        if let Some(model) = &self.model {
-            llama.push_str(&format!("model = {}\n", tomlfile::quote(model)));
-        }
-        if let Some(context) = self.context {
-            llama.push_str(&format!("context = {context}\n"));
-        }
-        if let Some(spec_type) = &self.spec_type {
-            llama.push_str(&format!("spec_type = {}\n", tomlfile::quote(spec_type)));
-        }
-        if let Some(draft) = &self.draft {
-            llama.push_str(&format!("draft = {}\n", tomlfile::quote(draft)));
-        }
-        if let Some(args) = &self.args {
-            let items: Vec<String> = args.iter().map(|arg| tomlfile::quote(arg)).collect();
-            llama.push_str(&format!("args = [{}]\n", items.join(", ")));
-        }
-        if let Some(mmproj) = &self.mmproj {
-            llama.push_str(&format!("mmproj = {}\n", tomlfile::quote(mmproj)));
-        }
-        if let Some(offload) = self.mmproj_offload {
-            llama.push_str(&format!("mmproj_offload = {offload}\n"));
-        }
-        if let Some(tokens) = self.image_max_tokens {
-            llama.push_str(&format!("image_max_tokens = {tokens}\n"));
-        }
-        if !llama.is_empty() {
-            out.push_str("\n[server.llama]\n");
-            out.push_str(&llama);
-        }
-        let mut strata = String::new();
-        if let Some(url) = &self.strata_url {
-            strata.push_str(&format!("url = {}\n", tomlfile::quote(url)));
-        }
-        if let Some(config) = &self.strata_config {
-            strata.push_str(&format!("strata_config = {}\n", tomlfile::quote(config)));
-        }
-        if !strata.is_empty() {
-            out.push_str("\n[server.strata]\n");
-            out.push_str(&strata);
-        }
-        out
+    /// The server as the JSON of the record of a running server (AGL-035,
+    /// D1; AGL-041, D2, done here because the model keys left the
+    /// settings' format): every key, `null` when not set.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "llama_url": self.llama_url,
+            "strata_url": self.strata_url,
+            "engine": self.engine,
+            "model": self.model,
+            "context": self.context,
+            "spec_type": self.spec_type,
+            "draft": self.draft,
+            "args": self.args,
+            "mmproj": self.mmproj,
+            "mmproj_offload": self.mmproj_offload,
+            "image_max_tokens": self.image_max_tokens,
+            "strata_config": self.strata_config,
+        })
+    }
+
+    /// The server of a record written by [`ServerFile::to_json`]; `None`
+    /// when it is not one.
+    pub fn from_json(value: &Value) -> Option<ServerFile> {
+        let text = |key: &str| match value.get(key)? {
+            Value::Null => Some(None),
+            Value::String(text) => Some(Some(text.clone())),
+            _ => None,
+        };
+        let number = |key: &str| match value.get(key)? {
+            Value::Null => Some(None),
+            value => value.as_u64().and_then(|n| u32::try_from(n).ok()).map(Some),
+        };
+        let args = match value.get("args")? {
+            Value::Null => None,
+            Value::Array(items) => Some(
+                items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            _ => return None,
+        };
+        let offload = match value.get("mmproj_offload")? {
+            Value::Null => None,
+            Value::Bool(value) => Some(*value),
+            _ => return None,
+        };
+        Some(ServerFile {
+            kind: text("kind")?,
+            llama_url: text("llama_url")?,
+            strata_url: text("strata_url")?,
+            engine: text("engine")?,
+            model: text("model")?,
+            context: number("context")?,
+            spec_type: text("spec_type")?,
+            draft: text("draft")?,
+            args,
+            mmproj: text("mmproj")?,
+            mmproj_offload: offload,
+            image_max_tokens: number("image_max_tokens")?,
+            strata_config: text("strata_config")?,
+        })
     }
 }
 
@@ -740,6 +569,8 @@ pub struct ReplFile {
     pub tool_lines: Option<usize>,
     pub tool_chars: Option<usize>,
     pub frame: Option<bool>,
+    /// The longest voice recording, in seconds (AGL-039, D20).
+    pub max_record_seconds: Option<u32>,
 }
 
 /// `[forge]` (AGL-007).
@@ -756,6 +587,9 @@ pub struct ReplSettings {
     pub tool_lines: usize,
     pub tool_chars: usize,
     pub frame: bool,
+    /// The longest voice recording of Ctrl-R, in seconds (AGL-016;
+    /// AGL-039, D20).
+    pub max_record_seconds: u32,
 }
 
 impl Default for ReplSettings {
@@ -764,6 +598,7 @@ impl Default for ReplSettings {
             tool_lines: 10,
             tool_chars: 500,
             frame: true,
+            max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
         }
     }
 }
@@ -771,12 +606,12 @@ impl Default for ReplSettings {
 impl UserFile {
     /// Loads `path`; a missing file has no settings.
     pub fn load(path: &Path) -> Result<UserFile, Error> {
-        let Some(table) = tomlfile::read(path)? else {
+        let Some(mut file) = evaluate(path)? else {
             return Ok(UserFile::default());
         };
-        let mut file = Section::new(path, table);
         file.check_keys(&[
             "function", "language", "server", "whisper", "search", "colors", "repl", "forge",
+            "models",
         ])?;
         let function = file.string("function")?;
         let language = file
@@ -814,7 +649,7 @@ impl UserFile {
         let repl = match file.section("repl")? {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["tool_lines", "tool_chars", "frame"])?;
+                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds"])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -827,10 +662,15 @@ impl UserFile {
                         })
                         .transpose()
                 };
+                let tool_lines = count("tool_lines")?;
+                let tool_chars = count("tool_chars")?;
+                let max_record_seconds = count("max_record_seconds")?
+                    .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
                 ReplFile {
-                    tool_lines: count("tool_lines")?,
-                    tool_chars: count("tool_chars")?,
+                    tool_lines,
+                    tool_chars,
                     frame: repl.bool("frame")?,
+                    max_record_seconds,
                 }
             }
         };
@@ -843,6 +683,19 @@ impl UserFile {
                 }
             }
         };
+        let models = file
+            .strings("models")?
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if let Some(folder) = models.iter().find(|folder| !folder.is_absolute()) {
+            return Err(Error::SearchPathNotAbsolute {
+                path: path.into(),
+                key: "models".into(),
+                value: folder.display().to_string(),
+            });
+        }
         Ok(UserFile {
             function,
             language,
@@ -852,6 +705,7 @@ impl UserFile {
             colors,
             repl,
             forge,
+            models,
         })
     }
 }
@@ -873,12 +727,12 @@ pub fn function_name(
 #[derive(Debug)]
 pub struct Settings {
     pub server_url: String,
-    /// The `[server]` of the project over the user's defaults
-    /// (AGL-015).
+    /// The effective server: the Function's model with the settings' url
+    /// and engine (AGL-039, D21).
     pub server: ServerFile,
-    /// The `[whisper]` of the project over the user's.
+    /// The `whisper` of the project over the user's.
     pub whisper: WhisperFile,
-    /// The `[search]` of the project over the user's, when it is
+    /// The `search` of the project over the user's, when it is
     /// complete; the tool `search` exists only then (AGL-019, D5).
     pub search: Option<Search>,
     pub function: String,
@@ -887,32 +741,23 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Combines the user file, the project's Function and `[server]`
-    /// (`project_path` is its file, for hints) and `--function` (D58, D59,
-    /// AGL-015).
+    /// Combines the user file, the project's (`project_path` is its file,
+    /// for hints), `--function` (D58, D59, AGL-015) and the model of the
+    /// loaded Function (AGL-039, D21).
     pub fn resolve(
         user: &UserFile,
         user_path: &Path,
-        project: (&Path, Option<&str>, &ServerFile, &WhisperFile, &SearchFile),
+        project: (&Path, &ProjectFile),
         cli_function: Option<&str>,
-        function_server: Option<(&ServerFile, &Path)>,
+        model: &ServerFile,
     ) -> Result<Settings, Error> {
-        let (project_path, project_function, project_server, project_whisper, project_search) =
-            project;
-        let server = project_server.over(&user.server);
-        // The `[server]` table of the loaded Function is the kind and the
-        // model side of the settings when the file declares it (AGL-033,
-        // D1, D3; AGL-036, D1); without it, the resolved `[server]` of its
-        // kind decides (the fallback).
-        let server = match function_server {
-            Some((table, table_path)) => server.effective(table, table_path)?,
-            None => server.selected(),
-        };
-        let whisper = project_whisper.over(&user.whisper);
-        let search_file = project_search.over(&user.search);
+        let (project_path, project) = project;
+        let server = project.server.over(&user.server).effective(model);
+        let whisper = project.whisper.over(&user.whisper);
+        let search_file = project.search.over(&user.search);
         let search = search_file.complete().map_err(|key| Error::MissingKey {
-            // The file that has a `[search]`, the project's first.
-            path: if project_search.is_empty() {
+            // The file that has a `search`, the project's first.
+            path: if project.search.is_empty() {
                 user_path.into()
             } else {
                 project_path.into()
@@ -924,11 +769,7 @@ impl Settings {
             user_path: user_path.into(),
             project_path: project_path.into(),
         })?;
-        let function = cli_function
-            .or(project_function)
-            .or(user.function.as_deref())
-            .unwrap_or(DEFAULT_FUNCTION)
-            .to_owned();
+        let function = function_name(cli_function, project.function.as_deref(), user.function.as_deref());
         let defaults = ReplSettings::default();
         Ok(Settings {
             server_url,
@@ -941,6 +782,10 @@ impl Settings {
                 tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
                 tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),
                 frame: user.repl.frame.unwrap_or(defaults.frame),
+                max_record_seconds: user
+                    .repl
+                    .max_record_seconds
+                    .unwrap_or(defaults.max_record_seconds),
             },
         })
     }
@@ -950,83 +795,95 @@ impl Settings {
 mod tests {
     use super::*;
     use crate::error::Expected;
+    use crate::forge::testutil::TempDir;
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A directory removed when dropped.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> TempDir {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir =
-                std::env::temp_dir().join(format!("agentLIBRE-test-{}-{n}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-
-        fn write(&self, relative: &str, text: &str) -> PathBuf {
-            let path = self.0.join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, text).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
+    /// Writes `text` as a settings file and loads it.
     fn user(text: &str) -> Result<UserFile, Error> {
         let dir = TempDir::new();
-        UserFile::load(&dir.write(SETTINGS_FILE, text))
+        let path = dir.0.join(SETTINGS_FILE);
+        fs::write(&path, text).unwrap();
+        UserFile::load(&path)
+    }
+
+    /// A user file of the attributes `body`.
+    fn user_of(body: &str) -> Result<UserFile, Error> {
+        user(&format!("{{ agl, ... }}: {{ {body} }}"))
+    }
+
+    fn with_url() -> UserFile {
+        UserFile {
+            server: ServerFile {
+                llama_url: Some("http://x".into()),
+                ..ServerFile::default()
+            },
+            ..UserFile::default()
+        }
+    }
+
+    /// The model of a llama Function.
+    fn llama_model() -> ServerFile {
+        ServerFile {
+            kind: Some("llama".into()),
+            model: Some("m.gguf".into()),
+            context: Some(8192),
+            ..ServerFile::default()
+        }
+    }
+
+    fn resolve_with(user: &UserFile, project: &ProjectFile, cli: Option<&str>, model: &ServerFile) -> Result<Settings, Error> {
+        Settings::resolve(
+            user,
+            Path::new("/c/settings.nix"),
+            (Path::new("/d/settings.nix"), project),
+            cli,
+            model,
+        )
     }
 
     #[test]
     fn user_file() {
-        let text =
-            "function = \"coder\"\nlanguage = \"uk\"\n[server.llama]\nurl = \"http://127.0.0.1:18080\"\n";
+        let loaded = user_of(
+            r#"function = "coder"; language = "uk";
+               server = { engine = "vulkan-server"; llama.url = "http://127.0.0.1:18080"; strata.url = "http://127.0.0.1:18088"; };
+               models = [ "/mnt/gguf" ];"#,
+        )
+        .unwrap();
         assert_eq!(
-            user(text).unwrap(),
+            loaded,
             UserFile {
                 function: Some("coder".into()),
                 language: Some(Lang::Uk),
                 server: ServerFile {
                     llama_url: Some("http://127.0.0.1:18080".into()),
+                    strata_url: Some("http://127.0.0.1:18088".into()),
+                    engine: Some("vulkan-server".into()),
                     ..ServerFile::default()
                 },
+                models: vec![PathBuf::from("/mnt/gguf")],
                 ..UserFile::default()
             }
         );
-        let server = user(
-            "[server.llama]\nurl = \"http://127.0.0.1:18080\"\nmodel = \"m.gguf\"\ncontext = 8192\n\
-             args = [\"-ngl\", \"999\"]\n",
-        )
-        .unwrap()
-        .server;
-        assert_eq!(
-            server,
-            ServerFile {
-                llama_url: Some("http://127.0.0.1:18080".into()),
-                model: Some("m.gguf".into()),
-                context: Some(8192),
-                args: Some(vec!["-ngl".into(), "999".into()]),
-                ..ServerFile::default()
-            }
-        );
+        // The model keys are the Function's (AGL-039, D21).
+        for key in ["model", "context", "kind"] {
+            assert!(
+                matches!(user_of(&format!("server.llama.{key} = 1;")), Err(Error::UnknownKey { .. })),
+                "{key}"
+            );
+        }
+        assert!(matches!(user_of("server.kind = \"llama\";"), Err(Error::UnknownKey { key, .. }) if key == "server.kind"));
+        // The weights folders are absolute (D24b).
+        assert!(matches!(user_of(r#"models = [ "gguf" ];"#), Err(Error::SearchPathNotAbsolute { .. })));
+        // A settings file is a function of `{ agl, ... }` (D8, D12).
+        assert!(matches!(user("{ function = \"x\"; }"), Err(Error::NixNotAFunction { .. })));
+        assert!(matches!(user("{ agl, ... }: { function = ; }"), Err(Error::NixEval { .. })));
     }
 
     #[test]
     fn the_whisper_table() {
-        let loaded = user(
-            "[whisper]\nurl = \"http://127.0.0.1:18082\"\nmodel = \"w.bin\"\nargs = [\"-t\", \"12\"]\n",
-        )
-        .unwrap()
-        .whisper;
+        let loaded = user_of(r#"whisper = { url = "http://127.0.0.1:18082"; model = "w.bin"; args = [ "-t" "12" ]; };"#)
+            .unwrap()
+            .whisper;
         assert_eq!(
             loaded,
             WhisperFile {
@@ -1035,51 +892,33 @@ mod tests {
                 args: Some(vec!["-t".into(), "12".into()]),
             }
         );
-        // The project wins per key, `args` as a whole; render and parse back.
-        let project = WhisperFile {
-            model: Some("small.bin".into()),
-            args: Some(Vec::new()),
-            ..WhisperFile::default()
-        };
-        let merged = project.over(&loaded);
-        assert_eq!(merged.url, loaded.url);
-        assert_eq!(merged.model.as_deref(), Some("small.bin"));
-        assert_eq!(merged.args, Some(Vec::new()));
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &merged.render());
-        assert_eq!(UserFile::load(&path).unwrap().whisper, merged);
-        assert_eq!(WhisperFile::default().render(), "");
-        assert!(matches!(
-            user("[whisper]\nport = 1"),
-            Err(Error::UnknownKey { key, .. }) if key == "whisper.port"
-        ));
-        assert!(matches!(
-            user("[whisper]\nurl = \"https://x\""),
-            Err(Error::UnsupportedUrl { .. })
-        ));
-        // `resolve` hands the merged table over.
-        let settings = Settings::resolve(
-            &UserFile {
-                whisper: loaded,
-                server: ServerFile {
-                    llama_url: Some("http://x".into()),
-                    ..ServerFile::default()
-                },
-                ..UserFile::default()
+        // The project wins per key, `args` as a whole.
+        let project = ProjectFile {
+            whisper: WhisperFile {
+                model: Some("small.bin".into()),
+                args: Some(Vec::new()),
+                ..WhisperFile::default()
             },
-            Path::new("/c/agentLIBRE.toml"),
-            (
-                Path::new("/d/agentLIBRE.toml"),
-                None,
-                &ServerFile::default(),
-                &project,
-                &SearchFile::default(),
-            ),
+            ..ProjectFile::default()
+        };
+        let settings = resolve_with(
+            &UserFile { whisper: loaded.clone(), ..with_url() },
+            &project,
             None,
-            None,
+            &llama_model(),
         )
         .unwrap();
-        assert_eq!(settings.whisper, merged);
+        assert_eq!(settings.whisper.url, loaded.url);
+        assert_eq!(settings.whisper.model.as_deref(), Some("small.bin"));
+        assert_eq!(settings.whisper.args, Some(Vec::new()));
+        assert!(matches!(
+            user_of("whisper.port = 1;"),
+            Err(Error::UnknownKey { key, .. }) if key == "whisper.port"
+        ));
+        assert!(matches!(user_of(r#"whisper.url = "https://x";"#), Err(Error::UnsupportedUrl { .. })));
+        // The model is a file name or an absolute path (AGL-039, D24a).
+        assert!(user_of(r#"whisper.model = "/w/w.bin";"#).is_ok());
+        assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::InvalidName(_))));
     }
 
     fn full_search() -> SearchFile {
@@ -1093,36 +932,27 @@ mod tests {
 
     #[test]
     fn the_search_table() {
-        let loaded = user(
-            "[search]\nurl = \"https://search.example/v1/search\"\n\
-             client_certificate = \"/c/client.crt\"\nclient_private_key = \"/c/client.pk8\"\n\
-             private_ca = \"/c/ca.crt\"\n",
+        let loaded = user_of(
+            r#"search = {
+                 url = "https://search.example/v1/search";
+                 client_certificate = "/c/client.crt";
+                 client_private_key = "/c/client.pk8";
+                 private_ca = "/c/ca.crt";
+               };"#,
         )
         .unwrap()
         .search;
         assert_eq!(loaded, full_search());
-        // The project wins per key; render and parse back.
-        let project = SearchFile {
-            url: Some("https://other.example/v1/search".into()),
-            ..SearchFile::default()
-        };
-        let merged = project.over(&loaded);
-        assert_eq!(merged.url.as_deref(), Some("https://other.example/v1/search"));
-        assert_eq!(merged.private_ca, loaded.private_ca);
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &merged.render());
-        assert_eq!(UserFile::load(&path).unwrap().search, merged);
-        assert_eq!(SearchFile::default().render(), "");
         assert!(matches!(
-            user("[search]\nport = 1"),
+            user_of("search.port = 1;"),
             Err(Error::UnknownKey { key, .. }) if key == "search.port"
         ));
         assert!(matches!(
-            user("[search]\nurl = \"http://x\""),
+            user_of(r#"search.url = "http://x";"#),
             Err(Error::UnsupportedSearchUrl { url, .. }) if url == "http://x"
         ));
         assert!(matches!(
-            user("[search]\nprivate_ca = \"ca.crt\""),
+            user_of(r#"search.private_ca = "ca.crt";"#),
             Err(Error::SearchPathNotAbsolute { key, value, .. })
                 if key == "search.private_ca" && value == "ca.crt"
         ));
@@ -1131,25 +961,11 @@ mod tests {
     #[test]
     fn the_search_is_set_up_only_by_a_complete_table() {
         let resolve = |user_search: SearchFile, project_search: SearchFile| {
-            Settings::resolve(
-                &UserFile {
-                    search: user_search,
-                    server: ServerFile {
-                        llama_url: Some("http://x".into()),
-                        ..ServerFile::default()
-                    },
-                    ..UserFile::default()
-                },
-                Path::new("/c/agentLIBRE.toml"),
-                (
-                    Path::new("/d/agentLIBRE.toml"),
-                    None,
-                    &ServerFile::default(),
-                    &WhisperFile::default(),
-                    &project_search,
-                ),
+            resolve_with(
+                &UserFile { search: user_search, ..with_url() },
+                &ProjectFile { search: project_search, ..ProjectFile::default() },
                 None,
-                None,
+                &llama_model(),
             )
         };
         // None: no search, no error.
@@ -1167,7 +983,7 @@ mod tests {
         assert!(matches!(
             resolve(partial.clone(), SearchFile::default()),
             Err(Error::MissingKey { path, key })
-                if key == "search.client_certificate" && path == Path::new("/c/agentLIBRE.toml")
+                if key == "search.client_certificate" && path == Path::new("/c/settings.nix")
         ));
         // The project completes the user's table per key...
         let rest = SearchFile {
@@ -1180,258 +996,64 @@ mod tests {
         assert!(matches!(
             resolve(SearchFile::default(), SearchFile { url: full_search().url, ..SearchFile::default() }),
             Err(Error::MissingKey { path, key })
-                if key == "search.client_certificate" && path == Path::new("/d/agentLIBRE.toml")
+                if key == "search.client_certificate" && path == Path::new("/d/settings.nix")
         ));
     }
 
     #[test]
-    fn the_projector_keys() {
-        let file = user(
-            "[server.llama]\nurl = \"http://x\"\nmmproj = \"p.gguf\"\nmmproj_offload = false\n\
-             image_max_tokens = 1024\n",
-        )
-        .unwrap()
-        .server;
-        assert_eq!(file.mmproj.as_deref(), Some("p.gguf"));
-        assert_eq!(file.mmproj_offload, Some(false));
-        assert_eq!(file.image_max_tokens, Some(1024));
-        // The project's keys win per key, and they render and parse back.
-        let defaults = ServerFile {
-            mmproj: Some("d.gguf".into()),
-            mmproj_offload: Some(true),
-            image_max_tokens: Some(512),
-            ..ServerFile::default()
-        };
-        let merged = file.over(&defaults);
-        assert_eq!(merged.mmproj.as_deref(), Some("p.gguf"));
-        assert_eq!(merged.mmproj_offload, Some(false));
-        assert_eq!(merged.image_max_tokens, Some(1024));
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &file.render());
-        assert_eq!(UserFile::load(&path).unwrap().server, file);
-        // Only an unset key falls back.
-        let bare = ServerFile::default().over(&defaults);
-        assert_eq!(bare, defaults);
-        // A name that is not a file name, or a cap below 1, is an error.
-        assert!(matches!(
-            user("[server.llama]\nmmproj = \"a/b.gguf\""),
-            Err(Error::InvalidName(_))
-        ));
-        assert!(matches!(
-            user("[server.llama]\nimage_max_tokens = 0"),
-            Err(Error::NotPositive { key, .. }) if key == "server.llama.image_max_tokens"
-        ));
-        assert!(matches!(
-            user("[server.llama]\nmmproj_offload = \"yes\""),
-            Err(Error::WrongType { key, .. }) if key == "server.llama.mmproj_offload"
-        ));
-    }
-
-    #[test]
-    fn the_engine_key() {
-        let file = user("[server]\nengine = \"vulkan-server\"\n[server.llama]\nurl = \"http://x\"\n")
-            .unwrap()
-            .server;
-        assert_eq!(file.engine.as_deref(), Some("vulkan-server"));
-        // The project's key wins per key, and it renders and parses back.
-        let defaults = ServerFile {
-            engine: Some("d-engine".into()),
-            ..ServerFile::default()
-        };
-        let merged = file.over(&defaults);
-        assert_eq!(merged.engine.as_deref(), Some("vulkan-server"));
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &file.render());
-        assert_eq!(UserFile::load(&path).unwrap().server, file);
-        // Only an unset key falls back.
-        let bare = ServerFile::default().over(&defaults);
-        assert_eq!(bare.engine.as_deref(), Some("d-engine"));
-    }
-
-    /// `Settings::resolve` of a user file and a project's `[server]`.
-    fn resolved(user: &UserFile, project: &ServerFile) -> Result<Settings, Error> {
-        Settings::resolve(
-            user,
-            Path::new("/c/agentLIBRE.toml"),
-            (
-                Path::new("/d/agentLIBRE.toml"),
-                None,
-                project,
-                &WhisperFile::default(),
-                &SearchFile::default(),
-            ),
-            None,
-            None,
-        )
-    }
-
-    fn server(url: &str, model: &str, context: u32, args: &[&str]) -> ServerFile {
-        ServerFile {
-            llama_url: Some(url.into()),
-            model: Some(model.into()),
-            context: Some(context),
-            args: Some(args.iter().map(|arg| (*arg).into()).collect()),
-            ..ServerFile::default()
-        }
-    }
-
-    #[test]
-    fn the_project_server_wins_per_key() {
-        let user = UserFile {
-            server: server("http://127.0.0.1:18080", "big.gguf", 131072, &["-ngl", "999"]),
-            ..UserFile::default()
-        };
-        // Nothing set in the project: the user's defaults.
-        let settings = resolved(&user, &ServerFile::default()).unwrap();
-        assert_eq!(settings.server, user.server);
-        assert_eq!(settings.server_url, "http://127.0.0.1:18080");
-        // Some keys set: those win, the others come from the user file.
-        let project = ServerFile {
-            llama_url: Some("http://127.0.0.1:18081".into()),
-            context: Some(65536),
-            ..ServerFile::default()
-        };
-        let settings = resolved(&user, &project).unwrap();
-        assert_eq!(settings.server_url, "http://127.0.0.1:18081");
-        assert_eq!(
-            settings.server,
-            server("http://127.0.0.1:18081", "big.gguf", 65536, &["-ngl", "999"])
-        );
-    }
-
-    #[test]
-    fn the_project_args_replace_the_user_args_as_a_whole() {
-        let user = UserFile {
-            server: server("http://x", "m.gguf", 8192, &["-ngl", "999", "-fa", "on"]),
-            ..UserFile::default()
-        };
-        let project = ServerFile {
-            args: Some(vec!["-ngl".into(), "10".into()]),
-            ..ServerFile::default()
-        };
-        let args = resolved(&user, &project).unwrap().server.args;
-        assert_eq!(args, Some(vec!["-ngl".into(), "10".into()]));
-        // An empty list is a value too: it replaces, it is not "unset".
-        let empty = ServerFile {
-            args: Some(Vec::new()),
-            ..ServerFile::default()
-        };
-        assert_eq!(resolved(&user, &empty).unwrap().server.args, Some(Vec::new()));
-    }
-
-    #[test]
-    fn the_server_table_renders_and_parses_back() {
-        let file = server("http://127.0.0.1:18081", "q.gguf", 65536, &["-ngl", "99\"x"]);
-        let text = file.render();
-        assert_eq!(
-            text,
-            "\n[server.llama]\nurl = \"http://127.0.0.1:18081\"\nmodel = \"q.gguf\"\ncontext = 65536\n\
-             args = [\"-ngl\", \"99\\\"x\"]\n"
-        );
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &text);
-        let parsed = UserFile::load(&path).unwrap();
-        assert_eq!(parsed.server, file);
-        // Nothing set: no table at all.
-        assert_eq!(ServerFile::default().render(), "");
-    }
-
-    #[test]
-    fn the_settings_of_both_kinds_have_their_own_tables() {
-        // AGL-035, D4: the model side of each kind is in its own table.
-        // AGL-036, D2: each kind has its own url.
-        let both = user(
-            "[server]\nkind = \"strata\"\n[server.llama]\nurl = \"http://127.0.0.1:18080\"\n\
-             model = \"m.gguf\"\ncontext = 8192\n\
-             [server.strata]\nurl = \"http://127.0.0.1:18089\"\nstrata_config = \"/s/c.json\"\n",
-        )
-        .unwrap()
-        .server;
-        assert_eq!(both.model.as_deref(), Some("m.gguf"));
-        assert_eq!(both.strata_config.as_deref(), Some("/s/c.json"));
-        assert_eq!(both.llama_url.as_deref(), Some("http://127.0.0.1:18080"));
-        assert_eq!(both.strata_url.as_deref(), Some("http://127.0.0.1:18089"));
-        assert_eq!(both.url().as_deref(), Some("http://127.0.0.1:18089"));
-        // Render and parse back, both tables.
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &both.render());
-        assert_eq!(UserFile::load(&path).unwrap().server, both);
-        // The table of the kind that is not selected is not used.
-        let strata = both.selected();
-        assert_eq!(strata.model, None);
-        assert_eq!(strata.context, None);
-        assert_eq!(strata.llama_url, None);
-        assert_eq!(strata.strata_config.as_deref(), Some("/s/c.json"));
-        let llama = ServerFile {
-            kind: Some("llama".into()),
-            ..both.clone()
-        }
-        .selected();
-        assert_eq!(llama.model.as_deref(), Some("m.gguf"));
-        assert_eq!(llama.strata_config, None);
-        assert_eq!(llama.strata_url, None);
-        assert_eq!(llama.url().as_deref(), Some("http://127.0.0.1:18080"));
-        // A key outside its table is an unknown key: the llama keys and the
-        // shared url directly under `[server]`, a strata key in
-        // `[server.llama]` and a llama key in `[server.strata]`.
-        for text in [
-            "[server]\nurl = \"http://127.0.0.1:18080\"\n",
-            "[server]\nmodel = \"m.gguf\"\n",
-            "[server.llama]\nstrata_config = \"/s/c.json\"\n",
-            "[server.strata]\nmodel = \"m.gguf\"\n",
-        ] {
-            assert!(
-                matches!(user(text), Err(Error::UnknownKey { .. })),
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_speculative_keys() {
-        // Parse: the two keys, with the draft name checked like the model.
-        let loaded = user(
-            "[server.llama]\nmodel = \"m.gguf\"\nspec_type = \"draft-mtp\"\n\
-             draft = \"d.gguf\"\n",
-        )
-        .unwrap()
-        .server;
-        assert_eq!(loaded.spec_type.as_deref(), Some("draft-mtp"));
-        assert_eq!(loaded.draft.as_deref(), Some("d.gguf"));
-        assert!(matches!(
-            user("[server.llama]\ndraft = \"../x.gguf\"\n"),
-            Err(Error::InvalidName { .. })
-        ));
-        // The project wins per key, the user's defaults fill the rest.
+    fn the_effective_server_is_the_model_with_the_url_of_its_kind() {
+        // AGL-039, D21: the kind and the model keys are the Function's, the
+        // url of that kind and the engine are the settings'.
         let user = UserFile {
             server: ServerFile {
                 llama_url: Some("http://127.0.0.1:18080".into()),
-                model: Some("m.gguf".into()),
-                spec_type: Some("draft-mtp".into()),
+                strata_url: Some("http://127.0.0.1:19000".into()),
+                engine: Some("e".into()),
                 ..ServerFile::default()
             },
             ..UserFile::default()
         };
-        let project = ServerFile {
-            draft: Some("d.gguf".into()),
+        let llama = resolve_with(&user, &ProjectFile::default(), None, &llama_model()).unwrap();
+        assert_eq!(llama.server_url, "http://127.0.0.1:18080");
+        assert_eq!(
+            llama.server,
+            ServerFile {
+                kind: Some("llama".into()),
+                llama_url: Some("http://127.0.0.1:18080".into()),
+                engine: Some("e".into()),
+                ..llama_model()
+            }
+        );
+        let strata_model = ServerFile {
+            kind: Some("strata".into()),
+            strata_config: Some("/s.json".into()),
             ..ServerFile::default()
         };
-        let merged = project.over(&user.server);
-        assert_eq!(merged.spec_type.as_deref(), Some("draft-mtp"));
-        assert_eq!(merged.draft.as_deref(), Some("d.gguf"));
-        let settings = resolved(&user, &project).unwrap();
-        assert_eq!(settings.server, merged);
-        // Render and parse back.
-        let dir = TempDir::new();
-        let path = dir.write(SETTINGS_FILE, &merged.render());
-        assert_eq!(UserFile::load(&path).unwrap().server, merged);
+        let strata = resolve_with(&user, &ProjectFile::default(), None, &strata_model).unwrap();
+        assert_eq!(strata.server_url, "http://127.0.0.1:19000");
+        assert_eq!(strata.server.llama_url, None);
+        // The Strata server has a default address (AGL-036, D6); the
+        // llama-server's is required.
+        let strata = resolve_with(&with_url(), &ProjectFile::default(), None, &strata_model).unwrap();
+        assert_eq!(strata.server_url, DEFAULT_STRATA_URL);
+        assert!(matches!(
+            resolve_with(&UserFile::default(), &ProjectFile::default(), None, &llama_model()),
+            Err(Error::MissingServerUrl { .. })
+        ));
+        // The project's url wins per key.
+        let project = ProjectFile {
+            server: ServerFile { llama_url: Some("http://p".into()), ..ServerFile::default() },
+            ..ProjectFile::default()
+        };
+        assert_eq!(resolve_with(&user, &project, None, &llama_model()).unwrap().server_url, "http://p");
     }
 
     #[test]
-    fn colors_and_repl_tables() {
-        let loaded = user(
-            "[colors]\nmuted = \"italic #010203\"\ninput_background = \"#000000\"\n\
-             [repl]\ntool_lines = 3\nframe = false\n",
+    fn colors_repl_and_forge_tables() {
+        let loaded = user_of(
+            r##"colors = { muted = "italic #010203"; input_background = "#000000"; };
+                repl = { tool_lines = 3; frame = false; max_record_seconds = 15; };
+                forge.auto_rehome = false;"##,
         )
         .unwrap();
         assert_eq!(loaded.colors.len(), 2);
@@ -1443,20 +1065,15 @@ mod tests {
                 tool_lines: Some(3),
                 tool_chars: None,
                 frame: Some(false),
+                max_record_seconds: Some(15),
             }
         );
-        let settings = Settings::resolve(
-            &loaded_with_server(loaded),
-            Path::new("/c/x.toml"),
-            (
-                Path::new("/d/x.toml"),
-                None,
-                &ServerFile::default(),
-                &WhisperFile::default(),
-                &SearchFile::default(),
-            ),
+        assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
+        let settings = resolve_with(
+            &UserFile { server: with_url().server, ..user_of(r#"repl = { tool_lines = 3; frame = false; max_record_seconds = 15; };"#).unwrap() },
+            &ProjectFile::default(),
             None,
-            None,
+            &llama_model(),
         )
         .unwrap();
         assert_eq!(
@@ -1465,72 +1082,57 @@ mod tests {
                 tool_lines: 3,
                 tool_chars: 500,
                 frame: false,
+                max_record_seconds: 15,
             }
         );
+        // The voice limit is 60 s unless set (AGL-016, D5; AGL-039, D20).
+        let plain = resolve_with(&with_url(), &ProjectFile::default(), None, &llama_model()).unwrap();
+        assert_eq!(plain.repl.max_record_seconds, 60);
     }
 
     #[test]
-    fn the_forge_table() {
-        // Absent: the defaults.
-        assert_eq!(user("").unwrap().forge, ForgeFile::default());
-        assert_eq!(
-            user("[forge]\nauto_rehome = false\n").unwrap().forge,
-            ForgeFile {
-                auto_rehome: Some(false)
-            }
-        );
-        assert_eq!(
-            user("[forge]\nauto_rehome = true\n").unwrap().forge,
-            ForgeFile {
-                auto_rehome: Some(true)
-            }
-        );
-        // Strict: an unknown key and a wrong type are rejected.
+    fn invalid_values_are_errors() {
         assert!(matches!(
-            user("[forge]\ndir = \"x\""),
-            Err(Error::UnknownKey { key, .. }) if key == "forge.dir"
-        ));
-        assert!(matches!(
-            user("[forge]\nauto_rehome = \"on\""),
-            Err(Error::WrongType { key, .. }) if key == "forge.auto_rehome"
-        ));
-    }
-
-    fn loaded_with_server(file: UserFile) -> UserFile {
-        UserFile {
-            server: ServerFile {
-                llama_url: Some("http://x".into()),
-                ..ServerFile::default()
-            },
-            ..file
-        }
-    }
-
-    #[test]
-    fn invalid_colors_and_repl_values() {
-        assert!(matches!(
-            user("[colors]\nmuted = \"red\""),
+            user_of(r#"colors.muted = "red";"#),
             Err(Error::InvalidStyle { key, .. }) if key == "colors.muted"
         ));
         assert!(matches!(
-            user("[colors]\nmutd = \"dim\""),
+            user_of(r#"colors.mutd = "dim";"#),
             Err(Error::UnknownKey { key, .. }) if key == "colors.mutd"
         ));
+        for (body, key) in [
+            ("repl.tool_lines = 0;", "repl.tool_lines"),
+            ("repl.tool_chars = -5;", "repl.tool_chars"),
+            ("repl.max_record_seconds = 0;", "repl.max_record_seconds"),
+        ] {
+            assert!(
+                matches!(user_of(body), Err(Error::NotPositive { key: k, .. }) if k == key),
+                "{body}"
+            );
+        }
         assert!(matches!(
-            user("[colors]\nmuted = 1"),
-            Err(Error::WrongType { key, .. }) if key == "colors.muted"
+            user_of("forge.auto_rehome = \"on\";"),
+            Err(Error::WrongType { key, .. }) if key == "forge.auto_rehome"
         ));
         assert!(matches!(
-            user("[repl]\ntool_lines = 0"),
-            Err(Error::NotPositive { key, .. }) if key == "repl.tool_lines"
+            user_of(r#"functon = "coder";"#),
+            Err(Error::UnknownKey { key, .. }) if key == "functon"
         ));
         assert!(matches!(
-            user("[repl]\ntool_chars = -5"),
-            Err(Error::NotPositive { key, .. }) if key == "repl.tool_chars"
+            user_of("function = 1;"),
+            Err(Error::WrongType { key, expected: Expected::String, .. }) if key == "function"
         ));
         assert!(matches!(
-            user("[repl]\nlines = 5"),
-            Err(Error::UnknownKey { key, .. }) if key == "repl.lines"
+            user_of(r#"server = "http://x";"#),
+            Err(Error::WrongType { key, expected: Expected::Table, .. }) if key == "server"
+        ));
+        assert!(matches!(
+            user_of(r#"language = "de";"#),
+            Err(Error::UnsupportedLanguage { value, .. }) if value == "de"
+        ));
+        assert!(matches!(
+            user_of(r#"server.strata.url = "https://x";"#),
+            Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
         ));
     }
 
@@ -1542,86 +1144,50 @@ mod tests {
     }
 
     #[test]
-    fn unknown_keys_are_errors() {
-        assert!(matches!(
-            user("functon = \"coder\""),
-            Err(Error::UnknownKey { key, .. }) if key == "functon"
-        ));
-        assert!(matches!(
-            user("[server]\nkind = \"llama\"\nport = 1"),
-            Err(Error::UnknownKey { key, .. }) if key == "server.port"
-        ));
+    fn the_project_file() {
+        let dir = TempDir::new();
+        let path = dir.0.join(SETTINGS_FILE);
+        assert_eq!(ProjectFile::load(&path).unwrap(), ProjectFile::default());
+        fs::write(&path, r#"{ agl, ... }: { function = "f"; server.llama.url = "http://p"; whisper.model = "w.bin"; }"#).unwrap();
+        let project = ProjectFile::load(&path).unwrap();
+        assert_eq!(project.function.as_deref(), Some("f"));
+        assert_eq!(project.server.llama_url.as_deref(), Some("http://p"));
+        assert_eq!(project.whisper.model.as_deref(), Some("w.bin"));
+        // The interface and the weights folders are the user's.
+        fs::write(&path, "{ agl, ... }: { language = \"uk\"; }").unwrap();
+        assert!(matches!(ProjectFile::load(&path), Err(Error::UnknownKey { key, .. }) if key == "language"));
     }
 
     #[test]
-    fn wrong_types_are_errors() {
-        assert!(matches!(
-            user("function = 1"),
-            Err(Error::WrongType { key, expected: Expected::String, .. }) if key == "function"
-        ));
-        assert!(matches!(
-            user("server = \"http://x\""),
-            Err(Error::WrongType { key, expected: Expected::Table, .. }) if key == "server"
-        ));
-        assert!(matches!(
-            user("[server.llama]\nurl = 1"),
-            Err(Error::WrongType { key, .. }) if key == "server.llama.url"
-        ));
-    }
-
-    #[test]
-    fn invalid_values_are_errors() {
-        assert!(matches!(
-            user("language = \"de\""),
-            Err(Error::UnsupportedLanguage { value, .. }) if value == "de"
-        ));
-        assert!(matches!(
-            user("[server.llama]\nurl = \"https://x\""),
-            Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
-        ));
-        assert!(matches!(
-            user("[server.strata]\nurl = \"https://x\""),
-            Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
-        ));
-        assert!(matches!(user("function ="), Err(Error::Parse { .. })));
-        assert!(matches!(
-            user("[server.llama]\nmodel = \"/tmp/m.gguf\""),
-            Err(Error::InvalidName(name)) if name == "/tmp/m.gguf"
-        ));
-        assert!(matches!(
-            user("[server.llama]\ncontext = 0"),
-            Err(Error::NotPositive { key, .. }) if key == "server.llama.context"
-        ));
-        assert!(matches!(
-            user("[server.llama]\nargs = \"-ngl 999\""),
-            Err(Error::WrongType { key, .. }) if key == "server.llama.args"
-        ));
+    fn set_top_writes_the_file_anew_and_keeps_the_values() {
+        // AGL-039, D11, D12.
+        let dir = TempDir::new();
+        let path = dir.0.join("config/settings.nix");
+        set_top(&path, "function", Value::String("a".into())).unwrap();
+        assert_eq!(UserFile::load(&path).unwrap().function.as_deref(), Some("a"));
+        fs::write(
+            &path,
+            "# a comment\n{ agl, ... }: let url = \"http://x\"; in { function = \"a\"; server.llama.url = url; }\n",
+        )
+        .unwrap();
+        set_top(&path, "function", Value::String("b".into())).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("{ agl, ... }: {\n"), "{text}");
+        assert!(!text.contains("# a comment") && !text.contains("let"));
+        let loaded = UserFile::load(&path).unwrap();
+        assert_eq!(loaded.function.as_deref(), Some("b"));
+        assert_eq!(loaded.server.llama_url.as_deref(), Some("http://x"));
     }
 
     #[test]
     fn function_precedence() {
-        let path = Path::new("/c/agentLIBRE.toml");
-        let user = UserFile {
-            function: Some("user".into()),
-            server: ServerFile {
-                llama_url: Some("http://x".into()),
-                ..ServerFile::default()
-            },
-            ..UserFile::default()
-        };
-        let resolve = |user: &UserFile, project, cli| {
-            Settings::resolve(
+        let user = UserFile { function: Some("user".into()), ..with_url() };
+        let resolve = |user: &UserFile, project: Option<&str>, cli| {
+            resolve_with(
                 user,
-                path,
-                (
-                    Path::new("/d/agentLIBRE.toml"),
-                    project,
-                    &ServerFile::default(),
-                    &WhisperFile::default(),
-                    &SearchFile::default(),
-                ),
+                &ProjectFile { function: project.map(str::to_owned), ..ProjectFile::default() },
                 cli,
-                None,
+                &llama_model(),
             )
             .unwrap()
             .function
@@ -1629,173 +1195,22 @@ mod tests {
         assert_eq!(resolve(&user, Some("project"), Some("cli")), "cli");
         assert_eq!(resolve(&user, Some("project"), None), "project");
         assert_eq!(resolve(&user, None, None), "user");
-        let no_function = UserFile {
-            function: None,
-            ..user
-        };
-        assert_eq!(resolve(&no_function, None, None), "minimal");
+        // The default (AGL-039, D32).
+        assert_eq!(resolve(&with_url(), None, None), "agentLIBRE-gpu-high");
     }
 
     #[test]
-    fn server_url_comes_from_the_user_file() {
-        let user = UserFile {
-            server: ServerFile {
-                llama_url: Some("http://127.0.0.1:18080".into()),
-                ..ServerFile::default()
-            },
-            ..UserFile::default()
-        };
-        let settings = resolved(&user, &ServerFile::default());
-        assert_eq!(settings.unwrap().server_url, "http://127.0.0.1:18080");
-    }
-
-    #[test]
-    fn missing_server_url_is_an_error() {
-        assert!(matches!(
-            resolved(&UserFile::default(), &ServerFile::default()),
-            Err(Error::MissingServerUrl { .. })
-        ));
-    }
-
-    #[test]
-    fn the_server_kind() {
-        assert_eq!(ServerKind::parse("llama"), Some(ServerKind::Llama));
-        assert_eq!(ServerKind::parse("strata"), Some(ServerKind::Strata));
-        assert_eq!(ServerKind::parse("mistral"), None);
-        // The absent key is llama (AGL-030, D1).
-        let server = user("[server.llama]\nurl = \"http://127.0.0.1:18080\"\n")
-            .unwrap()
-            .server;
-        assert_eq!(server.kind(), ServerKind::Llama);
-        let server = user("[server]\nkind = \"strata\"\n[server.strata]\nurl = \"http://127.0.0.1:18088\"\n")
-            .unwrap()
-            .server;
-        assert_eq!(server.kind(), ServerKind::Strata);
-        // An unknown kind is an error that names the value (AGL-030, D1).
-        assert!(matches!(
-            user("[server]\nkind = \"mistral\"\n"),
-            Err(Error::UnknownServerKind { value, .. }) if value == "mistral"
-        ));
-    }
-
-    #[test]
-    fn the_strata_kind_has_a_default_url() {
-        // A Strata server has a default address, so `url` is not required
-        // (AGL-030, D1); the llama-server address stays required.
-        let user = UserFile {
-            server: ServerFile {
-                kind: Some("strata".into()),
-                ..ServerFile::default()
-            },
-            ..UserFile::default()
-        };
-        let settings = resolved(&user, &ServerFile::default());
-        assert_eq!(settings.unwrap().server_url, DEFAULT_STRATA_URL);
-    }
-
-    /// `Settings::resolve` with the `[server]` table of a function file.
-    fn resolved_with(user: &UserFile, table: &ServerFile) -> Result<Settings, Error> {
-        Settings::resolve(
-            user,
-            Path::new("/c/agentLIBRE.toml"),
-            (
-                Path::new("/d/agentLIBRE.toml"),
-                None,
-                &ServerFile::default(),
-                &WhisperFile::default(),
-                &SearchFile::default(),
-            ),
-            None,
-            Some((table, Path::new("/f/profile.toml"))),
-        )
-    }
-
-    #[test]
-    fn the_function_table_selects_the_kind_and_its_url() {
-        // AGL-036, D1, D2: the settings say llama and hold both urls; the
-        // Function's table says strata and the strata url runs.
-        let user = UserFile {
-            server: ServerFile {
-                kind: Some("llama".into()),
-                llama_url: Some("http://127.0.0.1:18080".into()),
-                strata_url: Some("http://127.0.0.1:18089".into()),
-                model: Some("m.gguf".into()),
-                ..ServerFile::default()
-            },
-            ..UserFile::default()
-        };
-        let strata = ServerFile {
-            kind: Some("strata".into()),
-            strata_config: Some("/s/c.json".into()),
+    fn the_record_round_trips() {
+        let server = ServerFile {
+            kind: Some("llama".into()),
+            llama_url: Some("http://x".into()),
+            model: Some("/m/m.gguf".into()),
+            context: Some(131072),
+            args: Some(vec!["-ngl".into(), "999".into()]),
+            mmproj_offload: Some(false),
             ..ServerFile::default()
         };
-        let settings = resolved_with(&user, &strata).unwrap();
-        assert_eq!(settings.server.kind(), ServerKind::Strata);
-        assert_eq!(settings.server_url, "http://127.0.0.1:18089");
-        assert_eq!(settings.server.llama_url, None);
-        assert_eq!(settings.server.model, None);
-        assert_eq!(settings.server.strata_config.as_deref(), Some("/s/c.json"));
-        // D6: without a strata url, the default.
-        let no_url = UserFile {
-            server: ServerFile {
-                strata_url: None,
-                ..user.server.clone()
-            },
-            ..UserFile::default()
-        };
-        assert_eq!(resolved_with(&no_url, &strata).unwrap().server_url, DEFAULT_STRATA_URL);
-        // D5: a table without `kind` is llama, whatever the settings say.
-        let strata_settings = UserFile {
-            server: ServerFile {
-                kind: Some("strata".into()),
-                ..user.server.clone()
-            },
-            ..UserFile::default()
-        };
-        let llama = ServerFile {
-            model: Some("p.gguf".into()),
-            ..ServerFile::default()
-        };
-        let settings = resolved_with(&strata_settings, &llama).unwrap();
-        assert_eq!(settings.server.kind(), ServerKind::Llama);
-        assert_eq!(settings.server_url, "http://127.0.0.1:18080");
-        assert_eq!(settings.server.model.as_deref(), Some("p.gguf"));
-        assert_eq!(settings.server.strata_url, None);
-        // A table of the llama kind with a strata key is still an error.
-        let mixed = ServerFile {
-            strata_config: Some("/s/c.json".into()),
-            ..llama
-        };
-        assert!(matches!(
-            resolved_with(&user, &mixed),
-            Err(Error::Function { key, .. }) if key == "server.strata_config"
-        ));
-        // The llama url stays required (D6).
-        let no_llama_url = UserFile::default();
-        assert!(matches!(
-            resolved_with(&no_llama_url, &ServerFile { model: Some("p.gguf".into()), ..ServerFile::default() }),
-            Err(Error::MissingServerUrl { .. })
-        ));
-    }
-
-    #[test]
-    fn the_function_table_reads_its_kind() {
-        // AGL-036, D1: `kind` is a key of the table, checked; the urls are
-        // not (facts of the settings).
-        let parse = |text: &str| {
-            let path = Path::new("/f/profile.toml");
-            let table = tomlfile::parse(path, text).unwrap();
-            ServerFile::parse_model_side(Section::new(path, table), path)
-        };
-        let table = parse("kind = \"strata\"\nstrata_config = \"/s/c.json\"\n").unwrap();
-        assert_eq!(table.kind(), ServerKind::Strata);
-        assert!(matches!(
-            parse("kind = \"mistral\"\n"),
-            Err(Error::UnknownServerKind { value, .. }) if value == "mistral"
-        ));
-        assert!(matches!(
-            parse("url = \"http://127.0.0.1:18080\"\n"),
-            Err(Error::UnknownKey { .. })
-        ));
+        assert_eq!(ServerFile::from_json(&server.to_json()), Some(server));
+        assert_eq!(ServerFile::from_json(&json!({ "kind": 1 })), None);
     }
 }

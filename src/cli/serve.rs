@@ -68,8 +68,8 @@ pub struct Server {
     /// The unit of the project's whisper server, which `agl server stop`
     /// stops too (AGL-014).
     pub whisper_unit: String,
-    /// The project's `[server]` over the user's, both kinds (AGL-036, D1):
-    /// the kind is the Function's when its file declares a `[server]`.
+    /// The project's `server` over the user's: the url of each kind and
+    /// the engine (AGL-036, D1; AGL-039, D21).
     pub settings: ServerFile,
     pub url: String,
     /// The user's and the project's settings files, for hints.
@@ -78,27 +78,26 @@ pub struct Server {
     /// The project's store directory: the record of the launched server
     /// is there (AGL-035, D1).
     pub dir: PathBuf,
-    /// The `[server]` table of the Function the run loads, with the file
-    /// it came from (AGL-033, D1): when the file declares one, the table
-    /// is the model side of the settings, self-contained.
-    pub function_server: Option<(ServerFile, PathBuf)>,
+    /// The model of the Function the run loads, its weights resolved
+    /// (AGL-039, D21, D24): the kind and the model side of the server.
+    pub model: ServerFile,
 }
 
 impl Server {
-    /// The server of `project`, with `settings` the project's `[server]`
-    /// over the user's and `function_server` the `[server]` table of the
-    /// run's Function (AGL-033, D1). A project that is not registered has
-    /// no unit: an error (D14).
+    /// The server of `project`, with `settings` the project's `server`
+    /// over the user's and `model` the model of the run's Function
+    /// (AGL-039, D21). A project that is not registered has no unit: an
+    /// error (D14).
     pub fn of(
         project: &Workspace,
         settings: &ServerFile,
         user_path: &Path,
-        function_server: Option<(ServerFile, PathBuf)>,
+        model: ServerFile,
     ) -> Result<Server, Error> {
         let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
             project: project.project.clone(),
         })?;
-        let project_path = project.dir.join(crate::forge::MARKER_FILE);
+        let project_path = project.dir.join(crate::settings::SETTINGS_FILE);
         let mut server = Server {
             unit: unit_name(&key),
             whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
@@ -107,7 +106,7 @@ impl Server {
             user_path: user_path.into(),
             project_path,
             dir: project.dir.clone(),
-            function_server,
+            model,
         };
         // The url of the effective kind (AGL-036, D2, D6).
         server.url = server
@@ -120,15 +119,11 @@ impl Server {
         Ok(server)
     }
 
-    /// The settings that actually run (AGL-033, D1, D3; AGL-036, D1): the
-    /// Function's `[server]` table when the file declares it
-    /// (self-contained, with its kind), else the resolved settings of
-    /// their kind (the fallback).
+    /// The settings that actually run (AGL-033, D1; AGL-039, D21): the
+    /// Function's model with the url of its kind and the engine of the
+    /// settings.
     pub fn effective_settings(&self) -> Result<ServerFile, Error> {
-        match &self.function_server {
-            Some((table, path)) => self.settings.effective(table, path),
-            None => Ok(self.settings.selected()),
-        }
+        Ok(self.settings.effective(&self.model))
     }
 
     /// What the server is, in a line (AGL-033, D2): the effective
@@ -543,7 +538,7 @@ impl Autostart<'_> {
     /// The server of the kind starts as the unit of the project, the code
     /// of `agl server start` (AGL-035, D2).
     fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let server = Server::of(self.project, self.effective, &self.user_path, None)?;
+        let server = Server::of(self.project, self.effective, &self.user_path, self.effective.clone())?;
         launch_unit(
             &server,
             self.effective,
@@ -594,7 +589,7 @@ impl Autostart<'_> {
     /// python server from the config JSON; the child is kept in the field
     /// (AGL-024, D2, D3) and the wait for ready (D149).
     fn launch(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let project_path = self.project.dir.join(crate::forge::MARKER_FILE);
+        let project_path = self.project.dir.join(crate::settings::SETTINGS_FILE);
         let (engine, log) = match self.effective.kind() {
             ServerKind::Strata => {
                 let launch =
@@ -1031,26 +1026,23 @@ fn serves(
 }
 
 /// The record of what the running server was launched with (AGL-035,
-/// D1): `pid` and the effective `[server]`, in the format of a settings
-/// file.
+/// D1): `pid` and the effective server, as JSON (AGL-041, D2).
 fn write_record(dir: &Path, pid: u32, effective: &ServerFile) -> Result<(), Error> {
     let path = dir.join(STATE_FILE);
-    fs::write(&path, format!("pid = {pid}\n{}", effective.render()))
-        .map_err(|source| Error::Write { path, source })
+    let record = serde_json::json!({ "pid": pid, "server": effective.to_json() });
+    fs::write(&path, format!("{record}\n")).map_err(|source| Error::Write { path, source })
 }
 
 /// What the running server was launched with (AGL-035, D1): `None` when
 /// there is no record, it cannot be read, or its process is gone.
 fn read_record(dir: &Path) -> Option<ServerFile> {
     let path = dir.join(STATE_FILE);
-    let table = crate::tomlfile::read(&path).ok()??;
-    let mut file = crate::tomlfile::Section::new(&path, table);
-    file.check_keys(&["pid", "server"]).ok()?;
-    let pid = file.integer("pid").ok()??;
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let pid = record.get("pid")?.as_u64()?;
     if !Path::new(&format!("/proc/{pid}")).exists() {
         return None;
     }
-    ServerFile::parse(file.section("server").ok()?, &path).ok()
+    ServerFile::from_json(record.get("server")?)
 }
 
 /// The record goes away with the server it describes (AGL-035, D1).
@@ -1226,6 +1218,17 @@ pub(crate) fn ask_terminal(question: &str, _lang: Lang) -> bool {
         return false;
     }
     is_yes(&line)
+}
+
+/// Asks `question` in the terminal and returns the line answered, `None`
+/// when it is empty or cannot be read (AGL-039, D24c).
+pub(crate) fn ask_line(question: &str) -> Option<String> {
+    print!("{question} ");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).ok()?;
+    let line = line.trim();
+    (!line.is_empty()).then(|| line.to_owned())
 }
 
 /// Whether the answer to a yes/no question is yes.
@@ -1824,31 +1827,40 @@ mod tests {
         format!("sha256:{hex12}{}", "0".repeat(52))
     }
 
+    /// The model of a llama Function (AGL-039, D21).
+    fn model(weights: &str, context: u32) -> ServerFile {
+        ServerFile {
+            kind: Some("llama".into()),
+            model: Some(weights.into()),
+            context: Some(context),
+            ..ServerFile::default()
+        }
+    }
+
     #[test]
     fn the_unit_is_named_by_the_project_and_the_settings_merge() {
         let user = ServerFile {
             llama_url: Some("http://127.0.0.1:18080".into()),
-            model: Some("big.gguf".into()),
-            context: Some(131072),
-            args: Some(vec!["-ngl".into(), "999".into()]),
+            engine: Some("e".into()),
             ..ServerFile::default()
         };
         let own = ServerFile {
             llama_url: Some("http://127.0.0.1:18081".into()),
-            context: Some(65536),
             ..ServerFile::default()
         };
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&user);
         let server =
-            Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml"), None).unwrap();
+            Server::of(&ws, &merged, Path::new("/c/settings.nix"), model("big.gguf", 65536)).unwrap();
         assert_eq!(server.unit, "agentLIBRE-server-60af300abea6");
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
-        assert_eq!(server.settings.model.as_deref(), Some("big.gguf"));
-        assert_eq!(server.settings.context, Some(65536));
-        assert_eq!(server.project_path, PathBuf::from("/d/agl-lite-60af300abea6/agentLIBRE.toml"));
+        let effective = server.effective_settings().unwrap();
+        assert_eq!(effective.model.as_deref(), Some("big.gguf"));
+        assert_eq!(effective.context, Some(65536));
+        assert_eq!(effective.engine.as_deref(), Some("e"));
+        assert_eq!(server.project_path, PathBuf::from("/d/agl-lite-60af300abea6/settings.nix"));
     }
 
     #[test]
@@ -1859,14 +1871,14 @@ mod tests {
         };
         let ws = project(None, ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &user, Path::new("/c/agentLIBRE.toml"), None),
+            Server::of(&ws, &user, Path::new("/c/settings.nix"), model("m.gguf", 4096)),
             Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
         ));
         // A registered project with no url anywhere is the url error.
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &ServerFile::default(), Path::new("/c/agentLIBRE.toml"), None),
+            Server::of(&ws, &ServerFile::default(), Path::new("/c/settings.nix"), model("m.gguf", 4096)),
             Err(Error::MissingServerUrl { .. })
         ));
     }
@@ -2370,38 +2382,18 @@ mod tests {
     }
 
     #[test]
-    fn the_function_table_is_the_effective_settings() {
-        // The `[server]` table of the function file is the kind and the
-        // model side (AGL-033, D1; AGL-036, D1): self-contained — a table
-        // without `kind` is llama (D5) —, while the url of the kind and
-        // `engine` stay of the settings.
+    fn the_function_model_is_the_effective_settings() {
+        // The model of the Function is the kind and the model side
+        // (AGL-033, D1; AGL-036, D1; AGL-039, D21), while the url of the
+        // kind and `engine` stay of the settings.
         let origin = origin("60af300abea6");
         let own = ServerFile {
             llama_url: Some("http://127.0.0.1:18080".into()),
-            model: Some("project.gguf".into()),
-            ..ServerFile::default()
-        };
-        let user = ServerFile {
-            context: Some(131072),
             ..ServerFile::default()
         };
         let ws = project(Some(&origin), own);
-        let merged = ws.server.over(&user);
-        let table = ServerFile {
-            model: Some("function.gguf".into()),
-            context: Some(4096),
-            ..ServerFile::default()
-        };
-        let server = Server::of(
-            &ws,
-            &merged,
-            Path::new("/c/agentLIBRE.toml"),
-            Some((
-                table.clone(),
-                Path::new("/f/function.toml").to_path_buf(),
-            )),
-        )
-        .unwrap();
+        let merged = ws.server.over(&ServerFile::default());
+        let server = Server::of(&ws, &merged, Path::new("/c/settings.nix"), model("function.gguf", 4096)).unwrap();
         assert_eq!(
             server.effective_settings().unwrap(),
             ServerFile {
@@ -2412,9 +2404,5 @@ mod tests {
                 ..ServerFile::default()
             }
         );
-        // Without the table, the resolved settings are the effective.
-        let server = Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml"), None)
-            .unwrap();
-        assert_eq!(server.effective_settings().unwrap(), merged);
     }
 }
