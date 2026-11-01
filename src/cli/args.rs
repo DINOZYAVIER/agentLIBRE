@@ -23,6 +23,16 @@ pub enum Command {
     /// `agl forge …` (AGL-007); the arguments after the word
     /// `forge` are parsed in the forge surface.
     Forge(Vec<OsString>),
+    /// `agl function list|use` (AGL-036, D3).
+    Function(FunctionAction),
+}
+
+/// `agl function list` or `agl function use <name> [--user]` (AGL-036,
+/// D3): `user` writes the user's file instead of the project's.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FunctionAction {
+    List,
+    Use { name: String, user: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +79,33 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Some("-h" | "--help") => Ok(Command::Help),
             Some(other) => Err(Error::UnknownOption(other.into())),
         };
+    }
+    if args.peek().is_some_and(|arg| arg == "function") {
+        args.next();
+        let action = match args.next().map(text).transpose()?.as_deref() {
+            Some("list") => FunctionAction::List,
+            Some("use") => {
+                let name = args
+                    .next()
+                    .ok_or_else(|| Error::MissingValue("use".into()))
+                    .and_then(text)?;
+                FunctionAction::Use { name, user: false }
+            }
+            Some("-h" | "--help") => return Ok(Command::Help),
+            Some(other) => return Err(Error::UnknownOption(other.into())),
+            None => return Err(Error::MissingValue("function".into())),
+        };
+        let mut action = action;
+        for extra in args {
+            match (text(extra)?.as_str(), &mut action) {
+                ("--user", FunctionAction::Use { user, .. }) if !*user => *user = true,
+                ("--user", FunctionAction::Use { .. }) => {
+                    return Err(Error::RepeatedOption("--user".into()));
+                }
+                (other, _) => return Err(Error::UnknownOption(other.into())),
+            }
+        }
+        return Ok(Command::Function(action));
     }
     if args.peek().is_some_and(|arg| arg == "server") {
         args.next();
@@ -365,6 +402,52 @@ mod tests {
             parse_strs(&["-p", "server"]).unwrap(),
             Command::Run(Args {
                 prompt: Some("server".into()),
+                ..Args::default()
+            })
+        );
+    }
+
+    #[test]
+    fn function_commands() {
+        // AGL-036, D3.
+        assert_eq!(
+            parse_strs(&["function", "list"]).unwrap(),
+            Command::Function(FunctionAction::List)
+        );
+        assert_eq!(
+            parse_strs(&["function", "use", "p"]).unwrap(),
+            Command::Function(FunctionAction::Use { name: "p".into(), user: false })
+        );
+        assert_eq!(
+            parse_strs(&["function", "use", "p", "--user"]).unwrap(),
+            Command::Function(FunctionAction::Use { name: "p".into(), user: true })
+        );
+        assert!(matches!(
+            parse_strs(&["function", "use", "p", "--user", "--user"]),
+            Err(Error::RepeatedOption(o)) if o == "--user"
+        ));
+        assert!(matches!(
+            parse_strs(&["function", "use"]),
+            Err(Error::MissingValue(o)) if o == "use"
+        ));
+        assert!(matches!(
+            parse_strs(&["function", "list", "--user"]),
+            Err(Error::UnknownOption(o)) if o == "--user"
+        ));
+        assert!(matches!(
+            parse_strs(&["function"]),
+            Err(Error::MissingValue(o)) if o == "function"
+        ));
+        assert!(matches!(
+            parse_strs(&["function", "show"]),
+            Err(Error::UnknownOption(o)) if o == "show"
+        ));
+        assert_eq!(parse_strs(&["function", "--help"]).unwrap(), Command::Help);
+        // Only the first word is a command; a message may say "function".
+        assert_eq!(
+            parse_strs(&["-p", "function"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("function".into()),
                 ..Args::default()
             })
         );

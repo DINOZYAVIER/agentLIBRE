@@ -767,22 +767,27 @@ impl Engine {
 /// What the server is, in a line (AGL-033, D2): `llama-server` with
 /// the model, the Strata server with the config's `model_name`.
 fn what_of(effective: &ServerFile) -> Result<String, Error> {
-    match effective.kind() {
-        ServerKind::Strata => {
-            let name = effective
-                .strata_config
-                .as_deref()
-                .map(|path| strata_config(Path::new(path)))
-                .transpose()?
-                .and_then(|cfg| cfg.model_name);
-            Ok(name
-                .map(|name| format!("the Strata server ({name})"))
-                .unwrap_or_else(|| "the Strata server".to_owned()))
-        }
-        ServerKind::Llama => Ok(match &effective.model {
-            Some(name) => format!("llama-server ({name})"),
-            None => "llama-server".to_owned(),
-        }),
+    let model = model_of(effective)?;
+    Ok(match (effective.kind(), model) {
+        (ServerKind::Strata, Some(name)) => format!("the Strata server ({name})"),
+        (ServerKind::Strata, None) => "the Strata server".to_owned(),
+        (ServerKind::Llama, Some(name)) => format!("llama-server ({name})"),
+        (ServerKind::Llama, None) => "llama-server".to_owned(),
+    })
+}
+
+/// The model of the settings, by its name (AGL-033, D2; AGL-036, D3): the
+/// model file of the llama kind, the config's `model_name` of the strata
+/// kind; `None` when the settings name none.
+pub(crate) fn model_of(settings: &ServerFile) -> Result<Option<String>, Error> {
+    match settings.kind() {
+        ServerKind::Strata => Ok(settings
+            .strata_config
+            .as_deref()
+            .map(|path| strata_config(Path::new(path)))
+            .transpose()?
+            .and_then(|cfg| cfg.model_name)),
+        ServerKind::Llama => Ok(settings.model.clone()),
     }
 }
 

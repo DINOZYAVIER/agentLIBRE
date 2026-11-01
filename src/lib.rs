@@ -216,6 +216,11 @@ fn run(
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             return cli::forge::run(&args, &user, &paths, &cwd, *lang);
         }
+        Command::Function(action) => {
+            let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            return cli::function::run(action, &user, &paths, &cwd, *lang);
+        }
     };
     let (paths, user) = loaded?;
     let user_path = paths.settings_file();

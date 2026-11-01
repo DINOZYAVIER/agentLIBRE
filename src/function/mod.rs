@@ -22,6 +22,11 @@ const BUILTIN: &[(&str, &str)] = &[
     ("agentLIBRE", include_str!("../builtin/functions/agentLIBRE.toml")),
 ];
 
+/// The names of the built-in Functions (AGL-036, D3).
+pub fn builtin_names() -> impl Iterator<Item = &'static str> {
+    BUILTIN.iter().map(|(name, _)| *name)
+}
+
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 

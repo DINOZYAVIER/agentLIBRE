@@ -160,6 +160,7 @@ Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name
            [--think <level>] [--yes]
        agl init
        agl server start [--yes] [--function <name>]|stop|status [--function <name>]
+       agl function list|use <name> [--user]
        agl forge list|show|new|status|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
@@ -186,6 +187,13 @@ project's agentLIBRE.toml over the one of the user):
   server status       show whether it runs and is ready (--function: the
                       server of that Function)
 
+Functions (the workspace's functions/, then the user's, then the built-ins;
+a Function's [server] table names its server kind and model):
+  function list               the Functions, each with its kind and model;
+                              * marks the one the runs here load
+  function use <name>         the runs here load <name>: `function` in the
+                              project's agentLIBRE.toml (--user: the user's)
+
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
   forge list                      the artifacts of the workspace
@@ -201,6 +209,7 @@ under XDG_DATA_HOME):
               [--think <level>] [--yes]
               agl init
               agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
+              agl function list|use <назва> [--user]
               agl forge list|show|new|status|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
@@ -228,6 +237,13 @@ agentLIBRE.toml проєкту поверх файлу користувача):
   server status       показати, чи він працює і чи готовий (--function:
                       сервер цієї Функції)
 
+Функції (functions/ робочої області, потім користувача, потім вбудовані;
+таблиця [server] Функції називає вид її сервера і модель):
+  function list               Функції, кожна з видом і моделлю; * позначає
+                              ту, яку тут завантажують запуски
+  function use <назва>        запуски тут завантажують <назва>: `function` у
+                              agentLIBRE.toml проєкту (--user: користувача)
+
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
   forge list                      артефакти робочої області
@@ -238,6 +254,56 @@ Forge (сховище артефактів робочої області, agentL
   forge log <назва>               коміти файлу артефакту
   forge diff <назва> [коміт]     розбіжності файлу артефакту
   forge rehome [<сховище>] [--new]   перемістити сховище робочої області",
+    };
+
+    /// `agl function list`: a Function of the workspace's `functions/`
+    /// (AGL-036, D3).
+    pub const FUNCTION_SOURCE_WORKSPACE: Msg = Msg {
+        en: "workspace",
+        uk: "воркспейс",
+    };
+
+    /// `agl function list`: a Function of the user's `functions/`.
+    pub const FUNCTION_SOURCE_USER: Msg = Msg {
+        en: "user",
+        uk: "користувач",
+    };
+
+    /// `agl function list`: a built-in Function.
+    pub const FUNCTION_SOURCE_BUILTIN: Msg = Msg {
+        en: "built-in",
+        uk: "вбудована",
+    };
+
+    /// `agl function list`: the server names no model.
+    pub const FUNCTION_NO_MODEL: Msg = Msg {
+        en: "no model",
+        uk: "без моделі",
+    };
+
+    /// `agl function list`: a Function without a `[server]` table runs on
+    /// the server of the settings (AGL-033, D3).
+    pub const FUNCTION_FROM_SETTINGS: Msg = Msg {
+        en: "(the settings' server)",
+        uk: "(сервер із налаштувань)",
+    };
+
+    /// `agl function list`: the Function hides others of the same name.
+    pub const FUNCTION_SHADOWS: Msg = Msg {
+        en: "over {sources}",
+        uk: "замість: {sources}",
+    };
+
+    /// `agl function use` wrote the key (AGL-036, D7).
+    pub const FUNCTION_SET: Msg = Msg {
+        en: "the runs load the Function {name} (function in {path})",
+        uk: "запуски завантажують Function {name} (function у {path})",
+    };
+
+    /// `agl function use --user` while the project names its own.
+    pub const FUNCTION_PROJECT_WINS: Msg = Msg {
+        en: "in this project {path} names {name}, which wins over the user's file",
+        uk: "у цьому проєкті {path} називає {name}, і він важливіший за файл користувача",
     };
 
     /// The pointer appended to usage errors.
