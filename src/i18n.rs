@@ -733,16 +733,22 @@ Forge (сховище артефактів робочої області, agentL
         uk: "JSON-конфіг Strata {path} не можна прочитати або розібрати: {detail}",
     };
 
-    /// `Error::StrataPython` (AGL-033, D2).
-    pub const STRATA_PYTHON: Msg = Msg {
-        en: "no venv python at {path} (the .venv beside the Strata config)",
-        uk: "немає venv python за {path} (.venv поруч з конфігом Strata)",
+    /// `Error::StrataNoCwd` (AGL-038, D3, D7).
+    pub const STRATA_NO_CWD: Msg = Msg {
+        en: "the Strata config {path} names no cwd (the directory of the Strata checkout, where .venv and serve/server.py are)",
+        uk: "конфіг Strata {path} не називає cwd (каталог checkout Strata, де лежать .venv і serve/server.py)",
     };
 
-    /// `Error::StrataServerPy` (AGL-033, D2).
+    /// `Error::StrataPython` (AGL-033, D2; AGL-038, D3).
+    pub const STRATA_PYTHON: Msg = Msg {
+        en: "no venv python at {path} (the .venv in the cwd of the Strata config)",
+        uk: "немає venv python за {path} (.venv у cwd конфігу Strata)",
+    };
+
+    /// `Error::StrataServerPy` (AGL-033, D2; AGL-038, D3).
     pub const STRATA_SERVER_PY: Msg = Msg {
-        en: "no serve/server.py at {path} (beside the Strata config)",
-        uk: "немає serve/server.py за {path} (поруч з конфігом Strata)",
+        en: "no serve/server.py at {path} (in the cwd of the Strata config)",
+        uk: "немає serve/server.py за {path} (у cwd конфігу Strata)",
     };
 
     /// The question of D9: another server runs, start one more?
@@ -2215,6 +2221,9 @@ impl Error {
             ),
             Error::StrataConfig { path, detail } => {
                 tr!(lang, m::STRATA_CONFIG, path = path.display(), detail = detail)
+            }
+            Error::StrataNoCwd { path } => {
+                tr!(lang, m::STRATA_NO_CWD, path = path.display()).to_string()
             }
             Error::StrataPython { path } => {
                 tr!(lang, m::STRATA_PYTHON, path = path.display()).to_string()

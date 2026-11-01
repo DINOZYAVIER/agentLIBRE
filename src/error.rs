@@ -197,11 +197,14 @@ pub enum Error {
     /// The Strata config JSON the `strata_config` names cannot be read or
     /// parsed (AGL-033, D2).
     StrataConfig { path: PathBuf, detail: String },
-    /// The `.venv/bin/python` beside the Strata config is missing (AGL-033,
-    /// D2).
+    /// The Strata config names no `cwd`, the Strata checkout (AGL-038, D3,
+    /// D7).
+    StrataNoCwd { path: PathBuf },
+    /// The `.venv/bin/python` in the `cwd` of the Strata config is missing
+    /// (AGL-033, D2; AGL-038, D3).
     StrataPython { path: PathBuf },
-    /// The `serve/server.py` beside the Strata config is missing (AGL-033,
-    /// D2).
+    /// The `serve/server.py` in the `cwd` of the Strata config is missing
+    /// (AGL-033, D2; AGL-038, D3).
     StrataServerPy { path: PathBuf },
     /// An audio needs whisper and `[whisper]` lacks `url` or `model`
     /// (AGL-014, D22).
@@ -549,15 +552,18 @@ impl std::fmt::Display for Error {
                 Error::StrataConfig { path, detail } => {
                     format!("the Strata config {} cannot be read: {detail}", path.display())
                 }
+                Error::StrataNoCwd { path } => {
+                    format!("the Strata config {} names no cwd", path.display())
+                }
                 Error::StrataPython { path } => {
                     format!(
-                        "no venv python at {} (the .venv beside the Strata config)",
+                        "no venv python at {} (the .venv in the cwd of the Strata config)",
                         path.display()
                     )
                 }
                 Error::StrataServerPy { path } => {
                     format!(
-                        "no serve/server.py at {} (beside the Strata config)",
+                        "no serve/server.py at {} (in the cwd of the Strata config)",
                         path.display()
                     )
                 }
