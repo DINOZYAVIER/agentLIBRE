@@ -1121,11 +1121,12 @@ fn consent(question: &str, others: &Others, lang: Lang) -> Result<(), Error> {
 }
 
 /// The restart consent of D2 (AGL-033): the same consent, with the
-/// question of the mismatch; a refusal is the `RestartDeclined`.
+/// question of the mismatch; a refusal — no terminal, or the human's no
+/// (AGL-034, F29) — is the `RestartDeclined`.
 fn restart_consent(what: &str, others: &Others, lang: Lang) -> Result<(), Error> {
     match consent(&texts::restart_question(what, lang), others, lang) {
         Ok(()) => Ok(()),
-        Err(Error::ServerRunning { .. }) => Err(Error::RestartDeclined),
+        Err(Error::ServerRunning { .. } | Error::StartDeclined) => Err(Error::RestartDeclined),
         Err(error) => Err(error),
     }
 }
@@ -1183,9 +1184,11 @@ fn switch_kind(
         .what
         .unwrap_or_else(|| tr!(lang, m::SERVER_OF_THE_PROJECT).to_owned());
     let at = elsewhere.url.as_deref().unwrap_or("?");
+    // A refusal — no terminal, or the human's no (AGL-034, F29) — is
+    // the `SwitchDeclined`.
     match consent(&texts::switch_question(&old, at, what, lang), others, lang) {
         Ok(()) => {}
-        Err(Error::ServerRunning { .. }) => return Err(Error::SwitchDeclined),
+        Err(Error::ServerRunning { .. } | Error::StartDeclined) => return Err(Error::SwitchDeclined),
         Err(error) => return Err(error),
     }
     if let Some(engine) = engine.and_then(|engine| engine.lock().unwrap().take()) {
@@ -1898,8 +1901,11 @@ mod tests {
             consent(question, &Others::Refuse, Lang::En),
             Err(Error::ServerRunning { units }) if units.is_empty()
         ));
-        // The restart consent: the refusal is the `RestartDeclined`.
+        // The restart consent: the refusal is the `RestartDeclined`, also
+        // the human's no in a terminal (AGL-034, F29).
         assert!(restart_consent("llama-server", &Others::Refuse, Lang::En)
+            .is_err_and(|error| matches!(error, Error::RestartDeclined)));
+        assert!(restart_consent("llama-server", &Others::Ask(&no), Lang::En)
             .is_err_and(|error| matches!(error, Error::RestartDeclined)));
         assert!(restart_consent("llama-server", &Others::Yes, Lang::En).is_ok());
     }
@@ -2177,6 +2183,19 @@ mod tests {
             Lang::En,
         );
         assert!(matches!(refused, Err(Error::SwitchDeclined)));
+        assert!(read_record(&dir).is_some());
+        // The human's no in a terminal is the same refusal (AGL-034, F29).
+        let no = |_question: &str, _lang: Lang| false;
+        let answered = switch_kind(
+            &dir,
+            None,
+            None,
+            (&strata, "the Strata server"),
+            &Others::Ask(&no),
+            &mut |line| said.push(line.to_owned()),
+            Lang::En,
+        );
+        assert!(matches!(answered, Err(Error::SwitchDeclined)));
         assert!(read_record(&dir).is_some());
         // Agreed: the owned server stops, the record goes, and it is told.
         switch_kind(
