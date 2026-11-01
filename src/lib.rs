@@ -474,7 +474,7 @@ fn agent_session(
     };
     match agent.turn(&message, &mut StderrReport::new(lang))? {
         TurnEnd::Answer(text) => {
-            println!("{text}");
+            outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))
         }
         TurnEnd::Stopped(reason) => {

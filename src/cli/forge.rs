@@ -17,6 +17,7 @@ use crate::i18n::{Lang, Msg, m};
 use crate::paths::Paths;
 use crate::settings::UserFile;
 use crate::tr;
+use crate::outln;
 
 /// Runs a `forge` command over the arguments after the word `forge`,
 /// in the workspace of `cwd`.
@@ -133,7 +134,7 @@ fn resolve_workspace(
         &|options| ask_store(m::FORGE_ASK_STORE, options, lang),
     )?;
     for line in lines {
-        println!("{line}");
+        outln!("{line}");
     }
     Ok(ws)
 }
@@ -171,9 +172,9 @@ pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result
     if !crate::repl::term::is_interactive() {
         return Err(Error::RehomeNoStore { stores });
     }
-    println!("{}", tr!(lang, question));
+    outln!("{}", tr!(lang, question));
     for (i, option) in options.iter().enumerate() {
-        println!("  {}. {option}", i + 1);
+        outln!("  {}. {option}", i + 1);
     }
     let mut line = String::new();
     let stdin = io::stdin();
@@ -198,7 +199,7 @@ pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result
 
 /// `forge list`: the table of the artifacts of the workspace.
 fn list(ws: &Workspace) -> Result<ExitCode, Error> {
-    println!(
+    outln!(
         "{:<24} {:<10} {:<8} {:<10} FLAG",
         "NAME", "TYPE", "STATUS", "UPDATED"
     );
@@ -217,19 +218,19 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
                 } else {
                     String::new()
                 };
-                println!(
+                outln!(
                     "{:<24} {:<10} {:<8} {:<10} {}",
                     artifact.name, artifact.type_name, artifact.status, artifact.updated, flag
                 );
             }
             Header::UnknownSchema { schema, .. } => {
-                println!(
+                outln!(
                     "{:<24} {:<10} {:<8} {:<10} !schema {schema}",
                     stem, "", "", ""
                 );
             }
             Header::Broken { detail, .. } => {
-                println!(
+                outln!(
                     "{:<24} {:<10} {:<8} {:<10} !parse {detail}",
                     stem, "", "", ""
                 );
@@ -322,10 +323,10 @@ fn new_task_spec(
     let mut artifact = task_spec::scaffold(&name, &task_spec::today());
     artifact.path = path.clone();
     for line in forge::materialize(ws, lang)? {
-        println!("{line}");
+        outln!("{line}");
     }
     forge::write_artifact(&artifact)?;
-    println!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = path.display()));
+    outln!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = path.display()));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -371,7 +372,7 @@ fn status(
     artifact.status = to.name().to_string();
     artifact.updated = task_spec::today();
     forge::write_artifact(&artifact)?;
-    println!(
+    outln!(
         "{}",
         tr!(
             lang,
@@ -749,7 +750,7 @@ fn rehome_new(
             target: tr!(lang, m::FORGE_NEW_STORE).to_string(),
         });
     }
-    println!("{}", forge::rehome_new(ws, lang)?);
+    outln!("{}", forge::rehome_new(ws, lang)?);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -770,7 +771,7 @@ fn rehome_to(
             target: name.to_string(),
         });
     }
-    println!("{}", forge::rehome_store(&paths.data, ws, name, lang)?);
+    outln!("{}", forge::rehome_store(&paths.data, ws, name, lang)?);
     Ok(ExitCode::SUCCESS)
 }
 

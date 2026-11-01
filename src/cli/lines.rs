@@ -18,6 +18,7 @@ use crate::status::{
     Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
 };
 use crate::tr;
+use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
@@ -69,7 +70,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             let name = message.split_whitespace().next().unwrap_or(message);
             match name {
                 "/quit" | "/exit" => break,
-                "/help" => println!("{}", help_text(lang, false)),
+                "/help" => outln!("{}", help_text(lang, false)),
                 "/status" => {
                     let info = Info {
                         session: session.id.clone(),
@@ -77,7 +78,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         unfinished: session.unfinished().and_then(|turn| turn.state),
                         context,
                     };
-                    println!("{}", status_text(&facts, &info, reasoning, lang));
+                    outln!("{}", status_text(&facts, &info, reasoning, lang));
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
                     Remember::Entry { name, text } => match memory.write() {
@@ -211,7 +212,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         });
         state = None;
         match end {
-            Ok(TurnEnd::Answer(text)) => println!("{text}"),
+            Ok(TurnEnd::Answer(text)) => outln!("{text}"),
             Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
                 eprintln!(
                     "{}",

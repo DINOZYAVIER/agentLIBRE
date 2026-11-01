@@ -14,6 +14,7 @@ use crate::paths::Paths;
 use crate::settings::{function_name, ServerFile, ServerKind, UserFile};
 use crate::tomlfile;
 use crate::tr;
+use crate::outln;
 
 use super::args::FunctionAction;
 
@@ -218,7 +219,7 @@ pub fn run(
     match action {
         FunctionAction::List => {
             for line in Catalog::of(paths, &project, user).lines(lang) {
-                println!("{line}");
+                outln!("{line}");
             }
         }
         FunctionAction::Use { name, user: to_user } => {
@@ -233,12 +234,12 @@ pub fn run(
                 project.dir.join(forge::MARKER_FILE)
             };
             use_function(&path, &name)?;
-            println!("{}", tr!(lang, m::FUNCTION_SET, name = name, path = path.display()));
+            outln!("{}", tr!(lang, m::FUNCTION_SET, name = name, path = path.display()));
             // The project's own key wins over the user's in this project.
             if to_user
                 && let Some(own) = project.function.as_deref().filter(|own| *own != name)
             {
-                println!(
+                outln!(
                     "{}",
                     tr!(
                         lang,

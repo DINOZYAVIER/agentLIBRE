@@ -10,6 +10,7 @@ use crate::i18n::{Lang, m};
 use crate::paths::Paths;
 use crate::settings::UserFile;
 use crate::tr;
+use crate::outln;
 
 use super::forge::ask_store;
 
@@ -32,7 +33,7 @@ pub fn run(user: &UserFile, paths: &Paths, cwd: &Path, lang: Lang) -> Result<Exi
     }
     lines.extend(written);
     for line in lines {
-        println!("{line}");
+        outln!("{line}");
     }
     Ok(ExitCode::SUCCESS)
 }

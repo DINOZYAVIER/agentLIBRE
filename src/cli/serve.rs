@@ -21,6 +21,7 @@ use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
 use crate::settings::{ServerFile, ServerKind};
 use crate::tr;
+use crate::outln;
 
 /// The name every unit of a llama-server starts with (D8); the project's
 /// key follows after a dash.
@@ -182,7 +183,7 @@ pub fn run(
                 path_var,
                 &llama,
                 &others,
-                &mut |line| println!("{line}"),
+                &mut |line| outln!("{line}"),
                 lang,
             )
             .map(|()| ExitCode::SUCCESS)
@@ -199,10 +200,10 @@ pub fn run(
                 remove_record(&server.dir);
                 println!("{}", tr!(lang, m::SERVER_STOPPED));
             } else if !whisper {
-                println!("{}", texts::not_running(&server.unit, lang));
+                outln!("{}", texts::not_running(&server.unit, lang));
             }
             if whisper {
-                println!("{}", tr!(lang, m::WHISPER_STOPPED));
+                outln!("{}", tr!(lang, m::WHISPER_STOPPED));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -220,7 +221,7 @@ pub fn run(
             // compares — the full path of the llama kind, the config's
             // model_name of the strata kind.
             let model = expected_model(&server.effective_settings()?, models)?;
-            println!(
+            outln!(
                 "{}",
                 texts::status(
                     &server.unit,
