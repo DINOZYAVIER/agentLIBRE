@@ -3,9 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use toml::Value;
-
-use crate::error::{Error, Expected};
+use crate::error::Error;
 use crate::forge::{self, Artifact};
 
 /// The name of the type.
@@ -78,18 +76,11 @@ pub struct TaskSpec {
 /// Validates the `[task-spec]` table of `artifact` strictly and takes
 /// it.
 pub fn take(artifact: &Artifact) -> Result<TaskSpec, Error> {
-    let Value::Table(table) = &artifact.type_table else {
-        return Err(Error::WrongType {
-            path: artifact.path.clone(),
-            key: artifact.type_name.clone(),
-            expected: Expected::Table,
-        });
-    };
-    let mut section = crate::tomlfile::Section::at(
+    let mut section = crate::nix::Section::at(
         &artifact.path,
         &artifact.type_name,
-        table.clone(),
-    );
+        artifact.type_table.clone(),
+    )?;
     section.check_keys(&["anchor", "last"])?;
     let anchor = section.required_string("anchor")?;
     let last = section.required_string("last")?;
@@ -114,9 +105,7 @@ pub fn check(artifact: &Artifact) -> Result<(), Error> {
 /// Verification, a one-line HTML-comment hint under each heading.
 /// `path` is set by the caller.
 pub fn scaffold(name: &str, today: &str) -> Artifact {
-    let mut table = toml::Table::new();
-    table.insert("anchor".into(), Value::String(String::new()));
-    table.insert("last".into(), Value::String(String::new()));
+    let table = serde_json::json!({ "anchor": "", "last": "" });
     Artifact {
         path: PathBuf::new(),
         type_name: TYPE.into(),
@@ -127,7 +116,7 @@ pub fn scaffold(name: &str, today: &str) -> Artifact {
         deps: Vec::new(),
         supersedes: Vec::new(),
         cmds: Some(Vec::new()),
-        type_table: Value::Table(table),
+        type_table: table,
         body: "\n\
 ## Objective
 <!-- What this task changes, and its scope. -->
@@ -418,36 +407,31 @@ mod tests {
     fn take_is_strict() {
         // An unknown key.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
-        let Value::Table(mut table) = artifact.type_table.clone() else {
-            panic!("a table")
-        };
-        table.insert("branch".into(), Value::String("x".into()));
-        artifact.type_table = Value::Table(table);
+        artifact.type_table["branch"] = "x".into();
         assert!(matches!(
             take(&artifact),
             Err(Error::UnknownKey { key, .. }) if key == "task-spec.branch"
         ));
         // anchor is required.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
-        let Value::Table(mut table) = artifact.type_table.clone() else {
-            panic!("a table")
-        };
-        table.remove("anchor");
-        artifact.type_table = Value::Table(table);
+        artifact.type_table.as_object_mut().unwrap().remove("anchor");
         assert!(matches!(
             take(&artifact),
             Err(Error::MissingKey { key, .. }) if key == "task-spec.anchor"
         ));
         // last is a string.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
-        let Value::Table(mut table) = artifact.type_table.clone() else {
-            panic!("a table")
-        };
-        table.insert("last".into(), Value::Integer(1));
-        artifact.type_table = Value::Table(table);
+        artifact.type_table["last"] = 1.into();
         assert!(matches!(
             take(&artifact),
             Err(Error::WrongType { key, .. }) if key == "task-spec.last"
+        ));
+        // The set itself must be a set.
+        let mut artifact = scaffold("agl-001-x", "2026-10-17");
+        artifact.type_table = "x".into();
+        assert!(matches!(
+            take(&artifact),
+            Err(Error::WrongType { key, .. }) if key == "task-spec"
         ));
     }
 

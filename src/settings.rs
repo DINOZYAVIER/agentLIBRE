@@ -103,12 +103,9 @@ pub struct ProjectFile {
 }
 
 impl ProjectFile {
-    /// Loads the project's `path`; a missing file has no settings.
-    pub fn load(path: &Path) -> Result<ProjectFile, Error> {
-        let Some(mut file) = evaluate(path)? else {
-            return Ok(ProjectFile::default());
-        };
-        // The identity is the marker's until AGL-041 moves it here.
+    /// The project's settings of the evaluated `file` (`path`), its
+    /// identity taken out already.
+    pub fn from_section(mut file: Section, path: &Path) -> Result<ProjectFile, Error> {
         file.check_keys(&["function", "server", "whisper", "search"])?;
         Ok(ProjectFile {
             function: file.string("function")?,
@@ -1147,15 +1144,15 @@ mod tests {
     fn the_project_file() {
         let dir = TempDir::new();
         let path = dir.0.join(SETTINGS_FILE);
-        assert_eq!(ProjectFile::load(&path).unwrap(), ProjectFile::default());
+        let load = |path: &Path| ProjectFile::from_section(evaluate(path)?.expect("written"), path);
         fs::write(&path, r#"{ agl, ... }: { function = "f"; server.llama.url = "http://p"; whisper.model = "w.bin"; }"#).unwrap();
-        let project = ProjectFile::load(&path).unwrap();
+        let project = load(&path).unwrap();
         assert_eq!(project.function.as_deref(), Some("f"));
         assert_eq!(project.server.llama_url.as_deref(), Some("http://p"));
         assert_eq!(project.whisper.model.as_deref(), Some("w.bin"));
         // The interface and the weights folders are the user's.
         fs::write(&path, "{ agl, ... }: { language = \"uk\"; }").unwrap();
-        assert!(matches!(ProjectFile::load(&path), Err(Error::UnknownKey { key, .. }) if key == "language"));
+        assert!(matches!(load(&path), Err(Error::UnknownKey { key, .. }) if key == "language"));
     }
 
     #[test]

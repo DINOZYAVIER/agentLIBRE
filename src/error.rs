@@ -28,8 +28,6 @@ pub enum Error {
     CurrentDir(io::Error),
     /// A settings file cannot be read.
     Read { path: PathBuf, source: io::Error },
-    /// A settings file is not valid TOML; `detail` comes from the parser.
-    Parse { path: PathBuf, detail: String },
     /// A settings file has a key outside `allowed` (D60).
     UnknownKey {
         path: PathBuf,
@@ -457,9 +455,6 @@ impl std::fmt::Display for Error {
                 Error::NoHome { var } => format!("HOME is not set and {var} is not absolute"),
                 Error::CurrentDir(source) => format!("cannot read the current directory: {source}"),
                 Error::Read { path, source } => format!("cannot read {}: {source}", path.display()),
-                Error::Parse { path, detail } => {
-                    format!("invalid TOML in {}: {detail}", path.display())
-                }
                 Error::UnknownKey { path, key, .. } => {
                     format!("unknown key `{key}` in {}", path.display())
                 }
@@ -660,7 +655,7 @@ impl std::fmt::Display for Error {
                     format!("{} has no `---` front-matter", path.display())
                 }
                 Error::ArtifactUnknownSchema { path, schema } => {
-                    format!("{} has schema {schema}, expected forge/v1", path.display())
+                    format!("{} has schema {schema}, expected {}", path.display(), crate::forge::SCHEMA)
                 }
                 Error::ArtifactTypeTableMissing { path, type_name } => {
                     format!("{} has no [{type_name}] table", path.display())

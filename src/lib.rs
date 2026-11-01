@@ -27,7 +27,6 @@ mod status;
 #[cfg(test)]
 mod test_server;
 mod theme;
-mod tomlfile;
 mod tools;
 mod weights;
 

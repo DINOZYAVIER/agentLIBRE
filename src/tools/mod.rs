@@ -485,12 +485,17 @@ fn forge_list(ws: &crate::forge::Workspace, lang: crate::i18n::Lang) -> ToolResu
         Err(error) => return forge_fail(error.message(lang)),
     };
     let mut lines = Vec::new();
-    for path in files {
+    // One evaluation of all the front matters (AGL-041).
+    let headers = match forge::read_headers(&files) {
+        Ok(headers) => headers,
+        Err(error) => return forge_fail(error.message(lang)),
+    };
+    for (path, header) in files.iter().zip(headers) {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match forge::read_header(&path) {
+        match Ok::<Header, crate::error::Error>(header) {
             Ok(Header::Artifact(artifact)) => lines.push(format!(
                 "{} {} {} {} deps=[{}]",
                 artifact.name,

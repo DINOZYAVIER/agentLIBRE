@@ -364,12 +364,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "не вдалося прочитати {path}: {source}",
     };
 
-    /// `Error::Parse`.
-    pub const PARSE: Msg = Msg {
-        en: "invalid TOML in {path}:\n{detail}",
-        uk: "некоректний TOML у {path}:\n{detail}",
-    };
-
     /// `Error::UnknownKey`.
     pub const UNKNOWN_KEY: Msg = Msg {
         en: "unknown key `{key}` in {path}; allowed: {allowed}",
@@ -1673,8 +1667,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ArtifactUnknownSchema`.
     pub const ARTIFACT_UNKNOWN_SCHEMA: Msg = Msg {
-        en: "{path} has schema {schema}, expected forge/v1",
-        uk: "у {path} схема {schema}, очікується forge/v1",
+        en: "{path} has schema {schema}, expected forge/v2",
+        uk: "у {path} схема {schema}, очікується forge/v2",
     };
 
     /// `Error::ArtifactTypeTableMissing`.
@@ -2020,9 +2014,6 @@ impl Error {
             Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
             Error::Read { path, source } => {
                 tr!(lang, m::READ, path = path.display(), source = source)
-            }
-            Error::Parse { path, detail } => {
-                tr!(lang, m::PARSE, path = path.display(), detail = detail)
             }
             Error::UnknownKey { path, key, allowed } => {
                 tr!(

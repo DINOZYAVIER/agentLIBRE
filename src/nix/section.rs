@@ -1,6 +1,6 @@
 //! Reading an evaluated Nix value strictly (AGL-039): unknown keys,
 //! missing keys and wrong types are errors that name the file and the key
-//! path, as `tomlfile::Section` does for TOML (D60).
+//! path (D60).
 
 use std::path::{Path, PathBuf};
 
@@ -33,8 +33,38 @@ impl Section {
         }
     }
 
+    /// The value `value` read at the location `prefix` of `path`, such as
+    /// `task-spec`; it must be a set.
+    pub fn at(path: &Path, prefix: &str, value: Value) -> Result<Section, Error> {
+        let mut section = Section::top(path, value).map_err(|_| Error::WrongType {
+            path: path.into(),
+            key: prefix.into(),
+            expected: Expected::Table,
+        })?;
+        section.prefix = format!("{prefix}.");
+        Ok(section)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Consumes the section into the raw value of its set, for a set
+    /// carried unparsed.
+    pub fn into_value(self) -> Value {
+        Value::Object(self.map)
+    }
+
+    /// Rejects any key left in the set: the known keys were read, so a
+    /// remainder is an unknown key of an artifact's envelope.
+    pub fn check_empty(&self) -> Result<(), Error> {
+        match self.map.keys().next() {
+            Some(key) => Err(Error::ArtifactKey {
+                path: self.path.clone(),
+                key: self.key(key),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// The full name of `key` in the file; with an empty `key`, the name of

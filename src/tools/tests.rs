@@ -320,8 +320,6 @@ impl ForgeStore {
 
     /// An artifact of the `note` type: a type without a lifecycle.
     fn note(&self, name: &str) -> Artifact {
-        let mut table = toml::Table::new();
-        table.insert("text".into(), toml::Value::String("a note".into()));
         Artifact {
             path: self
                 .ws
@@ -337,7 +335,7 @@ impl ForgeStore {
             deps: Vec::new(),
             supersedes: Vec::new(),
             cmds: None,
-            type_table: toml::Value::Table(table),
+            type_table: serde_json::json!({ "text": "a note" }),
             body: "\na note\n".into(),
         }
     }
@@ -1046,8 +1044,8 @@ fn forge_rename_rewrites_the_references_of_the_store() {
             .join("agl-001-a.md"),
     )
     .unwrap();
-    assert!(a_text.contains("deps = [\"agl-002-bis\", \"agl-003-c\"]"), "{a_text}");
-    assert!(a_text.contains("supersedes = [\"agl-002-bis\"]"), "{a_text}");
+    assert!(a_text.contains("deps = [ \"agl-002-bis\" \"agl-003-c\" ];"), "{a_text}");
+    assert!(a_text.contains("supersedes = [ \"agl-002-bis\" ];"), "{a_text}");
     // The un-referenced artifact is untouched, the old file is gone.
     assert!(!f
         .ws
@@ -1089,7 +1087,7 @@ fn forge_rename_rewrites_the_references_of_the_store() {
             .join("agl-004-d.md"),
     )
     .unwrap();
-    assert!(d_text.contains("deps = [\"note-two\"]"), "{d_text}");
+    assert!(d_text.contains("deps = [ \"note-two\" ];"), "{d_text}");
 }
 
 #[test]

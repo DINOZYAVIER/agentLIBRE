@@ -2,34 +2,33 @@
 //!
 //! One store per project (AGL-010: the nearest registered ancestor of
 //! the cwd), at `agentLIBRE/<project>/forge/<type>/` under
-//! XDG_DATA_HOME: the project's `agentLIBRE.toml` (the list of the
+//! XDG_DATA_HOME: the project's `settings.nix` (the list of the
 //! identities the store was re-homed from, the last one the current
-//! home, and the project settings) next to the `forge/` directory, and
-//! one file per artifact (TOML front-matter + Markdown body). The
-//! `forge/v1` envelope lives here; the `task-spec` type is in
+//! home, and the project settings, AGL-041) next to the `forge/`
+//! directory, and one file per artifact (a Nix front matter + Markdown
+//! body). The `forge/v2` envelope lives here; the `task-spec` type is in
 //! [`task_spec`].
 
 pub mod task_spec;
 
 use std::fs;
-use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
-use toml::{Table, Value};
+use serde_json::{Map, Value};
 
 use crate::error::Error;
+use crate::nix::{self, Section};
 use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
-use crate::tomlfile::quote as toml_string;
-use crate::tomlfile::Section;
 
 /// The name of the per-workspace marker file, in the data directory
-/// next to `forge/`.
-pub const MARKER_FILE: &str = "agentLIBRE.toml";
+/// next to `forge/`: the store's `settings.nix`, which carries the
+/// identity beside the project settings (AGL-039, D13; AGL-041).
+pub const MARKER_FILE: &str = crate::settings::SETTINGS_FILE;
 
-/// The schema of the artifact front-matter (the v1 envelope).
-pub const SCHEMA: &str = "forge/v1";
+/// The schema of the artifact front matter (the v2 envelope, AGL-041).
+pub const SCHEMA: &str = "forge/v2";
 
 /// The `sha256:<hex>` identity of a project: the sha256 of its
 /// canonical directory path.
@@ -176,33 +175,28 @@ pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-/// The project's `agentLIBRE.toml` (AGL-010): the format and the list
-/// of the identities the store carries, the last one the current home.
-/// The project's settings are its `settings.nix` (AGL-039, D11); AGL-041
-/// moves the identity there too.
+/// The identity of a store (AGL-010): the format and the list of the
+/// identities the store carries, the last one the current home; the
+/// `format` and `workspace_sha256` of its `settings.nix` (AGL-041).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Marker {
     pub hashes: Vec<String>,
 }
 
 impl Marker {
-    /// Parses `text` (from `path`) strictly: `format = 1` and the
-    /// `workspace_sha256` list of `sha256:<64-hex>` identities.
-    pub fn parse(path: &Path, text: &str) -> Result<Marker, Error> {
-        let mut file = Section::new(path, crate::tomlfile::parse(path, text)?);
-        file.check_keys(&["format", "workspace_sha256"])?;
+    /// Takes the identity out of the evaluated settings `file`:
+    /// `format = 1` and the `workspace_sha256` list of `sha256:<64-hex>`.
+    pub fn take(file: &mut Section) -> Result<Marker, Error> {
+        let path = file.path().to_path_buf();
         let format = file.required_integer("format")?;
         if format != 1 {
-            return Err(Error::MarkerFormat {
-                path: path.into(),
-                format,
-            });
+            return Err(Error::MarkerFormat { path, format });
         }
         let hashes = file.required_strings("workspace_sha256")?;
         for value in &hashes {
             if !is_identity(value) {
                 return Err(Error::MarkerIdentity {
-                    path: path.into(),
+                    path,
                     value: value.to_string(),
                 });
             }
@@ -210,21 +204,23 @@ impl Marker {
         Ok(Marker { hashes })
     }
 
-    /// Renders the marker the way it is written.
-    pub fn render(&self) -> String {
-        let hashes = self
-            .hashes
-            .iter()
-            .map(|hash| toml_string(hash))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("format = 1\nworkspace_sha256 = [{hashes}]\n")
-    }
-
-    /// Writes the marker to `path`: a temp file in the same directory
-    /// plus a rename.
+    /// Writes the identity into the settings file `path`, keeping its
+    /// other values (AGL-039, D12): the file is written anew.
     pub fn write(&self, path: &Path) -> Result<(), Error> {
-        write_atomic(path, &self.render())
+        let mut map = if path.exists() {
+            match nix::eval_file(path)? {
+                Value::Object(map) => map,
+                _ => Map::new(),
+            }
+        } else {
+            Map::new()
+        };
+        map.insert("format".into(), Value::from(1));
+        map.insert(
+            "workspace_sha256".into(),
+            Value::Array(self.hashes.iter().cloned().map(Value::String).collect()),
+        );
+        nix::write_settings(path, &map)
     }
 }
 
@@ -263,14 +259,14 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
             continue;
         }
         let marker_path = dir.join(MARKER_FILE);
-        let text = match fs::read_to_string(&marker_path) {
-            Ok(text) => text,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(Error::Read { path: marker_path, source }),
-        };
-        let marker = Marker::parse(&marker_path, &text)?;
-        // The project's settings beside the marker (AGL-039, D11).
-        let settings = ProjectFile::load(&dir.join(crate::settings::SETTINGS_FILE))?;
+        if !marker_path.is_file() {
+            continue;
+        }
+        // One evaluation: the identity and the project's settings
+        // (AGL-039, D11; AGL-041).
+        let mut file = Section::top(&marker_path, nix::eval_file(&marker_path)?)?;
+        let marker = Marker::take(&mut file)?;
+        let settings = ProjectFile::from_section(file, &marker_path)?;
         found.push(Store {
             dir,
             hashes: marker.hashes,
@@ -702,7 +698,7 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// A parsed artifact: the `forge/v1` envelope, the raw `[<type>]`
+/// A parsed artifact: the `forge/v2` envelope, the raw `<type>` set
 /// table, and the body, verbatim.
 #[derive(Debug, Clone)]
 pub struct Artifact {
@@ -799,13 +795,40 @@ pub fn check_date(key: &str, value: &str, path: &Path) -> Result<(), Error> {
     }
 }
 
-/// Parses and validates the front-matter of `path` strictly: the
-/// `forge/v1` envelope, the `[<type>]` table carried unparsed (and
+/// What the evaluation throws when a front matter is not a set; agl
+/// recognizes it in the evaluator's message (AGL-041).
+const NOT_A_SET: &str = "agentLIBRE: the front matter is not an attribute set";
+
+/// The front matter `front` as the expression agl evaluates: a plain set
+/// (AGL-039, D13), or the throw of [`NOT_A_SET`].
+fn front_expr(front: &str) -> String {
+    format!(
+        "(let v = ({front}\n); in if builtins.isAttrs v then v else throw {})",
+        nix::string(NOT_A_SET)
+    )
+}
+
+/// Evaluates the front matter `front` of `path` (AGL-041).
+fn eval_front(path: &Path, front: &str) -> Result<Value, Error> {
+    nix::eval_expr(path, &front_expr(front)).map_err(|error| match error {
+        Error::NixEval { detail, .. } if detail.contains(&format!("error: {NOT_A_SET}")) => {
+            Error::ArtifactFrontMatter { path: path.into() }
+        }
+        error => error,
+    })
+}
+
+/// Parses and validates the front matter of `path` strictly: the
+/// `forge/v2` envelope (AGL-041), the type's set carried unparsed (and
 /// validated by the type when it is known), and the body.
 pub fn parse_artifact(path: &Path, text: &str) -> Result<Artifact, Error> {
     let (front, body) = split_front_matter(path, text)?;
-    let table = crate::tomlfile::parse(path, &front)?;
-    let mut file = Section::new(path, table);
+    artifact_of(path, eval_front(path, &front)?, body)
+}
+
+/// The artifact of the evaluated front matter `value` of `path`.
+fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Error> {
+    let mut file = Section::top(path, value)?;
     let schema = file.required_string("schema")?;
     if schema != SCHEMA {
         return Err(Error::ArtifactUnknownSchema {
@@ -856,6 +879,25 @@ pub fn parse_artifact(path: &Path, text: &str) -> Result<Artifact, Error> {
     Ok(artifact)
 }
 
+/// The header of the evaluated front matter `value` of `path`: an
+/// unknown schema or an invalid envelope is marked, not an error.
+fn header_of(path: &Path, value: Value, body: String) -> Header {
+    let schema = value
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if schema != SCHEMA {
+        return Header::UnknownSchema { schema };
+    }
+    match artifact_of(path, value, body) {
+        Ok(artifact) => Header::Artifact(Box::new(artifact)),
+        Err(error) => Header::Broken {
+            detail: error.to_string(),
+        },
+    }
+}
+
 /// Reads the header of the store file `path` for `list`: it does not
 /// fail on an unknown schema or an unparseable file, it marks them.
 pub fn read_header(path: &Path) -> Result<Header, Error> {
@@ -863,7 +905,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         path: path.into(),
         source,
     })?;
-    let (front, _body) = match split_front_matter(path, &text) {
+    let (front, body) = match split_front_matter(path, &text) {
         Ok(split) => split,
         Err(error) => {
             return Ok(Header::Broken {
@@ -871,138 +913,80 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
             })
         }
     };
-    let table = match crate::tomlfile::parse(path, &front) {
-        Ok(table) => table,
-        Err(error) => {
-            return Ok(Header::Broken {
-                detail: error.to_string(),
-            })
-        }
-    };
-    let schema = table
-        .get("schema")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if schema != SCHEMA {
-        return Ok(Header::UnknownSchema { schema });
-    }
-    match parse_artifact(path, &text) {
-        Ok(artifact) => Ok(Header::Artifact(Box::new(artifact))),
+    match eval_front(path, &front) {
+        Ok(value) => Ok(header_of(path, value, body)),
+        Err(error @ Error::NixNotFound { .. }) => Err(error),
         Err(error) => Ok(Header::Broken {
             detail: error.to_string(),
         }),
     }
 }
 
-/// A TOML key: bare when possible, quoted otherwise.
-fn toml_key(key: &str) -> String {
-    let bare = !key.is_empty()
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    if bare {
-        key.to_string()
-    } else {
-        toml_string(key)
+/// The headers of the store files `paths`, as [`read_header`] reads them,
+/// in one evaluation of all their front matters (AGL-041: 41 files at
+/// about 14 ms each would be about 0.6 s); when that evaluation fails,
+/// one evaluation per file, so a broken file is marked and the others
+/// are read.
+pub fn read_headers(paths: &[PathBuf]) -> Result<Vec<Header>, Error> {
+    let mut split = Vec::new();
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|source| Error::Read {
+            path: path.clone(),
+            source,
+        })?;
+        split.push(split_front_matter(path, &text));
     }
-}
-
-/// A TOML value that can be written on one line.
-fn toml_inline(value: &Value) -> String {
-    match value {
-        Value::String(text) => toml_string(text),
-        Value::Integer(n) => n.to_string(),
-        Value::Float(f) => {
-            if f.is_nan() {
-                "nan".to_string()
-            } else if f.is_infinite() {
-                format!("{}inf", if f.is_sign_negative() { "-" } else { "" })
-            } else {
-                let text = f.to_string();
-                if text.contains(['.', 'e']) {
-                    text
-                } else {
-                    format!("{text}.0")
-                }
-            }
-        }
-        Value::Boolean(b) => b.to_string(),
-        Value::Datetime(date) => date.to_string(),
-        Value::Array(items) => format!(
-            "[{}]",
-            items
+    if split.iter().all(Result::is_ok) && !split.is_empty() {
+        let expr = format!(
+            "[ {} ]",
+            split
                 .iter()
-                .map(toml_inline)
+                .map(|front| front_expr(&front.as_ref().expect("all split").0))
                 .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Table(_) => unreachable!("tables are rendered as sections"),
-    }
-}
-
-/// Renders the entries of `table`: the one-line values first (key
-/// order), then each sub-table as a `[prefix.key]` section. `prefix`
-/// is the table's own name, empty at the top level.
-fn toml_table(out: &mut String, prefix: &str, table: &Table) {
-    let mut subs = Vec::new();
-    for (key, value) in table {
-        match value {
-            Value::Table(sub) => subs.push((key, sub)),
-            value => out.push_str(&format!(
-                "{} = {}\n",
-                toml_key(key),
-                toml_inline(value)
-            )),
+                .join(" ")
+        );
+        if let Ok(Value::Array(values)) = nix::eval_expr(Path::new("<forge list>"), &expr)
+            && values.len() == paths.len()
+        {
+            return Ok(paths
+                .iter()
+                .zip(values)
+                .zip(split)
+                .map(|((path, value), front)| header_of(path, value, front.expect("all split").1))
+                .collect());
         }
     }
-    for (key, sub) in subs {
-        out.push('\n');
-        let name = if prefix.is_empty() {
-            toml_key(key)
-        } else {
-            format!("{prefix}.{}", toml_key(key))
-        };
-        out.push_str(&format!("[{name}]\n"));
-        toml_table(out, &name, sub);
-    }
+    paths.iter().map(|path| read_header(path)).collect()
 }
 
-/// Renders an artifact: the front-matter in the envelope key order,
-/// `---`, and the body, the way the file is written.
+/// Renders an artifact: the front matter in the envelope key order, one
+/// key per line, `---`, and the body, the way the file is written
+/// (AGL-041: the form of the migration script, byte for byte).
 pub fn render(artifact: &Artifact) -> String {
-    let scalar = |front: &mut String, key: &str, value: &str| {
-        front.push_str(&format!("{key} = {}\n", toml_string(value)));
-    };
-    let array = |front: &mut String, key: &str, items: &[String]| {
-        let items = items
-            .iter()
-            .map(|item| toml_string(item))
-            .collect::<Vec<_>>()
-            .join(", ");
-        front.push_str(&format!("{key} = [{items}]\n"));
-    };
-    let mut front = String::new();
-    scalar(&mut front, "schema", SCHEMA);
-    scalar(&mut front, "type", &artifact.type_name);
-    scalar(&mut front, "name", &artifact.name);
-    scalar(&mut front, "status", &artifact.status);
-    scalar(&mut front, "created", &artifact.created);
-    scalar(&mut front, "updated", &artifact.updated);
-    array(&mut front, "deps", &artifact.deps);
-    array(&mut front, "supersedes", &artifact.supersedes);
-    let Value::Table(table) = &artifact.type_table else {
-        unreachable!("a parsed artifact always carries a table")
-    };
-    let header = toml_key(&artifact.type_name);
-    front.push_str(&format!("\n[{header}]\n"));
-    toml_table(&mut front, &header, table);
-    if let Some(cmds) = &artifact.cmds {
-        front.push('\n');
-        front.push_str("[verification]\n");
-        array(&mut front, "cmds", cmds);
+    let strings = |items: &[String]| nix::render(&Value::Array(items.iter().cloned().map(Value::String).collect()));
+    let mut front = String::from("{\n");
+    for (key, value) in [
+        ("schema", nix::string(SCHEMA)),
+        ("type", nix::string(&artifact.type_name)),
+        ("name", nix::string(&artifact.name)),
+        ("status", nix::string(&artifact.status)),
+        ("created", nix::string(&artifact.created)),
+        ("updated", nix::string(&artifact.updated)),
+        ("deps", strings(&artifact.deps)),
+        ("supersedes", strings(&artifact.supersedes)),
+    ] {
+        front.push_str(&format!("  {key} = {value};\n"));
     }
-    format!("---\n{front}---\n{}", artifact.body)
+    front.push_str(&format!(
+        "  {} = {};\n",
+        nix::key(&artifact.type_name),
+        nix::render(&artifact.type_table)
+    ));
+    if let Some(cmds) = &artifact.cmds {
+        front.push_str(&format!("  verification.cmds = {};\n", strings(cmds)));
+    }
+    front.push('}');
+    format!("---\n{front}\n---\n{}", artifact.body)
 }
 
 /// Reads and parses the artifact file `path`.
@@ -1164,11 +1148,20 @@ mod tests {
         ws
     }
 
-    /// The marker at `dir/agentLIBRE.toml`.
+    /// The identity in `dir/settings.nix`.
     fn marker(dir: &Path) -> Marker {
         let path = dir.join(MARKER_FILE);
-        let text = fs::read_to_string(&path).unwrap();
-        Marker::parse(&path, &text).unwrap()
+        let mut file = Section::top(&path, nix::eval_file(&path).unwrap()).unwrap();
+        Marker::take(&mut file).unwrap()
+    }
+
+    /// The identity of the settings `body`, as `stores` reads it.
+    fn take_marker(body: &str) -> Result<Marker, Error> {
+        let dir = TempDir::new();
+        let path = dir.path().join(MARKER_FILE);
+        fs::write(&path, format!("{{ agl, ... }}: {{ {body} }}")).unwrap();
+        let mut file = Section::top(&path, nix::eval_file(&path)?)?;
+        Marker::take(&mut file)
     }
 
     /// Moves `from` to `to` (a new parent, the same last component).
@@ -1227,34 +1220,36 @@ mod tests {
 
     #[test]
     fn the_marker_round_trips_and_is_strict() {
-        let path = Path::new("/d/agentLIBRE.toml");
+        // The identity is two keys of the store's `settings.nix`
+        // (AGL-041), written beside the other values (AGL-039, D12).
+        let dir = TempDir::new();
+        let path = dir.path().join(MARKER_FILE);
+        fs::write(&path, "{ agl, ... }: { function = \"f\"; }\n").unwrap();
         let marker = Marker {
             hashes: vec![identity(1), identity(2)],
         };
-        assert_eq!(Marker::parse(path, &marker.render()).unwrap(), marker);
-        // The project's settings are its `settings.nix` (AGL-039, D11).
-        for old in ["function = \"x\"\n", "[server.llama]\nurl = \"http://x\"\n"] {
-            let text = if old.starts_with('[') {
-                format!("format = 1\nworkspace_sha256 = []\n{old}")
-            } else {
-                format!("{old}format = 1\nworkspace_sha256 = []\n")
-            };
-            assert!(matches!(Marker::parse(path, &text), Err(Error::UnknownKey { .. })), "{old}");
-        }
+        marker.write(&path).unwrap();
+        assert_eq!(super::tests::marker(dir.path()), marker);
+        let project = crate::settings::ProjectFile::from_section(
+            {
+                let mut file = Section::top(&path, nix::eval_file(&path).unwrap()).unwrap();
+                Marker::take(&mut file).unwrap();
+                file
+            },
+            &path,
+        )
+        .unwrap();
+        assert_eq!(project.function.as_deref(), Some("f"));
         assert!(matches!(
-            Marker::parse(path, "format = 2\nworkspace_sha256 = []\n"),
+            take_marker("format = 2; workspace_sha256 = [ ];"),
             Err(Error::MarkerFormat { format: 2, .. })
         ));
         assert!(matches!(
-            Marker::parse(path, "format = 1\nworkspace_sha256 = [\"sha256:xyz\"]\n"),
+            take_marker(r#"format = 1; workspace_sha256 = [ "sha256:xyz" ];"#),
             Err(Error::MarkerIdentity { .. })
         ));
         assert!(matches!(
-            Marker::parse(path, "format = 1\nworkspace_sha256 = []\nnote = \"x\"\n"),
-            Err(Error::UnknownKey { .. })
-        ));
-        assert!(matches!(
-            Marker::parse(path, "format = 1\n"),
+            take_marker("format = 1;"),
             Err(Error::MissingKey { key, .. }) if key == "workspace_sha256"
         ));
     }
@@ -1276,10 +1271,10 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].dir, store);
         assert_eq!(found[0].hashes, vec![identity(1)]);
-        // A marker that does not parse is an error.
+        // A marker that does not evaluate is an error.
         fs::create_dir_all(data.join("broken")).unwrap();
-        fs::write(data.join("broken/agentLIBRE.toml"), "format = one\n").unwrap();
-        assert!(matches!(stores(&data), Err(Error::Parse { .. })));
+        fs::write(data.join("broken").join(MARKER_FILE), "{ agl, ... }: { format = ; }\n").unwrap();
+        assert!(matches!(stores(&data), Err(Error::NixEval { .. })));
     }
 
     #[test]
@@ -1723,16 +1718,17 @@ mod tests {
         let ws = fresh_store(&data, &from);
         assert_eq!(ws.function, None);
         // The Function is set in the store's `settings.nix` (AGL-039,
-        // D11) beside the marker.
-        Marker {
-            hashes: vec![identity_of(&from)],
-        }
-        .write(&ws.dir.join(MARKER_FILE))
-        .unwrap();
+        // D11), the identity beside it (AGL-041).
+        fs::create_dir_all(&ws.dir).unwrap();
         fs::write(
             ws.dir.join(crate::settings::SETTINGS_FILE),
             "{ agl, ... }: { function = \"coder\"; }\n",
         )
+        .unwrap();
+        Marker {
+            hashes: vec![identity_of(&from)],
+        }
+        .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
         let (found, _) = auto(&data, &from);
         assert_eq!(found.function.as_deref(), Some("coder"));
@@ -1760,15 +1756,16 @@ mod tests {
             ..ServerFile::default()
         };
         let origin = identity_of(&from);
-        Marker {
-            hashes: vec![origin.clone()],
-        }
-        .write(&ws.dir.join(MARKER_FILE))
-        .unwrap();
+        fs::create_dir_all(&ws.dir).unwrap();
         fs::write(
             ws.dir.join(crate::settings::SETTINGS_FILE),
             "{ agl, ... }: { server.llama.url = \"http://127.0.0.1:18081\"; }\n",
         )
+        .unwrap();
+        Marker {
+            hashes: vec![origin.clone()],
+        }
+        .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
         let (found, _) = auto(&data, &from);
         assert_eq!(found.server, server);
@@ -1812,21 +1809,18 @@ mod tests {
 
     fn task_spec_text() -> &'static str {
         r#"---
-schema = "forge/v1"
-type = "task-spec"
-name = "agl-001-x"
-status = "open"
-created = "2026-10-15"
-updated = "2026-10-15"
-deps = ["agl-000-a"]
-supersedes = []
-
-[task-spec]
-anchor = ""
-last = ""
-
-[verification]
-cmds = ["true"]
+{
+  schema = "forge/v2";
+  type = "task-spec";
+  name = "agl-001-x";
+  status = "open";
+  created = "2026-10-15";
+  updated = "2026-10-15";
+  deps = [ "agl-000-a" ];
+  supersedes = [ ];
+  task-spec = { anchor = ""; last = ""; };
+  verification.cmds = [ "true" ];
+}
 ---
 # AGL-001
 
@@ -1847,11 +1841,7 @@ body line
         assert_eq!(artifact.deps, vec!["agl-000-a".to_string()]);
         assert!(artifact.supersedes.is_empty());
         assert_eq!(artifact.cmds, Some(vec!["true".to_string()]));
-        let Value::Table(table) = &artifact.type_table else {
-            panic!("the type table is carried")
-        };
-        assert_eq!(table.get("anchor").and_then(Value::as_str), Some(""));
-        assert_eq!(table.get("last").and_then(Value::as_str), Some(""));
+        assert_eq!(artifact.type_table, serde_json::json!({ "anchor": "", "last": "" }));
         // The body, verbatim.
         assert_eq!(artifact.body, "# AGL-001\n\nbody line\n");
         // Render and parse again: the file is byte-identical.
@@ -1867,40 +1857,40 @@ body line
         let path = Path::new("/s/agl-001-x.md");
         // An unknown key at the top level.
         let text = task_spec_text().replace(
-            "schema = \"forge/v1\"\n",
-            "schema = \"forge/v1\"\nextra = 1\n",
+            "schema = \"forge/v2\";\n",
+            "schema = \"forge/v2\";\n  extra = 1;\n",
         );
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::ArtifactKey { key, .. }) if key == "extra"
         ));
         // A missing required key.
-        let text = task_spec_text().replace("status = \"open\"\n", "");
+        let text = task_spec_text().replace("  status = \"open\";\n", "");
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::MissingKey { key, .. }) if key == "status"
         ));
         // A missing type table.
-        let text = task_spec_text().replace("[task-spec]\nanchor = \"\"\nlast = \"\"\n\n", "");
+        let text = task_spec_text().replace("  task-spec = { anchor = \"\"; last = \"\"; };\n", "");
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::ArtifactTypeTableMissing { type_name, .. })
                 if type_name == "task-spec"
         ));
         // An unknown key in the type table (the task-spec check).
-        let text = task_spec_text().replace("[task-spec]\n", "[task-spec]\nextra = 1\n");
+        let text = task_spec_text().replace("task-spec = { ", "task-spec = { extra = 1; ");
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::UnknownKey { key, .. }) if key == "task-spec.extra"
         ));
         // A wrong type for a key.
-        let text = task_spec_text().replace("deps = [\"agl-000-a\"]", "deps = 1");
+        let text = task_spec_text().replace("deps = [ \"agl-000-a\" ]", "deps = 1");
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::WrongType { key, .. }) if key == "deps"
         ));
         // A state outside the lifecycle (the task-spec check).
-        let text = task_spec_text().replace("status = \"open\"", "status = \"draft\"");
+        let text = task_spec_text().replace("status = \"open\";", "status = \"draft\";");
         assert!(matches!(
             parse_artifact(path, &text),
             Err(Error::BadState { state, .. }) if state == "draft"
@@ -1915,7 +1905,7 @@ body line
             ("2026-1-15", false),
             ("20261015", false),
         ] {
-            let text = task_spec_text().replace("created = \"2026-10-15\"", &format!("created = \"{value}\""));
+            let text = task_spec_text().replace("created = \"2026-10-15\";", &format!("created = \"{value}\";"));
             let broken = parse_artifact(path, &text).is_err();
             assert_eq!(broken, !ok, "created = {value}");
         }
@@ -1925,50 +1915,43 @@ body line
     fn an_unknown_type_is_carried_unparsed() {
         let path = Path::new("/s/note-1.md");
         let text = r#"---
-schema = "forge/v1"
-type = "note"
-name = "note-1"
-status = "whatever"
-created = "2026-10-15"
-updated = "2026-10-15"
-deps = []
-supersedes = []
-
-[note]
-mood = "fine"
-n = 3
-
-[verification]
-cmds = []
+{
+  schema = "forge/v2";
+  type = "note";
+  name = "note-1";
+  status = "whatever";
+  created = "2026-10-15";
+  updated = "2026-10-15";
+  deps = [ ];
+  supersedes = [ ];
+  note = { mood = "fine"; n = 3; };
+  verification.cmds = [ ];
+}
 ---
 a note
 "#;
         let artifact = parse_artifact(path, text).unwrap();
         assert_eq!(artifact.type_name, "note");
         assert_eq!(artifact.status, "whatever");
-        let Value::Table(table) = &artifact.type_table else {
-            panic!("the type table is carried")
-        };
-        assert_eq!(table.get("mood").and_then(Value::as_str), Some("fine"));
-        assert_eq!(table.get("n").and_then(Value::as_integer), Some(3));
-        // And the round trip.
-        assert_eq!(parse_artifact(path, &render(&artifact)).unwrap().body, "a note\n");
+        assert_eq!(artifact.type_table, serde_json::json!({ "mood": "fine", "n": 3 }));
+        // And the round trip, byte for byte.
+        assert_eq!(render(&artifact), text);
     }
 
     #[test]
     fn an_unknown_schema_is_declined() {
         let path = Path::new("/s/old.md");
-        let text = task_spec_text().replace("schema = \"forge/v1\"", "schema = \"forge/v0\"");
+        let text = task_spec_text().replace("schema = \"forge/v2\"", "schema = \"forge/v1\"");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::ArtifactUnknownSchema { schema, .. }) if schema == "forge/v0"
+            Err(Error::ArtifactUnknownSchema { schema, .. }) if schema == "forge/v1"
         ));
         // `list` marks it instead of failing.
         let dir = TempDir::new();
         let file = dir.path().join("old.md");
         fs::write(&file, &text).unwrap();
         match read_header(&file).unwrap() {
-            Header::UnknownSchema { schema, .. } => assert_eq!(schema, "forge/v0"),
+            Header::UnknownSchema { schema, .. } => assert_eq!(schema, "forge/v1"),
             other => panic!("expected an unknown schema, got {other:?}"),
         }
     }
@@ -1982,12 +1965,29 @@ a note
             Header::Broken { .. } => {}
             other => panic!("expected a broken header, got {other:?}"),
         }
-        let bad_toml = dir.path().join("bad-toml.md");
-        fs::write(&bad_toml, "---\nschema = forge/v1\n---\nbody\n").unwrap();
-        match read_header(&bad_toml).unwrap() {
+        // Nix that does not evaluate, and a front matter that is not a set.
+        let bad = dir.path().join("bad-nix.md");
+        fs::write(&bad, "---\n{ schema = ; }\n---\nbody\n").unwrap();
+        match read_header(&bad).unwrap() {
             Header::Broken { .. } => {}
             other => panic!("expected a broken header, got {other:?}"),
         }
+        let list = dir.path().join("a-list.md");
+        fs::write(&list, "---\n[ 1 ]\n---\nbody\n").unwrap();
+        assert!(matches!(
+            parse_artifact(&list, &fs::read_to_string(&list).unwrap()),
+            Err(Error::ArtifactFrontMatter { .. })
+        ));
+        // `list` reads them all in one evaluation, or file by file when one
+        // is broken: the good ones are read either way (AGL-041).
+        let good = dir.path().join("agl-001-x.md");
+        fs::write(&good, task_spec_text()).unwrap();
+        let headers = read_headers(&[good.clone(), bad.clone(), good.clone()]).unwrap();
+        assert!(matches!(&headers[0], Header::Artifact(artifact) if artifact.name == "agl-001-x"));
+        assert!(matches!(&headers[1], Header::Broken { .. }));
+        assert!(matches!(&headers[2], Header::Artifact(_)));
+        let headers = read_headers(&[good.clone(), good]).unwrap();
+        assert!(headers.iter().all(|header| matches!(header, Header::Artifact(_))));
     }
 
     #[test]

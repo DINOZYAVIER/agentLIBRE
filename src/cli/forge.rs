@@ -206,12 +206,14 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
     // The git flags read the project directory when it is a git
     // repository (AGL-010); the cell is blank otherwise.
     let in_repository = forge::in_repository(&ws.project)?;
-    for path in forge::artifact_files(&ws.dir)? {
+    let files = forge::artifact_files(&ws.dir)?;
+    // One evaluation of all the front matters (AGL-041).
+    for (path, header) in files.iter().zip(forge::read_headers(&files)?) {
         let stem = path
             .file_stem()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match forge::read_header(&path)? {
+        match header {
             Header::Artifact(artifact) => {
                 let flag = if in_repository && artifact.type_name == task_spec::TYPE {
                     git_flag_cell(&artifact, &ws.project)?
@@ -548,11 +550,8 @@ fn id_resolves(cwd: &Path, id: &str) -> bool {
 }
 
 /// The `[task-spec]` table of `spec`.
-fn task_spec_table(spec: task_spec::TaskSpec) -> toml::Value {
-    let mut table = toml::Table::new();
-    table.insert("anchor".into(), toml::Value::String(spec.anchor));
-    table.insert("last".into(), toml::Value::String(spec.last));
-    toml::Value::Table(table)
+fn task_spec_table(spec: task_spec::TaskSpec) -> serde_json::Value {
+    serde_json::json!({ "anchor": spec.anchor, "last": spec.last })
 }
 
 /// Runs the `[verification]` cmds of `artifact` via the tools' `bash -c`
@@ -949,9 +948,9 @@ mod tests {
             forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap(),
             ExitCode::SUCCESS
         );
-        assert!(data.join(&key).join("agentLIBRE.toml").is_file());
+        assert!(data.join(&key).join("settings.nix").is_file());
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.starts_with("---\nschema = \"forge/v1\"\ntype = \"task-spec\""));
+        assert!(text.starts_with("---\n{\n  schema = \"forge/v2\";\n  type = \"task-spec\";"));
         assert!(text.contains("## Objective"));
         // The next number is the max plus one.
         assert_eq!(
@@ -1179,7 +1178,7 @@ mod tests {
             forge(&data, &repo, &["rehome", "--new"]).unwrap(),
             ExitCode::SUCCESS
         );
-        assert!(data.join(&key).join("agentLIBRE.toml").is_file());
+        assert!(data.join(&key).join("settings.nix").is_file());
         // The identity is in a store now: a second `--new` and a named
         // other store are refused; the same store is a no-op.
         assert!(matches!(
