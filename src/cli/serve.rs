@@ -261,6 +261,9 @@ pub fn start(
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
     let what = server.what()?;
+    // The server of the other kind that agl owns stops first (AGL-036,
+    // D10): the two do not fit the GPU together.
+    switch_kind(&server.dir, Some(&server.unit), None, (url, &what), others, say, lang)?;
     // A server answers at the url, this project's unit or a foreign one:
     // wait for it to be ready, then the check of D2 (AGL-033) — it
     // serves the effective settings, or a mismatch restarts it.
@@ -466,6 +469,9 @@ impl Autostart<'_> {
     pub fn ensure(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let llama = self.llama;
         let what = self.what()?;
+        // The server of the other kind that agl owns stops first
+        // (AGL-036, D10): the two do not fit the GPU together.
+        self.switch(say)?;
         match health(llama) {
             // The server is ready: the check of D2 (AGL-033) decides —
             // it serves the effective settings, or a mismatch restarts.
@@ -491,6 +497,23 @@ impl Autostart<'_> {
             // a foreign process on the port is an error, not a target.
             Health::Down => self.launch(&what, say),
         }
+    }
+
+    /// The switch of D10 (AGL-036): the server of the other kind that agl
+    /// owns stops, with the consent. `ensure` runs it; the interactive
+    /// session runs it before it takes the terminal, where a question can
+    /// still be answered.
+    pub fn switch(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        let unit = self.project.unit_key().map(|key| unit_name(&key));
+        switch_kind(
+            &self.project.dir,
+            unit.as_deref(),
+            Some(&self.engine),
+            (self.llama.url(), &self.what()?),
+            &self.others,
+            say,
+            self.lang,
+        )
     }
 
     /// The mismatch of D2 (AGL-033): the consent as today (ask / `--yes`
@@ -1093,6 +1116,89 @@ fn restart_consent(what: &str, others: &Others, lang: Lang) -> Result<(), Error>
         Err(Error::ServerRunning { .. }) => Err(Error::RestartDeclined),
         Err(error) => Err(error),
     }
+}
+
+/// The server agl owns runs elsewhere than `url`, the url of the effective
+/// kind (AGL-036, D10): the server of the other kind, which holds the GPU.
+/// It is told by the record (AGL-035, D1) — its url is not `url` — or,
+/// without a record, by the project's unit, active while nothing answers
+/// at `url`. `None` when agl owns no server elsewhere.
+fn owned_elsewhere(dir: &Path, unit: Option<&str>, url: &str) -> Result<Option<Elsewhere>, Error> {
+    if let Some(record) = read_record(dir) {
+        let Some(at) = record.url().filter(|at| at != url) else {
+            return Ok(None);
+        };
+        return Ok(Some(Elsewhere {
+            what: Some(what_of(&record)?),
+            url: Some(at),
+        }));
+    }
+    let Some(unit) = unit else {
+        return Ok(None);
+    };
+    let free = local_address(url).is_none_or(|(host, port)| !port_open(&host, port));
+    Ok((free && unit_active(unit)?).then_some(Elsewhere {
+        what: None,
+        url: None,
+    }))
+}
+
+/// The server agl owns elsewhere (AGL-036, D10): what it is and where,
+/// when the record says.
+struct Elsewhere {
+    what: Option<String>,
+    url: Option<String>,
+}
+
+/// The switch of D10 (AGL-036): when the server agl owns runs elsewhere
+/// than `url` — the other kind's — it stops with the consent (ask /
+/// `--yes` / refuse) before the server of the effective kind, `what`,
+/// starts: the child in `engine` and the project's `unit`; then its port
+/// must be free. A foreign server is not touched.
+fn switch_kind(
+    dir: &Path,
+    unit: Option<&str>,
+    engine: Option<&Mutex<Option<Engine>>>,
+    (url, what): (&str, &str),
+    others: &Others,
+    say: &mut dyn FnMut(&str),
+    lang: Lang,
+) -> Result<(), Error> {
+    let Some(elsewhere) = owned_elsewhere(dir, unit, url)? else {
+        return Ok(());
+    };
+    let old = elsewhere
+        .what
+        .unwrap_or_else(|| tr!(lang, m::SERVER_OF_THE_PROJECT).to_owned());
+    let at = elsewhere.url.as_deref().unwrap_or("?");
+    match consent(&texts::switch_question(&old, at, what, lang), others, lang) {
+        Ok(()) => {}
+        Err(Error::ServerRunning { .. }) => return Err(Error::SwitchDeclined),
+        Err(error) => return Err(error),
+    }
+    if let Some(engine) = engine.and_then(|engine| engine.lock().unwrap().take()) {
+        engine.shutdown();
+    }
+    if let Some(unit) = unit
+        && unit_active(unit)?
+    {
+        systemctl(&["stop", unit])?;
+    }
+    remove_record(dir);
+    if let Some((host, port)) = elsewhere.url.as_deref().and_then(local_address) {
+        let started = Instant::now();
+        while port_open(&host, port) {
+            if started.elapsed() >= Duration::from_secs(10) {
+                return Err(Error::PortBusy {
+                    url: at.into(),
+                    units: Vec::new(),
+                });
+            }
+            thread::sleep(POLL);
+        }
+    }
+    say(&tr!(lang, m::SERVER_SWITCH_STOPPED, old = old));
+    Ok(())
 }
 
 /// The answer to a question on a terminal (D9, D13; AGL-033): the
@@ -2016,6 +2122,76 @@ mod tests {
         remove_record(&dir);
         assert_eq!(read_record(&dir), None);
         assert!(!dir.join(STATE_FILE).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A local url where nothing listens: a port that was free a moment ago.
+    fn free_url() -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    }
+
+    #[test]
+    fn the_owned_server_of_the_other_kind_is_told_by_the_record() {
+        // AGL-036, D10: the record says where the owned server runs; a url
+        // other than the effective kind's is the other kind's server.
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-elsewhere-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let llama = free_url();
+        let strata = free_url();
+        let record = ServerFile {
+            kind: Some("llama".into()),
+            llama_url: Some(llama.clone()),
+            model: Some("m.gguf".into()),
+            ..ServerFile::default()
+        };
+        // No record and no unit: nothing is owned.
+        assert!(owned_elsewhere(&dir, None, &strata).unwrap().is_none());
+        write_record(&dir, std::process::id(), &record).unwrap();
+        // The same url: the server of the kind, not elsewhere.
+        assert!(owned_elsewhere(&dir, None, &llama).unwrap().is_none());
+        let elsewhere = owned_elsewhere(&dir, None, &strata).unwrap().unwrap();
+        assert_eq!(elsewhere.url.as_deref(), Some(llama.as_str()));
+        assert_eq!(elsewhere.what.as_deref(), Some("llama-server (m.gguf)"));
+        // The switch refused: the record stays, the error names the switch.
+        let mut said = Vec::new();
+        let refused = switch_kind(
+            &dir,
+            None,
+            None,
+            (&strata, "the Strata server"),
+            &Others::Refuse,
+            &mut |line| said.push(line.to_owned()),
+            Lang::En,
+        );
+        assert!(matches!(refused, Err(Error::SwitchDeclined)));
+        assert!(read_record(&dir).is_some());
+        // Agreed: the owned server stops, the record goes, and it is told.
+        switch_kind(
+            &dir,
+            None,
+            None,
+            (&strata, "the Strata server"),
+            &Others::Yes,
+            &mut |line| said.push(line.to_owned()),
+            Lang::En,
+        )
+        .unwrap();
+        assert!(read_record(&dir).is_none());
+        assert_eq!(said, ["llama-server (m.gguf) stopped"]);
+        // Nothing owned elsewhere: no question, nothing said.
+        let mut silent = Vec::new();
+        switch_kind(
+            &dir,
+            None,
+            None,
+            (&strata, "the Strata server"),
+            &Others::Refuse,
+            &mut |line| silent.push(line.to_owned()),
+            Lang::En,
+        )
+        .unwrap();
+        assert!(silent.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

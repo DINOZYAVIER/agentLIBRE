@@ -643,6 +643,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер не перезапущено",
     };
 
+    /// `Error::SwitchDeclined` (AGL-036, D10).
+    pub const SWITCH_DECLINED: Msg = Msg {
+        en: "the server of the other kind was not stopped, so the new one was not started",
+        uk: "сервер іншого виду не зупинено, тож новий не запущено",
+    };
+
     /// `Error::MissingStrataConfig` (AGL-033, D2).
     pub const MISSING_STRATA_CONFIG: Msg = Msg {
         en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project):\n\n[server.strata]\nstrata_config = \"/path/to/strata-config.json\"",
@@ -1362,6 +1368,27 @@ Forge (сховище артефактів робочої області, agentL
     pub const SERVER_RESTART_QUESTION: Msg = Msg {
         en: "the running server does not serve this profile ({what}). Restart it? [y/N]",
         uk: "сервер, що працює, не відповідає цьому профілю ({what}). Перезапустити? [y/N]",
+    };
+
+    /// The question of D10 (AGL-036): the server agl owns runs elsewhere —
+    /// the other kind's — and holds the GPU; `old` and `url` are it, `what`
+    /// the server of the run.
+    pub const SERVER_SWITCH_QUESTION: Msg = Msg {
+        en: "{old} runs at {url}; stop it to start {what}? [y/N]",
+        uk: "{old} працює за {url}; зупинити його, щоб запустити {what}? [y/N]",
+    };
+
+    /// The server of the other kind stopped (AGL-036, D10).
+    pub const SERVER_SWITCH_STOPPED: Msg = Msg {
+        en: "{old} stopped",
+        uk: "{old} зупинено",
+    };
+
+    /// The server agl owns, when no record says what it runs (AGL-036,
+    /// D10).
+    pub const SERVER_OF_THE_PROJECT: Msg = Msg {
+        en: "the server of the project",
+        uk: "сервер проєкту",
     };
 
     /// `agl server stop` stopped it (D146).
@@ -2092,6 +2119,7 @@ impl Error {
             }
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
             Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
+            Error::SwitchDeclined => tr!(lang, m::SWITCH_DECLINED).to_string(),
             Error::MissingStrataConfig {
                 user_path,
                 project_path,
@@ -2554,6 +2582,11 @@ pub mod server {
     /// does not serve the profile's effective settings.
     pub fn restart_question(what: &str, lang: Lang) -> String {
         tr!(lang, m::SERVER_RESTART_QUESTION, what = what)
+    }
+
+    /// The question of D10 (AGL-036): `old` at `url` stops for `what`.
+    pub fn switch_question(old: &str, url: &str, what: &str, lang: Lang) -> String {
+        tr!(lang, m::SERVER_SWITCH_QUESTION, old = old, url = url, what = what)
     }
 
     pub fn not_running(unit: &str, lang: Lang) -> String {

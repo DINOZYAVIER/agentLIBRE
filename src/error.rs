@@ -175,6 +175,9 @@ pub enum Error {
     StartDeclined,
     /// The human answered no to the restart of D2 (AGL-033).
     RestartDeclined,
+    /// The human answered no to the stop of the server of the other kind
+    /// (AGL-036, D10).
+    SwitchDeclined,
     /// The `[server]` of the strata kind names no `strata_config` (AGL-033,
     /// D2).
     MissingStrataConfig {
@@ -528,6 +531,7 @@ impl std::fmt::Display for Error {
                 }
                 Error::StartDeclined => "llama-server was not started".into(),
                 Error::RestartDeclined => "the server was not restarted".into(),
+                Error::SwitchDeclined => "the server of the other kind was not stopped".into(),
                 Error::MissingStrataConfig { .. } => {
                     "the strata kind needs strata_config (the path of the Strata config JSON)"
                         .into()
