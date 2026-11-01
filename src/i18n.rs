@@ -1177,6 +1177,18 @@ Forge (сховище артефактів робочої області, agentL
         uk: "замінити історію резюме",
     };
 
+    /// `/function` (AGL-036, D3, D4, D9).
+    pub const CMD_FUNCTION: Msg = Msg {
+        en: "the Functions; /function <name> starts a new session with it",
+        uk: "Функції; /function <назва> починає з нею нову сесію",
+    };
+
+    /// `/function <name>` leaves the session for a new one (AGL-036, D4).
+    pub const FUNCTION_SWITCH: Msg = Msg {
+        en: "the Function {name}: a new session",
+        uk: "Function {name}: нова сесія",
+    };
+
     /// The description of a `/` command (AGL-013).
     pub const CMD_ATTACH: Msg = Msg {
         en: "attach an image, a video or an audio to the next message",
@@ -2727,6 +2739,7 @@ pub mod repl {
             "/remember" => tr!(lang, m::CMD_REMEMBER),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
+            "/function" => tr!(lang, m::CMD_FUNCTION),
             _ => "",
         }
     }

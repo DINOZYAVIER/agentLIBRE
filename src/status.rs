@@ -13,8 +13,9 @@ use crate::theme::Role;
 use crate::tr;
 
 /// The `/` commands (D118, D139, AGL-013).
-pub const COMMANDS: [&str; 9] = [
+pub const COMMANDS: [&str; 10] = [
     "/quit", "/exit", "/help", "/status", "/think", "/attach", "/remember", "/new", "/compact",
+    "/function",
 ];
 
 /// What `/remember` asked for (AGL-006, M34, M37).
@@ -72,10 +73,12 @@ pub struct Info {
     pub context: Option<usize>,
 }
 
-/// `/help` (D134); the keys only make sense in a terminal.
+/// `/help` (D134); the keys only make sense in a terminal, and
+/// `/function` is the terminal session's (AGL-036, D3).
 pub fn help_text(lang: Lang, with_keys: bool) -> String {
     let mut lines: Vec<String> = COMMANDS
         .iter()
+        .filter(|name| with_keys || **name != "/function")
         .map(|name| format!("{name:<9} {}", texts::command(name, lang)))
         .collect();
     if with_keys {

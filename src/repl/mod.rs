@@ -64,6 +64,12 @@ struct Inner {
     compact: bool,
     /// `/remember name | text`, for the main thread to write (AGL-006).
     remember: Option<(String, String)>,
+    /// `/function`: the list of the Functions, for the main thread to show
+    /// (AGL-036, D9).
+    functions: bool,
+    /// `/function <name>`: the switch, for the main thread to check
+    /// (AGL-036, D4).
+    switch: Option<String>,
     info: Info,
     /// The model's reasoning level (AGL-013); it survives `/new`.
     reasoning: Option<ReasoningLevel>,
@@ -261,6 +267,24 @@ impl Input {
                 // An ordinary message: the model names the entry (M37).
                 Remember::Turn(message) => self.submitted(message),
             },
+            // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
+            // shows the list, or checks the Function and leaves the session
+            // for a new one with it — not while a turn runs (as `/new`).
+            "/function" => {
+                let function = trimmed.split_whitespace().nth(1).map(str::to_owned);
+                let mut inner = self.control.lock();
+                if inner.busy() {
+                    drop(inner);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    return;
+                }
+                match function {
+                    Some(function) => inner.switch = Some(function),
+                    None => inner.functions = true,
+                }
+                drop(inner);
+                self.control.wake.notify_all();
+            }
             "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
                 if inner.busy() {
@@ -482,7 +506,22 @@ enum Next {
     New,
     Compact,
     Remember(String, String),
+    /// `/function` (AGL-036, D9).
+    Functions,
+    /// `/function <name>` (AGL-036, D4).
+    Switch(String),
     Quit,
+}
+
+/// How the interactive session ends (AGL-036, D4): the human left, or a
+/// `/function <name>` asks for a new session with that Function at the
+/// reasoning level of this one.
+pub enum End {
+    Exit(ExitCode),
+    Function {
+        name: String,
+        reasoning: Option<ReasoningLevel>,
+    },
 }
 
 fn wait_for_next(control: &Control) -> Next {
@@ -494,6 +533,13 @@ fn wait_for_next(control: &Control) -> Next {
         if inner.new_session {
             inner.new_session = false;
             return Next::New;
+        }
+        if inner.functions {
+            inner.functions = false;
+            return Next::Functions;
+        }
+        if let Some(name) = inner.switch.take() {
+            return Next::Switch(name);
         }
         if let Some((name, text)) = inner.remember.take() {
             return Next::Remember(name, text);
@@ -516,7 +562,7 @@ fn wait_for_next(control: &Control) -> Next {
 }
 
 /// The interactive session in a terminal (D115-D138).
-pub fn run(setup: Setup) -> Result<ExitCode, Error> {
+pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
         function,
         function_name,
@@ -537,6 +583,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         search,
         image_tokens,
         memory,
+        catalog,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -621,9 +668,26 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         }
     }
 
+    let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
         match wait_for_next(&control) {
             Next::Quit => break,
+            Next::Functions => {
+                presenter.show_notice(&catalog.lines(lang).join("\n"), Role::Muted);
+            }
+            // The Function must load and fit before the session is left
+            // (AGL-036, D4): a refusal keeps this session as it is.
+            Next::Switch(name) => match catalog.check(&name) {
+                Ok(()) => {
+                    presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
+                    end = End::Function {
+                        name,
+                        reasoning: control.lock().reasoning,
+                    };
+                    break;
+                }
+                Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
+            },
             Next::New => match Session::create(sessions_dir, function_name, &workspace) {
                 Ok(new) => {
                     session = new;
@@ -794,7 +858,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     // A recording that goes keeps nothing, and ffmpeg is stopped (AGL-016).
     voice.cancel();
     dock.finish();
-    Ok(ExitCode::SUCCESS)
+    Ok(end)
 }
 
 #[cfg(test)]
@@ -1363,6 +1427,26 @@ mod tests {
     }
 
     #[test]
+    fn function_asks_the_main_thread_for_the_list_or_the_switch() {
+        // AGL-036, D4, D9: the main thread shows the list or checks the
+        // Function; not during a turn.
+        let f = fixture();
+        f.inner().running = true;
+        f.type_text("/function other");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("/function is not available during a turn"));
+        assert!(f.inner().switch.is_none());
+        f.inner().running = false;
+        f.type_text("/function");
+        f.input.key(Key::Enter);
+        assert!(f.inner().functions);
+        f.inner().functions = false;
+        f.type_text("/function other");
+        f.input.key(Key::Enter);
+        assert_eq!(f.inner().switch.as_deref(), Some("other"));
+    }
+
+    #[test]
     fn think_shows_and_sets_the_reasoning_level() {
         let f = fixture();
         // Alone it shows the current level: the template's default
@@ -1461,6 +1545,12 @@ mod tests {
         control.lock().running = false;
         control.lock().new_session = true;
         assert!(matches!(wait_for_next(&control), Next::New));
+        // `/function` (AGL-036, D4, D9).
+        control.lock().functions = true;
+        assert!(matches!(wait_for_next(&control), Next::Functions));
+        control.lock().switch = Some("other".into());
+        assert!(matches!(wait_for_next(&control), Next::Switch(name) if name == "other"));
+        assert!(!control.lock().running);
         // A compaction counts as running, so that Ctrl-C can stop it.
         control.lock().compact = true;
         assert!(matches!(wait_for_next(&control), Next::Compact));

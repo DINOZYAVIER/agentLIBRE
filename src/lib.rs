@@ -62,15 +62,6 @@ struct EngineGuard {
     dir: PathBuf,
 }
 
-impl EngineGuard {
-    fn new(autostart: &cli::serve::Autostart<'_>) -> Self {
-        EngineGuard {
-            engine: Arc::clone(&autostart.engine),
-            dir: autostart.project.dir.clone(),
-        }
-    }
-}
-
 impl Drop for EngineGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.lock().unwrap().take() {
@@ -130,6 +121,8 @@ pub struct Setup<'a> {
     pub search: &'a dyn search::Searcher,
     /// Where the memory of the workspace is (AGL-006).
     pub memory: &'a dyn memory::Home,
+    /// The Functions of the REPL's `/function` (AGL-036, D3).
+    pub catalog: &'a cli::function::Catalog,
 }
 
 pub fn cli() -> ExitCode {
@@ -223,7 +216,6 @@ fn run(
         }
     };
     let (paths, user) = loaded?;
-    let user_path = paths.settings_file();
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
     // The project settings come from the store of the project (AGL-010).
     let project = cli::forge::project_of(
@@ -236,6 +228,50 @@ fn run(
     if args.resume.is_some() && args.function.is_some() {
         return Err(Error::FunctionWithResume);
     }
+    // The engine agl launched (when it did) is shut down when this guard
+    // drops, at the end of the command: normal exit, an error, an
+    // interrupted turn (AGL-024, D3). The hard `_exit` of a second Ctrl-C
+    // runs no Rust code and leaves the engine running, the accepted
+    // consequence recorded in the spec. It outlives the sessions of a
+    // `/function` switch, so the switch of D10 (AGL-036) can stop it.
+    let engine = Arc::new(Mutex::new(None));
+    let _engine_guard = EngineGuard {
+        engine: Arc::clone(&engine),
+        dir: project.dir.clone(),
+    };
+    let mut args = args;
+    loop {
+        match agent_session(&env, &paths, &user, &cwd, &project, &args, &engine, *lang)? {
+            repl::End::Exit(code) => return Ok(code),
+            // `/function <name>` (AGL-036, D4): a new session with that
+            // Function, the reasoning level kept.
+            repl::End::Function { name, reasoning } => {
+                args = cli::args::Args {
+                    function: Some(name),
+                    reasoning,
+                    yes: args.yes,
+                    ..cli::args::Args::default()
+                };
+            }
+        }
+    }
+}
+
+/// One session of the agent command: `-p`, the interactive session or the
+/// stdin session, with the Function of `args` (AGL-036, D4: the
+/// interactive session may end in a switch to another Function).
+#[allow(clippy::too_many_arguments)]
+fn agent_session(
+    env: &impl Fn(&str) -> Option<OsString>,
+    paths: &Paths,
+    user: &UserFile,
+    cwd: &Path,
+    project: &forge::Workspace,
+    args: &cli::args::Args,
+    engine: &Arc<Mutex<Option<cli::serve::Engine>>>,
+    lang: Lang,
+) -> Result<repl::End, Error> {
+    let user_path = paths.settings_file();
     let session = args
         .resume
         .as_deref()
@@ -260,7 +296,7 @@ fn run(
         &name,
     )?;
     let settings = Settings::resolve(
-        &user,
+        user,
         &user_path,
         (
             &project.dir.join(forge::MARKER_FILE),
@@ -291,9 +327,11 @@ fn run(
         Machine::resume(&function, &settings.function, &turn)?;
     }
 
-    let workspace = session.as_ref().map_or(cwd, |s| s.workspace.clone());
+    let workspace = session
+        .as_ref()
+        .map_or_else(|| cwd.to_path_buf(), |s| s.workspace.clone());
     let forge = tools::ForgeEnv {
-        lang: *lang,
+        lang,
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
     };
     let image_tokens = settings
@@ -303,7 +341,7 @@ fn run(
     let memory = memory::StoreHome {
         workspace: workspace.clone(),
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
-        lang: *lang,
+        lang,
     };
     // The settings' `server` is the effective one (the function's
     // `[server]` table when the file declares it, AGL-033, D1, D3), and
@@ -319,13 +357,13 @@ fn run(
     };
     let autostart = cli::serve::Autostart {
         llama: backend.as_ref(),
-        project: &project,
+        project,
         effective: &settings.server,
         whisper: &settings.whisper,
         user_path: user_path.clone(),
         models: paths.models(),
         path_var: env("PATH"),
-        lang: *lang,
+        lang,
         // The consent of D2 (AGL-033): the restart asks, as the server
         // commands do — `--yes` skips, the terminal asks, a
         // non-interactive terminal refuses.
@@ -336,14 +374,8 @@ fn run(
         } else {
             cli::serve::Others::Refuse
         },
-        engine: Arc::new(Mutex::new(None)),
+        engine: Arc::clone(engine),
     };
-    // The engine agl launched (when it did) is shut down when this guard
-    // drops, at the end of the command: normal exit, an error, an
-    // interrupted turn (AGL-024, D3). The hard `_exit` of a second Ctrl-C
-    // runs no Rust code and leaves the engine running, the accepted
-    // consequence recorded in the spec.
-    let _engine_guard = EngineGuard::new(&autostart);
     // The files of `--attach` are read before anything is started.
     let sources = args
         .attach
@@ -364,9 +396,20 @@ fn run(
         Some(session) => session,
         None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
     };
-    let Some(message) = args.prompt else {
+    let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
         let interactive = repl::term::is_interactive();
+        // The Functions of `/function` (AGL-036, D3, D9), the run's one
+        // marked.
+        let catalog = cli::function::Catalog {
+            current: settings.function.clone(),
+            ..cli::function::Catalog::of(paths, project, user)
+        };
+        // The switch of D10 (AGL-036) before the terminal is taken: its
+        // question needs the plain terminal.
+        if interactive {
+            autostart.switch(&mut |line| eprintln!("{line}"))?;
+        }
         let setup = Setup {
             function: &function,
             function_name: &settings.function,
@@ -380,21 +423,22 @@ fn run(
             autostart: &autostart,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
             repl: settings.repl,
-            lang: *lang,
+            lang,
             forge,
             history_file: paths.history_file(),
             reasoning: args.reasoning,
             image_tokens,
             search,
             memory: &memory,
+            catalog: &catalog,
         };
         return if interactive {
             repl::run(setup)
         } else {
-            cli::lines::run(setup)
+            cli::lines::run(setup).map(repl::End::Exit)
         };
     };
-    eprintln!("{}", tr!(*lang, m::SESSION, id = session.id));
+    eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
     interrupt::install();
     let id = session.id.clone();
     // The attached files get their placeholders before the message and are
@@ -428,17 +472,17 @@ fn run(
         search,
         memory: &memory,
     };
-    match agent.turn(&message, &mut StderrReport::new(*lang))? {
+    match agent.turn(&message, &mut StderrReport::new(lang))? {
         TurnEnd::Answer(text) => {
             println!("{text}");
-            Ok(ExitCode::SUCCESS)
+            Ok(repl::End::Exit(ExitCode::SUCCESS))
         }
         TurnEnd::Stopped(reason) => {
-            eprintln!("agl: {}", i18n::stopped(reason, &function, &id, *lang));
-            Ok(ExitCode::from(match reason {
+            eprintln!("agl: {}", i18n::stopped(reason, &function, &id, lang));
+            Ok(repl::End::Exit(ExitCode::from(match reason {
                 StopReason::Interrupted => interrupt::EXIT_CODE,
                 _ => 1,
-            }))
+            })))
         }
     }
 }
