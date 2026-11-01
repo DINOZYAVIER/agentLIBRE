@@ -1938,7 +1938,16 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         assert!(port_open("127.0.0.1", port));
         drop(listener);
-        assert!(!port_open("127.0.0.1", port));
+        // A closed port is not seen. A test beside this one may be handed
+        // the port just freed and listen on it at once (it made the Nix
+        // build fail, AGL-041), so a few freed ports are tried.
+        let closed = (0..5).any(|_| {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            !port_open("127.0.0.1", port)
+        });
+        assert!(closed);
     }
 
     /// A server on a free port that answers every request to `/health`
