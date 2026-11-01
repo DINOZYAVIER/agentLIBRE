@@ -171,17 +171,17 @@ Options:
   --function <name>   use Function <name>
   --think <level>     the model's reasoning level: off, low, medium or xhigh
   --attach <path>     with -p: attach an image, a video or an audio; repeatable
-  --yes               start the llama-server of the project without asking
-                      when the server of another project runs
+  --yes               start or switch the server of the project without
+                      asking when another server runs
   -h, --help          print this help
 
 Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml):
   init                register the current directory as a project now; a
                       directory is registered at its first write otherwise
 
-Server (systemd user unit agentLIBRE-llama-server-<project>; [server] in the
+Server (systemd user unit agentLIBRE-server-<project>; [server] in the
 project's agentLIBRE.toml over the one of the user):
-  server start        start llama-server and wait until it is ready; with
+  server start        start the server and wait until it is ready; with
                       --function, the server of that Function's [server] table
   server stop         stop it and the whisper server of the project
   server status       show whether it runs and is ready (--function: the
@@ -221,17 +221,17 @@ under XDG_DATA_HOME):
   --think <level>     рівень міркувань моделі: off, low, medium або xhigh
   --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
                       повторювати
-  --yes               запустити llama-server проєкту без питання, коли працює
-                      сервер іншого проєкту
+  --yes               запустити чи перемкнути сервер проєкту без питання,
+                      коли працює інший сервер
   -h, --help          показати цю довідку
 
 Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml):
   init                зареєструвати поточний каталог як проєкт зараз; інакше
                       каталог реєструється при першому записі
 
-Сервер (user-unit systemd agentLIBRE-llama-server-<проєкт>; [server] у
+Сервер (user-unit systemd agentLIBRE-server-<проєкт>; [server] у
 agentLIBRE.toml проєкту поверх файлу користувача):
-  server start        запустити llama-server і дочекатися готовності; з
+  server start        запустити сервер і дочекатися готовності; з
                       --function — сервер таблиці [server] цієї Функції
   server stop         зупинити його і whisper-сервер проєкту
   server status       показати, чи він працює і чи готовий (--function:
@@ -561,20 +561,20 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ServerUnreachable`.
     pub const SERVER_UNREACHABLE: Msg = Msg {
-        en: "cannot reach llama-server at {url}: {detail}\nTo start it: agl server start",
-        uk: "не вдалося з'єднатися з llama-server за адресою {url}: {detail}\nЩоб запустити: agl server start",
+        en: "cannot reach {server} at {url}: {detail}\nTo start it: agl server start",
+        uk: "не вдалося з'єднатися з {server} за адресою {url}: {detail}\nЩоб запустити: agl server start",
     };
 
     /// `Error::ServerStatus`.
     pub const SERVER_STATUS: Msg = Msg {
-        en: "llama-server at {url} answered {status}: {message}",
-        uk: "llama-server за адресою {url} відповів {status}: {message}",
+        en: "{server} at {url} answered {status}: {message}",
+        uk: "{server} за адресою {url} відповів {status}: {message}",
     };
 
     /// `Error::ServerReply`.
     pub const SERVER_REPLY: Msg = Msg {
-        en: "unexpected reply from llama-server at {url}: {detail}",
-        uk: "неочікувана відповідь llama-server за адресою {url}: {detail}",
+        en: "unexpected reply from {server} at {url}: {detail}",
+        uk: "неочікувана відповідь: {server} за адресою {url}: {detail}",
     };
 
     /// `Error::SessionNotFound`.
@@ -651,8 +651,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::NotLocalServer`.
     pub const NOT_LOCAL_SERVER: Msg = Msg {
-        en: "agl server start runs llama-server only on 127.0.0.1 or localhost, not at {url}",
-        uk: "agl server start запускає llama-server лише на 127.0.0.1 або localhost, не за {url}",
+        en: "agl starts the server only on 127.0.0.1 or localhost, not at {url}",
+        uk: "agl запускає сервер лише на 127.0.0.1 або localhost, не за {url}",
     };
 
     /// `Error::EngineNotFound` (AGL-024, D5).
@@ -675,8 +675,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ProjectNotRegistered` (AGL-015, D14).
     pub const PROJECT_NOT_REGISTERED: Msg = Msg {
-        en: "{project} is not a registered project, so it has no llama-server of its own; run `agl init` there first",
-        uk: "{project} не є зареєстрованим проєктом, тож не має власного llama-server; спершу виконай там `agl init`",
+        en: "{project} is not a registered project, so it has no server of its own; run `agl init` there first",
+        uk: "{project} не є зареєстрованим проєктом, тож не має власного сервера; спершу виконай там `agl init`",
     };
 
     /// `Error::PortBusy` without a running unit (D7).
@@ -687,26 +687,32 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::PortBusy` with running units (D7).
     pub const PORT_BUSY_UNITS: Msg = Msg {
-        en: "the address {url} is already in use; the llama-server units that run: {units}. Stop the one that holds it (agl server stop) or set another `url` in the project's [server]",
-        uk: "адреса {url} уже зайнята; працюють unit-и llama-server: {units}. Зупини той, що її тримає (agl server stop), або задай інший `url` у [server] проєкту",
+        en: "the address {url} is already in use; the server units that run: {units}. Stop the one that holds it (agl server stop) or set another `url` in the project's [server]",
+        uk: "адреса {url} уже зайнята; працюють unit-и серверів: {units}. Зупини той, що її тримає (agl server stop), або задай інший `url` у [server] проєкту",
     };
 
     /// `Error::ServerRunning` (D13).
     pub const SERVER_RUNNING: Msg = Msg {
-        en: "a llama-server of another project is running ({units}); to start one more, use --yes",
-        uk: "працює llama-server іншого проєкту ({units}); щоб запустити ще один, додай --yes",
+        en: "a server of another project is running ({units}); to start one more, use --yes",
+        uk: "працює сервер іншого проєкту ({units}); щоб запустити ще один, додай --yes",
     };
 
     /// `Error::StartDeclined` (D9).
     pub const START_DECLINED: Msg = Msg {
-        en: "llama-server was not started",
-        uk: "llama-server не запущено",
+        en: "the server was not started",
+        uk: "сервер не запущено",
     };
 
     /// `Error::RestartDeclined` (AGL-033, D2).
     pub const RESTART_DECLINED: Msg = Msg {
         en: "the server was not restarted",
         uk: "сервер не перезапущено",
+    };
+
+    /// The Strata server, as the texts name it (AGL-038, D1).
+    pub const STRATA_SERVER: Msg = Msg {
+        en: "the Strata server",
+        uk: "сервер Strata",
     };
 
     /// `Error::SwitchDeclined` (AGL-036, D10).
@@ -741,8 +747,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The question of D9: another server runs, start one more?
     pub const OTHERS_RUNNING: Msg = Msg {
-        en: "A llama-server is running ({units}). Start one more? [y/N]",
-        uk: "llama-server уже працює ({units}). Запустити ще один? [y/N]",
+        en: "A server of another project is running ({units}). Start one more? [y/N]",
+        uk: "Уже працює сервер іншого проєкту ({units}). Запустити ще один? [y/N]",
     };
 
     /// `Error::WhisperNotSet` (AGL-014, D22).
@@ -1089,8 +1095,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `StopReason::ServerError`.
     pub const STOP_SERVER: Msg = Msg {
-        en: "stopped: llama-server failed",
-        uk: "зупинено: помилка llama-server",
+        en: "stopped: the server failed",
+        uk: "зупинено: помилка сервера",
     };
 
     /// `StopReason::StirLimit`.
@@ -1456,7 +1462,8 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{old} працює за {url}; зупинити його, щоб запустити {what}? [y/N]",
     };
 
-    /// The server of the other kind stopped (AGL-036, D10).
+    /// The server stopped: the one of the other kind (AGL-036, D10), or
+    /// `agl server stop`'s (D146; AGL-038, D1).
     pub const SERVER_SWITCH_STOPPED: Msg = Msg {
         en: "{old} stopped",
         uk: "{old} зупинено",
@@ -1469,11 +1476,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер проєкту",
     };
 
-    /// `agl server stop` stopped it (D146).
-    pub const SERVER_STOPPED: Msg = Msg {
-        en: "llama-server stopped",
-        uk: "llama-server зупинено",
-    };
 
     /// `agl server stop` stopped the whisper server too (AGL-014).
     pub const WHISPER_STOPPED: Msg = Msg {
@@ -2115,9 +2117,13 @@ impl Error {
                     problem = function_problem(problem, lang)
                 )
             }
-            Error::ServerUnreachable { url, detail } => {
-                tr!(lang, m::SERVER_UNREACHABLE, url = url, detail = detail)
-            }
+            Error::ServerUnreachable { kind, url, detail } => tr!(
+                lang,
+                m::SERVER_UNREACHABLE,
+                server = server::name(*kind, lang),
+                url = url,
+                detail = detail
+            ),
             Error::MissingModel {
                 user_path,
                 project_path,
@@ -2217,6 +2223,7 @@ impl Error {
                 tr!(lang, m::STRATA_SERVER_PY, path = path.display()).to_string()
             }
             Error::ServerStatus {
+                kind,
                 url,
                 status,
                 message,
@@ -2224,14 +2231,19 @@ impl Error {
                 tr!(
                     lang,
                     m::SERVER_STATUS,
+                    server = server::name(*kind, lang),
                     url = url,
                     status = status,
                     message = message
                 )
             }
-            Error::ServerReply { url, detail } => {
-                tr!(lang, m::SERVER_REPLY, url = url, detail = detail)
-            }
+            Error::ServerReply { kind, url, detail } => tr!(
+                lang,
+                m::SERVER_REPLY,
+                server = server::name(*kind, lang),
+                url = url,
+                detail = detail
+            ),
             Error::SessionNotFound { id, dir } => {
                 tr!(lang, m::SESSION_NOT_FOUND, id = id, dir = dir.display())
             }
@@ -2488,6 +2500,25 @@ mod tests {
     }
 
     #[test]
+    fn the_errors_of_a_backend_name_its_kind() {
+        // AGL-038, D1: the Strata server is not called llama-server.
+        let reply = |kind| Error::ServerReply {
+            kind,
+            url: "http://127.0.0.1:18088".into(),
+            detail: "the engine stopped".into(),
+        };
+        let strata = reply(crate::settings::ServerKind::Strata);
+        assert_eq!(
+            strata.message(Lang::En),
+            "unexpected reply from the Strata server at http://127.0.0.1:18088: the engine stopped"
+        );
+        assert!(strata.message(Lang::Uk).contains("сервер Strata"));
+        assert_eq!(strata.to_string(), "unexpected reply from the Strata server at http://127.0.0.1:18088");
+        let llama = reply(crate::settings::ServerKind::Llama);
+        assert!(llama.message(Lang::En).contains("from llama-server at"));
+    }
+
+    #[test]
     fn locale_selects_ukrainian() {
         assert_eq!(locale(&[("LANG", "uk_UA.UTF-8")]), Lang::Uk);
         assert_eq!(locale(&[("LANG", "uk")]), Lang::Uk);
@@ -2643,6 +2674,7 @@ pub mod server {
     use super::Lang;
     use super::m;
     use crate::cli::serve::Health;
+    use crate::settings::ServerKind;
 
     /// `agl server start` begins (D146); `what` is the server, in a line
     /// (AGL-033, D2).
@@ -2660,6 +2692,14 @@ pub mod server {
     /// does not serve the profile's effective settings.
     pub fn restart_question(what: &str, lang: Lang) -> String {
         tr!(lang, m::SERVER_RESTART_QUESTION, what = what)
+    }
+
+    /// The server of `kind` (AGL-038, D1).
+    pub fn name(kind: ServerKind, lang: Lang) -> &'static str {
+        match kind {
+            ServerKind::Llama => "llama-server",
+            ServerKind::Strata => tr!(lang, m::STRATA_SERVER),
+        }
     }
 
     /// The question of D10 (AGL-036): `old` at `url` stops for `what`.

@@ -1,5 +1,6 @@
 //! `agl server start|stop|status` and the autostart: the project's
-//! llama-server as a transient systemd user unit (D146-D150, AGL-015),
+//! server, llama-server or the Strata server (AGL-033), as a transient
+//! systemd user unit (D146-D150, AGL-015),
 //! or, on the agent command's path, the inference engine as a background
 //! child of agl (AGL-024).
 
@@ -23,9 +24,9 @@ use crate::settings::{ServerFile, ServerKind};
 use crate::tr;
 use crate::outln;
 
-/// The name every unit of a llama-server starts with (D8); the project's
-/// key follows after a dash.
-pub const UNIT_PREFIX: &str = "agentLIBRE-llama-server";
+/// The name every unit of the project's server starts with, both kinds
+/// (D8; AGL-038, D1); the project's key follows after a dash.
+pub const UNIT_PREFIX: &str = "agentLIBRE-server";
 
 /// `context` when `[server]` does not set it (D148).
 const DEFAULT_CONTEXT: u32 = 16384;
@@ -38,7 +39,7 @@ const STATE_FILE: &str = "server.state";
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(500);
 
-/// Hosts `start` can run llama-server on (D148).
+/// Hosts `start` can run the server on (D148).
 const LOCAL_HOSTS: [&str; 2] = ["127.0.0.1", "localhost"];
 
 /// The engine's binary name when `[server] engine` does not set one
@@ -196,9 +197,14 @@ pub fn run(
                 systemctl(&["stop", &server.whisper_unit])?;
             }
             if unit_active(&server.unit)? {
+                // The server by its kind (AGL-038, D1): what the record
+                // says it runs, else the server of the project.
+                let what = read_record(&server.dir)
+                    .and_then(|record| what_of(&record).ok())
+                    .unwrap_or_else(|| tr!(lang, m::SERVER_OF_THE_PROJECT).to_owned());
                 systemctl(&["stop", &server.unit])?;
                 remove_record(&server.dir);
-                println!("{}", tr!(lang, m::SERVER_STOPPED));
+                outln!("{}", tr!(lang, m::SERVER_SWITCH_STOPPED, old = what));
             } else if !whisper {
                 outln!("{}", texts::not_running(&server.unit, lang));
             }
@@ -1465,7 +1471,7 @@ mod tests {
     fn status_lines() {
         assert_eq!(
             texts::status(
-                "agentLIBRE-llama-server-60af300abea6",
+                "agentLIBRE-server-60af300abea6",
                 true,
                 "http://127.0.0.1:18080",
                 None,
@@ -1473,12 +1479,12 @@ mod tests {
                 Health::Loading,
                 Lang::En
             ),
-            "unit: agentLIBRE-llama-server-60af300abea6 (active)\nurl: http://127.0.0.1:18080\n\
+            "unit: agentLIBRE-server-60af300abea6 (active)\nurl: http://127.0.0.1:18080\n\
              model: not set\nrunning: not running\nhealth: loading"
         );
         assert_eq!(
             texts::status(
-                "agentLIBRE-llama-server-60af300abea6",
+                "agentLIBRE-server-60af300abea6",
                 false,
                 "http://x",
                 Some("q.gguf"),
@@ -1486,7 +1492,7 @@ mod tests {
                 Health::Down,
                 Lang::Uk
             ),
-            "unit: agentLIBRE-llama-server-60af300abea6 (неактивний)\nадреса: http://x\n\
+            "unit: agentLIBRE-server-60af300abea6 (неактивний)\nадреса: http://x\n\
              модель: q.gguf\nпрацює: не працює\nстан: не відповідає"
         );
     }
@@ -1533,7 +1539,7 @@ mod tests {
     #[test]
     fn the_unit_runs_llama_server_with_the_needed_arguments() {
         let args = systemd_run_args(
-            "agentLIBRE-llama-server-60af300abea6",
+            "agentLIBRE-server-60af300abea6",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
@@ -1546,7 +1552,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agentLIBRE-llama-server-60af300abea6",
+                "--unit=agentLIBRE-server-60af300abea6",
                 "--collect",
                 "--quiet",
                 "--",
@@ -1581,7 +1587,7 @@ mod tests {
         .map(OsString::from)
         .collect();
         let args = systemd_run_args(
-            "agentLIBRE-llama-server-60af300abea6",
+            "agentLIBRE-server-60af300abea6",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (65536, "127.0.0.1", 18080),
@@ -1601,7 +1607,7 @@ mod tests {
     #[test]
     fn engine_args_are_the_systemd_tail_after_the_prefix() {
         let systemd = systemd_run_args(
-            "agentLIBRE-llama-server-60af300abea6",
+            "agentLIBRE-server-60af300abea6",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
@@ -1834,7 +1840,7 @@ mod tests {
         let merged = ws.server.over(&user);
         let server =
             Server::of(&ws, &merged, Path::new("/c/agentLIBRE.toml"), None).unwrap();
-        assert_eq!(server.unit, "agentLIBRE-llama-server-60af300abea6");
+        assert_eq!(server.unit, "agentLIBRE-server-60af300abea6");
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
         assert_eq!(server.settings.model.as_deref(), Some("big.gguf"));
@@ -1864,11 +1870,11 @@ mod tests {
 
     #[test]
     fn systemctl_listing_gives_the_unit_names() {
-        let listing = "agentLIBRE-llama-server-60af300abea6.service loaded active running llama\n\
-                       agentLIBRE-llama-server-0123456789ab.service loaded active running llama\n";
+        let listing = "agentLIBRE-server-60af300abea6.service loaded active running llama\n\
+                       agentLIBRE-server-0123456789ab.service loaded active running llama\n";
         assert_eq!(
             parse_units(listing),
-            ["agentLIBRE-llama-server-60af300abea6", "agentLIBRE-llama-server-0123456789ab"]
+            ["agentLIBRE-server-60af300abea6", "agentLIBRE-server-0123456789ab"]
         );
         assert!(parse_units("").is_empty());
     }
@@ -2284,7 +2290,7 @@ mod tests {
             cwd: Some(PathBuf::from("/w")),
         };
         let args: Vec<String> = strata_systemd_run_args(
-            "agentLIBRE-llama-server-60af300abea6",
+            "agentLIBRE-server-60af300abea6",
             &launch,
         )
         .iter()
@@ -2294,7 +2300,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agentLIBRE-llama-server-60af300abea6",
+                "--unit=agentLIBRE-server-60af300abea6",
                 "--collect",
                 "--quiet",
                 "--property=WorkingDirectory=/w",

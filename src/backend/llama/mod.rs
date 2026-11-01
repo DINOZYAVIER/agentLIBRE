@@ -14,6 +14,7 @@ use crate::action::Value;
 use crate::error::Error;
 use crate::function::Sampling;
 use crate::interrupt;
+use crate::settings::ServerKind;
 
 /// How long connecting may take (D97).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,6 +40,7 @@ impl Llama {
 
     fn unreachable(&self, error: impl std::fmt::Display) -> Error {
         Error::ServerUnreachable {
+            kind: ServerKind::Llama,
             url: self.url.clone(),
             detail: error.to_string(),
         }
@@ -46,6 +48,7 @@ impl Llama {
 
     fn bad_reply(&self, detail: impl Into<String>) -> Error {
         Error::ServerReply {
+            kind: ServerKind::Llama,
             url: self.url.clone(),
             detail: detail.into(),
         }
@@ -78,6 +81,7 @@ impl Llama {
             .and_then(|reply| reply["error"]["message"].as_str().map(str::to_owned))
             .unwrap_or(text);
         Err(Error::ServerStatus {
+            kind: ServerKind::Llama,
             url: self.url.clone(),
             status,
             message,

@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::grammar::pattern::PatternError;
+use crate::settings::ServerKind;
 use crate::theme::StyleError;
 
 /// An error that stops `agl`.
@@ -100,16 +101,25 @@ pub enum Error {
         key: String,
         problem: FunctionProblem,
     },
-    /// llama-server cannot be reached (D97).
-    ServerUnreachable { url: String, detail: String },
-    /// llama-server answered with an error status.
+    /// The server of `kind` cannot be reached (D97; AGL-038, D1).
+    ServerUnreachable {
+        kind: ServerKind,
+        url: String,
+        detail: String,
+    },
+    /// The server of `kind` answered with an error status.
     ServerStatus {
+        kind: ServerKind,
         url: String,
         status: u16,
         message: String,
     },
-    /// llama-server answered something agl does not understand.
-    ServerReply { url: String, detail: String },
+    /// The server of `kind` answered something agl does not understand.
+    ServerReply {
+        kind: ServerKind,
+        url: String,
+        detail: String,
+    },
     /// No session in `dir` has an id that is or starts with `id`.
     SessionNotFound { id: String, dir: PathBuf },
     /// More than one session id starts with `id` (D107).
@@ -152,9 +162,9 @@ pub enum Error {
     EngineSpawn { engine: String, source: io::Error },
     /// `systemd-run` or `systemctl` failed.
     Systemd { detail: String },
-    /// The unit stopped before llama-server was ready (D149).
+    /// The unit stopped before the server was ready (D149).
     ServerFailed { unit: String },
-    /// llama-server was not ready in time (D149).
+    /// The server was not ready in time (D149).
     ServerTimeout { seconds: u64, unit: String },
     /// The engine agl launched exited before it was ready (AGL-024, D2);
     /// its output is in `log`.
@@ -166,7 +176,7 @@ pub enum Error {
     /// (AGL-015, D14).
     ProjectNotRegistered { project: PathBuf },
     /// The port of the project's `url` is held by something that is not
-    /// its unit; `units` are the llama-server units that run (D7).
+    /// its unit; `units` are the server units that run (D7).
     PortBusy { url: String, units: Vec<String> },
     /// The server of another project runs and nobody can be asked: `-p`
     /// and the stdin session without `--yes` (D13).
@@ -468,14 +478,14 @@ impl std::fmt::Display for Error {
                 Error::Function { path, key, .. } => {
                     format!("a problem with `{key}` in {}", path.display())
                 }
-                Error::ServerUnreachable { url, .. } => {
-                    format!("cannot reach llama-server at {url}")
+                Error::ServerUnreachable { kind, url, .. } => {
+                    format!("cannot reach {} at {url}", kind.server())
                 }
-                Error::ServerStatus { url, status, .. } => {
-                    format!("llama-server at {url} answered {status}")
+                Error::ServerStatus { kind, url, status, .. } => {
+                    format!("{} at {url} answered {status}", kind.server())
                 }
-                Error::ServerReply { url, .. } => {
-                    format!("unexpected reply from llama-server at {url}")
+                Error::ServerReply { kind, url, .. } => {
+                    format!("unexpected reply from {} at {url}", kind.server())
                 }
                 Error::SessionNotFound { id, dir } => {
                     format!("no session `{id}` in {}", dir.display())
@@ -527,9 +537,9 @@ impl std::fmt::Display for Error {
                 }
                 Error::PortBusy { url, .. } => format!("the port of {url} is busy"),
                 Error::ServerRunning { units } => {
-                    format!("a llama-server is running: {}", units.join(", "))
+                    format!("a server is running: {}", units.join(", "))
                 }
-                Error::StartDeclined => "llama-server was not started".into(),
+                Error::StartDeclined => "the server was not started".into(),
                 Error::RestartDeclined => "the server was not restarted".into(),
                 Error::SwitchDeclined => "the server of the other kind was not stopped".into(),
                 Error::MissingStrataConfig { .. } => {

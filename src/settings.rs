@@ -46,6 +46,15 @@ impl ServerKind {
             ServerKind::Strata => "strata",
         }
     }
+
+    /// The server of the kind, in English (AGL-038, D1): what the plain
+    /// rendering of an error names; the messages take `i18n::server::name`.
+    pub fn server(self) -> &'static str {
+        match self {
+            ServerKind::Llama => "llama-server",
+            ServerKind::Strata => "the Strata server",
+        }
+    }
 }
 
 /// The user file, `$XDG_CONFIG_HOME/agentLIBRE/agentLIBRE.toml`.
