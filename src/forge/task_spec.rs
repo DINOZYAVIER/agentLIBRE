@@ -177,7 +177,7 @@ fn resolve_commit(repo: &Path, id: &str) -> Result<String, Error> {
 /// Whether `ancestor` is an ancestor of `descendant` in the
 /// repository at `repo`; both ids must resolve.
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Error> {
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new(crate::programs::program("git")?)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo)
         .output()

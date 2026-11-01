@@ -348,7 +348,7 @@ pub fn frame_times(duration: f64) -> Vec<f64> {
 
 /// The length of a video, from `ffprobe`.
 fn video_duration(path: &Path) -> Result<f64, Error> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(crate::programs::program("ffprobe")?)
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
         .arg(path)
         .stdin(Stdio::null())
@@ -373,12 +373,13 @@ fn video_duration(path: &Path) -> Result<f64, Error> {
 /// (D8, D16).
 pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
     let times = frame_times(video_duration(path)?);
+    let ffmpeg = crate::programs::program("ffmpeg")?;
     let scale = format!(
         "scale=w='if(gt(iw,ih),min({FRAME_EDGE},iw),-2)':h='if(gt(iw,ih),-2,min({FRAME_EDGE},ih))'"
     );
     let mut frames = Vec::new();
     for at in times {
-        let output = Command::new("ffmpeg")
+        let output = Command::new(&ffmpeg)
             .args(["-v", "error", "-ss", &format!("{at:.3}"), "-i"])
             .arg(path)
             .args(["-frames:v", "1", "-vf", &scale, "-q:v", "4", "-f", "image2pipe", "-c:v", "mjpeg", "-"])
@@ -407,7 +408,7 @@ pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
 
 /// An audio as 16 kHz mono WAV, what whisper reads.
 pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(crate::programs::program("ffmpeg")?)
         .args(["-v", "error", "-i", "pipe:0", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -502,7 +503,7 @@ pub fn clipboard() -> Clip {
 }
 
 fn wl_paste(args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("wl-paste")
+    let output = Command::new(crate::programs::program("wl-paste").ok()?)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -700,12 +701,13 @@ mod tests {
     /// `ffmpeg` makes a video and a sound; the frames and the WAV come out.
     #[test]
     fn ffmpeg_cuts_frames_and_converts_audio() {
-        if Command::new("ffmpeg").arg("-version").output().is_err() {
+        // The tools' ffmpeg, as the code under test runs it (AGL-040).
+        let Ok(ffmpeg) = crate::programs::program("ffmpeg") else {
             return;
-        }
+        };
         let dir = TempDir::new();
         let video = dir.0.join("t.mp4");
-        let made = Command::new("ffmpeg")
+        let made = Command::new(&ffmpeg)
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=10", "-t", "3", "-pix_fmt", "yuv420p"])
             .arg(&video)
             .status()
@@ -716,7 +718,7 @@ mod tests {
         // JPEG, scaled to 640 on the long edge.
         assert!(frames.iter().all(|(_, jpeg)| jpeg.starts_with(&[0xff, 0xd8])));
         let sound = dir.0.join("t.mp3");
-        let made = Command::new("ffmpeg")
+        let made = Command::new(&ffmpeg)
             .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
             .arg(&sound)
             .status()

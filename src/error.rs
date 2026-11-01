@@ -225,6 +225,11 @@ pub enum Error {
     MediaKind { path: PathBuf },
     /// `ffmpeg` or `ffprobe` cannot be run or failed.
     Ffmpeg { detail: String },
+    /// `AGENTLIBRE_TOOLS` is not set to an absolute directory: agl runs
+    /// outside its package's wrapper and the dev shell (AGL-040).
+    ToolsDirMissing,
+    /// A helper program is not in the `AGENTLIBRE_TOOLS` directory.
+    ToolMissing { name: String, dir: PathBuf },
     /// `git` cannot be run.
     GitSpawn { source: io::Error },
     /// `git <args>` exited with a failure.
@@ -584,6 +589,13 @@ impl std::fmt::Display for Error {
                     format!("{} is not an image, a video or an audio", path.display())
                 }
                 Error::Ffmpeg { detail } => format!("ffmpeg failed: {detail}"),
+                Error::ToolsDirMissing => format!(
+                    "{} is not set: run agl from its Nix package or `nix develop`",
+                    crate::programs::TOOLS_VAR
+                ),
+                Error::ToolMissing { name, dir } => {
+                    format!("{name} is not in {}", dir.display())
+                }
                 Error::GitSpawn { source } => format!("cannot run git: {source}"),
                 Error::GitFailed { args, detail } => format!("git {args} failed: {detail}"),
                 Error::NotInRepository { cwd } => {

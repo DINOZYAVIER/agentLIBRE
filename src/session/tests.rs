@@ -463,13 +463,14 @@ fn the_media_of_a_session_are_kept_numbered_by_kind_and_read_back() {
 
 #[test]
 fn the_frames_of_a_video_are_kept_with_their_times() {
-    if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+    // The tools' ffmpeg, as the code under test runs it (AGL-040).
+    let Ok(ffmpeg) = crate::programs::program("ffmpeg") else {
         return;
-    }
+    };
     let dir = Dir::new("video");
     fs::create_dir_all(&dir.0).unwrap();
     let clip = dir.0.join("c.mp4");
-    let made = std::process::Command::new("ffmpeg")
+    let made = std::process::Command::new(&ffmpeg)
         .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10", "-t", "2", "-pix_fmt", "yuv420p"])
         .arg(&clip)
         .status()

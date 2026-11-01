@@ -1552,6 +1552,18 @@ Forge (сховище артефактів робочої області, agentL
         uk: " (незбігається)",
     };
 
+    /// `Error::ToolsDirMissing` (AGL-040).
+    pub const TOOLS_DIR_MISSING: Msg = Msg {
+        en: "{var} is not set: run agl from its Nix package or `nix develop`",
+        uk: "{var} не задано: запускай agl з його Nix-пакета або в `nix develop`",
+    };
+
+    /// `Error::ToolMissing` (AGL-040).
+    pub const TOOL_MISSING: Msg = Msg {
+        en: "{name} is not in {dir}",
+        uk: "{name} немає в {dir}",
+    };
+
     /// `Error::GitSpawn`.
     pub const GIT_SPAWN: Msg = Msg {
         en: "cannot run git: {source}",
@@ -2282,6 +2294,12 @@ impl Error {
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
+            Error::ToolsDirMissing => {
+                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::programs::TOOLS_VAR)
+            }
+            Error::ToolMissing { name, dir } => {
+                tr!(lang, m::TOOL_MISSING, name = name, dir = dir.display())
+            }
             Error::GitSpawn { source } => tr!(lang, m::GIT_SPAWN, source = source),
             Error::GitFailed { args, detail } => {
                 tr!(lang, m::GIT_FAILED, args = args, detail = detail)

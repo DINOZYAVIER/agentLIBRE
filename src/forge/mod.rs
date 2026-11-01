@@ -136,7 +136,7 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
 /// Runs `git <args>` in `cwd` and returns the trimmed stdout; a spawn
 /// failure or a nonzero exit is an error.
 pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
-    let output = Process::new("git")
+    let output = Process::new(crate::programs::program("git")?)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -152,16 +152,21 @@ pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
 }
 
 /// Whether `dir` is inside a git work tree (a repository or a
-/// directory of one).
-pub fn in_repository(dir: &Path) -> bool {
+/// directory of one). A git that cannot be run is an error, not a
+/// "no": without the tools (AGL-040) the answer would be wrong.
+pub fn in_repository(dir: &Path) -> Result<bool, Error> {
     // Outside a repository the check exits with a failure, in a bare
     // repository it answers false.
-    matches!(git(dir, &["rev-parse", "--is-inside-work-tree"]), Ok(answer) if answer == "true")
+    match git(dir, &["rev-parse", "--is-inside-work-tree"]) {
+        Ok(answer) => Ok(answer == "true"),
+        Err(Error::GitFailed { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The canonical git toplevel of `cwd`; an error outside a repository.
 pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
-    if !in_repository(cwd) {
+    if !in_repository(cwd)? {
         return Err(Error::NotInRepository { cwd: cwd.to_path_buf() });
     }
     let path = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
@@ -1697,7 +1702,7 @@ mod tests {
         let plain = plain_dir(dir.path(), "plain");
         let ws = fresh_store(&data, &plain);
         assert_eq!(ws.project, plain);
-        assert!(!in_repository(&plain));
+        assert!(!in_repository(&plain).unwrap());
         assert_eq!(marker(&ws.dir).hashes, vec![identity_of(&plain)]);
     }
 
@@ -1744,7 +1749,7 @@ mod tests {
         // The git toplevel is not the project; git is still readable
         // from the project directory.
         assert_ne!(ws.project, fs::canonicalize(&repo).unwrap());
-        assert!(in_repository(&ws.project));
+        assert!(in_repository(&ws.project).unwrap());
     }
 
     #[test]

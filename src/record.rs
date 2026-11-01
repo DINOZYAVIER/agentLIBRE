@@ -32,7 +32,8 @@ pub trait Recording: Send {
 /// Starts recording the default source for at most `limit` seconds (D4,
 /// D5).
 pub fn start(limit: u32) -> Result<Box<dyn Recording>, Error> {
-    Ffmpeg::start("ffmpeg".as_ref(), limit).map(|recording| Box::new(recording) as Box<dyn Recording>)
+    let ffmpeg = crate::programs::program("ffmpeg")?;
+    Ffmpeg::start(ffmpeg.as_os_str(), limit).map(|recording| Box::new(recording) as Box<dyn Recording>)
 }
 
 /// The arguments of `ffmpeg` for a recording of `limit` seconds into

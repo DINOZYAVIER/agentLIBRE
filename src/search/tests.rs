@@ -446,7 +446,7 @@ fn the_live_service_answers_web_and_wikipedia() {
     let path = Path::new(&home).join(".config/agentLIBRE/agentLIBRE.toml");
     let user = crate::settings::UserFile::load(&path).unwrap();
     let search = user.search.complete().unwrap().expect("[search] is set in the user file");
-    let curl = Curl::new(search);
+    let curl = Curl::new(search).unwrap();
     for (source, language, query) in [("web", "en", "rust programming language"), ("wikipedia", "en", "Kyiv")] {
         let mut args = call(query, source);
         args.push(text("language", language));

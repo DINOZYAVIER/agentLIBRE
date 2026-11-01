@@ -205,7 +205,7 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
     );
     // The git flags read the project directory when it is a git
     // repository (AGL-010); the cell is blank otherwise.
-    let in_repository = forge::in_repository(&ws.project);
+    let in_repository = forge::in_repository(&ws.project)?;
     for path in forge::artifact_files(&ws.dir)? {
         let stem = path
             .file_stem()
@@ -419,7 +419,7 @@ fn check(
     // The git checks read the project directory when it is a git
     // repository (AGL-010).
     let project = ws.project.as_path();
-    let in_repository = forge::in_repository(project);
+    let in_repository = forge::in_repository(project)?;
     if in_repository && artifact.type_name == task_spec::TYPE {
         // The range: the set ids resolve, the anchor is an ancestor of
         // the last.
@@ -555,13 +555,14 @@ fn task_spec_table(spec: task_spec::TaskSpec) -> toml::Value {
     toml::Value::Table(table)
 }
 
-/// Runs the `[verification]` cmds of `artifact` via `sh -c` in
-/// `cwd`, their output on the parent's own streams (streamed, not
+/// Runs the `[verification]` cmds of `artifact` via the tools' `bash -c`
+/// (AGL-040, D4), without the wrapper's variables (D3), in `cwd`, their output on the parent's own streams (streamed, not
 /// captured); `true` when one fails (the run stops at the first
 /// failure).
 fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> {
     for cmd in artifact.cmds.as_deref().unwrap_or_default() {
-        let status = std::process::Command::new("sh")
+        let mut command = std::process::Command::new(crate::programs::program("bash")?);
+        let status = crate::programs::clean_env(&mut command)
             .arg("-c")
             .arg(cmd)
             .current_dir(cwd)
@@ -657,7 +658,7 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
             dir: dir.to_path_buf(),
         });
     }
-    let status = std::process::Command::new("git")
+    let status = std::process::Command::new(crate::programs::program("git")?)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::inherit())

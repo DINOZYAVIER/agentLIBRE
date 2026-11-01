@@ -16,6 +16,7 @@ mod machine;
 mod media;
 mod memory;
 mod paths;
+mod programs;
 mod record;
 mod repl;
 mod search;
@@ -314,7 +315,7 @@ fn agent_session(
     let curl;
     let search: &dyn search::Searcher = match &settings.search {
         Some(config) => {
-            curl = search::Curl::new(config.clone());
+            curl = search::Curl::new(config.clone())?;
             &curl
         }
         None => {

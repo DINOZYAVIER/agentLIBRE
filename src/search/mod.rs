@@ -233,8 +233,9 @@ pub struct Curl {
 }
 
 impl Curl {
-    pub fn new(search: Search) -> Curl {
-        Curl::with_program(search, "curl".into())
+    /// With the tools' `curl` (AGL-040).
+    pub fn new(search: Search) -> Result<Curl, crate::error::Error> {
+        Ok(Curl::with_program(search, crate::programs::program("curl")?.into()))
     }
 
     /// With another program in place of `curl`, for the tests.

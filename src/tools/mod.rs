@@ -163,9 +163,20 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
         Ok(writer) => writer,
         Err(error) => return fail(error),
     };
+    // The Nix `bash` of the tools, the human's environment without the
+    // wrapper's variables (AGL-040, D3; AGL-039, D15).
+    let program = match crate::programs::program("bash") {
+        Ok(program) => program,
+        Err(error) => {
+            return ToolResult {
+                outcome: Outcome::Fail,
+                content: format!("Cannot run bash: {error}"),
+            };
+        }
+    };
     let mut child = {
-        let mut command_line = Command::new("bash");
-        command_line
+        let mut command_line = Command::new(program);
+        crate::programs::clean_env(&mut command_line)
             .arg("-c")
             .arg(command)
             .current_dir(workspace)
