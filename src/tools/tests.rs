@@ -208,9 +208,13 @@ fn edit_results() {
 #[test]
 fn run_dispatches_calls() {
     let dir = Dir::new("run");
+    // The stores of the test's own, not of the human's XDG tree (AGL-038,
+    // F19).
+    let data = dir.0.join("data");
     let env = ForgeEnv {
         lang: Lang::En,
         auto_rehome: true,
+        data: &data,
     };
     let (result, write) = run(
         &dir.0,
@@ -1452,7 +1456,11 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         action: "list".into(),
         ..ForgeArgs::default()
     };
-    let env = |lang, auto_rehome| ForgeEnv { lang, auto_rehome };
+    let env = |lang, auto_rehome| ForgeEnv {
+        lang,
+        auto_rehome,
+        data: &paths.data,
+    };
     // A project with a store, then moved.
     let from = root.0.join("a/proj");
     fs::create_dir_all(&from).unwrap();
@@ -1461,7 +1469,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         title: Some("First".into()),
         ..ForgeArgs::default()
     };
-    let (result, _) = forge_in_paths(&paths, &from, env(Lang::En, true), &new);
+    let (result, _) = forge(&from, env(Lang::En, true), &new);
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     let to = root.0.join("b/proj");
     fs::create_dir_all(to.parent().unwrap()).unwrap();
@@ -1469,7 +1477,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     // `auto_rehome = false`: even a read does not adopt the store; the
     // choice is the human's, so the tool refuses and points at
     // `forge rehome`.
-    let (result, write) = forge_in_paths(&paths, &to, env(Lang::En, false), &list);
+    let (result, write) = forge(&to, env(Lang::En, false), &list);
     assert_eq!(result.outcome, Outcome::Fail, "{}", result.content);
     assert!(result.content.contains("rehome"), "{}", result.content);
     assert_eq!(write, None);
@@ -1477,7 +1485,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     let adopted_name = forge::stores(&data.0).unwrap()[0].name();
     assert!(!adopted_name.contains(&forge::identity_of(&fs::canonicalize(&to).unwrap())[7..19]));
     // `auto_rehome = true`: adopted, and the tool says so once.
-    let (result, _) = forge_in_paths(&paths, &to, env(Lang::En, true), &list);
+    let (result, _) = forge(&to, env(Lang::En, true), &list);
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert!(result.content.starts_with("adopted the store "), "{}", result.content);
     assert!(result.content.contains("agl-001-first"), "{}", result.content);
@@ -1486,7 +1494,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         action: "fly".into(),
         ..ForgeArgs::default()
     };
-    let (result, _) = forge_in_paths(&paths, &to, env(Lang::Uk, true), &fly);
+    let (result, _) = forge(&to, env(Lang::Uk, true), &fly);
     assert_eq!(
         result.content,
         "невідомий action fly; action'и: list, show, new, edit, append, status, \

@@ -91,7 +91,7 @@ pub struct Agent<'a> {
     /// The context size of the server, in tokens.
     pub context: usize,
     /// What the `forge` tool takes from the session (AGL-008).
-    pub forge: ForgeEnv,
+    pub forge: ForgeEnv<'a>,
     /// The model's reasoning level (AGL-013); `None` is the template's
     /// default. `Off` silences the thinking states.
     pub reasoning: Option<ReasoningLevel>,

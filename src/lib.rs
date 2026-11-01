@@ -110,7 +110,7 @@ pub struct Setup<'a> {
     pub repl: ReplSettings,
     pub lang: Lang,
     /// What the agent's `forge` tool takes from the session (AGL-008).
-    pub forge: tools::ForgeEnv,
+    pub forge: tools::ForgeEnv<'a>,
     pub history_file: PathBuf,
     /// The model's reasoning level (AGL-013); the REPL's `/think`
     /// changes it for the session.
@@ -333,6 +333,7 @@ fn agent_session(
     let forge = tools::ForgeEnv {
         lang,
         auto_rehome: user.forge.auto_rehome.unwrap_or(true),
+        data: &paths.data,
     };
     let image_tokens = settings
         .server

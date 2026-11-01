@@ -32,11 +32,14 @@ pub struct ToolResult {
 }
 
 /// What the `forge` tool needs from the session (AGL-008): the
-/// language of its refusals and `[forge] auto_rehome`.
+/// language of its refusals, `[forge] auto_rehome` and the data directory
+/// of the stores, from the caller and not from the environment (AGL-038,
+/// F19).
 #[derive(Clone, Copy, Debug)]
-pub struct ForgeEnv {
+pub struct ForgeEnv<'a> {
     pub lang: Lang,
     pub auto_rehome: bool,
+    pub data: &'a Path,
 }
 
 /// A successful write of the `forge` tool: the artifact it touched, as
@@ -54,7 +57,7 @@ pub struct ForgeWrite {
 /// `forge` write comes back with the result.
 pub fn run(
     workspace: &Path,
-    env: ForgeEnv,
+    env: ForgeEnv<'_>,
     tool: &str,
     args: &[(String, Value)],
 ) -> (ToolResult, Option<ForgeWrite>) {
@@ -364,26 +367,13 @@ fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
 /// `forge` (AGL-008): the workspace forge, the store of the recorded
 /// artifacts of the workspace of `workspace`, over the same engine as
 /// the `agl forge` CLI. The store is resolved as the CLI does,
-/// with the session's `[forge] auto_rehome` and language; the caller
-/// (the agent) cannot be asked, so a needed store choice is the
-/// `RehomeNoStore` error.
-pub fn forge(workspace: &Path, env: ForgeEnv, args: &ForgeArgs) -> (ToolResult, Option<ForgeWrite>) {
-    match crate::paths::Paths::from_env(|name| std::env::var_os(name)) {
-        Ok(paths) => forge_in_paths(&paths, workspace, env, args),
-        Err(error) => (forge_fail(error.message(env.lang)), None),
-    }
-}
-
-/// [`forge`] over the data directory of `paths`.
-fn forge_in_paths(
-    paths: &crate::paths::Paths,
-    workspace: &Path,
-    env: ForgeEnv,
-    args: &ForgeArgs,
-) -> (ToolResult, Option<ForgeWrite>) {
+/// with the session's `[forge] auto_rehome`, language and data
+/// directory; the caller (the agent) cannot be asked, so a needed store
+/// choice is the `RehomeNoStore` error.
+pub fn forge(workspace: &Path, env: ForgeEnv<'_>, args: &ForgeArgs) -> (ToolResult, Option<ForgeWrite>) {
     let lang = env.lang;
     let (ws, lines) =
-        match crate::forge::resolve_store(&paths.data, workspace, lang, env.auto_rehome) {
+        match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
             Ok(resolved) => resolved,
             Err(error) => return (forge_fail(error.message(lang)), None),
         };

@@ -345,6 +345,7 @@ fn agent_searching<'a>(
         forge: ForgeEnv {
             lang: crate::i18n::Lang::En,
             auto_rehome: true,
+            data: &dir.0,
         },
         reasoning,
         image_tokens: 1000,
