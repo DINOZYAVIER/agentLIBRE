@@ -58,7 +58,7 @@ consequences. Keep output concise and exact.
   `task-NN-<slug>` (for example `task-01-llama-client`) on its last commit.
   Tags mark tasks, not versions. Review fixes go in new commits; re-tag only
   when the human asks.
-- Remote: private GitHub repository `DINOZYAVIER/agl-lite`. Push only when
+- Remote: private GitHub repository `DINOZYAVIER/agentLIBRE`. Push only when
   the human asks.
 
 ## LLM-assisted commits
