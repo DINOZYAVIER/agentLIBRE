@@ -13,7 +13,6 @@
 | `~/.config/agentLIBRE/` | The user's `settings.nix` and `functions/*.nix` (AGL-039). |
 | `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/` | The workspace store: its `settings.nix` (the identity and the project's settings, AGL-041), `functions/*.nix`, `memory/`, `forge/`, the JSON record `server.state` of the server agl launched. |
 | `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/forge/` | The workspace forge in XDG_DATA_HOME: the AGL-XXX task specs (`task-spec` artifacts) and the other artifact types, one store per git toplevel, managed by `agl forge`. |
-| `experiments/` | The grammar probes behind `SPEC.md`, Appendix B (not tracked since 7e2905a): the `probe*.py` scripts and their `results/`. |
 | `../agl-lite-tasks/` | The non-artifact working documents, archived outside the repository (not tracked): MEMORY_SPEC.md, the feedback notes, the README, `scripts/forge-v2-migrate.py` (the one-off rewrite of AGL-041). |
 
 Update this map when adding top-level paths.
