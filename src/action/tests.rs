@@ -1,5 +1,3 @@
-use serde_json::Value as Json;
-
 use super::*;
 use crate::format::tests::qwen;
 use crate::grammar::matcher::matches;
@@ -275,8 +273,10 @@ fn text_before_a_call() {
     ));
 }
 
-/// The tools of experiments B2-B4.
-fn experiment_actions() -> Actions {
+/// The tool set the corpus below exercises: every parameter kind the model
+/// reads — required and optional text, optional ints, a value that holds the
+/// call's own tags — plus the `answer` as a tool.
+fn corpus_tools() -> Actions {
     let param = |name: &str, kind, required| Param {
         name: name.into(),
         kind,
@@ -318,83 +318,135 @@ fn experiment_actions() -> Actions {
     }
 }
 
-/// An output recorded in B2-B4.
-enum Recorded {
-    /// An action as the probe parsed it (D76).
-    Action(Action),
-    /// A raw call cut off by the token limit.
-    CutOff(String),
-}
-
-/// The outputs recorded in B2-B4.
-fn recorded_outputs() -> Vec<Recorded> {
-    let rows = |text: &str| -> Vec<Json> {
-        text.lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    };
-    let args = |tool: &str, args: &Json| {
-        let order: &[&str] = match tool {
-            "read" => &["path", "offset", "limit"],
-            _ => &["command"],
-        };
-        let args = order
-            .iter()
-            .filter_map(|&name| {
-                let value = args.get(name)?.as_str()?;
-                let value = match name {
-                    "offset" | "limit" => Value::Int(value.parse().unwrap()),
-                    _ => text(value),
-                };
-                Some((name.to_string(), value))
-            })
-            .collect();
-        Recorded::Action(Action::Call {
-            text: None,
-            tool: tool.into(),
-            args,
-        })
-    };
-    let mut actions = Vec::new();
-    for row in rows(include_str!("fixtures/b2-path-b.jsonl")) {
-        actions.push(match &row["call"] {
-            Json::Array(call) => args(call[0].as_str().unwrap(), &call[1]),
-            _ => Recorded::Action(Action::Answer(row["text"].as_str().unwrap().into())),
-        });
-    }
-    let b3 = include_str!("fixtures/b3-state-instruction.jsonl");
-    let b4 = include_str!("fixtures/b4-answer-form.jsonl");
-    for row in rows(b3).into_iter().chain(rows(b4)) {
-        let answer = || row["answer"].as_str().unwrap().to_owned();
-        let cut_off = row["stop"] == "limit" && answer().starts_with("<tool_call>");
-        actions.push(match row["action"].as_str().unwrap() {
-            "text" if cut_off => Recorded::CutOff(answer()),
-            "text" => Recorded::Action(Action::Answer(answer())),
-            "answer" => Recorded::Action(call("answer", &[("text", text(&answer()))])),
-            tool => args(tool, &row["args"]),
-        });
-    }
-    actions
+/// The shapes of the outputs the model produced in the grammar experiments,
+/// rebuilt in code (the recorded jsonl left the repository, AGL-042): calls
+/// with every parameter kind and the gnarly values, the answers as text and
+/// as the `answer` tool, and text before a call.
+fn corpus() -> Vec<Action> {
+    let bash = |command: &str| call("bash", &[("command", text(command))]);
+    let read = |path: &str| call("read", &[("path", text(path))]);
+    vec![
+        // bash: from the trivial to the gnarly.
+        bash("ls -la"),
+        bash("git log --oneline -- src/action | head -20"),
+        bash("echo \"a && b\" | sed 's/a/b/' && true"),
+        bash("printf 'x\\n</parameter>\\ny'"),
+        bash("cargo test --release -- --test-threads=1"),
+        // read: with and without the optional ints.
+        read("src/action/tests.rs"),
+        call("read", &[
+            ("path", text("src/lib.rs")),
+            ("offset", Value::Int(0)),
+            ("limit", Value::Int(100_000)),
+        ]),
+        call("read", &[
+            ("path", text("src/lib.rs")),
+            ("offset", Value::Int(30)),
+        ]),
+        // edit: multi-line values, an empty new, a value that holds a tag.
+        call("edit", &[
+            ("path", text("src/lib.rs")),
+            ("old", text("fn f() -> Vec<&str> {\n    vec![]\n}")),
+            ("new", text("")),
+        ]),
+        call("edit", &[
+            ("path", text("src/lib.rs")),
+            ("old", text("let x = 1;")),
+            ("new", text("let x = 1;\nlet y = 2; // </parameter> in a comment")),
+        ]),
+        // the answer as a tool.
+        call("answer", &[("text", text("Done. The build is green."))]),
+        call("answer", &[("text", text("The split yields one empty item, so I will filter it."))]),
+    ]
 }
 
 #[test]
-fn recorded_experiment_actions() {
+fn the_corpus_round_trips() {
+    with_big_stack(|| {
+        let actions = corpus_tools();
+        for action in corpus() {
+            check(&actions, &render(&qwen(), &action), &action);
+        }
+        // The same text as a plain answer where the answer is text.
+        for answer in [
+            "Done.",
+            "A `Vec<&str>` holds &str.",
+            "The split yields one empty item, so I will filter it.",
+            "Sure: <tool_call> is Qwen's tag",
+        ] {
+            check(&actions, answer, &Action::Answer(answer.into()));
+        }
+        // Text before a call, the way the model wrote it.
+        let plain = call("bash", &[("command", text("cargo test"))]);
+        let expected = Action::Call {
+            text: Some("The split yields one empty item, so I will filter it.".into()),
+            tool: "bash".into(),
+            args: vec![("command".into(), text("cargo test"))],
+        };
+        let output = format!(
+            "The split yields one empty item, so I will filter it.\n\n{}",
+            render(&qwen(), &plain)
+        );
+        check(&actions, &output, &expected);
+    });
+}
+
+#[test]
+fn a_cut_off_call_is_incomplete_at_every_prefix() {
     with_big_stack(|| {
         let format = qwen();
-        let actions = experiment_actions();
-        let recorded = recorded_outputs();
-        assert_eq!(recorded.len(), 60 + 110 + 80);
-        let mut cut_off = 0;
-        for output in &recorded {
-            match output {
-                Recorded::Action(action) => check(&actions, &render(&format, action), action),
-                Recorded::CutOff(text) => {
-                    assert_eq!(parse(&format, &actions, text), Err(ParseError::Incomplete));
-                    cut_off += 1;
-                }
+        let cut_off = [
+            // A call with the optional ints, cut anywhere.
+            render(
+                &format,
+                &call(
+                    "read",
+                    &[
+                        ("path", text("src/lib.rs")),
+                        ("offset", Value::Int(10)),
+                        ("limit", Value::Int(20)),
+                    ],
+                ),
+            ),
+            // The answer as a tool, cut mid-text.
+            render(
+                &format,
+                &call(
+                    "answer",
+                    &[("text", text("The split yields one empty item, so I will filter it."))],
+                ),
+            ),
+        ];
+        // Where only calls are allowed, every prefix is incomplete.
+        let calls_only = Actions {
+            tools: corpus_tools().tools,
+            answer: false,
+        };
+        for output in &cut_off {
+            for (end, _) in output.char_indices() {
+                assert_eq!(
+                    parse(&format, &calls_only, &output[..end]),
+                    Err(ParseError::Incomplete),
+                    "{:?}",
+                    &output[..end]
+                );
             }
         }
-        assert_eq!(cut_off, 1);
+        // Where the answer is allowed too, the cut-off is incomplete from the
+        // moment the call's function name is being read (before that the
+        // prefix is a plain answer).
+        let actions = corpus_tools();
+        for output in &cut_off {
+            let committed = output.find("<function=").unwrap() + "<function=".len();
+            for (end, _) in output.char_indices().skip(committed) {
+                assert_eq!(
+                    parse(&format, &actions, &output[..end]),
+                    Err(ParseError::Incomplete),
+                    "{:?}",
+                    &output[..end]
+                );
+            }
+        }
     });
 }
 
