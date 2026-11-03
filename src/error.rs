@@ -61,6 +61,11 @@ pub enum Error {
     UnknownServerKind { path: PathBuf, value: String },
     /// `[search] url` is not an `https://` URL (AGL-019, D3).
     UnsupportedSearchUrl { path: PathBuf, url: String },
+    /// `agl search login` without a complete `search.ca` in the user file
+    /// (AGL-043 F20); `key` is the first one missing.
+    SearchCaNotSet { user_path: PathBuf, key: String },
+    /// A step of `agl search login` failed (AGL-043 F20).
+    SearchLogin { detail: String },
     /// A file path of `[search]` is not absolute (AGL-019, D3).
     SearchPathNotAbsolute {
         path: PathBuf,
@@ -467,6 +472,10 @@ impl std::fmt::Display for Error {
                 Error::UnsupportedSearchUrl { path, url } => {
                     format!("unsupported search address `{url}` in {}", path.display())
                 }
+                Error::SearchCaNotSet { user_path, key } => {
+                    format!("`search.ca.{key}` is not set in {}", user_path.display())
+                }
+                Error::SearchLogin { detail } => format!("agl search login failed: {detail}"),
                 Error::SearchPathNotAbsolute { path, key, .. } => {
                     format!("`{key}` in {} must be an absolute path", path.display())
                 }

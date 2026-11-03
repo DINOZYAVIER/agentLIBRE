@@ -19,6 +19,84 @@ pub struct SearchFile {
     pub client_certificate: Option<String>,
     pub client_private_key: Option<String>,
     pub private_ca: Option<String>,
+    /// The step-ca that issues the client certificates (AGL-043 F20); not
+    /// one of the four keys of the search itself.
+    pub ca: SearchCaFile,
+}
+
+/// `search.ca` (AGL-043 F20): the step-ca of `agl search login` — its
+/// `https://` address, its root certificate (an absolute path) and the
+/// name of its OIDC provisioner. A key that is not set is `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchCaFile {
+    pub url: Option<String>,
+    pub root: Option<String>,
+    pub provisioner: Option<String>,
+}
+
+/// A complete `search.ca`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchCa {
+    pub url: String,
+    pub root: PathBuf,
+    pub provisioner: String,
+}
+
+impl SearchCaFile {
+    const KEYS: &'static [&'static str] = &["url", "root", "provisioner"];
+
+    fn parse(section: Option<Section>, path: &Path) -> Result<SearchCaFile, Error> {
+        let Some(mut ca) = section else {
+            return Ok(SearchCaFile::default());
+        };
+        ca.check_keys(Self::KEYS)?;
+        let url = ca.string("url")?;
+        if let Some(url) = &url
+            && !url.starts_with("https://")
+        {
+            return Err(Error::UnsupportedSearchUrl {
+                path: path.into(),
+                url: url.clone(),
+            });
+        }
+        let root = ca.string("root")?;
+        if let Some(root) = &root
+            && !Path::new(root).is_absolute()
+        {
+            return Err(Error::SearchPathNotAbsolute {
+                path: path.into(),
+                key: ca.key("root"),
+                value: root.clone(),
+            });
+        }
+        Ok(SearchCaFile {
+            url,
+            root,
+            provisioner: ca.string("provisioner")?,
+        })
+    }
+
+    /// The keys set here, the others from `defaults`.
+    fn over(&self, defaults: &SearchCaFile) -> SearchCaFile {
+        SearchCaFile {
+            url: self.url.clone().or_else(|| defaults.url.clone()),
+            root: self.root.clone().or_else(|| defaults.root.clone()),
+            provisioner: self
+                .provisioner
+                .clone()
+                .or_else(|| defaults.provisioner.clone()),
+        }
+    }
+
+    /// The step-ca when all three keys are set; the first missing key's
+    /// name otherwise.
+    pub fn complete(&self) -> Result<SearchCa, &'static str> {
+        Ok(SearchCa {
+            url: self.url.clone().ok_or("url")?,
+            root: self.root.clone().ok_or("root")?.into(),
+            provisioner: self.provisioner.clone().ok_or("provisioner")?,
+        })
+    }
 }
 
 /// A complete `[search]`: the search is set up (AGL-019, D5).
@@ -32,7 +110,7 @@ pub struct Search {
 
 impl SearchFile {
     const KEYS: &'static [&'static str] =
-        &["url", "client_certificate", "client_private_key", "private_ca"];
+        &["url", "client_certificate", "client_private_key", "private_ca", "ca"];
 
     pub fn parse(section: Option<Section>, path: &Path) -> Result<SearchFile, Error> {
         let Some(mut search) = section else {
@@ -61,16 +139,26 @@ impl SearchFile {
             }
             Ok(value)
         };
+        let client_certificate = file("client_certificate")?;
+        let client_private_key = file("client_private_key")?;
+        let private_ca = file("private_ca")?;
         Ok(SearchFile {
             url,
-            client_certificate: file("client_certificate")?,
-            client_private_key: file("client_private_key")?,
-            private_ca: file("private_ca")?,
+            client_certificate,
+            client_private_key,
+            private_ca,
+            ca: SearchCaFile::parse(search.section("ca")?, path)?,
         })
     }
 
+    /// Whether none of the four keys of the search is set; `ca` does not
+    /// count (AGL-043 F20): a step-ca set up before the first login is no
+    /// half-set search.
     pub fn is_empty(&self) -> bool {
-        *self == SearchFile::default()
+        SearchFile {
+            ca: SearchCaFile::default(),
+            ..self.clone()
+        } == SearchFile::default()
     }
 
     /// The keys set here, the others from `defaults`.
@@ -86,6 +174,7 @@ impl SearchFile {
                 .clone()
                 .or_else(|| defaults.client_private_key.clone()),
             private_ca: self.private_ca.clone().or_else(|| defaults.private_ca.clone()),
+            ca: self.ca.over(&defaults.ca),
         }
     }
 

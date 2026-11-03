@@ -25,6 +25,14 @@ pub enum Command {
     Forge(Vec<OsString>),
     /// `agl function list|use` (AGL-036, D3).
     Function(FunctionAction),
+    /// `agl search login` (AGL-043 F20).
+    Search(SearchAction),
+}
+
+/// `agl search login` (AGL-043 F20).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SearchAction {
+    Login,
 }
 
 /// `agl function list` or `agl function use <name> [--user]` (AGL-036,
@@ -106,6 +114,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             }
         }
         return Ok(Command::Function(action));
+    }
+    if args.peek().is_some_and(|arg| arg == "search") {
+        args.next();
+        let action = match args.next().map(text).transpose()?.as_deref() {
+            Some("login") => SearchAction::Login,
+            Some("-h" | "--help") => return Ok(Command::Help),
+            Some(other) => return Err(Error::UnknownOption(other.into())),
+            None => return Err(Error::MissingValue("search".into())),
+        };
+        if let Some(extra) = args.next() {
+            return Err(Error::UnknownOption(text(extra)?));
+        }
+        return Ok(Command::Search(action));
     }
     if args.peek().is_some_and(|arg| arg == "server") {
         args.next();
@@ -405,6 +426,27 @@ mod tests {
                 ..Args::default()
             })
         );
+    }
+
+    #[test]
+    fn search_commands() {
+        // AGL-043 F20.
+        assert_eq!(
+            parse_strs(&["search", "login"]).unwrap(),
+            Command::Search(SearchAction::Login)
+        );
+        assert!(matches!(
+            parse_strs(&["search"]),
+            Err(Error::MissingValue(word)) if word == "search"
+        ));
+        assert!(matches!(
+            parse_strs(&["search", "logout"]),
+            Err(Error::UnknownOption(word)) if word == "logout"
+        ));
+        assert!(matches!(
+            parse_strs(&["search", "login", "x"]),
+            Err(Error::UnknownOption(word)) if word == "x"
+        ));
     }
 
     #[test]

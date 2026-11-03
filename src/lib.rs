@@ -222,6 +222,10 @@ fn run(
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             return cli::function::run(action, &user, &paths, &cwd, *lang);
         }
+        Command::Search(action) => {
+            let (paths, user) = loaded?;
+            return cli::search::run(action, &user, &paths, *lang);
+        }
     };
     let (paths, user) = loaded?;
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
@@ -332,11 +336,30 @@ fn agent_session(
     // The tool `search` is there only where `[search]` is complete: no tool,
     // no grammar for it and no word of it in the prompt otherwise
     // (AGL-019, D5).
+    // An expired client certificate leaves the tool out too, with a
+    // notice (AGL-043 F20).
+    let expired = settings.search.as_ref().is_some_and(|config| {
+        programs::program("step").is_ok_and(|step| {
+            cli::search::certificate_expired(&step, &config.client_certificate)
+        })
+    });
     let curl;
     let search: &dyn search::Searcher = match &settings.search {
-        Some(config) => {
+        Some(config) if !expired => {
             curl = search::Curl::new(config.clone())?;
             &curl
+        }
+        Some(config) => {
+            eprintln!(
+                "{}",
+                tr!(
+                    lang,
+                    m::SEARCH_CERT_EXPIRED,
+                    cert = config.client_certificate.display()
+                )
+            );
+            function.without_tool("search");
+            &search::NoSearch
         }
         None => {
             function.without_tool("search");

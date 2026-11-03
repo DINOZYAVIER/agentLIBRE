@@ -163,6 +163,7 @@ Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name
        agl init
        agl server start [--yes] [--function <name>]|stop|status [--function <name>]
        agl function list|use <name> [--user]
+       agl search login
        agl forge list|show|new|status|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
@@ -197,6 +198,11 @@ built-ins; a Function's model names its server kind and weights):
   function use <name>         the runs here load <name>: `function` in the
                               project's settings.nix (--user: the user's)
 
+Search (`search` of the user's settings.nix):
+  search login        a client certificate of the search from the step-ca of
+                      `search.ca`, through a login in the browser; its files
+                      go into `search`
+
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
   forge list                      the artifacts of the workspace
@@ -213,6 +219,7 @@ under XDG_DATA_HOME):
               agl init
               agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
               agl function list|use <назва> [--user]
+              agl search login
               agl forge list|show|new|status|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
@@ -246,6 +253,11 @@ under XDG_DATA_HOME):
                               ту, яку тут завантажують запуски
   function use <назва>        запуски тут завантажують <назва>: `function` у
                               settings.nix проєкту (--user: користувача)
+
+Пошук (`search` у settings.nix користувача):
+  search login        клієнтський сертифікат пошуку від step-ca із
+                      `search.ca` через вхід у браузері; його файли
+                      записуються в `search`
 
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
@@ -470,6 +482,30 @@ Forge (сховище артефактів робочої області, agentL
     pub const UNSUPPORTED_SEARCH_URL: Msg = Msg {
         en: "unsupported search address `{url}` in {path}; only https:// is supported",
         uk: "непідтримувана адреса пошуку `{url}` у {path}; підтримується лише https://",
+    };
+
+    /// `Error::SearchCaNotSet` (AGL-043 F20).
+    pub const SEARCH_CA_NOT_SET: Msg = Msg {
+        en: "agl search login needs `search.ca` with url, root and provisioner in {user_path}; `{key}` is not set:\n\nsearch.ca = {{ url = \"https://ca.example\"; root = \"/path/to/root.crt\"; provisioner = \"NAME\"; }};",
+        uk: "agl search login потребує `search.ca` з url, root і provisioner у {user_path}; `{key}` не задано:\n\nsearch.ca = {{ url = \"https://ca.example\"; root = \"/path/to/root.crt\"; provisioner = \"NAME\"; }};",
+    };
+
+    /// `Error::SearchLogin` (AGL-043 F20).
+    pub const SEARCH_LOGIN: Msg = Msg {
+        en: "agl search login failed: {detail}",
+        uk: "agl search login не вдався: {detail}",
+    };
+
+    /// `agl search login` is done (AGL-043 F20).
+    pub const SEARCH_LOGIN_DONE: Msg = Msg {
+        en: "the search certificate is {cert}, valid until {end}",
+        uk: "сертифікат пошуку — {cert}, чинний до {end}",
+    };
+
+    /// A run whose search certificate has expired (AGL-043 F20).
+    pub const SEARCH_CERT_EXPIRED: Msg = Msg {
+        en: "the search certificate {cert} has expired: the search is off for this run (agl search login)",
+        uk: "сертифікат пошуку {cert} прострочений: пошук у цьому запуску вимкнено (agl search login)",
     };
 
     /// `Error::SearchPathNotAbsolute`.
@@ -2127,6 +2163,13 @@ impl Error {
             Error::UnsupportedSearchUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)
             }
+            Error::SearchCaNotSet { user_path, key } => tr!(
+                lang,
+                m::SEARCH_CA_NOT_SET,
+                user_path = user_path.display(),
+                key = key
+            ),
+            Error::SearchLogin { detail } => tr!(lang, m::SEARCH_LOGIN, detail = detail),
             Error::SearchPathNotAbsolute { path, key, value } => {
                 tr!(
                     lang,

@@ -12,7 +12,7 @@ mod server;
 mod whisper;
 
 pub use repl::{ReplFile, ReplSettings};
-pub use search::{Search, SearchFile};
+pub use search::{Search, SearchCa, SearchFile};
 pub use server::{DEFAULT_IMAGE_TOKENS, ServerFile};
 pub use whisper::WhisperFile;
 

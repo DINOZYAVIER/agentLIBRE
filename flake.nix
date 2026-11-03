@@ -23,6 +23,7 @@
         ln -s ${pkgs.ffmpeg}/bin/ffmpeg $out/bin/ffmpeg
         ln -s ${pkgs.ffmpeg}/bin/ffprobe $out/bin/ffprobe
         ln -s ${pkgs.wl-clipboard}/bin/wl-paste $out/bin/wl-paste
+        ln -s ${pkgs.step-cli}/bin/step $out/bin/step
       '';
 
       # Only what the build reads: a change of the docs does not rebuild.

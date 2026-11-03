@@ -5,6 +5,7 @@ use std::fs;
 
 use serde_json::json;
 
+use super::search::SearchCaFile;
 use super::server::DEFAULT_STRATA_URL;
 
 /// Writes `text` as a settings file and loads it.
@@ -138,7 +139,54 @@ fn full_search() -> SearchFile {
         client_certificate: Some("/c/client.crt".into()),
         client_private_key: Some("/c/client.pk8".into()),
         private_ca: Some("/c/ca.crt".into()),
+        ca: SearchCaFile::default(),
     }
+}
+
+#[test]
+fn the_step_ca_of_the_search() {
+    // AGL-043 F20: `search.ca` names the step-ca of `agl search login`.
+    let file = user_of(
+        r#"search.ca = { url = "https://ca.example"; root = "/c/root.crt"; provisioner = "kanidm"; };"#,
+    )
+    .unwrap();
+    assert_eq!(
+        file.search.ca.complete().unwrap(),
+        SearchCa {
+            url: "https://ca.example".into(),
+            root: "/c/root.crt".into(),
+            provisioner: "kanidm".into(),
+        }
+    );
+    // Alone it is no half-set search: no search, no error.
+    assert!(file.search.is_empty());
+    assert_eq!(file.search.complete(), Ok(None));
+    // The keys: an https:// address, an absolute root, a missing key named.
+    assert!(matches!(
+        user_of(r#"search.ca.url = "http://ca.example";"#),
+        Err(Error::UnsupportedSearchUrl { .. })
+    ));
+    assert!(matches!(
+        user_of(r#"search.ca.root = "root.crt";"#),
+        Err(Error::SearchPathNotAbsolute { .. })
+    ));
+    assert!(matches!(
+        user_of(r#"search.ca.port = 1;"#),
+        Err(Error::UnknownKey { key, .. }) if key == "search.ca.port"
+    ));
+    let partial = user_of(r#"search.ca.url = "https://ca.example";"#).unwrap();
+    assert_eq!(partial.search.ca.complete(), Err("root"));
+    // The project's keys over the user's.
+    let project = SearchFile {
+        ca: SearchCaFile {
+            provisioner: Some("other".into()),
+            ..SearchCaFile::default()
+        },
+        ..SearchFile::default()
+    };
+    let merged = project.over(&file.search);
+    assert_eq!(merged.ca.complete().unwrap().provisioner, "other");
+    assert_eq!(merged.ca.complete().unwrap().url, "https://ca.example");
 }
 
 #[test]
