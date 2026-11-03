@@ -75,9 +75,9 @@ pub enum Compaction {
     Done,
     /// The history holds nothing besides the last summary.
     Nothing,
-    /// The prompt and the summary do not fit the context, or the summary
-    /// was cut off or empty (D140).
-    Impossible,
+    /// The prompt and the summary of at most `limit` tokens do not fit
+    /// the context, or the summary was empty (D140; AGL-043 F6).
+    Impossible { limit: u32 },
 }
 
 /// Everything a turn needs.
@@ -207,17 +207,20 @@ impl Agent<'_> {
         // the next step too; one that makes no room lets the step run when
         // it fits.
         if function.compact_early
-            && prompt_tokens + early_reserve(function) > self.context
+            && prompt_tokens + early_reserve(function, self.context) > self.context
             && self.compact(report)? == Compaction::Done
         {
             return Ok(None);
         }
-        let needed = prompt_tokens + think_budget + function.max_action_tokens as usize;
+        let action_budget = function.action_tokens(self.context);
+        let needed = prompt_tokens + think_budget + action_budget as usize;
         if needed > self.context {
             // A summary of the history may make room (D139, D140).
             return match self.compact(report)? {
                 Compaction::Done => Ok(None),
-                Compaction::Nothing | Compaction::Impossible => self.stop(StopReason::ContextFull),
+                Compaction::Nothing | Compaction::Impossible { .. } => {
+                    self.stop(StopReason::ContextFull)
+                }
             };
         }
 
@@ -267,7 +270,7 @@ impl Agent<'_> {
                 prompt: &prompt,
                 grammar: Some(&grammar_str),
                 stop: &[],
-                max_tokens: function.max_action_tokens,
+                max_tokens: action_budget,
                 sampling: &function.sampling,
                 media: &expanded.uploads,
                 structured: None,
@@ -294,7 +297,7 @@ impl Agent<'_> {
         // and the model is told to split the work (D154).
         if generated.stop == Stop::Limit {
             let cut = CutOff {
-                limit: function.max_action_tokens,
+                limit: action_budget,
                 thinking: None,
                 discarded: u32::try_from(action_tokens).unwrap_or(u32::MAX),
                 call: generated.text.contains(format.call.begin_before.trim()),
@@ -332,7 +335,7 @@ impl Agent<'_> {
         } else {
             Some(ReasoningLevel::Off)
         };
-        let max_tokens = function.max_action_tokens
+        let max_tokens = function.action_tokens(self.context)
             + if think { function.max_think_tokens } else { 0 };
         let mut stirs = 0u32;
         let (generated, action) = loop {
@@ -641,7 +644,7 @@ impl Agent<'_> {
     /// prompt, the history, then the index of the workspace's memory, which
     /// is not stored (AGL-006, M27, M33).
     fn step_messages(&self) -> Vec<Message> {
-        let mut messages = vec![Message::System(system_prompt(self.function))];
+        let mut messages = vec![Message::System(system_prompt(self.function, self.context))];
         messages.extend(self.session.history());
         if let Some(index) = self
             .memory
@@ -678,6 +681,71 @@ impl Agent<'_> {
         Ok(self.backend.count_prompt(&prompt, &flat)? + expanded.pictures * self.image_tokens)
     }
 
+    /// One summary request of `instruction` over `base`, within `budget`
+    /// tokens: the history is cut until the request fits (AGL-038, D5);
+    /// `None` when it cannot fit.
+    fn summarize(
+        &self,
+        base: &mut Vec<Message>,
+        instruction: &str,
+        budget: u32,
+    ) -> Result<Option<crate::backend::Generated>, Error> {
+        let function = self.function;
+        let tools = function_tools(function);
+        let (messages, expanded, prompt) = loop {
+            let mut messages = base.clone();
+            let expanded = media::expand(
+                &mut messages,
+                &self.session.media(),
+                &self.session.media_dir(),
+                self.backend,
+            )?;
+            let compact_prompt = Prompt {
+                messages: &messages,
+                instruction: Some(instruction),
+                tools: &tools,
+                preserve_thinking: false,
+                reasoning: self.reasoning,
+                format: &function.format,
+            };
+            let rendered = self.backend.render(&compact_prompt)?;
+            let prompt = function.format.start_step(rendered, false);
+            let needed = self.backend.count_prompt(&compact_prompt, &prompt)?
+                + expanded.pictures * self.image_tokens
+                + budget as usize;
+            if needed <= self.context {
+                break (messages, expanded, prompt);
+            }
+            if !cut_for_summary(base, needed - self.context) {
+                return Ok(None);
+            }
+        };
+        // In the stirred mode the summary is a structured generation too,
+        // with the thinking off and no tool to call (AGL-030, D9).
+        let structured = Prompt {
+            messages: &messages,
+            instruction: Some(instruction),
+            tools: &[],
+            preserve_thinking: false,
+            reasoning: Some(ReasoningLevel::Off),
+            format: &function.format,
+        };
+        let generated = self.backend.generate(
+            &Request {
+                prompt: &prompt,
+                grammar: None,
+                stop: &[],
+                max_tokens: budget,
+                sampling: &function.sampling,
+                media: &expanded.uploads,
+                structured: self.stirred.then_some(&structured),
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )?;
+        Ok(Some(generated))
+    }
+
     /// Replaces the history with a summary the model writes without
     /// thinking or a grammar, from the history without thinking (D139,
     /// D140). A history whose summary request does not fit is cut until it
@@ -692,7 +760,8 @@ impl Agent<'_> {
         }
         report.compacting();
         let function = self.function;
-        let mut base = vec![Message::System(system_prompt(function))];
+        let budget = function.compact_tokens(self.context);
+        let mut base = vec![Message::System(system_prompt(function, self.context))];
         base.extend(
             self.session
                 .history()
@@ -706,62 +775,36 @@ impl Agent<'_> {
                     other => other,
                 }),
         );
-        let tools = function_tools(function);
-        let (messages, expanded, prompt) = loop {
-            let mut messages = base.clone();
-            let expanded = media::expand(
-                &mut messages,
-                &self.session.media(),
-                &self.session.media_dir(),
-                self.backend,
-            )?;
-            let compact_prompt = Prompt {
-                messages: &messages,
-                instruction: Some(&function.compact),
-                tools: &tools,
-                preserve_thinking: false,
-                reasoning: self.reasoning,
-                format: &function.format,
+        // A summary that reaches its budget is asked once more, shorter; a
+        // second cut one is kept with a note that it is incomplete (AGL-043
+        // F6).
+        let Some(first) = self.summarize(&mut base, &function.compact, budget)? else {
+            return Ok(Compaction::Impossible { limit: budget });
+        };
+        let summary = if first.stop == Stop::Limit {
+            let shorter = format!(
+                "{}\n\nWrite it shorter: the summary must fit in {budget} tokens.",
+                function.compact
+            );
+            let Some(second) = self.summarize(&mut base, &shorter, budget)? else {
+                return Ok(Compaction::Impossible { limit: budget });
             };
-            let rendered = self.backend.render(&compact_prompt)?;
-            let prompt = function.format.start_step(rendered, false);
-            let needed = self.backend.count_prompt(&compact_prompt, &prompt)?
-                + expanded.pictures * self.image_tokens
-                + function.max_compact_tokens as usize;
-            if needed <= self.context {
-                break (messages, expanded, prompt);
+            let text = second.text.trim();
+            if second.stop == Stop::Limit && !text.is_empty() {
+                format!(
+                    "{text}\n\n(This summary was cut at its limit of {budget} tokens and is \
+                     incomplete.)"
+                )
+            } else {
+                text.to_owned()
             }
-            if !cut_for_summary(&mut base, needed - self.context) {
-                return Ok(Compaction::Impossible);
-            }
+        } else {
+            first.text.trim().to_owned()
         };
-        // In the stirred mode the summary is a structured generation too,
-        // with the thinking off and no tool to call (AGL-030, D9).
-        let structured = Prompt {
-            messages: &messages,
-            instruction: Some(&function.compact),
-            tools: &[],
-            preserve_thinking: false,
-            reasoning: Some(ReasoningLevel::Off),
-            format: &function.format,
-        };
-        let generated = self.backend.generate(
-            &Request {
-                prompt: &prompt,
-                grammar: None,
-                stop: &[],
-                max_tokens: function.max_compact_tokens,
-                sampling: &function.sampling,
-                media: &expanded.uploads,
-                structured: self.stirred.then_some(&structured),
-            },
-            &mut |_| {},
-            &mut |_| {},
-        )?;
-        let summary = generated.text.trim();
-        if generated.stop == Stop::Limit || summary.is_empty() {
-            return Ok(Compaction::Impossible);
+        if summary.is_empty() {
+            return Ok(Compaction::Impossible { limit: budget });
         }
+        let summary = summary.as_str();
         // The question that started the turn is kept after the summary
         // (F31): the summary need not repeat it, and the turn goes on from
         // the summary and the question together.
@@ -809,11 +852,11 @@ impl Agent<'_> {
 /// The reserve of the early compaction (AGL-038, D6): the most a step can
 /// add to the history — its action, its thinking, a tool result of
 /// `tools::LIMIT` bytes counted at a token per byte — and the summary.
-fn early_reserve(function: &Function) -> usize {
-    function.max_action_tokens as usize
+fn early_reserve(function: &Function, context: usize) -> usize {
+    function.action_tokens(context) as usize
         + function.max_think_tokens as usize
         + crate::tools::LIMIT
-        + function.max_compact_tokens as usize
+        + function.compact_tokens(context) as usize
 }
 
 /// How much of a tool result the summary request keeps at each end
@@ -975,8 +1018,8 @@ fn stir_nudge(state: &str, detail: &str) -> String {
 /// runtime prefix means and how large an action may be (AGL-009) is in the
 /// `system` of the built-in `agentLIBRE` Function, not here. Stable text, for
 /// the prompt cache (D14, D19).
-fn system_prompt(function: &Function) -> String {
-    function.system.clone()
+fn system_prompt(function: &Function, context: usize) -> String {
+    function.system_at(context)
 }
 
 /// Every tool of any state, for the stable tool list of the prompt (D14,

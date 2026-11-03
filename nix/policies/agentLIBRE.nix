@@ -1,5 +1,5 @@
 # The DinoBot persona and the runtime part (AGL-018, D2; AGL-009): what the
-# runtime prefix means and how large one action may be; the loader fills
+# runtime prefix means and how large one action may be; agl fills
 # in `{runtime_prefix}` and `{max_action_tokens}`. The steps of a turn are
 # unlimited: 0 is the value of the no limit (AGL-021, D1).
 {

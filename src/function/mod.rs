@@ -16,11 +16,19 @@ use crate::settings::{ServerFile, ServerKind};
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
 
-/// Token limits of one generation when the Function does not set them
-/// (D18, D96).
+/// The thinking's token limit of one generation when the Function does
+/// not set it (D18, D96).
 const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
-const DEFAULT_MAX_ACTION_TOKENS: u32 = 8192;
-const DEFAULT_MAX_COMPACT_TOKENS: u32 = 4096;
+
+/// The action's limit when the Function does not set it: this share of the
+/// context (AGL-043 F14: an eighth, 16384 at 131072).
+const ACTION_SHARE: usize = 8;
+
+/// The summary's limit when the Function does not set it: this share of
+/// the context within the bounds (AGL-043 F6: a sixteenth, 4096 to 16384).
+const COMPACT_SHARE: usize = 16;
+const MIN_COMPACT_TOKENS: usize = 4096;
+const MAX_COMPACT_TOKENS: usize = 16384;
 
 /// The stirs of one step of the stirred mode when the Function does not set
 /// them (AGL-030, D6): two stirs, three action attempts in all.
@@ -91,14 +99,18 @@ pub struct Function {
     /// The steps of a turn; `None` when unlimited (D40, AGL-021, D2).
     pub max_steps_total: Option<u32>,
     pub max_think_tokens: u32,
-    pub max_action_tokens: u32,
+    /// The Function's `max_action_tokens`; `None` is a share of the
+    /// context (`action_tokens`, AGL-043 F14).
+    pub max_action_tokens: Option<u32>,
     /// The stirs of one step of the stirred mode (AGL-030, D6); the parse
     /// of the action is retried at most this many times after a failure.
     /// `0` means no stirs: a parse failure stops the turn.
     pub max_stirs: u32,
     /// The instruction that asks for a summary of the history (D139).
     pub compact: String,
-    pub max_compact_tokens: u32,
+    /// The Function's `max_compact_tokens`; `None` is a share of the
+    /// context (`compact_tokens`, AGL-043 F6).
+    pub max_compact_tokens: Option<u32>,
     /// Compact early (AGL-038, D6, D9): when the history plus the most a
     /// step can add and the summary would not fit, so the summary always
     /// fits at the next step; off, the compaction waits until a step does
@@ -217,6 +229,30 @@ impl Function {
         Function::from_value(&path, value)
     }
 
+    /// The action's limit at a context of `context` tokens: the Function's
+    /// `max_action_tokens`, else an eighth of the context (AGL-043 F14).
+    pub fn action_tokens(&self, context: usize) -> u32 {
+        self.max_action_tokens
+            .unwrap_or_else(|| u32::try_from(context / ACTION_SHARE).unwrap_or(u32::MAX))
+    }
+
+    /// The summary's limit at a context of `context` tokens: the
+    /// Function's `max_compact_tokens`, else a sixteenth of the context
+    /// between 4096 and 16384 (AGL-043 F6).
+    pub fn compact_tokens(&self, context: usize) -> u32 {
+        self.max_compact_tokens.unwrap_or_else(|| {
+            let share = (context / COMPACT_SHARE).clamp(MIN_COMPACT_TOKENS, MAX_COMPACT_TOKENS);
+            u32::try_from(share).unwrap_or(u32::MAX)
+        })
+    }
+
+    /// The system text at a context of `context` tokens: the action's
+    /// limit in place of `{max_action_tokens}` (AGL-017, D8; AGL-043 F14).
+    pub fn system_at(&self, context: usize) -> String {
+        self.system
+            .replace("{max_action_tokens}", &self.action_tokens(context).to_string())
+    }
+
     /// The Function without the tool `name` in every state: the tool list
     /// and the grammar do not have it, so the model cannot ask for it
     /// (AGL-019, D5). A state left with no tool and no answer would have no
@@ -266,18 +302,15 @@ impl Function {
         };
         let max_think_tokens =
             positive(&mut policy, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
-        let max_action_tokens =
-            positive(&mut policy, "max_action_tokens")?.unwrap_or(DEFAULT_MAX_ACTION_TOKENS);
-        // The two words the runtime fills in the Function's own text
-        // (AGL-017, D8); other brace text stays as written.
-        let system = system
-            .replace("{runtime_prefix}", RUNTIME_PREFIX)
-            .replace("{max_action_tokens}", &max_action_tokens.to_string());
+        let max_action_tokens = positive(&mut policy, "max_action_tokens")?;
+        // The runtime fills two words in the Function's own text (AGL-017,
+        // D8): the prefix here, the action's limit where the context is
+        // known (`system_at`, AGL-043 F14); other brace text stays.
+        let system = system.replace("{runtime_prefix}", RUNTIME_PREFIX);
         let compact = policy
             .string("compact")?
             .unwrap_or_else(|| DEFAULT_COMPACT.into());
-        let max_compact_tokens =
-            positive(&mut policy, "max_compact_tokens")?.unwrap_or(DEFAULT_MAX_COMPACT_TOKENS);
+        let max_compact_tokens = positive(&mut policy, "max_compact_tokens")?;
         let initial = policy.required_string("initial")?;
         let mut sections = policy.required_section("state")?.sections()?;
         let names: Vec<String> = sections.iter().map(|(name, _)| name.clone()).collect();

@@ -1545,7 +1545,7 @@ mod tests {
             notice(Ok(Compaction::Nothing)),
             Some(("Nothing to compact.".into(), Role::Muted))
         );
-        let (text, role) = notice(Ok(Compaction::Impossible)).unwrap();
+        let (text, role) = notice(Ok(Compaction::Impossible { limit: 4096 })).unwrap();
         assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
         assert_eq!(role, Role::StatusFailure);
         assert_eq!(

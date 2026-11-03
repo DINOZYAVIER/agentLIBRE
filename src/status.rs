@@ -166,12 +166,8 @@ pub fn compact_notice(
         Ok(Compaction::Nothing) => {
             Some((tr!(lang, m::NOTHING_TO_COMPACT).to_string(), Role::Muted))
         }
-        Ok(Compaction::Impossible) => Some((
-            tr!(
-                lang,
-                m::COMPACTION_FAILED,
-                limit = function.max_compact_tokens
-            ),
+        Ok(Compaction::Impossible { limit }) => Some((
+            tr!(lang, m::COMPACTION_FAILED, limit = limit),
             Role::StatusFailure,
         )),
         Err(Error::Interrupted) => Some((

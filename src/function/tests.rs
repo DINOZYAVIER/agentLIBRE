@@ -94,15 +94,26 @@ fn builtin_gpu_high_minimal() {
     assert_eq!(function.max_steps_total, Some(50));
     assert_eq!(
         (function.max_think_tokens, function.max_action_tokens),
-        (4096, 8192)
+        (4096, None)
     );
+    // Unset, the action's limit is an eighth of the context (AGL-043 F14).
+    assert_eq!(function.action_tokens(131_072), 16_384);
+    assert_eq!(function.action_tokens(65_536), 8_192);
+    assert_eq!(function.action_tokens(262_144), 32_768);
     assert!(
         function
             .compact
             .starts_with("Summarize the conversation so far")
     );
     assert!(function.compact.ends_with("Write only the summary."));
-    assert_eq!(function.max_compact_tokens, 4096);
+    // Unset, the summary's limit is a sixteenth of the context between
+    // 4096 and 16384 (AGL-043 F6).
+    assert_eq!(function.max_compact_tokens, None);
+    assert_eq!(function.compact_tokens(131_072), 8_192);
+    assert_eq!(function.compact_tokens(65_536), 4_096);
+    assert_eq!(function.compact_tokens(32_768), 4_096);
+    assert_eq!(function.compact_tokens(262_144), 16_384);
+    assert_eq!(function.compact_tokens(1_048_576), 16_384);
     // The early compaction is off unless set (AGL-038, D9).
     assert!(!function.compact_early);
     assert_eq!(
@@ -386,8 +397,10 @@ fn top_level_errors() {
     let compaction = function(&plain(r#"compact = "Sum up."; max_compact_tokens = 512;"#)).unwrap();
     assert_eq!(
         (compaction.compact.as_str(), compaction.max_compact_tokens),
-        ("Sum up.", 512)
+        ("Sum up.", Some(512))
     );
+    // A set limit is the limit at any context.
+    assert_eq!(compaction.compact_tokens(1_048_576), 512);
     assert_eq!(
         problem_of(function(&plain("max_compact_tokens = 0;"))),
         ("policy.max_compact_tokens".into(), FunctionProblem::NotPositive)
@@ -685,13 +698,19 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
         nix::string("Prefix {runtime_prefix}, at most {max_action_tokens} tokens, keep {x} and {{y}}.")
     ))
     .unwrap();
+    // The prefix is filled at load, the action's limit where the context
+    // is known (AGL-043 F14).
     assert_eq!(
         f.system,
+        "Prefix [agentLIBRE runtime], at most {max_action_tokens} tokens, keep {x} and {{y}}."
+    );
+    assert_eq!(
+        f.system_at(131_072),
         "Prefix [agentLIBRE runtime], at most 500 tokens, keep {x} and {{y}}."
     );
-    // Without the default limit set, the default is told.
+    // Without the limit set, the share of the context is told.
     let g = function(r#"{ system = "{max_action_tokens}"; initial = "a"; state.a.answer = true; }"#).unwrap();
-    assert_eq!(g.system, "8192");
+    assert_eq!(g.system_at(131_072), "16384");
 }
 
 #[test]
@@ -706,11 +725,13 @@ fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
     assert!(high.system.starts_with("You are DinoBot"));
-    assert!(high.system.contains(
+    // The action's limit is told at the context of the run (AGL-043 F14).
+    let told = high.system_at(131_072);
+    assert!(told.contains(
         "Messages that start with [agentLIBRE runtime] come from the agentLIBRE runtime, \
-         not from the human. One action holds at most 8192 tokens; write a large file in parts."
+         not from the human. One action holds at most 16384 tokens; write a large file in parts."
     ));
-    assert!(!high.system.contains('{'));
+    assert!(!told.contains('{'));
     // The step limit differs too: `minimal` keeps the 50 of the absent key
     // (D40); the other is unlimited (AGL-021, D1).
     assert_eq!(minimal.max_steps_total, Some(50));

@@ -721,7 +721,8 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     assert_eq!(
         session.events[3],
         Event::CutOff(CutOff {
-            limit: 8192,
+            // An eighth of the test's 16384 context (AGL-043 F14).
+            limit: 2048,
             thinking: None,
             discarded: discarded as u32,
             call: true,
@@ -734,7 +735,7 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     assert_eq!(
         history[1],
         Message::Runtime(
-            "Your last action hit max_action_tokens (8192) and was discarded; nothing was \
+            "Your last action hit max_action_tokens (2048) and was discarded; nothing was \
              executed or shown. Split the work into smaller actions, for example write a \
              large file in parts."
                 .into()
@@ -771,7 +772,7 @@ fn stops() {
         session.events[session.events.len() - 2..],
         [
             Event::CutOff(CutOff {
-                limit: 8192,
+                limit: 2048,
                 thinking: None,
                 discarded: "<tool_call>\n<function=bash>\n<parameter=command>\nyes"
                     .chars()
@@ -965,7 +966,7 @@ fn stirred_cut_off_is_not_a_stir() {
     // discarded output was heading for a call (AGL-043 F8).
     assert!(session.events.iter().any(|event| matches!(
         event,
-        Event::CutOff(CutOff { limit: 8192, thinking: None, call: true, .. })
+        Event::CutOff(CutOff { limit: 2048, thinking: None, call: true, .. })
     )), "{:?}", session.events);
 
     // A thinking state: the budget is the thinking's and the action's
@@ -984,7 +985,7 @@ fn stirred_cut_off_is_not_a_stir() {
         Stop::Limit,
     )]);
     let (_, _, session) = run_stirred(&thinking, &script, &dir, "go", None, true);
-    let limit = thinking.max_action_tokens + thinking.max_think_tokens;
+    let limit = thinking.action_tokens(16_384) + thinking.max_think_tokens;
     assert!(session.events.iter().any(|event| matches!(
         event,
         Event::CutOff(CutOff { limit: l, thinking: Some(_), call: true, .. }) if *l == limit
@@ -1210,10 +1211,13 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
     // no paragraph about the forge.
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 5);
-    assert!(systems.iter().all(|system| *system == agentlibre.system));
-    assert!(agentlibre.system.contains("Messages that start with [agentLIBRE runtime]"));
-    assert!(agentlibre.system.contains("at most 8192 tokens"));
-    assert!(!agentlibre.system.contains("forge"));
+    // The action's limit is told at the context, an eighth of the test's
+    // 16384 (AGL-043 F14).
+    let told = agentlibre.system_at(16_384);
+    assert!(systems.iter().all(|system| *system == told));
+    assert!(told.contains("Messages that start with [agentLIBRE runtime]"));
+    assert!(told.contains("at most 2048 tokens"));
+    assert!(!told.contains("forge"));
 }
 
 #[test]
@@ -1226,7 +1230,7 @@ fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
     assert!(end.is_ok());
     let systems = script.systems.borrow();
     assert_eq!(systems.len(), 1);
-    assert_eq!(systems[0], agentlibre.system);
+    assert_eq!(systems[0], agentlibre.system_at(16_384));
     assert!(systems[0].starts_with("You are DinoBot"));
     assert!(systems[0].contains("Messages that start with [agentLIBRE runtime]"));
 }
@@ -1270,6 +1274,49 @@ fn the_prompt_size_of_every_step_is_reported() {
 }
 
 #[test]
+fn a_cut_summary_is_asked_again_shorter_then_kept_with_a_note() {
+    // AGL-043 F6: the summary reached its budget (4096 at the test's
+    // 16384 context): one more request, shorter; that one fits.
+    let dir = Dir::new("shorter");
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let script = Script::new(&[
+        ("a long summary", Stop::Limit),
+        ("Shorter.", Stop::End),
+        ("t", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[OVERFLOW, FITS, FITS]);
+    let (end, _, session) = run(&minimal, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert!(session.events.iter().any(|event| matches!(
+        event,
+        Event::Compact { summary, .. } if summary == "Shorter."
+    )));
+    let prompts = script.prompts.borrow();
+    assert!(!prompts[0].contains("Write it shorter"));
+    assert!(prompts[1].contains("Write it shorter: the summary must fit in 4096 tokens."));
+    drop(prompts);
+
+    // Cut again: it is kept, and the model is told it is incomplete.
+    let script = Script::new(&[
+        ("a long summary", Stop::Limit),
+        ("Still long", Stop::Limit),
+        ("t", THOUGHT),
+        ("Done.", Stop::End),
+    ])
+    .with_counts(&[OVERFLOW, FITS, FITS]);
+    let (end, _, session) = run(&minimal, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    assert_eq!(
+        session.history()[0],
+        Message::Runtime(
+            "Still long\n\n(This summary was cut at its limit of 4096 tokens and is incomplete.)"
+                .into()
+        )
+    );
+}
+
+#[test]
 fn a_context_that_compaction_cannot_free_stops_the_turn() {
     let dir = Dir::new("no-room");
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
@@ -1280,9 +1327,10 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
     assert_eq!(log, ["[work]", "compacting"]);
     assert_eq!(kinds(&session), ["user", "state", "stop"]);
 
-    // A summary cut off by max_compact_tokens or an empty one is dropped.
-    for summary in [("a long summary", Stop::Limit), (" \n", Stop::End)] {
-        let script = Script::new(&[summary]).with_counts(&[OVERFLOW, FITS]);
+    // An empty summary is dropped, also when the shorter retry of a cut
+    // one is empty (AGL-043 F6).
+    for summaries in [&[(" \n", Stop::End)][..], &[("a long summary", Stop::Limit), (" ", Stop::End)]] {
+        let script = Script::new(summaries).with_counts(&[OVERFLOW, FITS, FITS]);
         let (end, _, session) = run(&minimal, &script, &dir, "go");
         assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
         assert_eq!(kinds(&session), ["user", "state", "stop"]);
@@ -1360,13 +1408,14 @@ fn a_summary_request_without_results_to_cut_drops_the_oldest_turn() {
 
 #[test]
 fn the_early_compaction_keeps_room_for_the_summary() {
-    // AGL-038, D6, D9: at a 65536 context the reserve is 32768 (8192 +
-    // 4096 + 16384 + 4096); a history of 40000 compacts early with the
-    // setting on, and runs the step with it off.
+    // AGL-038, D6, D9: at a 65536 context the reserve is 32768 (the
+    // action's eighth 8192 + 4096 + 16384 + the summary's 4096, AGL-043
+    // F6, F14); a history of 40000 compacts early with the setting on, and
+    // runs the step with it off.
     let dir = Dir::new("early");
     let mut early = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
     assert!(!early.compact_early);
-    assert_eq!(super::early_reserve(&early), 32_768);
+    assert_eq!(super::early_reserve(&early, 65_536), 32_768);
     early.compact_early = true;
     let script = Script::new(&[
         ("t1", THOUGHT),
