@@ -27,8 +27,8 @@ pub const DEFAULT_STRATA_URL: &str = "http://127.0.0.1:18088";
 
 /// The longest voice recording of the REPL's Ctrl-R, in seconds, when the
 /// settings do not set `repl.max_record_seconds` (AGL-016, D5, D8;
-/// AGL-039, D20).
-const DEFAULT_MAX_RECORD_SECONDS: u32 = 60;
+/// AGL-039, D20; AGL-043 F18).
+const DEFAULT_MAX_RECORD_SECONDS: u32 = 300;
 
 /// The kind of inference server (AGL-030, D1): the llama.cpp
 /// `llama-server` with grammar-constrained decoding, or a Strata server
@@ -1082,9 +1082,10 @@ mod tests {
                 max_record_seconds: 15,
             }
         );
-        // The voice limit is 60 s unless set (AGL-016, D5; AGL-039, D20).
+        // The voice limit is 300 s unless set (AGL-016, D5; AGL-039, D20;
+        // AGL-043 F18).
         let plain = resolve_with(&with_url(), &ProjectFile::default(), None, &llama_model()).unwrap();
-        assert_eq!(plain.repl.max_record_seconds, 60);
+        assert_eq!(plain.repl.max_record_seconds, 300);
     }
 
     #[test]
