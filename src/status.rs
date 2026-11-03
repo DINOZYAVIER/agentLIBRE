@@ -8,9 +8,35 @@ use crate::backend::ReasoningLevel;
 use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::{Lang, m, repl as texts};
-use crate::session::StopReason;
+use crate::session::{CutOff, StopReason};
 use crate::theme::Role;
 use crate::tr;
+
+/// The line of a cut-off, in the transcript and on stderr (D154;
+/// AGL-043 F8).
+pub fn cut_off_line(cut: &CutOff, lang: Lang) -> String {
+    let what = if cut.call {
+        tr!(lang, m::CUT_OFF_CALL)
+    } else {
+        tr!(lang, m::CUT_OFF_TEXT)
+    };
+    match cut.thinking {
+        None => tr!(lang, m::CUT_OFF_EVENT, tokens = cut.discarded, what = what),
+        Some(thinking) => tr!(
+            lang,
+            m::CUT_OFF_EVENT_THINKING,
+            thinking = thinking,
+            tokens = cut.discarded,
+            what = what
+        ),
+    }
+}
+
+/// The line of a stir, in the transcript and on stderr (AGL-030, D4;
+/// AGL-043 F8).
+pub fn stir_line(attempt: u32, error: &str, lang: Lang) -> String {
+    tr!(lang, m::STIR_EVENT, attempt = attempt, error = error)
+}
 
 /// The `/` commands (D118, D139, AGL-013).
 pub const COMMANDS: [&str; 10] = [

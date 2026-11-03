@@ -13,7 +13,7 @@ use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::media::{Kind as MediaKind, Media};
-use crate::session::{Event, ForgeKind};
+use crate::session::{CutOff, Event, ForgeKind};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
@@ -144,9 +144,20 @@ impl Presenter {
     }
 
     /// `[cut off]` where an action hit its token limit (D154).
-    pub fn show_cut_off(&self) {
-        self.screen
-            .print(&[self.theme.paint(Role::Muted, "[cut off]")]);
+    pub fn show_cut_off(&self, cut: &CutOff) {
+        let line = crate::status::cut_off_line(cut, self.lang);
+        self.screen.print(&[self.theme.paint(Role::Muted, &line)]);
+    }
+
+    /// A stir of the stirred mode: its number and the parse error
+    /// (AGL-030, D4; AGL-043 F8).
+    pub fn show_stir(&self, attempt: u32, error: &str) {
+        self.screen.print(&notice_lines(
+            &self.theme,
+            &crate::status::stir_line(attempt, error, self.lang),
+            self.screen.columns(),
+            Role::Muted,
+        ));
     }
 
     /// A medium the session took (AGL-043 F17): its placeholder and its
@@ -292,7 +303,7 @@ impl Presenter {
                 }
                 Event::Answer(text) => self.show_answer(text, None),
                 Event::Compact { .. } => self.show_compacted(),
-                Event::CutOff(_) => self.show_cut_off(),
+                Event::CutOff(cut) => self.show_cut_off(cut),
                 Event::Forge {
                     name,
                     kind,
@@ -302,7 +313,8 @@ impl Presenter {
                     self.show_memory(name, *kind, text.as_deref());
                 }
                 Event::Media(medium) => self.show_media(medium),
-                Event::Stop(_) | Event::Stir { .. } => {}
+                Event::Stir { attempt, error } => self.show_stir(*attempt, error),
+                Event::Stop(_) => {}
             }
         }
     }
@@ -572,9 +584,14 @@ impl Report for Presenter {
         self.screen.activity(Activity::Generating);
     }
 
-    fn cut_off(&mut self) {
+    fn cut_off(&mut self, cut: &CutOff) {
         self.close();
-        self.show_cut_off();
+        self.show_cut_off(cut);
+    }
+
+    fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
+        self.close();
+        self.show_stir(attempt, error);
     }
 
     fn context_used(&mut self, tokens: usize) {
@@ -1062,6 +1079,16 @@ mod tests {
                     crate::media::Frame { at: 1.0, sha256: "c".repeat(64) },
                 ],
             }),
+            Event::Stir {
+                attempt: 1,
+                error: "`nope` is not a tool of this state".into(),
+            },
+            Event::CutOff(CutOff {
+                limit: 12288,
+                thinking: Some(4000),
+                discarded: 8288,
+                call: true,
+            }),
             Event::Answer("Done".into()),
         ];
         presenter.replay(&events);
@@ -1080,6 +1107,13 @@ mod tests {
         // A line per medium (AGL-043 F17).
         assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
         assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
+        // The stir and the cut-off with what it discarded (AGL-043 F8).
+        // The stir line wraps at the 40 columns of the test screen.
+        let all = printed.join("\n");
+        assert!(all.contains("[stir 1: `nope`"), "{all}");
+        assert!(printed.contains(
+            &"[cut off: 4000 tokens of thinking, 8288 of a tool call]".to_owned()
+        ));
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));

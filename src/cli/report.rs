@@ -6,7 +6,7 @@ use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
-use crate::session::ForgeKind;
+use crate::session::{CutOff, ForgeKind};
 use crate::tools::ToolResult;
 use crate::tr;
 
@@ -99,8 +99,12 @@ impl Report for StderrReport {
         eprintln!("[compacted]");
     }
 
-    fn cut_off(&mut self) {
-        eprintln!("[cut off]");
+    fn cut_off(&mut self, cut: &CutOff) {
+        eprintln!("{}", crate::status::cut_off_line(cut, self.lang));
+    }
+
+    fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
+        eprintln!("{}", crate::status::stir_line(attempt, error, self.lang));
     }
 }
 

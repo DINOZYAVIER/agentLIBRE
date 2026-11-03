@@ -81,7 +81,12 @@ fn write_and_read_back() {
         Event::Stop(StopReason::StepLimit),
         Event::Answer("Done: `Vec<&str>`\nok".into()),
         Event::Compact { summary: "The test is fixed.".into(), question: None },
-        Event::CutOff(8192),
+        Event::CutOff(CutOff {
+            limit: 12288,
+            thinking: Some(4000),
+            discarded: 8288,
+            call: true,
+        }),
         Event::Compact {
             summary: "It is fixed for good.".into(),
             question: Some("Fix the test".into()),
@@ -116,7 +121,14 @@ fn write_and_read_back() {
     assert_eq!(lines[8]["summary"], "The test is fixed.");
     assert_eq!(
         lines[9],
-        json!({"type": "cut_off", "limit": 8192, "time": lines[9]["time"]})
+        json!({
+            "type": "cut_off",
+            "limit": 12288,
+            "thinking": 4000,
+            "discarded": 8288,
+            "call": true,
+            "time": lines[9]["time"]
+        })
     );
     // The kept question rides the summary and round-trips (F31).
     assert_eq!(lines[10]["summary"], "It is fixed for good.");
@@ -331,7 +343,12 @@ fn unfinished_turns() {
         call("c4", "ls"),
         result("c4", Outcome::Ok),
         // A discarded action is a step of the visit (D154).
-        Event::CutOff(8192),
+        Event::CutOff(CutOff {
+            limit: 8192,
+            thinking: None,
+            discarded: 8192,
+            call: false,
+        }),
         Event::Stop(StopReason::Interrupted),
         // The next message continues the same turn (D105).
         Event::User("u3".into()),

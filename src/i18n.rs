@@ -1916,6 +1916,36 @@ Forge (сховище артефактів робочої області, agentL
     // The agent's forge writes (AGL-008): the `[forge: …]` marker
     // line, muted in the REPL and on stderr in `-p`.
 
+    /// A discarded generation (D154; AGL-043 F8): the tokens of the
+    /// action and what it was heading for (`CUT_OFF_CALL`, `CUT_OFF_TEXT`).
+    pub const CUT_OFF_EVENT: Msg = Msg {
+        en: "[cut off: {tokens} tokens of {what}]",
+        uk: "[cut off: {tokens} токенів, {what}]",
+    };
+
+    /// The same in the stirred mode, with the tokens of the thinking.
+    pub const CUT_OFF_EVENT_THINKING: Msg = Msg {
+        en: "[cut off: {thinking} tokens of thinking, {tokens} of {what}]",
+        uk: "[cut off: {thinking} токенів думання, {tokens} — {what}]",
+    };
+
+    pub const CUT_OFF_CALL: Msg = Msg {
+        en: "a tool call",
+        uk: "виклик tool",
+    };
+
+    pub const CUT_OFF_TEXT: Msg = Msg {
+        en: "text",
+        uk: "текст",
+    };
+
+    /// A stir of the stirred mode (AGL-030, D4; AGL-043 F8): its number
+    /// in the step and the parse error.
+    pub const STIR_EVENT: Msg = Msg {
+        en: "[stir {attempt}: {error}]",
+        uk: "[stir {attempt}: {error}]",
+    };
+
     /// The replay of a video medium (AGL-043 F17): its head and the
     /// count of its frames.
     pub const MEDIA_EVENT_FRAMES: Msg = Msg {

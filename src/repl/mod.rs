@@ -489,8 +489,11 @@ impl Report for Reporter<'_> {
     fn compacted(&mut self) {
         self.presenter.compacted();
     }
-    fn cut_off(&mut self) {
-        self.presenter.cut_off();
+    fn cut_off(&mut self, cut: &crate::session::CutOff) {
+        self.presenter.cut_off(cut);
+    }
+    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
+        self.presenter.stirred(attempt, max, error);
     }
     fn context_used(&mut self, tokens: usize) {
         self.presenter.context_used(tokens);

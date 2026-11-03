@@ -18,7 +18,7 @@ use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::media;
 use crate::search::Searcher;
-use crate::session::{Event, ForgeKind, INTERRUPTED, Session, StopReason};
+use crate::session::{CutOff, Event, ForgeKind, INTERRUPTED, Session, StopReason};
 use crate::tools::{self, ForgeEnv, ToolResult};
 
 /// What the user sees while a turn runs.
@@ -47,15 +47,16 @@ pub trait Report {
     fn compacting(&mut self) {}
     /// A summary replaced the history (D139).
     fn compacted(&mut self) {}
-    /// An action hit `max_action_tokens` and was discarded (D154).
-    fn cut_off(&mut self) {}
+    /// A generation hit its budget and was discarded (D154; AGL-043 F8).
+    fn cut_off(&mut self, _cut: &CutOff) {}
     /// The prompt of the next step has this many tokens (D152).
     fn context_used(&mut self, _tokens: usize) {}
     /// A generation decoded this many tokens (AGL-012).
     fn decoded(&mut self, _tokens: usize) {}
     /// A stir of the stirred mode: the `attempt`-th corrective retry of the
-    /// step, after the malformed output named by `error` (AGL-030, D4).
-    fn stirred(&mut self, _attempt: u32, _error: &str) {}
+    /// step, of at most `max`, after the malformed output named by `error`
+    /// (AGL-030, D4; AGL-043 F8).
+    fn stirred(&mut self, _attempt: u32, _max: u32, _error: &str) {}
 }
 
 /// How a turn ended.
@@ -274,8 +275,13 @@ impl Agent<'_> {
                 }
             },
         )?;
-        if !generated.text.is_empty() {
-            report.decoded(self.backend.count_tokens(&generated.text)?);
+        let action_tokens = if generated.text.is_empty() {
+            0
+        } else {
+            self.backend.count_tokens(&generated.text)?
+        };
+        if action_tokens > 0 {
+            report.decoded(action_tokens);
         }
         if let Some(text) = stream.finish() {
             report.action_text(&text);
@@ -283,7 +289,13 @@ impl Agent<'_> {
         // Cut-off text may have been heading for a call: it is discarded
         // and the model is told to split the work (D154).
         if generated.stop == Stop::Limit {
-            return self.cut_off(machine, report);
+            let cut = CutOff {
+                limit: function.max_action_tokens,
+                thinking: None,
+                discarded: u32::try_from(action_tokens).unwrap_or(u32::MAX),
+                call: generated.text.contains(format.call.begin_before.trim()),
+            };
+            return self.cut_off(machine, report, cut);
         }
         // The grammar allows nothing else, so the server broke it.
         let action = action::parse(format, &state.actions, &generated.text)
@@ -357,15 +369,15 @@ impl Agent<'_> {
             if let Some(tokens) = generated.prompt_tokens {
                 report.context_used(tokens);
             }
+            let thinking_tokens = || -> Result<usize, Error> {
+                match &generated.thinking {
+                    Some(thinking) => self.backend.count_tokens(thinking),
+                    None => Ok(0),
+                }
+            };
             let decoded = match generated.completion_tokens {
                 Some(tokens) => tokens,
-                None => {
-                    self.backend.count_tokens(&generated.text)?
-                        + match &generated.thinking {
-                            Some(thinking) => self.backend.count_tokens(thinking)?,
-                            None => 0,
-                        }
-                }
+                None => self.backend.count_tokens(&generated.text)? + thinking_tokens()?,
             };
             if decoded > 0 {
                 report.decoded(decoded);
@@ -374,7 +386,22 @@ impl Agent<'_> {
             // the model: discarded, and the model is told to split the
             // work (D154).
             if generated.stop == Stop::Limit {
-                return self.cut_off(machine, report);
+                let tokens = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+                let thinking = if think {
+                    Some(tokens(thinking_tokens()?))
+                } else {
+                    None
+                };
+                let cut = CutOff {
+                    limit: max_tokens,
+                    // The thinking took its part of the one budget
+                    // (AGL-043 F8).
+                    thinking,
+                    discarded: tokens(self.backend.count_tokens(&generated.text)?),
+                    call: !generated.tool_calls.is_empty()
+                        || generated.text.contains(function.format.call.begin_before.trim()),
+                };
+                return self.cut_off(machine, report, cut);
             }
             match action::from_structured(&actions, &generated.text, &generated.tool_calls) {
                 Ok(action) => break (generated, action),
@@ -387,7 +414,7 @@ impl Agent<'_> {
                         attempt: stirs,
                         error: detail.clone(),
                     })?;
-                    report.stirred(stirs, &detail);
+                    report.stirred(stirs, function.max_stirs, &detail);
                     // The malformed output is discarded; the retry sees
                     // the nudge as a runtime message (AGL-030, D4, D8).
                     messages.push(Message::Runtime(stir_nudge(&state_name, &detail)));
@@ -411,10 +438,10 @@ impl Agent<'_> {
         &mut self,
         machine: &mut Machine,
         report: &mut dyn Report,
+        cut: CutOff,
     ) -> Result<Option<TurnEnd>, Error> {
-        self.session
-            .append(Event::CutOff(self.function.max_action_tokens))?;
-        report.cut_off();
+        report.cut_off(&cut);
+        self.session.append(Event::CutOff(cut))?;
         let progress = machine.after_cut_off();
         if machine.entered() {
             self.enter(machine.state().name.as_str(), report)?;

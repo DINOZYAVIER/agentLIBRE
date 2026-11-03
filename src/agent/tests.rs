@@ -235,8 +235,11 @@ impl Report for Log {
     fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
         self.0.push(format!("memory {}{name} {}", kind.sign(), text.unwrap_or("-")));
     }
-    fn cut_off(&mut self) {
+    fn cut_off(&mut self, _cut: &CutOff) {
         self.0.push("[cut off]".into());
+    }
+    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
+        self.0.push(format!("[stir {attempt}/{max}: {error}]"));
     }
     fn context_used(&mut self, tokens: usize) {
         self.1.push(tokens);
@@ -712,7 +715,18 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
         kinds(&session),
         ["user", "state", "thinking", "cut_off", "thinking", "answer"]
     );
-    assert_eq!(session.events[3], Event::CutOff(8192));
+    // The discarded tokens (the test counts a generation's characters) and
+    // where they were heading (AGL-043 F8).
+    let discarded = "<tool_call>\n<function=bash>\n<parameter=command>\ncat <<EOF".chars().count();
+    assert_eq!(
+        session.events[3],
+        Event::CutOff(CutOff {
+            limit: 8192,
+            thinking: None,
+            discarded: discarded as u32,
+            call: true,
+        })
+    );
     assert!(log.contains(&"[cut off]".to_string()));
     // The discarded text is not kept; the model reads the notice instead.
     let history = session.history();
@@ -755,7 +769,17 @@ fn stops() {
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::StepLimit));
     assert_eq!(
         session.events[session.events.len() - 2..],
-        [Event::CutOff(8192), Event::Stop(StopReason::StepLimit)]
+        [
+            Event::CutOff(CutOff {
+                limit: 8192,
+                thinking: None,
+                discarded: "<tool_call>\n<function=bash>\n<parameter=command>\nyes"
+                    .chars()
+                    .count() as u32,
+                call: true,
+            }),
+            Event::Stop(StopReason::StepLimit)
+        ]
     );
 
     let mut full = Script::new(&[]);
@@ -866,8 +890,11 @@ fn stirred_retries_a_malformed_call() {
         structured_step(None, "", &[("bash", "{}")], Stop::End),
         structured_step(None, "done", &[], Stop::End),
     ]);
-    let (end, _, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
+    let (end, lines, session) = run_stirred(&stirred, &script, &dir, "go", None, true);
     assert_eq!(end.unwrap(), TurnEnd::Answer("done".into()));
+    // Each stir is reported with its number of the most (AGL-043 F8).
+    assert!(lines.contains(&"[stir 1/2: `nope` is not a tool of this state]".to_string()), "{lines:?}");
+    assert!(lines.contains(&"[stir 2/2: `bash` needs the parameter `command`]".to_string()));
     let errors: Vec<&str> = session
         .events
         .iter()
@@ -934,10 +961,34 @@ fn stirred_cut_off_is_not_a_stir() {
         .events
         .iter()
         .any(|event| matches!(event, Event::Stir { .. })));
-    assert!(session
-        .events
-        .iter()
-        .any(|event| matches!(event, Event::CutOff(_))));
+    // A state without thinking: the budget is the action's, and the
+    // discarded output was heading for a call (AGL-043 F8).
+    assert!(session.events.iter().any(|event| matches!(
+        event,
+        Event::CutOff(CutOff { limit: 8192, thinking: None, call: true, .. })
+    )), "{:?}", session.events);
+
+    // A thinking state: the budget is the thinking's and the action's
+    // together, and the cut-off says what the thinking took of it.
+    let thinking = function_on(
+        r#"{ system = "s"; initial = "a"; max_steps_total = 1;
+             state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
+        r#"{ format = agl.formats."qwen3.8"; weights = "m.gguf"; }"#,
+    )
+    .unwrap();
+    let dir = Dir::new("stir-cut-thinking");
+    let script = Script::structured(vec![structured_step(
+        Some("a long thought"),
+        "",
+        &[("bash", "{\"comm")],
+        Stop::Limit,
+    )]);
+    let (_, _, session) = run_stirred(&thinking, &script, &dir, "go", None, true);
+    let limit = thinking.max_action_tokens + thinking.max_think_tokens;
+    assert!(session.events.iter().any(|event| matches!(
+        event,
+        Event::CutOff(CutOff { limit: l, thinking: Some(_), call: true, .. }) if *l == limit
+    )), "{:?}", session.events);
 }
 
 /// The structured mapping (AGL-030, D10): an answer, a call with its

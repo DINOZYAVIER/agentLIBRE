@@ -97,6 +97,21 @@ impl ForgeKind {
     }
 }
 
+/// What a cut-off discarded (D154; AGL-043 F8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutOff {
+    /// The budget of the generation: `max_action_tokens`, with the
+    /// thinking's budget in the stirred mode, where the thinking and the
+    /// action are one generation.
+    pub limit: u32,
+    /// The tokens the thinking took of `limit` (the stirred mode).
+    pub thinking: Option<u32>,
+    /// The tokens of the discarded action.
+    pub discarded: u32,
+    /// Whether the discarded action was heading for a tool call.
+    pub call: bool,
+}
+
 /// A session event (D104). The header line is not an event.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -123,9 +138,9 @@ pub enum Event {
         section: Option<String>,
     },
     Answer(String),
-    /// An action hit `max_action_tokens` (the field) and was discarded
-    /// (D154).
-    CutOff(u32),
+    /// A generation hit its token budget and was discarded (D154;
+    /// AGL-043 F8).
+    CutOff(CutOff),
     /// A stir of the stirred mode: the model's output was not an action of
     /// the state, the machine nudged it and retried (AGL-030, D4). `attempt`
     /// is the stir number of the step (1-based) and `error` the parse error.
@@ -344,9 +359,9 @@ impl Session {
                     text: Some(text.clone()),
                     call: None,
                 }),
-                Event::CutOff(limit) => {
+                Event::CutOff(cut) => {
                     thinking = None;
-                    messages.push(Message::Runtime(cut_off_notice(*limit)));
+                    messages.push(Message::Runtime(cut_off_notice(cut)));
                 }
                 Event::State(_)
                 | Event::Stop(_)
@@ -559,7 +574,18 @@ fn event_json(event: &Event) -> Json {
             json
         }
         Event::Answer(text) => json!({"type": "answer", "text": text}),
-        Event::CutOff(limit) => json!({"type": "cut_off", "limit": limit}),
+        Event::CutOff(cut) => {
+            let mut json = json!({
+                "type": "cut_off",
+                "limit": cut.limit,
+                "discarded": cut.discarded,
+                "call": cut.call,
+            });
+            if let Some(thinking) = cut.thinking {
+                json["thinking"] = json!(thinking);
+            }
+            json
+        }
         Event::Stir { attempt, error } => json!({"type": "stir", "attempt": attempt, "error": error}),
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact { summary, question } => {
@@ -646,7 +672,18 @@ fn event_from_json(json: &Json) -> Option<Event> {
             section: text("section"),
         },
         "answer" => Event::Answer(text("text")?),
-        "cut_off" => Event::CutOff(u32::try_from(json["limit"].as_u64()?).ok()?),
+        "cut_off" => {
+            let count = |key: &str| u32::try_from(json[key].as_u64()?).ok();
+            Event::CutOff(CutOff {
+                limit: count("limit")?,
+                thinking: match json.get("thinking") {
+                    None => None,
+                    Some(_) => Some(count("thinking")?),
+                },
+                discarded: count("discarded")?,
+                call: json["call"].as_bool()?,
+            })
+        }
         "stop" => Event::Stop(
             StopReason::ALL
                 .into_iter()
@@ -690,14 +727,29 @@ fn event_from_json(json: &Json) -> Option<Event> {
     })
 }
 
-/// What the model reads after an action hit `max_action_tokens` (D154,
-/// AGL-009); the prefix is added where the message is rendered.
-fn cut_off_notice(limit: u32) -> String {
-    format!(
-        "Your last action hit max_action_tokens ({limit}) and was discarded; nothing was \
-         executed or shown. Split the work into smaller actions, for example write a large \
-         file in parts."
-    )
+/// What the model reads after a generation hit its budget (D154,
+/// AGL-009); in the stirred mode it says how much of the budget the
+/// thinking took (AGL-043 F8). The prefix is added where the message is
+/// rendered.
+fn cut_off_notice(cut: &CutOff) -> String {
+    let CutOff {
+        limit,
+        discarded,
+        ..
+    } = cut;
+    match cut.thinking {
+        None => format!(
+            "Your last action hit max_action_tokens ({limit}) and was discarded; nothing was \
+             executed or shown. Split the work into smaller actions, for example write a large \
+             file in parts."
+        ),
+        Some(thinking) => format!(
+            "Your last step hit its limit of {limit} tokens, {thinking} of them thinking and \
+             {discarded} the action, and was discarded; nothing was executed or shown. Think \
+             less, or split the work into smaller actions, for example write a large file in \
+             parts."
+        ),
+    }
 }
 
 /// `args` in the parameter order of the built-in tool `tool` (D79).
