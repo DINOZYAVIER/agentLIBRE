@@ -17,11 +17,11 @@
 
 Update this map when adding top-level paths.
 
-## Alpha compatibility policy
+## Compatibility policy
 
-agentLIBRE is in alpha. Do not add backward-compatibility paths, legacy
-fallbacks, migration shims, or compatibility-preserving behavior unless the
-human explicitly asks for them in the current task.
+Do not add backward-compatibility paths, legacy fallbacks, migration shims, or
+compatibility-preserving behavior unless the human explicitly asks for them in
+the current task.
 
 ## Human decision gate
 
