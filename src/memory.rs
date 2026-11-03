@@ -300,19 +300,10 @@ pub fn add(
     )
 }
 
-/// The most of the text that goes into the index line of `/remember` (M37:
-/// the hook is the text).
-const HOOK_LIMIT: usize = 120;
-
-/// The index hook of a `/remember` text: the text on one line, cut with
-/// `…` when long.
+/// The index hook of a `/remember` text: the whole text on one line, not
+/// cut (M37: the hook is the text; AGL-043 F19).
 pub fn hook_of(text: &str) -> String {
-    let line = one_line(text);
-    if line.chars().count() <= HOOK_LIMIT {
-        return line;
-    }
-    let cut: String = line.chars().take(HOOK_LIMIT - 1).collect();
-    format!("{}…", cut.trim_end())
+    one_line(text)
 }
 
 /// `/remember name | text` (M34, M37): the program writes the entry,
@@ -860,13 +851,12 @@ mod tests {
             fs::read_to_string(dir.0.join(INDEX)).unwrap(),
             "- [Build and test](build-and-test.md) — cargo build / cargo test\n"
         );
-        // A long text is cut in the index and whole in the entry.
+        // A long text is whole in the index too, on one line (AGL-043 F19).
         let long = "word ".repeat(100);
         remember(&dir.0, "Long one", &long);
         let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
         let line = index.lines().last().unwrap();
-        assert!(line.ends_with('…'));
-        assert!(line.chars().count() < 160);
+        assert!(line.ends_with(long.trim_end()));
         assert!(show(&dir.0, "long-one").content.contains(long.trim_end()));
         assert_eq!(hook_of("a\nb  c"), "a b c");
         assert_eq!(remember(&dir.0, "", "t").0.outcome, Outcome::Fail);
