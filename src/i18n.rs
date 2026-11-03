@@ -1916,6 +1916,13 @@ Forge (сховище артефактів робочої області, agentL
     // The agent's forge writes (AGL-008): the `[forge: …]` marker
     // line, muted in the REPL and on stderr in `-p`.
 
+    /// The replay of a video medium (AGL-043 F17): its head and the
+    /// count of its frames.
+    pub const MEDIA_EVENT_FRAMES: Msg = Msg {
+        en: "{head} — frames: {frames}",
+        uk: "{head} — кадрів: {frames}",
+    };
+
     /// The `memory` tool or `/remember` wrote an entry: `+name` added,
     /// `~name` edited, `-name` removed (AGL-006, M28, M36).
     pub const MEMORY_EVENT: Msg = Msg {

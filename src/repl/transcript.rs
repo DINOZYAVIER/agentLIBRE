@@ -12,6 +12,7 @@ use crate::action::{Outcome, Value};
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
+use crate::media::{Kind as MediaKind, Media};
 use crate::session::{Event, ForgeKind};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
@@ -148,6 +149,29 @@ impl Presenter {
             .print(&[self.theme.paint(Role::Muted, "[cut off]")]);
     }
 
+    /// A medium the session took (AGL-043 F17): its placeholder and its
+    /// file name; the transcript of an audio, the count of the frames of a
+    /// video.
+    pub fn show_media(&self, medium: &Media) {
+        let head = format!("{} {}", medium.placeholder(), medium.name);
+        let line = match (&medium.kind, &medium.transcript) {
+            (MediaKind::Audio, Some(transcript)) => format!("{head} — “{transcript}”"),
+            (MediaKind::Video, _) => tr!(
+                self.lang,
+                m::MEDIA_EVENT_FRAMES,
+                head = head,
+                frames = medium.frames.len()
+            ),
+            _ => head,
+        };
+        self.screen.print(&notice_lines(
+            &self.theme,
+            &line,
+            self.screen.columns(),
+            Role::Muted,
+        ));
+    }
+
     /// `[compacted]` where a summary replaced the history (D140).
     pub fn show_compacted(&self) {
         self.screen
@@ -277,7 +301,8 @@ impl Presenter {
                 Event::Memory { name, kind, text } => {
                     self.show_memory(name, *kind, text.as_deref());
                 }
-                Event::Stop(_) | Event::Media(_) | Event::Stir { .. } => {}
+                Event::Media(medium) => self.show_media(medium),
+                Event::Stop(_) | Event::Stir { .. } => {}
             }
         }
     }
@@ -1016,6 +1041,27 @@ mod tests {
                 kind: crate::memory::Kind::Added,
                 text: Some("Run cargo test.".into()),
             },
+            Event::Media(crate::media::Media {
+                kind: crate::media::Kind::Audio,
+                number: 1,
+                sha256: "a".repeat(64),
+                ext: "wav".into(),
+                name: "voice.wav".into(),
+                transcript: Some("Check the logs.".into()),
+                frames: Vec::new(),
+            }),
+            Event::Media(crate::media::Media {
+                kind: crate::media::Kind::Video,
+                number: 1,
+                sha256: "b".repeat(64),
+                ext: "mp4".into(),
+                name: "clip.mp4".into(),
+                transcript: None,
+                frames: vec![
+                    crate::media::Frame { at: 0.0, sha256: "c".repeat(64) },
+                    crate::media::Frame { at: 1.0, sha256: "c".repeat(64) },
+                ],
+            }),
             Event::Answer("Done".into()),
         ];
         presenter.replay(&events);
@@ -1031,6 +1077,9 @@ mod tests {
         assert!(printed.contains(&"Running.".to_owned()));
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
         assert!(printed.contains(&"[forge: agl-009 +Progress]".to_owned()));
+        // A line per medium (AGL-043 F17).
+        assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
+        assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));
