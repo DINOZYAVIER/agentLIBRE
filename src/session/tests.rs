@@ -96,8 +96,20 @@ fn write_and_read_back() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 11);
-    assert_eq!(lines[0]["type"], "session");
+    // The header, then one line per event in order (AGL-043 F3): the
+    // structure, not a count to bump by hand.
+    let types: Vec<&str> = lines
+        .iter()
+        .map(|line| line["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "session", "user", "state", "thinking", "call", "result", "stop", "answer", "compact",
+            "cut_off", "compact"
+        ]
+    );
+    assert_eq!(lines.len(), events.len() + 1);
     assert_eq!(lines[0]["version"], 1);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
     assert_eq!(lines[4]["args"], json!({"command": "ls", "timeout": 30}));
