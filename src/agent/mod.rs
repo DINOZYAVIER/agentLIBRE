@@ -155,17 +155,7 @@ impl Agent<'_> {
         let function = self.function;
         let format = &function.format;
         let state = machine.state();
-        let mut messages = vec![Message::System(system_prompt(function))];
-        messages.extend(self.session.history());
-        // The index of the workspace's memory, after the history and before
-        // the state instruction; not stored (AGL-006, M27, M33).
-        if let Some(index) = self
-            .memory
-            .read()
-            .and_then(|dir| crate::memory::index_text(&dir))
-        {
-            messages.push(Message::Runtime(format!("workspace memory\n{index}")));
-        }
+        let mut messages = self.step_messages();
         // The media the messages name become the server's marker, the
         // frames and the transcripts (AGL-014, D6).
         let expanded = media::expand(
@@ -616,6 +606,47 @@ impl Agent<'_> {
         }
     }
 
+    /// The messages of a step before its state's instruction: the system
+    /// prompt, the history, then the index of the workspace's memory, which
+    /// is not stored (AGL-006, M27, M33).
+    fn step_messages(&self) -> Vec<Message> {
+        let mut messages = vec![Message::System(system_prompt(self.function))];
+        messages.extend(self.session.history());
+        if let Some(index) = self
+            .memory
+            .read()
+            .and_then(|dir| crate::memory::index_text(&dir))
+        {
+            messages.push(Message::Runtime(format!("workspace memory\n{index}")));
+        }
+        messages
+    }
+
+    /// The tokens of the history as the next step sends it, without its
+    /// state's instruction (AGL-043 F7): what the dock shows after a
+    /// compaction, also when no step follows it (the REPL's `/compact`).
+    fn history_tokens(&self) -> Result<usize, Error> {
+        let function = self.function;
+        let mut messages = self.step_messages();
+        let expanded = media::expand(
+            &mut messages,
+            &self.session.media(),
+            &self.session.media_dir(),
+            self.backend,
+        )?;
+        let tools = function_tools(function);
+        let prompt = Prompt {
+            messages: &messages,
+            instruction: None,
+            tools: &tools,
+            preserve_thinking: function.preserve_thinking,
+            reasoning: self.reasoning,
+            format: &function.format,
+        };
+        let flat = function.format.start_step(self.backend.render(&prompt)?, false);
+        Ok(self.backend.count_prompt(&prompt, &flat)? + expanded.pictures * self.image_tokens)
+    }
+
     /// Replaces the history with a summary the model writes without
     /// thinking or a grammar, from the history without thinking (D139,
     /// D140). A history whose summary request does not fit is cut until it
@@ -729,6 +760,11 @@ impl Agent<'_> {
             );
         }
         report.compacted();
+        // The dock's figure is fresh at once (AGL-043 F7); a failed count
+        // does not undo the compaction, the next step counts again.
+        if let Ok(tokens) = self.history_tokens() {
+            report.context_used(tokens);
+        }
         Ok(Compaction::Done)
     }
 

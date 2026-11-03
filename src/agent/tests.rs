@@ -1124,7 +1124,9 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
     // The summary is asked for after the history, without thinking.
     assert!(prompts[2].starts_with("[4 messages; Summarize the conversation so far"));
     assert!(prompts[2].ends_with("<think>\n\n</think>\n\n"));
-    assert_eq!(*script.thinking.borrow(), [false, true, false, false]);
+    // The renders: two steps, the summary, the count of the history after
+    // it (AGL-043 F7), a step.
+    assert_eq!(*script.thinking.borrow(), [false, true, false, false, false]);
     // The turn goes on from the summary and the kept question (F31).
     assert!(prompts[3].starts_with("[3 messages; -]"));
     // The summary is a runtime message, not the human's (AGL-009), and the
@@ -1151,11 +1153,12 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
     .with_counts(&[100, OVERFLOW, FITS]);
     let (end, _, _) = run(&agentlibre, &script, &dir, "go");
     assert!(end.is_ok());
-    // A step, a step, the compaction, a step: all carry the Function's
-    // `system`, the same text each time (AGL-017, D4, D8): the persona and
-    // the runtime part of `agentLIBRE`, no paragraph about the forge.
+    // A step, a step, the compaction, the count after it (AGL-043 F7), a
+    // step: all carry the Function's `system`, the same text each time
+    // (AGL-017, D4, D8): the persona and the runtime part of `agentLIBRE`,
+    // no paragraph about the forge.
     let systems = script.systems.borrow();
-    assert_eq!(systems.len(), 4);
+    assert_eq!(systems.len(), 5);
     assert!(systems.iter().all(|system| *system == agentlibre.system));
     assert!(agentlibre.system.contains("Messages that start with [agentLIBRE runtime]"));
     assert!(agentlibre.system.contains("at most 8192 tokens"));
@@ -1209,8 +1212,10 @@ fn the_prompt_size_of_every_step_is_reported() {
     agent(&minimal, &script, &mut session, &dir, None)
         .turn("go", &mut log)
         .unwrap();
-    // The summary prompt (the third count) is not a step.
-    assert_eq!(log.1, [100, OVERFLOW, 200]);
+    // The summary prompt (the third count) is not a step; the history
+    // after the summary is reported at once (the fourth, AGL-043 F7), then
+    // the next step's prompt (the default count).
+    assert_eq!(log.1, [100, OVERFLOW, 200, 100]);
 }
 
 #[test]
@@ -1233,7 +1238,10 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
     }
 
     // Still too long after a summary: nothing is left to compact.
-    let script = Script::new(&[("s", Stop::End)]).with_counts(&[OVERFLOW, FITS, OVERFLOW]);
+    // The counts: the step, the summary request, the history after the
+    // summary (AGL-043 F7), the next step.
+    let script =
+        Script::new(&[("s", Stop::End)]).with_counts(&[OVERFLOW, FITS, OVERFLOW, OVERFLOW]);
     let (end, _, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
     assert_eq!(kinds(&session), ["user", "state", "compact", "stop"]);
@@ -1357,12 +1365,16 @@ fn compaction_on_request() {
     agent(&minimal, &script, &mut session, &dir, None)
         .turn("hello", &mut log)
         .unwrap();
+    let reported = log.1.len();
     assert_eq!(
         agent(&minimal, &script, &mut session, &dir, None)
             .compact(&mut log)
             .unwrap(),
         Compaction::Done
     );
+    // The compaction on request reports the context it leaves, with no
+    // step after it (AGL-043 F7).
+    assert_eq!(log.1.len(), reported + 1);
     assert_eq!(
         session.events.last(),
         Some(&Event::Compact {
