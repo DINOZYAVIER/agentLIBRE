@@ -49,6 +49,9 @@ pub trait Report {
     fn compacted(&mut self) {}
     /// A generation hit its budget and was discarded (D154; AGL-043 F8).
     fn cut_off(&mut self, _cut: &CutOff) {}
+    /// A step begins: its prompt is rendered, counted and read by the
+    /// server until the first token (AGL-043 F2).
+    fn prefill(&mut self) {}
     /// The prompt of the next step has this many tokens (D152).
     fn context_used(&mut self, _tokens: usize) {}
     /// A generation decoded this many tokens (AGL-012).
@@ -153,6 +156,7 @@ impl Agent<'_> {
         machine: &mut Machine,
         report: &mut dyn Report,
     ) -> Result<Option<TurnEnd>, Error> {
+        report.prefill();
         let function = self.function;
         let format = &function.format;
         let state = machine.state();

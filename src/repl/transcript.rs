@@ -19,13 +19,24 @@ use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 use crate::tr;
 
-/// What the dock says the agent is doing (D135).
+/// What the dock says the agent is doing (D135; AGL-043 F2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
     Ready,
-    Generating,
+    /// The turn's start brings the server up.
+    StartingServer,
+    /// The turn's start transcribes an audio of the message.
+    Transcribing,
+    /// A step's prompt is rendered, counted and read by the server, until
+    /// its first token.
+    Prefill,
+    Thinking,
+    /// The action or the answer is being written.
+    Writing,
     Running(String),
     Compacting,
+    /// A stir of the stirred mode: the step is tried again.
+    Retry { attempt: u32, max: u32 },
 }
 
 /// Where the transcript is drawn: above the dock.
@@ -104,6 +115,16 @@ impl Presenter {
     /// The dock is idle again.
     pub fn set_ready(&self) {
         self.screen.activity(Activity::Ready);
+    }
+
+    /// The turn's start brings the server up (AGL-043 F2).
+    pub fn set_starting_server(&self) {
+        self.screen.activity(Activity::StartingServer);
+    }
+
+    /// The turn's start transcribes an audio (AGL-043 F2).
+    pub fn set_transcribing(&self) {
+        self.screen.activity(Activity::Transcribing);
     }
 
     /// A user message starts a turn.
@@ -498,7 +519,7 @@ impl Report for Presenter {
     fn thinking(&mut self, piece: &str) {
         if self.thinking.is_none() {
             self.close();
-            self.screen.activity(Activity::Generating);
+            self.screen.activity(Activity::Thinking);
             self.thinking = Some(StreamWrap::new(self.screen.columns()));
             let label = format!("{}: ", tr!(self.lang, m::THINKING));
             let wrap = self.thinking.as_mut().expect("just set");
@@ -526,7 +547,7 @@ impl Report for Presenter {
 
     fn action_text(&mut self, piece: &str) {
         self.close_thinking();
-        self.screen.activity(Activity::Generating);
+        self.screen.activity(Activity::Writing);
         let columns = self.screen.columns();
         let streamed = self.action.get_or_insert_with(|| Streamed {
             wrap: StreamWrap::new(columns),
@@ -566,7 +587,8 @@ impl Report for Presenter {
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         let elapsed = self.call_started.elapsed();
         self.show_card(call, result, Some(elapsed));
-        self.screen.activity(Activity::Generating);
+        // The next step's prompt is read next (AGL-043 F2).
+        self.screen.activity(Activity::Prefill);
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
@@ -581,7 +603,7 @@ impl Report for Presenter {
 
     fn compacted(&mut self) {
         self.show_compacted();
-        self.screen.activity(Activity::Generating);
+        self.screen.activity(Activity::Prefill);
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
@@ -589,9 +611,14 @@ impl Report for Presenter {
         self.show_cut_off(cut);
     }
 
-    fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
+    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
         self.close();
         self.show_stir(attempt, error);
+        self.screen.activity(Activity::Retry { attempt, max });
+    }
+
+    fn prefill(&mut self) {
+        self.screen.activity(Activity::Prefill);
     }
 
     fn context_used(&mut self, tokens: usize) {
@@ -905,6 +932,61 @@ mod tests {
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
         assert_eq!(ops.last().unwrap(), "Ready");
+    }
+
+    #[test]
+    fn the_dock_follows_the_phases_of_a_turn() {
+        // AGL-043 F2: the start, the prefill, the thinking, the writing,
+        // the call, the next prefill, a stir and the answer.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        presenter.set_starting_server();
+        presenter.set_transcribing();
+        presenter.prefill();
+        presenter.thinking("hmm ");
+        presenter.thinking_done();
+        presenter.action_text("Looking.\n");
+        presenter.text("Looking.");
+        presenter.call(&bash("ls"));
+        presenter.result(
+            &bash("ls"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+        );
+        presenter.prefill();
+        presenter.stirred(1, 2, "`nope` is not a tool of this state");
+        presenter.action_text("Done");
+        presenter.answer("Done");
+        let ops: Vec<String> = mock
+            .ops
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| {
+                !["erase", "speed", "live", "print"]
+                    .iter()
+                    .any(|prefix| op.starts_with(prefix))
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            ops,
+            [
+                "StartingServer",
+                "Transcribing",
+                "Prefill",
+                "Thinking",
+                "Writing",
+                "Running(\"bash\")",
+                "Prefill",
+                "Prefill",
+                "Retry { attempt: 1, max: 2 }",
+                "Writing",
+                "Ready"
+            ]
+        );
     }
 
     #[test]

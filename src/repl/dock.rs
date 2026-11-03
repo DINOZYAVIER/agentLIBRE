@@ -423,7 +423,14 @@ impl State {
         let lang = self.lang;
         let mut label = match &self.activity {
             Activity::Ready => tr!(lang, m::READY).to_string(),
-            Activity::Generating => tr!(lang, m::GENERATING).to_string(),
+            Activity::StartingServer => tr!(lang, m::STARTING_SERVER).to_string(),
+            Activity::Transcribing => tr!(lang, m::TRANSCRIBING_ACTIVITY).to_string(),
+            Activity::Prefill => tr!(lang, m::PREFILL).to_string(),
+            Activity::Thinking => tr!(lang, m::THINKING_ACTIVITY).to_string(),
+            Activity::Writing => tr!(lang, m::WRITING).to_string(),
+            Activity::Retry { attempt, max } => {
+                tr!(lang, m::RETRY, attempt = attempt, max = max)
+            }
             Activity::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
             Activity::Compacting => tr!(lang, m::COMPACTING).to_string(),
         };
@@ -638,20 +645,20 @@ mod tests {
     #[test]
     fn the_separator_row_carries_the_decoding_speed() {
         let (dock, _) = dock(40, 20);
-        dock.activity(Activity::Generating);
+        dock.activity(Activity::Writing);
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[0], format!("─ Generating {}", "─".repeat(27)));
+        assert_eq!(layout.rows[0], format!("─ Writing {}", "─".repeat(30)));
         drop(layout);
         dock.speed(Some(46.3));
         let layout = dock.lock().layout();
         assert_eq!(
             layout.rows[0],
-            format!("─ Generating · 46.3 tok/s {}", "─".repeat(14))
+            format!("─ Writing · 46.3 tok/s {}", "─".repeat(17))
         );
         drop(layout);
         dock.speed(None);
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[0], format!("─ Generating {}", "─".repeat(27)));
+        assert_eq!(layout.rows[0], format!("─ Writing {}", "─".repeat(30)));
     }
 
     #[test]
@@ -769,11 +776,11 @@ mod tests {
         dock.set_voice(Some(VoiceLabel::Transcribing));
         assert!(separator(&dock).contains("Ready · Transcribing…"));
         // A turn runs beside it (AGL-016, D7): both are shown.
-        dock.activity(Activity::Generating);
-        assert!(separator(&dock).contains("Generating · Transcribing…"));
+        dock.activity(Activity::Writing);
+        assert!(separator(&dock).contains("Writing · Transcribing…"));
         dock.set_voice(None);
         assert!(!separator(&dock).contains("Transcribing"));
-        assert!(separator(&dock).contains("Generating"));
+        assert!(separator(&dock).contains("Writing"));
     }
 
     #[test]

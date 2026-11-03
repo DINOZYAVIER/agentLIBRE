@@ -1106,10 +1106,41 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Готово",
     };
 
-    /// The dock's state.
-    pub const GENERATING: Msg = Msg {
-        en: "Generating",
-        uk: "Генерація",
+    /// The dock's state: the turn's start brings the server up
+    /// (AGL-043 F2).
+    pub const STARTING_SERVER: Msg = Msg {
+        en: "Starting the server",
+        uk: "Запуск сервера",
+    };
+
+    /// The dock's state: an audio of the message is transcribed.
+    pub const TRANSCRIBING_ACTIVITY: Msg = Msg {
+        en: "Transcribing",
+        uk: "Розпізнавання",
+    };
+
+    /// The dock's state: a step's prompt is read, until its first token.
+    pub const PREFILL: Msg = Msg {
+        en: "Reading the prompt",
+        uk: "Читання промпту",
+    };
+
+    /// The dock's state: the model thinks.
+    pub const THINKING_ACTIVITY: Msg = Msg {
+        en: "Thinking",
+        uk: "Роздуми",
+    };
+
+    /// The dock's state: the model writes its action or answer.
+    pub const WRITING: Msg = Msg {
+        en: "Writing",
+        uk: "Написання",
+    };
+
+    /// The dock's state: a stir of the stirred mode retries the step.
+    pub const RETRY: Msg = Msg {
+        en: "Retry {attempt}/{max}",
+        uk: "Повтор {attempt}/{max}",
     };
 
     /// The dock's state.

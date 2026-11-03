@@ -495,6 +495,9 @@ impl Report for Reporter<'_> {
     fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
         self.presenter.stirred(attempt, max, error);
     }
+    fn prefill(&mut self) {
+        self.presenter.prefill();
+    }
     fn context_used(&mut self, tokens: usize) {
         self.presenter.context_used(tokens);
     }
@@ -779,8 +782,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // The server is started here when it does not answer, at
                 // the first request, and its context size read (AGL-015,
                 // AGL-024).
+                // A notice of the autostart means the server is being
+                // brought up (AGL-043 F2).
                 let ready = autostart
                     .ensure(&mut |line| {
+                        presenter.set_starting_server();
                         presenter.show_notice(line, Role::Muted)
                     })
                     .and_then(|()| backend.context_size());
@@ -795,7 +801,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         &message,
                         backend,
                         autostart,
-                        &mut |line| presenter.show_notice(line, Role::Muted),
+                        // A notice of the store is the whisper server's
+                        // start or the transcription (AGL-043 F2).
+                        &mut |line| {
+                            presenter.set_transcribing();
+                            presenter.show_notice(line, Role::Muted)
+                        },
                     )?;
                     control.set_media_counts(&session);
                     Agent {
