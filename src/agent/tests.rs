@@ -21,6 +21,8 @@ struct Script {
     thinking: RefCell<Vec<bool>>,
     /// The system message of each rendered prompt.
     systems: RefCell<Vec<String>>,
+    /// The reasoning level of each rendered prompt (AGL-043 F16).
+    reasonings: RefCell<Vec<Option<ReasoningLevel>>>,
     /// The server's media marker, if it has a projector (AGL-014).
     marker: Option<String>,
     /// Whether the model hears an audio itself (AGL-014, D19).
@@ -59,6 +61,7 @@ impl Script {
             tokens: 100,
             thinking: RefCell::new(Vec::new()),
             systems: RefCell::new(Vec::new()),
+            reasonings: RefCell::new(Vec::new()),
             marker: Some("<__media_TEST__>".into()),
             hears: false,
             users: RefCell::new(Vec::new()),
@@ -86,6 +89,7 @@ impl Backend for Script {
         if let Some(Message::System(text)) = prompt.messages.first() {
             self.systems.borrow_mut().push(text.clone());
         }
+        self.reasonings.borrow_mut().push(prompt.reasoning);
         self.thinking
             .borrow_mut()
             .push(prompt.messages.iter().any(|m| {
@@ -595,6 +599,28 @@ fn the_off_level_silences_the_thinking() {
     assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
     assert!(!log.iter().any(|line| line.starts_with("thinking: ")));
     assert_eq!(kinds(&session), ["user", "state", "answer"]);
+}
+
+#[test]
+fn a_state_without_thinking_is_rendered_at_the_off_level() {
+    // The llama mode renders a state that does not think with `Off`,
+    // whatever the run's level, as the stirred mode does (AGL-043 F16).
+    let quiet = function(
+        r#"{ system = "s"; initial = "a";
+             state.a = { tools.bash = { }; think = false; answer = true; next.otherwise = "a"; }; }"#,
+    )
+    .unwrap();
+    let dir = Dir::new("quiet-state");
+    let script = Script::new(&[("Answer.", Stop::End)]);
+    let (end, _, _) = run_level(&quiet, &script, &dir, "hi", Some(ReasoningLevel::Low));
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
+    assert_eq!(*script.reasonings.borrow(), [Some(ReasoningLevel::Off)]);
+    // A thinking state keeps the run's level.
+    let thinking = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let dir = Dir::new("thinking-state");
+    let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
+    run_level(&thinking, &script, &dir, "hi", Some(ReasoningLevel::Low)).0.unwrap();
+    assert_eq!(script.reasonings.borrow()[0], Some(ReasoningLevel::Low));
 }
 
 #[test]

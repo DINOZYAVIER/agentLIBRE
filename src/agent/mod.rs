@@ -178,12 +178,20 @@ impl Agent<'_> {
         // `Off` silences the thinking states (AGL-013, Q4): the level and
         // the state decide the thinking together.
         let think = state.think && self.reasoning != Some(ReasoningLevel::Off);
+        // A step that does not think is rendered at `Off`, so the template
+        // and the closed thinking block agree, as in the stirred mode
+        // (AGL-043 F16).
+        let reasoning = if think {
+            self.reasoning
+        } else {
+            Some(ReasoningLevel::Off)
+        };
         let step_prompt = Prompt {
             messages: &messages,
             instruction: state.instruction.as_deref(),
             tools: &tools,
             preserve_thinking: function.preserve_thinking,
-            reasoning: self.reasoning,
+            reasoning,
             format,
         };
         let rendered = self.backend.render(&step_prompt)?;
