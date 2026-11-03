@@ -2,7 +2,9 @@
 
 use std::ffi::OsString;
 
-use crate::error::{CredentialProblem, Error, Expected, FunctionProblem, TemplateProblem};
+use crate::error::{
+    CredentialProblem, Error, Expected, FunctionProblem, ServerOwner, TemplateProblem,
+};
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
@@ -530,12 +532,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "некоректна назва `{name}`: назва непорожня, без `/` і не починається з `.`",
     };
 
-    /// `Error::FormatNotFound`.
-    pub const FORMAT_NOT_FOUND: Msg = Msg {
-        en: "model format `{name}` not found: no {path} and no built-in format of that name",
-        uk: "формат моделі `{name}` не знайдено: немає {path} і вбудованого формату з такою назвою",
-    };
-
     /// A template or Function problem at `key` of `path` (`Error::Template`,
     /// `Error::Function`).
     pub const PROBLEM_IN_PATH: Msg = Msg {
@@ -615,22 +611,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server згенерував текст поза граматикою: {text:?}",
     };
 
-    /// `Error::MissingModel`.
-    pub const MISSING_MODEL: Msg = Msg {
-        en: "the Function's model has no `weights`; name a file in {models} or another weights folder of {user_path} ({project_path} is the project's settings):\n\nmodel.weights = \"NAME.gguf\";",
-        uk: "у моделі Функції немає `weights`; вкажи файл із {models} або іншої теки ваг із {user_path} ({project_path} — налаштування проєкту):\n\nmodel.weights = \"NAME.gguf\";",
-    };
-
-    /// `Error::ModelNotFound`.
-    pub const MODEL_NOT_FOUND: Msg = Msg {
-        en: "no model file {path}",
-        uk: "немає файлу моделі {path}",
-    };
-
-    /// `Error::DraftNotFound`.
-    pub const DRAFT_NOT_FOUND: Msg = Msg {
-        en: "no draft model file {path}",
-        uk: "немає файлу draft-моделі {path}",
+    /// `Error::WeightsFileMissing` (AGL-043 F5).
+    pub const WEIGHTS_FILE_MISSING: Msg = Msg {
+        en: "no file {path} of {key}",
+        uk: "немає файлу {path} для {key}",
     };
 
     /// `Error::MissingSpecType`.
@@ -711,12 +695,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер іншого виду не зупинено, тож новий не запущено",
     };
 
-    /// `Error::MissingStrataConfig` (AGL-033, D2).
-    pub const MISSING_STRATA_CONFIG: Msg = Msg {
-        en: "the strata kind needs strata_config (the path of the Strata config JSON); add it to {project_path} (this project) or {user_path} (the default of every project), in the Function's model:\n\nmodel.strata_config = \"/path/to/strata-config.json\";",
-        uk: "strata-вид потребує strata_config (шлях до JSON-конфігу Strata); додай його у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів), у моделі Функції:\n\nmodel.strata_config = \"/path/to/strata-config.json\";",
-    };
-
     /// `Error::StrataConfig` (AGL-033, D2).
     pub const STRATA_CONFIG: Msg = Msg {
         en: "the Strata config {path} cannot be read or parsed: {detail}",
@@ -751,12 +729,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const WHISPER_NOT_SET: Msg = Msg {
         en: "an audio needs the whisper server, and `url` and `model` of `whisper` are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
         uk: "аудіо потребує whisper-сервера, а `url` і `model` у `whisper` задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
-    };
-
-    /// `Error::WhisperServerNotFound`.
-    pub const WHISPER_SERVER_NOT_FOUND: Msg = Msg {
-        en: "whisper-server is not in PATH (build whisper.cpp and put its whisper-server in PATH)",
-        uk: "whisper-server немає в PATH (збери whisper.cpp і поклади його whisper-server у PATH)",
     };
 
     /// `Error::Transcribe`.
@@ -807,25 +779,25 @@ Forge (сховище артефактів робочої області, agentL
         uk: "помилка ffmpeg: {detail}",
     };
 
-    /// `Error::ServerFailed`.
+    /// `Error::ServerFailed` of a unit.
     pub const SERVER_FAILED: Msg = Msg {
         en: "the server stopped before it was ready; see journalctl --user -u {unit}",
         uk: "сервер зупинився, не встигнувши стати готовим; див. journalctl --user -u {unit}",
     };
 
-    /// `Error::ServerTimeout`.
+    /// `Error::ServerTimeout` of a unit.
     pub const SERVER_TIMEOUT: Msg = Msg {
         en: "the server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
         uk: "сервер не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
     };
 
-    /// `Error::EngineDied` (AGL-024, D2).
+    /// `Error::ServerFailed` of agl's child (AGL-024, D2).
     pub const ENGINE_DIED: Msg = Msg {
         en: "the engine stopped before it was ready; see {log}",
         uk: "движок зупинився, не встигнувши стати готовим; див. {log}",
     };
 
-    /// `Error::EngineTimeout` (AGL-024, D2).
+    /// `Error::ServerTimeout` of agl's child (AGL-024, D2).
     pub const ENGINE_TIMEOUT: Msg = Msg {
         en: "the engine was not ready after {seconds} s; see {log}",
         uk: "движок не став готовим за {seconds} с; див. {log}",
@@ -1726,7 +1698,8 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{id} не є комітом в {repo}",
     };
 
-    /// `Error::BrokenRange`.
+    /// The broken range of a task-spec (`GitFlag::Broken`): its `anchor` is
+    /// not an ancestor of its `last`.
     pub const BROKEN_RANGE: Msg = Msg {
         en: "{anchor} is not an ancestor of {last}",
         uk: "{anchor} не є предком {last}",
@@ -2128,14 +2101,6 @@ impl Error {
                 )
             }
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
-            Error::FormatNotFound { name, path } => {
-                tr!(
-                    lang,
-                    m::FORMAT_NOT_FOUND,
-                    name = name,
-                    path = path.display()
-                )
-            }
             Error::Template { path, key, problem } => {
                 tr!(
                     lang,
@@ -2174,24 +2139,8 @@ impl Error {
                 url = url,
                 detail = detail
             ),
-            Error::MissingModel {
-                user_path,
-                project_path,
-                models,
-            } => {
-                tr!(
-                    lang,
-                    m::MISSING_MODEL,
-                    user_path = user_path.display(),
-                    project_path = project_path.display(),
-                    models = models.display()
-                )
-            }
-            Error::ModelNotFound { path } => {
-                tr!(lang, m::MODEL_NOT_FOUND, path = path.display())
-            }
-            Error::DraftNotFound { path } => {
-                tr!(lang, m::DRAFT_NOT_FOUND, path = path.display())
+            Error::WeightsFileMissing { key, path } => {
+                tr!(lang, m::WEIGHTS_FILE_MISSING, path = path.display(), key = key)
             }
             Error::MissingSpecType { draft } => {
                 tr!(lang, m::MISSING_SPEC_TYPE, draft = draft)
@@ -2215,29 +2164,24 @@ impl Error {
                 user_path = user_path.display(),
                 project_path = project_path.display()
             ),
-            Error::WhisperServerNotFound => tr!(lang, m::WHISPER_SERVER_NOT_FOUND).to_string(),
             Error::Transcribe { url, detail } => {
                 tr!(lang, m::TRANSCRIBE, url = url, detail = detail)
             }
             Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
             Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
             Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),
-            Error::ServerFailed { unit } => tr!(lang, m::SERVER_FAILED, unit = unit),
-            Error::ServerTimeout { seconds, unit } => {
-                tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)
-            }
-            Error::EngineDied { log } => {
-                tr!(lang, m::ENGINE_DIED, log = log.display()).to_string()
-            }
-            Error::EngineTimeout { seconds, log } => {
-                tr!(
-                    lang,
-                    m::ENGINE_TIMEOUT,
-                    seconds = seconds,
-                    log = log.display()
-                )
-                .to_string()
-            }
+            Error::ServerFailed { owner } => match owner {
+                ServerOwner::Unit(unit) => tr!(lang, m::SERVER_FAILED, unit = unit),
+                ServerOwner::Child(log) => tr!(lang, m::ENGINE_DIED, log = log.display()),
+            },
+            Error::ServerTimeout { seconds, owner } => match owner {
+                ServerOwner::Unit(unit) => {
+                    tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)
+                }
+                ServerOwner::Child(log) => {
+                    tr!(lang, m::ENGINE_TIMEOUT, seconds = seconds, log = log.display())
+                }
+            },
             Error::ProjectNotRegistered { project } => {
                 tr!(lang, m::PROJECT_NOT_REGISTERED, project = project.display())
             }
@@ -2254,15 +2198,6 @@ impl Error {
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
             Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
             Error::SwitchDeclined => tr!(lang, m::SWITCH_DECLINED).to_string(),
-            Error::MissingStrataConfig {
-                user_path,
-                project_path,
-            } => tr!(
-                lang,
-                m::MISSING_STRATA_CONFIG,
-                user_path = user_path.display(),
-                project_path = project_path.display()
-            ),
             Error::StrataConfig { path, detail } => {
                 tr!(lang, m::STRATA_CONFIG, path = path.display(), detail = detail)
             }
@@ -2448,9 +2383,6 @@ impl Error {
             Error::CmdSpawn { source } => tr!(lang, m::CMD_SPAWN, source = source),
             Error::CommitNotFound { id, repo } => {
                 tr!(lang, m::COMMIT_NOT_FOUND, id = id, repo = repo.display())
-            }
-            Error::BrokenRange { anchor, last } => {
-                tr!(lang, m::BROKEN_RANGE, anchor = anchor, last = last)
             }
             Error::Remove { path, source } => {
                 tr!(lang, m::REMOVE, path = path.display(), source = source)

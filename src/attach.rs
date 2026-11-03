@@ -232,7 +232,9 @@ mod tests {
         struct Fails;
         impl Transcriber for Fails {
             fn transcribe(&self, _: &Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
-                Err(Error::WhisperServerNotFound)
+                Err(Error::EngineNotFound {
+                    engine: "whisper-server".into(),
+                })
             }
         }
         let dir = Dir::new("fails");
@@ -240,7 +242,7 @@ mod tests {
         let mut pending = Vec::new();
         add(&session, &mut pending, source(Kind::Audio, "v.wav"));
         let result = store(&mut session, pending, "[Audio#1]", &Ears(false), &Fails, &mut |_| {});
-        assert!(matches!(result, Err(Error::WhisperServerNotFound)));
+        assert!(matches!(result, Err(Error::EngineNotFound { .. })));
         assert!(session.media().is_empty());
     }
 }

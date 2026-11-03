@@ -81,8 +81,6 @@ pub enum Error {
     },
     /// A format or Function name that cannot name a file.
     InvalidName(String),
-    /// Neither `path` nor a built-in format is called `name`.
-    FormatNotFound { name: String, path: PathBuf },
     /// A template or string of a format is unusable (D81).
     Template {
         path: PathBuf,
@@ -140,16 +138,10 @@ pub enum Error {
     OutsideGrammar(String),
     /// `--attach` without `-p` (AGL-014, D21).
     AttachWithoutPrompt,
-    /// `agl server start` without `[server] model` (D148).
-    MissingModel {
-        user_path: PathBuf,
-        project_path: PathBuf,
-        models: PathBuf,
-    },
-    /// `[server] model` names no file in the models directory.
-    ModelNotFound { path: PathBuf },
-    /// `[server] draft` names no file in the models directory (AGL-025, D2).
-    DraftNotFound { path: PathBuf },
+    /// A weights file of the run is not there (AGL-043 F5): `key` is the
+    /// setting that names it (`model.weights`, `model.mmproj`,
+    /// `model.draft`, `whisper.model`) and `path` the file looked for.
+    WeightsFileMissing { key: String, path: PathBuf },
     /// `[server] draft` is set but `spec_type` is not (AGL-025, D4).
     MissingSpecType { draft: String },
     /// `agl server start` with a `url` whose host is not local (D148).
@@ -160,16 +152,10 @@ pub enum Error {
     EngineSpawn { engine: String, source: io::Error },
     /// `systemd-run` or `systemctl` failed.
     Systemd { detail: String },
-    /// The unit stopped before the server was ready (D149).
-    ServerFailed { unit: String },
-    /// The server was not ready in time (D149).
-    ServerTimeout { seconds: u64, unit: String },
-    /// The engine agl launched exited before it was ready (AGL-024, D2);
-    /// its output is in `log`.
-    EngineDied { log: PathBuf },
-    /// The engine agl launched was not ready in time (AGL-024, D2); its
-    /// output is in `log`.
-    EngineTimeout { seconds: u64, log: PathBuf },
+    /// The server stopped before it was ready (D149; AGL-024, D2).
+    ServerFailed { owner: ServerOwner },
+    /// The server was not ready in time (D149; AGL-024, D2).
+    ServerTimeout { seconds: u64, owner: ServerOwner },
     /// A server command or the autostart outside a registered project
     /// (AGL-015, D14).
     ProjectNotRegistered { project: PathBuf },
@@ -186,12 +172,6 @@ pub enum Error {
     /// The human answered no to the stop of the server of the other kind
     /// (AGL-036, D10).
     SwitchDeclined,
-    /// The `[server]` of the strata kind names no `strata_config` (AGL-033,
-    /// D2).
-    MissingStrataConfig {
-        user_path: PathBuf,
-        project_path: PathBuf,
-    },
     /// The Strata config JSON the `strata_config` names cannot be read or
     /// parsed (AGL-033, D2).
     StrataConfig { path: PathBuf, detail: String },
@@ -210,8 +190,6 @@ pub enum Error {
         user_path: PathBuf,
         project_path: PathBuf,
     },
-    /// No `whisper-server` in `PATH`.
-    WhisperServerNotFound,
     /// The whisper server answered an error or nothing.
     Transcribe { url: String, detail: String },
     /// The prompt names a medium but the server has no multimodal
@@ -298,8 +276,6 @@ pub enum Error {
     CmdSpawn { source: io::Error },
     /// A task-spec id does not resolve in the workspace repository.
     CommitNotFound { id: String, repo: PathBuf },
-    /// The `anchor` of a task-spec is not an ancestor of its `last`.
-    BrokenRange { anchor: String, last: String },
     /// An artifact file cannot be removed.
     Remove { path: PathBuf, source: io::Error },
 }
@@ -408,6 +384,15 @@ pub enum FunctionProblem {
     SourceWithoutFile,
 }
 
+/// Who launched a server that did not get ready (AGL-043 F5): the
+/// systemd unit, whose output is in its journal, or agl's own child,
+/// whose output is in its log (AGL-024, D2).
+#[derive(Debug)]
+pub enum ServerOwner {
+    Unit(String),
+    Child(PathBuf),
+}
+
 impl Error {
     /// Whether the error is in the command line rather than the setup.
     pub fn is_usage(&self) -> bool {
@@ -490,7 +475,6 @@ impl std::fmt::Display for Error {
                 }
                 Error::MissingServerUrl { .. } => "the llama-server address is not set".into(),
                 Error::InvalidName(name) => format!("invalid name `{name}`"),
-                Error::FormatNotFound { name, .. } => format!("model format `{name}` not found"),
                 Error::Template { path, key, .. } => {
                     format!("a problem with `{key}` in {}", path.display())
                 }
@@ -529,10 +513,8 @@ impl std::fmt::Display for Error {
                 Error::OutsideGrammar(text) => {
                     format!("generated text outside the grammar: {text:?}")
                 }
-                Error::MissingModel { .. } => "the model is not set".into(),
-                Error::ModelNotFound { path } => format!("no model file {}", path.display()),
-                Error::DraftNotFound { path } => {
-                    format!("no draft model file {}", path.display())
+                Error::WeightsFileMissing { key, path } => {
+                    format!("no file {} of {key}", path.display())
                 }
                 Error::MissingSpecType { draft } => {
                     format!("the draft {draft} is set but the spec_type is not: set the spec_type too")
@@ -546,14 +528,6 @@ impl std::fmt::Display for Error {
                 }
                 Error::Systemd { detail } => format!("systemd failed: {detail}"),
                 Error::ServerFailed { .. } => "the server stopped before it was ready".into(),
-                Error::EngineDied { log } => format!(
-                    "the engine stopped before it was ready; see {}",
-                    log.display()
-                ),
-                Error::EngineTimeout { seconds, log } => format!(
-                    "the engine was not ready after {seconds} s; see {}",
-                    log.display()
-                ),
                 Error::ProjectNotRegistered { project } => {
                     format!("{} is not a registered project", project.display())
                 }
@@ -564,10 +538,6 @@ impl std::fmt::Display for Error {
                 Error::StartDeclined => "the server was not started".into(),
                 Error::RestartDeclined => "the server was not restarted".into(),
                 Error::SwitchDeclined => "the server of the other kind was not stopped".into(),
-                Error::MissingStrataConfig { .. } => {
-                    "the strata kind needs strata_config (the path of the Strata config JSON)"
-                        .into()
-                }
                 Error::StrataConfig { path, detail } => {
                     format!("the Strata config {} cannot be read: {detail}", path.display())
                 }
@@ -592,7 +562,6 @@ impl std::fmt::Display for Error {
                 Error::AttachWithoutPrompt => "--attach goes with -p".into(),
                 Error::NoMultimodal => "the server has no multimodal projector".into(),
                 Error::WhisperNotSet { .. } => "the whisper server is not set".into(),
-                Error::WhisperServerNotFound => "whisper-server is not in PATH".into(),
                 Error::Transcribe { url, detail } => {
                     format!("the whisper server at {url} could not transcribe: {detail}")
                 }
@@ -701,9 +670,6 @@ impl std::fmt::Display for Error {
                 }
                 Error::CommitNotFound { id, repo } => {
                     format!("{id} is not a commit in {}", repo.display())
-                }
-                Error::BrokenRange { anchor, last } => {
-                    format!("{anchor} is not an ancestor of {last}")
                 }
                 Error::Remove { path, source } => {
                     format!("cannot remove {}: {source}", path.display())

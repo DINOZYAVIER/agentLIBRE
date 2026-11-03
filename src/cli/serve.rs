@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::backend::llama::Llama;
 use crate::backend::Backend;
 use crate::cli::args::ServerAction;
-use crate::error::Error;
+use crate::error::{Error, ServerOwner};
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
 use crate::settings::{ServerFile, ServerKind};
@@ -72,8 +72,7 @@ pub struct Server {
     /// the engine (AGL-036, D1; AGL-039, D21).
     pub settings: ServerFile,
     pub url: String,
-    /// The user's and the project's settings files, for hints.
-    pub user_path: PathBuf,
+    /// The project's settings file, for hints.
     pub project_path: PathBuf,
     /// The project's store directory: the record of the launched server
     /// is there (AGL-035, D1).
@@ -103,7 +102,6 @@ impl Server {
             whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
             settings: settings.clone(),
             url: String::new(),
-            user_path: user_path.into(),
             project_path,
             dir: project.dir.clone(),
             model,
@@ -337,26 +335,22 @@ fn launch_unit(
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
     let args = match effective.kind() {
         ServerKind::Strata => {
-            let launch = strata_launch(
-                effective,
-                url,
-                &server.user_path,
-                &server.project_path,
-            )?;
+            let launch = strata_launch(effective, url)?;
             strata_systemd_run_args(&server.unit, &launch)
         }
         ServerKind::Llama => {
+            // The Function loader requires `weights` of the llama kind
+            // (AGL-039, D21; AGL-043 F5).
             let model = effective
                 .model
                 .as_deref()
-                .ok_or_else(|| Error::MissingModel {
-                    user_path: server.user_path.clone(),
-                    project_path: server.project_path.clone(),
-                    models: models.into(),
-                })?;
+                .expect("a llama Function has weights");
             let model = models.join(model);
             if !model.is_file() {
-                return Err(Error::ModelNotFound { path: model });
+                return Err(Error::WeightsFileMissing {
+                    key: "model.weights".into(),
+                    path: model,
+                });
             }
             // The engine the settings name, as the child's launch does
             // (AGL-024, D5; AGL-038, F27).
@@ -421,12 +415,14 @@ pub(super) fn wait_ready(
         if let Some(unit) = unit
             && !unit_active(unit)?
         {
-            return Err(Error::ServerFailed { unit: unit.into() });
+            return Err(Error::ServerFailed {
+                owner: ServerOwner::Unit(unit.into()),
+            });
         }
         if started.elapsed() >= READY_TIMEOUT {
             return Err(Error::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
-                unit: unit.unwrap_or(UNIT_PREFIX).into(),
+                owner: ServerOwner::Unit(unit.unwrap_or(UNIT_PREFIX).into()),
             });
         }
         thread::sleep(POLL);
@@ -589,11 +585,9 @@ impl Autostart<'_> {
     /// python server from the config JSON; the child is kept in the field
     /// (AGL-024, D2, D3) and the wait for ready (D149).
     fn launch(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let project_path = self.project.dir.join(crate::settings::SETTINGS_FILE);
         let (engine, log) = match self.effective.kind() {
             ServerKind::Strata => {
-                let launch =
-                    strata_launch(self.effective, self.llama.url(), &self.user_path, &project_path)?;
+                let launch = strata_launch(self.effective, self.llama.url())?;
                 // The log beside the config when it names one, else beside
                 // the project.
                 let log = launch
@@ -609,8 +603,6 @@ impl Autostart<'_> {
                 let engine = Engine::launch(
                     self.effective,
                     self.llama.url(),
-                    &self.user_path,
-                    &project_path,
                     &self.models,
                     self.path_var.clone(),
                     &log,
@@ -645,8 +637,6 @@ impl Engine {
     pub fn launch(
         settings: &ServerFile,
         url: &str,
-        user_path: &Path,
-        project_path: &Path,
         models: &Path,
         path_var: Option<OsString>,
         log: &Path,
@@ -659,17 +649,18 @@ impl Engine {
                 units: Vec::new(),
             });
         }
+        // The Function loader requires `weights` of the llama kind
+        // (AGL-039, D21; AGL-043 F5).
         let model = settings
             .model
             .as_deref()
-            .ok_or_else(|| Error::MissingModel {
-                user_path: user_path.into(),
-                project_path: project_path.into(),
-                models: models.into(),
-            })?;
+            .expect("a llama Function has weights");
         let model = models.join(model);
         if !model.is_file() {
-            return Err(Error::ModelNotFound { path: model });
+            return Err(Error::WeightsFileMissing {
+                key: "model.weights".into(),
+                path: model,
+            });
         }
         let engine = settings
             .engine
@@ -844,8 +835,6 @@ pub struct StrataLaunch {
 fn strata_launch(
     settings: &ServerFile,
     url: &str,
-    user_path: &Path,
-    project_path: &Path,
 ) -> Result<StrataLaunch, Error> {
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
@@ -855,13 +844,14 @@ fn strata_launch(
             units: Vec::new(),
         });
     }
-    let Some(config) = &settings.strata_config else {
-        return Err(Error::MissingStrataConfig {
-            user_path: user_path.into(),
-            project_path: project_path.into(),
-        });
-    };
-    let config = PathBuf::from(config);
+    // The Function loader requires `strata_config` of the strata kind
+    // (AGL-039, D21; AGL-043 F5).
+    let config = PathBuf::from(
+        settings
+            .strata_config
+            .as_deref()
+            .expect("a strata Function has a strata_config"),
+    );
     let cfg = strata_config(&config)?;
     // The Strata checkout is the config's `cwd` (AGL-038, D3, D7): the
     // config itself may live anywhere.
@@ -1083,12 +1073,14 @@ fn wait_child_ready(
             return Ok(());
         }
         if !engine.is_alive() {
-            return Err(Error::EngineDied { log: log.into() });
+            return Err(Error::ServerFailed {
+                owner: ServerOwner::Child(log.into()),
+            });
         }
         if started.elapsed() >= READY_TIMEOUT {
-            return Err(Error::EngineTimeout {
+            return Err(Error::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
-                log: log.into(),
+                owner: ServerOwner::Child(log.into()),
             });
         }
         thread::sleep(POLL);
@@ -1351,7 +1343,10 @@ pub(super) fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> 
         Some(name) => {
             let path = models.join(name);
             if !path.is_file() {
-                return Err(Error::DraftNotFound { path });
+                return Err(Error::WeightsFileMissing {
+                    key: "model.draft".into(),
+                    path,
+                });
             }
             Some(path)
         }
@@ -1373,7 +1368,10 @@ pub(super) fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec
     if let Some(name) = &settings.mmproj {
         let file = models.join(name);
         if !file.is_file() {
-            return Err(Error::ModelNotFound { path: file });
+            return Err(Error::WeightsFileMissing {
+                key: "model.mmproj".into(),
+                path: file,
+            });
         }
         projector.extend(["--mmproj".into(), file.into_os_string()]);
         if settings.mmproj_offload == Some(false) {
@@ -1699,7 +1697,8 @@ mod tests {
         // A `draft` that names no file.
         assert!(matches!(
             spec(&settings(Some("draft-mtp"), Some("nope.gguf")), &models),
-            Err(Error::DraftNotFound { path }) if path == models.join("nope.gguf")
+            Err(Error::WeightsFileMissing { key, path })
+                if key == "model.draft" && path == models.join("nope.gguf")
         ));
         // A `draft` without a `spec_type`: the build's default is `none`,
         // the draft would not run (AGL-025, D4).
@@ -1762,8 +1761,6 @@ mod tests {
                 match Engine::launch(
                     &settings,
                     &url,
-                    &dir,
-                    &dir,
                     &models,
                     Some(bin.clone().into_os_string()),
                     &log,
@@ -1803,8 +1800,6 @@ mod tests {
         let result = Engine::launch(
             &settings,
             &url,
-            &dir,
-            &dir,
             &models,
             Some(bin.into_os_string()),
             &dir.join("server.log"),
@@ -2092,7 +2087,8 @@ mod tests {
             .ensure(&mut |line| said.push(line.to_owned()));
         assert!(matches!(
             result,
-            Err(Error::ModelNotFound { path }) if path == Path::new("/m/m.gguf")
+            Err(Error::WeightsFileMissing { key, path })
+                if key == "model.weights" && path == Path::new("/m/m.gguf")
         ));
         assert!(said.is_empty());
     }
@@ -2388,14 +2384,13 @@ mod tests {
             ..ServerFile::default()
         };
         let url = free_url(3);
-        let paths = (Path::new("/c/agentLIBRE.toml"), Path::new("/d/agentLIBRE.toml"));
-        let launch = strata_launch(&settings, &url, paths.0, paths.1).unwrap();
+        let launch = strata_launch(&settings, &url).unwrap();
         assert_eq!(launch.python, checkout.join(".venv/bin/python"));
         assert_eq!(launch.server_py, checkout.join("serve/server.py"));
         assert_eq!(launch.cwd, checkout);
         fs::write(&config, "{}").unwrap();
         assert!(matches!(
-            strata_launch(&settings, &url, paths.0, paths.1),
+            strata_launch(&settings, &url),
             Err(Error::StrataNoCwd { path }) if path == config
         ));
         fs::remove_dir_all(&dir).unwrap();

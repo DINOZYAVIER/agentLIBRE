@@ -511,7 +511,7 @@ struct NoWhisper;
 
 impl crate::attach::Transcriber for NoWhisper {
     fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
-        Err(Error::WhisperServerNotFound)
+        Err(Error::EngineNotFound { engine: "whisper-server".into() })
     }
 }
 

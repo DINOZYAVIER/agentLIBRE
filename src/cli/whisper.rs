@@ -115,9 +115,14 @@ pub fn ensure(
     }
     let model = models.join(&server.model);
     if !model.is_file() {
-        return Err(Error::ModelNotFound { path: model });
+        return Err(Error::WeightsFileMissing {
+            key: "whisper.model".into(),
+            path: model,
+        });
     }
-    let program = find_program("whisper-server", path_var).ok_or(Error::WhisperServerNotFound)?;
+    let program = find_program("whisper-server", path_var).ok_or_else(|| Error::EngineNotFound {
+        engine: "whisper-server".into(),
+    })?;
     let output = Command::new("systemd-run")
         .args(systemd_run_args(server, &program, &model, &host, port))
         .stdin(Stdio::null())
