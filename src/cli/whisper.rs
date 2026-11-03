@@ -295,7 +295,7 @@ mod tests {
             model: Some("w.bin".into()),
             args: Some(vec!["-t".into(), "12".into()]),
         });
-        let server = WhisperServer::of(&ws, &settings, Path::new("/c/agentLIBRE.toml")).unwrap();
+        let server = WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.args, ["-t", "12"]);
         let (ws, partial) = registered(WhisperFile {
@@ -303,14 +303,14 @@ mod tests {
             ..WhisperFile::default()
         });
         assert!(matches!(
-            WhisperServer::of(&ws, &partial, Path::new("/c/agentLIBRE.toml")),
+            WhisperServer::of(&ws, &partial, Path::new("/c/settings.nix")),
             Err(Error::WhisperNotSet { .. })
         ));
         // Not registered: no unit, as for llama-server (AGL-015, D14).
         let (mut ws, settings) = registered(WhisperFile::default());
         ws.origin = None;
         assert!(matches!(
-            WhisperServer::of(&ws, &settings, Path::new("/c/agentLIBRE.toml")),
+            WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")),
             Err(Error::ProjectNotRegistered { .. })
         ));
     }
@@ -321,7 +321,7 @@ mod tests {
         let mut voice = Voice {
             project: ws,
             settings,
-            user_path: PathBuf::from("/c/agentLIBRE.toml"),
+            user_path: PathBuf::from("/c/settings.nix"),
             models: PathBuf::from("/m"),
             path_var: None,
             lang: Lang::En,

@@ -294,7 +294,7 @@ pub struct Workspace {
     pub key: String,
     /// The store directory under the data directory.
     pub dir: PathBuf,
-    /// The project's Function from the store's `agentLIBRE.toml`; none
+    /// The project's Function from the store's `settings.nix`; none
     /// for a store not yet written.
     pub function: Option<String>,
     /// The project's `[server]` from the same file (AGL-015); empty for
@@ -716,9 +716,10 @@ pub struct Artifact {
     pub updated: String,
     pub deps: Vec<String>,
     pub supersedes: Vec<String>,
-    /// `[verification] cmds`, when the table is present.
+    /// `verification.cmds`, when the set is present.
     pub cmds: Option<Vec<String>>,
-    /// The `[<type>]` table, carried unparsed.
+    /// The set named by the type (`task-spec = { … }`), carried
+    /// unparsed.
     pub type_table: Value,
     /// The body, verbatim.
     pub body: String,

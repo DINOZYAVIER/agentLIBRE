@@ -2029,7 +2029,7 @@ mod tests {
             project,
             effective,
             whisper: &NO_WHISPER,
-            user_path: PathBuf::from("/c/agentLIBRE.toml"),
+            user_path: PathBuf::from("/c/settings.nix"),
             models: PathBuf::from("/m"),
             path_var: None,
             lang: Lang::En,

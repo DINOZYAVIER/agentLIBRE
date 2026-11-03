@@ -14,8 +14,8 @@ use crate::outln;
 
 use super::forge::ask_store;
 
-/// Registers `cwd` as a project: its store directory and
-/// `agentLIBRE.toml` are written when missing. An ancestor that is a
+/// Registers `cwd` as a project: its store directory and its
+/// `settings.nix` are written when missing. An ancestor that is a
 /// project is not looked at: `init` makes `cwd` its own project.
 pub fn run(user: &UserFile, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
     let auto_rehome = user.forge.auto_rehome.unwrap_or(true);

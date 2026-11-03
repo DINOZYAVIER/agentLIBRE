@@ -177,8 +177,7 @@ Options:
                       asking when another server runs
   -h, --help          print this help
 
-Project (agentLIBRE/<project> under XDG_DATA_HOME, its agentLIBRE.toml and
-settings.nix):
+Project (agentLIBRE/<project> under XDG_DATA_HOME and its settings.nix):
   init                register the current directory as a project now; a
                       directory is registered at its first write otherwise
 
@@ -229,8 +228,7 @@ under XDG_DATA_HOME):
                       коли працює інший сервер
   -h, --help          показати цю довідку
 
-Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME, його agentLIBRE.toml і
-settings.nix):
+Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME і його settings.nix):
   init                зареєструвати поточний каталог як проєкт зараз; інакше
                       каталог реєструється при першому записі
 
@@ -928,20 +926,20 @@ Forge (сховище артефактів робочої області, agentL
         en: "must be at least 1",
         uk: "має бути щонайменше 1",
     };
-    /// The `[server]` table of a Function has no `model`, the key of the
-    /// llama kind (AGL-033, D1).
+    /// The `model` of a Function of the llama kind has no `weights`
+    /// (AGL-033, D1; AGL-039, D19).
     pub const FUNC_SERVER_MODEL_MISSING: Msg = Msg {
         en: "the model of the llama kind needs `weights`",
         uk: "модель llama-виду потребує `weights`",
     };
-    /// The `[server]` table of a Function has no `strata_config`, the key
-    /// of the strata kind (AGL-033, D1).
+    /// The `model` of a Function of the strata kind has no
+    /// `strata_config` (AGL-033, D1).
     pub const FUNC_SERVER_STRATA_CONFIG_MISSING: Msg = Msg {
         en: "the model of the strata kind needs `strata_config`",
         uk: "модель strata-виду потребує `strata_config`",
     };
-    /// A key of the `[server]` table of a Function that does not apply to
-    /// the kind of the project's `[server]` (AGL-033, D1).
+    /// A path of the Function's `model` that must be absolute
+    /// (`strata_config`).
     pub const FUNC_NOT_ABSOLUTE: Msg = Msg {
         en: "the path must be absolute",
         uk: "шлях має бути абсолютним",
@@ -957,6 +955,8 @@ Forge (сховище артефактів робочої області, agentL
         uk: "`source` називає файл, якого модель не задає",
     };
 
+    /// A key of the Function's `model` that does not apply to its kind
+    /// (AGL-033, D1; AGL-034, D4).
     pub const FUNC_SERVER_KEY_OF_OTHER_KIND: Msg = Msg {
         en: "{key} belongs to the {kind} kind, not to the model's `kind`",
         uk: "{key} належить до {kind}-виду, не до `kind` цієї моделі",
@@ -1484,7 +1484,7 @@ Forge (сховище артефактів робочої області, agentL
         uk: "неактивний",
     };
 
-    /// `agl server status`: `[server] model` is not set.
+    /// `agl server status`: the model's `weights` are not set.
     pub const SERVER_MODEL_NOT_SET: Msg = Msg {
         en: "not set",
         uk: "не задано",
@@ -1713,8 +1713,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The unique same-named store was adopted for a new location.
     pub const FORGE_ADOPTED: Msg = Msg {
-        en: "adopted the store {old} as {new} ([forge] auto_rehome = false asks instead)",
-        uk: "усиновлено сховище {old} як {new} ([forge] auto_rehome = false запитує натомість)",
+        en: "adopted the store {old} as {new} (forge.auto_rehome = false; asks instead)",
+        uk: "усиновлено сховище {old} як {new} (forge.auto_rehome = false; запитує натомість)",
     };
 
     /// A fresh store was created for a new location; the others are named.

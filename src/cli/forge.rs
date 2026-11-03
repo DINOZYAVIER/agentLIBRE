@@ -389,7 +389,7 @@ fn status(
 
 /// `forge check <name>`: the structural checks (the name matches the
 /// file, the range, the `deps` and `supersedes` resolve), then the
-/// `[verification]` cmds via `sh -c` in the cwd, streamed, the first
+/// `verification.cmds` via `bash -c` in the cwd, streamed, the first
 /// failing command stops the run. The git checks and `last` read the
 /// project directory and are skipped when it is not in a git
 /// repository. On a pass of an `open`/`in-progress` spec that lags (or
@@ -549,12 +549,12 @@ fn id_resolves(cwd: &Path, id: &str) -> bool {
     .is_ok()
 }
 
-/// The `[task-spec]` table of `spec`.
+/// The `task-spec` set of `spec`.
 fn task_spec_table(spec: task_spec::TaskSpec) -> serde_json::Value {
     serde_json::json!({ "anchor": spec.anchor, "last": spec.last })
 }
 
-/// Runs the `[verification]` cmds of `artifact` via the tools' `bash -c`
+/// Runs the `verification.cmds` of `artifact` via the tools' `bash -c`
 /// (AGL-040, D4), without the wrapper's variables (D3), in `cwd`, their output on the parent's own streams (streamed, not
 /// captured); `true` when one fails (the run stops at the first
 /// failure).

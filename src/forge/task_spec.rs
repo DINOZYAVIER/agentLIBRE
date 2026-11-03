@@ -63,7 +63,7 @@ impl Status {
     }
 }
 
-/// The `[task-spec]` table: the git range of the work.
+/// The `task-spec` set of the front matter: the git range of the work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSpec {
     /// A commit id (anything `git rev-parse` resolves), empty until set.
@@ -73,7 +73,7 @@ pub struct TaskSpec {
     pub last: String,
 }
 
-/// Validates the `[task-spec]` table of `artifact` strictly and takes
+/// Validates the `task-spec` set of `artifact` strictly and takes
 /// it.
 pub fn take(artifact: &Artifact) -> Result<TaskSpec, Error> {
     let mut section = crate::nix::Section::at(
@@ -88,7 +88,7 @@ pub fn take(artifact: &Artifact) -> Result<TaskSpec, Error> {
 }
 
 /// Validates the task-spec parts of `artifact`: the `status` is a
-/// lifecycle state and the `[task-spec]` table is strict.
+/// lifecycle state and the `task-spec` set is strict.
 pub fn check(artifact: &Artifact) -> Result<(), Error> {
     if Status::parse(&artifact.status).is_none() {
         return Err(Error::BadState {

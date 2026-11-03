@@ -32,7 +32,7 @@ pub struct ToolResult {
 }
 
 /// What the `forge` tool needs from the session (AGL-008): the
-/// language of its refusals, `[forge] auto_rehome` and the data directory
+/// language of its refusals, `forge.auto_rehome` and the data directory
 /// of the stores, from the caller and not from the environment (AGL-038,
 /// F19).
 #[derive(Clone, Copy, Debug)]
@@ -378,7 +378,7 @@ fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
 /// `forge` (AGL-008): the workspace forge, the store of the recorded
 /// artifacts of the workspace of `workspace`, over the same engine as
 /// the `agl forge` CLI. The store is resolved as the CLI does,
-/// with the session's `[forge] auto_rehome`, language and data
+/// with the session's `forge.auto_rehome`, language and data
 /// directory; the caller (the agent) cannot be asked, so a needed store
 /// choice is the `RehomeNoStore` error.
 pub fn forge(workspace: &Path, env: ForgeEnv<'_>, args: &ForgeArgs) -> (ToolResult, Option<ForgeWrite>) {

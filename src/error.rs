@@ -366,14 +366,14 @@ pub enum FunctionProblem {
     ConstraintKeys,
     /// A limit below 1.
     NotPositive,
-    /// The `[server]` table of a Function has no `model`, the key of the
-    /// llama kind (AGL-033, D1).
+    /// The `model` of a Function of the llama kind has no `weights`
+    /// (AGL-033, D1; AGL-039, D19).
     ServerModelMissing,
-    /// The `[server]` table of a Function has no `strata_config`, the key
-    /// of the strata kind (AGL-033, D1).
+    /// The `model` of a Function of the strata kind has no
+    /// `strata_config` (AGL-033, D1).
     ServerStrataConfigMissing,
-    /// A key of the `[server]` table of a Function that does not apply to
-    /// the kind of the project's `[server]` (AGL-033, D1).
+    /// A key of the Function's `model` that does not apply to its kind
+    /// (AGL-033, D1; AGL-034, D4).
     ServerKeyOfOtherKind(String),
     /// A path that must be absolute is not (AGL-039, D24e).
     NotAbsolute,

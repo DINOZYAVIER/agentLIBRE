@@ -437,15 +437,15 @@ fn a_profile_without_search_has_a_searcher_that_only_fails() {
     assert_eq!(result.outcome, Outcome::Fail);
 }
 
-/// Against the human's service with the `[search]` of their user file:
+/// Against the human's service with the `search` of their user file:
 /// `cargo test -- --ignored the_live_service`. Not run by default.
 #[test]
-#[ignore = "needs the human's [search] and the service"]
+#[ignore = "needs the human's search settings and the service"]
 fn the_live_service_answers_web_and_wikipedia() {
     let home = std::env::var_os("HOME").expect("HOME");
-    let path = Path::new(&home).join(".config/agentLIBRE/agentLIBRE.toml");
+    let path = Path::new(&home).join(".config/agentLIBRE/settings.nix");
     let user = crate::settings::UserFile::load(&path).unwrap();
-    let search = user.search.complete().unwrap().expect("[search] is set in the user file");
+    let search = user.search.complete().unwrap().expect("search is set in the user file");
     let curl = Curl::new(search).unwrap();
     for (source, language, query) in [("web", "en", "rust programming language"), ("wikipedia", "en", "Kyiv")] {
         let mut args = call(query, source);

@@ -933,8 +933,8 @@ mod tests {
         fn ready(&self) -> Result<(), Error> {
             if self.0.not_ready.load(Ordering::SeqCst) {
                 return Err(Error::WhisperNotSet {
-                    user_path: "/c/agentLIBRE.toml".into(),
-                    project_path: "/d/agentLIBRE.toml".into(),
+                    user_path: "/c/settings.nix".into(),
+                    project_path: "/d/settings.nix".into(),
                 });
             }
             Ok(())
