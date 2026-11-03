@@ -24,4 +24,4 @@ libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
 unicode-width = { version = "0.2", default-features = false }
-ureq = { version = "3", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }

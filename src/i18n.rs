@@ -456,8 +456,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::UnsupportedUrl`.
     pub const UNSUPPORTED_URL: Msg = Msg {
-        en: "unsupported server address `{url}` in {path}; only http:// is supported",
-        uk: "непідтримувана адреса сервера `{url}` у {path}; підтримується лише http://",
+        en: "unsupported server address `{url}` in {path}; http:// and https:// are supported",
+        uk: "непідтримувана адреса сервера `{url}` у {path}; підтримуються http:// і https://",
     };
 
     /// `Error::UnknownServerKind`.

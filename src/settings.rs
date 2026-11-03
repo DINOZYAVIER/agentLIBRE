@@ -220,7 +220,7 @@ impl WhisperFile {
         whisper.check_keys(Self::KEYS)?;
         let url = whisper.string("url")?;
         if let Some(url) = &url
-            && !url.starts_with("http://")
+            && !is_http_url(url)
         {
             return Err(Error::UnsupportedUrl {
                 path: path.into(),
@@ -362,12 +362,18 @@ impl SearchFile {
 /// `image_max_tokens` when the model does not set it (AGL-014, D23).
 pub const DEFAULT_IMAGE_TOKENS: u32 = 2048;
 
-/// The `url` of the set of a kind, an `http://` URL (AGL-036, D2);
-/// `None` when absent.
+/// Whether `url` is an `http://` or an `https://` address: the schemes of
+/// a server and of whisper (AGL-036, D2; AGL-043 F10).
+fn is_http_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// The `url` of the set of a kind, an `http://` or `https://` URL
+/// (AGL-036, D2; AGL-043 F10); `None` when absent.
 fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error> {
     let url = section.string("url")?;
     if let Some(url) = &url
-        && !url.starts_with("http://")
+        && !is_http_url(url)
     {
         return Err(Error::UnsupportedUrl {
             path: path.into(),
@@ -912,7 +918,9 @@ mod tests {
             user_of("whisper.port = 1;"),
             Err(Error::UnknownKey { key, .. }) if key == "whisper.port"
         ));
-        assert!(matches!(user_of(r#"whisper.url = "https://x";"#), Err(Error::UnsupportedUrl { .. })));
+        // http:// and https:// (AGL-043 F10); another scheme is refused.
+        assert!(user_of(r#"whisper.url = "https://x";"#).is_ok());
+        assert!(matches!(user_of(r#"whisper.url = "ftp://x";"#), Err(Error::UnsupportedUrl { .. })));
         // The model is a file name or an absolute path (AGL-039, D24a).
         assert!(user_of(r#"whisper.model = "/w/w.bin";"#).is_ok());
         assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::InvalidName(_))));
@@ -1128,9 +1136,10 @@ mod tests {
             user_of(r#"language = "de";"#),
             Err(Error::UnsupportedLanguage { value, .. }) if value == "de"
         ));
+        assert!(user_of(r#"server.strata.url = "https://x";"#).is_ok());
         assert!(matches!(
-            user_of(r#"server.strata.url = "https://x";"#),
-            Err(Error::UnsupportedUrl { url, .. }) if url == "https://x"
+            user_of(r#"server.llama.url = "unix:/run/llama";"#),
+            Err(Error::UnsupportedUrl { url, .. }) if url == "unix:/run/llama"
         ));
     }
 
