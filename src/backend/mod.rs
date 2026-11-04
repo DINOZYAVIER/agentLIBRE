@@ -84,7 +84,11 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
                       section, text; while open or in-progress); status (name, state); \
                       rename (name, new; in any status — the file, the front-matter name \
                       and every deps/supersedes reference in the store); remove (name; \
-                      while open, canceled or backlog).",
+                      while open, canceled or backlog). For example: action=edit, \
+                      name=\"agl-001-my-task\", old=\"the old words\", new=\"the new words\"; \
+                      action=append, name=\"agl-001-my-task\", section=\"Progress\", \
+                      text=\"Done the first part.\"; action=status, name=\"agl-001-my-task\", \
+                      state=\"done\".",
         params: &[
             (
                 "action",
@@ -172,9 +176,12 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
         name: "memory",
         description: "The memory of this workspace: entries kept across sessions. Keep the \
                       project's setup and conventions, the environment and the human's \
-                      preferences — not decisions, they are recorded in the forge. Actions: \
-                      add title hook text; show name; edit name old new; update name title \
-                      hook; remove name.",
+                      preferences — not decisions, they are recorded in the forge. Each action \
+                      needs all of its fields. For example: action=add, title=\"Build\", \
+                      hook=\"how to build the project\", text=\"cargo build --release\"; \
+                      action=show, name=\"build\"; action=edit, name=\"build\", \
+                      old=\"--release\", new=\"\"; action=update, name=\"build\", \
+                      title=\"Building\", hook=\"how to build\"; action=remove, name=\"build\".",
         params: &[
             ("action", false, Some("add, show, edit, update or remove."), true),
             (
