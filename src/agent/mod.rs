@@ -983,18 +983,20 @@ impl Agent<'_> {
             return Ok(Compaction::Impossible { limit: budget });
         }
         let summary = summary.as_str();
-        // The question that started the turn is kept after the summary
+        // The question of a turn that is going on is kept after the summary
         // (F31): the summary need not repeat it, and the turn goes on from
-        // the summary and the question together.
-        let question = self
-            .session
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match event {
-                Event::User(text) => Some(text.clone()),
-                _ => None,
-            });
+        // the summary and the question together. Between turns it has its
+        // answer, and asked again it would be answered again.
+        let question = self.session.unfinished().and_then(|_| {
+            self.session
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::User(text) => Some(text.clone()),
+                    _ => None,
+                })
+        });
         self.session.append(Event::Compact {
             summary: summary.into(),
             question,

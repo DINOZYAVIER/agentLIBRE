@@ -1500,7 +1500,7 @@ fn compaction_on_request() {
         session.events.last(),
         Some(&Event::Compact {
             summary: "Greeted.".into(),
-            question: Some("hello".into()),
+            question: None,
         })
     );
     assert_eq!(
@@ -2248,5 +2248,39 @@ fn a_long_search_result_is_cut_and_kept_like_any_output() {
     let file = session.output_file("c1");
     assert!(content.contains(&file.display().to_string()), "not told");
     assert_eq!(fs::read_to_string(&file).unwrap(), long);
+}
+
+#[test]
+fn a_compaction_between_turns_does_not_ask_the_answered_question_again() {
+    // F31 keeps the question of a turn that is going on; a question with its
+    // answer is in the summary.
+    let dir = Dir::new("compact-answered");
+    let minimal = Function::load(
+        Path::new("/none"),
+        Path::new("/none"),
+        "agentLIBRE-gpu-high-minimal",
+    )
+    .unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        ("Answered.", Stop::End),
+        (" The human asked; it was answered. ", Stop::End),
+    ]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut log = Log::default();
+    let mut turn = agent(&minimal, &script, &mut session, &dir, None);
+    turn.turn("the old question", &mut log).unwrap();
+    assert_eq!(turn.compact(&mut log).unwrap(), Compaction::Done);
+    let Some(Event::Compact { question, .. }) = session.events.last() else {
+        panic!("{:?}", session.events.last());
+    };
+    assert_eq!(*question, None);
+    assert!(
+        session
+            .history()
+            .iter()
+            .all(|message| !matches!(message, Message::User(_))),
+        "the answered question is asked again"
+    );
 }
 
