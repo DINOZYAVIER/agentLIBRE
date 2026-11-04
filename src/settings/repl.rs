@@ -19,6 +19,8 @@ pub struct ReplFile {
     pub frame: Option<bool>,
     /// The longest voice recording, in seconds (AGL-039, D20).
     pub max_record_seconds: Option<u32>,
+    /// Whether the session starts the server as it starts (AGL-046).
+    pub start_server: Option<bool>,
 }
 
 /// `[repl]` with the defaults of the old agl (D130).
@@ -30,6 +32,9 @@ pub struct ReplSettings {
     /// The longest voice recording of Ctrl-R, in seconds (AGL-016;
     /// AGL-039, D20).
     pub max_record_seconds: u32,
+    /// Whether the session starts the server as it starts, not at the first
+    /// message (AGL-046).
+    pub start_server: bool,
 }
 
 impl Default for ReplSettings {
@@ -39,6 +44,7 @@ impl Default for ReplSettings {
             tool_chars: 500,
             frame: true,
             max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
+            start_server: true,
         }
     }
 }
@@ -49,7 +55,7 @@ impl ReplFile {
         Ok(match section {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds"])?;
+                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds", "start_server"])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -71,6 +77,7 @@ impl ReplFile {
                     tool_chars,
                     frame: repl.bool("frame")?,
                     max_record_seconds,
+                    start_server: repl.bool("start_server")?,
                 }
             }
         })

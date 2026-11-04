@@ -679,6 +679,37 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         }
     }
 
+    // The server comes up as the session starts (AGL-046). It runs like a
+    // turn: what the human types meanwhile waits in the queue. A server
+    // that fails is told here and tried again at the first message.
+    if repl.start_server {
+        control.lock().running = true;
+        interrupt::reset();
+        let mut observer = Observer::new();
+        observer.attach_between_turns(&session);
+        let ready = autostart
+            .ensure(&mut |progress| match progress {
+                ServerProgress::Starting => {
+                    observer.enter(PhaseEvent::ServerStart, &mut presenter);
+                }
+                ServerProgress::Line(line) => presenter.show_notice(line, Role::Muted),
+            })
+            .and_then(|()| backend.context_size());
+        match ready {
+            Ok(size) => {
+                observer.end(PhaseEvent::Idle, &mut presenter);
+                dock.set_context_size(size);
+                control.lock().info.context = Some(size);
+            }
+            Err(error) => {
+                observer.end(PhaseEvent::Failed, &mut presenter);
+                presenter.show_notice(&error.message(lang), Role::StatusFailure);
+            }
+        }
+        control.lock().running = false;
+        presenter.set_ready();
+    }
+
     let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
         match wait_for_next(&control) {
@@ -1614,6 +1645,7 @@ mod tests {
             tool_chars: 20,
             frame: true,
             max_record_seconds: 60,
+            start_server: true,
         };
         let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
         presenter.begin_turn();

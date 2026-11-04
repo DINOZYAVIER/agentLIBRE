@@ -428,9 +428,10 @@ fn agent_session(
         .iter()
         .map(|path| media::Source::from_file(Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
-    // `-p` has one request, so the server is brought up now; the
-    // interactive and the stdin session do it at their first request
-    // (AGL-015, D10) and take the context size if the server answers.
+    // `-p` has one request, so the server is brought up now; the stdin
+    // session does it at its first request (AGL-015, D10), and the
+    // interactive one as it starts unless `repl.start_server` is off
+    // (AGL-046). Those two take the context size if the server answers.
     // The FSM of the turn sees the start too; its lines wait for the session
     // (AGL-046, D10).
     let mut observer = phase::Observer::new();

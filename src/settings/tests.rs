@@ -325,6 +325,7 @@ fn colors_repl_and_forge_tables() {
             tool_chars: None,
             frame: Some(false),
             max_record_seconds: Some(15),
+            start_server: None,
         }
     );
     assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
@@ -342,6 +343,7 @@ fn colors_repl_and_forge_tables() {
             tool_chars: 500,
             frame: false,
             max_record_seconds: 15,
+            start_server: true,
         }
     );
     // The voice limit is 300 s unless set (AGL-016, D5; AGL-039, D20;
@@ -473,4 +475,10 @@ fn the_record_round_trips() {
     };
     assert_eq!(ServerFile::from_json(&server.to_json()), Some(server));
     assert_eq!(ServerFile::from_json(&json!({ "kind": 1 })), None);
+}
+
+#[test]
+fn the_session_starts_the_server_unless_told_not_to() {
+    // AGL-046.
+    assert!(ReplSettings::default().start_server);
 }

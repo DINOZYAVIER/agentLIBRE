@@ -323,6 +323,7 @@ impl Settings {
                     .repl
                     .max_record_seconds
                     .unwrap_or(defaults.max_record_seconds),
+                start_server: user.repl.start_server.unwrap_or(defaults.start_server),
             },
         })
     }
