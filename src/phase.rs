@@ -15,7 +15,7 @@ use serde_json::{Value as Json, json};
 
 use crate::action::Outcome;
 use crate::agent::Report;
-use crate::backend::{Prefill, ToolCall};
+use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::memory::Kind as MemoryKind;
 use crate::session::{CutOff, ForgeKind, Session, StopReason, utc_now};
 use crate::tools::ToolResult;
@@ -341,6 +341,21 @@ impl Observer {
         self.write(line);
     }
 
+    fn write_progress(&mut self, progress: PromptProgress) {
+        let line = json!({
+            "type": "prompt_progress",
+            "schema": SCHEMA,
+            "turn": self.turn,
+            "step": self.step,
+            "total": progress.total,
+            "cache": progress.cache,
+            "processed": progress.processed,
+            "time_ms": progress.time_ms,
+            "time": utc_now(),
+        });
+        self.write(line);
+    }
+
     fn write_prefill(&mut self, prefill: Prefill) {
         let line = json!({
             "type": "prefill",
@@ -457,6 +472,10 @@ impl Report for Observed<'_> {
     fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
         self.enter(PhaseEvent::Stir { attempt, max });
         self.report.stirred(attempt, max, error);
+    }
+    fn prompt_progress(&mut self, progress: PromptProgress) {
+        self.observer.write_progress(progress);
+        self.report.prompt_progress(progress);
     }
     fn prompt_read(&mut self, prefill: Prefill) {
         self.observer.write_prefill(prefill);

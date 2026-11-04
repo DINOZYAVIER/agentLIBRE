@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::action::{self, Action};
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prefill, Prompt, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
+    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
     ToolDoc,
 };
 use crate::action::{Outcome, Value};
@@ -65,6 +65,8 @@ pub trait Report {
     fn compact_failed(&mut self) {}
     /// A transition of the FSM during the turn (AGL-046).
     fn transition(&mut self, _transition: &Transition) {}
+    /// How the reading of a prompt goes, as the server says (AGL-046, D19).
+    fn prompt_progress(&mut self, _progress: PromptProgress) {}
     /// How the server read the prompt of a generation (AGL-046).
     fn prompt_read(&mut self, _prefill: Prefill) {}
     /// What a step's prompt is made of (AGL-046, D15).
@@ -272,7 +274,8 @@ impl Agent<'_> {
         if let Some(markers) = format.think.as_ref().filter(|_| think) {
             let close = markers.close.trim();
             let call_start = format.call.begin_before.trim();
-            let thinking = self.backend.generate(
+            let cell = std::cell::RefCell::new(&mut *report);
+            let thinking = self.backend.generate_reading(
                 &Request {
                     prompt: &prompt,
                     grammar: None,
@@ -282,8 +285,9 @@ impl Agent<'_> {
                     media: &expanded.uploads,
                     structured: None,
                 },
+                Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
                 &mut |_| {},
-                &mut |piece| report.thinking(piece),
+                &mut |piece| cell.borrow_mut().thinking(piece),
             )?;
             report.thinking_done();
             if let Some(prefill) = thinking.prefill {
@@ -308,7 +312,8 @@ impl Agent<'_> {
         let grammar_str = grammar.render(&root);
         self.session.record_input("grammar", &grammar_str)?;
         let mut stream = TextStream::new(&format.call.begin_before);
-        let generated = self.backend.generate(
+        let cell = std::cell::RefCell::new(&mut *report);
+        let generated = self.backend.generate_reading(
             &Request {
                 prompt: &prompt,
                 grammar: Some(&grammar_str),
@@ -318,10 +323,11 @@ impl Agent<'_> {
                 media: &expanded.uploads,
                 structured: None,
             },
+            Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
             &mut |_| {},
             &mut |piece| {
                 if let Some(text) = stream.push(piece) {
-                    report.action_text(&text);
+                    cell.borrow_mut().action_text(&text);
                 }
             },
         )?;
@@ -397,7 +403,7 @@ impl Agent<'_> {
             // thinking is over at the first piece of text.
             let open = std::cell::Cell::new(think);
             let cell = std::cell::RefCell::new(&mut *report);
-            let generated = self.backend.generate(
+            let generated = self.backend.generate_reading(
                 &Request {
                     prompt: "",
                     grammar: None,
@@ -407,6 +413,7 @@ impl Agent<'_> {
                     media: uploads,
                     structured: Some(&prompt),
                 },
+                Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
                 &mut |piece| cell.borrow_mut().thinking(piece),
                 &mut |piece| {
                     if open.replace(false) {

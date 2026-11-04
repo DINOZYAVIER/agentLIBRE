@@ -11,7 +11,7 @@ use serde_json::{Value as Json, json};
 
 use super::llama::{messages_json, tool_json};
 use super::{
-    Prefill,
+    Prefill, PromptProgress,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
     StructuredCall, ToolDoc, kept_thinking,
 };
@@ -135,6 +135,16 @@ impl Backend for Strata {
         on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
+        self.generate_reading(request, None, on_thinking, on_text)
+    }
+
+    fn generate_reading(
+        &self,
+        request: &Request,
+        mut on_progress: Option<&mut dyn FnMut(PromptProgress)>,
+        on_thinking: &mut dyn FnMut(&str),
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<Generated, Error> {
         let mut body = match request.structured {
             Some(prompt) => structured_body(prompt, request),
             // A flat generation (the summary of a compaction): the flat
@@ -150,6 +160,9 @@ impl Backend for Strata {
             body["stop"] = json!(request.stop);
         }
         add_sampling(&mut body, request.sampling);
+        if on_progress.is_some() {
+            body["return_progress"] = true.into();
+        }
         let response = self.send("/v1/chat/completions", Some(&body))?;
         let mut stream = Accumulator::default();
         let reader = BufReader::new(response.into_body().into_reader());
@@ -169,6 +182,15 @@ impl Backend for Strata {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
+            if let Some(tell) = on_progress.as_mut()
+                && data.contains("\"prompt_progress\"")
+                && let Some(progress) = serde_json::from_str(data)
+                    .ok()
+                    .as_ref()
+                    .and_then(PromptProgress::of_chunk)
+            {
+                (*tell)(progress);
+            }
             let done = stream
                 .feed(data, on_thinking, on_text)
                 .map_err(|detail| self.bad_reply(detail))?;

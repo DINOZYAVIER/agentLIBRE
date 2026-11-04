@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{Map, Value as Json, json};
 
 use super::{
-    Prefill,
+    Prefill, PromptProgress,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, ToolDoc,
     kept_thinking,
 };
@@ -123,6 +123,16 @@ impl Backend for Llama {
     fn generate(
         &self,
         request: &Request,
+        on_thinking: &mut dyn FnMut(&str),
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<Generated, Error> {
+        self.generate_reading(request, None, on_thinking, on_text)
+    }
+
+    fn generate_reading(
+        &self,
+        request: &Request,
+        mut on_progress: Option<&mut dyn FnMut(PromptProgress)>,
         _on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error> {
@@ -133,6 +143,9 @@ impl Backend for Llama {
             "stream": true,
             "cache_prompt": true,
         });
+        if on_progress.is_some() {
+            body["return_progress"] = true.into();
+        }
         if !request.media.is_empty() {
             body["prompt"] = json!({
                 "prompt_string": request.prompt,
@@ -166,6 +179,11 @@ impl Backend for Llama {
                 serde_json::from_str(data).map_err(|error| self.bad_reply(error.to_string()))?;
             if let Some(message) = chunk["error"]["message"].as_str() {
                 return Err(self.bad_reply(message));
+            }
+            if let (Some(tell), Some(progress)) =
+                (on_progress.as_mut(), PromptProgress::of_chunk(&chunk))
+            {
+                (*tell)(progress);
             }
             let piece = chunk["content"].as_str().unwrap_or_default();
             if !piece.is_empty() {

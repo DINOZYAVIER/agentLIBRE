@@ -7,10 +7,12 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use super::editor::{Editor, Outcome};
 use super::term::Key;
 use super::transcript::{Activity, Screen};
+use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::theme::{Role, Theme};
@@ -88,6 +90,8 @@ struct State {
     voice: Option<VoiceLabel>,
     /// The decoding speed of the current generation (AGL-012).
     speed: Option<f64>,
+    /// The reading of the prompt going on (AGL-046, D19).
+    reading: Option<Reading>,
     editor: Editor,
     activity: Activity,
     queued: usize,
@@ -125,6 +129,7 @@ impl Dock {
                 context_used: None,
                 voice: None,
                 speed: None,
+                reading: None,
                 editor,
                 activity: Activity::Ready,
                 queued: 0,
@@ -234,6 +239,17 @@ impl Dock {
     }
 }
 
+impl Dock {
+    /// The time moves while a prompt is read, though nothing else tells the
+    /// dock to draw (AGL-046, D19).
+    pub fn tick(&self) {
+        let mut state = self.lock();
+        if state.reading.is_some() {
+            state.redraw("");
+        }
+    }
+}
+
 impl Screen for Dock {
     fn columns(&self) -> usize {
         self.lock().columns
@@ -257,6 +273,12 @@ impl Screen for Dock {
     fn context(&self, used: usize) {
         let mut state = self.lock();
         state.context_used = Some(used);
+        state.redraw("");
+    }
+
+    fn reading(&self, reading: Option<Reading>) {
+        let mut state = self.lock();
+        state.reading = reading;
         state.redraw("");
     }
 
@@ -422,6 +444,9 @@ impl State {
     fn separator(&self) -> String {
         let lang = self.lang;
         let mut label = self.activity.label(lang);
+        if let Some(reading) = &self.reading {
+            label.push_str(&format!(" · {}", reading.label(Instant::now(), lang)));
+        }
         if self.queued > 0 {
             label.push_str(&format!(" · {}", tr!(lang, m::QUEUED, n = self.queued)));
         }

@@ -4,6 +4,7 @@
 mod dock;
 mod editor;
 mod markdown;
+mod reading;
 mod transcript;
 mod text;
 pub(crate) mod term;
@@ -506,6 +507,9 @@ impl Report for Reporter<'_> {
     fn transition(&mut self, transition: &crate::phase::Transition) {
         self.presenter.transition(transition);
     }
+    fn prompt_progress(&mut self, progress: crate::backend::PromptProgress) {
+        self.presenter.prompt_progress(progress);
+    }
     fn prompt_read(&mut self, prefill: Prefill) {
         self.presenter.prompt_read(prefill);
     }
@@ -669,6 +673,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let reader = {
         let done = done.clone();
         thread::spawn(move || input_loop(input, done))
+    };
+    // The dock's clock while a prompt is read (AGL-046, D19).
+    let ticker = {
+        let done = done.clone();
+        let dock = dock.clone();
+        thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(150));
+                dock.tick();
+            }
+        })
     };
     term::unblock_sigint();
 
@@ -914,6 +929,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
 
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
+    let _ = ticker.join();
     // A recording that goes keeps nothing, and ffmpeg is stopped (AGL-016).
     voice.cancel();
     dock.finish();

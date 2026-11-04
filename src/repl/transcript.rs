@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use super::dock::grouped;
 use super::markdown;
+use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::action::{Outcome, Value};
 use crate::agent::Report;
-use crate::backend::{Prefill, ToolCall};
+use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::media::{Kind as MediaKind, Media};
 use crate::phase::{Phase, PhaseEvent, Transition};
@@ -63,6 +64,8 @@ impl Activity {
 /// Where the transcript is drawn: above the dock.
 pub trait Screen: Send + Sync {
     fn columns(&self) -> usize;
+    /// The reading of the prompt going on (AGL-046, D19).
+    fn reading(&self, _reading: Option<Reading>) {}
     /// Appends finished lines.
     fn print(&self, lines: &[String]);
     /// The unfinished line below the printed ones; empty clears it.
@@ -110,6 +113,10 @@ pub struct Presenter {
     compact_time: Option<Duration>,
     /// What the server read of the step's prompts (AGL-046).
     prefill: Option<Prefill>,
+    /// The reading going on, and the real speed of an earlier one, for the
+    /// dock (AGL-046, D19).
+    reading: Option<Reading>,
+    last_read_speed: Option<f64>,
     /// The prompt's last size, the one when a compaction began, and whether
     /// the last size came after that begin (AGL-046, D13).
     context: Option<usize>,
@@ -146,6 +153,8 @@ impl Presenter {
             tool_time: Duration::ZERO,
             compact_time: None,
             prefill: None,
+            reading: None,
+            last_read_speed: None,
             context: None,
             compact_before: None,
             context_fresh: false,
@@ -429,7 +438,8 @@ impl Presenter {
                 // The speed of the reading (AGL-046): the server's own, so a
                 // cached part of the prompt does not count.
                 if *phase == Activity::Prefill
-                    && let Some(prefill) = self.prefill.filter(|p| p.tokens > 0)
+                    && let Some(prefill) =
+                        self.prefill.filter(|p| p.tokens >= MIN_TOKENS_OF_A_SPEED)
                 {
                     let speed = prefill.tokens as f64 * 1000.0 / prefill.ms;
                     item.push_str(&format!(" ({})", texts::speed(speed, self.lang)));
@@ -726,14 +736,23 @@ impl Report for Presenter {
         self.show_stir(attempt, error);
     }
 
+    fn prompt_progress(&mut self, progress: PromptProgress) {
+        if let Some(reading) = &mut self.reading {
+            reading.progress(progress, Instant::now());
+            self.screen.reading(self.reading.clone());
+        }
+    }
+
+    /// The first generation of a step is what the phase of the reading
+    /// waited for; a later one reads what the step just wrote.
     fn prompt_read(&mut self, prefill: Prefill) {
-        self.prefill = Some(match self.prefill {
-            Some(known) => Prefill {
-                tokens: known.tokens + prefill.tokens,
-                ms: known.ms + prefill.ms,
-            },
-            None => prefill,
-        });
+        if self.prefill.is_some() {
+            return;
+        }
+        self.prefill = Some(prefill);
+        if prefill.tokens >= MIN_TOKENS_OF_A_SPEED {
+            self.last_read_speed = Some(prefill.tokens as f64 * 1000.0 / prefill.ms);
+        }
     }
 
     fn context_used(&mut self, tokens: usize) {
@@ -754,6 +773,9 @@ impl Report for Presenter {
                 .push((self.activity.clone(), transition.time)),
         }
         self.activity = activity_of(transition);
+        self.reading = (transition.to == Phase::Prefill)
+            .then(|| Reading::new(Instant::now(), self.last_read_speed));
+        self.screen.reading(self.reading.clone());
         self.screen.activity(self.activity.clone());
         if transition.violation {
             self.show_notice(
@@ -946,6 +968,14 @@ mod tests {
         }
         fn live(&self, text: &str) {
             self.ops.lock().unwrap().push(format!("live {text:?}"));
+        }
+        fn reading(&self, reading: Option<Reading>) {
+            let now = Instant::now();
+            let label = reading.map_or("none".to_owned(), |reading| {
+                let label = reading.label(now, Lang::En);
+                label.split(" · ").next().unwrap().replace('\u{a0}', "")
+            });
+            self.ops.lock().unwrap().push(format!("reading {label}"));
         }
         fn erase(&self, count: usize) -> bool {
             let mut printed = self.printed.lock().unwrap();
@@ -1216,8 +1246,8 @@ mod tests {
 
     #[test]
     fn the_reading_of_the_prompt_shows_its_speed() {
-        // AGL-046: the server's figure, over the step's generations; a step
-        // whose prompt was all cached shows none.
+        // AGL-046: the server's figure for the step's first generation; a
+        // step that read a few tokens shows none.
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
         let mut observer = Observer::new();
@@ -1231,8 +1261,8 @@ mod tests {
             ms: 800.0,
         });
         report.prompt_read(Prefill {
-            tokens: 100,
-            ms: 200.0,
+            tokens: 69,
+            ms: 463.0,
         });
         report.call(&bash("ls"));
         let ok = ToolResult {
@@ -1242,19 +1272,51 @@ mod tests {
         report.result(&bash("ls"), &ok);
         assert_eq!(
             row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Reading the prompt <1s (1000.0 tok/s) · bash <1s"
+            "─ ok · Reading the prompt <1s (1125.0 tok/s) · bash <1s"
         );
         mock.printed.lock().unwrap().clear();
         report.prefill();
         report.prompt_read(Prefill {
-            tokens: 0,
-            ms: 3.0,
+            tokens: 18,
+            ms: 304.0,
         });
         report.answer("Done");
         assert_eq!(
             row(&mock.printed.lock().unwrap(), "─ ok"),
             "─ ok · Reading the prompt <1s · Worked for <1s"
         );
+    }
+
+    #[test]
+    fn the_reading_is_on_the_dock_only_while_the_prompt_is_read() {
+        // AGL-046, D19.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        let mut observer = Observer::new();
+        let mut report = Observed {
+            observer: &mut observer,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.prompt_progress(PromptProgress {
+            total: 1000,
+            cache: 0,
+            processed: 500,
+            time_ms: 500,
+        });
+        let ops = mock.ops.lock().unwrap().clone();
+        assert_eq!(ops.iter().filter(|op| *op == "reading 500 / 1000").count(), 1, "{ops:?}");
+        report.thinking("hmm");
+        // A figure of a later generation of the step is not a reading.
+        report.prompt_progress(PromptProgress {
+            total: 1000,
+            cache: 0,
+            processed: 900,
+            time_ms: 500,
+        });
+        let ops = mock.ops.lock().unwrap().clone();
+        assert_eq!(ops.iter().filter(|op| op.starts_with("reading 900")).count(), 0);
+        assert_eq!(ops.iter().rfind(|op| op.starts_with("reading")).unwrap(), "reading none");
     }
 
     #[test]
@@ -1349,7 +1411,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter(|op| {
-                !["erase", "speed", "live", "print"]
+                !["erase", "speed", "live", "print", "reading"]
                     .iter()
                     .any(|prefix| op.starts_with(prefix))
             })

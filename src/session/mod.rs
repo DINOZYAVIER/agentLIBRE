@@ -273,7 +273,7 @@ impl Session {
             // What the observer wrote is not an event, so it can reach
             // neither the history nor the replay (AGL-046).
             match json["type"].as_str() {
-                Some("transition" | "step" | "prefill") => continue,
+                Some("transition" | "step" | "prefill" | "prompt_progress") => continue,
                 Some("prompt_input") => {
                     if let (Some(kind), Some(text)) = (json["kind"].as_str(), json["text"].as_str())
                     {

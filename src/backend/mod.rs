@@ -345,6 +345,31 @@ impl Prefill {
     }
 }
 
+/// How the reading of the prompt goes: llama.cpp's `prompt_progress`, which
+/// Strata shares (AGL-046, D19). `processed` counts from the first token, so
+/// it holds `cache`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PromptProgress {
+    pub total: usize,
+    pub cache: usize,
+    pub processed: usize,
+    pub time_ms: u64,
+}
+
+impl PromptProgress {
+    /// From a chunk of the stream, when it says so.
+    pub fn of_chunk(chunk: &serde_json::Value) -> Option<PromptProgress> {
+        let progress = &chunk["prompt_progress"];
+        let count = |key: &str| progress[key].as_u64().map(|n| n as usize);
+        Some(PromptProgress {
+            total: count("total")?,
+            cache: count("cache")?,
+            processed: count("processed")?,
+            time_ms: progress["time_ms"].as_u64()?,
+        })
+    }
+}
+
 impl Generated {
     /// A flat generation: the text and why it ended.
     pub fn plain(text: String, stop: Stop) -> Generated {
@@ -384,6 +409,17 @@ pub trait Backend {
         on_thinking: &mut dyn FnMut(&str),
         on_text: &mut dyn FnMut(&str),
     ) -> Result<Generated, Error>;
+    /// [`Backend::generate`] that also tells how the reading of the prompt
+    /// goes, when the server says so (AGL-046, D19).
+    fn generate_reading(
+        &self,
+        request: &Request,
+        _on_progress: Option<&mut dyn FnMut(PromptProgress)>,
+        on_thinking: &mut dyn FnMut(&str),
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<Generated, Error> {
+        self.generate(request, on_thinking, on_text)
+    }
     /// The number of tokens of `text`.
     fn count_tokens(&self, text: &str) -> Result<usize, Error>;
     /// The number of tokens of the prompt of a step, for the check that it
@@ -483,8 +519,25 @@ mod tests {
 
 #[cfg(test)]
 mod prefill_tests {
-    use super::Prefill;
+    use super::{Prefill, PromptProgress};
     use serde_json::json;
+
+    #[test]
+    fn the_progress_comes_from_a_chunk_that_has_it() {
+        let chunk = json!({"content": "", "prompt_progress": {
+            "total": 100, "cache": 40, "processed": 60, "time_ms": 25,
+        }});
+        assert_eq!(
+            PromptProgress::of_chunk(&chunk),
+            Some(PromptProgress {
+                total: 100,
+                cache: 40,
+                processed: 60,
+                time_ms: 25,
+            })
+        );
+        assert_eq!(PromptProgress::of_chunk(&json!({"content": "x"})), None);
+    }
 
     #[test]
     fn the_prefill_comes_from_the_servers_timings() {
