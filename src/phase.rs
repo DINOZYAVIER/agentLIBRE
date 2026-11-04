@@ -364,6 +364,7 @@ impl Observer {
             "step": self.step,
             "tokens": prefill.tokens,
             "ms": prefill.ms,
+            "tokens_per_second": (prefill.tokens as f64 * 1000.0 / prefill.ms).round(),
             "time": utc_now(),
         });
         self.write(line);

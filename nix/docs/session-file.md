@@ -53,7 +53,51 @@ tokens really read are `processed - cache`. `cache` near `total` means the promp
 cache held; `cache` 0 on a later step means the server read everything again, which
 is slow and worth looking into.
 
-`prefill`: how a generation's prompt was read: `tokens`, `ms`.
+`prefill`: how a generation's prompt was read: `tokens`, `ms`, `tokens_per_second`
+(the server's figures; older files lack the speed, and it is `tokens * 1000 / ms`).
+The first `prefill` of a step is the reading the step waited for; a later one reads
+only what the step just wrote. A speed from under about 64 tokens says little: it
+is mostly the server's fixed cost.
 
 `prompt_input`: a part of the prompt, in full, when it changes: `kind` (`system`,
 `tools`, `memory_index`, `grammar`, `sampling`, `model`), `text`.
+
+## Ready commands
+
+Filter by `type`, as a plain grep also finds the output of your own commands.
+`DIR` is the directory of all sessions, and a file's name sorts by time.
+
+The prefill speed of the last 3 sessions, the first generation of each step:
+
+```sh
+for f in $(ls "$DIR"/*.jsonl | tail -3); do
+  echo "$f"
+  jq -c 'select(.type == "prefill")
+    | {turn, step, tokens, ms, speed: (.tokens_per_second // (.tokens * 1000 / .ms | round))}' "$f" \
+    | jq -cs 'unique_by([.turn, .step]) | .[]'
+done
+```
+
+The whole reading of a prompt of each step, the cache included, in one file:
+
+```sh
+jq -c 'select(.type == "prompt_progress" and .processed == .cache) | {turn, step, total, cache}' "$FILE"
+```
+
+Where a session's time went, by phase, in seconds:
+
+```sh
+jq -s 'map(select(.type == "transition")) | group_by(.from)
+  | map({phase: .[0].from, seconds: (map(.ms) | add / 1000)})' "$FILE"
+```
+
+What failed in a session:
+
+```sh
+jq -c 'select((.type == "result" and .outcome != "ok")
+  or (.type == "command" and .failed) or .type == "stop" or .violation == true)
+  | {type, event, line, reason, outcome, content: (.content // "" | .[0:200])}' "$FILE"
+```
+
+If `jq` is not there, read the lines with any JSON tool in the same way.
+

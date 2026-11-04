@@ -460,6 +460,7 @@ fn agent_session(
         None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
     };
     // What the model is told of its environment and of this agl (AGL-048).
+    let sessions_dir = paths.sessions();
     let about = settings.about.enabled.unwrap_or(true).then(|| {
         let nix_dir = env(nix::NIX_VAR).map(PathBuf::from);
         let name = format!("{}.nix", settings.function);
@@ -497,6 +498,7 @@ fn agent_session(
             server_kind,
             server_url: &settings.server_url,
             model,
+            sessions: &sessions_dir,
             session_format: session_format.as_deref(),
             user_settings: user_path.as_path(),
             project_store: &project.dir,
