@@ -139,7 +139,7 @@ fn builtin_gpu_high_minimal() {
             kind: Some("llama".into()),
             model: Some("Qwen3.8-27B-UD-IQ4_XS.gguf".into()),
             context: Some(131072),
-            spec_type: Some("draft-mtp".into()),
+            spec_type: Some("draft-mtp,ngram-mod".into()),
             args: Some(["-ngl", "999", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"].map(String::from).to_vec()),
             mmproj: Some("mmproj-Qwen3.8-27B-F16.gguf".into()),
             mmproj_offload: Some(false),

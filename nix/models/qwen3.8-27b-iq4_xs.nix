@@ -1,6 +1,7 @@
 # Qwen3.8-27B in unsloth's UD-IQ4_XS (14.3 GB), the default model (AGL-039,
-# D33, D43, D44): multi-token prediction, the projector on the CPU, 128K of
-# context with a q8 KV cache, the whole model on the GPU. The weights are
+# D33, D43, D44): multi-token prediction and n-gram drafts of what the context
+# already holds (AGL-050), the projector on the CPU, 128K of context with a q8
+# KV cache, the whole model on the GPU. The weights are
 # found by their file name in the weights folders (D23, D24); `source` says
 # where they can be got (D5, D27, D29), agl does not fetch them.
 { agl, ... }:
@@ -10,7 +11,7 @@
   weights = "Qwen3.8-27B-UD-IQ4_XS.gguf";
   mmproj = "mmproj-Qwen3.8-27B-F16.gguf";
   mmproj_offload = false;
-  spec_type = "draft-mtp";
+  spec_type = "draft-mtp,ngram-mod";
   context = 131072;
   args = [ "-ngl" "999" "-fa" "on" "-ctk" "q8_0" "-ctv" "q8_0" ];
   sampling = {
