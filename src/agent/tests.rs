@@ -556,6 +556,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Media(_) => "media",
             Event::Memory { .. } => "memory",
             Event::Stir { .. } => "stir",
+            Event::Command(_) => "command",
         })
         .collect()
 }
@@ -1856,7 +1857,7 @@ fn the_memory_index_stands_before_the_history_and_stays_for_the_session() {
     turn.turn("again", &mut Log::default()).unwrap();
     assert_eq!(script.runtimes.borrow()[0], [first]);
 
-    // `/remember` and a compaction renew it.
+    // A compaction renews it.
     session.renew_memory_index();
     let script = Script::new(&[("t3", THOUGHT), ("Done.", Stop::End)]);
     let mut turn = agent(&function, &script, &mut session, &dir, None);

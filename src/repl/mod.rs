@@ -34,7 +34,7 @@ use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
 use crate::phase::{Observer, PhaseEvent};
-use crate::session::{Event, ForgeKind, Session, StopReason};
+use crate::session::{CommandRun, Event, ForgeKind, Session, StopReason};
 use crate::status::{
     COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
     status_text,
@@ -60,6 +60,9 @@ struct Inner {
     /// How many media of each kind the session holds, in the order of
     /// [`Kind::ALL`]: the numbers of new placeholders follow them.
     media_counts: [u32; 3],
+    /// Commands run at the prompt, for the main thread to record in the
+    /// session it holds (AGL-047, D5).
+    commands: Vec<CommandRun>,
     /// A turn is running.
     running: bool,
     quit: bool,
@@ -152,6 +155,13 @@ impl Inner {
     }
 }
 
+/// What a slash command said (AGL-047, D5).
+#[derive(Default)]
+struct Said {
+    lines: Vec<String>,
+    failed: bool,
+}
+
 /// Reacts to what the user does at the prompt (D118, D120).
 struct Input {
     dock: Arc<Dock>,
@@ -168,10 +178,16 @@ struct Input {
     clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
     /// Ctrl-R records the voice (AGL-016).
     voice: Arc<VoiceInput>,
+    /// What the running slash command says, while one runs (AGL-047, D5).
+    said: Mutex<Option<Said>>,
 }
 
 impl Input {
     fn notice(&self, text: &str, role: Role) {
+        if let Some(said) = self.said.lock().unwrap().as_mut() {
+            said.lines.push(text.to_owned());
+            said.failed |= matches!(role, Role::StatusFailure | Role::StatusPending);
+        }
         let columns = self.dock.columns();
         self.dock
             .print(&notice_lines(&self.theme, text, columns, role));
@@ -197,6 +213,22 @@ impl Input {
             self.control.wake.notify_all();
             return;
         }
+        *self.said.lock().unwrap() = Some(Said::default());
+        self.command(trimmed);
+        let said = self.said.lock().unwrap().take().unwrap_or_default();
+        let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
+        // What went to the main thread is recorded there, with its result.
+        if !said.lines.is_empty() || matches!(name, "/help" | "/status") {
+            self.control.lock().commands.push(CommandRun {
+                line: trimmed.to_owned(),
+                failed: said.failed,
+                output: Some(said.lines.join("\n")).filter(|output| !output.is_empty()),
+            });
+        }
+    }
+
+    /// A slash command; what it says is what [`Input::notice`] gathers.
+    fn command(&self, trimmed: &str) {
         let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
         match name {
             "/help" => self.notice(&help_text(self.lang, true), Role::Muted),
@@ -542,6 +574,24 @@ pub enum End {
     },
 }
 
+/// A slash command goes to the session (AGL-047, D5). A session that cannot
+/// be written to says so at the next event of the turn.
+fn record(session: &mut Session, line: String, failed: bool, output: Option<String>) {
+    let _ = session.append(Event::Command(CommandRun {
+        line,
+        failed,
+        output,
+    }));
+}
+
+/// The commands run at the prompt go to the session between turns, so that
+/// none stands between a call and its result (AGL-047, D5).
+fn record_commands(control: &Control, session: &mut Session) {
+    for run in std::mem::take(&mut control.lock().commands) {
+        let _ = session.append(Event::Command(run));
+    }
+}
+
 fn wait_for_next(control: &Control) -> Next {
     let mut inner = control.lock();
     loop {
@@ -669,6 +719,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         }),
         clipboard: Box::new(media::clipboard),
         voice: voice.clone(),
+        said: Mutex::new(None),
     };
     let reader = {
         let done = done.clone();
@@ -730,25 +781,39 @@ pub fn run(setup: Setup) -> Result<End, Error> {
 
     let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
-        match wait_for_next(&control) {
-            Next::Quit => break,
+        let next = wait_for_next(&control);
+        record_commands(&control, &mut session);
+        match next {
+            Next::Quit => {
+                record(&mut session, "/quit".into(), false, None);
+                break;
+            }
             Next::Functions => {
-                presenter.show_notice(&catalog.lines(lang).join("\n"), Role::Muted);
+                let list = catalog.lines(lang).join("\n");
+                presenter.show_notice(&list, Role::Muted);
+                record(&mut session, "/function".into(), false, Some(list));
             }
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
             Next::Switch(name) => match catalog.check(&name) {
                 Ok(()) => {
                     presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
+                    record(&mut session, format!("/function {name}"), false, None);
                     end = End::Function {
                         name,
                         reasoning: control.lock().reasoning,
                     };
                     break;
                 }
-                Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
+                Err(error) => {
+                    let text = error.message(lang);
+                    presenter.show_notice(&text, Role::StatusFailure);
+                    record(&mut session, format!("/function {name}"), true, Some(text));
+                }
             },
-            Next::New => match Session::create(sessions_dir, function_name, &workspace) {
+            Next::New => {
+                record(&mut session, "/new".into(), false, None);
+                match Session::create(sessions_dir, function_name, &workspace) {
                 Ok(new) => {
                     session = new;
                     let mut inner = control.lock();
@@ -762,11 +827,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = session.id), Role::Muted);
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
-            },
+                }
+            }
             Next::Remember(name, text) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
-                // writes the entry, no turn.
-                match memory.write() {
+                // writes the entry, no turn. The model has it from the
+                // record of the command (AGL-047, D5).
+                let line = format!("/remember {name} | {text}");
+                let (failed, output) = match memory.write() {
                     Ok((dir, lines)) => {
                         for line in lines {
                             presenter.show_notice(&line, Role::Muted);
@@ -781,20 +849,28 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                                 }) {
                                     presenter.show_notice(&error.message(lang), Role::StatusFailure);
                                 }
-                                session.renew_memory_index();
                                 presenter.show_memory(&write.name, write.kind, write.text.as_deref());
+                                (false, result.content)
                             }
-                            None => presenter.show_notice(
-                                &tr!(lang, m::REMEMBER_FAILED, reason = result.content),
-                                Role::StatusFailure,
-                            ),
+                            None => {
+                                presenter.show_notice(
+                                    &tr!(lang, m::REMEMBER_FAILED, reason = result.content),
+                                    Role::StatusFailure,
+                                );
+                                (true, result.content)
+                            }
                         }
                     }
-                    Err(error) => presenter.show_notice(
-                        &tr!(lang, m::REMEMBER_FAILED, reason = error.message(lang)),
-                        Role::StatusFailure,
-                    ),
-                }
+                    Err(error) => {
+                        let reason = error.message(lang);
+                        presenter.show_notice(
+                            &tr!(lang, m::REMEMBER_FAILED, reason = reason),
+                            Role::StatusFailure,
+                        );
+                        (true, reason)
+                    }
+                };
+                record(&mut session, line, failed, Some(output));
             }
             Next::Compact => {
                 let reasoning = control.lock().reasoning;
@@ -820,9 +896,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     })
                 });
                 control.lock().running = false;
-                if let Some((text, role)) = compact_notice(result, function, lang) {
-                    presenter.show_notice(&text, role);
+                let notice = compact_notice(result, function, lang);
+                if let Some((text, role)) = &notice {
+                    presenter.show_notice(text, *role);
                 }
+                let failed = notice.as_ref().is_some_and(|(_, role)| *role != Role::Muted);
+                record(&mut session, "/compact".into(), failed, notice.map(|(text, _)| text));
                 presenter.set_ready();
             }
             Next::Message(Queued {
@@ -928,6 +1007,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         }
     }
 
+    record_commands(&control, &mut session);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
     let _ = ticker.join();
@@ -1113,6 +1193,7 @@ mod tests {
                 Box::new(move || clip.lock().unwrap().clone())
             },
             voice,
+            said: Mutex::new(None),
         };
         Fixture {
             input,
@@ -1454,6 +1535,35 @@ mod tests {
         assert!(f.output().contains("usage: /remember"));
         assert!(f.inner().remember.is_none());
         assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn what_a_command_says_goes_to_the_main_thread_to_record() {
+        // AGL-047, D5.
+        let f = fixture();
+        for line in ["/status", "/think nonsense", "/attach /no/such/file", "/nope"] {
+            f.type_text(line);
+            f.input.key(Key::Enter);
+        }
+        let commands = std::mem::take(&mut f.inner().commands);
+        let lines: Vec<(&str, bool)> = commands
+            .iter()
+            .map(|run| (run.line.as_str(), run.failed))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("/status", false),
+                ("/think nonsense", true),
+                ("/attach /no/such/file", true),
+                ("/nope", true),
+            ]
+        );
+        assert!(commands[0].output.is_some());
+        // What only the main thread can run is recorded there.
+        f.type_text("/new");
+        f.input.key(Key::Enter);
+        assert!(f.inner().commands.is_empty());
     }
 
     #[test]

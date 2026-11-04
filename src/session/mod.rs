@@ -113,6 +113,41 @@ pub struct CutOff {
     pub call: bool,
 }
 
+/// A slash command the human ran (AGL-047, D5): the line, whether it failed
+/// and what it said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandRun {
+    pub line: String,
+    pub failed: bool,
+    pub output: Option<String>,
+}
+
+impl CommandRun {
+    /// What the model reads of it (AGL-047, D5), when anything: a failure in
+    /// full, so that it can help; of `/help` and `/status` the fact alone,
+    /// their output being no use in the context; `/quit`, `/exit` and `/new`
+    /// leave the session. The prefix is added where the message is rendered.
+    fn message(&self) -> Option<String> {
+        let name = self.line.split_whitespace().next().unwrap_or(&self.line);
+        let ran = format!("the human ran: {}", self.line);
+        let output = self.output.as_deref().filter(|output| !output.is_empty());
+        if self.failed {
+            return Some(match output {
+                Some(output) => format!("{ran}\nfailed: {output}"),
+                None => format!("{ran}\nfailed"),
+            });
+        }
+        match name {
+            "/quit" | "/exit" | "/new" => None,
+            "/help" | "/status" => Some(ran),
+            _ => Some(match output {
+                Some(output) => format!("{ran}\n{output}"),
+                None => ran,
+            }),
+        }
+    }
+}
+
 /// A session event (D104). The header line is not an event.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -169,6 +204,8 @@ pub enum Event {
         summary: String,
         question: Option<String>,
     },
+    /// A slash command the human ran (AGL-047, D5).
+    Command(CommandRun),
 }
 
 /// Where an unfinished turn continues (D105).
@@ -362,8 +399,7 @@ impl Session {
     }
 
     /// The next prompt reads the index anew: after a compaction, when the
-    /// cache is lost anyway, and after `/remember`, whose write the model
-    /// has in no other way (AGL-047).
+    /// cache is lost anyway (AGL-047, D2).
     pub fn renew_memory_index(&mut self) {
         self.memory_index = None;
     }
@@ -432,6 +468,11 @@ impl Session {
                 Event::CutOff(cut) => {
                     thinking = None;
                     messages.push(Message::Runtime(cut_off_notice(cut)));
+                }
+                Event::Command(run) => {
+                    if let Some(text) = run.message() {
+                        messages.push(Message::Runtime(text));
+                    }
                 }
                 Event::State(_)
                 | Event::Stop(_)
@@ -657,6 +698,13 @@ fn event_json(event: &Event) -> Json {
             json
         }
         Event::Stir { attempt, error } => json!({"type": "stir", "attempt": attempt, "error": error}),
+        Event::Command(run) => {
+            let mut json = json!({"type": "command", "line": run.line, "failed": run.failed});
+            if let Some(output) = &run.output {
+                json["output"] = output.as_str().into();
+            }
+            json
+        }
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact { summary, question } => {
             let mut json = json!({"type": "compact", "summary": summary});
@@ -742,6 +790,11 @@ fn event_from_json(json: &Json) -> Option<Event> {
             section: text("section"),
         },
         "answer" => Event::Answer(text("text")?),
+        "command" => Event::Command(CommandRun {
+            line: text("line")?,
+            failed: json["failed"].as_bool()?,
+            output: text("output"),
+        }),
         "cut_off" => {
             let count = |key: &str| u32::try_from(json[key].as_u64()?).ok();
             Event::CutOff(CutOff {

@@ -366,6 +366,14 @@ impl Presenter {
                         self.show_state(state);
                     }
                 }
+                Event::Command(run) => {
+                    let role = if run.failed {
+                        Role::StatusFailure
+                    } else {
+                        Role::Muted
+                    };
+                    self.show_notice(&run.line, role);
+                }
                 Event::Thinking(thinking) => self.show_thinking(thinking),
                 Event::Call { text, call } => {
                     if let Some(text) = text {

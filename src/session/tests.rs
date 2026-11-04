@@ -600,3 +600,58 @@ fn the_memory_event_round_trips_and_is_not_part_of_the_history() {
     assert_eq!(reopened.events, events);
     assert_eq!(reopened.history().len(), 1);
 }
+
+fn command(line: &str, failed: bool, output: Option<&str>) -> Event {
+    Event::Command(CommandRun {
+        line: line.into(),
+        failed,
+        output: output.map(str::to_owned),
+    })
+}
+
+#[test]
+fn a_command_is_kept_whole_and_the_model_reads_what_helps() {
+    // AGL-047, D5.
+    let dir = std::env::temp_dir().join(format!("agentLIBRE-commands-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let mut session = Session::create(&dir, "f", Path::new("/w")).unwrap();
+    let events = [
+        command("/help", false, Some("a long help")),
+        command("/status", false, Some("the status")),
+        command("/think low", false, Some("level: low")),
+        command("/remember tea | Green.", false, Some("Remembered `tea`.")),
+        command("/attach gone.png", true, Some("gone.png does not exist")),
+        command("/nope", true, None),
+        command("/new", false, None),
+        command("/quit", false, None),
+    ];
+    for event in events.clone() {
+        session.append(event).unwrap();
+    }
+    let runtime: Vec<String> = session
+        .history()
+        .into_iter()
+        .map(|message| match message {
+            Message::Runtime(text) => text,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        runtime,
+        [
+            "the human ran: /help",
+            "the human ran: /status",
+            "the human ran: /think low\nlevel: low",
+            "the human ran: /remember tea | Green.\nRemembered `tea`.",
+            "the human ran: /attach gone.png\nfailed: gone.png does not exist",
+            "the human ran: /nope\nfailed",
+        ]
+    );
+    // The file holds all of it, what the prompt leaves out too.
+    let reopened = Session::open(&dir, &session.id).unwrap();
+    assert_eq!(reopened.events, events);
+    // A command is no reason to compact.
+    assert!(!session.compactable());
+    let _ = fs::remove_dir_all(&dir);
+}
+

@@ -15,7 +15,7 @@ use crate::i18n::{m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
 use crate::phase::{Observer, PhaseEvent};
-use crate::session::{Event, Session, StopReason};
+use crate::session::{CommandRun, Event, Session, StopReason};
 use crate::status::{
     Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
 };
@@ -70,9 +70,18 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         }
         if message.starts_with('/') {
             let name = message.split_whitespace().next().unwrap_or(message);
+            // What the command says goes to the session too (AGL-047, D5).
+            let mut said = Said::default();
             match name {
-                "/quit" | "/exit" => break,
-                "/help" => outln!("{}", help_text(lang, false)),
+                "/quit" | "/exit" => {
+                    said.record(&mut session, message);
+                    break;
+                }
+                "/help" => {
+                    let text = help_text(lang, false);
+                    outln!("{text}");
+                    said.output.push(text.to_string());
+                }
                 "/status" => {
                     let info = Info {
                         session: session.id.clone(),
@@ -80,7 +89,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         unfinished: session.unfinished().and_then(|turn| turn.state),
                         context,
                     };
-                    outln!("{}", status_text(&facts, &info, reasoning, lang));
+                    let text = status_text(&facts, &info, reasoning, lang);
+                    outln!("{text}");
+                    said.output.push(text.to_string());
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
                     Remember::Entry { name, text } => match memory.write() {
@@ -95,49 +106,52 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                                         kind: write.kind,
                                         text: write.text.clone(),
                                     })?;
-                                    session.renew_memory_index();
                                     StderrReport::new(lang).memory(
                                         &write.name,
                                         write.kind,
                                         write.text.as_deref(),
                                     );
+                                    said.output.push(format!("Remembered `{}`.", write.name));
                                 }
-                                (result, None) => eprintln!(
-                                    "{}",
+                                (result, None) => said.fail(
                                     tr!(lang, m::REMEMBER_FAILED, reason = result.content)
+                                        .to_string(),
                                 ),
                             }
                         }
-                        Err(error) => eprintln!(
-                            "{}",
+                        Err(error) => said.fail(
                             tr!(lang, m::REMEMBER_FAILED, reason = error.message(lang))
+                                .to_string(),
                         ),
                     },
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
-                        eprintln!("{}", tr!(lang, m::REMEMBER_USAGE));
+                        said.fail(tr!(lang, m::REMEMBER_USAGE).to_string());
                     }
                 },
                 "/attach" => {
                     let path = unquote(message["/attach".len()..].trim());
                     if path.is_empty() {
-                        eprintln!("{}", tr!(lang, m::ATTACH_USAGE));
+                        said.fail(tr!(lang, m::ATTACH_USAGE).to_string());
                     } else {
                         match Source::from_file(std::path::Path::new(path)) {
                             Ok(source) => {
                                 let name = source.name.clone();
                                 let placeholder = attach::add(&session, &mut pending, source);
-                                eprintln!(
-                                    "{}",
+                                let text =
                                     tr!(lang, m::ATTACHED, placeholder = placeholder, name = name)
-                                );
+                                        .to_string();
+                                eprintln!("{text}");
+                                said.output.push(text);
                                 placeholders.push(placeholder);
                             }
-                            Err(error) => eprintln!("agl: {}", error.message(lang)),
+                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
                         }
                     }
                 }
                 "/new" => {
+                    said.record(&mut session, message);
+                    said = Said::recorded();
                     session = Session::create(sessions_dir, function_name, &workspace)?;
                     pending.clear();
                     placeholders.clear();
@@ -164,15 +178,19 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         .compact(&mut StderrReport::new(lang))
                     });
                     let interrupted = matches!(result, Err(Error::Interrupted));
-                    if let Some((text, _)) = compact_notice(result, function, lang) {
+                    if let Some((text, role)) = compact_notice(result, function, lang) {
                         eprintln!("{text}");
+                        said.failed = role != crate::theme::Role::Muted;
+                        said.output.push(text);
                     }
                     if interrupted {
+                        said.record(&mut session, message);
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
                     }
                 }
-                _ => eprintln!("{}", tr!(lang, m::UNKNOWN_COMMAND, name = name)),
+                _ => said.fail(tr!(lang, m::UNKNOWN_COMMAND, name = name).to_string()),
             }
+            said.record(&mut session, message);
             continue;
         }
         let mut report = StderrReport::new(lang);
@@ -253,6 +271,42 @@ fn unquote(path: &str) -> &str {
         }
     }
     path
+}
+
+/// What a slash command said, for the session (AGL-047, D5).
+#[derive(Default)]
+struct Said {
+    output: Vec<String>,
+    failed: bool,
+    recorded: bool,
+}
+
+impl Said {
+    /// For a command already written to the session it leaves, as `/new`.
+    fn recorded() -> Said {
+        Said {
+            recorded: true,
+            ..Said::default()
+        }
+    }
+
+    fn fail(&mut self, text: String) {
+        eprintln!("{text}");
+        self.output.push(text);
+        self.failed = true;
+    }
+
+    /// A session that cannot be written to says so at the next turn.
+    fn record(&self, session: &mut Session, line: &str) {
+        if self.recorded {
+            return;
+        }
+        let _ = session.append(Event::Command(CommandRun {
+            line: line.to_owned(),
+            failed: self.failed,
+            output: Some(self.output.join("\n")).filter(|output| !output.is_empty()),
+        }));
+    }
 }
 
 #[cfg(test)]
