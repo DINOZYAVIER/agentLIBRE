@@ -596,22 +596,8 @@ fn render_call(out: &mut String, format: &Format, name: &str, args: &[(String, V
     out.push_str(&call.begin_before);
     out.push_str(name);
     out.push_str(&call.begin_after);
-    for (param, value) in args {
-        out.push_str(&call.param_before);
-        out.push_str(param);
-        out.push_str(&call.param_between);
-        out.push_str(&value_string(value));
-        out.push_str(&call.param_after);
-    }
+    call.write_args(out, args);
     out.push_str(&call.end);
-}
-
-/// A parameter value as the model writes it.
-fn value_string(value: &Value) -> String {
-    match value {
-        Value::Text(text) => text.clone(),
-        Value::Int(n) => n.to_string(),
-    }
 }
 
 /// A tool doc as a text block of the flat prompt (AGL-030, D2).

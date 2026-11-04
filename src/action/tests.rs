@@ -1,5 +1,5 @@
 use super::*;
-use crate::format::tests::qwen;
+use crate::format::tests::{gemma, qwen};
 use crate::grammar::matcher::matches;
 use crate::grammar::pattern;
 use crate::test_server::with_big_stack;
@@ -16,16 +16,7 @@ fn render(format: &Format, action: &Action) -> String {
         .map(|t| format!("{t}\n\n"))
         .unwrap_or_default();
     out += &format!("{}{tool}{}", call.begin_before, call.begin_after);
-    for (name, value) in args {
-        let value = match value {
-            Value::Text(text) => text.clone(),
-            Value::Int(n) => n.to_string(),
-        };
-        out.push_str(&format!(
-            "{}{name}{}{value}{}",
-            call.param_before, call.param_between, call.param_after
-        ));
-    }
+    call.write_args(&mut out, args);
     out + &call.end
 }
 
@@ -469,4 +460,113 @@ fn a_tool_with_optional_parameters_is_in_the_order_the_model_reads_them() {
             assert_eq!(names, sorted, "{}", tool.name);
         }
     }
+}
+
+/// Checks a Gemma call against the grammar and the parser (AGL-050).
+fn check_gemma(actions: &Actions, output: &str, expected: &Action) {
+    let format = gemma();
+    let (grammar, root) = grammar(&format, actions);
+    assert!(matches(&grammar, &root, output), "grammar rejects {output:?}");
+    assert_eq!(parse(&format, actions, output).as_ref(), Ok(expected));
+    assert_eq!(render(&format, expected), output);
+}
+
+fn gemma_accepts(actions: &Actions, output: &str) -> bool {
+    let (grammar, root) = grammar(&gemma(), actions);
+    matches(&grammar, &root, output)
+}
+
+#[test]
+fn gemma_writes_integers_bare_after_a_comma() {
+    with_big_stack(|| {
+        let actions = builtin(true);
+        check_gemma(
+            &actions,
+            "<|tool_call>call:bash{command:<|\"|>ls -a<|\"|>,timeout:5}<tool_call|>",
+            &call("bash", &[("command", text("ls -a")), ("timeout", Value::Int(5))]),
+        );
+        check_gemma(
+            &actions,
+            "<|tool_call>call:bash{command:<|\"|>ls<|\"|>}<tool_call|>",
+            &call("bash", &[("command", text("ls"))]),
+        );
+        // Marks around an integer, or no comma, are not the model's language.
+        for output in [
+            "<|tool_call>call:bash{command:<|\"|>ls<|\"|>,timeout:<|\"|>5<|\"|>}<tool_call|>",
+            "<|tool_call>call:bash{command:<|\"|>ls<|\"|>timeout:5}<tool_call|>",
+            "<|tool_call>call:bash{,command:<|\"|>ls<|\"|>}<tool_call|>",
+        ] {
+            assert!(!gemma_accepts(&actions, output), "grammar accepts {output:?}");
+        }
+    });
+}
+
+#[test]
+fn gemma_has_no_comma_before_the_first_parameter_written() {
+    with_big_stack(|| {
+        // `language` and `limit` are optional and come before the required ones.
+        let actions = builtin(true);
+        check_gemma(
+            &actions,
+            "<|tool_call>call:search{query:<|\"|>q<|\"|>,source:<|\"|>wikipedia<|\"|>}<tool_call|>",
+            &call("search", &[("query", text("q")), ("source", text("wikipedia"))]),
+        );
+        check_gemma(
+            &actions,
+            "<|tool_call>call:search{limit:3,query:<|\"|>q<|\"|>,source:<|\"|>wikipedia<|\"|>}<tool_call|>",
+            &call(
+                "search",
+                &[("limit", Value::Int(3)), ("query", text("q")), ("source", text("wikipedia"))],
+            ),
+        );
+        check_gemma(
+            &actions,
+            "<|tool_call>call:memory{action:<|\"|>list<|\"|>,text:<|\"|>a, b: c<|\"|>}<tool_call|>",
+            &call("memory", &[("action", text("list")), ("text", text("a, b: c"))]),
+        );
+    });
+}
+
+#[test]
+fn gemma_values_keep_what_looks_like_its_language() {
+    with_big_stack(|| {
+        let actions = builtin(true);
+        let code = "fn f() { g(\"<|tool\", a, b) } // <tool_call";
+        check_gemma(
+            &actions,
+            &format!("<|tool_call>call:view{{path:<|\"|>{code}<|\"|>}}<tool_call|>"),
+            &call("view", &[("path", text(code))]),
+        );
+    });
+}
+
+#[test]
+fn gemma_cut_off_calls_are_incomplete() {
+    let format = gemma();
+    let actions = builtin(true);
+    for output in [
+        "<|tool_call>call:bash{command:<|\"|>ls",
+        "<|tool_call>call:bash{command:<|\"|>ls<|\"|>,timeout:5",
+        "<|tool_call>call:bash{command:<|\"|>ls<|\"|>,time",
+    ] {
+        assert_eq!(parse(&format, &actions, output), Err(ParseError::Incomplete), "{output:?}");
+    }
+}
+
+#[test]
+fn gemma_answers_with_text_before_a_call() {
+    with_big_stack(|| {
+        let actions = builtin(true);
+        check_gemma(&actions, "The answer is 42.", &Action::Answer("The answer is 42.".into()));
+        let (format, output) = (gemma(), "I will look.<|tool_call>call:view{path:<|\"|>a<|\"|>}<tool_call|>");
+        assert!(gemma_accepts(&actions, output));
+        assert_eq!(
+            parse(&format, &actions, output),
+            Ok(Action::Call {
+                text: Some("I will look.".into()),
+                tool: "view".into(),
+                args: vec![("path".into(), text("a"))],
+            })
+        );
+    });
 }

@@ -9,6 +9,7 @@ let
     };
     formats = {
       "qwen3.8" = import ./formats/qwen3.8.nix;
+      gemma4 = import ./formats/gemma4.nix;
     };
     models = {
       "qwen3.8-27b-iq4_xs" = import ./models/qwen3.8-27b-iq4_xs.nix { inherit agl; };

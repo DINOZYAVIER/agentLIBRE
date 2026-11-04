@@ -1,6 +1,7 @@
 //! Model formats: how a model writes thinking and tool calls (D12, D23,
 //! D77, D78, D81).
 
+use crate::action::{Kind, Value};
 use crate::error::{Error, TemplateProblem};
 use crate::nix::Section;
 
@@ -19,6 +20,9 @@ pub struct Format {
 pub struct Think {
     pub open: String,
     pub close: String,
+    /// The block of a step without thinking: `open` + `close` unless the
+    /// template writes it otherwise (AGL-050).
+    pub empty: String,
 }
 
 /// The call templates, split at their placeholders.
@@ -34,7 +38,45 @@ pub struct Call {
     pub param_between: String,
     /// Text after `{value}` in `param`: it ends every value.
     pub param_after: String,
+    /// The same three of an integer, from `int_param`; those of `param`
+    /// without one. A model may write integers bare, with nothing after the
+    /// value (AGL-050).
+    pub int_before: String,
+    pub int_between: String,
+    pub int_after: String,
+    /// Text between two parameters (AGL-050).
+    pub separator: String,
     pub end: String,
+}
+
+impl Call {
+    /// The text before the name, between the name and the value, and after
+    /// the value of a parameter of `kind`.
+    pub fn param_parts(&self, kind: Kind) -> (&str, &str, &str) {
+        match kind {
+            Kind::Text => (&self.param_before, &self.param_between, &self.param_after),
+            Kind::Int => (&self.int_before, &self.int_between, &self.int_after),
+        }
+    }
+
+    /// Writes `args` as the model writes them.
+    pub fn write_args(&self, out: &mut String, args: &[(String, Value)]) {
+        for (i, (name, value)) in args.iter().enumerate() {
+            if i > 0 {
+                out.push_str(&self.separator);
+            }
+            let (kind, text) = match value {
+                Value::Text(text) => (Kind::Text, text.clone()),
+                Value::Int(n) => (Kind::Int, n.to_string()),
+            };
+            let (before, between, after) = self.param_parts(kind);
+            out.push_str(before);
+            out.push_str(name);
+            out.push_str(between);
+            out.push_str(&text);
+            out.push_str(after);
+        }
+    }
 }
 
 impl Format {
@@ -46,7 +88,7 @@ impl Format {
         let think = match file.section("think")? {
             None => None,
             Some(mut think) => {
-                think.check_keys(&["open", "close"])?;
+                think.check_keys(&["open", "close", "empty"])?;
                 let mut take = |key| {
                     let text = think.required_string(key)?;
                     if text.is_empty() {
@@ -56,12 +98,19 @@ impl Format {
                 };
                 let open = take("open")?;
                 let close = take("close")?;
-                Some(Think { open, close })
+                let empty = match think.string("empty")? {
+                    Some(empty) if empty.is_empty() => {
+                        return Err(template_error(&think, "empty", TemplateProblem::Empty));
+                    }
+                    Some(empty) => empty,
+                    None => format!("{open}{close}"),
+                };
+                Some(Think { open, close, empty })
             }
         };
 
         let mut call = file.required_section("call")?;
-        call.check_keys(&["begin", "param", "end"])?;
+        call.check_keys(&["begin", "param", "int_param", "separator", "end"])?;
         let begin = call.required_string("begin")?;
         let [begin_before, begin_after]: [String; 2] = split(&begin, &[NAME], &[VALUE])
             .map_err(|problem| template_error(&call, "begin", problem))?
@@ -87,6 +136,14 @@ impl Format {
                 TemplateProblem::NothingAfterValue,
             ));
         }
+        let [int_before, int_between, int_after]: [String; 3] = match call.string("int_param")? {
+            None => [param_before.clone(), param_between.clone(), param_after.clone()],
+            Some(int_param) => split(&int_param, &[NAME, VALUE], &[])
+                .map_err(|problem| template_error(&call, "int_param", problem))?
+                .try_into()
+                .unwrap(),
+        };
+        let separator = call.string("separator")?.unwrap_or_default();
         let end = call.required_string("end")?;
         split(&end, &[], &[NAME, VALUE])
             .map_err(|problem| template_error(&call, "end", problem))?;
@@ -98,6 +155,10 @@ impl Format {
                 param_before,
                 param_between,
                 param_after,
+                int_before,
+                int_between,
+                int_after,
+                separator,
                 end,
             },
         })
@@ -110,19 +171,15 @@ impl Format {
     /// `enable_thinking = false` (AGL-013), is replaced. Formats without
     /// `think` leave the prompt as it is.
     pub fn start_step(&self, mut prompt: String, think: bool) -> String {
-        let Some(Think { open, close }) = &self.think else {
+        let Some(Think { open, empty, .. }) = &self.think else {
             return prompt;
         };
-        let empty_block = format!("{open}{close}");
-        if prompt.ends_with(empty_block.as_str()) {
-            prompt.truncate(prompt.len() - empty_block.len());
+        if prompt.ends_with(empty.as_str()) {
+            prompt.truncate(prompt.len() - empty.len());
         } else if prompt.ends_with(open.as_str()) {
             prompt.truncate(prompt.len() - open.len());
         }
-        prompt.push_str(open);
-        if !think {
-            prompt.push_str(close);
-        }
+        prompt.push_str(if think { open } else { empty });
         prompt
     }
 
@@ -199,6 +256,30 @@ pub mod tests {
         parse(qwen_value()).unwrap()
     }
 
+    /// The Gemma 4 format, as `nix/formats/gemma4.nix` writes it (the test
+    /// `builtin_gemma_is_the_nix_one` keeps the two the same).
+    pub fn gemma_value() -> Value {
+        json!({
+            "think": {
+                "open": "<|channel>thought\n",
+                "close": "\n<channel|>",
+                "empty": "<|channel>thought\n<channel|>",
+            },
+            "call": {
+                "begin": "<|tool_call>call:{name}{",
+                "param": "{name}:<|\"|>{value}<|\"|>",
+                "int_param": "{name}:{value}",
+                "separator": ",",
+                "end": "}<tool_call|>",
+            },
+        })
+    }
+
+    /// The built-in Gemma 4 format.
+    pub fn gemma() -> Format {
+        parse(gemma_value()).unwrap()
+    }
+
     fn parse(value: Value) -> Result<Format, Error> {
         Format::from_section(Section::top(Path::new("f.nix"), value).unwrap())
     }
@@ -221,6 +302,43 @@ pub mod tests {
     }
 
     #[test]
+    fn builtin_gemma_is_the_nix_one() {
+        let evaluated = crate::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.gemma4").unwrap();
+        assert_eq!(evaluated, gemma_value());
+    }
+
+    #[test]
+    fn gemma_writes_a_call_as_its_template_does() {
+        let format = gemma();
+        let mut out = String::new();
+        format.call.write_args(
+            &mut out,
+            &[
+                ("command".into(), crate::action::Value::Text("ls -a".into())),
+                ("timeout".into(), crate::action::Value::Int(5)),
+            ],
+        );
+        assert_eq!(out, "command:<|\"|>ls -a<|\"|>,timeout:5");
+        assert_eq!(format.call.begin_before, "<|tool_call>call:");
+        assert_eq!(format.call.begin_after, "{");
+        assert_eq!(format.call.end, "}<tool_call|>");
+    }
+
+    #[test]
+    fn gemma_starts_a_step_as_its_template_does() {
+        let format = gemma();
+        let base = "<|turn>model\n";
+        let open = "<|turn>model\n<|channel>thought\n";
+        let empty = "<|turn>model\n<|channel>thought\n<channel|>";
+        // The template opens thinking after a tool response, or fills an
+        // empty block without thinking; the first step has neither.
+        for rendered in [base, open, empty] {
+            assert_eq!(format.start_step(rendered.into(), true), open);
+            assert_eq!(format.start_step(rendered.into(), false), empty);
+        }
+    }
+
+    #[test]
     fn builtin_qwen() {
         let format = qwen();
         assert_eq!(
@@ -228,6 +346,7 @@ pub mod tests {
             Some(Think {
                 open: "<think>\n".into(),
                 close: "\n</think>\n\n".into(),
+                empty: "<think>\n\n</think>\n\n".into(),
             })
         );
         assert_eq!(
@@ -238,6 +357,10 @@ pub mod tests {
                 param_before: "<parameter=".into(),
                 param_between: ">\n".into(),
                 param_after: "\n</parameter>\n".into(),
+                int_before: "<parameter=".into(),
+                int_between: ">\n".into(),
+                int_after: "\n</parameter>\n".into(),
+                separator: String::new(),
                 end: "</function>\n</tool_call>".into(),
             }
         );
@@ -329,6 +452,12 @@ pub mod tests {
         assert_eq!(
             problem(call("<c {name}>", ok_param, "</c {name}>")),
             ("call.end".into(), Unexpected("{name}"))
+        );
+        assert_eq!(
+            problem(json!({ "call": {
+                "begin": "<c {name}>", "param": ok_param, "int_param": "{name}", "end": "</c>",
+            } })),
+            ("call.int_param".into(), Missing("{value}"))
         );
         assert_eq!(
             problem(json!({ "think": { "open": "", "close": "x" }, "call": super::tests::call() })),

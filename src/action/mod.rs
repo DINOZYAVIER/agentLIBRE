@@ -222,6 +222,7 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
     for tool in &actions.tools {
         let begin = format!("{}{}{}", call.begin_before, tool.name, call.begin_after);
         let mut items = vec![Expr::literal(&begin)];
+        let mut params = Vec::new();
         for param in &tool.params {
             let value = match &param.constraint {
                 Constraint::Text => text_value
@@ -231,21 +232,18 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
                 Constraint::Int { min, max } => int_range(*min, *max).expect("min <= max"),
                 Constraint::Pattern(expr) => expr.clone(),
             };
-            let header = format!("{}{}{}", call.param_before, param.name, call.param_between);
-            let item = Expr::Seq(vec![
-                Expr::literal(&header),
-                value,
-                Expr::literal(&call.param_after),
-            ]);
-            items.push(if param.required {
-                item
-            } else {
-                Expr::Repeat {
-                    expr: Box::new(item),
-                    min: 0,
-                    max: Some(1),
-                }
-            });
+            let (before, between, after) = call.param_parts(param.kind);
+            let header = format!("{before}{}{between}", param.name);
+            let mut item = vec![Expr::literal(&header), value];
+            if !after.is_empty() {
+                item.push(Expr::literal(after));
+            }
+            params.push((param.required, Expr::Seq(item)));
+        }
+        if call.separator.is_empty() {
+            items.extend(following_params(&params, ""));
+        } else {
+            items.push(separated_params(&params, &call.separator));
         }
         items.push(Expr::literal(&call.end));
         alts.push(grammar.rule("call", Expr::Seq(items)));
@@ -270,6 +268,47 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
         Expr::Alt(root)
     };
     (grammar, root)
+}
+
+/// The parameters that may come after others: each is written after
+/// `separator`, an optional one may be missing.
+fn following_params(params: &[(bool, Expr)], separator: &str) -> Vec<Expr> {
+    params
+        .iter()
+        .map(|(required, item)| {
+            let item = if separator.is_empty() {
+                item.clone()
+            } else {
+                Expr::Seq(vec![Expr::literal(separator), item.clone()])
+            };
+            if *required {
+                item
+            } else {
+                Expr::Repeat {
+                    expr: Box::new(item),
+                    min: 0,
+                    max: Some(1),
+                }
+            }
+        })
+        .collect()
+}
+
+/// All the parameters of a call in a format with a separator (AGL-050): the
+/// first one written has none before it, whichever optional ones are missing
+/// before it.
+fn separated_params(params: &[(bool, Expr)], separator: &str) -> Expr {
+    let Some(((required, item), tail)) = params.split_first() else {
+        return Expr::Seq(Vec::new());
+    };
+    let mut taken = vec![item.clone()];
+    taken.extend(following_params(tail, separator));
+    let taken = Expr::Seq(taken);
+    if *required {
+        taken
+    } else {
+        Expr::Alt(vec![taken, separated_params(tail, separator)])
+    }
 }
 
 /// Maps the response of a structured generation to an action by its
@@ -401,7 +440,9 @@ pub fn parse(format: &Format, actions: &Actions, output: &str) -> Result<Action,
     )?;
     let mut args = Vec::new();
     for param in &tool.params {
-        let header = format!("{}{}{}", call.param_before, param.name, call.param_between);
+        let (before, between, after) = call.param_parts(param.kind);
+        let separator = if args.is_empty() { "" } else { call.separator.as_str() };
+        let header = format!("{separator}{before}{}{between}", param.name);
         if !param.required && !cursor.rest().starts_with(&header) {
             // A cut-off header cannot be anything else.
             if !cursor.rest().is_empty() && header.starts_with(cursor.rest()) {
@@ -415,18 +456,29 @@ pub fn parse(format: &Format, actions: &Actions, output: &str) -> Result<Action,
                 let value = cursor.choose(
                     values
                         .iter()
-                        .map(|value| (format!("{value}{}", call.param_after), value)),
+                        .map(|value| (format!("{value}{after}"), value)),
                 )?;
                 value.clone()
+            }
+            // A bare integer ends where its digits do (AGL-050); a call
+            // always goes on after it.
+            _ if after.is_empty() => {
+                let len = cursor
+                    .rest()
+                    .find(|c: char| !c.is_ascii_digit() && c != '-')
+                    .ok_or(ParseError::Incomplete)?;
+                let value = cursor.rest()[..len].to_owned();
+                cursor.pos += len;
+                value
             }
             // Text values end at the first `param_after` by grammar; the
             // others cannot contain it (D72).
             _ => {
-                let Some(len) = cursor.rest().find(&call.param_after) else {
+                let Some(len) = cursor.rest().find(after) else {
                     return Err(ParseError::Incomplete);
                 };
                 let value = cursor.rest()[..len].to_owned();
-                cursor.pos += len + call.param_after.len();
+                cursor.pos += len + after.len();
                 value
             }
         };
