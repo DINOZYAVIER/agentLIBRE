@@ -17,6 +17,7 @@ use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::media;
+use crate::phase::{Observed, Observer, PhaseEvent, StepRecord, Transition};
 use crate::search::Searcher;
 use crate::session::{CutOff, Event, ForgeKind, INTERRUPTED, Session, StopReason};
 use crate::tools::{self, ForgeEnv, ToolResult};
@@ -60,7 +61,16 @@ pub trait Report {
     /// step, of at most `max`, after the malformed output named by `error`
     /// (AGL-030, D4; AGL-043 F8).
     fn stirred(&mut self, _attempt: u32, _max: u32, _error: &str) {}
+    /// A compaction that started made no summary (AGL-046).
+    fn compact_failed(&mut self) {}
+    /// A transition of the FSM during the turn (AGL-046).
+    fn transition(&mut self, _transition: &Transition) {}
+    /// What a step's prompt is made of (AGL-046, D15).
+    fn step_started(&mut self, _record: &StepRecord) {}
 }
+
+/// What starts the runtime message with the index of the memory.
+const MEMORY_MESSAGE: &str = "workspace memory\n";
 
 /// How a turn ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -113,9 +123,35 @@ pub struct Agent<'a> {
 }
 
 impl Agent<'_> {
-    /// Runs the turn for the user `message`. A stop is logged; a server
-    /// error is logged as a stop and returned.
+    /// Runs the turn for the user `message`, with an observer of its own.
+    #[cfg(test)]
     pub fn turn(&mut self, message: &str, report: &mut dyn Report) -> Result<TurnEnd, Error> {
+        let mut observer = Observer::new();
+        observer.attach(self.session);
+        self.turn_observed(message, report, &mut observer)
+    }
+
+    /// Runs the turn for the user `message`. A stop is logged; a server
+    /// error is logged as a stop and returned. `observer` saw what came
+    /// before the turn: the start of the server and the transcription
+    /// (AGL-046, D10).
+    pub fn turn_observed(
+        &mut self,
+        message: &str,
+        report: &mut dyn Report,
+        observer: &mut Observer,
+    ) -> Result<TurnEnd, Error> {
+        let mut observed = Observed { observer, report };
+        let end = self.run_turn(message, &mut observed);
+        match &end {
+            Ok(TurnEnd::Answer(_)) => {}
+            Ok(TurnEnd::Stopped(reason)) => observed.end(PhaseEvent::Stop(*reason)),
+            Err(_) => observed.end(PhaseEvent::Failed),
+        }
+        end
+    }
+
+    fn run_turn(&mut self, message: &str, report: &mut dyn Report) -> Result<TurnEnd, Error> {
         self.session.append(Event::User(message.into()))?;
         let unfinished = self.session.unfinished().expect("the turn has a message");
         let mut machine = Machine::resume(self.function, self.function_name, &unfinished)?;
@@ -202,13 +238,14 @@ impl Agent<'_> {
         let prompt_tokens = self.backend.count_prompt(&step_prompt, &prompt)?
             + expanded.pictures * self.image_tokens;
         report.context_used(prompt_tokens);
+        self.record_step(report, state, &messages, &tools, &prompt, prompt_tokens, think)?;
         // The early compaction (AGL-038, D6, D9): the history plus the most
         // a step can add and the summary must fit, so the summary fits at
         // the next step too; one that makes no room lets the step run when
         // it fits.
         if function.compact_early
             && prompt_tokens + early_reserve(function, self.context) > self.context
-            && self.compact(report)? == Compaction::Done
+            && self.compact_history(report)? == Compaction::Done
         {
             return Ok(None);
         }
@@ -216,7 +253,7 @@ impl Agent<'_> {
         let needed = prompt_tokens + think_budget + action_budget as usize;
         if needed > self.context {
             // A summary of the history may make room (D139, D140).
-            return match self.compact(report)? {
+            return match self.compact_history(report)? {
                 Compaction::Done => Ok(None),
                 Compaction::Nothing | Compaction::Impossible { .. } => {
                     self.stop(StopReason::ContextFull)
@@ -264,6 +301,7 @@ impl Agent<'_> {
         // it.
         let (grammar, root) = action::grammar(format, &state.actions);
         let grammar_str = grammar.render(&root);
+        self.session.record_input("grammar", &grammar_str)?;
         let mut stream = TextStream::new(&format.call.begin_before);
         let generated = self.backend.generate(
             &Request {
@@ -640,6 +678,55 @@ impl Agent<'_> {
         }
     }
 
+    /// Records what the prompt of a step is made of (AGL-046, D14, D15):
+    /// each part in full when it changed, and the step's hash and budgets.
+    #[allow(clippy::too_many_arguments)]
+    fn record_step(
+        &mut self,
+        report: &mut dyn Report,
+        state: &crate::function::State,
+        messages: &[Message],
+        tools: &[&'static ToolDoc],
+        prompt: &str,
+        prompt_tokens: usize,
+        think: bool,
+    ) -> Result<(), Error> {
+        let function = self.function;
+        if let Some(Message::System(system)) = messages.first() {
+            self.session.record_input("system", system)?;
+        }
+        let tool_docs: Vec<String> = tools
+            .iter()
+            .map(|doc| format!("{}: {} {:?}", doc.name, doc.description, doc.params))
+            .collect();
+        self.session.record_input("tools", &tool_docs.join("\n"))?;
+        let memory = match messages.last() {
+            Some(Message::Runtime(text)) => text.strip_prefix(MEMORY_MESSAGE).unwrap_or(""),
+            _ => "",
+        };
+        self.session.record_input("memory_index", memory)?;
+        self.session
+            .record_input("sampling", &format!("{:?}", function.sampling))?;
+        self.session
+            .record_input("model", &format!("{:?}", function.model))?;
+        report.step_started(&StepRecord {
+            state: &state.name,
+            prompt_sha256: media::sha256_hex(prompt.as_bytes()),
+            prompt_tokens,
+            think,
+            think_budget: if think {
+                function.max_think_tokens as usize
+            } else {
+                0
+            },
+            action_budget: function.action_tokens(self.context),
+            context: self.context,
+            stirred: self.stirred,
+            reasoning: format!("{:?}", self.reasoning),
+        });
+        Ok(())
+    }
+
     /// The messages of a step before its state's instruction: the system
     /// prompt, the history, then the index of the workspace's memory, which
     /// is not stored (AGL-006, M27, M33).
@@ -651,7 +738,7 @@ impl Agent<'_> {
             .read()
             .and_then(|dir| crate::memory::index_text(&dir))
         {
-            messages.push(Message::Runtime(format!("workspace memory\n{index}")));
+            messages.push(Message::Runtime(format!("{MEMORY_MESSAGE}{index}")));
         }
         messages
     }
@@ -755,6 +842,31 @@ impl Agent<'_> {
     /// is kept after the summary, so the turn goes on from the summary and
     /// the question together and the summary need not repeat it (F31).
     pub fn compact(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+        let mut observer = Observer::new();
+        observer.attach_between_turns(self.session);
+        let mut observed = Observed {
+            observer: &mut observer,
+            report,
+        };
+        let result = self.compact_history(&mut observed);
+        observed.end(if result.is_ok() {
+            PhaseEvent::Idle
+        } else {
+            PhaseEvent::Failed
+        });
+        result
+    }
+
+    /// The compaction inside a turn or of [`Agent::compact`].
+    fn compact_history(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+        let result = self.summarize_history(report)?;
+        if matches!(result, Compaction::Impossible { .. }) {
+            report.compact_failed();
+        }
+        Ok(result)
+    }
+
+    fn summarize_history(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
         if !self.session.compactable() {
             return Ok(Compaction::Nothing);
         }
@@ -833,12 +945,13 @@ impl Agent<'_> {
                 summary,
             );
         }
-        report.compacted();
-        // The dock's figure is fresh at once (AGL-043 F7); a failed count
-        // does not undo the compaction, the next step counts again.
+        // The dock's figure is fresh at once (AGL-043 F7) and the row of the
+        // compaction can name it (AGL-046, D13); a failed count does not
+        // undo the compaction, the next step counts again.
         if let Ok(tokens) = self.history_tokens() {
             report.context_used(tokens);
         }
+        report.compacted();
         Ok(Compaction::Done)
     }
 

@@ -9,10 +9,12 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::cli::report::StderrReport;
+use crate::cli::serve::ServerProgress;
 use crate::error::Error;
 use crate::i18n::{m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
+use crate::phase::{Observer, PhaseEvent};
 use crate::session::{Event, Session, StopReason};
 use crate::status::{
     Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
@@ -176,10 +178,18 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         let text = attach::with_placeholders(&placeholders, message);
         placeholders.clear();
         let attached = std::mem::take(&mut pending);
+        // The FSM of the turn sees the start too (AGL-046, D10).
+        let mut observer = Observer::new();
+        observer.attach(&session);
         // The server is started here when it does not answer, at the
         // first request (AGL-015, D10, AGL-024).
         let ready = autostart
-            .ensure(&mut |line| eprintln!("{line}"))
+            .ensure(&mut |progress| match progress {
+                ServerProgress::Starting => {
+                    observer.enter(PhaseEvent::ServerStart, &mut report);
+                }
+                ServerProgress::Line(line) => eprintln!("{line}"),
+            })
             .and_then(|()| backend.context_size());
         let end = ready.and_then(|size| {
             context = Some(size);
@@ -191,7 +201,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 &text,
                 backend,
                 autostart,
-                &mut |line| eprintln!("{line}"),
+                &mut |line| {
+                    observer.enter(PhaseEvent::Transcribe, &mut report);
+                    eprintln!("{line}");
+                },
             )?;
             Agent {
                 function,
@@ -208,8 +221,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 search,
                 memory,
             }
-            .turn(&text, &mut report)
+            .turn_observed(&text, &mut report, &mut observer)
         });
+        // A start that failed never reached the agent.
+        observer.end(PhaseEvent::Failed, &mut report);
         state = None;
         match end {
             Ok(TurnEnd::Answer(text)) => outln!("{text}"),

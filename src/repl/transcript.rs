@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::dock::grouped;
 use super::markdown;
 use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::action::{Outcome, Value};
@@ -13,6 +14,7 @@ use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::media::{Kind as MediaKind, Media};
+use crate::phase::{Phase, PhaseEvent, Transition};
 use crate::session::{CutOff, Event, ForgeKind};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
@@ -37,6 +39,25 @@ pub enum Activity {
     Compacting,
     /// A stir of the stirred mode: the step is tried again.
     Retry { attempt: u32, max: u32 },
+}
+
+impl Activity {
+    /// Its name, in the dock and on the rule of a step (AGL-045).
+    pub fn label(&self, lang: Lang) -> String {
+        match self {
+            Activity::Ready => tr!(lang, m::READY).to_string(),
+            Activity::StartingServer => tr!(lang, m::STARTING_SERVER).to_string(),
+            Activity::Transcribing => tr!(lang, m::TRANSCRIBING_ACTIVITY).to_string(),
+            Activity::Prefill => tr!(lang, m::PREFILL).to_string(),
+            Activity::Thinking => tr!(lang, m::THINKING_ACTIVITY).to_string(),
+            Activity::Writing => tr!(lang, m::WRITING).to_string(),
+            Activity::Retry { attempt, max } => {
+                tr!(lang, m::RETRY, attempt = attempt, max = max)
+            }
+            Activity::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
+            Activity::Compacting => tr!(lang, m::COMPACTING).to_string(),
+        }
+    }
 }
 
 /// Where the transcript is drawn: above the dock.
@@ -79,7 +100,22 @@ pub struct Presenter {
     settings: ReplSettings,
     lang: Lang,
     turn_started: Instant,
-    call_started: Instant,
+    /// The finished phases of the step, with their times, from the FSM of
+    /// the turn (AGL-045, AGL-046).
+    phases: Vec<(Activity, Duration)>,
+    /// What the dock says now.
+    activity: Activity,
+    /// The time of the last tool call and of the last compaction.
+    tool_time: Duration,
+    compact_time: Option<Duration>,
+    /// The prompt's last size, the one when a compaction began, and whether
+    /// the last size came after that begin (AGL-046, D13).
+    context: Option<usize>,
+    compact_before: Option<usize>,
+    context_fresh: bool,
+    /// Whether the turn has entered its first state: only a change of state
+    /// is shown (AGL-046, D13).
+    state_entered: bool,
     thinking: Option<StreamWrap>,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
@@ -103,7 +139,14 @@ impl Presenter {
             settings,
             lang,
             turn_started: Instant::now(),
-            call_started: Instant::now(),
+            phases: Vec::new(),
+            activity: Activity::Ready,
+            tool_time: Duration::ZERO,
+            compact_time: None,
+            context: None,
+            compact_before: None,
+            context_fresh: false,
+            state_entered: false,
             thinking: None,
             action: None,
             generation: None,
@@ -117,19 +160,11 @@ impl Presenter {
         self.screen.activity(Activity::Ready);
     }
 
-    /// The turn's start brings the server up (AGL-043 F2).
-    pub fn set_starting_server(&self) {
-        self.screen.activity(Activity::StartingServer);
-    }
-
-    /// The turn's start transcribes an audio (AGL-043 F2).
-    pub fn set_transcribing(&self) {
-        self.screen.activity(Activity::Transcribing);
-    }
-
     /// A user message starts a turn.
     pub fn begin_turn(&mut self) {
         self.turn_started = Instant::now();
+        self.phases.clear();
+        self.state_entered = false;
         self.generation = None;
         self.turn_tokens = 0;
         self.turn_decoding = Duration::ZERO;
@@ -204,10 +239,15 @@ impl Presenter {
         ));
     }
 
-    /// `[compacted]` where a summary replaced the history (D140).
+    /// The rule where a summary replaced the history (D140; AGL-046, D13):
+    /// what is replayed knows no time and no tokens.
     pub fn show_compacted(&self) {
-        self.screen
-            .print(&[self.theme.paint(Role::Muted, "[compacted]")]);
+        let label = Activity::Compacting.label(self.lang);
+        self.screen.print(&[self.edge(
+            Some(("ok", Role::StatusSuccess)),
+            &[label],
+            Role::Rule,
+        )]);
     }
 
     /// `[forge: …]` where the agent wrote to the forge (AGL-008).
@@ -278,11 +318,13 @@ impl Presenter {
 
     /// The answer between rules, with the time when it is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
-        self.screen.print(&self.answer_lines(text, elapsed, None));
+        let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
+        self.screen
+            .print(&self.answer_lines(text, self.edge(None, &items, Role::InputRule)));
     }
 
     pub fn show_card(&self, call: &ToolCall, result: &ToolResult, elapsed: Option<Duration>) {
-        self.screen.print(&self.card(call, result, elapsed));
+        self.screen.print(&self.card(call, result, elapsed, &[]));
     }
 
     /// A line of the session itself: help, a stop, an error.
@@ -298,10 +340,19 @@ impl Presenter {
     /// Shows what a session already holds (D126).
     pub fn replay(&self, events: &[Event]) {
         let mut calls: Vec<&ToolCall> = Vec::new();
+        let mut state_entered = false;
         for event in events {
             match event {
-                Event::User(message) => self.show_user(message),
-                Event::State(state) => self.show_state(state),
+                Event::User(message) => {
+                    state_entered = false;
+                    self.show_user(message);
+                }
+                // Only a change of state is shown (AGL-046, D13).
+                Event::State(state) => {
+                    if std::mem::replace(&mut state_entered, true) {
+                        self.show_state(state);
+                    }
+                }
                 Event::Thinking(thinking) => self.show_thinking(thinking),
                 Event::Call { text, call } => {
                     if let Some(text) = text {
@@ -342,51 +393,53 @@ impl Presenter {
 
     // Lines.
 
-    fn answer_lines(
-        &self,
-        text: &str,
-        elapsed: Option<Duration>,
-        speed: Option<f64>,
-    ) -> Vec<String> {
+    fn answer_lines(&self, text: &str, edge: String) -> Vec<String> {
         let columns = self.screen.columns();
         let rule = self.theme.paint(Role::InputRule, &"─".repeat(columns));
         let mut lines = vec![String::new(), rule];
         lines.push(String::new());
         lines.extend(markdown::render(text.trim(), columns, &self.theme));
-        lines.push(self.edge(elapsed, speed, Role::InputRule, None));
+        lines.push(edge);
         lines.push(String::new());
         lines
     }
 
-    /// A rule that carries a status, a decoding speed and `Worked for`,
-    /// when known.
-    fn edge(
-        &self,
-        elapsed: Option<Duration>,
-        speed: Option<f64>,
-        role: Role,
-        status: Option<(&str, Role)>,
-    ) -> String {
+    fn worked_for(&self, elapsed: Duration) -> String {
+        tr!(
+            self.lang,
+            m::WORKED_FOR,
+            time = texts::duration(elapsed.as_secs())
+        )
+    }
+
+    /// The phases of a step as items of its rule (AGL-045).
+    fn phase_items(&self, phases: &[(Activity, Duration)]) -> Vec<String> {
+        phases
+            .iter()
+            .map(|(phase, time)| {
+                format!(
+                    "{} {}",
+                    phase.label(self.lang),
+                    texts::duration(time.as_secs())
+                )
+            })
+            .collect()
+    }
+
+    /// A rule that carries a status and the items of the row. A row too
+    /// long for the width is left to wrap (AGL-045).
+    fn edge(&self, status: Option<(&str, Role)>, items: &[String], role: Role) -> String {
         let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
-        if status.is_some() || elapsed.is_some() {
+        if status.is_some() || !items.is_empty() {
             parts.push((" ".into(), role));
             if let Some((text, status_role)) = status {
                 parts.push((text.into(), status_role));
-                if elapsed.is_some() {
+                if !items.is_empty() {
                     parts.push((" · ".into(), role));
                 }
             }
-            if let Some(elapsed) = elapsed {
-                let text = tr!(
-                    self.lang,
-                    m::WORKED_FOR,
-                    time = texts::duration(elapsed.as_secs())
-                );
-                parts.push((text, role));
-            }
-            if let Some(speed) = speed {
-                parts.push((" · ".into(), role));
-                parts.push((texts::speed(speed, self.lang), role));
+            if !items.is_empty() {
+                parts.push((items.join(" · "), role));
             }
             parts.push((" ".into(), role));
         }
@@ -398,7 +451,13 @@ impl Presenter {
             .collect()
     }
 
-    fn card(&self, call: &ToolCall, result: &ToolResult, elapsed: Option<Duration>) -> Vec<String> {
+    fn card(
+        &self,
+        call: &ToolCall,
+        result: &ToolResult,
+        elapsed: Option<Duration>,
+        phases: &[(Activity, Duration)],
+    ) -> Vec<String> {
         let columns = self.screen.columns();
         let gutter = self.theme.paint(Role::InputRule, "  │ ");
         let gutter_width = 4;
@@ -449,7 +508,15 @@ impl Presenter {
             ));
         }
         if self.settings.frame {
-            lines.push(self.edge(elapsed, None, Role::Rule, Some((status_text, status_role))));
+            let mut items = self.phase_items(phases);
+            if let Some(elapsed) = elapsed {
+                items.push(format!(
+                    "{} {}",
+                    call.name,
+                    texts::duration(elapsed.as_secs())
+                ));
+            }
+            lines.push(self.edge(Some((status_text, status_role)), &items, Role::Rule));
         }
         lines
     }
@@ -513,13 +580,14 @@ impl Presenter {
 impl Report for Presenter {
     fn state(&mut self, state: &str) {
         self.close();
-        self.show_state(state);
+        if std::mem::replace(&mut self.state_entered, true) {
+            self.show_state(state);
+        }
     }
 
     fn thinking(&mut self, piece: &str) {
         if self.thinking.is_none() {
             self.close();
-            self.screen.activity(Activity::Thinking);
             self.thinking = Some(StreamWrap::new(self.screen.columns()));
             let label = format!("{}: ", tr!(self.lang, m::THINKING));
             let wrap = self.thinking.as_mut().expect("just set");
@@ -547,7 +615,6 @@ impl Report for Presenter {
 
     fn action_text(&mut self, piece: &str) {
         self.close_thinking();
-        self.screen.activity(Activity::Writing);
         let columns = self.screen.columns();
         let streamed = self.action.get_or_insert_with(|| Streamed {
             wrap: StreamWrap::new(columns),
@@ -573,22 +640,26 @@ impl Report for Presenter {
     fn answer(&mut self, text: &str) {
         self.close_thinking();
         self.generation_done();
-        let block = self.answer_lines(text, Some(self.turn_started.elapsed()), self.turn_speed());
+        let phases = std::mem::take(&mut self.phases);
+        let mut items = self.phase_items(&phases);
+        items.push(self.worked_for(self.turn_started.elapsed()));
+        if let Some(speed) = self.turn_speed() {
+            items.push(texts::speed(speed, self.lang));
+        }
+        let status = Some(("ok", Role::StatusSuccess));
+        let edge = self.edge(status, &items, Role::InputRule);
+        let block = self.answer_lines(text, edge);
         self.replace_streamed(block);
-        self.screen.activity(Activity::Ready);
     }
 
-    fn call(&mut self, call: &ToolCall) {
+    fn call(&mut self, _call: &ToolCall) {
         self.close();
-        self.call_started = Instant::now();
-        self.screen.activity(Activity::Running(call.name.clone()));
     }
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
-        let elapsed = self.call_started.elapsed();
-        self.show_card(call, result, Some(elapsed));
-        // The next step's prompt is read next (AGL-043 F2).
-        self.screen.activity(Activity::Prefill);
+        let phases = std::mem::take(&mut self.phases);
+        self.screen
+            .print(&self.card(call, result, Some(self.tool_time), &phases));
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
@@ -598,12 +669,36 @@ impl Report for Presenter {
 
     fn compacting(&mut self) {
         self.close();
-        self.screen.activity(Activity::Compacting);
+        self.compact_before = self.context;
+        self.context_fresh = false;
     }
 
     fn compacted(&mut self) {
-        self.show_compacted();
-        self.screen.activity(Activity::Prefill);
+        let mut items: Vec<String> = Vec::new();
+        let label = Activity::Compacting.label(self.lang);
+        items.push(match self.compact_time {
+            Some(time) => format!("{label} {}", texts::duration(time.as_secs())),
+            None => label,
+        });
+        if self.context_fresh
+            && let Some(after) = self.context
+        {
+            let after = grouped(after);
+            items.push(match self.compact_before {
+                Some(before) => tr!(
+                    self.lang,
+                    m::COMPACTED_TOKENS,
+                    before = grouped(before),
+                    after = after
+                ),
+                None => tr!(self.lang, m::COMPACTED_AFTER, after = after),
+            });
+        }
+        self.screen.print(&[self.edge(
+            Some(("ok", Role::StatusSuccess)),
+            &items,
+            Role::Rule,
+        )]);
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
@@ -611,22 +706,63 @@ impl Report for Presenter {
         self.show_cut_off(cut);
     }
 
-    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
+    fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
         self.close();
         self.show_stir(attempt, error);
-        self.screen.activity(Activity::Retry { attempt, max });
-    }
-
-    fn prefill(&mut self) {
-        self.screen.activity(Activity::Prefill);
     }
 
     fn context_used(&mut self, tokens: usize) {
+        self.context = Some(tokens);
+        self.context_fresh = true;
         self.screen.context(tokens);
+    }
+
+    /// The dock and the rows follow the FSM of the turn (AGL-046). A tool and
+    /// a compaction have their own place on a row, and `Ready` is no work.
+    fn transition(&mut self, transition: &Transition) {
+        match transition.from {
+            Phase::Ready => {}
+            Phase::Running => self.tool_time = transition.time,
+            Phase::Compacting => self.compact_time = Some(transition.time),
+            _ => self
+                .phases
+                .push((self.activity.clone(), transition.time)),
+        }
+        self.activity = activity_of(transition);
+        self.screen.activity(self.activity.clone());
+        if transition.violation {
+            self.show_notice(
+                &tr!(
+                    self.lang,
+                    m::PHASE_VIOLATION,
+                    event = transition.event.name(),
+                    from = transition.from.name()
+                ),
+                Role::StatusFailure,
+            );
+        }
     }
 
     fn decoded(&mut self, tokens: usize) {
         self.turn_tokens += tokens;
+    }
+}
+
+/// What the dock says after `transition`.
+fn activity_of(transition: &Transition) -> Activity {
+    match (transition.to, &transition.event) {
+        (Phase::Ready, _) => Activity::Ready,
+        (Phase::StartingServer, _) => Activity::StartingServer,
+        (Phase::Transcribing, _) => Activity::Transcribing,
+        (Phase::Thinking, _) => Activity::Thinking,
+        (Phase::Writing, _) => Activity::Writing,
+        (Phase::Compacting, _) => Activity::Compacting,
+        (Phase::Running, PhaseEvent::ToolStart { tool }) => Activity::Running(tool.clone()),
+        (Phase::Retry, PhaseEvent::Stir { attempt, max }) => Activity::Retry {
+            attempt: *attempt,
+            max: *max,
+        },
+        _ => Activity::Prefill,
     }
 }
 
@@ -763,6 +899,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::phase::{Observed, Observer};
 
     /// A screen that records what was drawn.
     #[derive(Default)]
@@ -860,7 +997,7 @@ mod tests {
                 "  │ one",
                 "  │ two",
                 "… limited to 2 lines / 20 chars",
-                &format!("─ fail · Worked for 1m 15s {}", "─".repeat(13)),
+                &format!("─ fail · bash 1m 15s {}", "─".repeat(19)),
             ]
         );
     }
@@ -931,7 +1068,180 @@ mod tests {
         assert_eq!(printed[2], "─".repeat(40));
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
-        assert_eq!(ops.last().unwrap(), "Ready");
+    }
+
+    /// The row of `printed` that starts with `start`, without its fill.
+    fn row(printed: &[String], start: &str) -> String {
+        printed
+            .iter()
+            .find(|line| line.starts_with(start))
+            .expect("the row")
+            .trim_end_matches('─')
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn the_rule_of_a_step_names_its_phases() {
+        // AGL-045: the phases in order, each with its time; then the tool
+        // on a card, the turn's time on the answer.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        let mut observer = Observer::new();
+        observer.enter(PhaseEvent::ServerStart, &mut presenter);
+        let mut report = Observed {
+            observer: &mut observer,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.prefill();
+        report.thinking("hmm ");
+        report.thinking_done();
+        report.action_text("Looking.");
+        report.call(&bash("ls"));
+        let ok = ToolResult {
+            outcome: Outcome::Ok,
+            content: "a".into(),
+        };
+        report.result(&bash("ls"), &ok);
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Starting the server <1s · Reading the prompt <1s · Thinking <1s · \
+             Writing <1s · bash <1s"
+        );
+        // The next step begins with no phase of the last one; a retry
+        // keeps the order of what happened.
+        mock.printed.lock().unwrap().clear();
+        report.action_text("Oops");
+        report.stirred(1, 2, "`nope` is not a tool of this state");
+        report.action_text("Done");
+        report.answer("Done");
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Reading the prompt <1s · Writing <1s · Retry 1/2 <1s · Writing <1s · \
+             Worked for <1s"
+        );
+    }
+
+    #[test]
+    fn a_new_turn_forgets_the_phases_of_the_last() {
+        // AGL-045: an interrupted turn leaves its phases behind.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        let mut first = Observer::new();
+        let mut report = Observed {
+            observer: &mut first,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.thinking("hmm");
+        report.end(PhaseEvent::Failed);
+        presenter.close();
+        presenter.begin_turn();
+        let mut second = Observer::new();
+        let mut report = Observed {
+            observer: &mut second,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.answer("Done");
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Reading the prompt <1s · Worked for <1s"
+        );
+    }
+
+    #[test]
+    fn a_compaction_has_its_own_row_and_leaves_the_steps_row() {
+        // AGL-046, D13: its time and the tokens before and after; the next
+        // step's row does not repeat it.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        let mut observer = Observer::new();
+        let mut report = Observed {
+            observer: &mut observer,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.context_used(52_400);
+        report.compacting();
+        report.context_used(3_100);
+        report.compacted();
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Compacting <1s · 52\u{a0}400 → 3\u{a0}100 tokens"
+        );
+        mock.printed.lock().unwrap().clear();
+        report.action_text("Done");
+        report.answer("Done");
+        let answer = row(&mock.printed.lock().unwrap(), "─ ok");
+        assert!(!answer.contains("Compacting"), "{answer}");
+        // A count that failed leaves the tokens out; so does a replay.
+        mock.printed.lock().unwrap().clear();
+        presenter.begin_turn();
+        presenter.compacting();
+        presenter.compacted();
+        presenter.show_compacted();
+        let printed = mock.printed.lock().unwrap();
+        assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
+        assert_eq!(row(&printed, "─ ok"), "─ ok · Compacting <1s");
+        assert_eq!(printed[1].trim_end_matches('─').trim_end(), "─ ok · Compacting");
+    }
+
+    #[test]
+    fn only_a_change_of_state_is_shown() {
+        // AGL-046, D13.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        presenter.state("inference");
+        assert!(mock.printed.lock().unwrap().is_empty());
+        presenter.state("verify");
+        assert_eq!(*mock.printed.lock().unwrap(), ["[verify]"]);
+        // A new turn starts over, in a replay too.
+        mock.printed.lock().unwrap().clear();
+        presenter.begin_turn();
+        presenter.state("inference");
+        assert!(mock.printed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_transition_that_must_not_happen_is_marked_and_the_turn_goes_on() {
+        // AGL-046, D11.
+        let (mut presenter, mock) = presenter(true);
+        presenter.transition(&Transition {
+            from: Phase::Writing,
+            to: Phase::Thinking,
+            event: PhaseEvent::FirstThinking,
+            time: Duration::ZERO,
+            violation: true,
+        });
+        let printed = mock.printed.lock().unwrap().join("\n");
+        assert!(printed.contains("first_thinking"), "{printed}");
+        assert!(printed.contains("Writing"), "{printed}");
+    }
+
+    #[test]
+    fn the_status_on_a_rule_is_painted_in_its_role() {
+        // AGL-045: `ok` keeps the color of `status_success`.
+        let theme = Theme::new(true, &[]);
+        let (presenter, mock) = presenter(true);
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        presenter.show_card(
+            &bash("ls"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+            Some(Duration::from_secs(1)),
+        );
+        let green = theme.paint(Role::StatusSuccess, "ok");
+        let printed = mock.printed.lock().unwrap();
+        let rule = printed.last().expect("the rule");
+        assert!(rule.contains(&green), "{rule:?}");
+        assert!(rule.contains("bash 1s"), "{rule:?}");
     }
 
     #[test]
@@ -940,25 +1250,30 @@ mod tests {
         // the call, the next prefill, a stir and the answer.
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
-        presenter.set_starting_server();
-        presenter.set_transcribing();
-        presenter.prefill();
-        presenter.thinking("hmm ");
-        presenter.thinking_done();
-        presenter.action_text("Looking.\n");
-        presenter.text("Looking.");
-        presenter.call(&bash("ls"));
-        presenter.result(
+        let mut observer = Observer::new();
+        observer.enter(PhaseEvent::ServerStart, &mut presenter);
+        observer.enter(PhaseEvent::Transcribe, &mut presenter);
+        let mut report = Observed {
+            observer: &mut observer,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.thinking("hmm ");
+        report.thinking_done();
+        report.action_text("Looking.\n");
+        report.text("Looking.");
+        report.call(&bash("ls"));
+        report.result(
             &bash("ls"),
             &ToolResult {
                 outcome: Outcome::Ok,
                 content: "a".into(),
             },
         );
-        presenter.prefill();
-        presenter.stirred(1, 2, "`nope` is not a tool of this state");
-        presenter.action_text("Done");
-        presenter.answer("Done");
+        report.prefill();
+        report.stirred(1, 2, "`nope` is not a tool of this state");
+        report.action_text("Done");
+        report.answer("Done");
         let ops: Vec<String> = mock
             .ops
             .lock()
@@ -980,7 +1295,6 @@ mod tests {
                 "Thinking",
                 "Writing",
                 "Running(\"bash\")",
-                "Prefill",
                 "Prefill",
                 "Retry { attempt: 1, max: 2 }",
                 "Writing",
@@ -1006,8 +1320,6 @@ mod tests {
         assert_eq!(printed[0], "Looking at it.");
         assert_eq!(printed[1], "");
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
-        let ops = mock.ops.lock().unwrap().clone();
-        assert!(ops.contains(&"Running(\"bash\")".to_owned()));
     }
 
     #[test]
@@ -1077,8 +1389,8 @@ mod tests {
             .clone();
         assert!(rule.contains("tok/s"), "{rule:?}");
         let figure: f64 = rule
-            .split('·')
-            .nth(1)
+            .rsplit('·')
+            .next()
             .expect("the speed part")
             .split_whitespace()
             .next()
@@ -1175,7 +1487,8 @@ mod tests {
         ];
         presenter.replay(&events);
         let printed = mock.printed.lock().unwrap().clone();
-        assert!(printed.contains(&"[work]".to_owned()));
+        // The state a turn starts in is not shown (AGL-046, D13).
+        assert!(!printed.contains(&"[work]".to_owned()));
         // The memory marker, then the text written (AGL-006, M28).
         let marker = printed
             .iter()

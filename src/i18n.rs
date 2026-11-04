@@ -1431,6 +1431,24 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Працював {time}",
     };
 
+    /// The tokens before and after a compaction, on its row (AGL-046, D13).
+    pub const COMPACTED_TOKENS: Msg = Msg {
+        en: "{before} → {after} tokens",
+        uk: "{before} → {after} токенів",
+    };
+
+    /// The tokens after a compaction when those before it are not known.
+    pub const COMPACTED_AFTER: Msg = Msg {
+        en: "{after} tokens",
+        uk: "{after} токенів",
+    };
+
+    /// The mark of a transition that must not happen (AGL-046, D11).
+    pub const PHASE_VIOLATION: Msg = Msg {
+        en: "[fsm: `{event}` must not happen in {from}]",
+        uk: "[fsm: `{event}` не має ставатися в {from}]",
+    };
+
     /// The decoding speed (AGL-012).
     pub const SPEED: Msg = Msg {
         en: "{speed} tok/s",

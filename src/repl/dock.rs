@@ -47,7 +47,7 @@ fn context_usage(used: Option<usize>, size: usize) -> (String, Role) {
 }
 
 /// `n` with a no-break space between groups of three digits.
-fn grouped(n: usize) -> String {
+pub(super) fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (index, digit) in digits.chars().enumerate() {
@@ -421,19 +421,7 @@ impl State {
     /// `─ Ready ────` with the number of waiting messages.
     fn separator(&self) -> String {
         let lang = self.lang;
-        let mut label = match &self.activity {
-            Activity::Ready => tr!(lang, m::READY).to_string(),
-            Activity::StartingServer => tr!(lang, m::STARTING_SERVER).to_string(),
-            Activity::Transcribing => tr!(lang, m::TRANSCRIBING_ACTIVITY).to_string(),
-            Activity::Prefill => tr!(lang, m::PREFILL).to_string(),
-            Activity::Thinking => tr!(lang, m::THINKING_ACTIVITY).to_string(),
-            Activity::Writing => tr!(lang, m::WRITING).to_string(),
-            Activity::Retry { attempt, max } => {
-                tr!(lang, m::RETRY, attempt = attempt, max = max)
-            }
-            Activity::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
-            Activity::Compacting => tr!(lang, m::COMPACTING).to_string(),
-        };
+        let mut label = self.activity.label(lang);
         if self.queued > 0 {
             label.push_str(&format!(" · {}", tr!(lang, m::QUEUED, n = self.queued)));
         }

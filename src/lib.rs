@@ -16,6 +16,7 @@ mod machine;
 mod media;
 mod memory;
 mod nix;
+mod phase;
 mod paths;
 mod programs;
 mod record;
@@ -430,8 +431,16 @@ fn agent_session(
     // `-p` has one request, so the server is brought up now; the
     // interactive and the stdin session do it at their first request
     // (AGL-015, D10) and take the context size if the server answers.
+    // The FSM of the turn sees the start too; its lines wait for the session
+    // (AGL-046, D10).
+    let mut observer = phase::Observer::new();
     let context = if args.prompt.is_some() {
-        autostart.ensure(&mut |line| eprintln!("{line}"))?;
+        autostart.ensure(&mut |progress| match progress {
+            cli::serve::ServerProgress::Starting => {
+                observer.on(phase::PhaseEvent::ServerStart);
+            }
+            cli::serve::ServerProgress::Line(line) => eprintln!("{line}"),
+        })?;
         Some(backend.context_size()?)
     } else {
         backend.context_size().ok()
@@ -494,14 +503,22 @@ fn agent_session(
         .map(|source| attach::add(&session, &mut pending, source))
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
-    attach::store(
+    observer.attach(&session);
+    let stored = attach::store(
         &mut session,
         pending,
         &message,
         backend.as_ref(),
         &autostart,
-        &mut |line| eprintln!("{line}"),
-    )?;
+        &mut |line| {
+            observer.on(phase::PhaseEvent::Transcribe);
+            eprintln!("{line}");
+        },
+    );
+    if stored.is_err() {
+        observer.on(phase::PhaseEvent::Failed);
+    }
+    stored?;
     let mut agent = Agent {
         function: &function,
         function_name: &settings.function,
@@ -517,7 +534,7 @@ fn agent_session(
         search,
         memory: &memory,
     };
-    match agent.turn(&message, &mut StderrReport::new(lang))? {
+    match agent.turn_observed(&message, &mut StderrReport::new(lang), &mut observer)? {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))

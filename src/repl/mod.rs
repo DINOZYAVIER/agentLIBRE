@@ -27,10 +27,12 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::{ReasoningLevel, ToolCall};
+use crate::cli::serve::ServerProgress;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
+use crate::phase::{Observer, PhaseEvent};
 use crate::session::{Event, ForgeKind, Session, StopReason};
 use crate::status::{
     COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
@@ -501,6 +503,9 @@ impl Report for Reporter<'_> {
     fn context_used(&mut self, tokens: usize) {
         self.presenter.context_used(tokens);
     }
+    fn transition(&mut self, transition: &crate::phase::Transition) {
+        self.presenter.transition(transition);
+    }
     fn decoded(&mut self, tokens: usize) {
         self.presenter.decoded(tokens);
     }
@@ -777,17 +782,20 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 dock.set_queued(control.lock().queue.len());
                 presenter.begin_turn();
                 presenter.show_user(&message);
+                // The FSM of the turn sees the start too (AGL-046, D10).
+                let mut observer = Observer::new();
+                observer.attach(&session);
                 // The running turn keeps the level it started with (AGL-013).
                 let reasoning = control.lock().reasoning;
                 // The server is started here when it does not answer, at
                 // the first request, and its context size read (AGL-015,
                 // AGL-024).
-                // A notice of the autostart means the server is being
-                // brought up (AGL-043 F2).
                 let ready = autostart
-                    .ensure(&mut |line| {
-                        presenter.set_starting_server();
-                        presenter.show_notice(line, Role::Muted)
+                    .ensure(&mut |progress| match progress {
+                        ServerProgress::Starting => {
+                            observer.enter(PhaseEvent::ServerStart, &mut presenter);
+                        }
+                        ServerProgress::Line(line) => presenter.show_notice(line, Role::Muted),
                     })
                     .and_then(|()| backend.context_size());
                 let result = ready.and_then(|context| {
@@ -804,7 +812,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         // A notice of the store is the whisper server's
                         // start or the transcription (AGL-043 F2).
                         &mut |line| {
-                            presenter.set_transcribing();
+                            observer.enter(PhaseEvent::Transcribe, &mut presenter);
                             presenter.show_notice(line, Role::Muted)
                         },
                     )?;
@@ -824,15 +832,18 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         search,
                         memory,
                     }
-                    .turn(
+                    .turn_observed(
                         &message,
                         &mut Reporter {
                             presenter: &mut presenter,
                             control: &control,
                         },
+                        &mut observer,
                     )
                 });
                 presenter.close();
+                // A start that failed never reached the agent.
+                observer.end(PhaseEvent::Failed, &mut presenter);
                 let mut failed = None;
                 match result {
                     Ok(TurnEnd::Answer(_)) => {}

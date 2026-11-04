@@ -1969,3 +1969,83 @@ fn a_compaction_summary_is_kept_in_the_memory_directory_and_not_in_the_index() {
     // Not in the index (M16): the prompt does not carry it.
     assert!(!memory.join("MEMORY.md").exists());
 }
+
+/// The lines of a session file of the given type.
+fn lines_of(session: &Session, kind: &str) -> Vec<serde_json::Value> {
+    let dir = session.media_dir();
+    let path = dir
+        .parent()
+        .unwrap()
+        .join(format!("{}.jsonl", session.id));
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|line| line["type"] == kind)
+        .collect()
+}
+
+#[test]
+fn the_session_file_holds_the_turn_and_the_history_does_not() {
+    // AGL-046, D1, D9, D14, D15.
+    let dir = Dir::new("observed");
+    let function = Function::load(
+        Path::new("/none"),
+        Path::new("/none"),
+        "agentLIBRE-gpu-high-minimal",
+    )
+    .unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done", Stop::End),
+    ]);
+    let (end, _, session) = run(&function, &script, &dir, "go");
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done".into()));
+    let transitions = lines_of(&session, "transition");
+    assert!(!transitions.is_empty());
+    assert!(transitions.iter().all(|line| line["turn"] == 1));
+    assert!(transitions.iter().all(|line| line["schema"] == 1));
+    assert_eq!(transitions[0]["from"], "Ready");
+    assert_eq!(transitions[0]["to"], "Prefill");
+    assert_eq!(transitions.last().unwrap()["to"], "Ready");
+    // Each line starts where the last one ended.
+    for pair in transitions.windows(2) {
+        assert_eq!(pair[0]["to"], pair[1]["from"], "{pair:?}");
+    }
+    let steps = lines_of(&session, "step");
+    assert!(!steps.is_empty());
+    assert_eq!(steps[0]["step"], 1);
+    assert_eq!(steps[0]["state"], "inference");
+    assert_eq!(steps[0]["prompt_sha256"].as_str().unwrap().len(), 64);
+    // Each part of the prompt is written when it changes: here, once.
+    let inputs = lines_of(&session, "prompt_input");
+    for kind in ["system", "tools", "sampling", "model"] {
+        let count = inputs.iter().filter(|line| line["kind"] == kind).count();
+        assert_eq!(count, 1, "{kind}");
+    }
+    // None of it is an event, and none of it is read back as one.
+    let history = session.history();
+    let reopened = Session::open(session.media_dir().parent().unwrap(), &session.id).unwrap();
+    assert_eq!(reopened.events, session.events);
+    assert_eq!(format!("{:?}", reopened.history()), format!("{history:?}"));
+}
+
+#[test]
+fn a_part_of_the_prompt_is_written_again_only_when_it_changes() {
+    // AGL-046, D14: a reopened session knows what it wrote.
+    let dir = Dir::new("inputs");
+    let mut session = Session::create(&dir.0, "f", Path::new("/w")).unwrap();
+    session.record_input("system", "one").unwrap();
+    session.record_input("system", "one").unwrap();
+    session.record_input("memory_index", "").unwrap();
+    assert_eq!(lines_of(&session, "prompt_input").len(), 1);
+    let mut reopened = Session::open(&dir.0, &session.id).unwrap();
+    reopened.record_input("system", "one").unwrap();
+    assert_eq!(lines_of(&reopened, "prompt_input").len(), 1);
+    reopened.record_input("system", "two").unwrap();
+    let inputs = lines_of(&reopened, "prompt_input");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[1]["text"], "two");
+}

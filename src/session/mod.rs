@@ -1,6 +1,7 @@
 //! Sessions: an append-only JSONL log of a conversation that can be
 //! resumed (D30, D31, D36, D49, D104-D108, D139-D141).
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -45,7 +46,7 @@ impl StopReason {
         StopReason::StirLimit,
     ];
 
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             StopReason::StepLimit => "step_limit",
             StopReason::ContextFull => "context_full",
@@ -189,6 +190,8 @@ pub struct Session {
     pub events: Vec<Event>,
     path: PathBuf,
     file: File,
+    /// What the prompt was last made of, by kind (AGL-046, D14).
+    prompt_inputs: BTreeMap<String, String>,
 }
 
 impl Session {
@@ -213,6 +216,7 @@ impl Session {
             events: Vec::new(),
             path,
             file,
+            prompt_inputs: BTreeMap::new(),
         };
         let header = json!({
             "type": "session",
@@ -263,8 +267,22 @@ impl Session {
             return Err(bad(0, "the header needs function and workspace"));
         };
         let mut events = Vec::new();
+        let mut prompt_inputs = BTreeMap::new();
         for (index, line) in lines {
             let json: Json = serde_json::from_str(line).map_err(|e| bad(index, &e.to_string()))?;
+            // What the observer wrote is not an event, so it can reach
+            // neither the history nor the replay (AGL-046).
+            match json["type"].as_str() {
+                Some("transition" | "step") => continue,
+                Some("prompt_input") => {
+                    if let (Some(kind), Some(text)) = (json["kind"].as_str(), json["text"].as_str())
+                    {
+                        prompt_inputs.insert(kind.to_owned(), text.to_owned());
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             events.push(event_from_json(&json).ok_or_else(|| bad(index, "unknown event"))?);
         }
         let file = OpenOptions::new()
@@ -281,6 +299,7 @@ impl Session {
             events,
             path,
             file,
+            prompt_inputs,
         };
         if complete.len() < text.len() {
             // Drop the half line so that new events start on their own line.
@@ -310,6 +329,38 @@ impl Session {
         self.write_line(&json)?;
         self.events.push(event);
         Ok(())
+    }
+
+    /// Records a part of what the prompt is made of when it changed
+    /// (AGL-046, D14). It is no event: the history does not hold it.
+    pub fn record_input(&mut self, kind: &str, text: &str) -> Result<(), Error> {
+        let known = self.prompt_inputs.get(kind).map_or("", String::as_str);
+        if known == text {
+            return Ok(());
+        }
+        self.write_line(&json!({
+            "type": "prompt_input",
+            "schema": 1,
+            "kind": kind,
+            "text": text,
+            "time": utc_now(),
+        }))?;
+        self.prompt_inputs.insert(kind.into(), text.into());
+        Ok(())
+    }
+
+    /// A handle on the session file for the observer of a turn (AGL-046).
+    /// The file is opened to append, so the lines of both stay whole.
+    pub fn log_file(&self) -> Option<File> {
+        self.file.try_clone().ok()
+    }
+
+    /// The turns of the session: its user messages.
+    pub fn turns(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| matches!(event, Event::User(_)))
+            .count()
     }
 
     fn write_line(&mut self, json: &Json) -> Result<(), Error> {

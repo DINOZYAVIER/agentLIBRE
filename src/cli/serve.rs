@@ -429,6 +429,14 @@ pub(super) fn wait_ready(
     }
 }
 
+/// What [`Autostart::ensure`] tells on the way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerProgress<'a> {
+    /// The server is not ready: the wait for it begins (AGL-046).
+    Starting,
+    Line(&'a str),
+}
+
 /// Brings the project's server up when a request finds none (AGL-015,
 /// D6, D10); the same code as `agl server start`: the check of D2
 /// (AGL-033) beside the health check, the launch of both kinds, the
@@ -466,13 +474,14 @@ impl Autostart<'_> {
     /// (AGL-033, D2): it did, it was loading and is ready now and serves,
     /// or agl launched the server of the kind itself as a background
     /// child (AGL-024, D2) — restarting the one that does not serve,
-    /// with the consent as today. `say` takes the progress lines.
-    pub fn ensure(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+    /// with the consent as today. `progress` is told when the wait for a
+    /// server begins (AGL-046) and takes the progress lines.
+    pub fn ensure(&self, progress: &mut dyn FnMut(ServerProgress)) -> Result<(), Error> {
         let llama = self.llama;
         let what = self.what()?;
         // The server of the other kind that agl owns stops first
         // (AGL-036, D10): the two do not fit the GPU together.
-        self.switch(say)?;
+        self.switch(&mut |line| progress(ServerProgress::Line(line)))?;
         match health(llama) {
             // The server is ready: the check of D2 (AGL-033) decides —
             // it serves the effective settings, or a mismatch restarts.
@@ -480,23 +489,29 @@ impl Autostart<'_> {
                 if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
                     Ok(())
                 } else {
-                    self.restart(&what, say)
+                    progress(ServerProgress::Starting);
+                    self.restart(&what, &mut |line| progress(ServerProgress::Line(line)))
                 }
             }
             // Someone loads it now: wait for it, as `start` does, then
             // the check of D2 (AGL-033).
             Health::Loading => {
-                wait_ready(llama, None, &what, say, self.lang)?;
+                progress(ServerProgress::Starting);
+                let mut say = |line: &str| progress(ServerProgress::Line(line));
+                wait_ready(llama, None, &what, &mut say, self.lang)?;
                 if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
                     Ok(())
                 } else {
-                    self.restart(&what, say)
+                    self.restart(&what, &mut say)
                 }
             }
             // Connection refused: launch the server of the kind as a
             // background child (AGL-024, D2; AGL-033, D2 — both kinds);
             // a foreign process on the port is an error, not a target.
-            Health::Down => self.launch(&what, say),
+            Health::Down => {
+                progress(ServerProgress::Starting);
+                self.launch(&what, &mut |line| progress(ServerProgress::Line(line)))
+            }
         }
     }
 
@@ -2039,6 +2054,38 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_for_a_loading_server_is_told_before_it_begins() {
+        // AGL-046: the dock said Ready for as long as the model loaded.
+        let url = health_server(&[503, 200]);
+        let llama = Llama::new(&url);
+        let ws = project(None, ServerFile::default());
+        let settings = ServerFile::default();
+        let mut told = Vec::new();
+        autostart(&llama, &ws, &settings)
+            .ensure(&mut |progress| {
+                told.push(match progress {
+                    ServerProgress::Starting => "starting".to_owned(),
+                    ServerProgress::Line(_) => "line".to_owned(),
+                });
+            })
+            .unwrap();
+        assert_eq!(told, ["starting", "line"]);
+    }
+
+    #[test]
+    fn a_ready_server_is_not_told_as_starting() {
+        let url = health_server(&[200]);
+        let llama = Llama::new(&url);
+        let ws = project(None, ServerFile::default());
+        let settings = ServerFile::default();
+        let mut told = Vec::new();
+        autostart(&llama, &ws, &settings)
+            .ensure(&mut |progress| told.push(progress == ServerProgress::Starting))
+            .unwrap();
+        assert!(told.is_empty());
+    }
+
+    #[test]
     fn a_server_that_answers_is_not_started_again() {
         let url = health_server(&[200]);
         let llama = Llama::new(&url);
@@ -2047,7 +2094,11 @@ mod tests {
         let settings = ServerFile::default();
         let mut said = Vec::new();
         autostart(&llama, &ws, &settings)
-            .ensure(&mut |line| said.push(line.to_owned()))
+            .ensure(&mut |progress| {
+                if let ServerProgress::Line(line) = progress {
+                    said.push(line.to_owned());
+                }
+            })
             .unwrap();
         assert!(said.is_empty());
     }
@@ -2060,7 +2111,11 @@ mod tests {
         let settings = ServerFile::default();
         let mut said = Vec::new();
         autostart(&llama, &ws, &settings)
-            .ensure(&mut |line| said.push(line.to_owned()))
+            .ensure(&mut |progress| {
+                if let ServerProgress::Line(line) = progress {
+                    said.push(line.to_owned());
+                }
+            })
             .unwrap();
         assert_eq!(
             said,
@@ -2084,7 +2139,11 @@ mod tests {
         };
         let mut said = Vec::new();
         let result = autostart(&llama, &ws, &settings)
-            .ensure(&mut |line| said.push(line.to_owned()));
+            .ensure(&mut |progress| {
+                if let ServerProgress::Line(line) = progress {
+                    said.push(line.to_owned());
+                }
+            });
         assert!(matches!(
             result,
             Err(Error::WeightsFileMissing { key, path })
@@ -2268,7 +2327,11 @@ mod tests {
         };
         let mut said = Vec::new();
         autostart(&llama, &ws, &settings)
-            .ensure(&mut |line| said.push(line.to_owned()))
+            .ensure(&mut |progress| {
+                if let ServerProgress::Line(line) = progress {
+                    said.push(line.to_owned());
+                }
+            })
             .unwrap();
         assert!(said.is_empty());
     }
@@ -2289,7 +2352,11 @@ mod tests {
         let mut said = Vec::new();
         assert!(matches!(
             autostart(&llama, &ws, &settings)
-                .ensure(&mut |line| said.push(line.to_owned())),
+                .ensure(&mut |progress| {
+                if let ServerProgress::Line(line) = progress {
+                    said.push(line.to_owned());
+                }
+            }),
             Err(Error::RestartDeclined)
         ));
         assert!(said.is_empty());
