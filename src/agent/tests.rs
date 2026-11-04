@@ -818,6 +818,7 @@ fn structured_step(
             .collect(),
         prompt_tokens: Some(312),
         completion_tokens: Some(20),
+        prefill: None,
     }
 }
 

@@ -26,7 +26,7 @@ use transcript::{Presenter, Screen, notice_lines};
 use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
-use crate::backend::{ReasoningLevel, ToolCall};
+use crate::backend::{Prefill, ReasoningLevel, ToolCall};
 use crate::cli::serve::ServerProgress;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
@@ -505,6 +505,9 @@ impl Report for Reporter<'_> {
     }
     fn transition(&mut self, transition: &crate::phase::Transition) {
         self.presenter.transition(transition);
+    }
+    fn prompt_read(&mut self, prefill: Prefill) {
+        self.presenter.prompt_read(prefill);
     }
     fn decoded(&mut self, tokens: usize) {
         self.presenter.decoded(tokens);

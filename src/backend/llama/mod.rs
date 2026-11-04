@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::{Map, Value as Json, json};
 
 use super::{
+    Prefill,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, ToolDoc,
     kept_thinking,
 };
@@ -179,7 +180,9 @@ impl Backend for Llama {
                     }
                     _ => Stop::End,
                 };
-                return Ok(Generated::plain(text, stop));
+                let mut generated = Generated::plain(text, stop);
+                generated.prefill = Prefill::of_timings(&chunk["timings"]);
+                return Ok(generated);
             }
         }
         Err(self.bad_reply("the stream ended without a final chunk"))

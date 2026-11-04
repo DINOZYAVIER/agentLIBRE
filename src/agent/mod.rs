@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::action::{self, Action};
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prompt, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
+    Backend, Message, Prefill, Prompt, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
     ToolDoc,
 };
 use crate::action::{Outcome, Value};
@@ -65,6 +65,8 @@ pub trait Report {
     fn compact_failed(&mut self) {}
     /// A transition of the FSM during the turn (AGL-046).
     fn transition(&mut self, _transition: &Transition) {}
+    /// How the server read the prompt of a generation (AGL-046).
+    fn prompt_read(&mut self, _prefill: Prefill) {}
     /// What a step's prompt is made of (AGL-046, D15).
     fn step_started(&mut self, _record: &StepRecord) {}
 }
@@ -284,6 +286,9 @@ impl Agent<'_> {
                 &mut |piece| report.thinking(piece),
             )?;
             report.thinking_done();
+            if let Some(prefill) = thinking.prefill {
+                report.prompt_read(prefill);
+            }
             if !thinking.text.is_empty() {
                 report.decoded(self.backend.count_tokens(&thinking.text)?);
             }
@@ -320,6 +325,9 @@ impl Agent<'_> {
                 }
             },
         )?;
+        if let Some(prefill) = generated.prefill {
+            report.prompt_read(prefill);
+        }
         let action_tokens = if generated.text.is_empty() {
             0
         } else {
@@ -409,6 +417,9 @@ impl Agent<'_> {
             )?;
             if open.replace(false) {
                 cell.borrow_mut().thinking_done();
+            }
+            if let Some(prefill) = generated.prefill {
+                report.prompt_read(prefill);
             }
             // The exact counts of the server's `usage` (AGL-030, D11).
             if let Some(tokens) = generated.prompt_tokens {

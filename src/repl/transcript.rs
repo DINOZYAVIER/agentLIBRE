@@ -11,7 +11,7 @@ use super::markdown;
 use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::action::{Outcome, Value};
 use crate::agent::Report;
-use crate::backend::ToolCall;
+use crate::backend::{Prefill, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::media::{Kind as MediaKind, Media};
 use crate::phase::{Phase, PhaseEvent, Transition};
@@ -108,6 +108,8 @@ pub struct Presenter {
     /// The time of the last tool call and of the last compaction.
     tool_time: Duration,
     compact_time: Option<Duration>,
+    /// What the server read of the step's prompts (AGL-046).
+    prefill: Option<Prefill>,
     /// The prompt's last size, the one when a compaction began, and whether
     /// the last size came after that begin (AGL-046, D13).
     context: Option<usize>,
@@ -143,6 +145,7 @@ impl Presenter {
             activity: Activity::Ready,
             tool_time: Duration::ZERO,
             compact_time: None,
+            prefill: None,
             context: None,
             compact_before: None,
             context_fresh: false,
@@ -164,6 +167,7 @@ impl Presenter {
     pub fn begin_turn(&mut self) {
         self.turn_started = Instant::now();
         self.phases.clear();
+        self.prefill = None;
         self.state_entered = false;
         self.generation = None;
         self.turn_tokens = 0;
@@ -417,11 +421,20 @@ impl Presenter {
         phases
             .iter()
             .map(|(phase, time)| {
-                format!(
+                let mut item = format!(
                     "{} {}",
                     phase.label(self.lang),
                     texts::duration(time.as_secs())
-                )
+                );
+                // The speed of the reading (AGL-046): the server's own, so a
+                // cached part of the prompt does not count.
+                if *phase == Activity::Prefill
+                    && let Some(prefill) = self.prefill.filter(|p| p.tokens > 0)
+                {
+                    let speed = prefill.tokens as f64 * 1000.0 / prefill.ms;
+                    item.push_str(&format!(" ({})", texts::speed(speed, self.lang)));
+                }
+                item
             })
             .collect()
     }
@@ -650,6 +663,7 @@ impl Report for Presenter {
         let edge = self.edge(status, &items, Role::InputRule);
         let block = self.answer_lines(text, edge);
         self.replace_streamed(block);
+        self.prefill = None;
     }
 
     fn call(&mut self, _call: &ToolCall) {
@@ -660,6 +674,7 @@ impl Report for Presenter {
         let phases = std::mem::take(&mut self.phases);
         self.screen
             .print(&self.card(call, result, Some(self.tool_time), &phases));
+        self.prefill = None;
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
@@ -709,6 +724,16 @@ impl Report for Presenter {
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
         self.close();
         self.show_stir(attempt, error);
+    }
+
+    fn prompt_read(&mut self, prefill: Prefill) {
+        self.prefill = Some(match self.prefill {
+            Some(known) => Prefill {
+                tokens: known.tokens + prefill.tokens,
+                ms: known.ms + prefill.ms,
+            },
+            None => prefill,
+        });
     }
 
     fn context_used(&mut self, tokens: usize) {
@@ -1187,6 +1212,49 @@ mod tests {
         assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
         assert_eq!(row(&printed, "─ ok"), "─ ok · Compacting <1s");
         assert_eq!(printed[1].trim_end_matches('─').trim_end(), "─ ok · Compacting");
+    }
+
+    #[test]
+    fn the_reading_of_the_prompt_shows_its_speed() {
+        // AGL-046: the server's figure, over the step's generations; a step
+        // whose prompt was all cached shows none.
+        let (mut presenter, mock) = presenter(true);
+        presenter.begin_turn();
+        let mut observer = Observer::new();
+        let mut report = Observed {
+            observer: &mut observer,
+            report: &mut presenter,
+        };
+        report.prefill();
+        report.prompt_read(Prefill {
+            tokens: 900,
+            ms: 800.0,
+        });
+        report.prompt_read(Prefill {
+            tokens: 100,
+            ms: 200.0,
+        });
+        report.call(&bash("ls"));
+        let ok = ToolResult {
+            outcome: Outcome::Ok,
+            content: "a".into(),
+        };
+        report.result(&bash("ls"), &ok);
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Reading the prompt <1s (1000.0 tok/s) · bash <1s"
+        );
+        mock.printed.lock().unwrap().clear();
+        report.prefill();
+        report.prompt_read(Prefill {
+            tokens: 0,
+            ms: 3.0,
+        });
+        report.answer("Done");
+        assert_eq!(
+            row(&mock.printed.lock().unwrap(), "─ ok"),
+            "─ ok · Reading the prompt <1s · Worked for <1s"
+        );
     }
 
     #[test]

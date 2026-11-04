@@ -305,7 +305,7 @@ pub struct StructuredCall {
     pub arguments: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct Generated {
     pub text: String,
     pub stop: Stop,
@@ -318,6 +318,31 @@ pub struct Generated {
     /// The exact token counts of the server's `usage` (AGL-030, D11).
     pub prompt_tokens: Option<usize>,
     pub completion_tokens: Option<usize>,
+    /// How the server read the prompt, when it tells (AGL-046).
+    pub prefill: Option<Prefill>,
+}
+
+/// What the server read of the prompt: a cached part is not read again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Prefill {
+    pub tokens: usize,
+    pub ms: f64,
+}
+
+impl Prefill {
+    /// From the server's `timings`, whose names llama.cpp set and Strata
+    /// shares.
+    pub fn of_timings(timings: &serde_json::Value) -> Option<Prefill> {
+        let ms = timings["prompt_ms"].as_f64().filter(|ms| *ms > 0.0)?;
+        let tokens = timings["prompt_n"]
+            .as_u64()
+            .map(|tokens| tokens as usize)
+            .or_else(|| {
+                let speed = timings["prompt_per_second"].as_f64()?;
+                Some((speed * ms / 1000.0).round() as usize)
+            })?;
+        Some(Prefill { tokens, ms })
+    }
 }
 
 impl Generated {
@@ -329,6 +354,7 @@ impl Generated {
             thinking: None,
             tool_calls: Vec::new(),
             prompt_tokens: None,
+            prefill: None,
             completion_tokens: None,
         }
     }
@@ -452,5 +478,27 @@ mod tests {
             kept_thinking(&messages, false),
             vec![false, false, true, true, true, true, true]
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_tests {
+    use super::Prefill;
+    use serde_json::json;
+
+    #[test]
+    fn the_prefill_comes_from_the_servers_timings() {
+        let of = |timings| Prefill::of_timings(&timings);
+        assert_eq!(
+            of(json!({"prompt_n": 12, "prompt_ms": 30.0})),
+            Some(Prefill { tokens: 12, ms: 30.0 })
+        );
+        assert_eq!(
+            of(json!({"prompt_per_second": 100.0, "prompt_ms": 500.0})),
+            Some(Prefill { tokens: 50, ms: 500.0 })
+        );
+        assert_eq!(of(json!({"prompt_n": 12})), None);
+        assert_eq!(of(json!({"prompt_n": 0, "prompt_ms": 0.0})), None);
+        assert_eq!(of(serde_json::Value::Null), None);
     }
 }

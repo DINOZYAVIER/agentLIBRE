@@ -11,6 +11,7 @@ use serde_json::{Value as Json, json};
 
 use super::llama::{messages_json, tool_json};
 use super::{
+    Prefill,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
     StructuredCall, ToolDoc, kept_thinking,
 };
@@ -379,6 +380,7 @@ struct Accumulator {
     stop: Option<Stop>,
     prompt_tokens: Option<usize>,
     completion_tokens: Option<usize>,
+    prefill: Option<Prefill>,
 }
 
 impl Accumulator {
@@ -438,6 +440,9 @@ impl Accumulator {
         if let Some(n) = chunk["usage"]["completion_tokens"].as_u64() {
             self.completion_tokens = Some(n as usize);
         }
+        if let Some(prefill) = Prefill::of_timings(&chunk["timings"]) {
+            self.prefill = Some(prefill);
+        }
         Ok(false)
     }
 
@@ -457,6 +462,7 @@ impl Accumulator {
                 .collect(),
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
+            prefill: self.prefill,
         })
     }
 }
