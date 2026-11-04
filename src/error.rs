@@ -209,6 +209,24 @@ pub enum Error {
     /// A weights file is in none of the weights folders and nobody named
     /// its folder (AGL-039, D24c).
     WeightsNotFound { name: String, folders: Vec<PathBuf> },
+    /// A weights file with a source is missing where nobody can be asked:
+    /// a run with `-p` or without a terminal (AGL-050, D11).
+    WeightsNotDownloaded { name: String, size: u64 },
+    /// `curl` or the file system failed on a download (AGL-050, D17).
+    DownloadFailed { name: String, detail: String },
+    /// The disk has too little room for a download (AGL-050, D17).
+    DownloadNoSpace {
+        name: String,
+        needed: u64,
+        available: u64,
+        dir: PathBuf,
+    },
+    /// A downloaded file has another sha256 (AGL-050, D17).
+    DownloadMismatch {
+        name: String,
+        expected: String,
+        got: String,
+    },
     /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
     NixDirMissing,
     /// The system's `nix-instantiate` cannot be run (AGL-039, D38).
@@ -387,6 +405,12 @@ pub enum FunctionProblem {
     BadWeightsName,
     /// A `source` names a file the model does not set (AGL-039, D5).
     SourceWithoutFile,
+    /// A `source` url is not https (AGL-050, D8).
+    BadSourceUrl,
+    /// A `source` sha256 is not 64 lowercase hex digits (AGL-050, D8).
+    BadSourceSha256,
+    /// A `source` size is not a positive number of bytes (AGL-050, D8).
+    BadSourceSize,
 }
 
 /// Who launched a server that did not get ready (AGL-043 F5): the
@@ -585,6 +609,22 @@ impl std::fmt::Display for Error {
                     let folders: Vec<String> =
                         folders.iter().map(|folder| folder.display().to_string()).collect();
                     format!("{name} is in none of the weights folders: {}", folders.join(", "))
+                }
+                Error::WeightsNotDownloaded { name, size } => format!(
+                    "{name} ({}) is not downloaded: run `agl` in a terminal, it offers to download it",
+                    crate::download::gigabytes(*size)
+                ),
+                Error::DownloadFailed { name, detail } => {
+                    format!("the download of {name} failed: {detail}")
+                }
+                Error::DownloadNoSpace { name, needed, available, dir } => format!(
+                    "{name} needs {} in {} and {} is free",
+                    crate::download::gigabytes(*needed),
+                    dir.display(),
+                    crate::download::gigabytes(*available)
+                ),
+                Error::DownloadMismatch { name, expected, got } => {
+                    format!("the sha256 of {name} is {got}, not {expected}; nothing was kept")
                 }
                 Error::NixDirMissing => format!(
                     "{} is not set: run agl from its Nix package or `nix develop`",

@@ -225,6 +225,24 @@ pub fn run(
             // The file is written anew from its value (AGL-039, D11, D12).
             settings::set_top(&path, "function", serde_json::Value::String(name.clone()))?;
             outln!("{}", tr!(lang, m::FUNCTION_SET, name = name, path = path.display()));
+            // The choice is made: what it needs is offered right away, and
+            // a no is answered again at the first run (AGL-050, D10).
+            if crate::repl::term::is_interactive()
+                && let Ok(function) =
+                    Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)
+            {
+                crate::weights::offer(
+                    &function.model,
+                    &function.sources,
+                    &crate::weights::Folders {
+                        own: paths.models(),
+                        listed: &user.models,
+                        user_path: &paths.settings_file(),
+                    },
+                    &super::serve::ask_line,
+                    lang,
+                )?;
+            }
             // The project's own key wins over the user's in this project.
             if to_user
                 && let Some(own) = project.function.as_deref().filter(|own| *own != name)
@@ -288,7 +306,19 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(
             names,
-            ["agentLIBRE-gpu-high", "agentLIBRE-gpu-high-minimal", "broken", "mine"]
+            [
+                "agentLIBRE-cpu-high",
+                "agentLIBRE-cpu-low",
+                "agentLIBRE-cpu-medium",
+                "agentLIBRE-cpu-very-high",
+                "agentLIBRE-gpu-high",
+                "agentLIBRE-gpu-high-minimal",
+                "agentLIBRE-gpu-low",
+                "agentLIBRE-gpu-medium",
+                "agentLIBRE-gpu-very-high",
+                "broken",
+                "mine",
+            ]
         );
         let by = |name: &str| entries.iter().find(|e| e.name == name).unwrap();
         // The workspace's file wins over the user's, and says so.
@@ -303,7 +333,8 @@ mod tests {
         // A Function that does not load is listed with its error.
         assert!(by("broken").error.as_deref().is_some_and(|e| e.contains("strata_config")));
         let lines = catalog.lines(Lang::En);
-        assert_eq!(lines[3], "* mine                         workspace  llama   p.gguf over user");
+        let current = lines.iter().find(|line| line.starts_with("* ")).unwrap();
+        assert_eq!(current, "* mine                         workspace  llama   p.gguf over user");
     }
 
     #[test]

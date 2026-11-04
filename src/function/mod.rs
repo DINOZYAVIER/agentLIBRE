@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::action::{self, Actions, Constraint, Kind, Outcome, Tool};
 use crate::backend::RUNTIME_PREFIX;
+use crate::download::FileSource;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
@@ -97,6 +98,8 @@ pub struct Function {
     /// The file the Function came from; a built-in says so
     /// (`<built-in>/functions/<name>.nix`).
     pub path: PathBuf,
+    /// Where the files of its model come from (AGL-050, D8).
+    pub sources: Vec<FileSource>,
     pub format: Format,
     pub system: String,
     pub preserve_thinking: bool,
@@ -302,9 +305,10 @@ impl Function {
         };
         let source = model.section("source")?;
         let server = read_model(&mut model)?;
-        if let Some(source) = source {
-            check_source(source, &server)?;
-        }
+        let sources = match source {
+            Some(source) => read_sources(source, &server)?,
+            None => Vec::new(),
+        };
 
         policy.check_keys(POLICY_KEYS)?;
         let system = policy.required_string("system")?;
@@ -350,6 +354,7 @@ impl Function {
         check_graph(path, &states, initial)?;
         Ok(Function {
             path: path.to_path_buf(),
+            sources,
             format,
             system,
             preserve_thinking,
@@ -440,23 +445,49 @@ fn weights_name(model: &mut Section, key: &str) -> Result<Option<String>, Error>
     Ok(name)
 }
 
-/// Checks `source` (AGL-039, D4, D5): strings, keyed by a file of the
-/// model that the model sets.
-fn check_source(mut source: Section, server: &ServerFile) -> Result<(), Error> {
+/// Reads `source` (AGL-039, D4, D5; AGL-050, D8): keyed by a file of the
+/// model that the model sets, each a url at a fixed version, its sha256 and
+/// its size. The files agl can fetch come back under their local names; a
+/// `strata_config` is a path of the machine (AGL-039, D24e).
+fn read_sources(mut source: Section, server: &ServerFile) -> Result<Vec<FileSource>, Error> {
     source.check_keys(SOURCE_KEYS)?;
-    for (key, url) in source.string_entries()? {
-        let set = match key.as_str() {
-            "weights" => server.model.is_some(),
-            "mmproj" => server.mmproj.is_some(),
-            "draft" => server.draft.is_some(),
-            _ => server.strata_config.is_some(),
+    let mut sources = Vec::new();
+    for (key, mut file) in source.sections()? {
+        let name = match key.as_str() {
+            "weights" => server.model.clone(),
+            "mmproj" => server.mmproj.clone(),
+            "draft" => server.draft.clone(),
+            _ => server.strata_config.clone(),
         };
-        if !set {
+        let Some(name) = name else {
             return Err(problem(&source, &key, FunctionProblem::SourceWithoutFile));
+        };
+        file.check_keys(&["url", "sha256", "size"])?;
+        let url = file.required_string("url")?;
+        if !url.starts_with("https://") {
+            return Err(problem(&file, "url", FunctionProblem::BadSourceUrl));
         }
-        let _ = url;
+        let sha256 = file.required_string("sha256")?;
+        if sha256.len() != 64 || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+            return Err(problem(&file, "sha256", FunctionProblem::BadSourceSha256));
+        }
+        let size = file
+            .integer("size")?
+            .ok_or_else(|| Error::MissingKey {
+                path: file.path().into(),
+                key: file.key("size"),
+            })
+            .and_then(|size| {
+                u64::try_from(size)
+                    .ok()
+                    .filter(|size| *size > 0)
+                    .ok_or_else(|| problem(&file, "size", FunctionProblem::BadSourceSize))
+            })?;
+        if key != "strata_config" {
+            sources.push(FileSource { name, url, sha256, size });
+        }
     }
-    Ok(())
+    Ok(sources)
 }
 
 /// What reading a state needs from the rest of the Function.

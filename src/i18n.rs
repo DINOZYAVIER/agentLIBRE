@@ -1622,6 +1622,67 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} немає в жодній теці ваг. У якій теці він? (абсолютний шлях; порожньо — зупинити)",
     };
 
+    /// `FunctionProblem::BadSourceUrl` (AGL-050, D8).
+    pub const FUNC_BAD_SOURCE_URL: Msg = Msg {
+        en: "a source is an https url",
+        uk: "джерело — це https-адреса",
+    };
+
+    /// `FunctionProblem::BadSourceSha256` (AGL-050, D8).
+    pub const FUNC_BAD_SOURCE_SHA256: Msg = Msg {
+        en: "a sha256 is 64 lowercase hex digits",
+        uk: "sha256 — це 64 шістнадцяткові цифри в нижньому регістрі",
+    };
+
+    /// `FunctionProblem::BadSourceSize` (AGL-050, D8).
+    pub const FUNC_BAD_SOURCE_SIZE: Msg = Msg {
+        en: "a size is a positive number of bytes",
+        uk: "розмір — це додатне число байтів",
+    };
+
+    /// The offer of the weights a Function needs (AGL-050, D9, D10).
+    pub const DOWNLOAD_OFFER: Msg = Msg {
+        en: "This Function needs files that are not here:\n{files}\nDownload {total} to {dir}? [y/N]",
+        uk: "Для цієї Function бракує файлів:\n{files}\nЗавантажити {total} у {dir}? [y/N]",
+    };
+
+    /// The offer of the pinned version over a file of another size
+    /// (AGL-050, D17).
+    pub const DOWNLOAD_REPLACE: Msg = Msg {
+        en: "{path} is not the version this Function names ({have}, it names {want}). Download that one and replace it? [y/N]",
+        uk: "{path} не та версія, яку називає ця Function ({have}, а названо {want}). Завантажити її і замінити цей файл? [y/N]",
+    };
+
+    /// The start of a download (AGL-050).
+    pub const DOWNLOAD_START: Msg = Msg {
+        en: "Downloading {name} ({size})",
+        uk: "Завантажую {name} ({size})",
+    };
+
+    /// `Error::WeightsNotDownloaded` (AGL-050, D11).
+    pub const WEIGHTS_NOT_DOWNLOADED: Msg = Msg {
+        en: "{name} ({size}) is not downloaded: run `agl` in a terminal, it offers to download it",
+        uk: "{name} ({size}) не завантажено: запусти `agl` у терміналі, він запропонує завантажити",
+    };
+
+    /// `Error::DownloadFailed` (AGL-050, D17).
+    pub const DOWNLOAD_FAILED: Msg = Msg {
+        en: "the download of {name} failed: {detail}; run it again and it resumes",
+        uk: "завантаження {name} не вдалось: {detail}; запусти ще раз, і воно продовжиться",
+    };
+
+    /// `Error::DownloadNoSpace` (AGL-050, D17).
+    pub const DOWNLOAD_NO_SPACE: Msg = Msg {
+        en: "{name} needs {needed} in {dir}, and {available} is free",
+        uk: "для {name} потрібно {needed} у {dir}, а вільно {available}",
+    };
+
+    /// `Error::DownloadMismatch` (AGL-050, D17).
+    pub const DOWNLOAD_MISMATCH: Msg = Msg {
+        en: "the sha256 of the downloaded {name} is {got}, not {expected}; it was not kept",
+        uk: "sha256 завантаженого {name} — {got}, а не {expected}; файл не збережено",
+    };
+
     /// `Error::WeightsNotFound` (AGL-039, D24c).
     pub const WEIGHTS_NOT_FOUND: Msg = Msg {
         en: "{name} is in none of the weights folders ({folders}); put it in one of them, add its folder to `models` of {user_path}, or name it by an absolute path",
@@ -2406,6 +2467,26 @@ impl Error {
                     user_path = user_path
                 )
             }
+            Error::WeightsNotDownloaded { name, size } => tr!(
+                lang,
+                m::WEIGHTS_NOT_DOWNLOADED,
+                name = name,
+                size = crate::download::gigabytes(*size)
+            ),
+            Error::DownloadFailed { name, detail } => {
+                tr!(lang, m::DOWNLOAD_FAILED, name = name, detail = detail)
+            }
+            Error::DownloadNoSpace { name, needed, available, dir } => tr!(
+                lang,
+                m::DOWNLOAD_NO_SPACE,
+                name = name,
+                needed = crate::download::gigabytes(*needed),
+                dir = dir.display(),
+                available = crate::download::gigabytes(*available)
+            ),
+            Error::DownloadMismatch { name, expected, got } => {
+                tr!(lang, m::DOWNLOAD_MISMATCH, name = name, got = got, expected = expected)
+            }
             Error::NixDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)
             }
@@ -2617,6 +2698,9 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::NotAbsolute => tr!(lang, m::FUNC_NOT_ABSOLUTE).to_string(),
         P::BadWeightsName => tr!(lang, m::FUNC_BAD_WEIGHTS_NAME).to_string(),
         P::SourceWithoutFile => tr!(lang, m::FUNC_SOURCE_WITHOUT_FILE).to_string(),
+        P::BadSourceUrl => tr!(lang, m::FUNC_BAD_SOURCE_URL).to_string(),
+        P::BadSourceSha256 => tr!(lang, m::FUNC_BAD_SOURCE_SHA256).to_string(),
+        P::BadSourceSize => tr!(lang, m::FUNC_BAD_SOURCE_SIZE).to_string(),
     }
 }
 

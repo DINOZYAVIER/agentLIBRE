@@ -6,6 +6,7 @@ mod agent;
 mod attach;
 mod backend;
 mod cli;
+mod download;
 mod error;
 mod forge;
 mod format;
@@ -208,6 +209,7 @@ fn run(
                     listed: &user.models,
                     user_path: &paths.settings_file(),
                 },
+                &function.sources,
                 &missing,
                 *lang,
             )?;
@@ -325,8 +327,9 @@ fn agent_session(
         &function.model,
     )?;
     // The weights files become absolute paths before anything starts; a
-    // file found nowhere is asked for in a terminal (AGL-039, D22-D24).
-    let missing = if repl::term::is_interactive() {
+    // file found nowhere is asked for in a terminal (AGL-039, D22-D24), and
+    // offered for download; `-p` asks nobody (AGL-050, D10, D11).
+    let missing = if repl::term::is_interactive() && args.prompt.is_none() {
         weights::Missing::Ask(&cli::serve::ask_line)
     } else {
         weights::Missing::Fail
@@ -339,6 +342,7 @@ fn agent_session(
             listed: &user.models,
             user_path: &user_path,
         },
+        &function.sources,
         &missing,
         lang,
     )?;

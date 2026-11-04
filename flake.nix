@@ -20,6 +20,7 @@
         ln -s ${pkgs.bash}/bin/bash $out/bin/bash
         ln -s ${pkgs.git}/bin/git $out/bin/git
         ln -s ${pkgs.curl}/bin/curl $out/bin/curl
+        ln -s ${pkgs.coreutils}/bin/sha256sum $out/bin/sha256sum
         ln -s ${pkgs.ffmpeg}/bin/ffmpeg $out/bin/ffmpeg
         ln -s ${pkgs.ffmpeg}/bin/ffprobe $out/bin/ffprobe
         ln -s ${pkgs.wl-clipboard}/bin/wl-paste $out/bin/wl-paste

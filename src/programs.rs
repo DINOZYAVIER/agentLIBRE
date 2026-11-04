@@ -1,5 +1,6 @@
 //! The helper programs agl runs (AGL-040; AGL-039 D15): `bash`, `git`,
-//! `curl`, `ffmpeg`, `ffprobe`, `wl-paste` and `step` (AGL-043 F20), by
+//! `curl`, `sha256sum` (AGL-050), `ffmpeg`, `ffprobe`, `wl-paste` and `step`
+//! (AGL-043 F20), by
 //! their absolute paths in the directory the package's wrapper names in
 //! `AGENTLIBRE_TOOLS`, not by their names on `PATH`. The engines, `systemd-run` and `systemctl` are
 //! not among them (AGL-039 D16).
