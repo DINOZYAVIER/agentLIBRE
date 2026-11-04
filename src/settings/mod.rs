@@ -88,6 +88,8 @@ pub struct UserFile {
     pub repl: ReplFile,
     /// `forge` (AGL-007).
     pub forge: ForgeFile,
+    /// `about` (AGL-048).
+    pub about: AboutFile,
     /// `models`: the weights folders after agl's own (AGL-039, D24b),
     /// absolute paths, looked in in order.
     pub models: Vec<PathBuf>,
@@ -175,7 +177,7 @@ impl UserFile {
         };
         file.check_keys(&[
             "function", "language", "server", "whisper", "search", "colors", "repl", "forge",
-            "models",
+            "models", "about",
         ])?;
         let function = file.string("function")?;
         let language = file
@@ -211,6 +213,7 @@ impl UserFile {
             }
         };
         let repl = ReplFile::parse(file.section("repl")?, path)?;
+        let about = AboutFile::parse(file.section("about")?, path)?;
         let forge = match file.section("forge")? {
             None => ForgeFile::default(),
             Some(mut forge) => {
@@ -242,7 +245,41 @@ impl UserFile {
             colors,
             repl,
             forge,
+            about,
             models,
+        })
+    }
+}
+
+/// `about` of the user's settings (AGL-048): whether the model is told of its
+/// environment and of this agl, and where agl's source is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AboutFile {
+    /// `about.enabled`; unset is on. Off is for a clean comparison with a
+    /// benchmark.
+    pub enabled: Option<bool>,
+    /// `about.source`: the absolute path of agl's repository. The package
+    /// does not know it.
+    pub source: Option<String>,
+}
+
+impl AboutFile {
+    fn parse(section: Option<Section>, path: &Path) -> Result<AboutFile, Error> {
+        let Some(mut about) = section else {
+            return Ok(AboutFile::default());
+        };
+        about.check_keys(&["enabled", "source"])?;
+        let source = about.string("source")?;
+        if let Some(source) = source.as_ref().filter(|source| !Path::new(source).is_absolute()) {
+            return Err(Error::SearchPathNotAbsolute {
+                path: path.into(),
+                key: about.key("source"),
+                value: source.clone(),
+            });
+        }
+        Ok(AboutFile {
+            enabled: about.bool("enabled")?,
+            source,
         })
     }
 }
@@ -275,6 +312,8 @@ pub struct Settings {
     pub function: String,
     pub colors: Vec<(Role, Style)>,
     pub repl: ReplSettings,
+    /// `about` of the user's settings (AGL-048).
+    pub about: AboutFile,
 }
 
 impl Settings {
@@ -315,6 +354,7 @@ impl Settings {
             search,
             function,
             colors: user.colors.clone(),
+            about: user.about.clone(),
             repl: ReplSettings {
                 tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
                 tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),

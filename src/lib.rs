@@ -1,6 +1,7 @@
 //! agentLIBRE: free and open-source agentic system.
 
 mod action;
+mod about;
 mod agent;
 mod attach;
 mod backend;
@@ -124,6 +125,8 @@ pub struct Setup<'a> {
     pub search: &'a dyn search::Searcher,
     /// Where the memory of the workspace is (AGL-006).
     pub memory: &'a dyn memory::Home,
+    /// What the model is told of its environment and of this agl (AGL-048).
+    pub about: Option<&'a str>,
     /// The Functions of the REPL's `/function` (AGL-036, D3).
     pub catalog: &'a cli::function::Catalog,
 }
@@ -157,6 +160,11 @@ fn run(
         *lang = language;
     }
     let args = match cli::args::parse(args)? {
+        Command::Version => {
+            let rev = env(about::REV_VAR).and_then(|rev| rev.into_string().ok());
+            let _ = writeln!(io::stdout(), "{}", about::version(rev.as_deref()));
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Help => {
             // A closed pipe, as in `agl --help | head -1`, is not an error.
             let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::HELP));
@@ -451,6 +459,51 @@ fn agent_session(
         Some(session) => session,
         None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
     };
+    // What the model is told of its environment and of this agl (AGL-048).
+    let about = settings.about.enabled.unwrap_or(true).then(|| {
+        let nix_dir = env(nix::NIX_VAR).map(PathBuf::from);
+        let name = format!("{}.nix", settings.function);
+        let function_file = [
+            paths.functions_dir(&project.key).join(&name),
+            paths.functions().join(&name),
+        ]
+        .into_iter()
+        .find(|file| file.is_file())
+        .or_else(|| {
+            nix_dir
+                .as_ref()
+                .map(|dir| dir.join("functions").join(&name))
+                .filter(|file| file.is_file())
+        });
+        let session_format = nix_dir
+            .as_ref()
+            .map(|dir| dir.join("docs/session-file.md"))
+            .filter(|file| file.is_file());
+        let git_root = about::git_root(&workspace);
+        let now = session::utc_now();
+        let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
+        let (server_kind, model) = match settings.server.kind() {
+            ServerKind::Strata => ("strata", settings.server.strata_config.as_deref()),
+            ServerKind::Llama => ("llama", settings.server.model.as_deref()),
+        };
+        about::About {
+            workspace: &workspace,
+            git_root: git_root.as_deref(),
+            system: std::env::consts::OS,
+            date: &now[..10.min(now.len())],
+            version: &version,
+            function: &settings.function,
+            function_file: function_file.as_deref(),
+            server_kind,
+            server_url: &settings.server_url,
+            model,
+            session_format: session_format.as_deref(),
+            user_settings: user_path.as_path(),
+            project_store: &project.dir,
+            source: settings.about.source.as_deref(),
+        }
+        .render()
+    });
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
         let interactive = repl::term::is_interactive();
@@ -485,6 +538,7 @@ fn agent_session(
             image_tokens,
             search,
             memory: &memory,
+            about: about.as_deref(),
             catalog: &catalog,
         };
         return if interactive {
@@ -534,6 +588,7 @@ fn agent_session(
         whisper: &autostart,
         search,
         memory: &memory,
+        about: about.as_deref(),
     };
     match agent.turn_observed(&message, &mut StderrReport::new(lang), &mut observer)? {
         TurnEnd::Answer(text) => {

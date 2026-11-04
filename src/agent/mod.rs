@@ -124,6 +124,8 @@ pub struct Agent<'a> {
     pub search: &'a dyn Searcher,
     /// Where the memory of the workspace is (AGL-006).
     pub memory: &'a dyn crate::memory::Home,
+    /// What the model is told of its environment and of this agl (AGL-048).
+    pub about: Option<&'a str>,
 }
 
 impl Agent<'_> {
@@ -751,7 +753,19 @@ impl Agent<'_> {
     /// next prompt continues this one, so nothing stands after the history
     /// that the next step's history would go before (AGL-047, D1).
     fn step_messages(&mut self) -> Vec<Message> {
-        let mut messages = vec![Message::System(system_prompt(self.function, self.context))];
+        let mut system = system_prompt(self.function, self.context);
+        if let Some(about) = self.about {
+            system.push_str("\n\n");
+            system.push_str(
+                &about
+                    .replace(crate::about::CONTEXT, &self.context.to_string())
+                    .replace(
+                        crate::about::SESSION_LOG,
+                        &self.session.file_path().display().to_string(),
+                    ),
+            );
+        }
+        let mut messages = vec![Message::System(system)];
         let memory = self.memory;
         let index = self
             .session

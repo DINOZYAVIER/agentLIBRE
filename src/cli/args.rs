@@ -10,6 +10,8 @@ use crate::error::Error;
 pub enum Command {
     /// Print the help text.
     Help,
+    /// Print the version (AGL-048).
+    Version,
     /// Run the agent.
     Run(Args),
     /// `agl server start|stop|status` (D146); the flag is `--yes` of
@@ -166,6 +168,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         let arg = text(arg)?;
         let slot = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
+            "--version" => return Ok(Command::Version),
             "--yes" => {
                 if parsed.yes {
                     return Err(Error::RepeatedOption(arg));
@@ -326,6 +329,11 @@ mod tests {
             panic!("expected a run");
         };
         assert_eq!(args.prompt.as_deref(), Some("--help"));
+    }
+
+    #[test]
+    fn version() {
+        assert_eq!(parse_strs(&["--version"]).unwrap(), Command::Version);
     }
 
     #[test]

@@ -404,6 +404,11 @@ impl Session {
         self.memory_index = None;
     }
 
+    /// The session's file (AGL-048).
+    pub fn file_path(&self) -> &Path {
+        &self.path
+    }
+
     /// A handle on the session file for the observer of a turn (AGL-046).
     /// The file is opened to append, so the lines of both stay whole.
     pub fn log_file(&self) -> Option<File> {

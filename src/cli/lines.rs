@@ -39,6 +39,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         search,
         image_tokens,
         memory,
+        about,
         ..
     } = setup;
     let workspace = session.workspace.clone();
@@ -174,6 +175,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             whisper: autostart,
                             search,
                             memory,
+                            about,
                         }
                         .compact(&mut StderrReport::new(lang))
                     });
@@ -239,6 +241,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 whisper: autostart,
                 search,
                 memory,
+                about,
             }
             .turn_observed(&text, &mut report, &mut observer)
         });

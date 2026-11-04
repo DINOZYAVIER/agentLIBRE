@@ -482,3 +482,15 @@ fn the_session_starts_the_server_unless_told_not_to() {
     // AGL-046.
     assert!(ReplSettings::default().start_server);
 }
+
+#[test]
+fn about_is_read_and_its_source_must_be_absolute() {
+    // AGL-048.
+    let about = user_of(r#"about = { enabled = false; source = "/r/agentLIBRE"; };"#)
+        .unwrap()
+        .about;
+    assert_eq!(about.enabled, Some(false));
+    assert_eq!(about.source.as_deref(), Some("/r/agentLIBRE"));
+    assert!(user_of(r#"about.source = "relative";"#).is_err());
+    assert!(user_of("about.nope = true;").is_err());
+}

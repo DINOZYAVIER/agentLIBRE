@@ -68,7 +68,8 @@
           for bin in agl agentLIBRE; do
             wrapProgram $out/bin/$bin \
               --set AGENTLIBRE_TOOLS ${tools}/bin \
-              --set AGENTLIBRE_NIX $out/share/agentLIBRE/nix
+              --set AGENTLIBRE_NIX $out/share/agentLIBRE/nix \
+              --set AGENTLIBRE_REV ${self.shortRev or self.dirtyShortRev or "unknown"}
           done
         '';
         meta = {

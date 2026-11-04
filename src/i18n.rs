@@ -176,6 +176,7 @@ Options:
   --attach <path>     with -p: attach an image, a video or an audio; repeatable
   --yes               start or switch the server of the project without
                       asking when another server runs
+  --version           print the version and the commit of this agl
   -h, --help          print this help
 
 Project (agentLIBRE/<project> under XDG_DATA_HOME and its settings.nix):
@@ -233,6 +234,7 @@ under XDG_DATA_HOME):
                       повторювати
   --yes               запустити чи перемкнути сервер проєкту без питання,
                       коли працює інший сервер
+  --version           показати версію і коміт цього agl
   -h, --help          показати цю довідку
 
 Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME і його settings.nix):

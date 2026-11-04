@@ -375,6 +375,7 @@ fn agent_searching<'a>(
         whisper: &NoWhisper,
         search,
         memory: &NoMemory,
+        about: None,
     }
 }
 
@@ -2145,3 +2146,37 @@ fn a_part_of_the_prompt_is_written_again_only_when_it_changes() {
     assert_eq!(inputs.len(), 2);
     assert_eq!(inputs[1]["text"], "two");
 }
+
+#[test]
+fn the_model_is_told_of_its_environment_after_the_system_text() {
+    // AGL-048: the context and the session's file filled in, and the same at
+    // every step, so the prompt's early part does not change.
+    let dir = Dir::new("about");
+    let function = Function::load(
+        Path::new("/none"),
+        Path::new("/none"),
+        "agentLIBRE-gpu-high-minimal",
+    )
+    .unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut turn = agent(&function, &script, &mut session, &dir, None);
+    turn.context = 131_072;
+    turn.about = Some("context {context}, file {session_log}");
+    turn.turn("go", &mut Log::default()).unwrap();
+    let file = session.file_path().display().to_string();
+    let systems = script.systems.borrow();
+    assert_eq!(systems.len(), 2);
+    assert_eq!(systems[0], systems[1]);
+    assert!(
+        systems[0].ends_with(&format!("\n\ncontext 131072, file {file}")),
+        "{}",
+        systems[0]
+    );
+}
+

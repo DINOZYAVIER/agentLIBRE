@@ -651,6 +651,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         search,
         image_tokens,
         memory,
+        about,
         catalog,
         ..
     } = setup;
@@ -889,6 +890,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         whisper: autostart,
                         search,
                         memory,
+                        about,
                     }
                     .compact(&mut Reporter {
                         presenter: &mut presenter,
@@ -960,6 +962,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         whisper: autostart,
                         search,
                         memory,
+                        about,
                     }
                     .turn_observed(
                         &message,
