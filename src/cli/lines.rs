@@ -95,6 +95,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                                         kind: write.kind,
                                         text: write.text.clone(),
                                     })?;
+                                    session.renew_memory_index();
                                     StderrReport::new(lang).memory(
                                         &write.name,
                                         write.kind,

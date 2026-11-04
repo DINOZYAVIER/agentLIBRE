@@ -781,6 +781,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                                 }) {
                                     presenter.show_notice(&error.message(lang), Role::StatusFailure);
                                 }
+                                session.renew_memory_index();
                                 presenter.show_memory(&write.name, write.kind, write.text.as_deref());
                             }
                             None => presenter.show_notice(

@@ -33,6 +33,8 @@ struct Script {
     uploads: RefCell<Vec<Vec<String>>>,
     /// The texts of the runtime messages of each rendered prompt, in order.
     runtimes: RefCell<Vec<Vec<String>>>,
+    /// The kinds of the messages of each rendered prompt, in order.
+    orders: RefCell<Vec<Vec<&'static str>>>,
     /// The runtime messages of each structured generation (AGL-030, D9).
     structured: RefCell<Vec<Vec<String>>>,
 }
@@ -67,6 +69,7 @@ impl Script {
             users: RefCell::new(Vec::new()),
             uploads: RefCell::new(Vec::new()),
             runtimes: RefCell::new(Vec::new()),
+            orders: RefCell::new(Vec::new()),
             structured: RefCell::new(Vec::new()),
         }
     }
@@ -110,6 +113,19 @@ impl Backend for Script {
             })
             .collect();
         self.users.borrow_mut().push(users.join("\n"));
+        self.orders.borrow_mut().push(
+            prompt
+                .messages
+                .iter()
+                .map(|m| match m {
+                    Message::System(_) => "system",
+                    Message::User(_) => "user",
+                    Message::Runtime(_) => "runtime",
+                    Message::Assistant { .. } => "assistant",
+                    Message::Tool { .. } => "tool",
+                })
+                .collect(),
+        );
         self.runtimes.borrow_mut().push(
             prompt
                 .messages
@@ -1808,6 +1824,85 @@ fn turn_with_memory(
 }
 
 #[test]
+fn the_memory_index_stands_before_the_history_and_stays_for_the_session() {
+    // AGL-047, D1, D2.
+    let dir = Dir::new("memfrozen");
+    let memory = dir.0.join("memory");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(memory.join("MEMORY.md"), "- [One](one.md) — first\n").unwrap();
+    let home = DirMemory(memory.clone());
+    let function = Function::load(
+        Path::new("/none"),
+        Path::new("/none"),
+        "agentLIBRE-gpu-high-minimal",
+    )
+    .unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let first = "workspace memory\n- [One](one.md) — first";
+
+    let script = Script::new(&[("t1", THOUGHT), ("Done.", Stop::End)]);
+    let mut turn = agent(&function, &script, &mut session, &dir, None);
+    turn.memory = &home;
+    turn.turn("go", &mut Log::default()).unwrap();
+    assert_eq!(script.runtimes.borrow()[0], [first]);
+    let order = session.history();
+    assert!(matches!(order[0], Message::User(_)));
+
+    // A change of the file does not reach the next turn of the session.
+    fs::write(memory.join("MEMORY.md"), "- [Two](two.md) — second\n").unwrap();
+    let script = Script::new(&[("t2", THOUGHT), ("Done.", Stop::End)]);
+    let mut turn = agent(&function, &script, &mut session, &dir, None);
+    turn.memory = &home;
+    turn.turn("again", &mut Log::default()).unwrap();
+    assert_eq!(script.runtimes.borrow()[0], [first]);
+
+    // `/remember` and a compaction renew it.
+    session.renew_memory_index();
+    let script = Script::new(&[("t3", THOUGHT), ("Done.", Stop::End)]);
+    let mut turn = agent(&function, &script, &mut session, &dir, None);
+    turn.memory = &home;
+    turn.turn("and again", &mut Log::default()).unwrap();
+    assert_eq!(
+        script.runtimes.borrow()[0],
+        ["workspace memory\n- [Two](two.md) — second"]
+    );
+
+    // A session opened again reads it anew.
+    let reopened_dir = session.media_dir();
+    let id = session.id.clone();
+    fs::write(memory.join("MEMORY.md"), "- [Three](three.md) — third\n").unwrap();
+    let mut session = Session::open(reopened_dir.parent().unwrap(), &id).unwrap();
+    assert_eq!(
+        session.memory_index(|| Some("anew".into())),
+        Some("anew".to_owned())
+    );
+    assert_eq!(
+        session.memory_index(|| Some("not read".into())),
+        Some("anew".to_owned())
+    );
+}
+
+#[test]
+fn the_memory_index_comes_right_after_the_system_prompt() {
+    // AGL-047, D1: the next step's history goes after it.
+    let dir = Dir::new("memorder");
+    let memory = dir.0.join("memory");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(memory.join("MEMORY.md"), "- [One](one.md) — first\n").unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("true"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let (end, _, _) = turn_with_memory(&DirMemory(memory), &script, &dir, "go");
+    assert!(end.is_ok());
+    let orders = script.orders.borrow();
+    assert_eq!(orders[0], ["system", "runtime", "user"]);
+    assert_eq!(orders[1], ["system", "runtime", "user", "assistant", "tool"]);
+}
+
+#[test]
 fn the_memory_index_is_a_runtime_message_each_step_and_not_in_the_history() {
     let dir = Dir::new("memindex");
     let memory = dir.0.join("memory");
@@ -1895,11 +1990,10 @@ fn the_memory_tool_writes_logs_an_event_and_shows_a_marker() {
         panic!("not a result");
     };
     assert!(content.starts_with("the store was made\nRemembered `build-and-test`."));
-    // The next step sees the entry in the index.
-    assert_eq!(
-        script.runtimes.borrow()[1],
-        ["workspace memory\n- [Build and test](build-and-test.md) — how to test"]
-    );
+    // The index stays as it was for the session; the next step has the
+    // write in its history (AGL-047, D2).
+    assert!(script.runtimes.borrow()[1].is_empty());
+    assert!(script.users.borrow()[1].contains("Remembered `build-and-test`."));
 }
 
 #[test]

@@ -718,7 +718,7 @@ impl Agent<'_> {
             .map(|doc| format!("{}: {} {:?}", doc.name, doc.description, doc.params))
             .collect();
         self.session.record_input("tools", &tool_docs.join("\n"))?;
-        let memory = match messages.last() {
+        let memory = match messages.get(1) {
             Some(Message::Runtime(text)) => text.strip_prefix(MEMORY_MESSAGE).unwrap_or(""),
             _ => "",
         };
@@ -746,25 +746,27 @@ impl Agent<'_> {
     }
 
     /// The messages of a step before its state's instruction: the system
-    /// prompt, the history, then the index of the workspace's memory, which
-    /// is not stored (AGL-006, M27, M33).
-    fn step_messages(&self) -> Vec<Message> {
+    /// prompt, the index of the workspace's memory, which is not stored
+    /// (AGL-006, M27), then the history. The server's cache holds only if the
+    /// next prompt continues this one, so nothing stands after the history
+    /// that the next step's history would go before (AGL-047, D1).
+    fn step_messages(&mut self) -> Vec<Message> {
         let mut messages = vec![Message::System(system_prompt(self.function, self.context))];
-        messages.extend(self.session.history());
-        if let Some(index) = self
-            .memory
-            .read()
-            .and_then(|dir| crate::memory::index_text(&dir))
-        {
+        let memory = self.memory;
+        let index = self
+            .session
+            .memory_index(|| memory.read().and_then(|dir| crate::memory::index_text(&dir)));
+        if let Some(index) = index {
             messages.push(Message::Runtime(format!("{MEMORY_MESSAGE}{index}")));
         }
+        messages.extend(self.session.history());
         messages
     }
 
     /// The tokens of the history as the next step sends it, without its
     /// state's instruction (AGL-043 F7): what the dock shows after a
     /// compaction, also when no step follows it (the REPL's `/compact`).
-    fn history_tokens(&self) -> Result<usize, Error> {
+    fn history_tokens(&mut self) -> Result<usize, Error> {
         let function = self.function;
         let mut messages = self.step_messages();
         let expanded = media::expand(
@@ -963,6 +965,7 @@ impl Agent<'_> {
                 summary,
             );
         }
+        self.session.renew_memory_index();
         // The dock's figure is fresh at once (AGL-043 F7) and the row of the
         // compaction can name it (AGL-046, D13); a failed count does not
         // undo the compaction, the next step counts again.

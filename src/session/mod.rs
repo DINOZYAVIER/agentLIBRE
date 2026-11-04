@@ -192,6 +192,9 @@ pub struct Session {
     file: File,
     /// What the prompt was last made of, by kind (AGL-046, D14).
     prompt_inputs: BTreeMap<String, String>,
+    /// The memory index as this run of the session read it; `None` before
+    /// that (AGL-047, D2).
+    memory_index: Option<Option<String>>,
 }
 
 impl Session {
@@ -217,6 +220,7 @@ impl Session {
             path,
             file,
             prompt_inputs: BTreeMap::new(),
+            memory_index: None,
         };
         let header = json!({
             "type": "session",
@@ -300,6 +304,7 @@ impl Session {
             path,
             file,
             prompt_inputs,
+            memory_index: None,
         };
         if complete.len() < text.len() {
             // Drop the half line so that new events start on their own line.
@@ -347,6 +352,20 @@ impl Session {
         }))?;
         self.prompt_inputs.insert(kind.into(), text.into());
         Ok(())
+    }
+
+    /// The memory index for the prompt, read once by `read` (AGL-047, D2):
+    /// a change in the prompt's early part makes the server read all of it
+    /// again.
+    pub fn memory_index(&mut self, read: impl FnOnce() -> Option<String>) -> Option<String> {
+        self.memory_index.get_or_insert_with(read).clone()
+    }
+
+    /// The next prompt reads the index anew: after a compaction, when the
+    /// cache is lost anyway, and after `/remember`, whose write the model
+    /// has in no other way (AGL-047).
+    pub fn renew_memory_index(&mut self) {
+        self.memory_index = None;
     }
 
     /// A handle on the session file for the observer of a turn (AGL-046).
