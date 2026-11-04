@@ -8,8 +8,10 @@
     "Messages that start with {runtime_prefix} come from the agentLIBRE runtime, not from the human. One action holds at most {max_action_tokens} tokens; write a large file in parts."
   ];
   max_steps_total = 0;
-  initial = "work";
-  state.work = {
+  initial = "inference";
+  # The one state for now; other states and the transitions to them come
+  # later (AGL-046, D7).
+  state.inference = {
     tools = {
       bash = { };
       edit = { };
@@ -18,6 +20,6 @@
       memory = { };
     };
     answer = true;
-    next.otherwise = "work";
+    next.otherwise = "inference";
   };
 }

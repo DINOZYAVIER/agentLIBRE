@@ -3,8 +3,10 @@
 # 50 (D40). The states are those of `agentLIBRE`.
 {
   system = "You are an AI agent running on agentLIBRE (agl), an agentic system.";
-  initial = "work";
-  state.work = {
+  initial = "inference";
+  # The one state for now; other states and the transitions to them come
+  # later (AGL-046, D7).
+  state.inference = {
     tools = {
       bash = { };
       edit = { };
@@ -13,6 +15,6 @@
       memory = { };
     };
     answer = true;
-    next.otherwise = "work";
+    next.otherwise = "inference";
   };
 }

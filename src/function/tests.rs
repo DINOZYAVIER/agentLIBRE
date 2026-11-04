@@ -125,13 +125,13 @@ fn builtin_gpu_high_minimal() {
             ..Sampling::default()
         }
     );
-    let work = &function.states[function.initial];
-    assert_eq!(work.name, "work");
-    assert_eq!(work.instruction, None);
+    let inference = &function.states[function.initial];
+    assert_eq!(inference.name, "inference");
+    assert_eq!(inference.instruction, None);
     assert!(function.format.think.is_some());
-    assert_eq!(work.actions.tools, action::builtin_tools());
-    assert!(work.actions.answer && work.think);
-    assert_eq!(work.next("bash", Outcome::Timeout), function.initial);
+    assert_eq!(inference.actions.tools, action::builtin_tools());
+    assert!(inference.actions.answer && inference.think);
+    assert_eq!(inference.next("bash", Outcome::Timeout), function.initial);
     // The model of D33 and D44 (AGL-039).
     assert_eq!(
         function.model,

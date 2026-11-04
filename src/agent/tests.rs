@@ -559,7 +559,7 @@ fn a_call_then_an_answer() {
     assert_eq!(
         log,
         [
-            "[work]",
+            "[inference]",
             "thinking: I will list files",
             "> bash",
             "  ok",
@@ -1111,7 +1111,7 @@ fn text_before_a_call_streams_and_is_reported_whole() {
     assert_eq!(
         log,
         [
-            "[work]",
+            "[inference]",
             "thinking: t",
             "stream: I will run it.\n",
             "text: I will run it.",
@@ -1147,7 +1147,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
     assert_eq!(
         log,
         [
-            "[work]",
+            "[inference]",
             "thinking: t1",
             "> bash",
             "  ok",
@@ -1324,7 +1324,7 @@ fn a_context_that_compaction_cannot_free_stops_the_turn() {
     let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
     let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Stopped(StopReason::ContextFull));
-    assert_eq!(log, ["[work]", "compacting"]);
+    assert_eq!(log, ["[inference]", "compacting"]);
     assert_eq!(kinds(&session), ["user", "state", "stop"]);
 
     // An empty summary is dropped, also when the shorter retry of a cut
