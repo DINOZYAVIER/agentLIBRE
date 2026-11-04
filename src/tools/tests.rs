@@ -34,7 +34,7 @@ fn running(pid: &str) -> bool {
 }
 
 fn sh(dir: &Dir, command: &str) -> ToolResult {
-    bash(&dir.0, command, Duration::from_secs(10))
+    bash(&dir.0, command, Duration::from_secs(10), &out(dir))
 }
 
 #[test]
@@ -63,44 +63,33 @@ fn bash_output_and_exit_codes() {
 }
 
 #[test]
-fn bash_keeps_the_end_of_long_output() {
+fn bash_shows_the_start_and_end_of_long_output_and_keeps_all_of_it() {
+    // AGL-049.
     let dir = Dir::new("long");
     let result = sh(&dir, "seq 1 100000; echo LAST");
     let content = &result.content;
-    assert!(
-        content.starts_with("[output truncated: first "),
-        "{}",
-        &content[..80]
-    );
+    assert!(content.starts_with("1\n2\n3\n"), "{}", &content[..40]);
     assert!(content.ends_with("99999\n100000\nLAST\n"));
-    let body = content.split_once('\n').unwrap().1;
-    assert!(body.len() <= LIMIT);
+    assert!(content.contains("bytes omitted; the full output: "), "not told");
+    assert!(content.len() <= 4096 * 4 + 300);
     // `seq 1 100000` prints 588895 bytes, then "LAST\n".
-    let omitted: usize = content["[output truncated: first ".len()..]
-        .split(' ')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(omitted + body.len(), 588_895 + 5);
+    let kept = fs::read(out(&dir).file).unwrap();
+    assert_eq!(kept.len(), 588_895 + 5);
+    assert!(kept.ends_with(b"100000\nLAST\n"));
 }
 
 #[test]
-fn truncation_keeps_whole_characters() {
-    let mut tail = Tail::default();
-    tail.push("я".repeat(LIMIT).as_bytes());
-    tail.push(b"x");
-    let text = tail.text();
-    let body = text.split_once('\n').unwrap().1;
-    assert!(body.starts_with('я') && body.ends_with('x'));
-    assert!(!text.contains('\u{fffd}'));
+fn a_short_output_leaves_no_file() {
+    let dir = Dir::new("short");
+    assert_eq!(sh(&dir, "echo hi").content, "hi\n");
+    assert!(!out(&dir).file.exists());
 }
 
 #[test]
 fn bash_timeout() {
     let dir = Dir::new("timeout");
     let started = Instant::now();
-    let result = bash(&dir.0, "echo before; sleep 30", Duration::from_secs(1));
+    let result = bash(&dir.0, "echo before; sleep 30", Duration::from_secs(1), &out(&dir));
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(
         result,
@@ -111,7 +100,7 @@ fn bash_timeout() {
     );
     // A command that ignores SIGTERM is killed after the grace time.
     let started = Instant::now();
-    let result = bash(&dir.0, "trap '' TERM; sleep 30", Duration::from_secs(1));
+    let result = bash(&dir.0, "trap '' TERM; sleep 30", Duration::from_secs(1), &out(&dir));
     assert_eq!(result.outcome, Outcome::Timeout);
     assert!(started.elapsed() < Duration::from_secs(8));
 }
@@ -141,6 +130,7 @@ fn tmux_sessions_survive() {
         &dir.0,
         &format!("tmux -S {socket} new-session -d -s agl2 'sleep 60'; sleep 30"),
         Duration::from_secs(1),
+        &out(&dir),
     );
     assert_eq!(timed_out.outcome, Outcome::Timeout);
     let sessions = Command::new("tmux")
@@ -224,6 +214,7 @@ fn run_dispatches_calls() {
             ("command".into(), Value::Text("echo hi".into())),
             ("timeout".into(), Value::Int(5)),
         ],
+        &out(&dir),
     );
     assert_eq!(result.content, "hi\n");
     assert_eq!(write, None);
@@ -237,6 +228,7 @@ fn run_dispatches_calls() {
             ("old".into(), Value::Text("x".into())),
             ("new".into(), Value::Text("y".into())),
         ],
+        &out(&dir),
     );
     assert_eq!(result.outcome, Outcome::Ok);
     // forge: the store of the workspace, resolved from the environment
@@ -247,6 +239,7 @@ fn run_dispatches_calls() {
         env,
         "forge",
         &[("action".into(), Value::Text("list".into()))],
+        &out(&dir),
     );
     assert_eq!(result.outcome, Outcome::Ok);
     assert!(
@@ -372,7 +365,7 @@ impl ForgeStore {
             state: field("state"),
             text: field("text"),
         };
-        forge_run(&self.ws, &args, Lang::En)
+        forge_run(&self.ws, &args, Lang::En, &no_file())
     }
 }
 
@@ -464,19 +457,15 @@ fn forge_show_is_the_rendered_artifact() {
             f.ws.dir.join("forge").display()
         )
     );
-    // A long body goes through the standard 16 KB tail.
+    // A long body is cut like any tool's output (AGL-049).
     let mut big = f.spec("agl-002-big", "open");
     big.body = "x".repeat(40_000);
     f.write(&big);
     let content = f.call("show", &[("name", "agl-002-big")]).content;
-    assert!(
-        content.starts_with("[output truncated: first "),
-        "{}",
-        &content[..40]
-    );
+    assert!(content.contains("bytes omitted; the full output: "), "not told");
+    assert!(content.contains("agl-002-big"), "not named");
     assert!(content.ends_with("xxx"));
-    let body = content.split_once('\n').unwrap().1;
-    assert!(body.len() <= LIMIT);
+    assert!(content.len() <= 4096 * 4 + 300, "{}", content.len());
 }
 
 #[test]
@@ -1467,7 +1456,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         title: Some("First".into()),
         ..ForgeArgs::default()
     };
-    let (result, _) = forge(&from, env(Lang::En, true), &new);
+    let (result, _) = forge(&from, env(Lang::En, true), &new, &no_file());
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     let to = root.0.join("b/proj");
     fs::create_dir_all(to.parent().unwrap()).unwrap();
@@ -1475,7 +1464,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     // `auto_rehome = false`: even a read does not adopt the store; the
     // choice is the human's, so the tool refuses and points at
     // `forge rehome`.
-    let (result, write) = forge(&to, env(Lang::En, false), &list);
+    let (result, write) = forge(&to, env(Lang::En, false), &list, &no_file());
     assert_eq!(result.outcome, Outcome::Fail, "{}", result.content);
     assert!(result.content.contains("rehome"), "{}", result.content);
     assert_eq!(write, None);
@@ -1483,7 +1472,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
     let adopted_name = forge::stores(&data.0).unwrap()[0].name();
     assert!(!adopted_name.contains(&forge::identity_of(&fs::canonicalize(&to).unwrap())[7..19]));
     // `auto_rehome = true`: adopted, and the tool says so once.
-    let (result, _) = forge(&to, env(Lang::En, true), &list);
+    let (result, _) = forge(&to, env(Lang::En, true), &list, &no_file());
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert!(result.content.starts_with("adopted the store "), "{}", result.content);
     assert!(result.content.contains("agl-001-first"), "{}", result.content);
@@ -1492,10 +1481,34 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         action: "fly".into(),
         ..ForgeArgs::default()
     };
-    let (result, _) = forge(&to, env(Lang::Uk, true), &fly);
+    let (result, _) = forge(&to, env(Lang::Uk, true), &fly, &no_file());
     assert_eq!(
         result.content,
         "невідомий action fly; action'и: list, show, new, edit, append, status, \
          rename, remove"
     );
 }
+
+/// Where a test's output goes, at the limit of a 128k context, in text of
+/// four bytes per token.
+fn out(dir: &Dir) -> Output<'static> {
+    Output {
+        tokens: 4096,
+        file: dir.0.join("outputs/c1.txt"),
+        count: &four_bytes_a_token,
+    }
+}
+
+fn four_bytes_a_token(text: &str) -> Option<usize> {
+    Some(text.len() / 4)
+}
+
+/// The limit of a test where the output goes to no file of its own.
+fn no_file() -> Output<'static> {
+    Output {
+        tokens: 4096,
+        file: Default::default(),
+        count: &four_bytes_a_token,
+    }
+}
+

@@ -24,6 +24,13 @@ These are what the history is built from.
 | `stop` | `reason` |
 | `forge`, `memory`, `media` | a write of those tools, a medium of the session |
 
+A long output shows its start and its end in `content`, cut to a limit in tokens,
+and the mark in `content` names the file with all of it: for `bash` and `search`,
+`outputs/<session id>/<call id>.txt` beside the session files, which over 10 MiB
+keeps a start and an end; for `forge show` and `memory show`, the file of the spec
+or the entry. The limit is the context / 32, or `max_tool_output_tokens` of the
+Function's policy.
+
 ## What happened during a turn
 
 These are not part of the conversation and never reach the model's history. Each

@@ -14,9 +14,10 @@ use crate::i18n::Lang;
 use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
 
-/// How much of a result the model sees (D28, D103); the bound of a result
-/// in the reserve of the early compaction (AGL-038, D6).
-pub const LIMIT: usize = 16 * 1024;
+mod output;
+
+use output::Capture;
+pub use output::{Output, limited, shown};
 
 /// `timeout` when the call does not give one (D26).
 const DEFAULT_TIMEOUT: u64 = 60;
@@ -60,6 +61,7 @@ pub fn run(
     env: ForgeEnv<'_>,
     tool: &str,
     args: &[(String, Value)],
+    output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
     let text = |name: &str| {
         args.iter()
@@ -78,10 +80,13 @@ pub fn run(
                     _ => None,
                 })
                 .unwrap_or(DEFAULT_TIMEOUT);
-            (bash(workspace, text("command"), Duration::from_secs(timeout)), None)
+            (
+                bash(workspace, text("command"), Duration::from_secs(timeout), output),
+                None,
+            )
         }
         "edit" => (edit(workspace, text("path"), text("old"), text("new")), None),
-        "forge" => forge(workspace, env, &forge_args(args)),
+        "forge" => forge(workspace, env, &forge_args(args), output),
         // The agent keeps the memory of the session, so it runs this one
         // itself (AGL-006).
         "memory" => (
@@ -113,43 +118,9 @@ pub fn run(
     }
 }
 
-/// The last [`LIMIT`] bytes of a stream and how many came before them.
-#[derive(Default)]
-struct Tail {
-    bytes: Vec<u8>,
-    dropped: usize,
-}
-
-impl Tail {
-    fn push(&mut self, data: &[u8]) {
-        self.bytes.extend_from_slice(data);
-        if self.bytes.len() > LIMIT {
-            let excess = self.bytes.len() - LIMIT;
-            self.bytes.drain(..excess);
-            self.dropped += excess;
-        }
-    }
-
-    /// The text with the truncation mark (D100). A character cut in half
-    /// at the start counts as omitted.
-    fn text(&self) -> String {
-        let mut start = 0;
-        if self.dropped > 0 {
-            while start < self.bytes.len() && (self.bytes[start] & 0b1100_0000) == 0b1000_0000 {
-                start += 1;
-            }
-        }
-        let body = String::from_utf8_lossy(&self.bytes[start..]);
-        match self.dropped + start {
-            0 => body.into_owned(),
-            omitted => format!("[output truncated: first {omitted} bytes omitted]\n{body}"),
-        }
-    }
-}
-
 /// Runs `bash -c command` in `workspace` and waits for it (D26, D100,
 /// D102, D103).
-pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
+pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<'_>) -> ToolResult {
     let fail = |error: io::Error| ToolResult {
         outcome: Outcome::Fail,
         content: format!("Cannot run bash: {error}"),
@@ -191,15 +162,15 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
         }
     };
 
-    let tail = Arc::new(Mutex::new(Tail::default()));
+    let capture = Arc::new(Mutex::new(Capture::new(output.tokens, output.file.clone())));
     let reading = {
-        let tail = Arc::clone(&tail);
+        let capture = Arc::clone(&capture);
         thread::spawn(move || {
             let mut buffer = [0; 8192];
             while let Ok(n) = reader.read(&mut buffer)
                 && n > 0
             {
-                tail.lock().unwrap().push(&buffer[..n]);
+                capture.lock().unwrap().push(&buffer[..n]);
             }
         })
     };
@@ -233,7 +204,7 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration) -> ToolResult {
             content: INTERRUPTED.into(),
         };
     }
-    let mut content = tail.lock().unwrap().text();
+    let mut content = capture.lock().unwrap().text(output.count);
     let mut footer = Vec::new();
     let outcome = if timed_out {
         footer.push(format!("timed out after {} s", timeout.as_secs()));
@@ -381,14 +352,19 @@ fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
 /// with the session's `forge.auto_rehome`, language and data
 /// directory; the caller (the agent) cannot be asked, so a needed store
 /// choice is the `RehomeNoStore` error.
-pub fn forge(workspace: &Path, env: ForgeEnv<'_>, args: &ForgeArgs) -> (ToolResult, Option<ForgeWrite>) {
+pub fn forge(
+    workspace: &Path,
+    env: ForgeEnv<'_>,
+    args: &ForgeArgs,
+    output: &Output<'_>,
+) -> (ToolResult, Option<ForgeWrite>) {
     let lang = env.lang;
     let (ws, lines) =
         match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
             Ok(resolved) => resolved,
             Err(error) => return (forge_fail(error.message(lang)), None),
         };
-    let (mut result, write) = forge_run(&ws, args, lang);
+    let (mut result, write) = forge_run(&ws, args, lang, output);
     // A store that moved or was adopted on the way: say so, once.
     if !lines.is_empty() {
         let head = lines.join("\n") + "\n";
@@ -404,6 +380,7 @@ pub fn forge_run(
     ws: &crate::forge::Workspace,
     args: &ForgeArgs,
     lang: crate::i18n::Lang,
+    output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
     use crate::i18n::m;
     use crate::tr;
@@ -423,7 +400,7 @@ pub fn forge_run(
     };
     match args.action.as_str() {
         "list" => (forge_list(ws, lang), None),
-        "show" => (forge_show(ws, &args.name, lang), None),
+        "show" => (forge_show(ws, &args.name, lang, output), None),
         "new" => {
             // The name is the one the tool made, not an argument.
             let (result, name) = forge_new(ws, &args.title, lang);
@@ -520,12 +497,13 @@ fn forge_list(ws: &crate::forge::Workspace, lang: crate::i18n::Lang) -> ToolResu
     }
 }
 
-/// `forge show` (AGL-008): the rendered artifact, through the standard
-/// 16 KB tool-result tail (D28, D100).
+/// `forge show` (AGL-008): the rendered artifact, cut like any tool's output
+/// (AGL-049); the whole is the artifact's own file.
 fn forge_show(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
     lang: crate::i18n::Lang,
+    output: &Output<'_>,
 ) -> ToolResult {
     use crate::forge;
     let Some(name) = name else {
@@ -533,11 +511,10 @@ fn forge_show(
     };
     match find_artifact(ws, name) {
         Ok(artifact) => {
-            let mut tail = Tail::default();
-            tail.push(forge::render(&artifact).as_bytes());
+            let text = forge::render(&artifact);
             ToolResult {
                 outcome: Outcome::Ok,
-                content: tail.text(),
+                content: output::limited(&text, output.tokens, &artifact.path, output.count),
             }
         }
         Err(error) => forge_fail(error.message(lang)),

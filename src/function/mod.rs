@@ -23,6 +23,9 @@ const DEFAULT_MAX_THINK_TOKENS: u32 = 4096;
 /// The action's limit when the Function does not set it: this share of the
 /// context (AGL-043 F14: an eighth, 16384 at 131072).
 const ACTION_SHARE: usize = 8;
+/// The share of the context a tool's output takes at most, when the Function
+/// does not say (AGL-049, D3b): 4096 tokens at 128k, 8192 at 256k.
+const TOOL_OUTPUT_SHARE: usize = 32;
 
 /// The summary's limit when the Function does not set it: this share of
 /// the context within the bounds (AGL-043 F6: a sixteenth, 4096 to 16384).
@@ -48,6 +51,7 @@ const POLICY_KEYS: &[&str] = &[
     "max_steps_total",
     "max_think_tokens",
     "max_action_tokens",
+    "max_tool_output_tokens",
     "compact",
     "max_compact_tokens",
 ];
@@ -102,6 +106,9 @@ pub struct Function {
     /// The Function's `max_action_tokens`; `None` is a share of the
     /// context (`action_tokens`, AGL-043 F14).
     pub max_action_tokens: Option<u32>,
+    /// The Function's `max_tool_output_tokens`; `None` is a share of the
+    /// context (`output_tokens`, AGL-049).
+    pub max_tool_output_tokens: Option<u32>,
     /// The stirs of one step of the stirred mode (AGL-030, D6); the parse
     /// of the action is retried at most this many times after a failure.
     /// `0` means no stirs: a parse failure stops the turn.
@@ -236,6 +243,14 @@ impl Function {
             .unwrap_or_else(|| u32::try_from(context / ACTION_SHARE).unwrap_or(u32::MAX))
     }
 
+    /// How many tokens of a tool's output the model sees at a context of
+    /// `context` tokens: the Function's `max_tool_output_tokens`, else a
+    /// thirty-second of the context (AGL-049).
+    pub fn output_tokens(&self, context: usize) -> usize {
+        self.max_tool_output_tokens
+            .map_or(context / TOOL_OUTPUT_SHARE, |tokens| tokens as usize)
+    }
+
     /// The summary's limit at a context of `context` tokens: the
     /// Function's `max_compact_tokens`, else a sixteenth of the context
     /// between 4096 and 16384 (AGL-043 F6).
@@ -303,6 +318,7 @@ impl Function {
         let max_think_tokens =
             positive(&mut policy, "max_think_tokens")?.unwrap_or(DEFAULT_MAX_THINK_TOKENS);
         let max_action_tokens = positive(&mut policy, "max_action_tokens")?;
+        let max_tool_output_tokens = positive(&mut policy, "max_tool_output_tokens")?;
         // The runtime fills two words in the Function's own text (AGL-017,
         // D8): the prefix here, the action's limit where the context is
         // known (`system_at`, AGL-043 F14); other brace text stays.
@@ -340,6 +356,7 @@ impl Function {
             max_steps_total,
             max_think_tokens,
             max_action_tokens,
+            max_tool_output_tokens,
             max_stirs,
             compact,
             max_compact_tokens,

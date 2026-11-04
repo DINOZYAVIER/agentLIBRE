@@ -1379,7 +1379,8 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
         ("t2", THOUGHT),
         ("Done.", Stop::End),
     ])
-    .with_counts(&[100, OVERFLOW, 15_000, FITS]);
+    // Before the overflow, the two parts of the long output are counted.
+    .with_counts(&[100, 10, 10, OVERFLOW, 15_000, FITS]);
     let (end, log, session) = run(&minimal, &script, &dir, "go");
     assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
     assert!(log.contains(&"[compacted]".to_string()), "{log:?}");
@@ -1391,8 +1392,9 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
         }
     );
     let users = script.users.borrow();
-    // The first summary request has the whole result, the second the cut.
-    assert!(users[2].contains(&"x".repeat(5000)));
+    // The first summary request has the result as the model saw it, its
+    // end being 80% of an eighth of the context (AGL-049); the second the cut.
+    assert!(users[2].contains(&"x".repeat(1600)));
     assert!(users[3].contains("characters cut for the summary]"));
     assert!(!users[3].contains(&"x".repeat(2000)));
 }
@@ -1427,14 +1429,14 @@ fn a_summary_request_without_results_to_cut_drops_the_oldest_turn() {
 
 #[test]
 fn the_early_compaction_keeps_room_for_the_summary() {
-    // AGL-038, D6, D9: at a 65536 context the reserve is 32768 (the
-    // action's eighth 8192 + 4096 + 16384 + the summary's 4096, AGL-043
-    // F6, F14); a history of 40000 compacts early with the setting on, and
-    // runs the step with it off.
+    // AGL-038, D6, D9: at a 65536 context the reserve is 18432 (the
+    // action's eighth 8192 + 4096 + a tool's output 2048 + the summary's
+    // 4096, AGL-043 F6, F14, AGL-049); a history of 50000 compacts early with
+    // the setting on, and runs the step with it off.
     let dir = Dir::new("early");
     let mut early = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
     assert!(!early.compact_early);
-    assert_eq!(super::early_reserve(&early, 65_536), 32_768);
+    assert_eq!(super::early_reserve(&early, 65_536), 18_432);
     early.compact_early = true;
     let script = Script::new(&[
         ("t1", THOUGHT),
@@ -1443,7 +1445,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
         ("t2", THOUGHT),
         ("Done.", Stop::End),
     ])
-    .with_counts(&[100, 40_000, FITS, 200]);
+    .with_counts(&[100, 50_000, FITS, 200]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
     let mut on = agent(&early, &script, &mut session, &dir, None);
@@ -1460,7 +1462,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
         ("t2", THOUGHT),
         ("Done.", Stop::End),
     ])
-    .with_counts(&[100, 40_000]);
+    .with_counts(&[100, 50_000]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut off = agent(&late, &script, &mut session, &dir, None);
     off.context = 65_536;
@@ -2178,5 +2180,73 @@ fn the_model_is_told_of_its_environment_after_the_system_text() {
         "{}",
         systems[0]
     );
+}
+
+#[test]
+fn a_long_output_names_its_file_beside_the_session_and_follows_the_context() {
+    // AGL-049.
+    let dir = Dir::new("output");
+    let function = Function::load(
+        Path::new("/none"),
+        Path::new("/none"),
+        "agentLIBRE-gpu-high-minimal",
+    )
+    .unwrap();
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&bash_call("seq 1 2000; echo LAST"), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let (end, _, session) = run(&function, &script, &dir, "go");
+    assert!(end.is_ok());
+    let content = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            Event::Result { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let file = session.output_file("c1");
+    assert!(file.starts_with(session.file_path().parent().unwrap()));
+    assert!(content.contains(&file.display().to_string()), "{content}");
+    // The context of these tests is 16384, so the limit is 512 tokens, and
+    // each counted part of this script's text fits: the window and the mark.
+    assert!(content.len() <= 512 * 8 + 300, "{}", content.len());
+    assert!(content.starts_with("1\n2\n") && content.ends_with("2000\nLAST\n"));
+    assert!(fs::read_to_string(&file).unwrap().starts_with("1\n2\n3\n"));
+}
+
+#[test]
+fn a_long_search_result_is_cut_and_kept_like_any_output() {
+    // AGL-049: the context of these tests is 16384, so the limit is 512
+    // tokens.
+    let dir = Dir::new("search-long");
+    let script = Script::new(&[
+        ("t1", THOUGHT),
+        (&search_call(&[("language", "uk"), ("limit", "3"), ("query", "Київ"), ("source", "wikipedia")]), Stop::End),
+        ("t2", THOUGHT),
+        ("Done.", Stop::End),
+    ]);
+    let long = "1. Київ\n".to_owned() + &"результат ".repeat(3000) + "\nкінець";
+    let search = FakeSearch::new(Outcome::Ok, &long);
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
+        .turn("what is Kyiv", &mut Log::default());
+    assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{end:?}");
+    let content = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            Event::Result { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(content.starts_with("1. Київ") && content.ends_with("кінець"));
+    let file = session.output_file("c1");
+    assert!(content.contains(&file.display().to_string()), "not told");
+    assert_eq!(fs::read_to_string(&file).unwrap(), long);
 }
 

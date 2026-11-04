@@ -833,3 +833,24 @@ fn without_a_tool_the_state_loses_it_and_keeps_an_action() {
     assert!(only.states[0].actions.tools.is_empty());
     assert!(only.states[0].actions.answer);
 }
+
+#[test]
+fn a_tools_output_follows_the_context_unless_the_function_says() {
+    // AGL-049, D3b.
+    let plain = function(r#"{ system = "s"; initial = "a"; state.a.answer = true; }"#).unwrap();
+    assert_eq!(plain.output_tokens(128 * 1024), 4096);
+    assert_eq!(plain.output_tokens(256 * 1024), 8192);
+    assert_eq!(plain.output_tokens(64 * 1024), 2048);
+    let set = function(
+        r#"{ system = "s"; max_tool_output_tokens = 1000; initial = "a"; state.a.answer = true; }"#,
+    )
+    .unwrap();
+    assert_eq!(set.output_tokens(256 * 1024), 1000);
+    assert!(
+        function(
+            r#"{ system = "s"; max_tool_output_tokens = 0; initial = "a"; state.a.answer = true; }"#
+        )
+        .is_err()
+    );
+}
+

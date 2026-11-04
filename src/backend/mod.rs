@@ -55,7 +55,8 @@ pub const TOOL_DOCS: [ToolDoc; 6] = [
     ToolDoc {
         name: "bash",
         description: "Run a shell command with `bash -c` in the workspace and return its \
-                      output (the end is kept when it is long).",
+                      output. A long output shows its start and its end and names the file \
+                      that holds all of it.",
         params: &[
             ("command", false, None, true),
             ("timeout", true, Some("Seconds; default 60."), false),

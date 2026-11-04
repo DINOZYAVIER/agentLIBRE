@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::forge::task_spec::slug;
 use crate::forge::write_atomic;
 use crate::i18n::Lang;
-use crate::tools::{ToolResult, edit};
+use crate::tools::{Output, ToolResult, edit, limited};
 
 /// The index file of the memory directory (M31).
 pub const INDEX: &str = "MEMORY.md";
@@ -22,9 +22,6 @@ pub const SUMMARIES: &str = "summaries";
 
 /// The most of the index that goes into a step's prompt (M33).
 const INDEX_CAP: usize = 4 * 1024;
-
-/// The most of an entry `show` returns, the end kept (D28, D100).
-const SHOW_LIMIT: usize = 16 * 1024;
 
 /// The longest file name of an entry, without `.md`.
 const NAME_LIMIT: usize = 64;
@@ -172,10 +169,15 @@ fn ok(content: impl Into<String>, write: Write) -> (ToolResult, Option<Write>) {
 /// Runs one action of the tool over the memory directory `dir` (M32).
 /// `call_text` is the text of the call that preceded it (AGL-029, D1): the
 /// body of `add` when its `text` field is empty; the other actions ignore it.
-pub fn run(dir: &Path, args: &Args, call_text: Option<&str>) -> (ToolResult, Option<Write>) {
+pub fn run(
+    dir: &Path,
+    args: &Args,
+    call_text: Option<&str>,
+    output: &Output<'_>,
+) -> (ToolResult, Option<Write>) {
     match args.action.as_str() {
         "add" => add(dir, &args.title, &args.hook, &args.text, call_text),
-        "show" => (show(dir, &args.name), None),
+        "show" => (show(dir, &args.name, output), None),
         "edit" => edit_entry(dir, &args.name, &args.old, &args.new),
         "update" => update(dir, &args.name, &args.title, &args.hook),
         "remove" => remove(dir, &args.name),
@@ -312,8 +314,9 @@ pub fn remember(dir: &Path, name: &str, text: &str) -> (ToolResult, Option<Write
     add(dir, name, &hook_of(text), text, None)
 }
 
-/// `show name` (M32): the entry's full text, the end kept when it is long.
-pub fn show(dir: &Path, name: &str) -> ToolResult {
+/// `show name` (M32): the entry's text, cut like any tool's output when it is
+/// long (AGL-049); the whole is the entry's own file.
+pub fn show(dir: &Path, name: &str, output: &Output<'_>) -> ToolResult {
     let missing = || ToolResult {
         outcome: Outcome::Fail,
         content: format!("No memory entry `{name}`."),
@@ -324,18 +327,7 @@ pub fn show(dir: &Path, name: &str) -> ToolResult {
     let Ok(text) = fs::read_to_string(entry_path(dir, name)) else {
         return missing();
     };
-    let content = if text.len() > SHOW_LIMIT {
-        let mut start = text.len() - SHOW_LIMIT;
-        while !text.is_char_boundary(start) {
-            start += 1;
-        }
-        format!(
-            "[output truncated: first {start} bytes omitted]\n{}",
-            &text[start..]
-        )
-    } else {
-        text
-    };
+    let content = limited(&text, output.tokens, &entry_path(dir, name), output.count);
     ToolResult {
         outcome: Outcome::Ok,
         content,
@@ -633,19 +625,19 @@ mod tests {
     }
 
     #[test]
-    fn show_returns_the_text_and_the_end_of_a_long_one() {
+    fn show_returns_the_text_and_cuts_a_long_one() {
         let dir = Dir::new("show");
         let name = added(&dir.0, "Notes", "h", "short text");
-        let shown = show(&dir.0, &name);
+        let shown = show(&dir.0, &name, &out());
         assert_eq!(shown.outcome, Outcome::Ok);
         assert_eq!(shown.content, "# Notes\n\nshort text\n");
-        assert_eq!(show(&dir.0, "nope").outcome, Outcome::Fail);
-        assert_eq!(show(&dir.0, "../etc/passwd").outcome, Outcome::Fail);
-        assert_eq!(show(&dir.0, "").outcome, Outcome::Fail);
+        assert_eq!(show(&dir.0, "nope", &out()).outcome, Outcome::Fail);
+        assert_eq!(show(&dir.0, "../etc/passwd", &out()).outcome, Outcome::Fail);
+        assert_eq!(show(&dir.0, "", &out()).outcome, Outcome::Fail);
         let long = added(&dir.0, "Long", "h", &"é".repeat(20_000));
-        let shown = show(&dir.0, &long);
-        assert!(shown.content.starts_with("[output truncated: first "));
-        assert!(shown.content.len() <= SHOW_LIMIT + 60);
+        let shown = show(&dir.0, &long, &out());
+        assert!(shown.content.contains("bytes omitted; the full output: "));
+        assert!(shown.content.len() <= 4096 * 4 + 300);
         assert!(shown.content.ends_with("é\n"));
     }
 
@@ -663,7 +655,7 @@ mod tests {
                 text: Some("18090".into()),
             })
         );
-        assert!(show(&dir.0, &name).content.contains("port 18090 and port 18081"));
+        assert!(show(&dir.0, &name, &out()).content.contains("port 18090 and port 18081"));
         // Twice, or not at all: a failed call, nothing written.
         let (twice, none) = edit_entry(&dir.0, &name, "port", "x");
         assert_eq!(twice.outcome, Outcome::Fail);
@@ -795,18 +787,18 @@ mod tests {
             text: "x".into(),
             ..Args::default()
         };
-        assert_eq!(run(&dir.0, &args, None).0.outcome, Outcome::Ok);
+        assert_eq!(run(&dir.0, &args, None, &out()).0.outcome, Outcome::Ok);
         let show_args = Args {
             action: "show".into(),
             name: "t".into(),
             ..Args::default()
         };
-        assert_eq!(run(&dir.0, &show_args, None).0.content, "# T\n\nx\n");
+        assert_eq!(run(&dir.0, &show_args, None, &out()).0.content, "# T\n\nx\n");
         let bad = Args {
             action: "list".into(),
             ..Args::default()
         };
-        let (result, write) = run(&dir.0, &bad, None);
+        let (result, write) = run(&dir.0, &bad, None, &out());
         assert_eq!(result.outcome, Outcome::Fail);
         assert!(result.content.contains("Unknown action `list`"));
         assert!(write.is_none());
@@ -857,7 +849,7 @@ mod tests {
         let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
         let line = index.lines().last().unwrap();
         assert!(line.ends_with(long.trim_end()));
-        assert!(show(&dir.0, "long-one").content.contains(long.trim_end()));
+        assert!(show(&dir.0, "long-one", &out()).content.contains(long.trim_end()));
         assert_eq!(hook_of("a\nb  c"), "a b c");
         assert_eq!(remember(&dir.0, "", "t").0.outcome, Outcome::Fail);
     }
@@ -875,5 +867,13 @@ mod tests {
         );
         // Not in the index: the prompt never carries it (M16).
         assert_eq!(index_text(&dir.0), None);
+    }
+
+    fn out() -> Output<'static> {
+        Output {
+            tokens: 4096,
+            file: Default::default(),
+            count: &|text| Some(text.len() / 4),
+        }
     }
 }

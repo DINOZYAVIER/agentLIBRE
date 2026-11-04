@@ -547,14 +547,37 @@ impl Agent<'_> {
                 report.call(&call);
                 let (result, write, memory_write) = match call.name.as_str() {
                     "view" => (self.view(&call.args), None, None),
-                    "search" => (self.search(&call.args), None, None),
+                    "search" => {
+                        let mut result = self.search(&call.args);
+                        // The service's reply is cut like any tool's output
+                        // (AGL-049).
+                        result.content = tools::shown(
+                            &result.content,
+                            &tools::Output {
+                                tokens: self.function.output_tokens(self.context),
+                                file: self.session.output_file(&call.id),
+                                count: &|text| self.backend.count_tokens(text).ok(),
+                            },
+                        );
+                        (result, None, None)
+                    }
                     "memory" => {
                         let (result, write) = self.memory_tool(&call.args, text.as_deref());
                         (result, None, write)
                     }
                     _ => {
                         let (result, write) =
-                            tools::run(self.workspace, self.forge, &call.name, &call.args);
+                            tools::run(
+                                self.workspace,
+                                self.forge,
+                                &call.name,
+                                &call.args,
+                                &tools::Output {
+                                    tokens: self.function.output_tokens(self.context),
+                                    file: self.session.output_file(&call.id),
+                                    count: &|text| self.backend.count_tokens(text).ok(),
+                                },
+                            );
                         (result, write, None)
                     }
                 };
@@ -639,7 +662,16 @@ impl Agent<'_> {
                 None => return fail("The memory of this workspace has no entries yet.".into()),
             }
         };
-        let (mut result, write) = crate::memory::run(&dir, &args, call_text);
+        let (mut result, write) = crate::memory::run(
+            &dir,
+            &args,
+            call_text,
+            &tools::Output {
+                tokens: self.function.output_tokens(self.context),
+                file: Default::default(),
+                count: &|text| self.backend.count_tokens(text).ok(),
+            },
+        );
         // A store that moved or was adopted on the way: said once.
         if !lines.is_empty() {
             result.content.insert_str(0, &(lines.join("\n") + "\n"));
@@ -998,12 +1030,12 @@ impl Agent<'_> {
 }
 
 /// The reserve of the early compaction (AGL-038, D6): the most a step can
-/// add to the history — its action, its thinking, a tool result of
-/// `tools::LIMIT` bytes counted at a token per byte — and the summary.
+/// add to the history — its action, its thinking, a tool result at its limit
+/// (AGL-049) — and the summary.
 fn early_reserve(function: &Function, context: usize) -> usize {
     function.action_tokens(context) as usize
         + function.max_think_tokens as usize
-        + crate::tools::LIMIT
+        + function.output_tokens(context)
         + function.compact_tokens(context) as usize
 }
 

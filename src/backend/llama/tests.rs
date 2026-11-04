@@ -97,7 +97,8 @@ fn tool_schemas() {
             "function": {
                 "name": "bash",
                 "description": "Run a shell command with `bash -c` in the workspace and return \
-                                its output (the end is kept when it is long).",
+                                its output. A long output shows its start and its end and \
+                                names the file that holds all of it.",
                 "parameters": {
                     "type": "object",
                     "properties": {
