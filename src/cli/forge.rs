@@ -780,9 +780,7 @@ fn rehome(
     // The store the workspace already carries, when its marker is
     // written: re-homing to another store would put the identity in
     // two markers.
-    let current = found
-        .iter()
-        .find(|store| store.hashes.iter().any(|hash| hash == &ws.identity));
+    let current = forge::mine(&found, &ws.identity).first().copied();
     if new_store {
         return rehome_new(ws, lang, current);
     }

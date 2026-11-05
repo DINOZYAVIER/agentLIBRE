@@ -1803,6 +1803,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{path}: формат маркера {format}, очікується 1",
     };
 
+    /// `Error::MarkerProject`.
+    pub const MARKER_PROJECT: Msg = Msg {
+        en: "{path} names the project {project}, which is not an absolute path",
+        uk: "{path} називає проєкт {project}, а це не абсолютний шлях",
+    };
     /// `Error::MarkerIdentity`.
     pub const MARKER_IDENTITY: Msg = Msg {
         en: "{path} lists {value}, which is not a sha256 identity",
@@ -2600,6 +2605,9 @@ impl Error {
             }
             Error::MarkerFormat { path, format } => {
                 tr!(lang, m::MARKER_FORMAT, path = path.display(), format = format)
+            }
+            Error::MarkerProject { path, project } => {
+                tr!(lang, m::MARKER_PROJECT, path = path.display(), project = project.display())
             }
             Error::MarkerIdentity { path, value } => {
                 tr!(lang, m::MARKER_IDENTITY, path = path.display(), value = value)

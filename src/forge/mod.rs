@@ -175,12 +175,14 @@ pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
     })
 }
 
-/// The identity of a store (AGL-010): the format and the list of the
-/// identities the store carries, the last one the current home; the
-/// `format` and `workspace_sha256` of its `settings.nix` (AGL-041).
+/// The identity of a store (AGL-010): the format, the list of the
+/// identities the store carries, the last one the current home, and the
+/// path of that home, which a hash cannot give back; the `format`,
+/// `workspace_sha256` and `project` of its `settings.nix` (AGL-041, AGL-055).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Marker {
     pub hashes: Vec<String>,
+    pub project: PathBuf,
 }
 
 impl Marker {
@@ -201,7 +203,11 @@ impl Marker {
                 });
             }
         }
-        Ok(Marker { hashes })
+        let project = PathBuf::from(file.required_string("project")?);
+        if !project.is_absolute() {
+            return Err(Error::MarkerProject { path, project });
+        }
+        Ok(Marker { hashes, project })
     }
 
     /// Writes the identity into the settings file `path`, keeping its
@@ -220,6 +226,7 @@ impl Marker {
             "workspace_sha256".into(),
             Value::Array(self.hashes.iter().cloned().map(Value::String).collect()),
         );
+        map.insert("project".into(), Value::from(self.project.to_string_lossy()));
         nix::write_settings(path, &map)
     }
 }
@@ -230,6 +237,8 @@ impl Marker {
 pub struct Store {
     pub dir: PathBuf,
     pub hashes: Vec<String>,
+    /// The directory of the project at the last identity (AGL-055).
+    pub project: PathBuf,
     pub function: Option<String>,
     pub server: ServerFile,
     pub whisper: WhisperFile,
@@ -270,6 +279,7 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
         found.push(Store {
             dir,
             hashes: marker.hashes,
+            project: marker.project,
             function: settings.function,
             server: settings.server,
             whisper: settings.whisper,
@@ -278,6 +288,24 @@ pub fn stores(data: &Path) -> Result<Vec<Store>, Error> {
     }
     found.sort_by_key(Store::name);
     Ok(found)
+}
+
+/// The stores of `identity`: the ones it is the current home of; else the ones
+/// it was a home of, when their project is gone (a move back). With their project
+/// still there, another copy now sits at that old path, and the store is not
+/// its own (AGL-055).
+pub fn mine<'a>(found: &'a [Store], identity: &str) -> Vec<&'a Store> {
+    let current: Vec<&Store> = found
+        .iter()
+        .filter(|store| store.hashes.last().is_some_and(|hash| hash == identity))
+        .collect();
+    if !current.is_empty() {
+        return current;
+    }
+    found
+        .iter()
+        .filter(|store| store.hashes.iter().any(|hash| hash == identity) && !store.project.is_dir())
+        .collect()
 }
 
 /// The resolved project of the cwd: its directory and the store
@@ -344,6 +372,7 @@ fn rehomed(
     store: &Store,
     key: &str,
     identity: &str,
+    project: &Path,
     lang: crate::i18n::Lang,
 ) -> Result<(PathBuf, String), Error> {
     use crate::i18n::m;
@@ -354,7 +383,7 @@ fn rehomed(
     hashes.push(identity.to_owned());
     // The project's settings are in its `settings.nix`, which moves with
     // the directory (AGL-039, D11).
-    let marker = Marker { hashes };
+    let marker = Marker { hashes, project: project.to_path_buf() };
     if store.dir != new {
         fs::rename(&store.dir, &new)
             .map_err(|source| Error::Write { path: new.clone(), source })?;
@@ -437,8 +466,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
     let found = stores(data)?;
     for project in cwd.ancestors() {
         let identity = identity_of(project);
-        let mut mine = found.iter().filter(|store| store.hashes.contains(&identity));
-        if let Some(store) = mine.next() {
+        if let Some(store) = mine(&found, &identity).first() {
             let key = store_key(&basename_of(project), &identity, &found);
             return Ok(Workspace {
                 project: project.to_path_buf(),
@@ -540,10 +568,7 @@ fn resolve_among(
     // By identity over all the ancestors first: the nearest wins.
     for project in projects {
         let identity = identity_of(project);
-        let mine: Vec<&Store> = found
-            .iter()
-            .filter(|store| store.hashes.contains(&identity))
-            .collect();
+        let mine = mine(&found, &identity);
         let key = store_key(&basename_of(project), &identity, &found);
         match mine.len() {
             0 => continue,
@@ -559,7 +584,7 @@ fn resolve_among(
             // A move or a rename, back or forth: the old directory
             // becomes the new one, the artifacts are untouched.
             1 => {
-                let (dir, line) = rehomed(data, mine[0], &key, &identity, lang)?;
+                let (dir, line) = rehomed(data, mine[0], &key, &identity, project, lang)?;
                 return Ok((
                     workspace(project, &identity, &key, dir, Some(mine[0])),
                     vec![line],
@@ -574,7 +599,9 @@ fn resolve_among(
         }
     }
     // Then by exact name over all of them: the nearest ancestor that
-    // has a same-named store.
+    // has a same-named store whose project is gone, as after a move. A store
+    // whose project is still there is that project's, and this is another
+    // copy of it (AGL-055).
     for project in projects {
         let basename = basename_of(project);
         if basename.is_empty() {
@@ -582,7 +609,7 @@ fn resolve_among(
         }
         let candidates: Vec<&Store> = found
             .iter()
-            .filter(|store| is_store_name(&store.name(), &basename))
+            .filter(|store| is_store_name(&store.name(), &basename) && !store.project.is_dir())
             .collect();
         if candidates.is_empty() {
             continue;
@@ -590,7 +617,7 @@ fn resolve_among(
         let identity = identity_of(project);
         let key = store_key(&basename, &identity, &found);
         let adopt = |store: &Store| {
-            let (dir, _line) = rehomed(data, store, &key, &identity, lang)?;
+            let (dir, _line) = rehomed(data, store, &key, &identity, project, lang)?;
             let line = tr!(
                 lang,
                 m::FORGE_ADOPTED,
@@ -653,6 +680,7 @@ pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
+        project: ws.project.clone(),
     }
     .write(&marker_path)?;
     Ok(vec![tr!(lang, m::FORGE_MARKER_WRITTEN, path = marker_path.display())])
@@ -675,7 +703,7 @@ pub fn rehome_store(
             name: store_name.to_string(),
             stores: found.iter().map(Store::name).collect(),
         })?;
-    let (_, line) = rehomed(data, target, &ws.key, &ws.identity, lang)?;
+    let (_, line) = rehomed(data, target, &ws.key, &ws.identity, &ws.project, lang)?;
     Ok(line)
 }
 
@@ -688,6 +716,7 @@ pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Err
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
         hashes: vec![ws.identity.clone()],
+        project: ws.project.clone(),
     }
     .write(&ws.dir.join(MARKER_FILE))?;
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
@@ -1242,9 +1271,7 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.path().join(MARKER_FILE);
         fs::write(&path, "{ agl, ... }: { function = \"f\"; }\n").unwrap();
-        let marker = Marker {
-            hashes: vec![identity(1), identity(2)],
-        };
+        let marker = Marker { hashes: vec![identity(1), identity(2)], project: "/gone".into() };
         marker.write(&path).unwrap();
         assert_eq!(super::tests::marker(dir.path()), marker);
         let project = crate::settings::ProjectFile::from_section(
@@ -1281,7 +1308,7 @@ mod tests {
         fs::create_dir_all(data.join("plain")).unwrap();
         let store = data.join("ws-0123456789ab");
         fs::create_dir_all(&store).unwrap();
-        Marker { hashes: vec![identity(1)] }
+        Marker { hashes: vec![identity(1)], project: "/gone".into() }
             .write(&store.join(MARKER_FILE))
             .unwrap();
         let found = stores(&data).unwrap();
@@ -1455,7 +1482,9 @@ mod tests {
         let (ws2, _) = resolve(&data, &second, EN, false, &|options| Ok(options.len() - 1))
             .unwrap();
         materialize(&ws2, EN).unwrap();
-        // A third checkout, the same basename, a new identity.
+        // A third checkout, the same basename, a new identity, the other two gone.
+        fs::remove_dir_all(&first).unwrap();
+        fs::remove_dir_all(&second).unwrap();
         let third = git_repo(dir.path(), "c/proj", 1);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
@@ -1574,6 +1603,7 @@ mod tests {
         let held = Store {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![identity(2)],
+            project: "/gone".into(),
             function: None,
             server: ServerFile::default(),
             whisper: WhisperFile::default(),
@@ -1595,6 +1625,7 @@ mod tests {
         let mine_store = Store {
             dir: PathBuf::from("/d/proj-0123456789ab"),
             hashes: vec![mine.to_string()],
+            project: "/gone".into(),
             function: None,
             server: ServerFile::default(),
             whisper: WhisperFile::default(),
@@ -1611,7 +1642,7 @@ mod tests {
         let mine = identity_of(&repo);
         let taken = data.join(format!("proj-{}", &mine["sha256:".len()..19]));
         fs::create_dir_all(&taken).unwrap();
-        Marker { hashes: vec![identity(7)] }
+        Marker { hashes: vec![identity(7)], project: "/gone".into() }
             .write(&taken.join(MARKER_FILE))
             .unwrap();
         let (ws, _) = resolve(&data, &repo, EN, false, &|options| Ok(options.len() - 1)).unwrap();
@@ -1746,6 +1777,89 @@ mod tests {
     }
 
     #[test]
+    fn a_second_clone_gets_a_store_of_its_own() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let first = git_repo(dir.path(), "a/proj", 1);
+        let ws = fresh_store(&data, &first);
+        let before = fs::read(ws.dir.join(MARKER_FILE)).unwrap();
+        let second = git_repo(dir.path(), "b/proj", 1);
+        // Neither asked nor adopted: the first project is still there.
+        let (clone, _) = resolve(&data, &second, EN, false, &|options| {
+            panic!("nothing to choose: {options:?}")
+        })
+        .unwrap();
+        assert_eq!(clone.dir, data.join(format!("proj-{}", short(&second))));
+        assert!(!clone.dir.exists());
+        assert_eq!(fs::read(ws.dir.join(MARKER_FILE)).unwrap(), before);
+        materialize(&clone, EN).unwrap();
+        assert_eq!(marker(&clone.dir).project, second);
+        // From then on, each is quiet on its own store, in either order.
+        for (project, store) in [(&first, &ws.dir), (&second, &clone.dir), (&first, &ws.dir)] {
+            let (found, lines) = auto(&data, project);
+            assert!(lines.is_empty());
+            assert_eq!(&found.dir, store);
+        }
+        assert_eq!(marker(&ws.dir).hashes, vec![identity_of(&first)]);
+    }
+
+    #[test]
+    fn a_copy_at_the_old_path_of_a_moved_project_gets_a_store_of_its_own() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let from = git_repo(dir.path(), "a/proj", 1);
+        fresh_store(&data, &from);
+        let to = dir.path().join("b/proj");
+        move_repo(&from, &to);
+        let to = fs::canonicalize(&to).unwrap();
+        let (moved, _) = auto(&data, &to);
+        assert_eq!(marker(&moved.dir).project, to);
+        // A new clone where the project was: its hash is in the store's list.
+        let again = git_repo(dir.path(), "a/proj", 1);
+        let (clone, _) = auto(&data, &again);
+        assert_ne!(clone.dir, moved.dir);
+        assert!(!clone.dir.exists());
+        materialize(&clone, EN).unwrap();
+        // Both have one store each, and the old entry is no ambiguity.
+        assert_eq!(auto(&data, &again).0.dir, clone.dir);
+        assert_eq!(auto(&data, &to).0.dir, moved.dir);
+        // With the moved one gone too, the store of the current home still wins.
+        fs::remove_dir_all(&to).unwrap();
+        assert_eq!(auto(&data, &again).0.dir, clone.dir);
+    }
+
+    #[test]
+    fn rehome_takes_the_store_of_a_project_still_there_when_asked() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        let first = git_repo(dir.path(), "a/proj", 1);
+        let ws = fresh_store(&data, &first);
+        let name = ws.dir.file_name().unwrap().to_string_lossy().into_owned();
+        let second = git_repo(dir.path(), "b/proj", 1);
+        let (clone, _) = auto(&data, &second);
+        rehome_store(&data, &clone, &name, EN).unwrap();
+        assert_eq!(marker(&clone.dir).project, second);
+        assert!(!ws.dir.exists());
+    }
+
+    #[test]
+    fn the_marker_says_where_the_project_is() {
+        let hashes = format!(r#"format = 1; workspace_sha256 = [ "{}" ];"#, identity(1));
+        assert!(matches!(
+            take_marker(&hashes),
+            Err(Error::MissingKey { key, .. }) if key == "project"
+        ));
+        assert!(matches!(
+            take_marker(&format!(r#"{hashes} project = "relative";"#)),
+            Err(Error::MarkerProject { .. })
+        ));
+        assert_eq!(
+            take_marker(&format!(r#"{hashes} project = "/p";"#)).unwrap().project,
+            Path::new("/p")
+        );
+    }
+
+    #[test]
     fn a_registered_parent_wins_over_a_same_named_child() {
         let dir = TempDir::new();
         let data = dir.path().join("data");
@@ -1804,9 +1918,7 @@ mod tests {
             "{ agl, ... }: { function = \"coder\"; }\n",
         )
         .unwrap();
-        Marker {
-            hashes: vec![identity_of(&from)],
-        }
+        Marker { hashes: vec![identity_of(&from)], project: "/gone".into() }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
         let (found, _) = auto(&data, &from);
@@ -1841,9 +1953,7 @@ mod tests {
             "{ agl, ... }: { server.llama.url = \"http://127.0.0.1:18081\"; }\n",
         )
         .unwrap();
-        Marker {
-            hashes: vec![origin.clone()],
-        }
+        Marker { hashes: vec![origin.clone()], project: "/gone".into() }
         .write(&ws.dir.join(MARKER_FILE))
         .unwrap();
         let (found, _) = auto(&data, &from);

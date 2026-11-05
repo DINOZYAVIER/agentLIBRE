@@ -270,6 +270,8 @@ pub enum Error {
     /// A workspace marker lists a value that is not a `sha256:<hex>`
     /// identity.
     MarkerIdentity { path: PathBuf, value: String },
+    /// The marker's `project` is not an absolute path (AGL-055).
+    MarkerProject { path: PathBuf, project: PathBuf },
     /// The current identity is in the markers of two stores: one was
     /// copied by hand.
     WorkspaceAmbiguous { dirs: Vec<String> },
@@ -697,6 +699,11 @@ impl std::fmt::Display for Error {
                 Error::MarkerIdentity { path, value } => {
                     format!("{} lists {value}, which is not a sha256 identity", path.display())
                 }
+                Error::MarkerProject { path, project } => format!(
+                    "{} names the project {}, which is not an absolute path",
+                    path.display(),
+                    project.display()
+                ),
                 Error::WorkspaceAmbiguous { dirs } => {
                     format!("the workspace identity is in the markers of {}", dirs.join(", "))
                 }
