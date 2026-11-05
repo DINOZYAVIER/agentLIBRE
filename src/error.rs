@@ -151,6 +151,16 @@ pub enum Error {
     MissingSpecType { draft: String },
     /// `agl server start` with a `url` whose host is not local (D148).
     NotLocalServer { url: String },
+    /// `server.llama.external`, and nothing answers there (AGL-052, D4).
+    OutsideServerDown { url: String },
+    /// `server.llama.external`, and it serves another model (AGL-052, D5).
+    OutsideModelDiffers { url: String, expected: String, running: String },
+    /// `agl server command` of a Function on another kind of server (AGL-052, D12).
+    ServerCommandNotLlama { function: String },
+    /// The Windows engine in WSL without the mirrored network (AGL-052, D10).
+    WslNotMirrored { mode: String },
+    /// `wslpath` did not convert a path (AGL-052, D10).
+    WslPath { path: PathBuf },
     /// No engine binary in `PATH` (D147, AGL-024, D5).
     EngineNotFound { engine: String },
     /// The engine agl launched cannot be run (AGL-024, D2).
@@ -554,6 +564,21 @@ impl std::fmt::Display for Error {
                 }
                 Error::NotLocalServer { url } => {
                     format!("the server address is not local: {url}")
+                }
+                Error::OutsideServerDown { url } => {
+                    format!("the server outside agl does not answer at {url}")
+                }
+                Error::OutsideModelDiffers { url, expected, running } => {
+                    format!("the server at {url} serves {running}, not {expected}")
+                }
+                Error::ServerCommandNotLlama { function } => {
+                    format!("{function} does not run on llama-server")
+                }
+                Error::WslNotMirrored { mode } => {
+                    format!("the network of WSL is {mode:?}, not mirrored")
+                }
+                Error::WslPath { path } => {
+                    format!("wslpath did not convert {}", path.display())
                 }
                 Error::EngineNotFound { engine } => format!("{engine} is not in PATH"),
                 Error::EngineSpawn { engine, source } => {

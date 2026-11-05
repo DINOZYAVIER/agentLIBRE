@@ -31,6 +31,7 @@ mod status;
 mod test_server;
 mod theme;
 mod tools;
+mod wsl;
 mod weights;
 
 use std::ffi::OsString;
@@ -191,9 +192,13 @@ fn run(
                 user.function.as_deref(),
             );
             let function = Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)?;
+            if action == cli::args::ServerAction::Command {
+                return cli::serve::print_command(&name, &function, &settings);
+            }
             // The weights: `start` asks for a file it does not find, as a
             // run does; `status` and `stop` keep the name (AGL-039, D24).
             let mut model = function.model.clone();
+            model.llama_external = settings.llama_external;
             let missing = match action {
                 cli::args::ServerAction::Start if repl::term::is_interactive() => {
                     weights::Missing::Ask(&cli::serve::ask_line)

@@ -2,8 +2,8 @@
 //! `curl`, `sha256sum` (AGL-050), `ffmpeg`, `ffprobe`, `wl-paste` and `step`
 //! (AGL-043 F20), by
 //! their absolute paths in the directory the package's wrapper names in
-//! `AGENTLIBRE_TOOLS`, not by their names on `PATH`. The engines, `systemd-run` and `systemctl` are
-//! not among them (AGL-039 D16).
+//! `AGENTLIBRE_TOOLS`, not by their names on `PATH`. `systemd-run` and `systemctl` are
+//! not among them (AGL-039 D16), and the engine has a directory of its own (AGL-052).
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
@@ -14,6 +14,11 @@ use crate::error::Error;
 
 /// The variable of the helper programs' directory (AGL-040, D2).
 pub const TOOLS_VAR: &str = "AGENTLIBRE_TOOLS";
+
+/// The variable of the directory of the engine that came with the package
+/// (AGL-052): `llama-server` on Linux, `llama-server.exe` in WSL. Without it,
+/// the engine is the system's.
+pub const ENGINES_VAR: &str = "AGENTLIBRE_ENGINES";
 
 /// The prefix of every variable the wrapper sets (AGL-040, D2, D3).
 const VAR_PREFIX: &[u8] = b"AGENTLIBRE_";

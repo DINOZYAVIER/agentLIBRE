@@ -27,6 +27,9 @@ pub struct ServerFile {
     /// `server.strata.url` (AGL-036, D2).
     pub llama_url: Option<String>,
     pub strata_url: Option<String>,
+    /// `server.llama.external`: the llama-server at the url runs outside agl's
+    /// care, as on the host of a virtual machine (AGL-052, D4).
+    pub llama_external: Option<bool>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
     pub engine: Option<String>,
@@ -91,20 +94,24 @@ impl ServerFile {
         };
         server.check_keys(Self::KEYS)?;
         let engine = server.string("engine")?;
-        let mut url_of = |kind: &str| -> Result<Option<String>, Error> {
-            match server.section(kind)? {
-                Some(mut table) => {
-                    table.check_keys(&["url"])?;
-                    read_url(&mut table, path)
-                }
-                None => Ok(None),
+        let (llama_url, llama_external) = match server.section("llama")? {
+            Some(mut table) => {
+                table.check_keys(&["url", "external"])?;
+                (read_url(&mut table, path)?, table.bool("external")?)
             }
+            None => (None, None),
         };
-        let llama_url = url_of("llama")?;
-        let strata_url = url_of("strata")?;
+        let strata_url = match server.section("strata")? {
+            Some(mut table) => {
+                table.check_keys(&["url"])?;
+                read_url(&mut table, path)?
+            }
+            None => None,
+        };
         Ok(ServerFile {
             llama_url,
             strata_url,
+            llama_external,
             engine,
             ..ServerFile::default()
         })
@@ -119,6 +126,12 @@ impl ServerFile {
     /// (AGL-030, D1).
     pub fn kind(&self) -> ServerKind {
         self.kind.as_deref().and_then(ServerKind::parse).unwrap_or_default()
+    }
+
+    /// Whether agl leaves the server alone and needs none of its files
+    /// (AGL-052, D4): the llama kind only.
+    pub fn external(&self) -> bool {
+        self.kind() == ServerKind::Llama && self.llama_external == Some(true)
     }
 
     /// Where the server of the kind listens (AGL-036, D2, D6): the `url` of
@@ -149,6 +162,7 @@ impl ServerFile {
             strata_url: (kind == ServerKind::Strata)
                 .then(|| self.strata_url.clone())
                 .flatten(),
+            llama_external: (kind == ServerKind::Llama).then_some(self.llama_external).flatten(),
             engine: self.engine.clone(),
             ..model.clone()
         }
@@ -177,6 +191,7 @@ impl ServerFile {
             kind: self.kind.clone().or_else(|| defaults.kind.clone()),
             llama_url: self.llama_url.clone().or_else(|| defaults.llama_url.clone()),
             strata_url: self.strata_url.clone().or_else(|| defaults.strata_url.clone()),
+            llama_external: self.llama_external.or(defaults.llama_external),
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
@@ -204,6 +219,7 @@ impl ServerFile {
             "kind": self.kind,
             "llama_url": self.llama_url,
             "strata_url": self.strata_url,
+            "llama_external": self.llama_external,
             "engine": self.engine,
             "model": self.model,
             "context": self.context,
@@ -248,6 +264,7 @@ impl ServerFile {
             kind: text("kind")?,
             llama_url: text("llama_url")?,
             strata_url: text("strata_url")?,
+            llama_external: value.get("llama_external").and_then(Value::as_bool),
             engine: text("engine")?,
             model: text("model")?,
             context: number("context")?,

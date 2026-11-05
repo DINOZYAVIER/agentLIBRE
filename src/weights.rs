@@ -124,7 +124,9 @@ pub fn resolve(
     missing: &Missing,
     lang: Lang,
 ) -> Result<(), Error> {
-    if let Missing::Ask(ask) = missing {
+    // The files of a server outside are where it runs (AGL-052, D4).
+    let external = server.external();
+    if !external && let Missing::Ask(ask) = missing {
         offer(server, sources, folders, *ask, lang)?;
     }
     let mut found = folders.all();
@@ -136,6 +138,7 @@ pub fn resolve(
         &mut server.mmproj,
     ]
     .into_iter()
+    .filter(|_| !external)
     .chain(whisper_set.then_some(&mut whisper.model));
     for file in files {
         let Some(name) = file.clone() else {
@@ -188,6 +191,18 @@ mod tests {
             model: Some(model.into()),
             ..ServerFile::default()
         }
+    }
+
+    #[test]
+    fn the_files_of_a_server_outside_are_not_looked_for() {
+        let dir = TempDir::new();
+        let own = dir.0.join("own");
+        fs::create_dir_all(&own).unwrap();
+        let folders = Folders { own, listed: &[], user_path: &dir.0.join("settings.nix") };
+        let mut outside = ServerFile { llama_external: Some(true), ..server("nowhere.gguf") };
+        let mut whisper = WhisperFile::default();
+        resolve(&mut outside, &mut whisper, &folders, &[], &Missing::Fail, Lang::En).unwrap();
+        assert_eq!(outside.model.as_deref(), Some("nowhere.gguf"));
     }
 
     #[test]

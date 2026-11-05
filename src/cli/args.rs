@@ -50,6 +50,8 @@ pub enum ServerAction {
     Start,
     Stop,
     Status,
+    /// The line that starts the server of a Function (AGL-052, D12).
+    Command,
 }
 
 /// Options of a run.
@@ -136,6 +138,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Some("start") => ServerAction::Start,
             Some("stop") => ServerAction::Stop,
             Some("status") => ServerAction::Status,
+            Some("command") => ServerAction::Command,
             Some("-h" | "--help") => return Ok(Command::Help),
             Some(other) => return Err(Error::UnknownOption(other.into())),
             None => return Err(Error::MissingValue("server".into())),
@@ -374,6 +377,10 @@ mod tests {
                 Command::Server(action, false, None)
             );
         }
+        assert_eq!(
+            parse_strs(&["server", "command", "--function", "f"]).unwrap(),
+            Command::Server(ServerAction::Command, false, Some("f".into()))
+        );
         // `--yes` belongs to `start` only (AGL-015, D16).
         assert_eq!(
             parse_strs(&["server", "start", "--yes"]).unwrap(),

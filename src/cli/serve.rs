@@ -162,7 +162,17 @@ pub fn run(
     lang: Lang,
 ) -> Result<ExitCode, Error> {
     let llama = Llama::new(&server.url);
+    let external = server.effective_settings()?.external();
     match action {
+        // `lib` prints it before anything is resolved.
+        ServerAction::Command => Ok(ExitCode::SUCCESS),
+        // A server outside is not started, only looked at (AGL-052, D4).
+        ServerAction::Start if external => {
+            let what = server.what()?;
+            check_outside(&llama, &server.effective_settings()?, &what, &mut |line| outln!("{line}"), lang)?;
+            outln!("{}", texts::already_running(&what, &server.url, lang));
+            Ok(ExitCode::SUCCESS)
+        }
         ServerAction::Start => {
             let others = if yes {
                 Others::Yes
@@ -189,7 +199,9 @@ pub fn run(
             if whisper {
                 systemctl(&["stop", &server.whisper_unit])?;
             }
-            if unit_active(&server.unit)? {
+            if external {
+                outln!("{}", tr!(lang, m::SERVER_OUTSIDE_NOT_STOPPED, url = server.url.as_str()));
+            } else if unit_active(&server.unit)? {
                 // The server by its kind (AGL-038, D1): what the record
                 // says it runs, else the server of the project.
                 let what = read_record(&server.dir)
@@ -214,7 +226,8 @@ pub fn run(
             // there is none.
             let running = (health == Health::Ready)
                 .then(|| llama.models().unwrap_or(None))
-                .flatten();
+                .flatten()
+                .map(|name| if external { file_name(&name).to_owned() } else { name });
             // The model of the effective settings, as the server names
             // it (AGL-033, D5): the same identity the check of D2
             // compares — the full path of the llama kind, the config's
@@ -355,16 +368,20 @@ fn launch_unit(
             // The engine the settings name, as the child's launch does
             // (AGL-024, D5; AGL-038, F27).
             let engine = effective.engine.as_deref().unwrap_or(DEFAULT_ENGINE);
-            let program = find_program(engine, path_var).ok_or_else(|| {
+            let program = engine_program(engine, path_var).ok_or_else(|| {
                 Error::EngineNotFound {
                     engine: engine.to_owned(),
                 }
             })?;
+            let windows = crate::wsl::is_windows_program(&program);
+            if windows {
+                crate::wsl::check_network()?;
+            }
             let context = effective.context.unwrap_or(DEFAULT_CONTEXT);
             let extra = effective.args.clone().unwrap_or_default();
             let projector = projector_args(effective, models)?;
             let spec = spec(effective, models)?;
-            systemd_run_args(
+            let args = systemd_run_args(
                 &server.unit,
                 &program,
                 &model,
@@ -372,7 +389,8 @@ fn launch_unit(
                 &projector,
                 &spec,
                 &extra,
-            )
+            );
+            if windows { crate::wsl::windows_paths(args, &program)? } else { args }
         }
     };
     let output = Command::new("systemd-run")
@@ -479,6 +497,13 @@ impl Autostart<'_> {
     pub fn ensure(&self, progress: &mut dyn FnMut(ServerProgress)) -> Result<(), Error> {
         let llama = self.llama;
         let what = self.what()?;
+        if self.effective.external() {
+            if health(llama) == Health::Loading {
+                progress(ServerProgress::Starting);
+            }
+            let mut say = |line: &str| progress(ServerProgress::Line(line));
+            return check_outside(llama, self.effective, &what, &mut say, self.lang);
+        }
         // The server of the other kind that agl owns stops first
         // (AGL-036, D10): the two do not fit the GPU together.
         self.switch(&mut |line| progress(ServerProgress::Line(line)))?;
@@ -520,6 +545,10 @@ impl Autostart<'_> {
     /// session runs it before it takes the terminal, where a question can
     /// still be answered.
     pub fn switch(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        // agl stops nothing for a server outside (AGL-052, D4).
+        if self.effective.external() {
+            return Ok(());
+        }
         let unit = self.project.unit_key().map(|key| unit_name(&key));
         switch_kind(
             &self.project.dir,
@@ -640,6 +669,8 @@ pub struct Engine {
     child: Child,
     /// Whether the child is already reaped (by `is_alive` or `shutdown`).
     dead: bool,
+    /// Where a Windows engine listens: what runs in WSL is only its relay.
+    windows: Option<(String, u16)>,
 }
 
 impl Engine {
@@ -682,8 +713,12 @@ impl Engine {
             .as_deref()
             .unwrap_or(DEFAULT_ENGINE)
             .to_owned();
-        let program = find_program(&engine, path_var)
+        let program = engine_program(&engine, path_var)
             .ok_or_else(|| Error::EngineNotFound { engine: engine.clone() })?;
+        let windows = crate::wsl::is_windows_program(&program);
+        if windows {
+            crate::wsl::check_network()?;
+        }
         let context = settings.context.unwrap_or(DEFAULT_CONTEXT);
         let extra = settings.args.clone().unwrap_or_default();
         let projector = projector_args(settings, models)?;
@@ -709,6 +744,7 @@ impl Engine {
         // program, the rest are the arguments.
         let command =
             engine_args(&program, &model, (context, &host, port), &projector, &spec, &extra);
+        let command = if windows { crate::wsl::windows_paths(command, &program)? } else { command };
         let child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
@@ -722,6 +758,7 @@ impl Engine {
         Ok(Engine {
             child,
             dead: false,
+            windows: windows.then_some((host, port)),
         })
     }
 
@@ -753,6 +790,15 @@ impl Engine {
     /// Ends the child (AGL-024, D3): `SIGTERM`, the grace of the bash
     /// tool, then `SIGKILL`.
     pub fn shutdown(mut self) {
+        self.end_child();
+        if let Some((host, port)) = &self.windows
+            && port_open(host, *port)
+        {
+            crate::wsl::stop_windows_engine();
+        }
+    }
+
+    fn end_child(&mut self) {
         if self.dead {
             return;
         }
@@ -976,6 +1022,7 @@ impl Engine {
         Ok(Engine {
             child,
             dead: false,
+            windows: None,
         })
     }
 }
@@ -986,6 +1033,10 @@ impl Engine {
 /// model.
 fn expected_model(settings: &ServerFile, models: &Path) -> Result<Option<String>, Error> {
     match settings.kind() {
+        // The path of a server outside is its own (AGL-052, D5).
+        ServerKind::Llama if settings.external() => {
+            Ok(settings.model.as_deref().map(|name| file_name(name).to_owned()))
+        }
         ServerKind::Llama => Ok(settings
             .model
             .as_deref()
@@ -997,6 +1048,83 @@ fn expected_model(settings: &ServerFile, models: &Path) -> Result<Option<String>
             .transpose()?
             .and_then(|cfg| cfg.model_name)),
     }
+}
+
+/// The name of a file with no path, of this system or of the host's.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// A server outside agl (AGL-052, D4, D5): down, an error; loading, waited
+/// for; ready, it must serve the file of the Function by its name. Nothing is
+/// started, stopped or restarted, and a server that names no model passes.
+fn check_outside(
+    llama: &dyn Backend,
+    effective: &ServerFile,
+    what: &str,
+    say: &mut dyn FnMut(&str),
+    lang: Lang,
+) -> Result<(), Error> {
+    match health(llama) {
+        Health::Down => {
+            return Err(Error::OutsideServerDown { url: llama.url().to_owned() });
+        }
+        Health::Loading => wait_ready(llama, None, what, say, lang)?,
+        Health::Ready => {}
+    }
+    let expected = effective.model.as_deref().map(file_name);
+    let running = llama.models().unwrap_or(None);
+    if let (Some(expected), Some(running)) = (expected, running.as_deref().map(file_name))
+        && expected != running
+    {
+        return Err(Error::OutsideModelDiffers {
+            url: llama.url().to_owned(),
+            expected: expected.to_owned(),
+            running: running.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// `agl server command` (AGL-052, D12): the line that starts the server of
+/// the Function `name`, with the files by their names, and the links to them.
+/// It reads no server. An address that is not local is reached from another
+/// machine, so the server listens on all its addresses.
+pub fn print_command(
+    name: &str,
+    function: &crate::function::Function,
+    settings: &ServerFile,
+) -> Result<ExitCode, Error> {
+    let model = &function.model;
+    if model.kind() != ServerKind::Llama {
+        return Err(Error::ServerCommandNotLlama { function: name.to_owned() });
+    }
+    outln!("{}", command_line(model, settings));
+    for source in &function.sources {
+        outln!("{}  {}", source.name, source.url);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The line of `agl server command`.
+fn command_line(model: &ServerFile, settings: &ServerFile) -> String {
+    let url = settings.llama_url.as_deref().unwrap_or("http://127.0.0.1:18080");
+    let (host, port) = match local_address(url) {
+        Some(address) => address,
+        None => ("0.0.0.0".to_owned(), url_port(url).unwrap_or(18080)),
+    };
+    let draft = model.draft.as_ref().map(PathBuf::from);
+    let spec = Spec { spec_type: model.spec_type.clone(), draft };
+    let projector = model.mmproj.as_ref().map(PathBuf::from).map_or_else(Vec::new, |file| projector_flags(model, file));
+    let command = engine_args(
+        Path::new(settings.engine.as_deref().unwrap_or(DEFAULT_ENGINE)),
+        Path::new(model.model.as_deref().unwrap_or_default()),
+        (model.context.unwrap_or(DEFAULT_CONTEXT), &host, port),
+        &projector,
+        &spec,
+        model.args.as_deref().unwrap_or_default(),
+    );
+    command.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
 /// The check of D2 (AGL-033): whether the server running at the url
@@ -1330,13 +1458,22 @@ fn systemctl(args: &[&str]) -> Result<(), Error> {
 
 /// The host and port of an `http://` URL whose host is local (D148).
 pub(super) fn local_address(url: &str) -> Option<(String, u16)> {
+    let (host, port) = http_address(url)?;
+    LOCAL_HOSTS.contains(&host).then(|| (host.to_owned(), port))
+}
+
+/// The host and the port of an `http://` address.
+fn http_address(url: &str) -> Option<(&str, u16)> {
     let rest = url.strip_prefix("http://")?;
     let authority = rest.split('/').next().unwrap_or_default();
-    let (host, port) = match authority.rsplit_once(':') {
+    Some(match authority.rsplit_once(':') {
         Some((host, port)) => (host, port.parse().ok()?),
         None => (authority, 80),
-    };
-    LOCAL_HOSTS.contains(&host).then(|| (host.to_owned(), port))
+    })
+}
+
+fn url_port(url: &str) -> Option<u16> {
+    http_address(url).map(|(_, port)| port)
 }
 
 /// The projector arguments of `[server]`: its file, where it runs and
@@ -1388,16 +1525,38 @@ pub(super) fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec
                 path: file,
             });
         }
-        projector.extend(["--mmproj".into(), file.into_os_string()]);
-        if settings.mmproj_offload == Some(false) {
-            projector.push("--no-mmproj-offload".into());
-        }
-        let tokens = settings
-            .image_max_tokens
-            .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
-        projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
+        projector = projector_flags(settings, file);
     }
     Ok(projector)
+}
+
+/// The arguments of the projector `file`.
+fn projector_flags(settings: &ServerFile, file: PathBuf) -> Vec<OsString> {
+    let mut projector: Vec<OsString> = vec!["--mmproj".into(), file.into_os_string()];
+    if settings.mmproj_offload == Some(false) {
+        projector.push("--no-mmproj-offload".into());
+    }
+    let tokens = settings
+        .image_max_tokens
+        .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
+    projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
+    projector
+}
+
+/// The engine `name`: the one of the package when it came with one, as a
+/// Linux program or as a Windows one in WSL (AGL-052), else on `path_var`.
+fn engine_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
+    let packaged = std::env::var_os(crate::programs::ENGINES_VAR).map(PathBuf::from);
+    packaged_engine(packaged.as_deref(), name).or_else(|| find_program(name, path_var))
+}
+
+/// `name` in the directory of the package's engine.
+fn packaged_engine(dir: Option<&Path>, name: &str) -> Option<PathBuf> {
+    let dir = dir?;
+    [name.to_owned(), format!("{name}.exe")]
+        .iter()
+        .map(|file| dir.join(file))
+        .find(|path| path.is_file())
 }
 
 /// The first executable `name` in `path_var` (D147).
@@ -1437,10 +1596,12 @@ pub(super) fn engine_args(
         "--port",
         &port.to_string(),
         "--jinja",
-        "-np",
-        "1",
     ] {
         args.push(arg.into());
+    }
+    // One slot, unless the Function's arguments say how many (AGL-051).
+    if !extra.iter().any(|arg| arg == "-np") {
+        args.extend(["-np".into(), "1".into()]);
     }
     args.extend(projector.iter().cloned());
     if let Some(spec_type) = &spec.spec_type {
@@ -1974,6 +2135,90 @@ mod tests {
     /// A server on a free port that answers every request to `/health`
     /// with the next of `statuses` (the last one repeats); returns its
     /// URL.
+    #[test]
+    fn the_engine_of_the_package_comes_first() {
+        let dir = std::env::temp_dir().join(format!("agl-engine-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(packaged_engine(Some(&dir), "llama-server"), None);
+        assert_eq!(packaged_engine(None, "llama-server"), None);
+        // In WSL the package holds the Windows one.
+        fs::write(dir.join("llama-server.exe"), "").unwrap();
+        assert_eq!(packaged_engine(Some(&dir), "llama-server"), Some(dir.join("llama-server.exe")));
+        fs::write(dir.join("llama-server"), "").unwrap();
+        assert_eq!(packaged_engine(Some(&dir), "llama-server"), Some(dir.join("llama-server")));
+        assert_eq!(packaged_engine(Some(&dir), "other"), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A server that answers `/health` with `status` and `/v1/models` with
+    /// the path `model`.
+    fn outside_server(status: u16, model: &'static str) -> Llama {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buffer = [0u8; 1024];
+                let n = stream.read(&mut buffer).unwrap_or(0);
+                let (code, body) = if buffer[..n].starts_with(b"GET /health") {
+                    (status, "{}".to_owned())
+                } else {
+                    (200, format!("{{\"models\":[{{\"model\":{model:?}}}]}}"))
+                };
+                let _ = write!(stream, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        Llama::new(&url)
+    }
+
+    fn outside(model: &str) -> ServerFile {
+        ServerFile {
+            llama_external: Some(true),
+            model: Some(model.into()),
+            ..ServerFile::default()
+        }
+    }
+
+    #[test]
+    fn a_server_outside_is_judged_by_the_name_of_its_file() {
+        let check = |server: &Llama, model| check_outside(server, &outside(model), "it", &mut |_| {}, Lang::En);
+        // Another path, of another system too: the same file.
+        assert!(check(&outside_server(200, "/m/a.gguf"), "a.gguf").is_ok());
+        assert!(check(&outside_server(200, "C:\\models\\a.gguf"), "a.gguf").is_ok());
+        assert!(matches!(
+            check(&outside_server(200, "/m/b.gguf"), "a.gguf"),
+            Err(Error::OutsideModelDiffers { expected, running, .. }) if expected == "a.gguf" && running == "b.gguf"
+        ));
+        // Nothing answers: an error, and no launch.
+        assert!(matches!(
+            check(&Llama::new("http://127.0.0.1:9"), "a.gguf"),
+            Err(Error::OutsideServerDown { .. })
+        ));
+    }
+
+    #[test]
+    fn the_line_of_a_function_starts_its_server_as_agl_does() {
+        let model = ServerFile {
+            model: Some("a.gguf".into()),
+            context: Some(4096),
+            mmproj: Some("p.gguf".into()),
+            mmproj_offload: Some(false),
+            spec_type: Some("draft-mtp".into()),
+            draft: Some("d.gguf".into()),
+            args: Some(vec!["-np".into(), "2".into()]),
+            ..ServerFile::default()
+        };
+        let at = |url: &str| ServerFile { llama_url: Some(url.into()), ..ServerFile::default() };
+        let line = command_line(&model, &at("http://127.0.0.1:18080"));
+        assert_eq!(
+            line,
+            "llama-server -m a.gguf -c 4096 --host 127.0.0.1 --port 18080 --jinja --mmproj p.gguf --no-mmproj-offload --image-max-tokens 2048 --spec-type draft-mtp --spec-draft-model d.gguf -np 2"
+        );
+        // Reached from another machine, it listens on all its addresses.
+        assert!(command_line(&model, &at("http://10.0.2.2:9000")).contains("--host 0.0.0.0 --port 9000"));
+    }
+
     fn health_server(statuses: &'static [u16]) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

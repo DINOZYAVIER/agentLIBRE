@@ -459,7 +459,7 @@ fn function_precedence() {
     assert_eq!(resolve(&user, Some("project"), None), "project");
     assert_eq!(resolve(&user, None, None), "user");
     // The default (AGL-039, D32).
-    assert_eq!(resolve(&with_url(), None, None), "agentLIBRE-gpu-high");
+    assert_eq!(resolve(&with_url(), None, None), "agentLIBRE-gpu-low");
 }
 
 #[test]
@@ -493,4 +493,20 @@ fn about_is_read_and_its_source_must_be_absolute() {
     assert_eq!(about.source.as_deref(), Some("/r/agentLIBRE"));
     assert!(user_of(r#"about.source = "relative";"#).is_err());
     assert!(user_of("about.nope = true;").is_err());
+}
+
+#[test]
+fn a_llama_server_may_be_outside_and_a_strata_one_not() {
+    let read = |text: &str| user_of(&format!("server = {text};")).map(|file| file.server);
+    let server = read(r#"{ llama = { url = "http://10.0.2.2:18080"; external = true; }; }"#).unwrap();
+    assert_eq!(server.llama_external, Some(true));
+    assert!(server.external());
+    assert!(read(r#"{ strata = { url = "http://127.0.0.1:1"; external = true; }; }"#).is_err());
+    assert!(read(r#"{ llama = { external = "yes"; }; }"#).is_err());
+    // Off by default, and the kind's: a Strata Function's server is its own.
+    assert!(!ServerFile::default().external());
+    let outside = ServerFile { llama_external: Some(true), ..ServerFile::default() };
+    let strata = ServerFile { kind: Some("strata".into()), ..ServerFile::default() };
+    assert!(!outside.effective(&strata).external());
+    assert!(outside.effective(&ServerFile::default()).external());
 }

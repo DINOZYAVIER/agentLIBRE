@@ -162,6 +162,7 @@ Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name
            [--think <level>] [--yes]
        agl init
        agl server start [--yes] [--function <name>]|stop|status [--function <name>]
+       agl server command [--function <name>]
        agl function list|use <name> [--user]
        agl search login
        agl forge list|show|new|status|range|check|log|diff|rehome
@@ -189,6 +190,8 @@ the user's):
   server start        start the server and wait until it is ready; with
                       --function, the server of that Function's model
   server stop         stop it and the whisper server of the project
+  server command      print the line that starts the server of a Function,
+                      and the links to its files, for a server outside agl
   server status       show whether it runs and is ready (--function: the
                       server of that Function)
 
@@ -222,6 +225,7 @@ under XDG_DATA_HOME):
               [--think <level>] [--yes]
               agl init
               agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
+              agl server command [--function <назва>]
               agl function list|use <назва> [--user]
               agl search login
               agl forge list|show|new|status|range|check|log|diff|rehome
@@ -249,6 +253,8 @@ under XDG_DATA_HOME):
   server start        запустити сервер і дочекатися готовності; з
                       --function — сервер моделі цієї Функції
   server stop         зупинити його і whisper-сервер проєкту
+  server command      надрукувати рядок запуску сервера функції і посилання
+                      на її файли, для сервера поза agl
   server status       показати, чи він працює і чи готовий (--function:
                       сервер цієї Функції)
 
@@ -564,8 +570,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::MissingServerUrl`.
     pub const MISSING_SERVER_URL: Msg = Msg {
-        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n{ agl, ... }: {\n  server.llama.url = \"http://HOST:PORT\";\n}",
-        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n{ agl, ... }: {\n  server.llama.url = \"http://HOST:PORT\";\n}",
+        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n{{ agl, ... }}: {{\n  server.llama.url = \"http://HOST:PORT\";\n}}",
+        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n{{ agl, ... }}: {{\n  server.llama.url = \"http://HOST:PORT\";\n}}",
     };
 
     /// `Error::InvalidName`.
@@ -663,6 +669,42 @@ Forge (сховище артефактів робочої області, agentL
     pub const MISSING_SPEC_TYPE: Msg = Msg {
         en: "the draft {draft} is set but the spec_type is not: set the spec_type too",
         uk: "draft {draft} задано, але spec_type ні: задано spec_type теж",
+    };
+
+    /// `Error::WslNotMirrored`.
+    pub const WSL_NOT_MIRRORED: Msg = Msg {
+        en: "agl in WSL reaches the Windows llama-server only in the mirrored network, and this one is {mode}: put `networkingMode=mirrored` under `[wsl2]` in %UserProfile%\\.wslconfig, then run `wsl --shutdown`",
+        uk: "agl у WSL бачить llama-server на Windows лише в дзеркальній мережі, а ця мережа {mode}: додай `networkingMode=mirrored` у `[wsl2]` файлу %UserProfile%\\.wslconfig і виконай `wsl --shutdown`",
+    };
+
+    /// `Error::WslPath`.
+    pub const WSL_PATH: Msg = Msg {
+        en: "wslpath did not convert {path}",
+        uk: "wslpath не перетворив {path}",
+    };
+
+    /// `Error::OutsideServerDown`.
+    pub const OUTSIDE_SERVER_DOWN: Msg = Msg {
+        en: "the server outside agl does not answer at {url}: start it there (`agl server command` prints the line), or check the address",
+        uk: "сервер поза agl не відповідає за {url}: запусти його там (рядок друкує `agl server command`) або перевір адресу",
+    };
+
+    /// `Error::OutsideModelDiffers`.
+    pub const OUTSIDE_MODEL_DIFFERS: Msg = Msg {
+        en: "the server at {url} serves {running}, and this Function needs {expected}: agl does not restart a server outside it",
+        uk: "сервер за {url} обслуговує {running}, а цій функції потрібна {expected}: agl не перезапускає сервер поза собою",
+    };
+
+    /// `Error::ServerCommandNotLlama`.
+    pub const SERVER_COMMAND_NOT_LLAMA: Msg = Msg {
+        en: "the Function {function} does not run on llama-server, so there is no line to print",
+        uk: "функція {function} працює не на llama-server, тож рядка для неї немає",
+    };
+
+    /// `agl server stop` with `server.llama.external` (AGL-052, D4).
+    pub const SERVER_OUTSIDE_NOT_STOPPED: Msg = Msg {
+        en: "the server at {url} runs outside agl, and agl does not stop it",
+        uk: "сервер за {url} працює поза agl, і agl його не зупиняє",
     };
 
     /// `Error::NotLocalServer`.
@@ -2357,6 +2399,19 @@ impl Error {
                 tr!(lang, m::MISSING_SPEC_TYPE, draft = draft)
             }
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
+            Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
+            Error::WslNotMirrored { mode } => tr!(lang, m::WSL_NOT_MIRRORED, mode = mode),
+            Error::WslPath { path } => tr!(lang, m::WSL_PATH, path = path.display()),
+            Error::OutsideModelDiffers { url, expected, running } => tr!(
+                lang,
+                m::OUTSIDE_MODEL_DIFFERS,
+                url = url,
+                expected = expected,
+                running = running
+            ),
+            Error::ServerCommandNotLlama { function } => {
+                tr!(lang, m::SERVER_COMMAND_NOT_LLAMA, function = function)
+            }
             Error::EngineNotFound { engine } => {
                 tr!(lang, m::ENGINE_NOT_FOUND, engine = engine).to_string()
             }
@@ -3085,5 +3140,21 @@ pub mod repl {
     /// The line that ends a turn that stopped (D127).
     pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {
         super::stop_reason(reason, function, lang)
+    }
+}
+
+#[cfg(test)]
+mod missing_url_tests {
+    use super::*;
+
+    /// A first run with nothing set shows this message: it holds a Nix example,
+    /// whose braces are not placeholders (AGL-052).
+    #[test]
+    fn the_message_of_a_missing_address_shows_its_nix_example() {
+        for lang in [Lang::En, Lang::Uk] {
+            let text = tr!(lang, m::MISSING_SERVER_URL, user_path = "/u", project_path = "/p");
+            assert!(text.contains("{ agl, ... }: {\n  server.llama.url"), "{text}");
+            assert!(text.contains("/u") && text.contains("/p"), "{text}");
+        }
     }
 }
