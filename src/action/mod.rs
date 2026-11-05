@@ -251,7 +251,7 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
     let mut root = Vec::new();
     if !alts.is_empty() {
         // Text may come before a call (D114); it cannot start one.
-        let before = grammar.text_without("before", &call.no_text, false);
+        let before = grammar.text_without_any("before", &call.no_text, false);
         let calls = if alts.len() == 1 {
             alts.pop().unwrap()
         } else {
@@ -260,7 +260,7 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
         root.push(Expr::Seq(vec![before, calls]));
     }
     if actions.answer {
-        root.push(grammar.text_without("answer", &call.no_text, true));
+        root.push(grammar.text_without_any("answer", &call.no_text, true));
     }
     let root = if root.len() == 1 {
         root.pop().unwrap()
@@ -268,6 +268,24 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
         Expr::Alt(root)
     };
     (grammar, root)
+}
+
+/// `root` for a step without thinking of a model that opens its thinking
+/// whatever the prompt says: Gemma 4 12B does so after a tool response, with
+/// a probability of 1. Forbidden that, it writes nearly anything; here the block
+/// it opens can only be empty (AGL-050).
+pub fn after_its_empty_block(format: &Format, root: Expr) -> Expr {
+    let Some(think) = &format.think else {
+        return root;
+    };
+    Expr::Seq(vec![
+        Expr::Repeat {
+            expr: Box::new(Expr::literal(&think.empty)),
+            min: 0,
+            max: Some(1),
+        },
+        root,
+    ])
 }
 
 /// The parameters that may come after others: each is written after

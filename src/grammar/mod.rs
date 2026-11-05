@@ -199,6 +199,65 @@ impl Grammar {
         self.kmp_text(hint, forbidden, non_empty, false)
     }
 
+    /// Any text that contains none of `forbidden`, with at least one character
+    /// when `non_empty`: state `s` means that the text ends with the `s`-th of
+    /// the forbidden strings' beginnings, the longest it can (AGL-050).
+    pub fn text_without_any(&mut self, hint: &str, forbidden: &[String], non_empty: bool) -> Expr {
+        if let [one] = forbidden {
+            return self.text_without(hint, one, non_empty);
+        }
+        let patterns: Vec<Vec<char>> = forbidden.iter().map(|text| text.chars().collect()).collect();
+        assert!(patterns.iter().all(|pattern| !pattern.is_empty()), "nothing to forbid");
+        let mut starts: Vec<Vec<char>> = patterns
+            .iter()
+            .flat_map(|pattern| (0..pattern.len()).map(|len| pattern[..len].to_vec()))
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        let step = |state: usize, c: char| {
+            let mut text = starts[state].clone();
+            text.push(c);
+            if patterns.iter().any(|pattern| text.ends_with(pattern)) {
+                return None;
+            }
+            (0..text.len()).find_map(|from| starts.binary_search(&text[from..].to_vec()).ok()).or(Some(0))
+        };
+        let mut alphabet: Vec<char> = patterns.iter().flatten().copied().collect();
+        alphabet.sort_unstable();
+        alphabet.dedup();
+        let other = Expr::Class {
+            negated: true,
+            ranges: alphabet.iter().map(|&c| (c, c)).collect(),
+        };
+        let base = self.fresh_name(hint);
+        let state_name = |state: usize| format!("{base}-{state}");
+        let transitions = |state: usize| {
+            let mut alts = vec![Expr::Seq(vec![other.clone(), Expr::Rule(state_name(0))])];
+            for &c in &alphabet {
+                if let Some(next) = step(state, c) {
+                    alts.push(Expr::Seq(vec![
+                        Expr::Literal(c.into()),
+                        Expr::Rule(state_name(next)),
+                    ]));
+                }
+            }
+            Expr::Alt(alts)
+        };
+        for state in 0..starts.len() {
+            let rule = Expr::Repeat {
+                expr: Box::new(transitions(state)),
+                min: 0,
+                max: Some(1),
+            };
+            self.rules.push((state_name(state), rule));
+        }
+        if non_empty {
+            transitions(0)
+        } else {
+            Expr::Rule(state_name(0))
+        }
+    }
+
     /// A value that `terminator` follows: `terminator` occurs in the value
     /// followed by `terminator` only at the end (D81). This is stronger
     /// than not containing it: with the Qwen3.8 `"\n</parameter>\n"`, a value
@@ -660,6 +719,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn text_without_any_rejects_exactly_the_forbidden_strings() {
+        for forbidden in [&["ab", "ba"][..], &["a", "bb"], &["aab", "ab", "b|"], &["<|", "<t|>", "<u|>"]] {
+            for non_empty in [false, true] {
+                let mut grammar = Grammar::new();
+                let list: Vec<String> = forbidden.iter().map(|text| (*text).to_owned()).collect();
+                let expr = grammar.text_without_any("text", &list, non_empty);
+                let mut alphabet: Vec<char> = forbidden.iter().flat_map(|text| text.chars()).collect();
+                alphabet.push('x');
+                alphabet.sort_unstable();
+                alphabet.dedup();
+                let long = if alphabet.len() > 5 { 4 } else { 6 };
+                for text in strings(&alphabet, long) {
+                    let expected = !forbidden.iter().any(|one| text.contains(one)) && !(non_empty && text.is_empty());
+                    assert_eq!(
+                        matches(&grammar, &expr, &text),
+                        expected,
+                        "{text:?} without {forbidden:?}, non_empty={non_empty}"
+                    );
+                }
+            }
+        }
+        // A single string is the same grammar as `text_without`.
+        let (mut one, mut any) = (Grammar::new(), Grammar::new());
+        let plain = one.text_without("t", "<x>", false);
+        let listed = any.text_without_any("t", &["<x>".to_owned()], false);
+        assert_eq!(one.render(&plain), any.render(&listed));
     }
 
     #[test]

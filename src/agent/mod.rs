@@ -310,7 +310,13 @@ impl Agent<'_> {
 
         // The grammar of the actions (D3): the action phase generates under
         // it.
-        let (grammar, root) = action::grammar(format, &state.actions);
+        let (grammar, mut root) = action::grammar(format, &state.actions);
+        // Its text is known only at the end of a step that may reason in the
+        // open (AGL-050).
+        let open_reasoning = !think && format.reasons_in_the_open();
+        if open_reasoning {
+            root = action::after_its_empty_block(format, root);
+        }
         let grammar_str = grammar.render(&root);
         self.session.record_input("grammar", &grammar_str)?;
         let mut stream = TextStream::new(&format.call.begin_before);
@@ -328,6 +334,9 @@ impl Agent<'_> {
             Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
             &mut |_| {},
             &mut |piece| {
+                if open_reasoning {
+                    return;
+                }
                 if let Some(text) = stream.push(piece) {
                     cell.borrow_mut().action_text(&text);
                 }
@@ -344,7 +353,16 @@ impl Agent<'_> {
         if action_tokens > 0 {
             report.decoded(action_tokens);
         }
-        if let Some(text) = stream.finish() {
+        let output = if open_reasoning && generated.stop != Stop::Limit {
+            format.outside_reasoning(&generated.text)
+        } else {
+            generated.text.as_str().into()
+        };
+        if open_reasoning {
+            if generated.stop != Stop::Limit && !output.starts_with(&format.call.begin_before) {
+                report.action_text(&output);
+            }
+        } else if let Some(text) = stream.finish() {
             report.action_text(&text);
         }
         // Cut-off text may have been heading for a call: it is discarded
@@ -359,7 +377,7 @@ impl Agent<'_> {
             return self.cut_off(machine, report, cut);
         }
         // The grammar allows nothing else, so the server broke it.
-        let action = action::parse(format, &state.actions, &generated.text)
+        let action = action::parse(format, &state.actions, &output)
             .map_err(|_| Error::OutsideGrammar(generated.text.clone()))?;
         self.run_action(machine, report, action)
     }

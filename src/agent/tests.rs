@@ -623,6 +623,22 @@ fn the_off_level_silences_the_thinking() {
 }
 
 #[test]
+fn a_step_without_thinking_shows_no_reasoning_in_the_open() {
+    let function = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-low").unwrap();
+    let call = "<|tool_call>call:bash{command:<|\"|>true<|\"|>}<tool_call|>";
+    let dir = Dir::new("open-reasoning");
+    let script = Script::new(&[
+        (&format!("The user wants it run.<channel|>{call}"), Stop::End),
+        ("<|channel>thought\n<channel|>Done.", Stop::End),
+    ]);
+    let (end, log, _) = run_level(&function, &script, &dir, "go", Some(ReasoningLevel::Off));
+    assert_eq!(end.unwrap(), TurnEnd::Answer("Done.".into()));
+    let streamed: Vec<_> = log.iter().filter(|line| line.starts_with("stream: ")).collect();
+    assert_eq!(streamed, ["stream: Done."]);
+    assert!(!log.iter().any(|line| line.contains("<channel|>") || line.contains("wants it run")), "{log:?}");
+}
+
+#[test]
 fn a_state_without_thinking_is_rendered_at_the_off_level() {
     // The llama mode renders a state that does not think with `Off`,
     // whatever the run's level, as the stirred mode does (AGL-043 F16).

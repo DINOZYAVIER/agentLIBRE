@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::{TOOL_DOCS, ToolCall};
-use crate::format::tests::qwen;
+use crate::format::tests::{gemma, qwen};
 
 fn call(id: &str) -> ToolCall {
     ToolCall {
@@ -204,4 +204,40 @@ fn unreachable_server() {
         llama.context_size(),
         Err(Error::ServerUnreachable { url, .. }) if url == "http://127.0.0.1:1"
     ));
+}
+
+#[test]
+fn the_text_before_a_call_stays_out_of_gemma_history() {
+    let messages = [
+        Message::Assistant {
+            thinking: None,
+            text: Some("I will look.".into()),
+            call: Some(ToolCall {
+                id: "c".into(),
+                name: "bash".into(),
+                args: vec![],
+            }),
+        },
+        Message::Assistant {
+            thinking: None,
+            text: Some("Done.".into()),
+            call: None,
+        },
+    ];
+    let contents = |format: &crate::format::Format| {
+        let prompt = Prompt {
+            messages: &messages,
+            instruction: None,
+            tools: &[],
+            preserve_thinking: true,
+            reasoning: None,
+            format,
+        };
+        messages_json(&prompt)
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(contents(&gemma()), ["", "Done."]);
+    assert_eq!(contents(&qwen()), ["I will look.", "Done."]);
 }

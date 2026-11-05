@@ -27,6 +27,10 @@ pub struct Think {
     /// all: Gemma 4 goes on after a tool response with no new turn, and an
     /// empty block there makes it reason in the open (AGL-050).
     pub no_block_after: Option<String>,
+    /// The mark a model ends its reasoning with when it reasons in the open in
+    /// a step without thinking, as Gemma 4 does: what comes before it is not
+    /// for the human, and the step's text is known only at its end (AGL-050).
+    pub stray_close: Option<String>,
 }
 
 /// The call templates, split at their placeholders.
@@ -53,7 +57,12 @@ pub struct Call {
     /// What the text outside a call cannot contain: where the start of a call
     /// is not enough, as with the marks of Gemma 4 that all start alike and
     /// would show up in an answer (AGL-050).
-    pub no_text: String,
+    pub no_text: Vec<String>,
+    /// Whether the history holds the text before a call. Gemma's template
+    /// writes it after the response to that call, so that the model reads what
+    /// it had said as coming after the result, and a prompt no longer ends in
+    /// the response (AGL-050).
+    pub text_in_history: bool,
     pub end: String,
 }
 
@@ -96,7 +105,7 @@ impl Format {
         let think = match file.section("think")? {
             None => None,
             Some(mut think) => {
-                think.check_keys(&["open", "close", "empty", "no_block_after"])?;
+                think.check_keys(&["open", "close", "empty", "no_block_after", "stray_close"])?;
                 let mut take = |key| {
                     let text = think.required_string(key)?;
                     if text.is_empty() {
@@ -114,12 +123,18 @@ impl Format {
                     None => format!("{open}{close}"),
                 };
                 let no_block_after = think.string("no_block_after")?;
-                Some(Think { open, close, empty, no_block_after })
+                let stray_close = match think.string("stray_close")? {
+                    Some(mark) if mark.is_empty() => {
+                        return Err(template_error(&think, "stray_close", TemplateProblem::Empty));
+                    }
+                    other => other,
+                };
+                Some(Think { open, close, empty, no_block_after, stray_close })
             }
         };
 
         let mut call = file.required_section("call")?;
-        call.check_keys(&["begin", "param", "int_param", "separator", "no_text", "end"])?;
+        call.check_keys(&["begin", "param", "int_param", "separator", "no_text", "text_in_history", "end"])?;
         let begin = call.required_string("begin")?;
         let [begin_before, begin_after]: [String; 2] = split(&begin, &[NAME], &[VALUE])
             .map_err(|problem| template_error(&call, "begin", problem))?
@@ -153,13 +168,14 @@ impl Format {
                 .unwrap(),
         };
         let separator = call.string("separator")?.unwrap_or_default();
-        let no_text = match call.string("no_text")? {
-            Some(no_text) if no_text.is_empty() => {
+        let no_text = match call.strings("no_text")? {
+            Some(no_text) if no_text.is_empty() || no_text.iter().any(String::is_empty) => {
                 return Err(template_error(&call, "no_text", TemplateProblem::Empty));
             }
             Some(no_text) => no_text,
-            None => begin_before.clone(),
+            None => vec![begin_before.clone()],
         };
+        let text_in_history = call.bool("text_in_history")?.unwrap_or(true);
         let end = call.required_string("end")?;
         split(&end, &[], &[NAME, VALUE])
             .map_err(|problem| template_error(&call, "end", problem))?;
@@ -176,9 +192,38 @@ impl Format {
                 int_after,
                 separator,
                 no_text,
+                text_in_history,
                 end,
             },
         })
+    }
+
+    /// Whether a step without thinking may reason in the open, so that its
+    /// text is known only at the end of the step (AGL-050).
+    pub fn reasons_in_the_open(&self) -> bool {
+        self.think.as_ref().is_some_and(|think| think.stray_close.is_some())
+    }
+
+    /// What is left of the `output` of a step without thinking when its
+    /// reasoning in the open is taken out (AGL-050): a call alone, with no text
+    /// before it, or the answer after the last mark. An output that holds
+    /// nothing after the mark is what the model said, without the mark.
+    pub fn outside_reasoning<'o>(&self, output: &'o str) -> std::borrow::Cow<'o, str> {
+        let Some(mark) = self.think.as_ref().and_then(|think| think.stray_close.as_deref()) else {
+            return output.into();
+        };
+        if let Some(start) = output.find(&self.call.begin_before) {
+            return output[start..].into();
+        }
+        let Some(at) = output.rfind(mark) else {
+            return output.into();
+        };
+        let answer = output[at + mark.len()..].trim_start();
+        if answer.is_empty() {
+            output.replace(mark, "").trim().to_owned().into()
+        } else {
+            answer.into()
+        }
     }
 
     /// Ends a rendered `prompt` so that the model thinks or not (D94):
@@ -286,13 +331,15 @@ pub mod tests {
                 "close": "\n<channel|>",
                 "empty": "<|channel>thought\n<channel|>",
                 "no_block_after": "<tool_response|>",
+                "stray_close": "<channel|>",
             },
             "call": {
                 "begin": "<|tool_call>call:{name}{",
                 "param": "{name}:<|\"|>{value}<|\"|>",
                 "int_param": "{name}:{value}",
                 "separator": ",",
-                "no_text": "<|",
+                "no_text": ["<|", "<tool_call|>", "<tool_response|>", "<turn|>"],
+                "text_in_history": false,
                 "end": "}<tool_call|>",
             },
         })
@@ -322,6 +369,27 @@ pub mod tests {
     fn builtin_qwen_is_the_nix_one() {
         let evaluated = crate::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.\"qwen3.8\"").unwrap();
         assert_eq!(evaluated, qwen_value());
+    }
+
+    #[test]
+    fn the_reasoning_in_the_open_is_taken_out() {
+        let format = gemma();
+        let cut = |output: &str| format.outside_reasoning(output).into_owned();
+        assert!(format.reasons_in_the_open());
+        assert_eq!(cut("There are 9."), "There are 9.");
+        assert_eq!(cut("The user asked.\n<channel|>There are 9."), "There are 9.");
+        assert_eq!(cut("thought\n<channel|>There are 9."), "There are 9.");
+        assert_eq!(cut("a<channel|>b<channel|>\nc"), "c");
+        // Nothing after the mark: what the model said is all there is.
+        assert_eq!(cut("There are 9.\n<channel|>"), "There are 9.");
+        // The text before a call goes; a value of the call keeps the mark.
+        let call = "<|tool_call>call:bash{command:<|\"|>grep '<channel|>' f<|\"|>}<tool_call|>";
+        assert_eq!(cut(&format!("I will look.<channel|>{call}")), call);
+        assert_eq!(cut(&format!("I will look.{call}")), call);
+        // A format with no such mark changes nothing.
+        let plain = qwen();
+        assert!(!plain.reasons_in_the_open());
+        assert_eq!(plain.outside_reasoning("a<channel|>b").into_owned(), "a<channel|>b");
     }
 
     #[test]
@@ -379,6 +447,7 @@ pub mod tests {
                 close: "\n</think>\n\n".into(),
                 empty: "<think>\n\n</think>\n\n".into(),
                 no_block_after: None,
+                stray_close: None,
             })
         );
         assert_eq!(
@@ -393,7 +462,8 @@ pub mod tests {
                 int_between: ">\n".into(),
                 int_after: "\n</parameter>\n".into(),
                 separator: String::new(),
-                no_text: "<tool_call>\n<function=".into(),
+                no_text: vec!["<tool_call>\n<function=".into()],
+                text_in_history: true,
                 end: "</function>\n</tool_call>".into(),
             }
         );

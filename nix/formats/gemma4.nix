@@ -10,14 +10,20 @@
     close = "\n<channel|>";
     empty = "<|channel>thought\n<channel|>";
     no_block_after = "<tool_response|>";
+    # It may reason in the open even so, and ends that with this mark. It may
+    # also open its block by itself; the grammar then lets only `empty` through.
+    stray_close = "<channel|>";
   };
   call = {
     begin = "<|tool_call>call:{name}{";
     param = "{name}:<|\"|>{value}<|\"|>";
     int_param = "{name}:{value}";
     separator = ",";
-    # All the model's marks start so, and the text outside a call shows none.
-    no_text = "<|";
+    # The text outside a call shows none of the model's marks. The opening ones
+    # all start with `<|`; `stray_close` is not here, it is taken out afterwards.
+    no_text = [ "<|" "<tool_call|>" "<tool_response|>" "<turn|>" ];
+    # The template writes the text before a call after the response to it.
+    text_in_history = false;
     end = "}<tool_call|>";
   };
 }

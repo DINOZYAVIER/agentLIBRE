@@ -585,3 +585,25 @@ fn gemma_answers_with_text_before_a_call() {
         );
     });
 }
+
+#[test]
+fn gemma_text_holds_none_of_its_marks_but_the_end_of_reasoning() {
+    let actions = builtin(true);
+    for mark in ["<|channel>", "<tool_call|>", "<tool_response|>", "<turn|>", "a<tool_call|>b"] {
+        assert!(!gemma_accepts(&actions, mark), "{mark}");
+    }
+    assert!(gemma_accepts(&actions, "x <y> |> z"));
+    assert!(gemma_accepts(&actions, "The user asked.<channel|>Nine."));
+}
+
+#[test]
+fn gemma_opens_its_block_only_empty_without_thinking() {
+    let format = gemma();
+    let actions = builtin(true);
+    let (grammar, root) = grammar(&format, &actions);
+    let root = after_its_empty_block(&format, root);
+    assert!(matches(&grammar, &root, "<|channel>thought\n<channel|>Nine."));
+    assert!(matches(&grammar, &root, "Nine."));
+    assert!(!matches(&grammar, &root, "<|channel>thought\nThe user asked.<channel|>Nine."));
+    assert!(!matches(&grammar, &root, "<|channel>thought\n<channel|>"));
+}

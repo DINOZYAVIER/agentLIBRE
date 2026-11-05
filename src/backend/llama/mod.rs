@@ -299,9 +299,12 @@ pub(crate) fn messages_json(prompt: &Prompt) -> Vec<Json> {
                 text,
                 call,
             } => {
+                let text = text
+                    .as_deref()
+                    .filter(|_| call.is_none() || prompt.format.call.text_in_history);
                 let mut json = json!({
                     "role": "assistant",
-                    "content": text.as_deref().unwrap_or_default(),
+                    "content": text.unwrap_or_default(),
                 });
                 if let Some(thinking) = thinking.as_deref().filter(|_| keep_thinking) {
                     json["reasoning_content"] = thinking.into();
