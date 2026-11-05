@@ -30,7 +30,7 @@ use crate::theme::{COLOR_KEYS, Role, Style};
 pub const SETTINGS_FILE: &str = "settings.nix";
 
 /// Function used when no settings name one (D39, D58; AGL-039, D32).
-const DEFAULT_FUNCTION: &str = "agentLIBRE-gpu-high";
+const DEFAULT_FUNCTION: &str = "agentLIBRE-gpu-low";
 
 /// The kind of inference server (AGL-030, D1): the llama.cpp
 /// `llama-server` with grammar-constrained decoding, or a Strata server
