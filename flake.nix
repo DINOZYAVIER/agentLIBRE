@@ -2,19 +2,21 @@
   description = "agentLIBRE (agl): a free and open-source agentic system";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # The engine that comes with the package (AGL-052).
+  inputs.llama-cpp.url = "github:ggml-org/llama.cpp/v0.9.0";
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, llama-cpp }:
     let
-      # The human's machine only (AGL-040, D5).
+      # Linux on x86-64, also in WSL (AGL-052, D1, D2).
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
       cargo = lib.importTOML ./Cargo.toml;
 
       # The helper programs agl runs by their absolute paths (AGL-040;
-      # AGL-039, D15). The engines, systemd-run and systemctl stay the
-      # system's (AGL-039, D16).
+      # AGL-039, D15). systemd-run and systemctl stay the system's (AGL-039,
+      # D16); the engines are below (AGL-052).
       tools = pkgs.runCommand "agentLIBRE-tools" { } ''
         mkdir -p $out/bin
         ln -s ${pkgs.bash}/bin/bash $out/bin/bash
@@ -37,6 +39,49 @@
           ./nix
         ];
       };
+
+      # llama-server of the pinned version. Outside NixOS it finds no Vulkan
+      # driver of the system, and none of them works from the store (AGL-052,
+      # measured on Ubuntu): it takes Mesa from the store, on AMD and Intel.
+      linuxEngine = pkgs.writeShellScriptBin "llama-server" ''
+        if [ -z "''${VK_DRIVER_FILES:-}" ] && [ ! -d /run/opengl-driver ]; then
+          export VK_DRIVER_FILES=${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json:${pkgs.mesa}/share/vulkan/icd.d/intel_icd.x86_64.json
+        fi
+        exec ${llama-cpp.packages.${system}.vulkan}/bin/llama-server "$@"
+      '';
+
+      # The official Windows release of the same commit as v0.9.0, for WSL,
+      # which runs it from the store (AGL-052, D9).
+      windowsEngine = pkgs.runCommand "llama-server-windows-b12110"
+        {
+          src = pkgs.fetchzip {
+            url = "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-win-vulkan-x64.zip";
+            hash = "sha256-TjgWYdERy0toaWcoebLfCiWucRb2d4Pp/mHBx+TMl4I=";
+            stripRoot = false;
+          };
+        }
+        ''
+          mkdir -p $out/bin
+          cp -r $src/. $out/bin/
+          chmod -R u+w,a+rx $out/bin
+        '';
+
+      # agl with the engine of a machine: the one build, wrapped (AGL-052).
+      withEngine =
+        name: engine:
+        pkgs.runCommand name
+          {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            meta = agl.meta;
+          }
+          ''
+            mkdir -p $out/bin
+            for bin in agl agentLIBRE; do
+              makeWrapper ${agl}/bin/$bin $out/bin/$bin \
+                --set AGENTLIBRE_ENGINES ${engine}/bin
+            done
+            ln -s ${agl}/share $out/share
+          '';
 
       agl = pkgs.rustPlatform.buildRustPackage {
         pname = cargo.package.name;
@@ -87,7 +132,12 @@
       lib = import ./nix;
 
       packages.${system} = {
-        default = agl;
+        # Linux with its own server.
+        default = withEngine "agentLIBRE" linuxEngine;
+        # WSL, where the server runs on Windows (AGL-052, D10).
+        wsl = withEngine "agentLIBRE-wsl" windowsEngine;
+        # A machine whose server is outside it (AGL-052, D4).
+        outside = agl;
         inherit tools;
       };
 
