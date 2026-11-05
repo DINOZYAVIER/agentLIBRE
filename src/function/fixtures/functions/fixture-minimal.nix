@@ -1,4 +1,4 @@
-# The laconic nameless policy on the same model (AGL-039, D28, D31, D44).
+# The tests' Function with the laconic policy, on the same model (AGL-053, D8).
 { agl, ... }:
 {
   policy = agl.policies.minimal;

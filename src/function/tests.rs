@@ -84,8 +84,8 @@ fn none() -> &'static Path {
 }
 
 #[test]
-fn builtin_gpu_high_minimal() {
-    let function = Function::load(none(), none(), "agentLIBRE-gpu-high-minimal").unwrap();
+fn a_built_in_on_the_minimal_policy() {
+    let function = Function::load(none(), none(), "fixture-minimal").unwrap();
     assert_eq!(
         function.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -146,7 +146,7 @@ fn builtin_gpu_high_minimal() {
             ..ServerFile::default()
         }
     );
-    assert_eq!(function.path, Path::new("<built-in>/functions/agentLIBRE-gpu-high-minimal.nix"));
+    assert_eq!(function.path, Path::new("<built-in>/functions/fixture-minimal.nix"));
 }
 
 #[test]
@@ -284,8 +284,8 @@ fn file_text(policy: &str) -> String {
 #[test]
 fn files_and_names() {
     let dir = TempDir::new();
-    fs::write(dir.0.join("agentLIBRE-gpu-high.nix"), file_text(CODER)).unwrap();
-    let replaced = Function::load(&dir.0, none(), "agentLIBRE-gpu-high");
+    fs::write(dir.0.join("fixture-high.nix"), file_text(CODER)).unwrap();
+    let replaced = Function::load(&dir.0, none(), "fixture-high");
     let missing = Function::load(&dir.0, none(), "coder");
     assert_eq!(replaced.unwrap().states.len(), 3);
     assert!(matches!(missing, Err(Error::FunctionNotFound { name, .. }) if name == "coder"));
@@ -324,7 +324,7 @@ fn the_load_tiers() {
     assert_eq!(workspace_wins.system, "workspace");
     let user_over_builtin = Function::load(&workspace.0, &user.0, "user-only").unwrap();
     assert_eq!(user_over_builtin.system, "user only");
-    let built_in = Function::load(&workspace.0, &user.0, "agentLIBRE-gpu-high-minimal").unwrap();
+    let built_in = Function::load(&workspace.0, &user.0, "fixture-minimal").unwrap();
     assert_eq!(
         built_in.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -740,8 +740,8 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 
 #[test]
 fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
-    let high = Function::load(none(), none(), "agentLIBRE-gpu-high").unwrap();
-    let minimal = Function::load(none(), none(), "agentLIBRE-gpu-high-minimal").unwrap();
+    let high = Function::load(none(), none(), "fixture-high").unwrap();
+    let minimal = Function::load(none(), none(), "fixture-minimal").unwrap();
     // `minimal` is laconic and nameless (AGL-018, D1; AGL-039, D31). The
     // other is the persona and the runtime part: the prefix and the size
     // of an action (AGL-009, AGL-018, D2).
@@ -774,75 +774,45 @@ fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
     assert_eq!(tools(&minimal), tools(&high));
     assert_eq!(minimal.sampling, high.sampling);
     assert_eq!(minimal.model, high.model);
-    // They are the built-ins there are (AGL-039, D28).
-    assert_eq!(
-        builtin_names().unwrap(),
-        [
-            "agentLIBRE-cpu-high",
-            "agentLIBRE-cpu-low",
-            "agentLIBRE-cpu-medium",
-            "agentLIBRE-cpu-very-high",
-            "agentLIBRE-gpu-high",
-            "agentLIBRE-gpu-high-minimal",
-            "agentLIBRE-gpu-low",
-            "agentLIBRE-gpu-medium",
-            "agentLIBRE-gpu-very-high",
-        ]
-    );
-}
-
-/// The Function `name` of the built-ins.
-fn builtin(name: &str) -> Function {
-    Function::load(none(), none(), name).unwrap()
+    // The tests' Functions are the built-ins here (AGL-053, D8).
+    assert_eq!(builtin_names().unwrap(), ["fixture-gemma", "fixture-high", "fixture-minimal"]);
 }
 
 #[test]
-fn the_new_functions_have_their_models_and_contexts() {
+fn the_gemma_models_have_their_files_and_their_drafts() {
     let cases = [
-        ("agentLIBRE-cpu-low", "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf", 32768, "cpu"),
-        ("agentLIBRE-cpu-medium", "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 32768, "cpu"),
-        ("agentLIBRE-cpu-high", "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 65536, "cpu"),
-        ("agentLIBRE-cpu-very-high", "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 131072, "cpu"),
-        ("agentLIBRE-gpu-low", "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 131072, "gpu"),
-        ("agentLIBRE-gpu-medium", "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", 131072, "gpu"),
+        ("gemma-4-e2b-qat", "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"),
+        ("gemma-4-e4b-qat", "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"),
+        ("gemma-4-12b-qat", "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"),
     ];
-    for (name, weights, context, device) in cases {
-        let function = builtin(name);
+    let dir = TempDir::new();
+    for (name, weights) in cases {
+        let text = format!(
+            r#"{{ agl, ... }}: {{ policy = agl.policies.minimal; model = agl.models."{name}"; }}"#
+        );
+        fs::write(dir.0.join(format!("{name}.nix")), text).unwrap();
+        let function = Function::load(&dir.0, none(), name).unwrap();
         assert_eq!(function.model.model.as_deref(), Some(weights), "{name}");
-        assert_eq!(function.model.context, Some(context), "{name}");
         assert_eq!(function.model.spec_type.as_deref(), Some("draft-mtp,ngram-mod"), "{name}");
-        // The dictation of `gpu-low` takes its projector on the GPU (AGL-051).
-        let offload = name == "agentLIBRE-gpu-low";
-        assert_eq!(function.model.mmproj_offload, Some(offload), "{name}");
         assert!(function.format.think.as_ref().unwrap().open.contains("channel"), "{name}");
         let args = function.model.args.as_ref().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-ctk", "q8_0"]), "{name}");
         assert!(args.windows(2).any(|pair| pair == ["-ctv", "q8_0"]), "{name}");
-        assert_eq!(args.iter().any(|arg| arg == "--device"), device == "cpu", "{name}");
-        assert_eq!(args.iter().any(|arg| arg == "999"), device == "gpu", "{name}");
         // All its files can be downloaded, at a fixed version.
         assert_eq!(function.sources.len(), 3, "{name}");
     }
 }
 
 #[test]
-fn the_longest_context_makes_room_for_itself() {
-    let function = builtin("agentLIBRE-gpu-very-high");
-    assert_eq!(function.model.model.as_deref(), Some("Qwen3.8-27B-UD-IQ4_XS.gguf"));
-    assert_eq!(function.model.context, Some(262144));
-    assert_eq!(function.model.spec_type.as_deref(), Some("draft-mtp,ngram-mod"));
-    let args = function.model.args.unwrap();
-    assert!(args.windows(2).any(|pair| pair == ["-ub", "256"]));
-    assert!(args.windows(2).any(|pair| pair == ["-ctvd", "q8_0"]));
-}
-
-#[test]
-fn every_built_in_source_is_at_a_fixed_version() {
-    for name in builtin_names().unwrap() {
-        for source in builtin(&name).sources {
-            assert!(!source.url.contains("/resolve/main/"), "{name}: {}", source.url);
-        }
-    }
+fn every_source_of_a_model_is_at_a_fixed_version() {
+    let sources = crate::nix::eval_with_agl(
+        Path::new("<built-in>/models"),
+        "map (model: model.source) (builtins.attrValues agl.models)",
+    )
+    .unwrap()
+    .to_string();
+    assert!(sources.contains("/resolve/"));
+    assert!(!sources.contains("/resolve/main/"), "{sources}");
 }
 
 #[test]

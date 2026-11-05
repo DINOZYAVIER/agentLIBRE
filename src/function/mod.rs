@@ -191,7 +191,8 @@ impl State {
 }
 
 /// The names of the built-in Functions (AGL-036, D3; AGL-039, D25, D28):
-/// the attributes of `agl.functions` of agl's `nix/` directory.
+/// the attributes of `agl.functions`, the Functions of the repository
+/// agentLIBRE-functions (AGL-053).
 pub fn builtin_names() -> Result<Vec<String>, Error> {
     let path = Path::new("<built-in>/functions");
     let value = nix::eval_with_agl(path, "builtins.attrNames agl.functions")?;

@@ -472,6 +472,7 @@ fn agent_session(
     let sessions_dir = paths.sessions();
     let about = settings.about.enabled.unwrap_or(true).then(|| {
         let nix_dir = env(nix::NIX_VAR).map(PathBuf::from);
+        let functions_dir = env(nix::FUNCTIONS_VAR).map(PathBuf::from);
         let name = format!("{}.nix", settings.function);
         let function_file = [
             paths.functions_dir(&project.key).join(&name),
@@ -480,7 +481,7 @@ fn agent_session(
         .into_iter()
         .find(|file| file.is_file())
         .or_else(|| {
-            nix_dir
+            functions_dir
                 .as_ref()
                 .map(|dir| dir.join("functions").join(&name))
                 .filter(|file| file.is_file())

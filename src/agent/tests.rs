@@ -467,7 +467,7 @@ fn search_runs_in_the_agent_and_its_text_is_the_result() {
         ("It is a city.", Stop::End),
     ]);
     let search = FakeSearch::new(Outcome::Ok, "1. Київ\n   https://x.example/");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("what is Kyiv", &mut Log::default());
@@ -500,7 +500,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
         ("I could not search.", Stop::End),
     ]);
     let search = FakeSearch::new(Outcome::Fail, "The search service is rate limited; try again later.");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("search", &mut Log::default());
@@ -515,7 +515,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
 
 #[test]
 fn without_search_the_tool_is_not_in_the_list_nor_the_grammar() {
-    let mut minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let mut minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let names = |function: &Function| -> Vec<&'static str> {
         function_tools(function).iter().map(|doc| doc.name).collect()
     };
@@ -565,7 +565,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
 #[test]
 fn a_call_then_an_answer() {
     let dir = Dir::new("answer");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
@@ -605,7 +605,7 @@ fn a_call_then_an_answer() {
 
 #[test]
 fn the_off_level_silences_the_thinking() {
-    let function = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let function = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     // A level keeps the thinking: two generations.
     let dir = Dir::new("think-level");
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
@@ -624,7 +624,7 @@ fn the_off_level_silences_the_thinking() {
 
 #[test]
 fn a_step_without_thinking_shows_no_reasoning_in_the_open() {
-    let function = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-low").unwrap();
+    let function = Function::load(Path::new("/none"), Path::new("/none"), "fixture-gemma").unwrap();
     let call = "<|tool_call>call:bash{command:<|\"|>true<|\"|>}<tool_call|>";
     let dir = Dir::new("open-reasoning");
     let script = Script::new(&[
@@ -653,7 +653,7 @@ fn a_state_without_thinking_is_rendered_at_the_off_level() {
     assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
     assert_eq!(*script.reasonings.borrow(), [Some(ReasoningLevel::Off)]);
     // A thinking state keeps the run's level.
-    let thinking = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let thinking = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let dir = Dir::new("thinking-state");
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
     run_level(&thinking, &script, &dir, "hi", Some(ReasoningLevel::Low)).0.unwrap();
@@ -663,7 +663,7 @@ fn a_state_without_thinking_is_rendered_at_the_off_level() {
 #[test]
 fn every_generation_reports_its_decoded_tokens() {
     let dir = Dir::new("decoded");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let outputs: [(&str, Stop); 4] = [
         ("I will list files", THOUGHT),
         (&bash_call("echo hello"), Stop::End),
@@ -733,7 +733,7 @@ fn states_and_instructions() {
 #[test]
 fn a_cut_off_action_is_discarded_and_the_model_is_told() {
     let dir = Dir::new("cut-off");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (
@@ -1084,7 +1084,7 @@ fn structured_output_maps_to_an_action() {
 #[test]
 fn thinking_at_the_limit_is_closed() {
     let dir = Dir::new("limit");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("a long thought ", Stop::Limit), ("ok", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert_eq!(end.unwrap(), TurnEnd::Answer("ok".into()));
@@ -1134,7 +1134,7 @@ fn text_stream_cuts_out_the_call() {
 #[test]
 fn text_before_a_call_streams_and_is_reported_whole() {
     let dir = Dir::new("stream");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
         (&format!("I will run it.\n{}", bash_call("true")), Stop::End),
@@ -1168,7 +1168,7 @@ const FITS: usize = 5_000;
 #[test]
 fn a_full_context_is_compacted_and_the_turn_goes_on() {
     let dir = Dir::new("compact");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -1229,7 +1229,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 fn the_system_message_is_the_functions_system_and_nothing_more() {
     let dir = Dir::new("system");
     let agentlibre =
-        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high").unwrap();
+        Function::load(Path::new("/none"), Path::new("/none"), "fixture-high").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -1259,7 +1259,7 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
 fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
     let dir = Dir::new("agentLIBRE");
     let agentlibre =
-        Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high").unwrap();
+        Function::load(Path::new("/none"), Path::new("/none"), "fixture-high").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
     let (end, _, _) = run(&agentlibre, &script, &dir, "hi");
     assert!(end.is_ok());
@@ -1273,7 +1273,7 @@ fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
 #[test]
 fn the_minimal_function_sends_the_one_line_system() {
     let dir = Dir::new("minimal");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
     assert!(end.is_ok());
@@ -1288,7 +1288,7 @@ fn the_minimal_function_sends_the_one_line_system() {
 #[test]
 fn the_prompt_size_of_every_step_is_reported() {
     let dir = Dir::new("used");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -1313,7 +1313,7 @@ fn a_cut_summary_is_asked_again_shorter_then_kept_with_a_note() {
     // AGL-043 F6: the summary reached its budget (4096 at the test's
     // 16384 context): one more request, shorter; that one fits.
     let dir = Dir::new("shorter");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("a long summary", Stop::Limit),
         ("Shorter.", Stop::End),
@@ -1354,7 +1354,7 @@ fn a_cut_summary_is_asked_again_shorter_then_kept_with_a_note() {
 #[test]
 fn a_context_that_compaction_cannot_free_stops_the_turn() {
     let dir = Dir::new("no-room");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     // The compaction prompt itself does not fit.
     let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
     let (end, log, session) = run(&minimal, &script, &dir, "go");
@@ -1387,7 +1387,7 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
     // its 4096; the long tool result is cut to its head and tail, and the
     // second count fits.
     let dir = Dir::new("cut-result");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("head -c 5000 /dev/zero | tr '\\0' x"), Stop::End),
@@ -1420,7 +1420,7 @@ fn a_summary_request_without_results_to_cut_drops_the_oldest_turn() {
     // AGL-038, D5: no tool result to cut — the first turn goes, the latest
     // is kept.
     let dir = Dir::new("cut-turn");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
         ("Hi.", Stop::End),
@@ -1450,7 +1450,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
     // 4096, AGL-043 F6, F14, AGL-049); a history of 50000 compacts early with
     // the setting on, and runs the step with it off.
     let dir = Dir::new("early");
-    let mut early = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let mut early = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     assert!(!early.compact_early);
     assert_eq!(super::early_reserve(&early, 65_536), 18_432);
     early.compact_early = true;
@@ -1489,7 +1489,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
 #[test]
 fn compaction_on_request() {
     let dir = Dir::new("on-request");
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("t", THOUGHT), ("Hi.", Stop::End), ("Greeted.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
@@ -1543,7 +1543,7 @@ fn turn_in(
     dir: &Dir,
     message: &str,
 ) -> Result<TurnEnd, Error> {
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     agent(&minimal, script, session, dir, None).turn(message, &mut Log::default())
 }
 
@@ -1578,7 +1578,7 @@ fn a_picture_is_counted_by_its_bound() {
     session
         .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut log = Log::default();
     agent(&minimal, &script, &mut session, &dir, None)
         .turn("see [Image#1]", &mut log)
@@ -1723,7 +1723,7 @@ fn view_keeps_the_file_and_the_next_step_sees_it() {
         ("It is a screenshot.", THOUGHT),
         ("A screenshot.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let (end, log, session) = run(&minimal, &script, &dir, "what is in shot.png?");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))), "{log:?}");
     // The call, the medium, then the result, in the log of the session.
@@ -1756,7 +1756,7 @@ fn view_of_something_else_is_a_failed_call_the_model_reads() {
         ("Hm.", THOUGHT),
         ("Cannot.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let (end, _, session) = run(&minimal, &script, &dir, "see");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));
     let results: Vec<(Outcome, &str)> = session
@@ -1785,7 +1785,7 @@ fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
         ("No.", Stop::End),
     ]);
     script.marker = None;
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let (_, _, session) = run(&minimal, &script, &dir, "see");
     assert!(session.media().is_empty());
     assert!(matches!(
@@ -1810,7 +1810,7 @@ fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
         ("Ok.", THOUGHT),
         ("It says good morning.", Stop::End),
     ]);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut agent = agent(&minimal, &script, &mut session, &dir, None);
     agent.whisper = &Words;
@@ -1834,7 +1834,7 @@ fn turn_with_memory(
     dir: &Dir,
     message: &str,
 ) -> (Result<TurnEnd, Error>, Log, Session) {
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let mut log = Log::default();
     let mut agent = agent(&default, script, &mut session, dir, None);
@@ -1854,7 +1854,7 @@ fn the_memory_index_stands_before_the_history_and_stays_for_the_session() {
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
-        "agentLIBRE-gpu-high-minimal",
+        "fixture-minimal",
     )
     .unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
@@ -2056,7 +2056,7 @@ fn a_memory_call_without_a_store_fails_for_everything_but_add() {
 fn a_compaction_summary_is_kept_in_the_memory_directory_and_not_in_the_index() {
     let dir = Dir::new("memsummary");
     let memory = dir.0.join("memory");
-    let default = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let default = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),
@@ -2107,7 +2107,7 @@ fn the_session_file_holds_the_turn_and_the_history_does_not() {
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
-        "agentLIBRE-gpu-high-minimal",
+        "fixture-minimal",
     )
     .unwrap();
     let script = Script::new(&[
@@ -2173,7 +2173,7 @@ fn the_model_is_told_of_its_environment_after_the_system_text() {
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
-        "agentLIBRE-gpu-high-minimal",
+        "fixture-minimal",
     )
     .unwrap();
     let script = Script::new(&[
@@ -2205,7 +2205,7 @@ fn a_long_output_names_its_file_beside_the_session_and_follows_the_context() {
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
-        "agentLIBRE-gpu-high-minimal",
+        "fixture-minimal",
     )
     .unwrap();
     let script = Script::new(&[
@@ -2247,7 +2247,7 @@ fn a_long_search_result_is_cut_and_kept_like_any_output() {
     ]);
     let long = "1. Київ\n".to_owned() + &"результат ".repeat(3000) + "\nкінець";
     let search = FakeSearch::new(Outcome::Ok, &long);
-    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "agentLIBRE-gpu-high-minimal").unwrap();
+    let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let end = agent_searching(&minimal, &script, &mut session, &dir, None, &search, false)
         .turn("what is Kyiv", &mut Log::default());
@@ -2274,7 +2274,7 @@ fn a_compaction_between_turns_does_not_ask_the_answered_question_again() {
     let minimal = Function::load(
         Path::new("/none"),
         Path::new("/none"),
-        "agentLIBRE-gpu-high-minimal",
+        "fixture-minimal",
     )
     .unwrap();
     let script = Script::new(&[

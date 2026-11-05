@@ -239,6 +239,8 @@ pub enum Error {
     },
     /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
     NixDirMissing,
+    /// `AGENTLIBRE_FUNCTIONS` is not set to an absolute directory (AGL-053, D6).
+    FunctionsDirMissing,
     /// The system's `nix-instantiate` cannot be run (AGL-039, D38).
     NixNotFound { source: io::Error },
     /// The evaluation of a Nix file failed; `detail` is Nix's message.
@@ -654,6 +656,10 @@ impl std::fmt::Display for Error {
                 Error::NixDirMissing => format!(
                     "{} is not set: run agl from its Nix package or `nix develop`",
                     crate::nix::NIX_VAR
+                ),
+                Error::FunctionsDirMissing => format!(
+                    "{} is not set: run agl from its Nix package or `nix develop`",
+                    crate::nix::FUNCTIONS_VAR
                 ),
                 Error::NixNotFound { source } => format!("cannot run nix-instantiate: {source}"),
                 Error::NixEval { path, detail } => {

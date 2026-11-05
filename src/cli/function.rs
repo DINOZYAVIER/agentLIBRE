@@ -308,16 +308,10 @@ mod tests {
         assert_eq!(
             names,
             [
-                "agentLIBRE-cpu-high",
-                "agentLIBRE-cpu-low",
-                "agentLIBRE-cpu-medium",
-                "agentLIBRE-cpu-very-high",
-                "agentLIBRE-gpu-high",
-                "agentLIBRE-gpu-high-minimal",
-                "agentLIBRE-gpu-low",
-                "agentLIBRE-gpu-medium",
-                "agentLIBRE-gpu-very-high",
                 "broken",
+                "fixture-gemma",
+                "fixture-high",
+                "fixture-minimal",
                 "mine",
             ]
         );
@@ -328,14 +322,14 @@ mod tests {
         assert_eq!(mine.shadows, [Source::User]);
         assert!(mine.current);
         assert_eq!((mine.kind, mine.model.as_deref()), (ServerKind::Llama, Some("p.gguf")));
-        let high = by("agentLIBRE-gpu-high");
+        let high = by("fixture-high");
         assert_eq!(high.source, Source::BuiltIn);
         assert_eq!(high.model.as_deref(), Some("Qwen3.8-27B-UD-IQ4_XS.gguf"));
         // A Function that does not load is listed with its error.
         assert!(by("broken").error.as_deref().is_some_and(|e| e.contains("strata_config")));
         let lines = catalog.lines(Lang::En);
         let current = lines.iter().find(|line| line.starts_with("* ")).unwrap();
-        assert_eq!(current, "* mine                         workspace  llama   p.gguf over user");
+        assert_eq!(current, "* mine             workspace  llama   p.gguf over user");
     }
 
     #[test]
@@ -343,7 +337,7 @@ mod tests {
         let dir = TempDir::new();
         let catalog = catalog(&dir.0);
         write(&catalog.user_dir, "broken", &file(STRATA_NO_CONFIG));
-        assert!(catalog.check("agentLIBRE-gpu-high").is_ok());
+        assert!(catalog.check("fixture-high").is_ok());
         assert!(matches!(catalog.check("nope"), Err(Error::FunctionNotFound { .. })));
         assert!(matches!(catalog.check("broken"), Err(Error::Function { .. })));
     }

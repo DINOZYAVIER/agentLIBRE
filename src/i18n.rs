@@ -2564,6 +2564,9 @@ impl Error {
             Error::NixDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)
             }
+            Error::FunctionsDirMissing => {
+                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::FUNCTIONS_VAR)
+            }
             Error::NixNotFound { source } => tr!(lang, m::NIX_NOT_FOUND, source = source),
             Error::NixEval { path, detail } => {
                 tr!(lang, m::NIX_EVAL, path = path.display(), detail = detail)

@@ -4,9 +4,14 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   # The engine that comes with the package (AGL-052).
   inputs.llama-cpp.url = "github:ggml-org/llama.cpp/v0.9.0";
+  # The Functions that come with the package (AGL-053).
+  inputs.functions = {
+    url = "github:DINOZYAVIER/agentLIBRE-functions";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs, llama-cpp }:
+    { self, nixpkgs, llama-cpp, functions }:
     let
       # Linux on x86-64, also in WSL (AGL-052, D1, D2).
       system = "x86_64-linux";
@@ -115,6 +120,7 @@
             wrapProgram $out/bin/$bin \
               --set AGENTLIBRE_TOOLS ${tools}/bin \
               --set AGENTLIBRE_NIX $out/share/agentLIBRE/nix \
+              --set AGENTLIBRE_FUNCTIONS ${functions} \
               --set AGENTLIBRE_REV ${self.shortRev or self.dirtyShortRev or "unknown"}
           done
         '';
@@ -128,8 +134,9 @@
     in
     {
       # The `agl` argument of the Functions and the settings: the built-in
-      # policies, formats, models and Functions (AGL-039, D7, D35).
-      lib = import ./nix;
+      # policies, formats and models, and the Functions of the repository
+      # agentLIBRE-functions (AGL-039, D7, D35; AGL-053).
+      lib = import ./nix { inherit functions; };
 
       packages.${system} = {
         # Linux with its own server.
@@ -150,6 +157,7 @@
           pkgs.git
         ];
         AGENTLIBRE_TOOLS = "${tools}/bin";
+        AGENTLIBRE_FUNCTIONS = "${functions}";
         # The checkout's built-ins, so a change of them is seen without a
         # build (AGL-039, D7).
         shellHook = ''
@@ -160,6 +168,23 @@
       checks.${system} = {
         # The build and `cargo test`.
         package = agl;
+        # The pinned Functions all load, on the package's own `agl`, and one is
+        # the default (AGL-053, D8). A line of `function list` with no kind in it
+        # is the error of a Function that does not load.
+        functions = pkgs.runCommand "${cargo.package.name}-functions"
+          { nativeBuildInputs = [ pkgs.git pkgs.nix ]; }
+          ''
+            export HOME=$TMPDIR NIX_REMOTE=dummy:// GIT_PAGER=cat
+            mkdir project && cd project && git init -q
+            ${agl}/bin/agl function list > list
+            cat list
+            want=$(ls ${functions}/functions | wc -l)
+            test "$want" -gt 0
+            test "$(grep -c ' llama ' list)" = "$want"
+            test "$(wc -l < list)" = "$want"
+            grep -q '^\* .* llama ' list
+            touch $out
+          '';
         clippy = agl.overrideAttrs (old: {
           pname = "${cargo.package.name}-clippy";
           nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];

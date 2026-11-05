@@ -16,6 +16,10 @@ pub use section::Section;
 /// The variable of agl's `nix/` directory (AGL-039, D7, D34).
 pub const NIX_VAR: &str = "AGENTLIBRE_NIX";
 
+/// The variable of the directory of the Functions, the repository
+/// agentLIBRE-functions (AGL-053, D6).
+pub const FUNCTIONS_VAR: &str = "AGENTLIBRE_FUNCTIONS";
+
 /// The evaluator, the system's, from `PATH` (AGL-039, D38, D39).
 const EVALUATOR: &str = "nix-instantiate";
 
@@ -23,8 +27,8 @@ const EVALUATOR: &str = "nix-instantiate";
 /// recognizes it in the evaluator's message.
 const NOT_A_FUNCTION: &str = "agentLIBRE: the file is not a function of { agl, ... }";
 
-/// agl's `nix/` directory: the built-in Functions, formats, policies and
-/// models, the `agl` argument of every file (AGL-039, D7, D35).
+/// agl's `nix/` directory: the built-in formats, policies and models, the
+/// `agl` argument of every file (AGL-039, D7, D35).
 pub fn nix_dir() -> Result<PathBuf, Error> {
     std::env::var_os(NIX_VAR)
         .map(PathBuf::from)
@@ -32,9 +36,29 @@ pub fn nix_dir() -> Result<PathBuf, Error> {
         .ok_or(Error::NixDirMissing)
 }
 
+/// The directory of the Functions behind `agl.functions` (AGL-053, D6).
+#[cfg(not(test))]
+fn functions_dir() -> Result<PathBuf, Error> {
+    std::env::var_os(FUNCTIONS_VAR)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .ok_or(Error::FunctionsDirMissing)
+}
+
+/// The tests' Functions, so that a change in the repository of the Functions
+/// does not break them (AGL-053, D8).
+#[cfg(test)]
+fn functions_dir() -> Result<PathBuf, Error> {
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/function/fixtures"))
+}
+
 /// The `agl` argument, as a Nix expression.
 fn agl_expr() -> Result<String, Error> {
-    Ok(format!("import {}", string(&nix_dir()?.to_string_lossy())))
+    Ok(format!(
+        "import {} {{ functions = {}; }}",
+        string(&nix_dir()?.to_string_lossy()),
+        string(&functions_dir()?.to_string_lossy()),
+    ))
 }
 
 /// Evaluates the Nix expression `expr` strictly to JSON; `path` names what

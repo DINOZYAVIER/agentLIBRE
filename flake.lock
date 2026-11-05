@@ -18,6 +18,22 @@
         "type": "github"
       }
     },
+    "functions": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793917053,
+        "narHash": "sha256-6urSiFr7oq8Xb5N+CL231xwGrKD/CTBs/aVnuyUSRh8=",
+        "owner": "DINOZYAVIER",
+        "repo": "agentLIBRE-functions",
+        "rev": "e2bc6df88f74aa515b817c832d50ced310419a72",
+        "type": "github"
+      },
+      "original": {
+        "owner": "DINOZYAVIER",
+        "repo": "agentLIBRE-functions",
+        "type": "github"
+      }
+    },
     "llama-cpp": {
       "inputs": {
         "flake-parts": "flake-parts",
@@ -87,6 +103,7 @@
     },
     "root": {
       "inputs": {
+        "functions": "functions",
         "llama-cpp": "llama-cpp",
         "nixpkgs": "nixpkgs_2"
       }

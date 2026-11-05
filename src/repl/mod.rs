@@ -1713,7 +1713,7 @@ mod tests {
     #[test]
     fn what_compact_tells() {
         let none = Path::new("/none");
-        let function = Function::load(none, none, "agentLIBRE-gpu-high-minimal").unwrap();
+        let function = Function::load(none, none, "fixture-minimal").unwrap();
         let notice = |result| compact_notice(result, &function, Lang::En);
         assert_eq!(notice(Ok(Compaction::Done)), None);
         assert_eq!(

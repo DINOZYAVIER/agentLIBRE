@@ -1,7 +1,9 @@
 # The `agl` argument of every Function and settings file (AGL-039, D7,
-# D35): the built-in policies, formats, models and Functions, and the engine
-# arguments the models share. A fixpoint, so the built-in Functions and models
-# take their parts from it.
+# D35): the built-in policies, formats and models, the engine arguments the
+# models share, and the Functions of the directory `functions`, which comes from
+# the repository agentLIBRE-functions (AGL-053). A fixpoint, so the Functions and
+# the models take their parts from it.
+{ functions }:
 let
   agl = {
     policies = {
@@ -27,17 +29,7 @@ let
       "gemma-4-e4b-qat" = import ./models/gemma-4-e4b-qat.nix { inherit agl; };
       "gemma-4-12b-qat" = import ./models/gemma-4-12b-qat.nix { inherit agl; };
     };
-    functions = {
-      agentLIBRE-cpu-low = import ./functions/agentLIBRE-cpu-low.nix { inherit agl; };
-      agentLIBRE-cpu-medium = import ./functions/agentLIBRE-cpu-medium.nix { inherit agl; };
-      agentLIBRE-cpu-high = import ./functions/agentLIBRE-cpu-high.nix { inherit agl; };
-      agentLIBRE-cpu-very-high = import ./functions/agentLIBRE-cpu-very-high.nix { inherit agl; };
-      agentLIBRE-gpu-low = import ./functions/agentLIBRE-gpu-low.nix { inherit agl; };
-      agentLIBRE-gpu-medium = import ./functions/agentLIBRE-gpu-medium.nix { inherit agl; };
-      agentLIBRE-gpu-high = import ./functions/agentLIBRE-gpu-high.nix { inherit agl; };
-      agentLIBRE-gpu-high-minimal = import ./functions/agentLIBRE-gpu-high-minimal.nix { inherit agl; };
-      agentLIBRE-gpu-very-high = import ./functions/agentLIBRE-gpu-very-high.nix { inherit agl; };
-    };
+    functions = import functions { inherit agl; };
   };
 in
 agl
