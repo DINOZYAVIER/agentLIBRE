@@ -16,6 +16,8 @@
     param = "{name}:<|\"|>{value}<|\"|>";
     int_param = "{name}:{value}";
     separator = ",";
+    # All the model's marks start so, and the text outside a call shows none.
+    no_text = "<|";
     end = "}<tool_call|>";
   };
 }

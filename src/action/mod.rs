@@ -251,7 +251,7 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
     let mut root = Vec::new();
     if !alts.is_empty() {
         // Text may come before a call (D114); it cannot start one.
-        let before = grammar.text_without("before", &call.begin_before, false);
+        let before = grammar.text_without("before", &call.no_text, false);
         let calls = if alts.len() == 1 {
             alts.pop().unwrap()
         } else {
@@ -260,7 +260,7 @@ pub fn grammar(format: &Format, actions: &Actions) -> (Grammar, Expr) {
         root.push(Expr::Seq(vec![before, calls]));
     }
     if actions.answer {
-        root.push(grammar.text_without("answer", &call.begin_before, true));
+        root.push(grammar.text_without("answer", &call.no_text, true));
     }
     let root = if root.len() == 1 {
         root.pop().unwrap()

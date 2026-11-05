@@ -541,6 +541,21 @@ fn gemma_values_keep_what_looks_like_its_language() {
 }
 
 #[test]
+fn gemma_text_outside_a_call_has_none_of_its_marks() {
+    with_big_stack(|| {
+        let actions = builtin(true);
+        for output in [
+            "<|channel>thought\n<channel|>The answer.",
+            "The answer<|turn>",
+            "<|channel>thought\n<channel|><|tool_call>call:view{path:<|\"|>a<|\"|>}<tool_call|>",
+        ] {
+            assert!(!gemma_accepts(&actions, output), "grammar accepts {output:?}");
+        }
+        assert!(gemma_accepts(&actions, "a < b and c > d: x<y"));
+    });
+}
+
+#[test]
 fn gemma_cut_off_calls_are_incomplete() {
     let format = gemma();
     let actions = builtin(true);

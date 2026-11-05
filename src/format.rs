@@ -50,6 +50,10 @@ pub struct Call {
     pub int_after: String,
     /// Text between two parameters (AGL-050).
     pub separator: String,
+    /// What the text outside a call cannot contain: where the start of a call
+    /// is not enough, as with the marks of Gemma 4 that all start alike and
+    /// would show up in an answer (AGL-050).
+    pub no_text: String,
     pub end: String,
 }
 
@@ -115,7 +119,7 @@ impl Format {
         };
 
         let mut call = file.required_section("call")?;
-        call.check_keys(&["begin", "param", "int_param", "separator", "end"])?;
+        call.check_keys(&["begin", "param", "int_param", "separator", "no_text", "end"])?;
         let begin = call.required_string("begin")?;
         let [begin_before, begin_after]: [String; 2] = split(&begin, &[NAME], &[VALUE])
             .map_err(|problem| template_error(&call, "begin", problem))?
@@ -149,6 +153,13 @@ impl Format {
                 .unwrap(),
         };
         let separator = call.string("separator")?.unwrap_or_default();
+        let no_text = match call.string("no_text")? {
+            Some(no_text) if no_text.is_empty() => {
+                return Err(template_error(&call, "no_text", TemplateProblem::Empty));
+            }
+            Some(no_text) => no_text,
+            None => begin_before.clone(),
+        };
         let end = call.required_string("end")?;
         split(&end, &[], &[NAME, VALUE])
             .map_err(|problem| template_error(&call, "end", problem))?;
@@ -164,6 +175,7 @@ impl Format {
                 int_between,
                 int_after,
                 separator,
+                no_text,
                 end,
             },
         })
@@ -280,6 +292,7 @@ pub mod tests {
                 "param": "{name}:<|\"|>{value}<|\"|>",
                 "int_param": "{name}:{value}",
                 "separator": ",",
+                "no_text": "<|",
                 "end": "}<tool_call|>",
             },
         })
@@ -380,6 +393,7 @@ pub mod tests {
                 int_between: ">\n".into(),
                 int_after: "\n</parameter>\n".into(),
                 separator: String::new(),
+                no_text: "<tool_call>\n<function=".into(),
                 end: "</function>\n</tool_call>".into(),
             }
         );
