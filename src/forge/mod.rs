@@ -386,6 +386,19 @@ fn is_store_name(name: &str, basename: &str) -> bool {
     matches!(hex.len(), 12 | 64) && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Refuses a `dir` that is agl's data directory or inside it (AGL-054): what
+/// is there is agl's, not a project, and taking it for one would rename a store
+/// of the same name. A data directory that does not exist holds nothing.
+fn outside_data(data: &Path, dir: &Path) -> Result<(), Error> {
+    match fs::canonicalize(data) {
+        Ok(data) if dir.starts_with(&data) => Err(Error::InsideDataDir {
+            dir: dir.to_path_buf(),
+            data,
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Resolves the project of `cwd` against the stores under `data`
 /// (AGL-010): the nearest ancestor of `cwd` (itself included) whose
 /// identity a store carries; else the nearest ancestor with a store
@@ -405,6 +418,7 @@ pub fn resolve(
         path: cwd.to_path_buf(),
         source,
     })?;
+    outside_data(data, &cwd)?;
     let projects: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
     resolve_among(data, &projects, lang, auto_rehome, ask)
 }
@@ -419,6 +433,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
         path: cwd.to_path_buf(),
         source,
     })?;
+    outside_data(data, &cwd)?;
     let found = stores(data)?;
     for project in cwd.ancestors() {
         let identity = identity_of(project);
@@ -466,6 +481,7 @@ pub fn resolve_dir(
         path: dir.to_path_buf(),
         source,
     })?;
+    outside_data(data, &dir)?;
     resolve_among(data, &[dir], lang, auto_rehome, ask)
 }
 
@@ -1665,6 +1681,68 @@ mod tests {
         // from the project directory.
         assert_ne!(ws.project, fs::canonicalize(&repo).unwrap());
         assert!(in_repository(&ws.project).unwrap());
+    }
+
+    /// A store under a data directory named as its project, and what must
+    /// not change in it (AGL-054).
+    fn a_store_named_as_the_data_directory(dir: &Path) -> (PathBuf, Workspace, Vec<u8>) {
+        let data = plain_dir(dir, "share/proj");
+        let repo = plain_dir(dir, "repos/proj");
+        let ws = fresh_store(&data, &repo);
+        plain_dir(&ws.dir, "forge/task-spec");
+        let settings = fs::read(ws.dir.join(MARKER_FILE)).unwrap();
+        (data, ws, settings)
+    }
+
+    #[test]
+    fn inside_the_data_directory_there_is_no_project() {
+        let dir = TempDir::new();
+        let (data, ws, settings) = a_store_named_as_the_data_directory(dir.path());
+        let refuses = |cwd: &Path| {
+            let refused = |result: Result<Workspace, Error>| {
+                assert!(matches!(result, Err(Error::InsideDataDir { .. })), "{cwd:?}");
+            };
+            let never = |options: &[String]| -> Result<usize, Error> {
+                panic!("nothing to choose: {options:?}")
+            };
+            refused(resolve(&data, cwd, EN, true, &never).map(|(ws, _)| ws));
+            refused(resolve(&data, cwd, EN, false, &never).map(|(ws, _)| ws));
+            refused(resolve_store(&data, cwd, EN, true).map(|(ws, _)| ws));
+            refused(resolve_dir(&data, cwd, EN, true, &never).map(|(ws, _)| ws));
+            refused(locate(&data, cwd));
+        };
+        // The data directory, a store, and a directory in a store.
+        refuses(&data);
+        refuses(&ws.dir);
+        refuses(&ws.dir.join("forge/task-spec"));
+        // The store stays as it was: its name and its marker.
+        assert!(ws.dir.is_dir());
+        assert_eq!(fs::read(ws.dir.join(MARKER_FILE)).unwrap(), settings);
+        assert_eq!(stores(&data).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_data_directory_is_refused_through_a_link() {
+        let dir = TempDir::new();
+        let (data, ws, _) = a_store_named_as_the_data_directory(dir.path());
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&ws.dir, &link).unwrap();
+        assert!(matches!(auto_err(&data, &link), Err(Error::InsideDataDir { .. })));
+    }
+
+    #[test]
+    fn beside_the_data_directory_a_project_is_found_as_before() {
+        let dir = TempDir::new();
+        let (data, ws, _) = a_store_named_as_the_data_directory(dir.path());
+        // Its own project, unchanged and quiet.
+        let (found, lines) = auto(&data, &fs::canonicalize(dir.path().join("repos/proj")).unwrap());
+        assert!(lines.is_empty());
+        assert_eq!(found.dir, ws.dir);
+        // A name that only starts with the data directory's is outside it.
+        let beside = plain_dir(dir.path(), "share/proj-beside");
+        let (fresh, _) = auto(&data, &beside);
+        assert_eq!(fresh.project, beside);
+        assert!(ws.dir.is_dir());
     }
 
     #[test]

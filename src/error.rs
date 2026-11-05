@@ -275,6 +275,8 @@ pub enum Error {
     WorkspaceAmbiguous { dirs: Vec<String> },
     /// `forge rehome` without a store off a TTY.
     RehomeNoStore { stores: Vec<String> },
+    /// The cwd is agl's data directory or inside it (AGL-054).
+    InsideDataDir { dir: PathBuf, data: PathBuf },
     /// No store is named `name`.
     StoreNotFound { name: String, stores: Vec<String> },
     /// An artifact file has no `---` front-matter delimiters.
@@ -698,6 +700,11 @@ impl std::fmt::Display for Error {
                 Error::WorkspaceAmbiguous { dirs } => {
                     format!("the workspace identity is in the markers of {}", dirs.join(", "))
                 }
+                Error::InsideDataDir { dir, data } => format!(
+                    "{} is inside agl's data directory {}, which is not a project: run agl from a project",
+                    dir.display(),
+                    data.display()
+                ),
                 Error::RehomeNoStore { .. } => "a store cannot be chosen without a terminal".into(),
                 Error::StoreNotFound { name, .. } => format!("no store is named {name}"),
                 Error::ArtifactFrontMatter { path } => {

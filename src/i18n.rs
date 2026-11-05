@@ -1815,6 +1815,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "ідентифікатор робочої області є в маркерах {dirs}; сховище скопійовано вручну, прибери копію",
     };
 
+    /// `Error::InsideDataDir`.
+    pub const INSIDE_DATA_DIR: Msg = Msg {
+        en: "{dir} is inside agl's data directory {data}, which is not a project: run agl from a project",
+        uk: "{dir} лежить у каталозі даних agl {data}, а це не проєкт: запускай agl із проєкту",
+    };
     /// `Error::RehomeNoStore`.
     pub const REHOME_NO_STORE: Msg = Msg {
         en: "a store cannot be chosen without a terminal; stores: {stores} (run `agl forge rehome <store>`)",
@@ -2601,6 +2606,9 @@ impl Error {
             }
             Error::WorkspaceAmbiguous { dirs } => {
                 tr!(lang, m::WORKSPACE_AMBIGUOUS, dirs = dirs.join(", "))
+            }
+            Error::InsideDataDir { dir, data } => {
+                tr!(lang, m::INSIDE_DATA_DIR, dir = dir.display(), data = data.display())
             }
             Error::RehomeNoStore { stores } => {
                 let stores = if stores.is_empty() {
