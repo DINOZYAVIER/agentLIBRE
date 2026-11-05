@@ -811,7 +811,9 @@ fn the_new_functions_have_their_models_and_contexts() {
         assert_eq!(function.model.model.as_deref(), Some(weights), "{name}");
         assert_eq!(function.model.context, Some(context), "{name}");
         assert_eq!(function.model.spec_type.as_deref(), Some("draft-mtp,ngram-mod"), "{name}");
-        assert_eq!(function.model.mmproj_offload, Some(false), "{name}");
+        // The dictation of `gpu-low` takes its projector on the GPU (AGL-051).
+        let offload = name == "agentLIBRE-gpu-low";
+        assert_eq!(function.model.mmproj_offload, Some(offload), "{name}");
         assert!(function.format.think.as_ref().unwrap().open.contains("channel"), "{name}");
         let args = function.model.args.as_ref().unwrap();
         assert!(args.windows(2).any(|pair| pair == ["-ctk", "q8_0"]), "{name}");
