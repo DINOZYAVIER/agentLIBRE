@@ -66,6 +66,11 @@ pub fn run(
             let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
             check(paths, &ws, cwd, lang, &name)
         }
+        "range" => {
+            let name = word(args, 1, "range")?.to_string();
+            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
+            range(paths, &ws, lang, &name, &args[2..])
+        }
         "log" => {
             no_extra(args, 2)?;
             let name = word(args, 1, "log")?.to_string();
@@ -243,16 +248,13 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
 }
 
 /// The git flag cell of the table for a task-spec: blank when `last`
-/// is empty, `ok`, `lags` or `broken` (a range that cannot be
-/// verified is broken too).
+/// is empty, `ok` or `broken` (a range that cannot be verified is broken
+/// too).
 fn git_flag_cell(artifact: &Artifact, project: &Path) -> Result<String, Error> {
     let spec = task_spec::take(artifact)?;
-    let status = Status::parse(&artifact.status)
-        .ok_or_else(|| Error::BadState { state: artifact.status.clone() })?;
-    match task_spec::git_flag(&spec, status, project) {
+    match task_spec::git_flag(&spec, project) {
         Ok(None) => Ok(String::new()),
         Ok(Some(GitFlag::Ok)) => Ok("ok".into()),
-        Ok(Some(GitFlag::Lags)) => Ok("lags".into()),
         Ok(Some(GitFlag::Broken)) | Err(_) => Ok("broken".into()),
     }
 }
@@ -338,7 +340,8 @@ fn valid_name(name: &str) -> bool {
 }
 
 /// `forge status <name> <state>`: validates the transition, bumps
-/// `updated`, rewrites the file with the body byte-identical.
+/// `updated`, rewrites the file with the body byte-identical, and prints
+/// the range of the task, which it does not touch (AGL-044 D2).
 fn status(
     paths: &Paths,
     ws: &Workspace,
@@ -384,17 +387,102 @@ fn status(
             to = to.name()
         )
     );
+    let spec = task_spec::take(&artifact)?;
+    outln!("{}", range_line(lang, name, &spec));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The range of a task-spec as a line; a value not set is named as such.
+fn range_line(lang: Lang, name: &str, spec: &task_spec::TaskSpec) -> String {
+    let value = |id: &str| {
+        if id.is_empty() {
+            tr!(lang, m::FORGE_RANGE_NOT_SET).to_owned()
+        } else {
+            id.to_owned()
+        }
+    };
+    tr!(
+        lang,
+        m::FORGE_RANGE,
+        name = name,
+        anchor = value(&spec.anchor),
+        last = value(&spec.last)
+    )
+}
+
+/// `forge range <name> [--anchor <id>] [--last <id>]` (AGL-044 D1): the only
+/// writer of the range of a task-spec, each id checked to resolve in the
+/// project's repository and stored as the commit it names, so that `HEAD`
+/// does not move afterwards. An anchor that is no ancestor of the last is
+/// refused, the file unchanged. Without an option, it prints the range.
+fn range(
+    paths: &Paths,
+    ws: &Workspace,
+    lang: Lang,
+    name: &str,
+    options: &[OsString],
+) -> Result<ExitCode, Error> {
+    let mut anchor: Option<String> = None;
+    let mut last: Option<String> = None;
+    let mut i = 0;
+    while i < options.len() {
+        let arg = word(options, i, "range")?;
+        i += 1;
+        let (slot, option) = match arg {
+            "--anchor" => (&mut anchor, "--anchor"),
+            "--last" => (&mut last, "--last"),
+            _ => return Err(Error::UnknownOption(arg.to_string())),
+        };
+        if slot.is_some() {
+            return Err(Error::RepeatedOption(option.to_string()));
+        }
+        *slot = Some(word(options, i, option)?.to_string());
+        i += 1;
+    }
+    let mut artifact = find_artifact(paths, ws, name)?;
+    if artifact.type_name != task_spec::TYPE {
+        return Err(Error::NotTaskSpec {
+            name: name.to_string(),
+            type_name: artifact.type_name,
+        });
+    }
+    let mut spec = task_spec::take(&artifact)?;
+    if anchor.is_none() && last.is_none() {
+        outln!("{}", range_line(lang, name, &spec));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let project = ws.project.as_path();
+    if let Some(id) = anchor {
+        spec.anchor = task_spec::resolve_commit(project, &id)?;
+    }
+    if let Some(id) = last {
+        spec.last = task_spec::resolve_commit(project, &id)?;
+    }
+    if let Some(GitFlag::Broken) = task_spec::git_flag(&spec, project)? {
+        eprintln!(
+            "{}",
+            tr!(
+                lang,
+                m::BROKEN_RANGE,
+                anchor = spec.anchor.as_str(),
+                last = spec.last.as_str()
+            )
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    outln!("{}", range_line(lang, name, &spec));
+    artifact.updated = task_spec::today();
+    artifact.type_table = task_spec_table(spec);
+    forge::write_artifact(&artifact)?;
     Ok(ExitCode::SUCCESS)
 }
 
 /// `forge check <name>`: the structural checks (the name matches the
 /// file, the range, the `deps` and `supersedes` resolve), then the
 /// `verification.cmds` via `bash -c` in the cwd, streamed, the first
-/// failing command stops the run. The git checks and `last` read the
-/// project directory and are skipped when it is not in a git
-/// repository. On a pass of an `open`/`in-progress` spec that lags (or
-/// has no `last` yet), `last` = HEAD and `updated` are recorded.
-/// Silent on success; the failures are lines.
+/// failing command stops the run. The git checks read the project
+/// directory and are skipped when it is not in a git repository. It
+/// writes nothing (AGL-044 D1). Silent on success; the failures are lines.
 fn check(
     paths: &Paths,
     ws: &Workspace,
@@ -452,17 +540,14 @@ fn check(
             && !spec.last.is_empty()
             && id_resolves(project, &spec.anchor)
             && id_resolves(project, &spec.last)
+            && let Ok(Some(GitFlag::Broken)) = task_spec::git_flag(&spec, project)
         {
-            let status =
-                Status::parse(&artifact.status).unwrap_or(Status::Open);
-            if let Ok(Some(GitFlag::Broken)) = task_spec::git_flag(&spec, status, project) {
-                failures.push(tr!(
-                    lang,
-                    m::BROKEN_RANGE,
-                    anchor = spec.anchor.as_str(),
-                    last = spec.last.as_str()
-                ));
-            }
+            failures.push(tr!(
+                lang,
+                m::BROKEN_RANGE,
+                anchor = spec.anchor.as_str(),
+                last = spec.last.as_str()
+            ));
         }
     }
     // `deps` and `supersedes` resolve in the store.
@@ -489,25 +574,6 @@ fn check(
     // failing command stops the run.
     if run_cmds(cwd, lang, &artifact)? {
         return Ok(ExitCode::FAILURE);
-    }
-    // A pass of an `open`/`in-progress` spec records a fresh `last` =
-    // HEAD when the header lags or `last` is empty, and bumps
-    // `updated`.
-    if in_repository
-        && artifact.type_name == task_spec::TYPE
-        && let Ok(spec) = task_spec::take(&artifact)
-        && let Some(status) = Status::parse(&artifact.status)
-        && matches!(status, Status::Open | Status::InProgress)
-    {
-        let head = forge::git(project, &["rev-parse", "HEAD"])?;
-        if spec.last.is_empty() || spec.last != head {
-            let mut spec = spec;
-            spec.last = head;
-            let mut artifact = artifact.clone();
-            artifact.updated = task_spec::today();
-            artifact.type_table = task_spec_table(spec);
-            forge::write_artifact(&artifact)?;
-        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -1046,20 +1112,18 @@ mod tests {
     }
 
     #[test]
-    fn check_passes_a_fresh_spec_and_records_head() {
+    fn check_passes_a_fresh_spec_and_writes_nothing() {
         let dir = TempDir::new();
         let data = dir.0.join("data");
         let repo = repo(&dir);
         let (_, file) = key_and_file(&data, &repo);
         forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let before = std::fs::read(&file).unwrap();
         assert_eq!(
             forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap(),
             ExitCode::SUCCESS
         );
-        let head = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
-        assert!(std::fs::read_to_string(&file)
-            .unwrap()
-            .contains(&format!("last = \"{head}\"")));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
         // A dep that is not in the store fails the check.
         let mut artifact = forge::load_artifact(&file).unwrap();
         artifact.deps.push("ghost".into());
@@ -1109,7 +1173,7 @@ mod tests {
         let data = dir.0.join("data");
         let repo = repo(&dir);
         // The cwd is a subdirectory of the repository: it is the
-        // project, and `check` records HEAD of the repository.
+        // project, and `range` reads the commits of the repository.
         let sub = repo.join("src");
         std::fs::create_dir_all(&sub).unwrap();
         forge(&data, &sub, &["new", "task-spec", "--title", "First Task"]).unwrap();
@@ -1118,13 +1182,106 @@ mod tests {
             .join(format!("src-{}", &identity["sha256:".len()..19]))
             .join("forge/task-spec/agl-001-first-task.md");
         assert_eq!(
-            forge(&data, &sub, &["check", "agl-001-first-task"]).unwrap(),
+            forge(&data, &sub, &["range", "agl-001-first-task", "--last", "HEAD"]).unwrap(),
             ExitCode::SUCCESS
         );
         let head = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
         assert!(std::fs::read_to_string(&file)
             .unwrap()
             .contains(&format!("last = \"{head}\"")));
+    }
+
+    /// The reproduction of AGL-044: a commit of another task does not move a
+    /// range, whatever `check` is run on, nor does a short `last` become long.
+    #[test]
+    fn a_commit_of_another_task_leaves_the_range_alone() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (_, file) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let short = forge::git(&repo, &["rev-parse", "--short", "HEAD"]).unwrap();
+        let mut artifact = forge::load_artifact(&file).unwrap();
+        artifact.type_table = task_spec_table(task_spec::TaskSpec {
+            anchor: String::new(),
+            last: short.clone(),
+        });
+        forge::write_artifact(&artifact).unwrap();
+        forge(&data, &repo, &["status", "agl-001-first-task", "in-progress"]).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        // `last` is the HEAD, in its short form.
+        forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        forge::git(&repo, &["commit", "-q", "--allow-empty", "-m", "another task"]).unwrap();
+        forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // The flag has nothing to say of it.
+        let artifact = forge::load_artifact(&file).unwrap();
+        assert_eq!(git_flag_cell(&artifact, &repo).unwrap(), "ok");
+    }
+
+    #[test]
+    fn range_sets_what_resolves_and_refuses_the_rest() {
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (_, file) = key_and_file(&data, &repo);
+        let name = "agl-001-first-task";
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let first = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        forge::git(&repo, &["commit", "-q", "--allow-empty", "-m", "second"]).unwrap();
+        let second = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let held = || {
+            let artifact = forge::load_artifact(&file).unwrap();
+            let spec = task_spec::take(&artifact).unwrap();
+            (spec.anchor, spec.last)
+        };
+        // Without an option it only prints.
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(forge(&data, &repo, &["range", name]).unwrap(), ExitCode::SUCCESS);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // A name that moves is stored as the commit it names.
+        forge(&data, &repo, &["range", name, "--anchor", &first, "--last", "HEAD"]).unwrap();
+        assert_eq!(held(), (first.clone(), second.clone()));
+        forge::git(&repo, &["commit", "-q", "--allow-empty", "-m", "third"]).unwrap();
+        assert_eq!(held(), (first.clone(), second.clone()));
+        // One value alone leaves the other.
+        forge(&data, &repo, &["range", name, "--last", "HEAD"]).unwrap();
+        let third = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(held(), (first.clone(), third.clone()));
+        // An id that does not resolve is refused, the file unchanged.
+        let before = std::fs::read(&file).unwrap();
+        assert!(matches!(
+            forge(&data, &repo, &["range", name, "--last", "nope"]),
+            Err(Error::CommitNotFound { id, .. }) if id == "nope"
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // So is an anchor that is no ancestor of the last.
+        assert_eq!(
+            forge(&data, &repo, &["range", name, "--anchor", &third, "--last", &second]).unwrap(),
+            ExitCode::FAILURE
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // The wrong words.
+        assert!(matches!(
+            forge(&data, &repo, &["range", name, "--last", "HEAD", "--last", "HEAD"]),
+            Err(Error::RepeatedOption(option)) if option == "--last"
+        ));
+        assert!(matches!(
+            forge(&data, &repo, &["range", name, "--first", "HEAD"]),
+            Err(Error::UnknownOption(option)) if option == "--first"
+        ));
+        assert!(matches!(
+            forge(&data, &repo, &["range", name, "--last"]),
+            Err(Error::MissingValue(option)) if option == "--last"
+        ));
+    }
+
+    #[test]
+    fn the_line_of_a_range_names_what_is_not_set() {
+        let spec = task_spec::TaskSpec { anchor: String::new(), last: "abc".into() };
+        assert_eq!(range_line(Lang::En, "x", &spec), "x: anchor none, last abc");
+        assert_eq!(range_line(Lang::Uk, "x", &spec), "x: anchor немає, last abc");
     }
 
     #[test]

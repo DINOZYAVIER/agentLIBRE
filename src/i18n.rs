@@ -164,7 +164,7 @@ Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name
        agl server start [--yes] [--function <name>]|stop|status [--function <name>]
        agl function list|use <name> [--user]
        agl search login
-       agl forge list|show|new|status|check|log|diff|rehome
+       agl forge list|show|new|status|range|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
 
@@ -210,7 +210,10 @@ under XDG_DATA_HOME):
   forge show <name>               the rendered header and the body
   forge new task-spec --title <t> a new task-spec ([--name <n>])
   forge status <name> <state>     open, in-progress, done, backlog or canceled
-  forge check <name>              the structural checks and the verification cmds
+  forge range <name> [--anchor <id>] [--last <id>]
+                                  show or set the commits of a task
+  forge check <name>              the structural checks and the verification cmds;
+                                  it changes nothing
   forge log <name>                the commits of the artifact's file
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
@@ -221,7 +224,7 @@ under XDG_DATA_HOME):
               agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
               agl function list|use <назва> [--user]
               agl search login
-              agl forge list|show|new|status|check|log|diff|rehome
+              agl forge list|show|new|status|range|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
 
@@ -267,7 +270,10 @@ Forge (сховище артефактів робочої області, agentL
   forge show <назва>              відтворений заголовок і тіло
   forge new task-spec --title <t> новий task-spec ([--name <n>])
   forge status <назва> <стан>     open, in-progress, done, backlog або canceled
-  forge check <назва>             структурні перевірки і команди verification
+  forge range <назва> [--anchor <id>] [--last <id>]
+                                  показати або задати коміти задачі
+  forge check <назва>             структурні перевірки і команди verification;
+                                  нічого не змінює
   forge log <назва>               коміти файлу артефакту
   forge diff <назва> [коміт]     розбіжності файлу артефакту
   forge rehome [<сховище>] [--new]   перемістити сховище робочої області",
@@ -1965,6 +1971,19 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_NEW_CREATED: Msg = Msg {
         en: "created {path}",
         uk: "створено {path}",
+    };
+
+    /// The range of a task-spec, printed by `forge range` and `forge status`
+    /// (AGL-044).
+    pub const FORGE_RANGE: Msg = Msg {
+        en: "{name}: anchor {anchor}, last {last}",
+        uk: "{name}: anchor {anchor}, last {last}",
+    };
+
+    /// A value of the range that is not set.
+    pub const FORGE_RANGE_NOT_SET: Msg = Msg {
+        en: "none",
+        uk: "немає",
     };
 
     /// `forge status` changed the state.

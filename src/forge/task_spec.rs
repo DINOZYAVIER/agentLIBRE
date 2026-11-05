@@ -143,19 +143,15 @@ pub fn scaffold(name: &str, today: &str) -> Artifact {
 /// A computed state of a task-spec (never stored).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitFlag {
-    /// The range is valid and, when it applies, `last` is the HEAD.
+    /// The range is valid.
     Ok,
-    /// `last` is not the repository HEAD: work was committed without
-    /// updating the header (only `open`/`in-progress` with `last` set).
-    Lags,
-    /// `anchor` is not an ancestor of `last` (any status, both ids
-    /// set).
+    /// `anchor` is not an ancestor of `last` (both ids set).
     Broken,
 }
 
 /// The full commit id that `id` resolves to in the repository at
 /// `repo`; an error when it does not resolve.
-fn resolve_commit(repo: &Path, id: &str) -> Result<String, Error> {
+pub fn resolve_commit(repo: &Path, id: &str) -> Result<String, Error> {
     let arg = format!("{id}^{{commit}}");
     forge::git(repo, &["rev-parse", "--verify", &arg]).map_err(|_| Error::CommitNotFound {
         id: id.to_string(),
@@ -182,14 +178,9 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Er
 }
 
 /// The computed git state of `spec` in the repository at `repo`:
-/// `None` when `last` is empty (no range to check). `done`, `backlog`
-/// and `canceled` specs keep `last` as history: the range validity
-/// only, never flagged.
-pub fn git_flag(
-    spec: &TaskSpec,
-    status: Status,
-    repo: &Path,
-) -> Result<Option<GitFlag>, Error> {
+/// `None` when `last` is empty (no range to check). The HEAD says nothing
+/// of a task's range when other tasks are worked on too (AGL-044 D3).
+pub fn git_flag(spec: &TaskSpec, repo: &Path) -> Result<Option<GitFlag>, Error> {
     if spec.last.is_empty() {
         return Ok(None);
     }
@@ -200,9 +191,7 @@ pub fn git_flag(
             return Ok(Some(GitFlag::Broken));
         }
     }
-    let head = forge::git(repo, &["rev-parse", "HEAD"])?;
-    let lags = matches!(status, Status::Open | Status::InProgress) && last != head;
-    Ok(Some(if lags { GitFlag::Lags } else { GitFlag::Ok }))
+    Ok(Some(GitFlag::Ok))
 }
 
 /// The slug of a title: the lowercase letters and digits of any
@@ -440,36 +429,25 @@ mod tests {
         let dir = TempDir::new();
         let repo = git_repo(&dir.0, 4);
         let head = back(&repo, 0);
-        // A valid range that does not reach the HEAD: lags while open
-        // or in-progress.
+        // A valid range that does not reach the HEAD is as good as one that
+        // does: other tasks may have commits after it.
         let spec = TaskSpec { anchor: back(&repo, 2), last: back(&repo, 1) };
-        assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Lags));
-        assert_eq!(
-            git_flag(&spec, Status::InProgress, &repo).unwrap(),
-            Some(GitFlag::Lags)
-        );
-        // done, backlog and canceled keep last as history: never lags.
-        assert_eq!(git_flag(&spec, Status::Done, &repo).unwrap(), Some(GitFlag::Ok));
-        assert_eq!(git_flag(&spec, Status::Backlog, &repo).unwrap(), Some(GitFlag::Ok));
-        assert_eq!(git_flag(&spec, Status::Canceled, &repo).unwrap(), Some(GitFlag::Ok));
-        // last is the HEAD: ok.
+        assert_eq!(git_flag(&spec, &repo).unwrap(), Some(GitFlag::Ok));
         let spec = TaskSpec { anchor: back(&repo, 1), last: head.clone() };
-        assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Ok));
+        assert_eq!(git_flag(&spec, &repo).unwrap(), Some(GitFlag::Ok));
         // An empty anchor: the range is not checked.
         let spec = TaskSpec { anchor: String::new(), last: head };
-        assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Ok));
-        // A broken range: the anchor is not an ancestor of the last, in
-        // any status.
+        assert_eq!(git_flag(&spec, &repo).unwrap(), Some(GitFlag::Ok));
+        // A broken range: the anchor is not an ancestor of the last.
         let spec = TaskSpec { anchor: back(&repo, 1), last: back(&repo, 2) };
-        assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), Some(GitFlag::Broken));
-        assert_eq!(git_flag(&spec, Status::Done, &repo).unwrap(), Some(GitFlag::Broken));
+        assert_eq!(git_flag(&spec, &repo).unwrap(), Some(GitFlag::Broken));
         // An empty last: no flag.
         let spec = TaskSpec { anchor: back(&repo, 2), last: String::new() };
-        assert_eq!(git_flag(&spec, Status::Open, &repo).unwrap(), None);
+        assert_eq!(git_flag(&spec, &repo).unwrap(), None);
         // An id that does not resolve.
         let spec = TaskSpec { anchor: String::new(), last: "nope".into() };
         assert!(matches!(
-            git_flag(&spec, Status::Open, &repo),
+            git_flag(&spec, &repo),
             Err(Error::CommitNotFound { id, .. }) if id == "nope"
         ));
     }
