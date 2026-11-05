@@ -23,6 +23,10 @@ pub struct Think {
     /// The block of a step without thinking: `open` + `close` unless the
     /// template writes it otherwise (AGL-050).
     pub empty: String,
+    /// What a prompt ends in when a step without thinking takes no block at
+    /// all: Gemma 4 goes on after a tool response with no new turn, and an
+    /// empty block there makes it reason in the open (AGL-050).
+    pub no_block_after: Option<String>,
 }
 
 /// The call templates, split at their placeholders.
@@ -88,7 +92,7 @@ impl Format {
         let think = match file.section("think")? {
             None => None,
             Some(mut think) => {
-                think.check_keys(&["open", "close", "empty"])?;
+                think.check_keys(&["open", "close", "empty", "no_block_after"])?;
                 let mut take = |key| {
                     let text = think.required_string(key)?;
                     if text.is_empty() {
@@ -105,7 +109,8 @@ impl Format {
                     Some(empty) => empty,
                     None => format!("{open}{close}"),
                 };
-                Some(Think { open, close, empty })
+                let no_block_after = think.string("no_block_after")?;
+                Some(Think { open, close, empty, no_block_after })
             }
         };
 
@@ -171,7 +176,7 @@ impl Format {
     /// `enable_thinking = false` (AGL-013), is replaced. Formats without
     /// `think` leave the prompt as it is.
     pub fn start_step(&self, mut prompt: String, think: bool) -> String {
-        let Some(Think { open, empty, .. }) = &self.think else {
+        let Some(Think { open, empty, no_block_after, .. }) = &self.think else {
             return prompt;
         };
         if prompt.ends_with(empty.as_str()) {
@@ -179,7 +184,11 @@ impl Format {
         } else if prompt.ends_with(open.as_str()) {
             prompt.truncate(prompt.len() - open.len());
         }
-        prompt.push_str(if think { open } else { empty });
+        if think {
+            prompt.push_str(open);
+        } else if !no_block_after.as_ref().is_some_and(|end| prompt.ends_with(end.as_str())) {
+            prompt.push_str(empty);
+        }
         prompt
     }
 
@@ -264,6 +273,7 @@ pub mod tests {
                 "open": "<|channel>thought\n",
                 "close": "\n<channel|>",
                 "empty": "<|channel>thought\n<channel|>",
+                "no_block_after": "<tool_response|>",
             },
             "call": {
                 "begin": "<|tool_call>call:{name}{",
@@ -336,6 +346,14 @@ pub mod tests {
             assert_eq!(format.start_step(rendered.into(), true), open);
             assert_eq!(format.start_step(rendered.into(), false), empty);
         }
+        // After a tool response the model goes on: thinking opens there, and
+        // no thinking takes no block.
+        let response = "<tool_response|>";
+        assert_eq!(format.start_step(response.into(), false), response);
+        let opened = "<tool_response|><|channel>thought\n";
+        assert_eq!(format.start_step(opened.into(), true), opened);
+        assert_eq!(format.start_step(opened.into(), false), response);
+        assert_eq!(format.start_step(response.into(), true), opened);
     }
 
     #[test]
@@ -347,6 +365,7 @@ pub mod tests {
                 open: "<think>\n".into(),
                 close: "\n</think>\n\n".into(),
                 empty: "<think>\n\n</think>\n\n".into(),
+                no_block_after: None,
             })
         );
         assert_eq!(
