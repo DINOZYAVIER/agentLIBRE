@@ -466,7 +466,7 @@ pub struct Autostart<'a> {
 impl Autostart<'_> {
     /// The server, in a line (AGL-033, D2): the effective settings, by
     /// `what_of`.
-    fn what(&self) -> Result<String, Error> {
+    pub(super) fn what(&self) -> Result<String, Error> {
         what_of(self.effective)
     }
 

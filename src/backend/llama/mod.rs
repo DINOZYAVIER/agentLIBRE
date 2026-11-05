@@ -90,6 +90,20 @@ impl Llama {
     }
 
     /// Sends a request and parses the JSON reply.
+    /// The text of `wav` as the model hears it (AGL-051): the language is
+    /// the one spoken, and the human checks it in the input line. A recording
+    /// with no sound is not sent: a model makes something up for it.
+    pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
+        if crate::media::wav_is_silent(wav) {
+            return Ok(String::new());
+        }
+        let reply = self.json("/v1/chat/completions", Some(&transcribe_body(wav)))?;
+        reply["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|text| before_its_marks(text).to_owned())
+            .ok_or_else(|| self.bad_reply("no `content` in the reply"))
+    }
+
     fn json(&self, path: &str, body: Option<&Json>) -> Result<Json, Error> {
         let text = self
             .send(path, body)?
@@ -253,6 +267,36 @@ impl Backend for Llama {
         let reply = self.json("/props", None)?;
         Ok(reply["modalities"]["audio"].as_bool().unwrap_or(false))
     }
+}
+
+/// What the model is asked of a recording (AGL-051, D2): no language is named,
+/// as the human may speak any.
+const TRANSCRIBE_PROMPT: &str = "Transcribe the speech exactly, in the language it is spoken. Output only the transcript, with no comments.";
+
+/// The most a transcript may take: a model that loops stops here. The
+/// longest recording is minutes long, and speech is far under this.
+const TRANSCRIBE_TOKENS: u32 = 4096;
+
+/// The text before the first mark of the model: Gemma 4 12B can loop on its
+/// empty block in place of a transcript, and that does not go to the input.
+fn before_its_marks(text: &str) -> &str {
+    text.find("<|").map_or(text, |at| &text[..at])
+}
+
+/// The body of a transcription: at temperature 0 and with no thinking.
+fn transcribe_body(wav: &[u8]) -> Json {
+    json!({
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": crate::media::base64(wav), "format": "wav"}},
+                {"type": "text", "text": TRANSCRIBE_PROMPT},
+            ],
+        }],
+        "temperature": 0,
+        "max_tokens": TRANSCRIBE_TOKENS,
+        "chat_template_kwargs": {"enable_thinking": false},
+    })
 }
 
 /// The body of a render: the messages and tools, plus the reasoning

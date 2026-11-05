@@ -1,7 +1,7 @@
 //! The voice input of the interactive session (AGL-016): Ctrl-R records
-//! the microphone, the second press stops, whisper turns the recording
-//! into text and the text goes into the input line (D2, D3). It works
-//! while a turn runs (D7).
+//! the microphone, the second press stops, the model when it hears
+//! (AGL-051), or else whisper, turns the recording into text and the text
+//! goes into the input line (D2, D3). It works while a turn runs (D7).
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -27,7 +27,7 @@ pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, Error> + Send 
 struct Active {
     recording: Box<dyn Recording>,
     since: Instant,
-    /// The whisper server being brought up while the human speaks (D6).
+    /// The server being brought up while the human speaks (D6).
     warm: Option<JoinHandle<Result<(), Error>>>,
     /// Tells a recording from the next one, for the thread that watches.
     id: u64,
@@ -103,7 +103,8 @@ impl VoiceInput {
     }
 
     fn start(self: &Arc<Self>) {
-        // Whisper must be set up: told before the human speaks.
+        // What takes the recording must be set up: told before the human
+        // speaks.
         if let Err(error) = self.dictation.ready() {
             self.notice(&error.message(self.lang), Role::StatusFailure);
             return;
@@ -207,7 +208,7 @@ impl VoiceInput {
             // not start, that is the error.
             match warm.join() {
                 Ok(result) => result?,
-                Err(_) => return Err(Error::Ffmpeg { detail: "the whisper thread failed".into() }),
+                Err(_) => return Err(Error::Ffmpeg { detail: "the thread of the server failed".into() }),
             }
         }
         let text = self

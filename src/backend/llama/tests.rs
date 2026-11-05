@@ -241,3 +241,20 @@ fn the_text_before_a_call_stays_out_of_gemma_history() {
     assert_eq!(contents(&gemma()), ["", "Done."]);
     assert_eq!(contents(&qwen()), ["I will look.", "Done."]);
 }
+
+#[test]
+fn a_transcription_names_no_language_and_does_not_think() {
+    let body = transcribe_body(b"RIFF");
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0]["input_audio"]["data"], crate::media::base64(b"RIFF"));
+    assert_eq!(content[0]["input_audio"]["format"], "wav");
+    assert_eq!(body["temperature"], 0);
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+}
+
+#[test]
+fn a_transcript_holds_no_mark_of_the_model() {
+    assert_eq!(before_its_marks("Words."), "Words.");
+    assert_eq!(before_its_marks("<|channel>thought\n<channel|><|channel>thought"), "");
+    assert_eq!(before_its_marks("Words.<|channel>thought"), "Words.");
+}

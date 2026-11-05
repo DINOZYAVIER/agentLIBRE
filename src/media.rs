@@ -406,6 +406,23 @@ pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
     Ok(frames)
 }
 
+/// The loudest sample of a recording with no sound in it, of 32768: under 50 dB
+/// below the full scale, as with a muted microphone (AGL-051).
+const SILENT_PEAK: i32 = 100;
+
+/// Whether a 16-bit WAV, as the recording makes it, holds no sound. One that
+/// cannot be read as such is not called silent.
+pub fn wav_is_silent(wav: &[u8]) -> bool {
+    let Some(at) = wav.windows(4).position(|tag| tag == b"data") else {
+        return false;
+    };
+    let samples = wav.get(at + 8..).unwrap_or_default();
+    let (samples, _) = samples.as_chunks::<2>();
+    samples
+        .iter()
+        .all(|sample| i32::from(i16::from_le_bytes(*sample)).abs() < SILENT_PEAK)
+}
+
 /// An audio as 16 kHz mono WAV, what whisper reads.
 pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let mut child = Command::new(crate::programs::program("ffmpeg")?)
@@ -548,6 +565,17 @@ fn hex(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_recording_with_no_sound_is_silent() {
+        let wav = |samples: &[i16]| {
+            let mut bytes = b"RIFF....WAVEfmt ....data....".to_vec();
+            bytes.extend(samples.iter().flat_map(|sample| sample.to_le_bytes()));
+            bytes
+        };
+        assert!(super::wav_is_silent(&wav(&[0, 3, -40, 99])));
+        assert!(!super::wav_is_silent(&wav(&[0, 3, -4000, 9])));
+        assert!(!super::wav_is_silent(b"not a wav"));
+    }
     use super::*;
 
     struct TempDir(PathBuf);
