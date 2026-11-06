@@ -1142,9 +1142,18 @@ fn serves(
     // compare, no restart.
     let observed = llama.models().unwrap_or(None);
     match observed {
-        Some(observed) => Ok(observed == expected),
+        Some(observed) => Ok(same_model(&observed, &expected)),
         None => Ok(true),
     }
+}
+
+/// Whether the server's name of its model is the `expected` one: the same, or, for
+/// a server on Windows, which names it by the Windows path it was given
+/// (`crate::wsl::windows_paths`), the same file name (AGL-056).
+fn same_model(observed: &str, expected: &str) -> bool {
+    observed == expected
+        || observed.contains('\\')
+            && observed.rsplit('\\').next() == expected.rsplit('/').next()
 }
 
 /// The record of what the running server was launched with (AGL-035,
@@ -1799,6 +1808,21 @@ mod tests {
         let tail: Vec<&OsString> = systemd.iter().skip(5).collect();
         let engine: Vec<&OsString> = engine.iter().collect();
         assert_eq!(tail, engine);
+    }
+
+    #[test]
+    fn a_server_on_windows_names_the_same_model_by_its_windows_path() {
+        let expected = "/home/nixos/.local/share/agentLIBRE/models/m.gguf";
+        assert!(same_model(expected, expected));
+        // The Windows path `wsl::windows_paths` gives llama-server.exe.
+        assert!(same_model(
+            r"\\wsl.localhost\NixOS\home\nixos\.local\share\agentLIBRE\models\m.gguf",
+            expected
+        ));
+        assert!(!same_model(r"\\wsl.localhost\NixOS\models\other.gguf", expected));
+        // A path of Linux is compared whole: another folder is another model.
+        assert!(!same_model("/other/m.gguf", expected));
+        assert!(!same_model("m.gguf", expected));
     }
 
     #[test]
