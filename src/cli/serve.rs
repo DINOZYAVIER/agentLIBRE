@@ -275,7 +275,6 @@ pub fn start(
     // A server answers at the url, this project's unit or a foreign one:
     // wait for it to be ready, then the check of D2 (AGL-033) — it
     // serves the effective settings, or a mismatch restarts it.
-    end_left_over(server, &host, port, say, lang)?;
     if health(llama) != Health::Down || port_open(&host, port) {
         let ours = unit_active(&server.unit)?;
         wait_ready(llama, ours.then_some(&server.unit), &what, say, lang)?;
@@ -406,35 +405,6 @@ fn launch_unit(
     // What the unit was launched with (AGL-035, D1).
     if let Some(pid) = unit_main_pid(&server.unit) {
         write_record(&server.dir, pid, effective)?;
-    }
-    Ok(())
-}
-
-/// A server on Windows that this project launched and whose WSL has stopped
-/// since (AGL-058, D24): its unit is gone, its record is here and the port is
-/// held. It is ended, so that it does not keep the port and the VRAM. With no
-/// record the port is someone else's, and that is `PortBusy`.
-fn end_left_over(
-    server: &Server,
-    host: &str,
-    port: u16,
-    say: &mut dyn FnMut(&str),
-    lang: Lang,
-) -> Result<(), Error> {
-    if !crate::wsl::engine_is_windows()
-        || read_record(&server.dir).is_none()
-        || !port_open(host, port)
-        || unit_active(&server.unit)?
-    {
-        return Ok(());
-    }
-    if crate::wsl::stop_engine_on_port(port) {
-        say(&tr!(lang, m::WINDOWS_SERVER_LEFT, port = port));
-        remove_record(&server.dir);
-        let started = Instant::now();
-        while port_open(host, port) && started.elapsed() < Duration::from_secs(10) {
-            thread::sleep(POLL);
-        }
     }
     Ok(())
 }

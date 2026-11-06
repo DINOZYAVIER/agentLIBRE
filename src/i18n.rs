@@ -691,12 +691,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "wslpath не перетворив {path}",
     };
 
-    /// A server on Windows, left by a WSL that stopped, was ended (AGL-058, D24).
-    pub const WINDOWS_SERVER_LEFT: Msg = Msg {
-        en: "a llama-server left on Windows held port {port}: it is stopped",
-        uk: "llama-server, що лишився на Windows, тримав порт {port}: його зупинено",
-    };
-
     /// `Error::ServerCa` (AGL-058, D12).
     pub const SERVER_CA: Msg = Msg {
         en: "the CA file {path} of `private_ca` cannot be used: {detail}",
