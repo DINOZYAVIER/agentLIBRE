@@ -1,0 +1,3 @@
+# Windows reads these with CRLF, and "Download raw file" of GitHub gives the blob as it
+# is: no normalization, or the blob would hold LF (AGL-057, D4).
+windows/*.cmd -text
