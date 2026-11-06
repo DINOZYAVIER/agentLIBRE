@@ -15,7 +15,7 @@ pub fn is_windows_program(program: &Path) -> bool {
 }
 
 /// Whether the engine of the package runs on Windows (AGL-052, D9).
-fn engine_is_windows() -> bool {
+pub fn engine_is_windows() -> bool {
     std::env::var_os(crate::programs::ENGINES_VAR)
         .is_some_and(|dir| Path::new(&dir).join("llama-server.exe").is_file())
 }
@@ -28,13 +28,15 @@ pub fn own_models(linux: PathBuf) -> Result<PathBuf, Error> {
         return Ok(linux);
     }
     let local = Command::new("cmd.exe")
-        .args(["/d", "/c", "echo %LOCALAPPDATA%"])
+        // `/u`: UTF-16, as a pipe otherwise gets the OEM code page, which a
+        // user name that is not ASCII would not survive (AGL-058, D25).
+        .args(["/u", "/d", "/c", "echo %LOCALAPPDATA%"])
         // cmd.exe complains of the path of Linux it would start in.
         .current_dir("/mnt/c")
         .output()
         .ok()
         .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        .map(|output| from_utf16le(&output.stdout).trim().to_owned());
     models_under(local.as_deref(), &|windows| {
         let output = Command::new("wslpath").arg("-u").arg(windows).output().ok()?;
         output
@@ -42,6 +44,17 @@ pub fn own_models(linux: PathBuf) -> Result<PathBuf, Error> {
             .success()
             .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
     })
+}
+
+/// The text of the bytes `cmd.exe /u` writes.
+fn from_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 fn models_under(
@@ -100,12 +113,25 @@ fn convert_paths(
         .collect()
 }
 
-/// Ends the engine on the Windows side, when ending its relay did not. It goes
-/// by the name of the program: Windows knows no process of Linux.
-pub fn stop_windows_engine() {
-    let _ = Command::new("taskkill.exe")
-        .args(["/F", "/IM", "llama-server.exe"])
-        .output();
+/// The PowerShell that ends what listens on `port` when that is `llama-server`,
+/// and says so.
+fn stop_script(port: u16) -> String {
+    format!(
+        "$owner = (Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess; \
+         if ($owner -and (Get-Process -Id $owner).ProcessName -eq 'llama-server') {{ \
+         Stop-Process -Id $owner -Force; Write-Output stopped }}"
+    )
+}
+
+/// Ends the engine on the Windows side that listens on `port`, and no other
+/// (AGL-058, D13): Windows knows no process of Linux, so it goes by the port.
+/// Whether one was ended.
+pub fn stop_engine_on_port(port: u16) -> bool {
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &stop_script(port)])
+        .current_dir("/mnt/c")
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("stopped"))
 }
 
 #[cfg(test)]
@@ -150,6 +176,23 @@ mod tests {
         }
         let cannot = |_: &str| None;
         assert!(matches!(models_under(Some(r"C:\x"), &cannot), Err(Error::WslNoLocalAppData)));
+    }
+
+    #[test]
+    fn local_app_data_keeps_a_name_that_is_not_ascii() {
+        // What `cmd.exe /u` writes (AGL-058, D25).
+        let path = "C:\\Users\\Олена\\AppData\\Local\r\n";
+        let bytes: Vec<u8> = path.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(from_utf16le(&bytes).trim(), "C:\\Users\\Олена\\AppData\\Local");
+    }
+
+    #[test]
+    fn the_stop_goes_by_the_port_and_checks_the_program() {
+        // AGL-058, D13.
+        let script = stop_script(18080);
+        assert!(script.contains("-LocalPort 18080"), "{script}");
+        assert!(script.contains("-eq 'llama-server'"), "{script}");
+        assert!(!script.contains("taskkill"), "{script}");
     }
 
     #[test]
