@@ -23,6 +23,10 @@ pub const SUMMARIES: &str = "summaries";
 /// The most of the index that goes into a step's prompt (M33).
 const INDEX_CAP: usize = 4 * 1024;
 
+/// What is shown of a line that does not fit `INDEX_CAP` by itself (AGL-058,
+/// D10): its name and the start of its text, leaving room for the other lines.
+const LONG_LINE_SHOWN: usize = 1024;
+
 /// The longest file name of an entry, without `.md`.
 const NAME_LIMIT: usize = 64;
 
@@ -461,9 +465,10 @@ pub fn index_text(dir: &Path) -> Option<String> {
     if text.len() <= INDEX_CAP {
         return Some(text.to_owned());
     }
-    let mut kept: Vec<&str> = Vec::new();
+    let mut kept: Vec<std::borrow::Cow<str>> = Vec::new();
     let mut size = 0;
     for line in text.lines().rev() {
+        let line = shown_line(line);
         if size + line.len() + 1 > INDEX_CAP {
             break;
         }
@@ -472,6 +477,20 @@ pub fn index_text(dir: &Path) -> Option<String> {
     }
     kept.reverse();
     Some(format!("[memory truncated]\n{}", kept.join("\n")))
+}
+
+/// A line of the index as the prompt carries it: whole, unless it alone is over
+/// the cap, when it would take every other line out with it (AGL-058, D10).
+/// `MEMORY.md` and the entry keep all of it.
+fn shown_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.len() < INDEX_CAP {
+        return line.into();
+    }
+    let mut end = LONG_LINE_SHOWN;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end]).into()
 }
 
 /// Writes the summary of a compaction to `summaries/<date>-<session>.md`
@@ -831,6 +850,24 @@ mod tests {
         assert!(cut.ends_with("— xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
         assert!(cut.contains("Entry 199"));
         assert!(!cut.contains("Entry 0]"));
+    }
+
+    #[test]
+    fn a_line_over_the_cap_does_not_take_the_others_out() {
+        // AGL-058, D10.
+        let dir = Dir::new("long-line");
+        remember(&dir.0, "Old one", "an old note");
+        let long = "пам'ять ".repeat(1500);
+        remember(&dir.0, "Long one", &long);
+        let index = index_text(&dir.0).unwrap();
+        assert!(index.starts_with("[memory truncated]\n"), "{}", &index[..80]);
+        assert!(index.contains("[Old one](old-one.md) — an old note"));
+        let line = index.lines().last().unwrap();
+        assert!(line.starts_with("- [Long one](long-one.md) — пам'ять"));
+        assert!(line.ends_with('…'));
+        assert!(index.len() <= INDEX_CAP);
+        // The file and the entry keep all of it.
+        assert!(fs::read_to_string(dir.0.join(INDEX)).unwrap().contains(long.trim_end()));
     }
 
     #[test]
