@@ -4,7 +4,7 @@
 //! reaches at `127.0.0.1` only in the mirrored network.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::Error;
@@ -12,6 +12,48 @@ use crate::error::Error;
 /// Whether `program` is a Windows one.
 pub fn is_windows_program(program: &Path) -> bool {
     program.extension().is_some_and(|extension| extension == "exe")
+}
+
+/// Whether the engine of the package runs on Windows (AGL-052, D9).
+fn engine_is_windows() -> bool {
+    std::env::var_os(crate::programs::ENGINES_VAR)
+        .is_some_and(|dir| Path::new(&dir).join("llama-server.exe").is_file())
+}
+
+/// agl's own weights folder (AGL-056, D7, D8): with an engine on Windows,
+/// `%LOCALAPPDATA%\agentLIBRE\models`, which it reads directly and not through
+/// `\\wsl.localhost`; else `linux`, under the data directory.
+pub fn own_models(linux: PathBuf) -> Result<PathBuf, Error> {
+    if !engine_is_windows() {
+        return Ok(linux);
+    }
+    let local = Command::new("cmd.exe")
+        .args(["/d", "/c", "echo %LOCALAPPDATA%"])
+        // cmd.exe complains of the path of Linux it would start in.
+        .current_dir("/mnt/c")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    models_under(local.as_deref(), &|windows| {
+        let output = Command::new("wslpath").arg("-u").arg(windows).output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+    })
+}
+
+fn models_under(
+    local: Option<&str>,
+    to_linux: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<PathBuf, Error> {
+    local
+        // An unset variable comes back from cmd.exe as its own name.
+        .filter(|local| !local.is_empty() && !local.contains('%'))
+        .and_then(to_linux)
+        .map(|local| local.join("agentLIBRE").join("models"))
+        .ok_or(Error::WslNoLocalAppData)
 }
 
 /// The network of WSL must be the mirrored one (`wslinfo` tells).
@@ -89,6 +131,25 @@ mod tests {
             convert_paths(command, program, &|_| None),
             Err(Error::WslPath { path }) if path == Path::new("/m/a.gguf")
         ));
+    }
+
+    #[test]
+    fn the_weights_are_under_the_local_app_data_of_windows() {
+        let to_linux = |windows: &str| {
+            assert_eq!(windows, r"C:\Users\me\AppData\Local");
+            Some(PathBuf::from("/mnt/c/Users/me/AppData/Local"))
+        };
+        assert_eq!(
+            models_under(Some(r"C:\Users\me\AppData\Local"), &to_linux).unwrap(),
+            Path::new("/mnt/c/Users/me/AppData/Local/agentLIBRE/models")
+        );
+        // Nothing to go by is an error, not the folder of Linux.
+        let never = |_: &str| -> Option<PathBuf> { panic!("nothing to convert") };
+        for local in [None, Some(""), Some("%LOCALAPPDATA%")] {
+            assert!(matches!(models_under(local, &never), Err(Error::WslNoLocalAppData)));
+        }
+        let cannot = |_: &str| None;
+        assert!(matches!(models_under(Some(r"C:\x"), &cannot), Err(Error::WslNoLocalAppData)));
     }
 
     #[test]

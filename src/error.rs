@@ -153,6 +153,8 @@ pub enum Error {
     ServerCommandNotLlama { function: String },
     /// The Windows engine in WSL without the mirrored network (AGL-052, D10).
     WslNotMirrored { mode: String },
+    /// Windows did not say where the weights go (AGL-056, D8).
+    WslNoLocalAppData,
     /// `wslpath` did not convert a path (AGL-052, D10).
     WslPath { path: PathBuf },
     /// No engine binary in `PATH` (D147, AGL-024, D5).
@@ -576,6 +578,7 @@ impl std::fmt::Display for Error {
                 Error::WslNotMirrored { mode } => {
                     format!("the network of WSL is {mode:?}, not mirrored")
                 }
+                Error::WslNoLocalAppData => "Windows does not say its %LOCALAPPDATA%".into(),
                 Error::WslPath { path } => {
                     format!("wslpath did not convert {}", path.display())
                 }

@@ -671,6 +671,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "agl у WSL бачить llama-server на Windows лише в дзеркальній мережі, а ця мережа {mode}: додай `networkingMode=mirrored` у `[wsl2]` файлу %UserProfile%\\.wslconfig і виконай `wsl --shutdown`",
     };
 
+    /// `Error::WslNoLocalAppData`.
+    pub const WSL_NO_LOCAL_APP_DATA: Msg = Msg {
+        en: "Windows does not say its %LOCALAPPDATA%, where the weights go; cmd.exe must run from WSL",
+        uk: "Windows не повідомляє свій %LOCALAPPDATA%, куди йдуть ваги; cmd.exe має запускатися з WSL",
+    };
+
     /// `Error::WslPath`.
     pub const WSL_PATH: Msg = Msg {
         en: "wslpath did not convert {path}",
@@ -2394,6 +2400,7 @@ impl Error {
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
             Error::WslNotMirrored { mode } => tr!(lang, m::WSL_NOT_MIRRORED, mode = mode),
+            Error::WslNoLocalAppData => tr!(lang, m::WSL_NO_LOCAL_APP_DATA).to_string(),
             Error::WslPath { path } => tr!(lang, m::WSL_PATH, path = path.display()),
             Error::OutsideModelDiffers { url, expected, running } => tr!(
                 lang,

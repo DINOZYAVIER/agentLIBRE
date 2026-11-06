@@ -206,11 +206,12 @@ fn run(
                 cli::args::ServerAction::Start => weights::Missing::Fail,
                 _ => weights::Missing::Keep,
             };
+            let models = wsl::own_models(paths.models())?;
             weights::resolve(
                 &mut model,
                 &mut settings::WhisperFile::default(),
                 &weights::Folders {
-                    own: paths.models(),
+                    own: models.clone(),
                     listed: &user.models,
                     user_path: &paths.settings_file(),
                 },
@@ -219,7 +220,7 @@ fn run(
                 *lang,
             )?;
             let server = cli::serve::Server::of(&project, &settings, model)?;
-            return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
+            return cli::serve::run(action, &server, &models, env("PATH"), yes, *lang);
         }
         Command::Init => {
             let (paths, user) = loaded?;
@@ -339,11 +340,12 @@ fn agent_session(
     } else {
         weights::Missing::Fail
     };
+    let models = wsl::own_models(paths.models())?;
     weights::resolve(
         &mut settings.server,
         &mut settings.whisper,
         &weights::Folders {
-            own: paths.models(),
+            own: models.clone(),
             listed: &user.models,
             user_path: &user_path,
         },
@@ -424,7 +426,7 @@ fn agent_session(
         effective: &settings.server,
         whisper: &settings.whisper,
         user_path: user_path.clone(),
-        models: paths.models(),
+        models,
         path_var: env("PATH"),
         lang,
         // The consent of D2 (AGL-033): the restart asks, as the server

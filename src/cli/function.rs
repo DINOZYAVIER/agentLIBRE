@@ -236,7 +236,7 @@ pub fn run(
                     &function.model,
                     &function.sources,
                     &crate::weights::Folders {
-                        own: paths.models(),
+                        own: crate::wsl::own_models(paths.models())?,
                         listed: &user.models,
                         user_path: &paths.settings_file(),
                     },

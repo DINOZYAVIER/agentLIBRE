@@ -39,7 +39,7 @@ The module turns on `hardware.graphics`, as the server runs on Vulkan. AMD is ch
 
 ### Windows
 
-agl runs in NixOS-WSL, and starts the official Windows `llama-server.exe`, which sees the GPU directly. It needs Windows 11 22H2 or later and WSL 2.4.4 or later. This path is not checked on a real Windows yet.
+agl runs in NixOS-WSL, and starts the official Windows `llama-server.exe`, which sees the GPU directly and reads the weights from `%LOCALAPPDATA%\agentLIBRE\models`. It needs Windows 11 22H2 or later and WSL 2.4.4 or later. This path is not checked on a real Windows yet.
 
 1. In `%UserProfile%\.wslconfig`:
 
