@@ -10,10 +10,14 @@
     flake = false;
   };
 
+  # NixOS on Windows, for the system of `nixosConfigurations.wsl` (AGL-056): the
+  # release, on the nixpkgs of its own, as it does not follow nixos-unstable.
+  inputs.nixos-wsl.url = "github:nix-community/NixOS-WSL/2605.7.2";
+
   outputs =
-    { self, nixpkgs, llama-cpp, functions }:
+    { self, nixpkgs, llama-cpp, functions, nixos-wsl }:
     let
-      # Linux on x86-64, also in WSL (AGL-052, D1, D2).
+      # NixOS on x86-64, also in WSL (AGL-056, D1).
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
@@ -44,16 +48,6 @@
           ./nix
         ];
       };
-
-      # llama-server of the pinned version. Outside NixOS it finds no Vulkan
-      # driver of the system, and none of them works from the store (AGL-052,
-      # measured on Ubuntu): it takes Mesa from the store, on AMD and Intel.
-      linuxEngine = pkgs.writeShellScriptBin "llama-server" ''
-        if [ -z "''${VK_DRIVER_FILES:-}" ] && [ ! -d /run/opengl-driver ]; then
-          export VK_DRIVER_FILES=${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json:${pkgs.mesa}/share/vulkan/icd.d/intel_icd.x86_64.json
-        fi
-        exec ${llama-cpp.packages.${system}.vulkan}/bin/llama-server "$@"
-      '';
 
       # The official Windows release of the same commit as v0.9.0, for WSL,
       # which runs it from the store (AGL-052, D9).
@@ -139,13 +133,26 @@
       lib = import ./nix { inherit functions; };
 
       packages.${system} = {
-        # Linux with its own server.
-        default = withEngine "agentLIBRE" linuxEngine;
-        # WSL, where the server runs on Windows (AGL-052, D10).
+        # NixOS with its own server, llama-server of the pinned version.
+        default = withEngine "agentLIBRE" llama-cpp.packages.${system}.vulkan;
+        # NixOS-WSL, where the server runs on Windows (AGL-052, D10).
         wsl = withEngine "agentLIBRE-wsl" windowsEngine;
         # A machine whose server is outside it (AGL-052, D4).
         outside = agl;
         inherit tools;
+      };
+
+      # agl on a NixOS of one's own (AGL-056, D2).
+      nixosModules.default = import ./nixos/module.nix { packages = self.packages.${system}; };
+
+      # A whole NixOS-WSL system with agl (AGL-056, D4).
+      nixosConfigurations.wsl = nixos-wsl.inputs.nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          nixos-wsl.nixosModules.default
+          self.nixosModules.default
+          ./nixos/wsl.nix
+        ];
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -185,6 +192,37 @@
             grep -q '^\* .* llama ' list
             touch $out
           '';
+        # The module on a plain NixOS and on NixOS-WSL: the right package, and
+        # `wslinfo` only where there is a WSL (AGL-056).
+        module =
+          let
+            plain = nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.default
+                {
+                  programs.agl.enable = true;
+                  boot.loader.grub.enable = false;
+                  fileSystems."/" = {
+                    device = "none";
+                    fsType = "tmpfs";
+                  };
+                  system.stateVersion = "26.05";
+                }
+              ];
+            };
+            names = configuration: map lib.getName configuration.config.environment.systemPackages;
+            wsl = self.nixosConfigurations.wsl.config;
+            ok =
+              plain.config.programs.agl.package == self.packages.${system}.default
+              && plain.config.hardware.graphics.enable
+              && !(builtins.elem "wslinfo" (names plain))
+              && wsl.programs.agl.package == self.packages.${system}.wsl
+              && builtins.elem "wslinfo" (names self.nixosConfigurations.wsl)
+              && builtins.elem "wslpath" (names self.nixosConfigurations.wsl);
+          in
+          assert ok;
+          pkgs.runCommand "${cargo.package.name}-module" { } "touch $out";
         clippy = agl.overrideAttrs (old: {
           pname = "${cargo.package.name}-clippy";
           nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
