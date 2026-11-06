@@ -1,25 +1,5 @@
 # AGENTS.md
 
-## Repository map
-
-| Path | Responsibility |
-| --- | --- |
-| `README.md` | Short project description. |
-| `Cargo.toml`, `Cargo.lock` | Crate manifest and locked dependencies. |
-| `flake.nix`, `flake.lock` | The Nix flake (AGL-040): the package (both binaries behind a wrapper that sets `AGENTLIBRE_TOOLS`, `AGENTLIBRE_NIX` and `AGENTLIBRE_FUNCTIONS`) in three variants by where its engine runs (AGL-052: `default`, `wsl`, `outside`), the NixOS module and the NixOS-WSL system (AGL-056), the directory of the helper programs, the dev shell, the checks, `lib` (the `agl` argument); `x86_64-linux`. |
-| `nixos/` | agl on NixOS (AGL-056): `module.nix`, `programs.agl`, the `nixosModules.default` of the flake; `wsl.nix`, the whole NixOS-WSL system of `nixosConfigurations.wsl`. |
-| `github:DINOZYAVIER/agentLIBRE-functions` | The Functions agl ships (AGL-053): a flake input pinned in `flake.lock`, Apache-2.0, `functions/<name>.nix`; the wrapper names it in `AGENTLIBRE_FUNCTIONS`. The tests use `src/function/fixtures/` instead. |
-| `windows/` | `install-agl.cmd` (AGL-057): agl on Windows from one file, a `.cmd` and PowerShell in one, with `.gitattributes` keeping its CRLF. |
-| `nix/` | The built-ins in Nix (AGL-039): the `agl` argument of every Function and settings file (`default.nix`) — the policies, the formats, the engine arguments, the models and `agl.functions` — and `docs/`, what the package carries for the model to read (AGL-048). |
-| `src/` | The `agl` and `agentLIBRE` binaries (one `main.rs`) of the `agentLIBRE` crate: the command-line surfaces (`cli/`: arguments, the stdin line protocol, `-p` progress output, `agl server` and its systemd unit, `agl init`, the `agl forge` store, the Functions of `agl function`, the client certificate of `agl search login`, the lines on stdout), the artifact store engine (`forge/`: the `forge/v2` envelope (a Nix front matter), the project identity in its `settings.nix`, found among the registered projects from the cwd up, the `task-spec` type), XDG paths (`paths.rs`), the helper programs agl runs by their absolute paths in `AGENTLIBRE_TOOLS` (`programs.rs`), the Windows engine in WSL (`wsl.rs`), the `settings.nix` of the user and of the project (`settings/`: the kind, the files and the assembly, and a module per service section — `server`, `whisper`, `search`, `repl`), the evaluation of Nix by `nix-instantiate`, the writing of Nix and the strict reading of evaluated values (`nix/`), the weights folders (`weights.rs`) and the download of a Function's files into them (`download.rs`), errors (`error.rs`) and their English/Ukrainian messages (`i18n.rs`), grammars and GBNF (`grammar/`), model formats (`format.rs`), Functions (`function/`), built-in formats and Functions (`builtin/`), the turn state machine (`machine/`), the FSM during a turn and what it writes to the session file (`phase.rs`), what the model is told of its environment and of this agl (`about.rs`), action grammars and output parsing (`action/`), the inference backend and its llama-server and Strata clients (`backend/`), the bash, edit and view tools (`tools/`), the search tool, the human's search service over mutual TLS by `curl` (`search/`), session files (`session/`), the media of a message — images, video, audio, their placeholders and files (`media.rs`) — and what the human attaches and the transcription of an audio (`attach.rs`, `cli/whisper.rs`), the recording of the human's voice (`record.rs`), the agent turn (`agent/`), the workspace memory, its entries and its index (`memory.rs`), the vocabulary shared by the interactive and line sessions (`status.rs`), Ctrl-C handling (`interrupt.rs`), the helpers of the ignored tests against a live server (`test_server.rs`), terminal colors (`theme.rs`), the interactive session and its terminal (`repl/`: line editor, dock, Markdown, text wrapping, transcript, terminal and its keys). |
-| `LICENSE.md`, `LICENSES/` | License summary and official license texts. |
-| `~/.config/agentLIBRE/` | The user's `settings.nix` and `functions/*.nix` (AGL-039). |
-| `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/` | The workspace store: its `settings.nix` (the identity, the path of the project and the project's settings, AGL-041, AGL-055), `functions/*.nix`, `memory/`, `forge/`, the JSON record `server.state` of the server agl launched. |
-| `~/.local/share/agentLIBRE/agl-lite-<sha256-12>/forge/` | The workspace forge in XDG_DATA_HOME: the AGL-XXX task specs (`task-spec` artifacts) and the other artifact types, one store per git toplevel, managed by `agl forge`. |
-| `../agl-lite-tasks/` | The non-artifact working documents, archived outside the repository (not tracked): MEMORY_SPEC.md, the feedback notes, the README, `scripts/forge-v2-migrate.py` (the one-off rewrite of AGL-041). |
-
-Update this map when adding top-level paths.
-
 ## Compatibility policy
 
 Do not add backward-compatibility paths, legacy fallbacks, migration shims, or
