@@ -683,6 +683,24 @@ Forge (сховище артефактів робочої області, agentL
         uk: "wslpath не перетворив {path}",
     };
 
+    /// A server on Windows, left by a WSL that stopped, was ended (AGL-058, D24).
+    pub const WINDOWS_SERVER_LEFT: Msg = Msg {
+        en: "a llama-server left on Windows held port {port}: it is stopped",
+        uk: "llama-server, що лишився на Windows, тримав порт {port}: його зупинено",
+    };
+
+    /// `Error::ServerCa` (AGL-058, D12).
+    pub const SERVER_CA: Msg = Msg {
+        en: "the CA file {path} of `private_ca` cannot be used: {detail}",
+        uk: "файл CA {path} із `private_ca` не можна використати: {detail}",
+    };
+
+    /// `Error::ServerCertificate` (AGL-058, D12).
+    pub const SERVER_CERTIFICATE: Msg = Msg {
+        en: "the certificate of the server at {url} is not trusted: {detail}\nIf a private CA signs it, name its certificate in `server.llama.private_ca`",
+        uk: "сертифікату сервера за {url} немає довіри: {detail}\nЯкщо його підписує приватний CA, вкажи сертифікат CA у `server.llama.private_ca`",
+    };
+
     /// `Error::OutsideServerDown`.
     pub const OUTSIDE_SERVER_DOWN: Msg = Msg {
         en: "the server outside agl does not answer at {url}: start it there (`agl server command` prints the line), or check the address",
@@ -2398,6 +2416,12 @@ impl Error {
                 tr!(lang, m::MISSING_SPEC_TYPE, draft = draft)
             }
             Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
+            Error::ServerCa { path, detail } => {
+                tr!(lang, m::SERVER_CA, path = path.display(), detail = detail)
+            }
+            Error::ServerCertificate { url, detail } => {
+                tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail)
+            }
             Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
             Error::WslNotMirrored { mode } => tr!(lang, m::WSL_NOT_MIRRORED, mode = mode),
             Error::WslNoLocalAppData => tr!(lang, m::WSL_NO_LOCAL_APP_DATA).to_string(),

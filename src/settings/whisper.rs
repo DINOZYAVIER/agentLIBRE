@@ -18,10 +18,12 @@ pub struct WhisperFile {
     pub model: Option<String>,
     /// More whisper-server arguments.
     pub args: Option<Vec<String>>,
+    /// The certificate of the CA of an `https://` server (AGL-058, D12).
+    pub private_ca: Option<String>,
 }
 
 impl WhisperFile {
-    const KEYS: &'static [&'static str] = &["url", "model", "args"];
+    const KEYS: &'static [&'static str] = &["url", "model", "args", "private_ca"];
 
     pub fn parse(section: Option<Section>, path: &Path) -> Result<WhisperFile, Error> {
         let Some(mut whisper) = section else {
@@ -45,6 +47,7 @@ impl WhisperFile {
             url,
             model,
             args: whisper.strings("args")?,
+            private_ca: super::server::read_private_ca(&mut whisper)?,
         })
     }
 
@@ -59,6 +62,7 @@ impl WhisperFile {
             url: self.url.clone().or_else(|| defaults.url.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             args: self.args.clone().or_else(|| defaults.args.clone()),
+            private_ca: self.private_ca.clone().or_else(|| defaults.private_ca.clone()),
         }
     }
 }

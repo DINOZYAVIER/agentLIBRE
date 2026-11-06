@@ -175,6 +175,7 @@ impl Agent<'_> {
                 Err(Error::Interrupted) => StopReason::Interrupted,
                 Err(
                     error @ (Error::ServerUnreachable { .. }
+                    | Error::ServerCertificate { .. }
                     | Error::ServerStatus { .. }
                     | Error::ServerReply { .. }
                     | Error::OutsideGrammar(_)),

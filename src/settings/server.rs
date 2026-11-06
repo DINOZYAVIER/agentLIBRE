@@ -33,6 +33,10 @@ pub struct ServerFile {
     /// `server.llama.external`: the llama-server at the url runs outside agl's
     /// care, as on the host of a virtual machine (AGL-052, D4).
     pub llama_external: Option<bool>,
+    /// `server.llama.private_ca`: the absolute path of the certificate of the
+    /// CA that signs an `https://` server; `None` is the bundled roots (AGL-058,
+    /// D12).
+    pub llama_private_ca: Option<String>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
     pub engine: Option<String>,
@@ -85,6 +89,20 @@ fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error>
     Ok(url)
 }
 
+/// `private_ca` of a set, an absolute path (AGL-058, D12); `None` when absent.
+pub(super) fn read_private_ca(section: &mut Section) -> Result<Option<String>, Error> {
+    let ca = section.string("private_ca")?;
+    if let Some(ca) = &ca
+        && !Path::new(ca).is_absolute()
+    {
+        return Err(Error::ServerCa {
+            path: ca.into(),
+            detail: "it is not an absolute path".into(),
+        });
+    }
+    Ok(ca)
+}
+
 impl ServerFile {
     /// The keys of `server` of a settings file (AGL-035, D4; AGL-039,
     /// D21): the engine and the set of each kind, which holds its `url`.
@@ -97,12 +115,16 @@ impl ServerFile {
         };
         server.check_keys(Self::KEYS)?;
         let engine = server.string("engine")?;
-        let (llama_url, llama_external) = match server.section("llama")? {
+        let (llama_url, llama_external, llama_private_ca) = match server.section("llama")? {
             Some(mut table) => {
-                table.check_keys(&["url", "external"])?;
-                (read_url(&mut table, path)?, table.bool("external")?)
+                table.check_keys(&["url", "external", "private_ca"])?;
+                (
+                    read_url(&mut table, path)?,
+                    table.bool("external")?,
+                    read_private_ca(&mut table)?,
+                )
             }
-            None => (None, None),
+            None => (None, None, None),
         };
         let strata_url = match server.section("strata")? {
             Some(mut table) => {
@@ -115,6 +137,7 @@ impl ServerFile {
             llama_url,
             strata_url,
             llama_external,
+            llama_private_ca,
             engine,
             ..ServerFile::default()
         })
@@ -162,6 +185,9 @@ impl ServerFile {
                 .then(|| self.strata_url.clone())
                 .flatten(),
             llama_external: (kind == ServerKind::Llama).then_some(self.llama_external).flatten(),
+            llama_private_ca: (kind == ServerKind::Llama)
+                .then(|| self.llama_private_ca.clone())
+                .flatten(),
             engine: self.engine.clone(),
             ..model.clone()
         }
@@ -191,6 +217,10 @@ impl ServerFile {
             llama_url: self.llama_url.clone().or_else(|| defaults.llama_url.clone()),
             strata_url: self.strata_url.clone().or_else(|| defaults.strata_url.clone()),
             llama_external: self.llama_external.or(defaults.llama_external),
+            llama_private_ca: self
+                .llama_private_ca
+                .clone()
+                .or_else(|| defaults.llama_private_ca.clone()),
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
@@ -264,6 +294,7 @@ impl ServerFile {
             llama_url: text("llama_url")?,
             strata_url: text("strata_url")?,
             llama_external: value.get("llama_external").and_then(Value::as_bool),
+            llama_private_ca: None,
             engine: text("engine")?,
             model: text("model")?,
             context: number("context")?,

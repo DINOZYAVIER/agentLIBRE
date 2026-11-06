@@ -145,6 +145,10 @@ pub enum Error {
     MissingSpecType { draft: String },
     /// `agl server start` with a `url` whose host is not local (D148).
     NotLocalServer { url: String },
+    /// The file of `private_ca` cannot be used (AGL-058, D12).
+    ServerCa { path: PathBuf, detail: String },
+    /// The server's certificate is not trusted (AGL-058, D12).
+    ServerCertificate { url: String, detail: String },
     /// `server.llama.external`, and nothing answers there (AGL-052, D4).
     OutsideServerDown { url: String },
     /// `server.llama.external`, and it serves another model (AGL-052, D5).

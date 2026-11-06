@@ -39,11 +39,36 @@ impl Llama {
         }
     }
 
+    /// A client that trusts the CA in the file `ca`, when one is named
+    /// (AGL-058, D12).
+    pub fn with_ca(url: &str, ca: Option<&str>) -> Result<Llama, Error> {
+        let Some(ca) = ca else {
+            return Ok(Llama::new(url));
+        };
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .tls_config(super::private_ca(ca)?)
+            .build()
+            .into();
+        Ok(Llama {
+            url: url.trim_end_matches('/').into(),
+            agent,
+        })
+    }
+
     fn unreachable(&self, error: impl std::fmt::Display) -> Error {
+        let detail = error.to_string();
+        if super::is_certificate_problem(&detail) {
+            return Error::ServerCertificate {
+                url: self.url.clone(),
+                detail,
+            };
+        }
         Error::ServerUnreachable {
             kind: ServerKind::Llama,
             url: self.url.clone(),
-            detail: error.to_string(),
+            detail,
         }
     }
 

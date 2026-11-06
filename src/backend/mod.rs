@@ -313,6 +313,35 @@ pub struct StructuredCall {
     pub arguments: String,
 }
 
+/// The TLS of a client that trusts only the CA in the file `path` (AGL-058, D12).
+pub fn private_ca(path: &str) -> Result<ureq::tls::TlsConfig, Error> {
+    let fail = |detail: String| Error::ServerCa {
+        path: path.into(),
+        detail,
+    };
+    let pem = std::fs::read(path).map_err(|error| fail(error.to_string()))?;
+    let mut certificates = Vec::new();
+    for item in ureq::tls::parse_pem(&pem) {
+        if let ureq::tls::PemItem::Certificate(certificate) =
+            item.map_err(|error| fail(error.to_string()))?
+        {
+            certificates.push(certificate);
+        }
+    }
+    if certificates.is_empty() {
+        return Err(fail("no certificate in it".into()));
+    }
+    Ok(ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::new_with_certs(&certificates))
+        .build())
+}
+
+/// Whether a failed request is a certificate that is not trusted, and not a
+/// server that is down (AGL-058, D12). The TLS library says so only in its text.
+pub fn is_certificate_problem(detail: &str) -> bool {
+    detail.to_ascii_lowercase().contains("certificate")
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Generated {
     pub text: String,

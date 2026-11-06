@@ -100,6 +100,7 @@ fn the_whisper_table() {
             url: Some("http://127.0.0.1:18082".into()),
             model: Some("w.bin".into()),
             args: Some(vec!["-t".into(), "12".into()]),
+            private_ca: None,
         }
     );
     // The project wins per key, `args` as a whole.

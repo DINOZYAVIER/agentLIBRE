@@ -28,6 +28,8 @@ pub const UNIT_PREFIX: &str = "agentLIBRE-whisper-server";
 pub struct WhisperServer {
     pub unit: String,
     pub url: String,
+    /// The certificate of the CA of an `https://` server (AGL-058, D12).
+    pub private_ca: Option<String>,
     pub model: String,
     pub args: Vec<String>,
 }
@@ -53,6 +55,7 @@ impl WhisperServer {
         Ok(WhisperServer {
             unit: format!("{UNIT_PREFIX}-{key}"),
             url: url.clone(),
+            private_ca: settings.private_ca.clone(),
             model: model.clone(),
             args: settings.args.clone().unwrap_or_default(),
         })
@@ -97,7 +100,7 @@ pub fn ensure(
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
-    let probe = Llama::new(&server.url);
+    let probe = Llama::with_ca(&server.url, server.private_ca.as_deref())?;
     match health(&probe) {
         Health::Ready => return Ok(()),
         Health::Loading => return wait_ready(&probe, None, "whisper-server", say, lang),
@@ -148,7 +151,7 @@ pub fn ensure(
 }
 
 /// The text of `wav` (16 kHz mono) from the whisper server at `url`.
-pub fn transcribe(url: &str, wav: &[u8]) -> Result<String, Error> {
+pub fn transcribe(url: &str, private_ca: Option<&str>, wav: &[u8]) -> Result<String, Error> {
     let boundary = "----agentLIBREwhisper7f3a9c";
     let mut body: Vec<u8> = Vec::new();
     for (name, value) in [("response_format", "json"), ("temperature", "0.0")] {
@@ -170,11 +173,13 @@ pub fn transcribe(url: &str, wav: &[u8]) -> Result<String, Error> {
         url: url.into(),
         detail,
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_connect(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
+        .timeout_connect(Some(std::time::Duration::from_secs(5)));
+    let agent: ureq::Agent = match private_ca {
+        Some(ca) => config.tls_config(crate::backend::private_ca(ca)?).build().into(),
+        None => config.build().into(),
+    };
     let mut response = agent
         .post(format!("{}/inference", url.trim_end_matches('/')))
         .header(
@@ -242,7 +247,10 @@ impl Voice {
         let model = (autostart.effective.kind() == ServerKind::Llama)
             .then(|| autostart.what().ok())
             .flatten()
-            .map(|what| (Llama::new(autostart.llama.url()), what));
+            .and_then(|what| {
+                let ca = autostart.effective.llama_private_ca.as_deref();
+                Some((Llama::with_ca(autostart.llama.url(), ca).ok()?, what))
+            });
         Voice {
             model,
             project: autostart.project.clone(),
@@ -297,7 +305,7 @@ impl Dictation for Voice {
         }
         let server = self.server()?;
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
-        transcribe(&server.url, wav)
+        transcribe(&server.url, server.private_ca.as_deref(), wav)
     }
 }
 
@@ -307,7 +315,7 @@ impl Transcriber for Autostart<'_> {
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
         say(&tr!(self.lang, m::TRANSCRIBING, name = source.name));
         let wav = media::audio_to_wav(&source.bytes)?;
-        transcribe(&server.url, &wav)
+        transcribe(&server.url, server.private_ca.as_deref(), &wav)
     }
 }
 
@@ -340,6 +348,7 @@ mod tests {
             url: Some("http://127.0.0.1:18081".into()),
             model: Some("w.bin".into()),
             args: Some(vec!["-t".into(), "12".into()]),
+            private_ca: None,
         });
         let server = WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-whisper-server-60af300abea6");
@@ -378,6 +387,7 @@ mod tests {
             url: Some("http://127.0.0.1:18081".into()),
             model: Some("w.bin".into()),
             args: None,
+            private_ca: None,
         };
         assert!(voice.ready().is_ok());
     }
@@ -478,6 +488,7 @@ mod tests {
         let server = WhisperServer {
             unit: "agentLIBRE-whisper-server-60af300abea6".into(),
             url: "http://127.0.0.1:18081".into(),
+            private_ca: None,
             model: "w.bin".into(),
             args: vec!["-t".into(), "12".into(), "-l".into(), "uk".into()],
         };
@@ -555,7 +566,7 @@ mod tests {
     #[test]
     fn the_audio_goes_as_a_multipart_form_and_the_text_comes_back_trimmed() {
         let (url, handle) = one_reply(200, "{\"text\":\" And so my fellow Americans,\\n ask not\\n\"}");
-        let text = transcribe(&url, b"RIFFwav").unwrap();
+        let text = transcribe(&url, None, b"RIFFwav").unwrap();
         assert_eq!(text, "And so my fellow Americans, ask not");
         let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
         assert!(request.starts_with("POST /inference HTTP/1.1"), "{request}");
@@ -568,11 +579,11 @@ mod tests {
     #[test]
     fn a_whisper_error_is_an_error_with_its_text() {
         let (url, handle) = one_reply(500, "{\"error\":\"boom\"}");
-        let error = transcribe(&url, b"x").unwrap_err();
+        let error = transcribe(&url, None, b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail.contains("500") && detail.contains("boom")));
         let (url, handle) = one_reply(200, "{\"error\":\"no audio\"}");
-        let error = transcribe(&url, b"x").unwrap_err();
+        let error = transcribe(&url, None, b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail == "no audio"));
     }

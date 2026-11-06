@@ -150,8 +150,9 @@ pub fn run(
     yes: bool,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    let llama = Llama::new(&server.url);
-    let external = server.effective_settings()?.external();
+    let effective = server.effective_settings()?;
+    let llama = Llama::with_ca(&server.url, effective.llama_private_ca.as_deref())?;
+    let external = effective.external();
     match action {
         // `lib` prints it before anything is resolved.
         ServerAction::Command => Ok(ExitCode::SUCCESS),
@@ -1061,6 +1062,11 @@ fn check_outside(
 ) -> Result<(), Error> {
     match health(llama) {
         Health::Down => {
+            // A certificate it does not trust is not a server that is down
+            // (AGL-058, D12).
+            if let Err(error @ Error::ServerCertificate { .. }) = llama.context_size() {
+                return Err(error);
+            }
             return Err(Error::OutsideServerDown { url: llama.url().to_owned() });
         }
         Health::Loading => wait_ready(llama, None, what, say, lang)?,
@@ -2299,6 +2305,7 @@ mod tests {
             url: None,
             model: None,
             args: None,
+            private_ca: None,
         };
         Autostart {
             llama,

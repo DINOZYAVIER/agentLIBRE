@@ -199,6 +199,7 @@ fn run(
             // run does; `status` and `stop` keep the name (AGL-039, D24).
             let mut model = function.model.clone();
             model.llama_external = settings.llama_external;
+            model.llama_private_ca = settings.llama_private_ca.clone();
             let missing = match action {
                 cli::args::ServerAction::Start if repl::term::is_interactive() => {
                     weights::Missing::Ask(&cli::serve::ask_line)
@@ -418,7 +419,10 @@ fn agent_session(
     let backend: Box<dyn Backend> = if stirred {
         Box::new(Strata::new(&settings.server_url))
     } else {
-        Box::new(Llama::new(&settings.server_url))
+        Box::new(Llama::with_ca(
+            &settings.server_url,
+            settings.server.llama_private_ca.as_deref(),
+        )?)
     };
     let autostart = cli::serve::Autostart {
         llama: backend.as_ref(),
