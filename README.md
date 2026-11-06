@@ -16,7 +16,41 @@ It's free (libre) and open-source.
 
 ## Install
 
-agl runs on NixOS. On Windows, that is NixOS-WSL. It is built from source on the first install, as there is no binary cache yet.
+agl runs on Linux with Nix, and on Windows in NixOS-WSL. It is built from source on the first install, as there is no binary cache yet.
+
+### Windows
+
+Download [`install-agl.cmd`](windows/install-agl.cmd) with "Download raw file" on that page, and double-click it. Windows may warn about a file from the internet: "More info", then "Run anyway".
+
+The file installs WSL, NixOS-WSL and agl. It asks for administrator rights once and for one restart of Windows, after which it goes on by itself. If something fails, it says what, and running it again goes on from there. It keeps a log in `%LOCALAPPDATA%\agentLIBRE\install`.
+
+It needs Windows 11 22H2 or later on x86-64, virtualization on in the BIOS, and the driver of your GPU. It writes `%UserProfile%\.wslconfig` with `networkingMode=mirrored`. If you have that file already it stays as it is, and you add this line under `[wsl2]` yourself.
+
+Then, in a terminal:
+
+```powershell
+wsl -d NixOS
+agl
+```
+
+agl starts the official Windows `llama-server.exe`, which sees the GPU directly and reads the weights from `%LOCALAPPDATA%\agentLIBRE\models`. To update agl, in NixOS:
+
+```sh
+sudo nixos-rebuild switch --flake github:DINOZYAVIER/agentLIBRE#wsl --refresh
+```
+
+### Linux
+
+With [Nix](https://nixos.org/download/), flakes on, and systemd, which starts the server:
+
+```sh
+git clone https://github.com/DINOZYAVIER/agentLIBRE
+cd agentLIBRE
+nix build
+./result/bin/agl
+```
+
+`nix profile add .` puts it on your `PATH`. The server runs on Vulkan, with the Mesa of the package unless the system has its own driver for Nix. AMD is checked; NVIDIA and Intel are not yet.
 
 ### NixOS
 
@@ -36,29 +70,6 @@ programs.agl.enable = true;
 ```
 
 The module turns on `hardware.graphics`, as the server runs on Vulkan. AMD is checked; NVIDIA and Intel are not yet.
-
-### Windows
-
-agl runs in NixOS-WSL, and starts the official Windows `llama-server.exe`, which sees the GPU directly and reads the weights from `%LOCALAPPDATA%\agentLIBRE\models`. It needs Windows 11 22H2 or later and WSL 2.4.4 or later. This path is not checked on a real Windows yet.
-
-1. In `%UserProfile%\.wslconfig`:
-
-   ```ini
-   [wsl2]
-   networkingMode=mirrored
-   ```
-
-2. In PowerShell, with [`nixos.wsl`](https://github.com/nix-community/NixOS-WSL/releases/latest) downloaded:
-
-   ```powershell
-   wsl --install --from-file nixos.wsl
-   ```
-
-3. In NixOS:
-
-   ```sh
-   sudo nixos-rebuild switch --flake github:DINOZYAVIER/agentLIBRE#wsl
-   ```
 
 ### A server on another machine
 
