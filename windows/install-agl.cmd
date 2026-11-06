@@ -49,7 +49,8 @@ function Stop-Install([string]$Text) {
 function Invoke-Logged([string]$Program, [string[]]$Arguments) {
   & $Program @Arguments 2>&1 | ForEach-Object {
     $line = "$_"
-    Write-Host $line
+    # wsl.exe leaves the console with a line feed that does not return the cursor.
+    Write-Host "`r$line"
     Add-Content -Path $log -Value $line -Encoding UTF8
   }
   return $LASTEXITCODE
@@ -60,8 +61,12 @@ function Write-LinuxScript([string]$Name, [string]$Text) {
   [IO.File]::WriteAllText((Join-Path $dir $Name), $Text.Replace("`r`n", "`n"), (New-Object Text.ASCIIEncoding))
 }
 
+# The wsl.exe of System32 is a stub with no WSL: asked anything, it waits 60 s for a key
+# that would install it. The real one is looked for instead.
 function Test-WslProgram {
-  & wsl.exe --version *> $null
+  $program = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
+  if (-not (Test-Path $program)) { return $false }
+  & $program --version *> $null
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -148,7 +153,10 @@ if ((Test-WslProgram) -and $platformBefore) {
   } catch {
     Stop-Install "The install of WSL did not start: $_"
   }
-  Write-Log "wsl --install exit $($install.ExitCode). Its own output was in its window; to see it, run this in a terminal as administrator: wsl --install --no-distribution"
+  Write-Log "wsl --install exit $($install.ExitCode)"
+  if ($install.ExitCode -ne 0) {
+    Stop-Install 'WSL did not install. To see why, run this in a terminal as administrator: wsl --install --no-distribution'
+  }
   # A feature of Windows that was off takes effect only after the restart.
   if (-not ($platformBefore -and (Test-WslProgram))) {
     Set-Content -Path $restartMarker -Value (Get-BootTime)
