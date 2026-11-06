@@ -88,6 +88,7 @@ pub fn offer(
             dir = folders.own.display()
         );
         if yes(&question) {
+            download::check_space(&absent, &folders.own)?;
             for source in absent {
                 download::fetch(source, &folders.own, lang)?;
             }

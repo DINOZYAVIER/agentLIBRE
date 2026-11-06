@@ -23,6 +23,11 @@ pub struct FileSource {
     pub size: u64,
 }
 
+/// What `curl` exits with when a server does not take a range.
+const CURL_NO_RANGES: i32 = 33;
+/// What `curl --fail` exits with on an error status.
+const CURL_HTTP_ERROR: i32 = 22;
+
 /// `bytes` for a human, in decimal gigabytes as the sizes of the sources are.
 pub fn gigabytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
@@ -43,15 +48,10 @@ pub fn fetch(source: &FileSource, dir: &Path, lang: Lang) -> Result<PathBuf, Err
         have
     };
     let needed = source.size - have;
-    let available = free_space(dir).map_err(|error| failed(source, &error.to_string()))?;
-    if available < needed {
-        return Err(Error::DownloadNoSpace {
-            name: source.name.clone(),
-            needed,
-            available,
-            dir: dir.to_path_buf(),
-        });
-    }
+    check_room(&source.name, needed, dir).map_err(|error| match error {
+        Room::Io(detail) => failed(source, &detail),
+        Room::No(error) => error,
+    })?;
     // A whole `.part` has nothing to resume: a server refuses the range.
     if needed > 0 {
         eprintln!(
@@ -60,6 +60,8 @@ pub fn fetch(source: &FileSource, dir: &Path, lang: Lang) -> Result<PathBuf, Err
         );
         run_curl(source, &part)?;
     }
+    // It takes a while, with nothing else on the screen (AGL-058, D26).
+    eprintln!("{}", tr!(lang, m::DOWNLOAD_CHECK, name = source.name));
     let got = checksum(source, &part)?;
     if got != source.sha256 {
         remove(source, &part)?;
@@ -83,11 +85,55 @@ fn run_curl(source: &FileSource, part: &Path) -> Result<(), Error> {
         .arg(&source.url)
         .status()
         .map_err(|error| failed(source, &error.to_string()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(failed(source, &format!("curl: {status}")))
+    match status.code() {
+        Some(0) => Ok(()),
+        // A server with no ranges would refuse every next try (AGL-058, D26).
+        Some(CURL_NO_RANGES) => {
+            remove(source, part)?;
+            Err(failed(source, "this server cannot resume, so the partial file is removed; run it again to start over"))
+        }
+        Some(CURL_HTTP_ERROR) => Err(failed(source, "the server refuses the file")),
+        _ => Err(failed(source, &format!("curl: {status}; run it again and it resumes"))),
     }
+}
+
+/// Why there is no room for a file.
+enum Room {
+    Io(String),
+    No(Error),
+}
+
+fn check_room(name: &str, needed: u64, dir: &Path) -> Result<(), Room> {
+    let available = free_space(dir).map_err(|error| Room::Io(error.to_string()))?;
+    if available < needed {
+        return Err(Room::No(Error::DownloadNoSpace {
+            name: name.to_owned(),
+            needed,
+            available,
+            dir: dir.to_path_buf(),
+        }));
+    }
+    Ok(())
+}
+
+/// Whether all of `sources` fit in `dir`, what their parts hold counted: asked
+/// before the first file comes down, so that the last is not refused after it
+/// (AGL-050, D17; AGL-058, D26).
+pub fn check_space(sources: &[&FileSource], dir: &Path) -> Result<(), Error> {
+    let Some(first) = sources.first() else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).map_err(|error| failed(first, &error.to_string()))?;
+    let needed = sources.iter().fold(0u64, |sum, source| {
+        let part = dir.join(format!("{}.part", source.name));
+        let have = fs::metadata(part).map_or(0, |metadata| metadata.len());
+        sum.saturating_add(source.size.saturating_sub(have))
+    });
+    let names: Vec<&str> = sources.iter().map(|source| source.name.as_str()).collect();
+    check_room(&names.join(", "), needed, dir).map_err(|error| match error {
+        Room::Io(detail) => failed(first, &detail),
+        Room::No(error) => error,
+    })
 }
 
 fn checksum(source: &FileSource, part: &Path) -> Result<String, Error> {
@@ -221,6 +267,27 @@ mod tests {
         source.url = "file:///nowhere".into();
         let error = fetch(&source, &dir.0.join("models"), Lang::En).unwrap_err();
         assert!(matches!(error, Error::DownloadFailed { name, .. } if name == "m.gguf"));
+    }
+
+    #[test]
+    fn the_space_is_asked_for_all_the_files_at_once() {
+        // Each fits by itself, and both do not (AGL-058, D26).
+        let dir = std::env::temp_dir().join(format!("agl-space-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let free = free_space(&dir).unwrap();
+        let source = |name: &str| FileSource {
+            name: name.into(),
+            url: "http://127.0.0.1:9/x".into(),
+            sha256: "0".repeat(64),
+            size: free / 3 * 2,
+        };
+        let (one, two) = (source("one"), source("two"));
+        assert!(check_space(&[&one], &dir).is_ok());
+        assert!(matches!(
+            check_space(&[&one, &two], &dir),
+            Err(Error::DownloadNoSpace { name, .. }) if name == "one, two"
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

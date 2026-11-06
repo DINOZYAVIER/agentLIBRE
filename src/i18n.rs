@@ -1728,6 +1728,12 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// The start of a download (AGL-050).
+    /// Before the sha256 of a downloaded file, which takes a while (AGL-058, D26).
+    pub const DOWNLOAD_CHECK: Msg = Msg {
+        en: "Checking {name}",
+        uk: "Перевірка {name}",
+    };
+
     pub const DOWNLOAD_START: Msg = Msg {
         en: "Downloading {name} ({size})",
         uk: "Завантажую {name} ({size})",
@@ -1741,8 +1747,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::DownloadFailed` (AGL-050, D17).
     pub const DOWNLOAD_FAILED: Msg = Msg {
-        en: "the download of {name} failed: {detail}; run it again and it resumes",
-        uk: "завантаження {name} не вдалось: {detail}; запусти ще раз, і воно продовжиться",
+        en: "the download of {name} failed: {detail}",
+        uk: "завантаження {name} не вдалось: {detail}",
     };
 
     /// `Error::DownloadNoSpace` (AGL-050, D17).
