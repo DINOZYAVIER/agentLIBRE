@@ -10,6 +10,9 @@ use super::ServerKind;
 use crate::error::Error;
 use crate::nix::Section;
 
+/// Where the llama-server listens when `server.llama.url` is not set (AGL-056, D5).
+pub const DEFAULT_LLAMA_URL: &str = "http://127.0.0.1:18080";
+
 /// Where a Strata server listens when `server.strata.url` is not set
 /// (AGL-030, D1; AGL-036, D6): its own run script binds port 18088
 /// (8080 is held by qBittorrent).
@@ -134,18 +137,14 @@ impl ServerFile {
         self.kind() == ServerKind::Llama && self.llama_external == Some(true)
     }
 
-    /// Where the server of the kind listens (AGL-036, D2, D6): the `url` of
-    /// the kind's set; the Strata server has a default address, the
-    /// llama-server's is required (`None`).
-    pub fn url(&self) -> Option<String> {
+    /// Where the server of the kind listens (AGL-036, D2, D6; AGL-056, D5): the
+    /// `url` of the kind's set, else the kind's default address.
+    pub fn url(&self) -> String {
         match self.kind() {
-            ServerKind::Llama => self.llama_url.clone(),
-            ServerKind::Strata => Some(
-                self.strata_url
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_STRATA_URL.to_owned()),
-            ),
+            ServerKind::Llama => self.llama_url.as_deref().unwrap_or(DEFAULT_LLAMA_URL),
+            ServerKind::Strata => self.strata_url.as_deref().unwrap_or(DEFAULT_STRATA_URL),
         }
+        .to_owned()
     }
 
     /// The effective server (AGL-033, D1; AGL-036, D1; AGL-039, D21): the

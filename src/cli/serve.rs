@@ -72,8 +72,6 @@ pub struct Server {
     /// the engine (AGL-036, D1; AGL-039, D21).
     pub settings: ServerFile,
     pub url: String,
-    /// The project's settings file, for hints.
-    pub project_path: PathBuf,
     /// The project's store directory: the record of the launched server
     /// is there (AGL-035, D1).
     pub dir: PathBuf,
@@ -90,30 +88,21 @@ impl Server {
     pub fn of(
         project: &Workspace,
         settings: &ServerFile,
-        user_path: &Path,
         model: ServerFile,
     ) -> Result<Server, Error> {
         let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
             project: project.project.clone(),
         })?;
-        let project_path = project.dir.join(crate::settings::SETTINGS_FILE);
         let mut server = Server {
             unit: unit_name(&key),
             whisper_unit: format!("{}-{key}", super::whisper::UNIT_PREFIX),
             settings: settings.clone(),
             url: String::new(),
-            project_path,
             dir: project.dir.clone(),
             model,
         };
         // The url of the effective kind (AGL-036, D2, D6).
-        server.url = server
-            .effective_settings()?
-            .url()
-            .ok_or_else(|| Error::MissingServerUrl {
-                user_path: user_path.into(),
-                project_path: server.project_path.clone(),
-            })?;
+        server.url = server.effective_settings()?.url();
         Ok(server)
     }
 
@@ -578,7 +567,7 @@ impl Autostart<'_> {
     /// The server of the kind starts as the unit of the project, the code
     /// of `agl server start` (AGL-035, D2).
     fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let server = Server::of(self.project, self.effective, &self.user_path, self.effective.clone())?;
+        let server = Server::of(self.project, self.effective, self.effective.clone())?;
         launch_unit(
             &server,
             self.effective,
@@ -1108,7 +1097,7 @@ pub fn print_command(
 
 /// The line of `agl server command`.
 fn command_line(model: &ServerFile, settings: &ServerFile) -> String {
-    let url = settings.llama_url.as_deref().unwrap_or("http://127.0.0.1:18080");
+    let url = settings.llama_url.as_deref().unwrap_or(crate::settings::DEFAULT_LLAMA_URL);
     let (host, port) = match local_address(url) {
         Some(address) => address,
         None => ("0.0.0.0".to_owned(), url_port(url).unwrap_or(18080)),
@@ -1265,9 +1254,10 @@ fn restart_consent(what: &str, others: &Others, lang: Lang) -> Result<(), Error>
 /// at `url`. `None` when agl owns no server elsewhere.
 fn owned_elsewhere(dir: &Path, unit: Option<&str>, url: &str) -> Result<Option<Elsewhere>, Error> {
     if let Some(record) = read_record(dir) {
-        let Some(at) = record.url().filter(|at| at != url) else {
+        let at = record.url();
+        if at == url {
             return Ok(None);
-        };
+        }
         return Ok(Some(Elsewhere {
             what: Some(what_of(&record)?),
             url: Some(at),
@@ -2034,7 +2024,7 @@ mod tests {
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&user);
         let server =
-            Server::of(&ws, &merged, Path::new("/c/settings.nix"), model("big.gguf", 65536)).unwrap();
+            Server::of(&ws, &merged, model("big.gguf", 65536)).unwrap();
         assert_eq!(server.unit, "agentLIBRE-server-60af300abea6");
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
@@ -2042,7 +2032,6 @@ mod tests {
         assert_eq!(effective.model.as_deref(), Some("big.gguf"));
         assert_eq!(effective.context, Some(65536));
         assert_eq!(effective.engine.as_deref(), Some("e"));
-        assert_eq!(server.project_path, PathBuf::from("/d/agl-lite-60af300abea6/settings.nix"));
     }
 
     #[test]
@@ -2053,16 +2042,14 @@ mod tests {
         };
         let ws = project(None, ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &user, Path::new("/c/settings.nix"), model("m.gguf", 4096)),
+            Server::of(&ws, &user, model("m.gguf", 4096)),
             Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
         ));
-        // A registered project with no url anywhere is the url error.
+        // With no url anywhere, the llama-server's default address (AGL-056, D5).
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
-        assert!(matches!(
-            Server::of(&ws, &ServerFile::default(), Path::new("/c/settings.nix"), model("m.gguf", 4096)),
-            Err(Error::MissingServerUrl { .. })
-        ));
+        let server = Server::of(&ws, &ServerFile::default(), model("m.gguf", 4096));
+        assert_eq!(server.unwrap().url, crate::settings::DEFAULT_LLAMA_URL);
     }
 
     #[test]
@@ -2720,7 +2707,7 @@ mod tests {
         };
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&ServerFile::default());
-        let server = Server::of(&ws, &merged, Path::new("/c/settings.nix"), model("function.gguf", 4096)).unwrap();
+        let server = Server::of(&ws, &merged, model("function.gguf", 4096)).unwrap();
         assert_eq!(
             server.effective_settings().unwrap(),
             ServerFile {

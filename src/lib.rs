@@ -218,7 +218,7 @@ fn run(
                 &missing,
                 *lang,
             )?;
-            let server = cli::serve::Server::of(&project, &settings, &paths.settings_file(), model)?;
+            let server = cli::serve::Server::of(&project, &settings, model)?;
             return cli::serve::run(action, &server, &paths.models(), env("PATH"), yes, *lang);
         }
         Command::Init => {

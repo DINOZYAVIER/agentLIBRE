@@ -78,12 +78,6 @@ pub enum Error {
         file: PathBuf,
         problem: CredentialProblem,
     },
-    /// No `[server.llama] url` in the project's file nor in the user file
-    /// (D59, AGL-015; AGL-036, D2, D6).
-    MissingServerUrl {
-        user_path: PathBuf,
-        project_path: PathBuf,
-    },
     /// A format or Function name that cannot name a file.
     InvalidName(String),
     /// A template or string of a format is unusable (D81).
@@ -522,7 +516,6 @@ impl std::fmt::Display for Error {
                 Error::SearchCredential { file, .. } => {
                     format!("the search credential {} is refused", file.display())
                 }
-                Error::MissingServerUrl { .. } => "the llama-server address is not set".into(),
                 Error::InvalidName(name) => format!("invalid name `{name}`"),
                 Error::Template { path, key, .. } => {
                     format!("a problem with `{key}` in {}", path.display())

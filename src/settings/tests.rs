@@ -291,14 +291,11 @@ fn the_effective_server_is_the_model_with_the_url_of_its_kind() {
     let strata = resolve_with(&user, &ProjectFile::default(), None, &strata_model).unwrap();
     assert_eq!(strata.server_url, "http://127.0.0.1:19000");
     assert_eq!(strata.server.llama_url, None);
-    // The Strata server has a default address (AGL-036, D6); the
-    // llama-server's is required.
+    // Each kind has a default address (AGL-036, D6; AGL-056, D5).
     let strata = resolve_with(&with_url(), &ProjectFile::default(), None, &strata_model).unwrap();
     assert_eq!(strata.server_url, DEFAULT_STRATA_URL);
-    assert!(matches!(
-        resolve_with(&UserFile::default(), &ProjectFile::default(), None, &llama_model()),
-        Err(Error::MissingServerUrl { .. })
-    ));
+    let llama = resolve_with(&UserFile::default(), &ProjectFile::default(), None, &llama_model()).unwrap();
+    assert_eq!(llama.server_url, super::DEFAULT_LLAMA_URL);
     // The project's url wins per key.
     let project = ProjectFile {
         server: ServerFile { llama_url: Some("http://p".into()), ..ServerFile::default() },

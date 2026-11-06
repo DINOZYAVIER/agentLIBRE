@@ -9,6 +9,7 @@
 mod repl;
 mod search;
 mod server;
+pub use server::DEFAULT_LLAMA_URL;
 mod whisper;
 
 pub use repl::{ReplFile, ReplSettings};
@@ -341,10 +342,7 @@ impl Settings {
             key: format!("search.{key}"),
         })?;
         // The url of the kind (AGL-036, D2, D6).
-        let server_url = server.url().ok_or_else(|| Error::MissingServerUrl {
-            user_path: user_path.into(),
-            project_path: project_path.into(),
-        })?;
+        let server_url = server.url();
         let function = function_name(cli_function, project.function.as_deref(), user.function.as_deref());
         let defaults = ReplSettings::default();
         Ok(Settings {

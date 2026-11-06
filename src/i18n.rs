@@ -568,12 +568,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "це не PEM типу {expected}",
     };
 
-    /// `Error::MissingServerUrl`.
-    pub const MISSING_SERVER_URL: Msg = Msg {
-        en: "the llama-server address is not set; add to {project_path} (this project) or {user_path} (the default of every project):\n\n{{ agl, ... }}: {{\n  server.llama.url = \"http://HOST:PORT\";\n}}",
-        uk: "адресу llama-server не задано; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\n{{ agl, ... }}: {{\n  server.llama.url = \"http://HOST:PORT\";\n}}",
-    };
-
     /// `Error::InvalidName`.
     pub const INVALID_NAME: Msg = Msg {
         en: "invalid name `{name}`: a name is not empty, has no `/` and does not start with `.`",
@@ -2352,17 +2346,6 @@ impl Error {
                 };
                 tr!(lang, m::SEARCH_CREDENTIAL, file = file.display(), problem = problem)
             }
-            Error::MissingServerUrl {
-                user_path,
-                project_path,
-            } => {
-                tr!(
-                    lang,
-                    m::MISSING_SERVER_URL,
-                    user_path = user_path.display(),
-                    project_path = project_path.display()
-                )
-            }
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Template { path, key, problem } => {
                 tr!(
@@ -3159,21 +3142,5 @@ pub mod repl {
     /// The line that ends a turn that stopped (D127).
     pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {
         super::stop_reason(reason, function, lang)
-    }
-}
-
-#[cfg(test)]
-mod missing_url_tests {
-    use super::*;
-
-    /// A first run with nothing set shows this message: it holds a Nix example,
-    /// whose braces are not placeholders (AGL-052).
-    #[test]
-    fn the_message_of_a_missing_address_shows_its_nix_example() {
-        for lang in [Lang::En, Lang::Uk] {
-            let text = tr!(lang, m::MISSING_SERVER_URL, user_path = "/u", project_path = "/p");
-            assert!(text.contains("{ agl, ... }: {\n  server.llama.url"), "{text}");
-            assert!(text.contains("/u") && text.contains("/p"), "{text}");
-        }
     }
 }
