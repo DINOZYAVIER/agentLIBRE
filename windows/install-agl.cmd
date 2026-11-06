@@ -16,9 +16,10 @@ $ErrorActionPreference = 'Continue'
 $env:WSL_UTF8 = '1'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
-$distro = 'NixOS'
+$distro = 'nixos-wsl-agl'
 $nixosWslUrl = 'https://github.com/nix-community/NixOS-WSL/releases/download/2605.7.2/nixos.wsl'
 $nixosWslSha256 = 'e7180ad555fdcb8e1e057e2ef056de467603a5e502ff8531053738371be3f6b9'
+$nixosWslSize = 577813513
 $minimumBuild = 22621
 $flake = if ($env:AGL_INSTALL_FLAKE) { $env:AGL_INSTALL_FLAKE } else { 'github:DINOZYAVIER/agentLIBRE' }
 
@@ -125,6 +126,7 @@ $wslConfig = Join-Path $env:USERPROFILE '.wslconfig'
 if (-not (Test-Path $wslConfig)) {
   Set-Content -Path $wslConfig -Value '[wsl2]', 'networkingMode=mirrored' -Encoding ASCII
   Write-Log "Written: $wslConfig"
+  Write-Log 'agl needs the mirrored networking of WSL. It applies to all your WSL distributions.'
 }
 
 # --- WSL.
@@ -138,7 +140,7 @@ if ((Test-WslProgram) -and $platformBefore) {
       Request-Restart
     }
     Remove-Item -Path $restartMarker
-    Stop-Install 'WSL is not working after the restart. In the log above, look for what its install said.'
+    Stop-Install 'WSL is not working after the restart. To see why, run this in a terminal as administrator: wsl --install --no-distribution'
   }
   Write-Log 'Installing WSL. Windows asks for administrator rights.'
   try {
@@ -146,7 +148,7 @@ if ((Test-WslProgram) -and $platformBefore) {
   } catch {
     Stop-Install "The install of WSL did not start: $_"
   }
-  Write-Log "wsl --install exit $($install.ExitCode)"
+  Write-Log "wsl --install exit $($install.ExitCode). Its own output was in its window; to see it, run this in a terminal as administrator: wsl --install --no-distribution"
   # A feature of Windows that was off takes effect only after the restart.
   if (-not ($platformBefore -and (Test-WslProgram))) {
     Set-Content -Path $restartMarker -Value (Get-BootTime)
@@ -160,6 +162,10 @@ if (Test-Distro) {
 } else {
   $image = Join-Path $dir 'nixos.wsl'
   $hashOk = (Test-Path $image) -and ((Get-FileHash -Path $image -Algorithm SHA256).Hash -eq $nixosWslSha256)
+  # A whole file of a wrong hash cannot be resumed: the server refuses the range.
+  if ((-not $hashOk) -and (Test-Path $image) -and ((Get-Item $image).Length -ge $nixosWslSize)) {
+    Remove-Item -Path $image
+  }
   if (-not $hashOk) {
     Write-Log "Downloading NixOS-WSL, 578 MB."
     # A login has just happened after a restart: the network may be coming up.
@@ -173,7 +179,7 @@ if (Test-Distro) {
     }
   }
   [void](Invoke-Logged 'wsl.exe' @('--update'))
-  $status = Invoke-Logged 'wsl.exe' @('--install', '--from-file', $image, '--no-launch')
+  $status = Invoke-Logged 'wsl.exe' @('--install', '--from-file', $image, '--name', $distro, '--no-launch')
   if (-not (Test-Distro)) {
     Stop-Install "$distro did not install: wsl exit $status."
   }
