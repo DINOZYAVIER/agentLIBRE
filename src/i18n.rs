@@ -663,8 +663,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::WeightsFileMissing` (AGL-043 F5).
     pub const WEIGHTS_FILE_MISSING: Msg = Msg {
-        en: "no file {path} of {key}",
-        uk: "немає файлу {path} для {key}",
+        en: "{key}: no file {path}",
+        uk: "{key}: немає файлу {path}",
     };
 
     /// `Error::MissingSpecType`.
@@ -2867,7 +2867,8 @@ mod tests {
             "unexpected reply from the Strata server at http://127.0.0.1:18088: the engine stopped"
         );
         assert!(strata.message(Lang::Uk).contains("сервер Strata"));
-        assert_eq!(strata.to_string(), "unexpected reply from the Strata server at http://127.0.0.1:18088");
+        // `Display` is the same text (AGL-058, D22).
+        assert_eq!(strata.to_string(), strata.message(Lang::En));
         let llama = reply(crate::settings::ServerKind::Llama);
         assert!(llama.message(Lang::En).contains("from llama-server at"));
     }
