@@ -222,6 +222,11 @@ pub fn run(
             // compares — the full path of the llama kind, the config's
             // model_name of the strata kind.
             let model = expected_model(&server.effective_settings()?, models)?;
+            // A server on Windows names the same file by its Windows path (AGL-056).
+            let running = running.map(|name| match &model {
+                Some(model) if same_model(&name, model) => model.clone(),
+                _ => name,
+            });
             outln!(
                 "{}",
                 texts::status(
