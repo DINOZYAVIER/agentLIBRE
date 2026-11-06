@@ -3,8 +3,9 @@
 //! it can read when it needs to.
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// The most a file keeps: its first and its last half (AGL-049, D5).
@@ -42,10 +43,19 @@ struct Kept {
 
 impl Kept {
     fn open(path: &Path) -> Kept {
+        // An output can hold secrets a command printed: the user's alone
+        // (AGL-058, D19).
         let file = path
             .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| File::create(path));
+            .map_or(Ok(()), |parent| DirBuilder::new().recursive(true).mode(0o700).create(parent))
+            .and_then(|()| {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(path)
+            });
         Kept {
             file: file.ok(),
             written: 0,
@@ -165,8 +175,8 @@ impl Capture {
         let written = kept.finish().is_ok() && kept.file.is_some();
         let end: Vec<u8> = self.end.iter().copied().collect();
         cut(
-            start_of(&self.start),
-            end_of(&end),
+            &start_of(&self.start),
+            &end_of(&end),
             self.total,
             self.tokens,
             written.then_some(self.file.as_path()),
@@ -204,8 +214,8 @@ pub fn limited(
     let start = &bytes[..(window / 5).min(bytes.len())];
     let end = &bytes[bytes.len().saturating_sub(window - window / 5)..];
     cut(
-        start_of(start),
-        end_of(end),
+        &start_of(start),
+        &end_of(end),
         bytes.len() as u64,
         tokens,
         Some(file),
@@ -242,22 +252,41 @@ fn cut(
     format!("{head}{joint}{mark}\n{tail}")
 }
 
-/// The whole characters at the start of `bytes`: a window can end in one.
-fn start_of(bytes: &[u8]) -> &str {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default(),
-    }
+/// The start of an output, as text: a window can end inside a character, which
+/// is left out. A byte that is not text is replaced, as in a short output, so
+/// that what follows it is kept (AGL-058, D6).
+fn start_of(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[..whole_characters(bytes)]).into_owned()
 }
 
-/// The whole characters at the end of `bytes`: a window can start in one.
-/// What is not text is cut there too, as a binary output says nothing here.
-fn end_of(bytes: &[u8]) -> &str {
+/// The end of an output, as text: a window can start inside a character, which
+/// is left out. A byte that is not text is replaced, so the last line of an
+/// output always reaches the model (AGL-058, D6).
+fn end_of(bytes: &[u8]) -> String {
     let skip = bytes
         .iter()
+        .take(3)
         .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
         .count();
-    start_of(&bytes[skip..])
+    String::from_utf8_lossy(&bytes[skip..]).into_owned()
+}
+
+/// How much of `bytes` is left without the character its end cuts in two.
+fn whole_characters(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(4) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continue;
+        }
+        let length = match byte {
+            0b1100_0000..=0b1101_1111 => 2,
+            0b1110_0000..=0b1110_1111 => 3,
+            0b1111_0000..=0b1111_0111 => 4,
+            _ => 1,
+        };
+        return if back < length { bytes.len() - back } else { bytes.len() };
+    }
+    bytes.len()
 }
 
 #[derive(Clone, Copy)]
@@ -308,6 +337,7 @@ fn fit(mut text: &str, budget: usize, count: &dyn Fn(&str) -> Option<usize>, kee
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// Text of a token per byte, as a run of digits is.
     fn dense(text: &str) -> Option<usize> {
@@ -421,6 +451,51 @@ mod tests {
         assert!(!text.contains('\u{fffd}'), "{text}");
         assert!(text.contains('я'));
         assert_eq!(fs::read_to_string(&path).unwrap(), "я".repeat(1000));
+    }
+
+    #[test]
+    fn a_kept_output_is_the_users_alone() {
+        // AGL-058, D19.
+        use std::os::unix::fs::PermissionsExt;
+        let path = file("private");
+        let mut capture = Capture::new(10, path.clone());
+        capture.push(&"line\n".repeat(200).into_bytes());
+        capture.text(&sparse);
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_byte_that_is_not_text_does_not_lose_the_end() {
+        // One such byte in the window of the end used to throw away all that
+        // came after it, the last line too (AGL-058, D6).
+        let path = file("stray");
+        let mut capture = Capture::new(100, path.clone());
+        capture.push(&"line\n".repeat(2000).into_bytes());
+        capture.push(b"a stray \xff byte\n");
+        capture.push(&"line\n".repeat(20).into_bytes());
+        capture.push(b"THE-LAST-LINE\n");
+        let text = capture.text(&sparse);
+        assert!(text.ends_with("THE-LAST-LINE\n"), "{text}");
+        assert!(text.contains("a stray \u{fffd} byte"), "{text}");
+        // In the start as well.
+        let path = file("stray-start");
+        let mut capture = Capture::new(100, path);
+        capture.push(b"first \xff line\n");
+        capture.push(&"line\n".repeat(2000).into_bytes());
+        let text = capture.text(&sparse);
+        assert!(text.starts_with("first \u{fffd} line\n"), "{text}");
+    }
+
+    #[test]
+    fn a_binary_output_still_shows_its_ends() {
+        let path = file("binary");
+        let mut capture = Capture::new(100, path);
+        let bytes: Vec<u8> = (0..20_000u32).map(|n| (n % 256) as u8).collect();
+        capture.push(&bytes);
+        let text = capture.text(&sparse);
+        assert!(text.contains('\u{fffd}'));
+        assert!(text.contains("bytes omitted"));
     }
 
     #[test]
