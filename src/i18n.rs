@@ -158,7 +158,7 @@ pub mod m {
     /// The `--help` text.
     pub const HELP: Msg = Msg {
         en: "\
-Usage: agl [-p <message> [--attach <path>]...] [--resume <id>] [--function <name>]
+Usage: agl [-p <message> [--attach <path>]...] [--resume [<id>|last]] [--function <name>]
            [--think <level>] [--yes]
        agl init
        agl server start [--yes] [--function <name>]|stop|status [--function <name>]
@@ -171,7 +171,8 @@ Without -p, agl starts an interactive session.
 
 Options:
   -p <message>        send one message, print the answer and exit
-  --resume <id>       continue session <id>
+  --resume <id>       continue session <id>; `last` is the last one of this
+                      project; with no id, it lists the latest ones
   --function <name>   use Function <name>
   --think <level>     the model's reasoning level: off, low, medium or xhigh
   --attach <path>     with -p: attach an image, a video or an audio; repeatable
@@ -221,7 +222,7 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agl [-p <повідомлення> [--attach <шлях>]...] [--resume <id>] [--function <назва>]
+Використання: agl [-p <повідомлення> [--attach <шлях>]...] [--resume [<id>|last]] [--function <назва>]
               [--think <level>] [--yes]
               agl init
               agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
@@ -234,7 +235,8 @@ under XDG_DATA_HOME):
 
 Параметри:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
-  --resume <id>       продовжити сесію <id>
+  --resume <id>       продовжити сесію <id>; `last` це остання сесія цього
+                      проєкту; без id показує список останніх
   --function <назва>  використати Function <назва>
   --think <level>     рівень міркувань моделі: off, low, medium або xhigh
   --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
@@ -356,6 +358,12 @@ Forge (сховище артефактів робочої області, agentL
     pub const REPEATED_OPTION: Msg = Msg {
         en: "option `{arg}` is given twice",
         uk: "параметр `{arg}` вказано двічі",
+    };
+
+    /// `agl --resume` in a project with no session (AGL-058, D20).
+    pub const NO_SESSIONS: Msg = Msg {
+        en: "no sessions of this project",
+        uk: "у цього проєкту немає сесій",
     };
 
     /// `Error::FunctionWithResume`.

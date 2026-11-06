@@ -655,3 +655,30 @@ fn a_command_is_kept_whole_and_the_model_reads_what_helps() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_session_is_the_users_alone_and_the_latest_are_listed() {
+    // AGL-058, D19, D20.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("agl-session-latest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let mut first = Session::create(&dir, "f", Path::new("/w/project")).unwrap();
+    first.append(Event::User("the first one\nits second line".into())).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut second = Session::create(&dir, "f", Path::new("/w/project/sub")).unwrap();
+    second.append(Event::User("x".repeat(100))).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut other = Session::create(&dir, "f", Path::new("/w/other")).unwrap();
+    other.append(Event::User("another project".into())).unwrap();
+    assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    let mode = fs::metadata(first.file_path()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let latest = Session::latest(&dir, Path::new("/w/project"), 20);
+    assert_eq!(latest.len(), 2, "{latest:?}");
+    assert_eq!(latest[0].id, second.id);
+    assert_eq!(latest[0].first, format!("{}…", "x".repeat(70)));
+    assert_eq!(latest[1].id, first.id);
+    assert_eq!(latest[1].first, "the first one");
+    assert_eq!(Session::latest(&dir, Path::new("/w/project"), 1).len(), 1);
+    assert!(Session::latest(&dir, Path::new("/none"), 20).is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}

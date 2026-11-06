@@ -2,8 +2,9 @@
 //! resumed (D30, D31, D36, D49, D104-D108, D139-D141).
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{self, BufRead, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -241,12 +242,21 @@ impl Session {
             path: path.into(),
             source,
         };
-        fs::create_dir_all(dir).map_err(|source| write_error(dir, source))?;
+        // A session holds what the commands printed: the user's alone
+        // (AGL-058, D19).
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|source| write_error(dir, source))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|source| write_error(dir, source))?;
         let id = uuid_v7().map_err(|source| write_error(dir, source))?;
         let path = dir.join(format!("{id}.jsonl"));
         let file = OpenOptions::new()
             .append(true)
             .create_new(true)
+            .mode(0o600)
             .open(&path)
             .map_err(|source| write_error(&path, source))?;
         let mut session = Session {
@@ -268,6 +278,28 @@ impl Session {
         });
         session.write_line(&header)?;
         Ok(session)
+    }
+
+    /// The latest sessions in `dir` of the project at `project`, the newest
+    /// first, at most `limit` (AGL-058, D20). A file that cannot be read is left
+    /// out: this only lists.
+    pub fn latest(dir: &Path, project: &Path, limit: usize) -> Vec<SessionInfo> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
+        // A file's name sorts by time.
+        paths.sort();
+        paths
+            .iter()
+            .rev()
+            .filter_map(|path| session_info(path, project))
+            .take(limit)
+            .collect()
     }
 
     /// Opens the session whose id is or starts with `id` (D107). A call
@@ -615,6 +647,44 @@ impl Session {
             .count();
         format!("c{}", calls + 1)
     }
+}
+
+/// A session as `agl --resume` lists it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub time: String,
+    /// The first line of its first message, short.
+    pub first: String,
+}
+
+/// The most of a first message `agl --resume` shows.
+const FIRST_SHOWN: usize = 70;
+
+/// The session at `path`, when it is of the project at `project`. It reads only
+/// as far as the first message.
+fn session_info(path: &Path, project: &Path) -> Option<SessionInfo> {
+    let mut lines = std::io::BufReader::new(File::open(path).ok()?).lines();
+    let header: Json = serde_json::from_str(&lines.next()?.ok()?).ok()?;
+    if header["type"] != "session" || !Path::new(header["workspace"].as_str()?).starts_with(project) {
+        return None;
+    }
+    let first = lines
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Json>(&line).ok())
+        .find(|line| line["type"] == "user")
+        .and_then(|line| line["text"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let first = first.lines().next().unwrap_or_default();
+    let mut shown: String = first.chars().take(FIRST_SHOWN).collect();
+    if first.chars().count() > FIRST_SHOWN {
+        shown.push('…');
+    }
+    Some(SessionInfo {
+        id: path.file_stem()?.to_string_lossy().into_owned(),
+        time: header["time"].as_str().unwrap_or_default().to_owned(),
+        first: shown,
+    })
 }
 
 /// The session file for `id`, a full id or a unique prefix.

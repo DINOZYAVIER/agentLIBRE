@@ -94,6 +94,9 @@ fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
     Ok(())
 }
 
+/// How many sessions `agl --resume` lists (AGL-058, D20).
+const SESSIONS_LISTED: usize = 20;
+
 /// Everything a session needs.
 pub struct Setup<'a> {
     pub function: &'a Function,
@@ -254,6 +257,17 @@ fn run(
         user.forge.auto_rehome.unwrap_or(true),
         *lang,
     )?;
+    // `agl --resume` with no id lists the sessions (AGL-058, D20).
+    if args.list_sessions {
+        let found = Session::latest(&paths.sessions(), &project.project, SESSIONS_LISTED);
+        if found.is_empty() {
+            let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::NO_SESSIONS));
+        }
+        for session in found {
+            let _ = writeln!(io::stdout(), "{}  {}  {}", session.id, session.time, session.first);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     auto_init(&project, *lang)?;
     if args.resume.is_some() && args.function.is_some() {
         return Err(Error::FunctionWithResume);
@@ -302,8 +316,21 @@ fn agent_session(
     lang: Lang,
 ) -> Result<repl::End, Error> {
     let user_path = paths.settings_file();
-    let session = args
-        .resume
+    // `last`: the last session of this project (AGL-058, D20).
+    let resume = match args.resume.as_deref() {
+        Some("last") => Some(
+            Session::latest(&paths.sessions(), &project.project, 1)
+                .into_iter()
+                .next()
+                .map(|session| session.id)
+                .ok_or_else(|| Error::SessionNotFound {
+                    id: "last".into(),
+                    dir: paths.sessions(),
+                })?,
+        ),
+        other => other.map(str::to_owned),
+    };
+    let session = resume
         .as_deref()
         .map(|id| Session::open(&paths.sessions(), id))
         .transpose()?;

@@ -59,8 +59,10 @@ pub enum ServerAction {
 pub struct Args {
     /// `-p <message>`: answer one message and exit; REPL otherwise.
     pub prompt: Option<String>,
-    /// `--resume <id>`.
+    /// `--resume <id>`, or `last`.
     pub resume: Option<String>,
+    /// `--resume` with no id: the sessions are listed (AGL-058, D20).
+    pub list_sessions: bool,
     /// `--function <name>`.
     pub function: Option<String>,
     /// `--think <level>`: the model's reasoning level (AGL-013).
@@ -167,8 +169,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
     }
     // `--think` is parsed to its level after the loop (AGL-013).
     let mut think: Option<String> = None;
+    let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let arg = text(arg)?;
+        // `--resume` alone, or before another option (AGL-058, D20).
+        if arg == "--resume"
+            && parsed.resume.is_none()
+            && args.peek().is_none_or(|next| next.as_encoded_bytes().starts_with(b"-"))
+        {
+            parsed.list_sessions = true;
+            continue;
+        }
         let slot = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "--version" => return Ok(Command::Version),
@@ -231,6 +242,7 @@ mod tests {
             Command::Run(Args {
                 prompt: Some("hi there".into()),
                 resume: Some("id".into()),
+                list_sessions: false,
                 function: Some("coder".into()),
                 reasoning: None,
                 yes: false,
@@ -363,6 +375,21 @@ mod tests {
             parse_strs(&["-p", "a", "-p", "b"]),
             Err(Error::RepeatedOption(o)) if o == "-p"
         ));
+    }
+
+    #[test]
+    fn resume_with_no_id_lists_the_sessions() {
+        // AGL-058, D20.
+        let Command::Run(args) = parse_strs(&["--resume"]).unwrap() else {
+            panic!("not a run");
+        };
+        assert!(args.list_sessions);
+        assert_eq!(args.resume, None);
+        let Command::Run(args) = parse_strs(&["--resume", "last"]).unwrap() else {
+            panic!("not a run");
+        };
+        assert!(!args.list_sessions);
+        assert_eq!(args.resume.as_deref(), Some("last"));
     }
 
     #[test]
