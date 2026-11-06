@@ -17,7 +17,7 @@
   outputs =
     { self, nixpkgs, llama-cpp, functions, nixos-wsl }:
     let
-      # NixOS on x86-64, also in WSL (AGL-056, D1).
+      # Linux on x86-64, also in WSL (AGL-057, D6).
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
@@ -48,6 +48,17 @@
           ./nix
         ];
       };
+
+      # llama-server of the pinned version. Outside NixOS it finds no Vulkan
+      # driver of the system, and none of them works from the store (AGL-052,
+      # measured on Ubuntu): it takes Mesa from the store, on AMD and Intel
+      # (AGL-057, D6).
+      linuxEngine = pkgs.writeShellScriptBin "llama-server" ''
+        if [ -z "''${VK_DRIVER_FILES:-}" ] && [ ! -d /run/opengl-driver ]; then
+          export VK_DRIVER_FILES=${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json:${pkgs.mesa}/share/vulkan/icd.d/intel_icd.x86_64.json
+        fi
+        exec ${llama-cpp.packages.${system}.vulkan}/bin/llama-server "$@"
+      '';
 
       # The official Windows release of the same commit as v0.9.0, for WSL,
       # which runs it from the store (AGL-052, D9).
@@ -133,8 +144,8 @@
       lib = import ./nix { inherit functions; };
 
       packages.${system} = {
-        # NixOS with its own server, llama-server of the pinned version.
-        default = withEngine "agentLIBRE" llama-cpp.packages.${system}.vulkan;
+        # Linux with its own server.
+        default = withEngine "agentLIBRE" linuxEngine;
         # NixOS-WSL, where the server runs on Windows (AGL-052, D10).
         wsl = withEngine "agentLIBRE-wsl" windowsEngine;
         # A machine whose server is outside it (AGL-052, D4).
