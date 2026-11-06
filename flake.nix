@@ -166,6 +166,15 @@
         ];
       };
 
+      # The known vulnerabilities of `Cargo.lock`, by hand (AGL-058, D16): the
+      # database changes with no commit, so it is no part of `checks`.
+      apps.${system}.audit = {
+        type = "app";
+        program = "${pkgs.writeShellScript "agentLIBRE-audit" ''
+          exec ${pkgs.cargo-audit}/bin/cargo-audit audit --file ${./Cargo.lock} "$@"
+        ''}";
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           pkgs.cargo
