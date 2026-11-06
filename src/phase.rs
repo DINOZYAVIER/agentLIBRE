@@ -255,8 +255,10 @@ impl Observer {
     /// agent appends its events to, and that write stops the turn.
     fn write(&mut self, line: Json) {
         match &mut self.file {
+            // One write: `Display` of a value alone would make one per piece.
             Some(file) => {
-                let _ = writeln!(file, "{line}").and_then(|()| file.flush());
+                let text = format!("{line}\n");
+                let _ = file.write_all(text.as_bytes()).and_then(|()| file.flush());
             }
             None => self.pending.push(line),
         }
@@ -414,6 +416,10 @@ impl Report for Observed<'_> {
     }
     fn thinking_done(&mut self) {
         self.report.thinking_done();
+    }
+    fn action_started(&mut self) {
+        self.enter(PhaseEvent::FirstText);
+        self.report.action_started();
     }
     fn action_text(&mut self, piece: &str) {
         self.enter(PhaseEvent::FirstText);

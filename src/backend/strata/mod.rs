@@ -435,6 +435,8 @@ impl Accumulator {
             self.text.push_str(piece);
         }
         for call in delta["tool_calls"].as_array().into_iter().flatten() {
+            // A call is being written: no text comes of it (AGL-058, D7).
+            on_text("");
             let index = call["index"].as_u64().unwrap_or(0) as usize;
             while self.calls.len() <= index {
                 self.calls.push(StructuredCall {

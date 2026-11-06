@@ -30,6 +30,9 @@ pub trait Report {
     fn thinking(&mut self, piece: &str);
     /// Thinking of this step is over.
     fn thinking_done(&mut self);
+    /// The first token of the action, shown or not: the text of a call is
+    /// not, and it is being written all the same (AGL-058, D7).
+    fn action_started(&mut self) {}
     /// A piece of the action's text as it streams; never a piece of the
     /// call itself (D131).
     fn action_text(&mut self, _piece: &str) {}
@@ -334,6 +337,7 @@ impl Agent<'_> {
             Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
             &mut |_| {},
             &mut |piece| {
+                cell.borrow_mut().action_started();
                 if open_reasoning {
                     return;
                 }
@@ -439,7 +443,10 @@ impl Agent<'_> {
                     if open.replace(false) {
                         cell.borrow_mut().thinking_done();
                     }
-                    cell.borrow_mut().action_text(piece);
+                    cell.borrow_mut().action_started();
+                    if !piece.is_empty() {
+                        cell.borrow_mut().action_text(piece);
+                    }
                 },
             )?;
             if open.replace(false) {
