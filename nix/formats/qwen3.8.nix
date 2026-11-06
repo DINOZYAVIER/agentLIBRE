@@ -5,6 +5,9 @@
   think = {
     open = "<think>\n";
     close = "\n</think>\n\n";
+    # It may write this after a line of its own even with an empty block
+    # (AGL-058, D8), and that is not part of the answer.
+    stray_close = "</think>";
   };
   call = {
     begin = "<tool_call>\n<function={name}>\n";

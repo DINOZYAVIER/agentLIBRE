@@ -308,7 +308,11 @@ pub mod tests {
     /// test `builtin_qwen_is_the_nix_one` keeps the two the same).
     pub fn qwen_value() -> Value {
         json!({
-            "think": { "open": "<think>\n", "close": "\n</think>\n\n" },
+            "think": {
+                "open": "<think>\n",
+                "close": "\n</think>\n\n",
+                "stray_close": "</think>",
+            },
             "call": {
                 "begin": "<tool_call>\n<function={name}>\n",
                 "param": "<parameter={name}>\n{value}\n</parameter>\n",
@@ -387,9 +391,11 @@ pub mod tests {
         assert_eq!(cut(&format!("I will look.<channel|>{call}")), call);
         assert_eq!(cut(&format!("I will look.{call}")), call);
         // A format with no such mark changes nothing.
-        let plain = qwen();
+        let plain = parse(json!({ "call": self::call() })).unwrap();
         assert!(!plain.reasons_in_the_open());
         assert_eq!(plain.outside_reasoning("a<channel|>b").into_owned(), "a<channel|>b");
+        // Qwen writes its answer, its mark and its answer again (AGL-058, D8).
+        assert_eq!(qwen().outside_reasoning("Paris.\n</think>\n\nParis.").into_owned(), "Paris.");
     }
 
     #[test]
@@ -447,7 +453,7 @@ pub mod tests {
                 close: "\n</think>\n\n".into(),
                 empty: "<think>\n\n</think>\n\n".into(),
                 no_block_after: None,
-                stray_close: None,
+                stray_close: Some("</think>".into()),
             })
         );
         assert_eq!(
