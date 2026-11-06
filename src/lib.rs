@@ -497,6 +497,14 @@ fn agent_session(
             .map(|dir| dir.join("docs/session-file.md"))
             .filter(|file| file.is_file());
         let git_root = about::git_root(&workspace);
+        let in_wsl = std::fs::read_to_string("/proc/version")
+            .is_ok_and(|version| version.to_ascii_lowercase().contains("microsoft"));
+        let system = about::system(
+            std::env::consts::OS,
+            std::fs::read_to_string("/etc/os-release").ok().as_deref(),
+            in_wsl,
+            wsl::engine_is_windows(),
+        );
         let now = session::utc_now();
         let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
         let (server_kind, model) = match settings.server.kind() {
@@ -506,7 +514,7 @@ fn agent_session(
         about::About {
             workspace: &workspace,
             git_root: git_root.as_deref(),
-            system: std::env::consts::OS,
+            system: &system,
             date: &now[..10.min(now.len())],
             version: &version,
             function: &settings.function,

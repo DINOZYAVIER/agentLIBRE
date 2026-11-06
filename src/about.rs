@@ -24,6 +24,29 @@ pub fn version(rev: Option<&str>) -> String {
     }
 }
 
+/// What the block says of the system (AGL-058, D17): the kind of system, its
+/// distribution, and WSL with the place of the server, which is another system.
+pub fn system(os: &str, os_release: Option<&str>, in_wsl: bool, server_on_windows: bool) -> String {
+    let distribution = os_release.and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+            .map(|name| name.trim().trim_matches('"').to_owned())
+            .filter(|name| !name.is_empty())
+    });
+    let mut line = os.to_owned();
+    if let Some(distribution) = distribution {
+        line.push_str(", ");
+        line.push_str(&distribution);
+    }
+    if in_wsl {
+        line.push_str(", in WSL");
+    }
+    if server_on_windows {
+        line.push_str("; the server runs on Windows, and its weights are on the Windows disk");
+    }
+    line
+}
+
 /// The nearest directory at or above `dir` that holds `.git`.
 pub fn git_root(dir: &Path) -> Option<PathBuf> {
     dir.ancestors()
@@ -114,6 +137,18 @@ impl About<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_names_its_distribution_and_wsl() {
+        let release = "NAME=NixOS\nPRETTY_NAME=\"NixOS 26.05 (Yarara)\"\nID=nixos\n";
+        assert_eq!(system("linux", None, false, false), "linux");
+        assert_eq!(system("linux", Some(release), false, false), "linux, NixOS 26.05 (Yarara)");
+        assert_eq!(
+            system("linux", Some(release), true, true),
+            "linux, NixOS 26.05 (Yarara), in WSL; the server runs on Windows, and its weights are on the Windows disk"
+        );
+        assert_eq!(system("linux", Some("ID=x\n"), true, false), "linux, in WSL");
+    }
 
     fn about<'a>() -> About<'a> {
         About {
