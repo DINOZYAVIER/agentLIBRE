@@ -103,7 +103,7 @@ What failed in a session:
 ```sh
 jq -c 'select((.type == "result" and .outcome != "ok")
   or (.type == "command" and .failed) or .type == "stop" or .violation == true)
-  | {type, event, line, reason, outcome, content: (.content // "" | .[0:200])}' "$FILE"
+  | {type, event, line, reason, outcome, content: (.content // .output // "" | .[0:200])}' "$FILE"
 ```
 
 If `jq` is not there, read the lines with any JSON tool in the same way.

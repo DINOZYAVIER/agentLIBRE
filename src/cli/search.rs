@@ -20,7 +20,7 @@ use crate::{outln, tr};
 
 /// Where the key and the certificate go when the user's `search` names no
 /// file of its own (AGL-043 F20), under the user's settings directory.
-const CREDENTIALS: &str = "credentials/ayeque-search";
+const CREDENTIALS: &str = "credentials/search";
 
 /// The subject `step` is asked for. The OIDC provisioner of step-ca takes
 /// the subject and the names of the certificate from the token (its `sub`

@@ -1957,8 +1957,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// A fresh store was created for a new location; the others are named.
     pub const FORGE_FRESH_STORE: Msg = Msg {
-        en: "created a new store {dir}; the existing stores are {names} (forge rehome reconnects a moved workspace)",
-        uk: "створено нове сховище {dir}; наявні сховища: {names} (forge rehome повертає переміщену робочу область)",
+        en: "this directory gets a new store {dir}; the existing stores are {names} (forge rehome reconnects a moved workspace)",
+        uk: "ця тека отримує нове сховище {dir}; наявні сховища: {names} (forge rehome повертає переміщену робочу область)",
     };
 
     /// The new-store choice of the store ask.
