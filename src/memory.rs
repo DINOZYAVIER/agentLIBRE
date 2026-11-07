@@ -5,6 +5,7 @@
 //! by hand (M30, M32, M34).
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::action::Outcome;
@@ -202,11 +203,13 @@ fn clean_title(title: &str) -> String {
 }
 
 /// A name is the file name of an entry without `.md`: the letters and
-/// digits of any script and `-`, as a slug is (M31).
+/// digits of any script and `-`, as a slug is (M31). The index is no entry:
+/// removing it would take every line with it (AGL-060).
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= NAME_LIMIT + 8
         && name.chars().all(|c| c.is_alphanumeric() || c == '-')
+        && format!("{name}.md") != INDEX
 }
 
 fn entry_path(dir: &Path, name: &str) -> PathBuf {
@@ -431,7 +434,13 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
         return fail(format!("No memory entry `{name}`."));
     }
     let link = format!("]({name}.md)");
-    let index = fs::read_to_string(dir.join(INDEX)).unwrap_or_default();
+    // An index that cannot be read is not an empty one: writing the lines
+    // kept would lose all of them (AGL-060).
+    let index = match fs::read_to_string(dir.join(INDEX)) {
+        Ok(index) => index,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return fail(format!("Cannot read the index: {error}")),
+    };
     let kept: String = index
         .lines()
         .filter(|line| !line.contains(&link))
@@ -889,6 +898,28 @@ mod tests {
         assert!(show(&dir.0, "long-one", &out()).content.contains(long.trim_end()));
         assert_eq!(hook_of("a\nb  c"), "a b c");
         assert_eq!(remember(&dir.0, "", "t").0.outcome, Outcome::Fail);
+    }
+
+    #[test]
+    fn the_index_is_no_entry() {
+        // AGL-060: `remove MEMORY` would take every line with it.
+        let dir = Dir::new("index-no-entry");
+        added(&dir.0, "One", "first", "1");
+        assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
+        assert!(dir.0.join(INDEX).is_file());
+    }
+
+    #[test]
+    fn remove_does_not_empty_an_index_it_cannot_read() {
+        // AGL-060.
+        let dir = Dir::new("remove-bad-index");
+        let one = added(&dir.0, "One", "first", "1");
+        fs::write(dir.0.join(INDEX), b"- [One](one.md) \xff\n").unwrap();
+        let (result, write) = remove(&dir.0, &one);
+        assert_eq!(result.outcome, Outcome::Fail);
+        assert!(write.is_none());
+        assert_eq!(fs::read(dir.0.join(INDEX)).unwrap(), b"- [One](one.md) \xff\n");
+        assert!(entry_path(&dir.0, &one).exists());
     }
 
     #[test]
