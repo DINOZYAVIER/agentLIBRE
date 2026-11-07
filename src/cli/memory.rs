@@ -104,7 +104,8 @@ pub fn show_text(dir: Option<&Path>, name: &str) -> Result<String, Error> {
     memory::whole(entry_dir(dir, name)?, name)
 }
 
-/// The memory directory, when `name` is an entry in it.
+/// The memory directory, when `name` is an entry in it, by its file or by its
+/// line (AGL-060, D8).
 pub fn entry_dir<'a>(dir: Option<&'a Path>, name: &str) -> Result<&'a Path, Error> {
     dir.filter(|dir| memory::exists(dir, name))
         .ok_or_else(|| Error::MemoryNoEntry {
@@ -277,6 +278,23 @@ mod tests {
         remove_asked(Some(&dir), "one", true, Some(&never), Lang::En).unwrap();
         remove_asked(Some(&dir), "two", true, None, Lang::En).unwrap();
         assert!(!dir.join("one.md").exists() && !dir.join("two.md").exists());
+    }
+
+    #[test]
+    fn a_line_with_no_file_can_be_removed_and_has_no_text_to_show() {
+        // AGL-060, D8.
+        let root = TempDir::new();
+        let dir = two_entries(&root.0);
+        fs::remove_file(dir.join("one.md")).unwrap();
+        assert!(matches!(show_text(Some(&dir), "one"), Err(Error::MemoryNoEntry { .. })));
+        assert_eq!(
+            remove_asked(Some(&dir), "one", true, None, Lang::En).unwrap(),
+            "removed: one"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(INDEX)).unwrap(),
+            "- [Two](two.md) — second\n"
+        );
     }
 
     #[test]

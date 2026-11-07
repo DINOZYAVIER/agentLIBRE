@@ -436,9 +436,10 @@ pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, O
     )
 }
 
-/// `remove name` (M32): deletes the file and its index line.
+/// `remove name` (M32): deletes the file and its index line; either alone is
+/// enough, as a hand edit can leave one without the other (AGL-060, D8).
 pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
-    if !valid_name(name) || !entry_path(dir, name).is_file() {
+    if !valid_name(name) {
         return fail(format!("No memory entry `{name}`."));
     }
     let link = format!("]({name}.md)");
@@ -449,6 +450,10 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
         Err(error) => return fail(format!("Cannot read the index: {error}")),
     };
+    let file = entry_path(dir, name).is_file();
+    if !file && !index.lines().any(|line| line.contains(&link)) {
+        return fail(format!("No memory entry `{name}`."));
+    }
     let kept: String = index
         .lines()
         .filter(|line| !line.contains(&link))
@@ -457,7 +462,7 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
     if let Err(error) = write_atomic(&dir.join(INDEX), &kept) {
         return fail(format!("Cannot write the index: {error:?}"));
     }
-    if let Err(error) = fs::remove_file(entry_path(dir, name)) {
+    if file && let Err(error) = fs::remove_file(entry_path(dir, name)) {
         return fail(format!("Cannot remove the entry: {error}"));
     }
     ok(
@@ -633,9 +638,13 @@ pub fn list(dir: &Path) -> Result<Vec<Listed>, Error> {
     Ok(entries)
 }
 
-/// Whether `name` is an entry with a file.
+/// Whether `name` is an entry: it has a file or a line of the index.
 pub fn exists(dir: &Path, name: &str) -> bool {
-    valid_name(name) && entry_path(dir, name).is_file()
+    let link = format!("]({name}.md)");
+    valid_name(name)
+        && (entry_path(dir, name).is_file()
+            || fs::read_to_string(dir.join(INDEX))
+                .is_ok_and(|index| index.lines().any(|line| line.contains(&link))))
 }
 
 /// The whole text of an entry, for the human: [`show`] cuts a long one for
@@ -1063,6 +1072,30 @@ mod tests {
         assert!(matches!(whole(&dir.0, "MEMORY"), Err(Error::MemoryNoEntry { .. })));
         assert_eq!(list(&dir.0).unwrap().len(), 1);
         assert!(dir.0.join(INDEX).is_file());
+    }
+
+    #[test]
+    fn remove_takes_a_line_with_no_file_and_a_file_with_no_line() {
+        // AGL-060, D8.
+        let dir = Dir::new("remove-out-of-step");
+        added(&dir.0, "Gone", "first", "1");
+        added(&dir.0, "Kept", "second", "2");
+        added(&dir.0, "Stray", "third", "3");
+        fs::remove_file(entry_path(&dir.0, "gone")).unwrap();
+        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        fs::write(dir.0.join(INDEX), index.replace("- [Stray](stray.md) — third\n", "")).unwrap();
+        assert!(exists(&dir.0, "gone") && exists(&dir.0, "stray"));
+        for name in ["gone", "stray"] {
+            let (result, write) = remove(&dir.0, name);
+            assert_eq!(result.content, format!("Removed `{name}`."));
+            assert_eq!(write.unwrap().kind, Kind::Removed);
+            assert!(!exists(&dir.0, name), "{name}");
+            assert_eq!(remove(&dir.0, name).0.outcome, Outcome::Fail, "{name}");
+        }
+        assert_eq!(
+            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
+            "- [Kept](kept.md) — second\n"
+        );
     }
 
     #[test]
