@@ -2,8 +2,10 @@
 //! `<store>/memory/`, one Markdown file each and an index, `MEMORY.md`,
 //! one line per entry (M31): `- [title](name.md) — a one-line hook`. The
 //! model writes them with the `memory` tool, the human with `/remember` or
-//! by hand (M30, M32, M34).
+//! by hand (M30, M32, M34); the human looks at them and removes them with
+//! `agl memory` and `/memory` (AGL-060).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -62,10 +64,7 @@ impl StoreHome {
 impl Home for StoreHome {
     fn read(&self) -> Option<PathBuf> {
         let (ws, _) = self.resolved().ok()?;
-        ws.dir
-            .join(crate::forge::MARKER_FILE)
-            .is_file()
-            .then(|| ws.dir.join("memory"))
+        of_store(&ws.dir)
     }
 
     fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
@@ -73,6 +72,15 @@ impl Home for StoreHome {
         lines.extend(crate::forge::materialize(&ws, self.lang)?);
         Ok((ws.dir.join("memory"), lines))
     }
+}
+
+/// The memory directory of the store at `store`, when it is a store; nothing
+/// is created.
+pub fn of_store(store: &Path) -> Option<PathBuf> {
+    store
+        .join(crate::forge::MARKER_FILE)
+        .is_file()
+        .then(|| store.join("memory"))
 }
 
 /// What the memory tool did, for the event and the marker (M28, M36).
@@ -474,7 +482,14 @@ pub fn index_text(dir: &Path) -> Option<String> {
     if text.len() <= INDEX_CAP {
         return Some(text.to_owned());
     }
-    let mut kept: Vec<std::borrow::Cow<str>> = Vec::new();
+    let mut kept = newest_lines(text);
+    kept.reverse();
+    Some(format!("[memory truncated]\n{}", kept.join("\n")))
+}
+
+/// The lines of an index over the cap that the prompt carries, newest first.
+fn newest_lines(text: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    let mut kept = Vec::new();
     let mut size = 0;
     for line in text.lines().rev() {
         let line = shown_line(line);
@@ -484,8 +499,7 @@ pub fn index_text(dir: &Path) -> Option<String> {
         size += line.len() + 1;
         kept.push(line);
     }
-    kept.reverse();
-    Some(format!("[memory truncated]\n{}", kept.join("\n")))
+    kept
 }
 
 /// A line of the index as the prompt carries it: whole, unless it alone is over
@@ -500,6 +514,145 @@ fn shown_line(line: &str) -> std::borrow::Cow<'_, str> {
         end -= 1;
     }
     format!("{}…", &line[..end]).into()
+}
+
+/// An entry as `agl memory list` shows it (AGL-060, D4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub name: String,
+    pub title: String,
+    /// Empty for a file with no line.
+    pub hook: String,
+    /// The prompt carries its line (M33).
+    pub in_prompt: bool,
+    /// Its file exists.
+    pub file: bool,
+    /// `MEMORY.md` has its line.
+    pub line: bool,
+}
+
+/// The title, the name and the hook of a line of the index; `None` for a line
+/// that is no entry's, as a hand-written heading.
+fn index_line(line: &str) -> Option<(&str, &str, &str)> {
+    let open = line.find('[')?;
+    let link = open + line[open..].find("](")?;
+    let target = &line[link + 2..];
+    let close = target.find(".md)")?;
+    let name = &target[..close];
+    if !valid_name(name) {
+        return None;
+    }
+    let after = &target[close + ".md)".len()..];
+    let hook = after.strip_prefix(" — ").unwrap_or(after).trim();
+    Some((&line[open + 1..link], name, hook))
+}
+
+/// The names of the entry files of `dir`; none when `dir` does not exist.
+fn entry_files(dir: &Path) -> Result<BTreeSet<String>, Error> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(source) => {
+            return Err(Error::Read {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|source| Error::Read {
+                path: dir.to_path_buf(),
+                source,
+            })?
+            .path();
+        if path.is_file()
+            && path.extension().is_some_and(|ext| ext == "md")
+            && let Some(name) = path.file_stem().and_then(|stem| stem.to_str())
+            && valid_name(name)
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Every entry of `dir` (AGL-060, D4): the lines of the index in their order,
+/// then the files with no line by name. An index that cannot be read is an
+/// error, not an empty memory.
+pub fn list(dir: &Path) -> Result<Vec<Listed>, Error> {
+    let path = dir.join(INDEX);
+    let index = match fs::read_to_string(&path) {
+        Ok(index) => index,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(source) => return Err(Error::Read { path, source }),
+    };
+    let index = index.trim();
+    let total = index.lines().count();
+    let carried = if index.len() <= INDEX_CAP {
+        total
+    } else {
+        newest_lines(index).len()
+    };
+    let mut files = entry_files(dir)?;
+    let mut entries = Vec::new();
+    let mut lined = BTreeSet::new();
+    for (number, line) in index.lines().enumerate() {
+        let Some((title, name, hook)) = index_line(line) else {
+            continue;
+        };
+        lined.insert(name.to_owned());
+        entries.push(Listed {
+            name: name.to_owned(),
+            title: title.to_owned(),
+            hook: hook.to_owned(),
+            in_prompt: number + carried >= total,
+            file: files.contains(name),
+            line: true,
+        });
+    }
+    files.retain(|name| !lined.contains(name));
+    for name in files {
+        let heading = fs::read_to_string(entry_path(dir, &name)).ok();
+        let title = heading
+            .as_deref()
+            .and_then(|text| text.lines().next())
+            .and_then(|first| first.strip_prefix("# "))
+            .unwrap_or(&name)
+            .to_owned();
+        entries.push(Listed {
+            name,
+            title,
+            hook: String::new(),
+            in_prompt: false,
+            file: true,
+            line: false,
+        });
+    }
+    Ok(entries)
+}
+
+/// Whether `name` is an entry with a file.
+pub fn exists(dir: &Path, name: &str) -> bool {
+    valid_name(name) && entry_path(dir, name).is_file()
+}
+
+/// The whole text of an entry, for the human: [`show`] cuts a long one for
+/// the model (AGL-060).
+pub fn whole(dir: &Path, name: &str) -> Result<String, Error> {
+    let missing = || Error::MemoryNoEntry {
+        name: name.to_owned(),
+    };
+    if !valid_name(name) {
+        return Err(missing());
+    }
+    let path = entry_path(dir, name);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(missing()),
+        Err(source) => Err(Error::Read { path, source }),
+    }
 }
 
 /// Writes the summary of a compaction to `summaries/<date>-<session>.md`
@@ -905,7 +1058,10 @@ mod tests {
         // AGL-060: `remove MEMORY` would take every line with it.
         let dir = Dir::new("index-no-entry");
         added(&dir.0, "One", "first", "1");
+        assert!(!exists(&dir.0, "MEMORY"));
         assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
+        assert!(matches!(whole(&dir.0, "MEMORY"), Err(Error::MemoryNoEntry { .. })));
+        assert_eq!(list(&dir.0).unwrap().len(), 1);
         assert!(dir.0.join(INDEX).is_file());
     }
 
@@ -920,6 +1076,75 @@ mod tests {
         assert!(write.is_none());
         assert_eq!(fs::read(dir.0.join(INDEX)).unwrap(), b"- [One](one.md) \xff\n");
         assert!(entry_path(&dir.0, &one).exists());
+    }
+
+    #[test]
+    fn list_gives_the_lines_in_order_and_then_the_files_with_no_line() {
+        // AGL-060, D4.
+        let dir = Dir::new("list");
+        assert_eq!(list(&dir.0).unwrap(), Vec::new());
+        added(&dir.0, "One", "first — with a dash", "1");
+        added(&dir.0, "Gone", "second", "2");
+        added(&dir.0, "Stray", "third", "3");
+        fs::remove_file(entry_path(&dir.0, "gone")).unwrap();
+        let mut index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        index = index.replace("- [Stray](stray.md) — third\n", "");
+        fs::write(dir.0.join(INDEX), format!("# A heading by hand\n{index}")).unwrap();
+        fs::write(entry_path(&dir.0, "bare"), "no heading\n").unwrap();
+        fs::create_dir_all(dir.0.join(SUMMARIES)).unwrap();
+        let entries = list(&dir.0).unwrap();
+        let shape: Vec<(&str, &str, &str, bool, bool, bool)> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.title.as_str(), e.hook.as_str(), e.in_prompt, e.file, e.line))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("one", "One", "first — with a dash", true, true, true),
+                ("gone", "Gone", "second", true, false, true),
+                ("bare", "bare", "", false, true, false),
+                ("stray", "Stray", "", false, true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_marks_the_lines_the_prompt_does_not_carry() {
+        // AGL-060, D4: the same lines as the index of the prompt (M33).
+        let dir = Dir::new("list-cut");
+        for n in 0..200 {
+            added(&dir.0, &format!("Entry {n}"), &"x".repeat(40), "t");
+        }
+        let entries = list(&dir.0).unwrap();
+        assert_eq!(entries.len(), 200);
+        let prompt = index_text(&dir.0).unwrap();
+        for entry in &entries {
+            let link = format!("]({}.md)", entry.name);
+            assert_eq!(entry.in_prompt, prompt.contains(&link), "{}", entry.name);
+        }
+        assert!(!entries[0].in_prompt);
+        assert!(entries[199].in_prompt);
+    }
+
+    #[test]
+    fn list_tells_an_index_it_cannot_read_from_an_empty_memory() {
+        // AGL-060.
+        let dir = Dir::new("list-bad-index");
+        fs::create_dir_all(&dir.0).unwrap();
+        fs::write(dir.0.join(INDEX), b"\xff\n").unwrap();
+        assert!(matches!(list(&dir.0), Err(Error::Read { .. })));
+    }
+
+    #[test]
+    fn whole_gives_a_long_entry_uncut() {
+        // AGL-060.
+        let dir = Dir::new("whole");
+        let long = "é".repeat(20_000);
+        let name = added(&dir.0, "Long", "h", &long);
+        assert_eq!(whole(&dir.0, &name).unwrap(), format!("# Long\n\n{long}\n"));
+        for name in ["nope", "../etc/passwd", ""] {
+            assert!(matches!(whole(&dir.0, name), Err(Error::MemoryNoEntry { .. })), "{name}");
+        }
     }
 
     #[test]

@@ -165,6 +165,7 @@ Usage: agl [-p <message> [--attach <path>]...] [--resume [<id>|last]] [--functio
        agl server command [--function <name>]
        agl function list|use <name> [--user]
        agl search login
+       agl memory list|show <name>|remove <name> [--yes]
        agl forge list|show|new|status|range|check|log|diff|rehome
 
 Without -p, agl starts an interactive session.
@@ -208,6 +209,14 @@ Search (`search` of the user's settings.nix):
                       `search.ca`, through a login in the browser; its files
                       go into `search`
 
+Memory (the entries of the project, `memory/` of its store):
+  memory list                   the entries, with their titles and hooks; marks
+                                what the prompt does not carry and what is out
+                                of step with MEMORY.md
+  memory show <name>            the whole text of an entry
+  memory remove <name> [--yes]  delete an entry and its line; it asks first,
+                                as nothing can bring it back
+
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
   forge list                      the artifacts of the workspace
@@ -229,6 +238,7 @@ under XDG_DATA_HOME):
               agl server command [--function <назва>]
               agl function list|use <назва> [--user]
               agl search login
+              agl memory list|show <назва>|remove <назва> [--yes]
               agl forge list|show|new|status|range|check|log|diff|rehome
 
 Без -p agl запускає інтерактивну сесію.
@@ -271,6 +281,13 @@ under XDG_DATA_HOME):
   search login        клієнтський сертифікат пошуку від step-ca із
                       `search.ca` через вхід у браузері; його файли
                       записуються в `search`
+
+Пам'ять (записи проєкту, `memory/` у його сховищі):
+  memory list                    записи, з назвами і підказками; позначає те, чого
+                                 немає в промпті, і розбіжності з MEMORY.md
+  memory show <назва>            увесь текст запису
+  memory remove <назва> [--yes]  видалити запис і його рядок; спершу питає, бо
+                                 нічим його не повернути
 
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
@@ -1354,6 +1371,66 @@ Forge (сховище артефактів робочої області, agentL
     pub const REMEMBER_FAILED: Msg = Msg {
         en: "not remembered: {reason}",
         uk: "не збережено: {reason}",
+    };
+
+    /// `agl memory list` over no entries (AGL-060).
+    pub const MEMORY_EMPTY: Msg = Msg {
+        en: "the memory has no entries",
+        uk: "у пам'яті немає записів",
+    };
+
+    /// The legend of the mark `~` (AGL-060, D4).
+    pub const MEMORY_MARK_CUT: Msg = Msg {
+        en: "~  not in the prompt, which holds at most 4 KB of MEMORY.md, the newest lines",
+        uk: "~  немає в промпті: він містить щонайбільше 4 КБ MEMORY.md, найновіші рядки",
+    };
+
+    /// The legend of the mark `?` (AGL-060, D4).
+    pub const MEMORY_MARK_NO_LINE: Msg = Msg {
+        en: "?  a file with no line in MEMORY.md",
+        uk: "?  файл без рядка в MEMORY.md",
+    };
+
+    /// The legend of the mark `!` (AGL-060, D4).
+    pub const MEMORY_MARK_NO_FILE: Msg = Msg {
+        en: "!  a line in MEMORY.md with no file",
+        uk: "!  рядок у MEMORY.md без файлу",
+    };
+
+    /// The question of a removal (AGL-060, D3, D7).
+    pub const MEMORY_REMOVE_ASK: Msg = Msg {
+        en: "Remove the memory entry {name}? [y/N]",
+        uk: "Видалити запис пам'яті {name}? [y/N]",
+    };
+
+    /// A removal the human said no to (AGL-060).
+    pub const MEMORY_NOT_REMOVED: Msg = Msg {
+        en: "not removed: {name}",
+        uk: "не видалено: {name}",
+    };
+
+    /// `agl memory remove` is done (AGL-060).
+    pub const MEMORY_REMOVED: Msg = Msg {
+        en: "removed: {name}",
+        uk: "видалено: {name}",
+    };
+
+    /// `Error::MemoryNoEntry`.
+    pub const MEMORY_NO_ENTRY: Msg = Msg {
+        en: "no memory entry {name}",
+        uk: "немає запису пам'яті {name}",
+    };
+
+    /// `Error::MemoryRemoveNeedsYes`.
+    pub const MEMORY_REMOVE_NEEDS_YES: Msg = Msg {
+        en: "{name} not removed: there is no terminal to ask on; add --yes",
+        uk: "{name} не видалено: немає термінала, щоб спитати; додай --yes",
+    };
+
+    /// `Error::MemoryRemoveFailed`.
+    pub const MEMORY_REMOVE_FAILED: Msg = Msg {
+        en: "not removed: {reason}",
+        uk: "не видалено: {reason}",
     };
 
     pub const CMD_THINK: Msg = Msg {
@@ -2655,6 +2732,13 @@ impl Error {
                     stores.join(", ")
                 };
                 tr!(lang, m::STORE_NOT_FOUND, name = name, stores = stores)
+            }
+            Error::MemoryNoEntry { name } => tr!(lang, m::MEMORY_NO_ENTRY, name = name),
+            Error::MemoryRemoveNeedsYes { name } => {
+                tr!(lang, m::MEMORY_REMOVE_NEEDS_YES, name = name)
+            }
+            Error::MemoryRemoveFailed { reason } => {
+                tr!(lang, m::MEMORY_REMOVE_FAILED, reason = reason)
             }
             Error::ArtifactFrontMatter { path } => {
                 tr!(lang, m::ARTIFACT_FRONT_MATTER, path = path.display())

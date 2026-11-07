@@ -281,6 +281,12 @@ pub enum Error {
     InsideDataDir { dir: PathBuf, data: PathBuf },
     /// No store is named `name`.
     StoreNotFound { name: String, stores: Vec<String> },
+    /// `agl memory` or `/memory`: no entry `name` (AGL-060).
+    MemoryNoEntry { name: String },
+    /// A removal with no terminal to ask on and no `--yes` (AGL-060, D3, D7).
+    MemoryRemoveNeedsYes { name: String },
+    /// A removal that could not be done (AGL-060).
+    MemoryRemoveFailed { reason: String },
     /// An artifact file has no `---` front-matter delimiters.
     ArtifactFrontMatter { path: PathBuf },
     /// An artifact file carries a schema the forge does not parse.

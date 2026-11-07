@@ -29,6 +29,56 @@ pub enum Command {
     Function(FunctionAction),
     /// `agl search login` (AGL-043 F20).
     Search(SearchAction),
+    /// `agl memory list|show|remove` (AGL-060).
+    Memory(MemoryAction),
+}
+
+/// What `agl memory` and `/memory` ask for (AGL-060, D2, D5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryAction {
+    List,
+    Show { name: String },
+    /// `yes`: no question (D3).
+    Remove { name: String, yes: bool },
+}
+
+/// Reads the words after `memory`, of the command line and of `/memory`.
+pub fn memory_action(words: impl IntoIterator<Item = String>) -> Result<MemoryAction, Error> {
+    let mut words = words.into_iter();
+    let action = words
+        .next()
+        .ok_or_else(|| Error::MissingValue("memory".into()))?;
+    let parsed = match action.as_str() {
+        "list" => MemoryAction::List,
+        "show" => MemoryAction::Show {
+            name: words
+                .next()
+                .ok_or_else(|| Error::MissingValue("show".into()))?,
+        },
+        "remove" => {
+            let mut name = None;
+            let mut yes = false;
+            for word in words.by_ref() {
+                match word.as_str() {
+                    "--yes" if yes => return Err(Error::RepeatedOption(word)),
+                    "--yes" => yes = true,
+                    _ if word.starts_with('-') || name.is_some() => {
+                        return Err(Error::UnknownOption(word));
+                    }
+                    _ => name = Some(word),
+                }
+            }
+            MemoryAction::Remove {
+                name: name.ok_or_else(|| Error::MissingValue("remove".into()))?,
+                yes,
+            }
+        }
+        _ => return Err(Error::UnknownOption(action)),
+    };
+    match words.next() {
+        Some(extra) => Err(Error::UnknownOption(extra)),
+        None => Ok(parsed),
+    }
 }
 
 /// `agl search login` (AGL-043 F20).
@@ -133,6 +183,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             return Err(Error::UnknownOption(text(extra)?));
         }
         return Ok(Command::Search(action));
+    }
+    if args.peek().is_some_and(|arg| arg == "memory") {
+        args.next();
+        let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
+        if matches!(words.first().map(String::as_str), Some("-h" | "--help")) {
+            return Ok(Command::Help);
+        }
+        return memory_action(words).map(Command::Memory);
     }
     if args.peek().is_some_and(|arg| arg == "server") {
         args.next();
@@ -489,6 +547,66 @@ mod tests {
             parse_strs(&["search", "login", "x"]),
             Err(Error::UnknownOption(word)) if word == "x"
         ));
+    }
+
+    #[test]
+    fn memory_commands() {
+        // AGL-060, D2, D3.
+        assert_eq!(
+            parse_strs(&["memory", "list"]).unwrap(),
+            Command::Memory(MemoryAction::List)
+        );
+        assert_eq!(
+            parse_strs(&["memory", "show", "tea"]).unwrap(),
+            Command::Memory(MemoryAction::Show { name: "tea".into() })
+        );
+        for words in [&["memory", "remove", "tea"][..], &["memory", "remove", "tea", "--yes"], &["memory", "remove", "--yes", "tea"]] {
+            assert_eq!(
+                parse_strs(words).unwrap(),
+                Command::Memory(MemoryAction::Remove {
+                    name: "tea".into(),
+                    yes: words.len() == 4,
+                })
+            );
+        }
+        for (words, word) in [
+            (&["memory"][..], "memory"),
+            (&["memory", "show"], "show"),
+            (&["memory", "remove"], "remove"),
+            (&["memory", "remove", "--yes"], "remove"),
+        ] {
+            assert!(
+                matches!(parse_strs(words), Err(Error::MissingValue(o)) if o == word),
+                "{words:?}"
+            );
+        }
+        for (words, word) in [
+            (&["memory", "add"][..], "add"),
+            (&["memory", "list", "x"], "x"),
+            (&["memory", "list", "--yes"], "--yes"),
+            (&["memory", "show", "a", "b"], "b"),
+            (&["memory", "show", "a", "--yes"], "--yes"),
+            (&["memory", "remove", "a", "b"], "b"),
+            (&["memory", "remove", "a", "--force"], "--force"),
+        ] {
+            assert!(
+                matches!(parse_strs(words), Err(Error::UnknownOption(o)) if o == word),
+                "{words:?}"
+            );
+        }
+        assert!(matches!(
+            parse_strs(&["memory", "remove", "a", "--yes", "--yes"]),
+            Err(Error::RepeatedOption(o)) if o == "--yes"
+        ));
+        assert_eq!(parse_strs(&["memory", "--help"]).unwrap(), Command::Help);
+        // Only the first word is a command; a message may say "memory".
+        assert_eq!(
+            parse_strs(&["-p", "memory"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("memory".into()),
+                ..Args::default()
+            })
+        );
     }
 
     #[test]

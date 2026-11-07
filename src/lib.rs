@@ -247,6 +247,11 @@ fn run(
             let (paths, user) = loaded?;
             return cli::search::run(action, &user, &paths, *lang);
         }
+        Command::Memory(action) => {
+            let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            return cli::memory::run(action, &user, &paths, &cwd, *lang);
+        }
     };
     let (paths, user) = loaded?;
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
