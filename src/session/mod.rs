@@ -125,9 +125,10 @@ pub struct CommandRun {
 
 impl CommandRun {
     /// What the model reads of it (AGL-047, D5), when anything: a failure in
-    /// full, so that it can help; of `/help` and `/status` the fact alone,
-    /// their output being no use in the context; `/quit`, `/exit` and `/new`
-    /// leave the session. The prefix is added where the message is rendered.
+    /// full, so that it can help; of `/help`, `/status` and `/memory list|show`
+    /// the fact alone, their output being no use in the context (AGL-060, D6);
+    /// `/quit`, `/exit` and `/new` leave the session. The prefix is added where
+    /// the message is rendered.
     fn message(&self) -> Option<String> {
         let name = self.line.split_whitespace().next().unwrap_or(&self.line);
         let ran = format!("the human ran: {}", self.line);
@@ -141,6 +142,7 @@ impl CommandRun {
         match name {
             "/quit" | "/exit" | "/new" => None,
             "/help" | "/status" => Some(ran),
+            "/memory" if self.line.split_whitespace().nth(1) != Some("remove") => Some(ran),
             _ => Some(match output {
                 Some(output) => format!("{ran}\n{output}"),
                 None => ran,

@@ -10,7 +10,7 @@ use crate::action::Outcome;
 use crate::cli::args::MemoryAction;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
-use crate::memory::{self, Listed};
+use crate::memory::{self, Home, Listed};
 use crate::paths::Paths;
 use crate::settings::UserFile;
 use crate::{outln, tr};
@@ -45,6 +45,16 @@ pub fn run(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `/memory list` and `/memory show`, of the store `home` finds; a removal
+/// is the caller's, which holds the session.
+pub fn looked_at(home: &dyn Home, action: &MemoryAction, lang: Lang) -> Result<String, Error> {
+    let dir = home.look()?;
+    match action {
+        MemoryAction::Show { name } => show_text(dir.as_deref(), name),
+        _ => list_text(dir.as_deref(), lang),
+    }
 }
 
 /// The lines of `list` (AGL-060, D4): `~` the prompt does not carry it, `?` a

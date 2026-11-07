@@ -39,9 +39,9 @@ pub fn stir_line(attempt: u32, error: &str, lang: Lang) -> String {
 }
 
 /// The `/` commands (D118, D139, AGL-013).
-pub const COMMANDS: [&str; 10] = [
-    "/quit", "/exit", "/help", "/status", "/think", "/attach", "/remember", "/new", "/compact",
-    "/function",
+pub const COMMANDS: [&str; 11] = [
+    "/quit", "/exit", "/help", "/status", "/think", "/attach", "/remember", "/memory", "/new",
+    "/compact", "/function",
 ];
 
 /// What `/remember` asked for (AGL-006, M34, M37).

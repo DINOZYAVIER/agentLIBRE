@@ -28,7 +28,8 @@ use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::{Prefill, ReasoningLevel, ToolCall};
-use crate::cli::serve::ServerProgress;
+use crate::cli::args::{MemoryAction, memory_action};
+use crate::cli::serve::{ServerProgress, is_yes};
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
@@ -70,6 +71,10 @@ struct Inner {
     compact: bool,
     /// `/remember name | text`, for the main thread to write (AGL-006).
     remember: Option<(String, String)>,
+    /// `/memory`, its line and action, for the main thread to run (AGL-060).
+    memory: Option<(String, MemoryAction)>,
+    /// A `/memory remove` waits for its `[y/N]` (AGL-060, D7).
+    question: Option<Question>,
     /// `/function`: the list of the Functions, for the main thread to show
     /// (AGL-036, D9).
     functions: bool,
@@ -155,6 +160,14 @@ impl Inner {
     }
 }
 
+/// A removal waiting for the answer of the human (AGL-060, D7): the next line
+/// is the answer, and no turn starts until it comes.
+#[derive(Debug, PartialEq, Eq)]
+struct Question {
+    line: String,
+    name: String,
+}
+
 /// What a slash command said (AGL-047, D5).
 #[derive(Default)]
 struct Said {
@@ -195,6 +208,20 @@ impl Input {
 
     /// Enter.
     fn submitted(&self, message: String) {
+        let question = self.control.lock().question.take();
+        if let Some(question) = question {
+            if is_yes(&message) {
+                let action = MemoryAction::Remove {
+                    name: question.name,
+                    yes: true,
+                };
+                self.control.lock().memory = Some((question.line, action));
+                self.control.wake.notify_all();
+            } else {
+                self.declined(question);
+            }
+            return;
+        }
         let _ = save_history(&self.history_file, &self.dock.history());
         let trimmed = message.trim();
         if trimmed.is_empty() {
@@ -225,6 +252,19 @@ impl Input {
                 output: Some(said.lines.join("\n")).filter(|output| !output.is_empty()),
             });
         }
+    }
+
+    /// The human did not agree to a removal: nothing happened, and the session
+    /// says so (AGL-060, D6).
+    fn declined(&self, question: Question) {
+        let text = tr!(self.lang, m::MEMORY_NOT_REMOVED, name = question.name);
+        self.notice(&text, Role::Muted);
+        self.control.lock().commands.push(CommandRun {
+            line: question.line,
+            failed: false,
+            output: Some(text),
+        });
+        self.control.wake.notify_all();
     }
 
     /// A slash command; what it says is what [`Input::notice`] gathers.
@@ -302,6 +342,25 @@ impl Input {
                 // An ordinary message: the model names the entry (M37).
                 Remember::Turn(message) => self.submitted(message),
             },
+            // `/memory` (AGL-060, D5): the main thread finds the store, which
+            // takes the evaluation of its marker, too long for the keyboard to
+            // wait; not while a turn runs, when the model can be writing it.
+            "/memory" => {
+                let words = trimmed.split_whitespace().skip(1).map(str::to_owned);
+                let Ok(action) = memory_action(words) else {
+                    self.notice(tr!(self.lang, m::MEMORY_USAGE), Role::StatusPending);
+                    return;
+                };
+                let mut inner = self.control.lock();
+                if inner.busy() {
+                    drop(inner);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    return;
+                }
+                inner.memory = Some((trimmed.to_owned(), action));
+                drop(inner);
+                self.control.wake.notify_all();
+            }
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
             // for a new one with it — not while a turn runs (as `/new`).
@@ -393,6 +452,13 @@ impl Input {
 
     /// Ctrl-C (D120).
     fn interrupt(&self) {
+        // At a question it is the answer no (AGL-060, D7).
+        let question = self.control.lock().question.take();
+        if let Some(question) = question {
+            self.declined(question);
+            self.dock.clear_input();
+            return;
+        }
         let mut inner = self.control.lock();
         if inner.busy() {
             let already = (self.request_stop)();
@@ -556,6 +622,8 @@ enum Next {
     New,
     Compact,
     Remember(String, String),
+    /// `/memory`: its line and action (AGL-060).
+    Memory(String, MemoryAction),
     /// `/function` (AGL-036, D9).
     Functions,
     /// `/function <name>` (AGL-036, D4).
@@ -598,6 +666,10 @@ fn wait_for_next(control: &Control) -> Next {
         if inner.quit {
             return Next::Quit;
         }
+        if inner.question.is_some() {
+            inner = control.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
+            continue;
+        }
         if inner.new_session {
             inner.new_session = false;
             return Next::New;
@@ -611,6 +683,9 @@ fn wait_for_next(control: &Control) -> Next {
         }
         if let Some((name, text)) = inner.remember.take() {
             return Next::Remember(name, text);
+        }
+        if let Some((line, action)) = inner.memory.take() {
+            return Next::Memory(line, action);
         }
         if inner.compact {
             inner.compact = false;
@@ -869,6 +944,66 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                             Role::StatusFailure,
                         );
                         (true, reason)
+                    }
+                };
+                record(&mut session, line, failed, Some(output));
+            }
+            // Without `--yes`, the question: the removal comes back with the
+            // answer, and the record with it (AGL-060, D7).
+            Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
+                let found = memory
+                    .look()
+                    .and_then(|dir| crate::cli::memory::entry_dir(dir.as_deref(), &name).map(drop));
+                match found {
+                    Ok(()) => {
+                        let question = tr!(lang, m::MEMORY_REMOVE_ASK, name = name);
+                        control.lock().question = Some(Question { line, name });
+                        presenter.show_notice(&question, Role::StatusPending);
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        record(&mut session, line, true, Some(text));
+                    }
+                }
+            }
+            // The model learns of it from the record, as of `/remember`
+            // (AGL-060, D6).
+            Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
+                let removed = memory
+                    .look()
+                    .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
+                let (failed, output) = match removed {
+                    Ok((result, write)) => {
+                        if let Err(error) = session.append(Event::Memory {
+                            name: write.name.clone(),
+                            kind: write.kind,
+                            text: write.text.clone(),
+                        }) {
+                            presenter.show_notice(&error.message(lang), Role::StatusFailure);
+                        }
+                        presenter.show_memory(&write.name, write.kind, write.text.as_deref());
+                        (false, result)
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        (true, text)
+                    }
+                };
+                record(&mut session, line, failed, Some(output));
+            }
+            Next::Memory(line, action) => {
+                let (failed, output) = match crate::cli::memory::looked_at(memory, &action, lang) {
+                    Ok(text) => {
+                        let text = text.trim_end().to_owned();
+                        presenter.show_notice(&text, Role::Muted);
+                        (false, text)
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        (true, text)
                     }
                 };
                 record(&mut session, line, failed, Some(output));
@@ -1538,6 +1673,115 @@ mod tests {
         assert!(f.output().contains("usage: /remember"));
         assert!(f.inner().remember.is_none());
         assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn memory_is_for_the_main_thread_and_waits_for_no_turn() {
+        // AGL-060, D5.
+        let f = fixture();
+        f.type_text("/memory list");
+        f.input.key(Key::Enter);
+        assert_eq!(
+            f.inner().memory,
+            Some(("/memory list".into(), MemoryAction::List))
+        );
+        f.inner().queue.push_back("later".into());
+        assert!(matches!(
+            wait_for_next(&f.input.control),
+            Next::Memory(line, MemoryAction::List) if line == "/memory list"
+        ));
+        f.inner().queue.clear();
+        // During a turn it is refused, and nothing is kept.
+        f.inner().running = true;
+        f.type_text("/memory remove tea");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("/memory is not available during a turn"));
+        assert!(f.inner().memory.is_none());
+        f.inner().running = false;
+        // A wrong form tells the usage, recorded as a failure.
+        std::mem::take(&mut f.inner().commands);
+        f.type_text("/memory add x");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("usage: /memory"));
+        assert!(f.inner().memory.is_none());
+        assert!(f.inner().commands[0].failed);
+    }
+
+    /// A fixture with the question of `/memory remove tea` waiting.
+    fn asked() -> Fixture {
+        let f = fixture();
+        f.inner().question = Some(Question {
+            line: "/memory remove tea".into(),
+            name: "tea".into(),
+        });
+        f
+    }
+
+    #[test]
+    fn the_answer_yes_goes_to_the_main_thread_and_any_other_line_does_not() {
+        // AGL-060, D7.
+        for answer in ["y", "YES"] {
+            let f = asked();
+            f.type_text(answer);
+            f.input.key(Key::Enter);
+            assert!(f.inner().question.is_none());
+            assert_eq!(
+                f.inner().memory,
+                Some((
+                    "/memory remove tea".into(),
+                    MemoryAction::Remove { name: "tea".into(), yes: true }
+                ))
+            );
+            assert!(f.inner().commands.is_empty());
+        }
+        // Enter alone, another word, or a message: no, and no turn from it.
+        for answer in ["", "n", "yes please", "/quit"] {
+            let f = asked();
+            f.type_text(answer);
+            f.input.key(Key::Enter);
+            assert!(f.inner().question.is_none(), "{answer:?}");
+            assert!(f.inner().memory.is_none(), "{answer:?}");
+            assert!(f.inner().queue.is_empty(), "{answer:?}");
+            assert!(!f.inner().quit, "{answer:?}");
+            assert!(f.output().contains("not removed: tea"), "{answer:?}");
+            let commands = std::mem::take(&mut f.inner().commands);
+            assert_eq!(
+                commands,
+                [CommandRun {
+                    line: "/memory remove tea".into(),
+                    failed: false,
+                    output: Some("not removed: tea".into()),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_at_the_question_is_no_and_does_not_leave() {
+        // AGL-060, D7.
+        let f = asked();
+        f.type_text("y");
+        f.input.key(Key::Ctrl('c'));
+        assert!(f.inner().question.is_none());
+        assert!(f.inner().memory.is_none());
+        assert!(!f.inner().quit);
+        assert!(f.input.dock.input_is_empty());
+        assert!(f.output().contains("not removed: tea"));
+    }
+
+    #[test]
+    fn no_turn_starts_while_the_question_waits() {
+        // AGL-060, D7: a line typed before the question was shown stays queued.
+        let f = asked();
+        f.inner().queue.push_back("typed before".into());
+        let control = f.input.control.clone();
+        let waiter = thread::spawn(move || wait_for_next(&control));
+        thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiter.is_finished());
+        f.type_text("y");
+        f.input.key(Key::Enter);
+        assert!(matches!(waiter.join().unwrap(), Next::Memory(_, _)));
+        assert_eq!(f.inner().texts(), ["typed before"]);
     }
 
     #[test]

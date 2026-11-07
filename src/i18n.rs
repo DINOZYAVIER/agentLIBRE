@@ -1373,6 +1373,17 @@ Forge (сховище артефактів робочої області, agentL
         uk: "не збережено: {reason}",
     };
 
+    pub const CMD_MEMORY: Msg = Msg {
+        en: "the workspace memory: list, show <name> or remove <name>",
+        uk: "пам'ять робочої області: list, show <назва> або remove <назва>",
+    };
+
+    /// `/memory` with no action, or with one it does not take (AGL-060).
+    pub const MEMORY_USAGE: Msg = Msg {
+        en: "usage: /memory list, /memory show <name> or /memory remove <name> [--yes]",
+        uk: "використання: /memory list, /memory show <назва> або /memory remove <назва> [--yes]",
+    };
+
     /// `agl memory list` over no entries (AGL-060).
     pub const MEMORY_EMPTY: Msg = Msg {
         en: "the memory has no entries",
@@ -3210,6 +3221,7 @@ pub mod repl {
             "/think" => tr!(lang, m::CMD_THINK),
             "/attach" => tr!(lang, m::CMD_ATTACH),
             "/remember" => tr!(lang, m::CMD_REMEMBER),
+            "/memory" => tr!(lang, m::CMD_MEMORY),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             "/function" => tr!(lang, m::CMD_FUNCTION),

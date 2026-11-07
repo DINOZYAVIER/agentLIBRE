@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use crate::Setup;
 use crate::agent::{Agent, Report, TurnEnd};
 use crate::attach::{self, Pending};
+use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
 use crate::cli::serve::ServerProgress;
 use crate::error::Error;
@@ -128,6 +129,45 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
                         said.fail(tr!(lang, m::REMEMBER_USAGE).to_string());
+                    }
+                },
+                // With no terminal, a removal needs its `--yes` (AGL-060, D7).
+                "/memory" => match memory_action(message.split_whitespace().skip(1).map(str::to_owned)) {
+                    Err(_) => said.fail(tr!(lang, m::MEMORY_USAGE).to_string()),
+                    Ok(MemoryAction::Remove { name, yes: false }) => said.fail(format!(
+                        "agl: {}",
+                        Error::MemoryRemoveNeedsYes { name }.message(lang)
+                    )),
+                    Ok(MemoryAction::Remove { name, yes: true }) => {
+                        let removed = memory
+                            .look()
+                            .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
+                        match removed {
+                            Ok((result, write)) => {
+                                session.append(Event::Memory {
+                                    name: write.name.clone(),
+                                    kind: write.kind,
+                                    text: write.text.clone(),
+                                })?;
+                                StderrReport::new(lang).memory(
+                                    &write.name,
+                                    write.kind,
+                                    write.text.as_deref(),
+                                );
+                                said.output.push(result);
+                            }
+                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
+                        }
+                    }
+                    Ok(action) => {
+                        match crate::cli::memory::looked_at(memory, &action, lang) {
+                            Ok(text) => {
+                                let text = text.trim_end();
+                                outln!("{text}");
+                                said.output.push(text.to_owned());
+                            }
+                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
+                        }
                     }
                 },
                 "/attach" => {

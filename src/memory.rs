@@ -40,6 +40,12 @@ pub trait Home: Send + Sync {
     /// The memory directory when the workspace has a store; nothing is
     /// created.
     fn read(&self) -> Option<PathBuf>;
+    /// [`Home::read`] that tells a store that cannot be resolved from a
+    /// workspace with no store (AGL-060): `/memory` must not show a failure
+    /// as an empty memory.
+    fn look(&self) -> Result<Option<PathBuf>, Error> {
+        Ok(self.read())
+    }
     /// The memory directory, the store registered first when it is not
     /// yet (M23); the lines say what the resolution did (a move, an
     /// adoption, the store made).
@@ -63,8 +69,12 @@ impl StoreHome {
 
 impl Home for StoreHome {
     fn read(&self) -> Option<PathBuf> {
-        let (ws, _) = self.resolved().ok()?;
-        of_store(&ws.dir)
+        self.look().ok().flatten()
+    }
+
+    fn look(&self) -> Result<Option<PathBuf>, Error> {
+        let (ws, _) = self.resolved()?;
+        Ok(of_store(&ws.dir))
     }
 
     fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
