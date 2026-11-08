@@ -139,111 +139,136 @@ pub struct Args {
     pub attach: Vec<String>,
 }
 
+/// An argument as text.
+fn text(arg: OsString) -> Result<String, Error> {
+    arg.into_string().map_err(|_| Error::InvalidUnicode)
+}
+
 /// Parses the arguments after the program name. Each option takes the
 /// next argument as its value, even one that starts with `-`.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error> {
-    let mut parsed = Args::default();
     let mut args = args.into_iter().peekable();
-    let text = |arg: OsString| arg.into_string().map_err(|_| Error::InvalidUnicode);
-    // The forge surface parses its own arguments (AGL-007), here, so that
-    // its help needs no settings (AGL-061, D1).
-    if args.peek().is_some_and(|arg| arg == "forge") {
-        args.next();
-        let args: Vec<OsString> = args.collect();
-        if args.first().is_none_or(|arg| arg == "-h" || arg == "--help") {
-            return Ok(Command::Help(HelpTopic::Forge));
+    let topic = match args.peek().and_then(|arg| arg.to_str()) {
+        Some("init") => HelpTopic::Init,
+        Some("server") => HelpTopic::Server,
+        Some("function") => HelpTopic::Function,
+        Some("search") => HelpTopic::Search,
+        Some("memory") => HelpTopic::Memory,
+        Some("forge") => HelpTopic::Forge,
+        // Only the first word is a command; a message may say "forge".
+        _ => return run_args(args),
+    };
+    let word = args.next().map(text).transpose()?.unwrap_or_default();
+    let parsed = match topic {
+        HelpTopic::Init => init_args(args),
+        HelpTopic::Server => server_args(args),
+        HelpTopic::Function => function_args(args),
+        HelpTopic::Search => search_args(args),
+        HelpTopic::Memory => {
+            let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
+            memory_action(words).map(Command::Memory)
         }
-        return crate::cli::forge::parse(&args).map(Command::Forge);
+        // The forge surface parses its own arguments (AGL-007), here, so
+        // that its help needs no settings (AGL-061, D1).
+        HelpTopic::Forge => crate::cli::forge::parse(&args.collect::<Vec<_>>()).map(Command::Forge),
+        HelpTopic::Program => unreachable!("the program is no command"),
+    };
+    // No action, or `-h`/`--help` where the command takes no value, is
+    // the help of the command (AGL-061, D2, D4, D6): a value comes first,
+    // so `forge show --help` still names an artifact `--help`.
+    match parsed {
+        Err(Error::MissingValue(missing)) if missing == word => Ok(Command::Help(topic)),
+        Err(Error::UnknownOption(option)) if option == "-h" || option == "--help" => {
+            Ok(Command::Help(topic))
+        }
+        parsed => parsed,
     }
-    if args.peek().is_some_and(|arg| arg == "init") {
-        args.next();
-        return match args.next().map(text).transpose()?.as_deref() {
-            None => Ok(Command::Init),
-            Some("-h" | "--help") => Ok(Command::Help(HelpTopic::Init)),
-            Some(other) => Err(Error::UnknownOption(other.into())),
-        };
+}
+
+/// `agl init`: no arguments.
+fn init_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    match args.next() {
+        None => Ok(Command::Init),
+        Some(other) => Err(Error::UnknownOption(text(other)?)),
     }
-    if args.peek().is_some_and(|arg| arg == "function") {
-        args.next();
-        let action = match args.next().map(text).transpose()?.as_deref() {
-            Some("list") => FunctionAction::List,
-            Some("use") => {
-                let name = args
+}
+
+/// `agl function list` or `agl function use <name> [--user]`.
+fn function_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let mut action = match args.next().map(text).transpose()?.as_deref() {
+        Some("list") => FunctionAction::List,
+        Some("use") => {
+            let name = args
+                .next()
+                .ok_or_else(|| Error::MissingValue("use".into()))
+                .and_then(text)?;
+            FunctionAction::Use { name, user: false }
+        }
+        Some(other) => return Err(Error::UnknownOption(other.into())),
+        None => return Err(Error::MissingValue("function".into())),
+    };
+    for extra in args {
+        match (text(extra)?.as_str(), &mut action) {
+            ("--user", FunctionAction::Use { user, .. }) if !*user => *user = true,
+            ("--user", FunctionAction::Use { .. }) => {
+                return Err(Error::RepeatedOption("--user".into()));
+            }
+            (other, _) => return Err(Error::UnknownOption(other.into())),
+        }
+    }
+    Ok(Command::Function(action))
+}
+
+/// `agl search login`.
+fn search_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let action = match args.next().map(text).transpose()?.as_deref() {
+        Some("login") => SearchAction::Login,
+        Some(other) => return Err(Error::UnknownOption(other.into())),
+        None => return Err(Error::MissingValue("search".into())),
+    };
+    if let Some(extra) = args.next() {
+        return Err(Error::UnknownOption(text(extra)?));
+    }
+    Ok(Command::Search(action))
+}
+
+/// `agl server start|stop|status|command` and their options.
+fn server_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let action = match args.next().map(text).transpose()?.as_deref() {
+        Some("start") => ServerAction::Start,
+        Some("stop") => ServerAction::Stop,
+        Some("status") => ServerAction::Status,
+        Some("command") => ServerAction::Command,
+        Some(other) => return Err(Error::UnknownOption(other.into())),
+        None => return Err(Error::MissingValue("server".into())),
+    };
+    let mut yes = false;
+    let mut function = None;
+    while let Some(extra) = args.next() {
+        match text(extra)?.as_str() {
+            "--yes" if action == ServerAction::Start && !yes => yes = true,
+            "--yes" if action == ServerAction::Start => {
+                return Err(Error::RepeatedOption("--yes".into()));
+            }
+            "--function" if action != ServerAction::Stop && function.is_none() => {
+                let value = args
                     .next()
-                    .ok_or_else(|| Error::MissingValue("use".into()))
-                    .and_then(text)?;
-                FunctionAction::Use { name, user: false }
+                    .ok_or_else(|| Error::MissingValue("--function".into()))?;
+                function = Some(text(value)?);
             }
-            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Function)),
-            Some(other) => return Err(Error::UnknownOption(other.into())),
-            None => return Err(Error::MissingValue("function".into())),
-        };
-        let mut action = action;
-        for extra in args {
-            match (text(extra)?.as_str(), &mut action) {
-                ("--user", FunctionAction::Use { user, .. }) if !*user => *user = true,
-                ("--user", FunctionAction::Use { .. }) => {
-                    return Err(Error::RepeatedOption("--user".into()));
-                }
-                (other, _) => return Err(Error::UnknownOption(other.into())),
+            "--function" if action != ServerAction::Stop => {
+                return Err(Error::RepeatedOption("--function".into()));
             }
+            other => return Err(Error::UnknownOption(other.into())),
         }
-        return Ok(Command::Function(action));
     }
-    if args.peek().is_some_and(|arg| arg == "search") {
-        args.next();
-        let action = match args.next().map(text).transpose()?.as_deref() {
-            Some("login") => SearchAction::Login,
-            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Search)),
-            Some(other) => return Err(Error::UnknownOption(other.into())),
-            None => return Err(Error::MissingValue("search".into())),
-        };
-        if let Some(extra) = args.next() {
-            return Err(Error::UnknownOption(text(extra)?));
-        }
-        return Ok(Command::Search(action));
-    }
-    if args.peek().is_some_and(|arg| arg == "memory") {
-        args.next();
-        let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
-        if matches!(words.first().map(String::as_str), Some("-h" | "--help")) {
-            return Ok(Command::Help(HelpTopic::Memory));
-        }
-        return memory_action(words).map(Command::Memory);
-    }
-    if args.peek().is_some_and(|arg| arg == "server") {
-        args.next();
-        let action = match args.next().map(text).transpose()?.as_deref() {
-            Some("start") => ServerAction::Start,
-            Some("stop") => ServerAction::Stop,
-            Some("status") => ServerAction::Status,
-            Some("command") => ServerAction::Command,
-            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Server)),
-            Some(other) => return Err(Error::UnknownOption(other.into())),
-            None => return Err(Error::MissingValue("server".into())),
-        };
-        let mut yes = false;
-        let mut function = None;
-        while let Some(extra) = args.next() {
-            match text(extra)?.as_str() {
-                "--yes" if action == ServerAction::Start && !yes => yes = true,
-                "--yes" if action == ServerAction::Start => {
-                    return Err(Error::RepeatedOption("--yes".into()));
-                }
-                "--function" if action != ServerAction::Stop && function.is_none() => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| Error::MissingValue("--function".into()))?;
-                    function = Some(text(value)?);
-                }
-                "--function" if action != ServerAction::Stop => {
-                    return Err(Error::RepeatedOption("--function".into()));
-                }
-                other => return Err(Error::UnknownOption(other.into())),
-            }
-        }
-        return Ok(Command::Server(action, yes, function));
-    }
+    Ok(Command::Server(action, yes, function))
+}
+
+/// The options of a run: `-p`, `--resume`, `--function`, `--think`,
+/// `--attach`, `--yes`.
+fn run_args(args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let mut parsed = Args::default();
     // `--think` is parsed to its level after the loop (AGL-013).
     let mut think: Option<String> = None;
     let mut args = args.peekable();
@@ -526,10 +551,6 @@ mod tests {
         ));
         assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help(HelpTopic::Server));
         assert!(matches!(
-            parse_strs(&["server"]),
-            Err(Error::MissingValue(o)) if o == "server"
-        ));
-        assert!(matches!(
             parse_strs(&["server", "restart"]),
             Err(Error::UnknownOption(o)) if o == "restart"
         ));
@@ -554,10 +575,6 @@ mod tests {
             parse_strs(&["search", "login"]).unwrap(),
             Command::Search(SearchAction::Login)
         );
-        assert!(matches!(
-            parse_strs(&["search"]),
-            Err(Error::MissingValue(word)) if word == "search"
-        ));
         assert!(matches!(
             parse_strs(&["search", "logout"]),
             Err(Error::UnknownOption(word)) if word == "logout"
@@ -589,8 +606,7 @@ mod tests {
             );
         }
         for (words, word) in [
-            (&["memory"][..], "memory"),
-            (&["memory", "show"], "show"),
+            (&["memory", "show"][..], "show"),
             (&["memory", "remove"], "remove"),
             (&["memory", "remove", "--yes"], "remove"),
         ] {
@@ -656,10 +672,6 @@ mod tests {
             Err(Error::UnknownOption(o)) if o == "--user"
         ));
         assert!(matches!(
-            parse_strs(&["function"]),
-            Err(Error::MissingValue(o)) if o == "function"
-        ));
-        assert!(matches!(
             parse_strs(&["function", "show"]),
             Err(Error::UnknownOption(o)) if o == "show"
         ));
@@ -714,6 +726,90 @@ mod tests {
                 ..Args::default()
             })
         );
+    }
+
+    #[test]
+    fn the_help_of_a_command() {
+        // AGL-061: no action (D2, D4), `-h` or `--help` in the place of the
+        // action or of an option (D6), after the type of `forge new` (D5).
+        let cases: [(&[&str], HelpTopic); 30] = [
+            (&["init", "--help"], HelpTopic::Init),
+            (&["init", "-h"], HelpTopic::Init),
+            (&["server"], HelpTopic::Server),
+            (&["server", "-h"], HelpTopic::Server),
+            (&["server", "start", "--help"], HelpTopic::Server),
+            (&["server", "stop", "--help"], HelpTopic::Server),
+            (&["server", "status", "--function", "f", "--help"], HelpTopic::Server),
+            (&["function"], HelpTopic::Function),
+            (&["function", "--help"], HelpTopic::Function),
+            (&["function", "list", "--help"], HelpTopic::Function),
+            (&["function", "use", "p", "--help"], HelpTopic::Function),
+            (&["search"], HelpTopic::Search),
+            (&["search", "-h"], HelpTopic::Search),
+            (&["search", "login", "--help"], HelpTopic::Search),
+            (&["memory"], HelpTopic::Memory),
+            (&["memory", "-h"], HelpTopic::Memory),
+            (&["memory", "list", "--help"], HelpTopic::Memory),
+            (&["memory", "show", "tea", "--help"], HelpTopic::Memory),
+            (&["memory", "remove", "--help"], HelpTopic::Memory),
+            (&["memory", "remove", "tea", "--help"], HelpTopic::Memory),
+            (&["forge"], HelpTopic::Forge),
+            (&["forge", "--help"], HelpTopic::Forge),
+            (&["forge", "list", "--help"], HelpTopic::Forge),
+            (&["forge", "show", "x", "-h"], HelpTopic::Forge),
+            (&["forge", "range", "x", "--help"], HelpTopic::Forge),
+            (&["forge", "new", "--help"], HelpTopic::Forge),
+            (&["forge", "new", "-h"], HelpTopic::Forge),
+            (&["forge", "new", "task-spec", "--help"], HelpTopic::Forge),
+            (&["forge", "new", "task-spec", "--title", "t", "--help"], HelpTopic::Forge),
+            (&["--help"], HelpTopic::Program),
+        ];
+        for (words, topic) in cases {
+            assert_eq!(parse_strs(words).unwrap(), Command::Help(topic), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn a_help_in_the_place_of_a_value_is_the_value() {
+        // AGL-061, D6, D7.
+        assert_eq!(
+            parse_strs(&["memory", "show", "--help"]).unwrap(),
+            Command::Memory(MemoryAction::Show { name: "--help".into() })
+        );
+        assert_eq!(
+            parse_strs(&["function", "use", "--help"]).unwrap(),
+            Command::Function(FunctionAction::Use { name: "--help".into(), user: false })
+        );
+        assert_eq!(
+            parse_strs(&["server", "start", "--function", "--help"]).unwrap(),
+            Command::Server(ServerAction::Start, false, Some("--help".into()))
+        );
+        assert_eq!(
+            parse_strs(&["forge", "show", "--help"]).unwrap(),
+            Command::Forge(ForgeAction::Show { name: "--help".into() })
+        );
+        assert_eq!(
+            parse_strs(&["forge", "new", "task-spec", "--title", "--help"]).unwrap(),
+            Command::Forge(ForgeAction::New { title: "--help".into(), name: None })
+        );
+        assert_eq!(
+            parse_strs(&["forge", "diff", "x", "--help"]).unwrap(),
+            Command::Forge(ForgeAction::Diff { name: "x".into(), commit: Some("--help".into()) })
+        );
+        // The options of the program keep the rule too (D7).
+        assert_eq!(
+            parse_strs(&["-p", "--help"]).unwrap(),
+            Command::Run(Args { prompt: Some("--help".into()), ..Args::default() })
+        );
+        // A problem before the `--help` is still the error.
+        assert!(matches!(
+            parse_strs(&["memory", "list", "x", "--help"]),
+            Err(Error::UnknownOption(o)) if o == "x"
+        ));
+        assert!(matches!(
+            parse_strs(&["forge", "new", "doc", "--help"]),
+            Err(Error::NewType { type_name }) if type_name == "doc"
+        ));
     }
 
     #[test]

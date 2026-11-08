@@ -314,9 +314,12 @@ fn new_task_spec(
 
 /// The arguments of `forge new task-spec --title <t> [--name <n>]`.
 fn new_args(args: &[OsString]) -> Result<ForgeAction, Error> {
-    let type_name = word(args, 1, "new")?.to_string();
-    if type_name != task_spec::TYPE {
-        return Err(Error::NewType { type_name });
+    // The type is a word of the action, not a value: `-h` there is an
+    // option, which `agl` turns into the help (AGL-061, D5).
+    match word(args, 1, "new")? {
+        type_name if type_name == task_spec::TYPE => {}
+        help @ ("-h" | "--help") => return Err(Error::UnknownOption(help.to_string())),
+        type_name => return Err(Error::NewType { type_name: type_name.to_string() }),
     }
     let mut title: Option<String> = None;
     let mut name: Option<String> = None;
