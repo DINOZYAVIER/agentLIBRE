@@ -9,8 +9,8 @@ use crate::error::Error;
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Print the help text.
-    Help,
+    /// Print the help of the program or of one command (AGL-061, D3).
+    Help(HelpTopic),
     /// Print the version (AGL-048).
     Version,
     /// Run the agent.
@@ -32,6 +32,19 @@ pub enum Command {
     Search(SearchAction),
     /// `agl memory list|show|remove` (AGL-060).
     Memory(MemoryAction),
+}
+
+/// What `--help` shows (AGL-061, D3): the help of the program, or of one
+/// command alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpTopic {
+    Program,
+    Init,
+    Server,
+    Function,
+    Search,
+    Memory,
+    Forge,
 }
 
 /// What `agl memory` and `/memory` ask for (AGL-060, D2, D5).
@@ -138,7 +151,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         args.next();
         let args: Vec<OsString> = args.collect();
         if args.first().is_none_or(|arg| arg == "-h" || arg == "--help") {
-            return Ok(Command::Help);
+            return Ok(Command::Help(HelpTopic::Forge));
         }
         return crate::cli::forge::parse(&args).map(Command::Forge);
     }
@@ -146,7 +159,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         args.next();
         return match args.next().map(text).transpose()?.as_deref() {
             None => Ok(Command::Init),
-            Some("-h" | "--help") => Ok(Command::Help),
+            Some("-h" | "--help") => Ok(Command::Help(HelpTopic::Init)),
             Some(other) => Err(Error::UnknownOption(other.into())),
         };
     }
@@ -161,7 +174,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
                     .and_then(text)?;
                 FunctionAction::Use { name, user: false }
             }
-            Some("-h" | "--help") => return Ok(Command::Help),
+            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Function)),
             Some(other) => return Err(Error::UnknownOption(other.into())),
             None => return Err(Error::MissingValue("function".into())),
         };
@@ -181,7 +194,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         args.next();
         let action = match args.next().map(text).transpose()?.as_deref() {
             Some("login") => SearchAction::Login,
-            Some("-h" | "--help") => return Ok(Command::Help),
+            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Search)),
             Some(other) => return Err(Error::UnknownOption(other.into())),
             None => return Err(Error::MissingValue("search".into())),
         };
@@ -194,7 +207,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         args.next();
         let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
         if matches!(words.first().map(String::as_str), Some("-h" | "--help")) {
-            return Ok(Command::Help);
+            return Ok(Command::Help(HelpTopic::Memory));
         }
         return memory_action(words).map(Command::Memory);
     }
@@ -205,7 +218,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Some("stop") => ServerAction::Stop,
             Some("status") => ServerAction::Status,
             Some("command") => ServerAction::Command,
-            Some("-h" | "--help") => return Ok(Command::Help),
+            Some("-h" | "--help") => return Ok(Command::Help(HelpTopic::Server)),
             Some(other) => return Err(Error::UnknownOption(other.into())),
             None => return Err(Error::MissingValue("server".into())),
         };
@@ -245,7 +258,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             continue;
         }
         let slot = match arg.as_str() {
-            "-h" | "--help" => return Ok(Command::Help),
+            "-h" | "--help" => return Ok(Command::Help(HelpTopic::Program)),
             "--version" => return Ok(Command::Version),
             "--yes" => {
                 if parsed.yes {
@@ -417,8 +430,8 @@ mod tests {
 
     #[test]
     fn help() {
-        assert_eq!(parse_strs(&["-h"]).unwrap(), Command::Help);
-        assert_eq!(parse_strs(&["-p", "x", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_strs(&["-h"]).unwrap(), Command::Help(HelpTopic::Program));
+        assert_eq!(parse_strs(&["-p", "x", "--help"]).unwrap(), Command::Help(HelpTopic::Program));
     }
 
     #[test]
@@ -511,7 +524,7 @@ mod tests {
             parse_strs(&["server", "stop", "--function", "p"]),
             Err(Error::UnknownOption(o)) if o == "--function"
         ));
-        assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_strs(&["server", "--help"]).unwrap(), Command::Help(HelpTopic::Server));
         assert!(matches!(
             parse_strs(&["server"]),
             Err(Error::MissingValue(o)) if o == "server"
@@ -604,7 +617,7 @@ mod tests {
             parse_strs(&["memory", "remove", "a", "--yes", "--yes"]),
             Err(Error::RepeatedOption(o)) if o == "--yes"
         ));
-        assert_eq!(parse_strs(&["memory", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_strs(&["memory", "--help"]).unwrap(), Command::Help(HelpTopic::Memory));
         // Only the first word is a command; a message may say "memory".
         assert_eq!(
             parse_strs(&["-p", "memory"]).unwrap(),
@@ -650,7 +663,7 @@ mod tests {
             parse_strs(&["function", "show"]),
             Err(Error::UnknownOption(o)) if o == "show"
         ));
-        assert_eq!(parse_strs(&["function", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_strs(&["function", "--help"]).unwrap(), Command::Help(HelpTopic::Function));
         // Only the first word is a command; a message may say "function".
         assert_eq!(
             parse_strs(&["-p", "function"]).unwrap(),
@@ -673,7 +686,7 @@ mod tests {
         );
         // The help needs no settings (AGL-061, D1).
         for words in [&["forge"][..], &["forge", "-h"], &["forge", "--help"]] {
-            assert_eq!(parse_strs(words).unwrap(), Command::Help, "{words:?}");
+            assert_eq!(parse_strs(words).unwrap(), Command::Help(HelpTopic::Forge), "{words:?}");
         }
         // Only the first word is a command; a message may say "forge".
         assert_eq!(
@@ -688,7 +701,7 @@ mod tests {
     #[test]
     fn init_takes_no_arguments() {
         assert_eq!(parse_strs(&["init"]).unwrap(), Command::Init);
-        assert_eq!(parse_strs(&["init", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse_strs(&["init", "--help"]).unwrap(), Command::Help(HelpTopic::Init));
         assert!(matches!(
             parse_strs(&["init", "x"]),
             Err(Error::UnknownOption(o)) if o == "x"

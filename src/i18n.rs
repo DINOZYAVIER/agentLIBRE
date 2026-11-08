@@ -155,19 +155,26 @@ macro_rules! tr {
 pub mod m {
     use super::Msg;
 
-    /// The `--help` text.
-    pub const HELP: Msg = Msg {
-        en: "\
-Usage: agl [-p <message> [--attach <path>]...] [--resume [<id>|last]] [--function <name>]
-           [--think <level>] [--yes]
-       agl init
-       agl server start [--yes] [--function <name>]|stop|status [--function <name>]
-       agl server command [--function <name>]
-       agl function list|use <name> [--user]
-       agl search login
-       agl memory list|show <name>|remove <name> [--yes]
-       agl forge list|show|new|status|range|check|log|diff|rehome
+    /// The word before the lines of usage of `--help` (AGL-061, D3); the
+    /// lines after the first are indented by its width.
+    pub const HELP_USAGE: Msg = Msg {
+        en: "Usage: ",
+        uk: "Використання: ",
+    };
 
+    /// The usage of a run of `agl`.
+    pub const HELP_RUN_USAGE: Msg = Msg {
+        en: "\
+agl [-p <message> [--attach <path>]...] [--resume [<id>|last]] [--function <name>]
+    [--think <level>] [--yes]",
+        uk: "\
+agl [-p <повідомлення> [--attach <шлях>]...] [--resume [<id>|last]] [--function <назва>]
+[--think <level>] [--yes]",
+    };
+
+    /// The options of a run of `agl`, in the help of the program.
+    pub const HELP_RUN: Msg = Msg {
+        en: "\
 Without -p, agl starts an interactive session.
 
 Options:
@@ -180,12 +187,55 @@ Options:
   --yes               start or switch the server of the project without
                       asking when another server runs
   --version           print the version and the commit of this agl
-  -h, --help          print this help
+  -h, --help          print this help",
+        uk: "\
+Без -p agl запускає інтерактивну сесію.
 
+Параметри:
+  -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
+  --resume <id>       продовжити сесію <id>; `last` це остання сесія цього
+                      проєкту; без id показує список останніх
+  --function <назва>  використати Function <назва>
+  --think <level>     рівень міркувань моделі: off, low, medium або xhigh
+  --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
+                      повторювати
+  --yes               запустити чи перемкнути сервер проєкту без питання,
+                      коли працює інший сервер
+  --version           показати версію і коміт цього agl
+  -h, --help          показати цю довідку",
+    };
+
+    /// The usage of `agl init`.
+    pub const HELP_INIT_USAGE: Msg = Msg {
+        en: "agl init",
+        uk: "agl init",
+    };
+
+    /// The section of `agl init` in the help (AGL-061, D3).
+    pub const HELP_INIT: Msg = Msg {
+        en: "\
 Project (agentLIBRE/<project> under XDG_DATA_HOME and its settings.nix):
   init                register the current directory as a project now; a
-                      directory is registered at its first write otherwise
+                      directory is registered at its first write otherwise",
+        uk: "\
+Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME і його settings.nix):
+  init                зареєструвати поточний каталог як проєкт зараз; інакше
+                      каталог реєструється при першому записі",
+    };
 
+    /// The usage of `agl server`.
+    pub const HELP_SERVER_USAGE: Msg = Msg {
+        en: "\
+agl server start [--yes] [--function <name>]|stop|status [--function <name>]
+agl server command [--function <name>]",
+        uk: "\
+agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
+agl server command [--function <назва>]",
+    };
+
+    /// The section of `agl server` in the help (AGL-061, D3).
+    pub const HELP_SERVER: Msg = Msg {
+        en: "\
 Server (systemd user unit agentLIBRE-server-<project>; the model of the
 Function, the url of its kind in `server` of settings.nix, the project's over
 the user's):
@@ -195,28 +245,97 @@ the user's):
   server command      print the line that starts the server of a Function,
                       and the links to its files, for a server outside agl
   server status       show whether it runs and is ready (--function: the
-                      server of that Function)
+                      server of that Function)",
+        uk: "\
+Сервер (user-unit systemd agentLIBRE-server-<проєкт>; модель Функції, url її
+виду в `server` у settings.nix, проєкту поверх користувача):
+  server start        запустити сервер і дочекатися готовності; з
+                      --function — сервер моделі цієї Функції
+  server stop         зупинити його і whisper-сервер проєкту
+  server command      надрукувати рядок запуску сервера функції і посилання
+                      на її файли, для сервера поза agl
+  server status       показати, чи він працює і чи готовий (--function:
+                      сервер цієї Функції)",
+    };
 
+    /// The usage of `agl function`.
+    pub const HELP_FUNCTION_USAGE: Msg = Msg {
+        en: "agl function list|use <name> [--user]",
+        uk: "agl function list|use <назва> [--user]",
+    };
+
+    /// The section of `agl function` in the help (AGL-061, D3).
+    pub const HELP_FUNCTION: Msg = Msg {
+        en: "\
 Functions (the workspace's functions/*.nix, then the user's, then the
 built-ins; a Function's model names its server kind and weights):
   function list               the Functions, each with its kind and model;
                               * marks the one the runs here load
   function use <name>         the runs here load <name>: `function` in the
-                              project's settings.nix (--user: the user's)
+                              project's settings.nix (--user: the user's)",
+        uk: "\
+Функції (functions/*.nix робочої області, потім користувача, потім
+вбудовані; модель Функції називає вид її сервера і ваги):
+  function list               Функції, кожна з видом і моделлю; * позначає
+                              ту, яку тут завантажують запуски
+  function use <назва>        запуски тут завантажують <назва>: `function` у
+                              settings.nix проєкту (--user: користувача)",
+    };
 
+    /// The usage of `agl search`.
+    pub const HELP_SEARCH_USAGE: Msg = Msg {
+        en: "agl search login",
+        uk: "agl search login",
+    };
+
+    /// The section of `agl search` in the help (AGL-061, D3).
+    pub const HELP_SEARCH: Msg = Msg {
+        en: "\
 Search (`search` of the user's settings.nix):
   search login        a client certificate of the search from the step-ca of
                       `search.ca`, through a login in the browser; its files
-                      go into `search`
+                      go into `search`",
+        uk: "\
+Пошук (`search` у settings.nix користувача):
+  search login        клієнтський сертифікат пошуку від step-ca із
+                      `search.ca` через вхід у браузері; його файли
+                      записуються в `search`",
+    };
 
+    /// The usage of `agl memory`.
+    pub const HELP_MEMORY_USAGE: Msg = Msg {
+        en: "agl memory list|show <name>|remove <name> [--yes]",
+        uk: "agl memory list|show <назва>|remove <назва> [--yes]",
+    };
+
+    /// The section of `agl memory` in the help (AGL-061, D3).
+    pub const HELP_MEMORY: Msg = Msg {
+        en: "\
 Memory (the entries of the project, `memory/` of its store):
   memory list                   the entries, with their titles and hooks; marks
                                 what the prompt does not carry and what is out
                                 of step with MEMORY.md
   memory show <name>            the whole text of an entry
   memory remove <name> [--yes]  delete an entry and its line; it asks first,
-                                as nothing can bring it back
+                                as nothing can bring it back",
+        uk: "\
+Пам'ять (записи проєкту, `memory/` у його сховищі):
+  memory list                    записи, з назвами і підказками; позначає те, чого
+                                 немає в промпті, і розбіжності з MEMORY.md
+  memory show <назва>            увесь текст запису
+  memory remove <назва> [--yes]  видалити запис і його рядок; спершу питає, бо
+                                 нічим його не повернути",
+    };
 
+    /// The usage of `agl forge`.
+    pub const HELP_FORGE_USAGE: Msg = Msg {
+        en: "agl forge list|show|new|status|range|check|log|diff|rehome",
+        uk: "agl forge list|show|new|status|range|check|log|diff|rehome",
+    };
+
+    /// The section of `agl forge` in the help (AGL-061, D3).
+    pub const HELP_FORGE: Msg = Msg {
+        en: "\
 Forge (the artifact store of the workspace, agentLIBRE/<workspace>/forge
 under XDG_DATA_HOME):
   forge list                      the artifacts of the workspace
@@ -231,64 +350,6 @@ under XDG_DATA_HOME):
   forge diff <name> [commit]      the diff of the artifact's file
   forge rehome [<store>] [--new]  move the workspace store",
         uk: "\
-Використання: agl [-p <повідомлення> [--attach <шлях>]...] [--resume [<id>|last]] [--function <назва>]
-              [--think <level>] [--yes]
-              agl init
-              agl server start [--yes] [--function <назва>]|stop|status [--function <назва>]
-              agl server command [--function <назва>]
-              agl function list|use <назва> [--user]
-              agl search login
-              agl memory list|show <назва>|remove <назва> [--yes]
-              agl forge list|show|new|status|range|check|log|diff|rehome
-
-Без -p agl запускає інтерактивну сесію.
-
-Параметри:
-  -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
-  --resume <id>       продовжити сесію <id>; `last` це остання сесія цього
-                      проєкту; без id показує список останніх
-  --function <назва>  використати Function <назва>
-  --think <level>     рівень міркувань моделі: off, low, medium або xhigh
-  --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
-                      повторювати
-  --yes               запустити чи перемкнути сервер проєкту без питання,
-                      коли працює інший сервер
-  --version           показати версію і коміт цього agl
-  -h, --help          показати цю довідку
-
-Проєкт (agentLIBRE/<проєкт> у XDG_DATA_HOME і його settings.nix):
-  init                зареєструвати поточний каталог як проєкт зараз; інакше
-                      каталог реєструється при першому записі
-
-Сервер (user-unit systemd agentLIBRE-server-<проєкт>; модель Функції, url її
-виду в `server` у settings.nix, проєкту поверх користувача):
-  server start        запустити сервер і дочекатися готовності; з
-                      --function — сервер моделі цієї Функції
-  server stop         зупинити його і whisper-сервер проєкту
-  server command      надрукувати рядок запуску сервера функції і посилання
-                      на її файли, для сервера поза agl
-  server status       показати, чи він працює і чи готовий (--function:
-                      сервер цієї Функції)
-
-Функції (functions/*.nix робочої області, потім користувача, потім
-вбудовані; модель Функції називає вид її сервера і ваги):
-  function list               Функції, кожна з видом і моделлю; * позначає
-                              ту, яку тут завантажують запуски
-  function use <назва>        запуски тут завантажують <назва>: `function` у
-                              settings.nix проєкту (--user: користувача)
-
-Пошук (`search` у settings.nix користувача):
-  search login        клієнтський сертифікат пошуку від step-ca із
-                      `search.ca` через вхід у браузері; його файли
-                      записуються в `search`
-
-Пам'ять (записи проєкту, `memory/` у його сховищі):
-  memory list                    записи, з назвами і підказками; позначає те, чого
-                                 немає в промпті, і розбіжності з MEMORY.md
-  memory show <назва>            увесь текст запису
-  memory remove <назва> [--yes]  видалити запис і його рядок; спершу питає, бо
-                                 нічим його не повернути
-
 Forge (сховище артефактів робочої області, agentLIBRE/<робоча область>/forge
 у XDG_DATA_HOME):
   forge list                      артефакти робочої області

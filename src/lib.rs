@@ -170,9 +170,9 @@ fn run(
             let _ = writeln!(io::stdout(), "{}", about::version(rev.as_deref()));
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Help => {
+        Command::Help(topic) => {
             // A closed pipe, as in `agl --help | head -1`, is not an error.
-            let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::HELP));
+            let _ = writeln!(io::stdout(), "{}", cli::help::text(*lang, topic));
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
