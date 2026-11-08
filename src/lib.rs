@@ -231,12 +231,12 @@ fn run(
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             return cli::init::run(&user, &paths, &cwd, *lang);
         }
-        // The forge surface parses its own arguments (AGL-007); it runs
-        // after the settings load, so `[forge]` and `language` apply.
-        Command::Forge(args) => {
+        // Parsed before the settings load (AGL-061, D1), it runs after
+        // them, so `[forge]` and `language` apply.
+        Command::Forge(action) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-            return cli::forge::run(&args, &user, &paths, &cwd, *lang);
+            return cli::forge::run(action, &user, &paths, &cwd, *lang);
         }
         Command::Function(action) => {
             let (paths, user) = loaded?;

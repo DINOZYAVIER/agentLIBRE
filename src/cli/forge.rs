@@ -19,91 +19,101 @@ use crate::settings::UserFile;
 use crate::tr;
 use crate::outln;
 
-/// Runs a `forge` command over the arguments after the word `forge`,
-/// in the workspace of `cwd`.
+/// A `forge` command, parsed from the arguments after the word `forge`
+/// before any settings load, as the other commands are (AGL-061, D1).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ForgeAction {
+    List,
+    Show { name: String },
+    /// `new task-spec --title <t> [--name <n>]`.
+    New { title: String, name: Option<String> },
+    Status { name: String, state: String },
+    Check { name: String },
+    Range { name: String, anchor: Option<String>, last: Option<String> },
+    Log { name: String },
+    Diff { name: String, commit: Option<String> },
+    Rehome { store: Option<String>, new_store: bool },
+}
+
+/// Parses the arguments after the word `forge`. No subcommand is a
+/// `MissingValue` of `forge`.
+pub fn parse(args: &[OsString]) -> Result<ForgeAction, Error> {
+    let name = |what| word(args, 1, what).map(str::to_string);
+    let action = match word(args, 0, "forge")? {
+        "list" => {
+            no_extra(args, 1)?;
+            ForgeAction::List
+        }
+        "show" => {
+            no_extra(args, 2)?;
+            ForgeAction::Show { name: name("show")? }
+        }
+        "new" => new_args(args)?,
+        "status" => {
+            no_extra(args, 3)?;
+            ForgeAction::Status {
+                name: name("status")?,
+                state: word(args, 2, "status")?.to_string(),
+            }
+        }
+        "check" => {
+            no_extra(args, 2)?;
+            ForgeAction::Check { name: name("check")? }
+        }
+        "range" => range_args(args)?,
+        "log" => {
+            no_extra(args, 2)?;
+            ForgeAction::Log { name: name("log")? }
+        }
+        "diff" => {
+            no_extra(args, 3)?;
+            ForgeAction::Diff {
+                name: name("diff")?,
+                commit: args.get(2).map(|_| word(args, 2, "diff").map(str::to_string)).transpose()?,
+            }
+        }
+        "rehome" => {
+            let (store, new_store) = rehome_args(args)?;
+            ForgeAction::Rehome { store, new_store }
+        }
+        other => return Err(Error::UnknownOption(other.to_string())),
+    };
+    Ok(action)
+}
+
+/// Runs a `forge` command in the workspace of `cwd`.
 pub fn run(
-    args: &[OsString],
+    action: ForgeAction,
     user: &UserFile,
     paths: &Paths,
     cwd: &Path,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    // No subcommand: the help of the program.
-    if args.is_empty() {
-        return help(lang);
-    }
     let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
-    match word(args, 0, "forge")? {
-        "-h" | "--help" => help(lang),
-        "list" => {
-            no_extra(args, 1)?;
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            list(&ws)
-        }
-        "show" => {
-            no_extra(args, 2)?;
-            let name = word(args, 1, "show")?.to_string();
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            let artifact = find_artifact(paths, &ws, &name)?;
+    let workspace = || resolve_workspace(paths, cwd, auto_rehome, lang);
+    match action {
+        ForgeAction::List => list(&workspace()?),
+        ForgeAction::Show { name } => {
+            let artifact = find_artifact(paths, &workspace()?, &name)?;
             // A closed pipe, as in `forge show x | head`, is not an error.
             let _ = write!(io::stdout(), "{}", forge::render(&artifact));
             Ok(ExitCode::SUCCESS)
         }
-        "new" => {
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            new_task_spec(paths, &ws, lang, args)
+        ForgeAction::New { title, name } => new_task_spec(paths, &workspace()?, lang, title, name),
+        ForgeAction::Status { name, state } => status(paths, &workspace()?, lang, &name, &state),
+        ForgeAction::Check { name } => check(paths, &workspace()?, cwd, lang, &name),
+        ForgeAction::Range { name, anchor, last } => {
+            range(paths, &workspace()?, lang, &name, anchor, last)
         }
-        "status" => {
-            no_extra(args, 3)?;
-            let name = word(args, 1, "status")?.to_string();
-            let state = word(args, 2, "status")?;
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            status(paths, &ws, lang, &name, state)
-        }
-        "check" => {
-            no_extra(args, 2)?;
-            let name = word(args, 1, "check")?.to_string();
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            check(paths, &ws, cwd, lang, &name)
-        }
-        "range" => {
-            let name = word(args, 1, "range")?.to_string();
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            range(paths, &ws, lang, &name, &args[2..])
-        }
-        "log" => {
-            no_extra(args, 2)?;
-            let name = word(args, 1, "log")?.to_string();
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            log(paths, &ws, &name)
-        }
-        "diff" => {
-            no_extra(args, 3)?;
-            let name = word(args, 1, "diff")?.to_string();
-            let commit = args
-                .get(2)
-                .map(|arg| arg.to_str().ok_or(Error::InvalidUnicode))
-                .transpose()?;
-            let ws = resolve_workspace(paths, cwd, auto_rehome, lang)?;
-            diff(paths, &ws, &name, commit)
-        }
-        "rehome" => {
-            let (store, new_store) = rehome_args(args)?;
+        ForgeAction::Log { name } => log(paths, &workspace()?, &name),
+        ForgeAction::Diff { name, commit } => diff(paths, &workspace()?, &name, commit.as_deref()),
+        ForgeAction::Rehome { store, new_store } => {
             // The explicit form of the adoption: it does not go through
             // the lookup that asks.
             let ws = forge::locate(&paths.data, cwd)?;
             rehome(paths, &ws, lang, store, new_store)
         }
-        other => Err(Error::UnknownOption(other.to_string())),
     }
-}
-
-/// The `--help` of a `forge` command: the help of the program.
-fn help(lang: Lang) -> Result<ExitCode, Error> {
-    // A closed pipe, as in `agl forge --help | head`, is not an
-    // error.
-    let _ = writeln!(io::stdout(), "{}", tr!(lang, m::HELP));
-    Ok(ExitCode::SUCCESS)
 }
 
 /// The argument `i` as text; a missing argument is a `MissingValue` of
@@ -265,8 +275,45 @@ fn new_task_spec(
     paths: &Paths,
     ws: &Workspace,
     lang: Lang,
-    args: &[OsString],
+    title: String,
+    name: Option<String>,
 ) -> Result<ExitCode, Error> {
+    let existing = artifact_names(ws)?;
+    let name = match name {
+        Some(name) => {
+            if !valid_name(&name) {
+                return Err(Error::InvalidName(name));
+            }
+            name
+        }
+        None => format!(
+            "agl-{:03}-{}",
+            task_spec::next_number(&existing),
+            task_spec::slug(&title)
+        ),
+    };
+    if existing.contains(&name) {
+        return Err(Error::NameTaken {
+            name: name.clone(),
+            dir: paths.forge_dir(&ws.key),
+        });
+    }
+    let path = paths
+        .forge_dir(&ws.key)
+        .join(task_spec::TYPE)
+        .join(format!("{name}.md"));
+    let mut artifact = task_spec::scaffold(&name, &task_spec::today());
+    artifact.path = path.clone();
+    for line in forge::materialize(ws, lang)? {
+        outln!("{line}");
+    }
+    forge::write_artifact(&artifact)?;
+    outln!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = path.display()));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The arguments of `forge new task-spec --title <t> [--name <n>]`.
+fn new_args(args: &[OsString]) -> Result<ForgeAction, Error> {
     let type_name = word(args, 1, "new")?.to_string();
     if type_name != task_spec::TYPE {
         return Err(Error::NewType { type_name });
@@ -300,38 +347,7 @@ fn new_task_spec(
     let Some(title) = title else {
         return Err(Error::MissingValue("--title".into()));
     };
-    let existing = artifact_names(ws)?;
-    let name = match name {
-        Some(name) => {
-            if !valid_name(&name) {
-                return Err(Error::InvalidName(name));
-            }
-            name
-        }
-        None => format!(
-            "agl-{:03}-{}",
-            task_spec::next_number(&existing),
-            task_spec::slug(&title)
-        ),
-    };
-    if existing.contains(&name) {
-        return Err(Error::NameTaken {
-            name: name.clone(),
-            dir: paths.forge_dir(&ws.key),
-        });
-    }
-    let path = paths
-        .forge_dir(&ws.key)
-        .join(task_spec::TYPE)
-        .join(format!("{name}.md"));
-    let mut artifact = task_spec::scaffold(&name, &task_spec::today());
-    artifact.path = path.clone();
-    for line in forge::materialize(ws, lang)? {
-        outln!("{line}");
-    }
-    forge::write_artifact(&artifact)?;
-    outln!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = path.display()));
-    Ok(ExitCode::SUCCESS)
+    Ok(ForgeAction::New { title, name })
 }
 
 /// A name the human gave with `--name`: non-empty, no path separator.
@@ -420,25 +436,9 @@ fn range(
     ws: &Workspace,
     lang: Lang,
     name: &str,
-    options: &[OsString],
+    anchor: Option<String>,
+    last: Option<String>,
 ) -> Result<ExitCode, Error> {
-    let mut anchor: Option<String> = None;
-    let mut last: Option<String> = None;
-    let mut i = 0;
-    while i < options.len() {
-        let arg = word(options, i, "range")?;
-        i += 1;
-        let (slot, option) = match arg {
-            "--anchor" => (&mut anchor, "--anchor"),
-            "--last" => (&mut last, "--last"),
-            _ => return Err(Error::UnknownOption(arg.to_string())),
-        };
-        if slot.is_some() {
-            return Err(Error::RepeatedOption(option.to_string()));
-        }
-        *slot = Some(word(options, i, option)?.to_string());
-        i += 1;
-    }
     let mut artifact = find_artifact(paths, ws, name)?;
     if artifact.type_name != task_spec::TYPE {
         return Err(Error::NotTaskSpec {
@@ -740,6 +740,29 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The arguments of `forge range <name> [--anchor <id>] [--last <id>]`.
+fn range_args(args: &[OsString]) -> Result<ForgeAction, Error> {
+    let name = word(args, 1, "range")?.to_string();
+    let mut anchor: Option<String> = None;
+    let mut last: Option<String> = None;
+    let mut i = 2;
+    while i < args.len() {
+        let arg = word(args, i, "range")?;
+        i += 1;
+        let (slot, option) = match arg {
+            "--anchor" => (&mut anchor, "--anchor"),
+            "--last" => (&mut last, "--last"),
+            _ => return Err(Error::UnknownOption(arg.to_string())),
+        };
+        if slot.is_some() {
+            return Err(Error::RepeatedOption(option.to_string()));
+        }
+        *slot = Some(word(args, i, option)?.to_string());
+        i += 1;
+    }
+    Ok(ForgeAction::Range { name, anchor, last })
+}
+
 /// The arguments of `forge rehome`: a store name and/or `--new`;
 /// parsed before the workspace, like the arguments of the other
 /// subcommands.
@@ -853,13 +876,8 @@ mod tests {
             data: data.to_path_buf(),
             state: data.to_path_buf(),
         };
-        run(
-            &args.iter().map(OsString::from).collect::<Vec<_>>(),
-            &UserFile::default(),
-            &paths,
-            cwd,
-            Lang::En,
-        )
+        let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
+        run(action, &UserFile::default(), &paths, cwd, Lang::En)
     }
 
     /// A git repository at `dir/proj` with one commit.
@@ -921,18 +939,6 @@ mod tests {
     }
 
     #[test]
-    fn no_subcommand_or_a_help_flag_is_the_help() {
-        let data = TempDir::new();
-        let cases: [&[&str]; 3] = [&[], &["-h"], &["--help"]];
-        for args in cases {
-            assert_eq!(
-                forge(data.0.as_path(), Path::new("/nowhere"), args).unwrap(),
-                ExitCode::SUCCESS
-            );
-        }
-    }
-
-    #[test]
     fn unknown_arguments_are_rejected() {
         let data = TempDir::new();
         let cases: [(&[&str], &str); 7] = [
@@ -978,19 +984,7 @@ mod tests {
     fn a_non_utf8_argument_is_rejected() {
         // The arguments are raw `OsString`s; a word that is not UTF-8
         // cannot be a subcommand.
-        let data = TempDir::new();
-        let paths = Paths {
-            config: data.0.clone(),
-            data: data.0.clone(),
-            state: data.0.clone(),
-        };
-        let result = run(
-            &[OsString::from_vec(vec![0xffu8])],
-            &UserFile::default(),
-            &paths,
-            Path::new("/nowhere"),
-            Lang::En,
-        );
+        let result = parse(&[OsString::from_vec(vec![0xffu8])]);
         assert!(matches!(result, Err(Error::InvalidUnicode)));
     }
 
@@ -1304,13 +1298,8 @@ mod tests {
         let mut user = UserFile::default();
         user.forge.auto_rehome = Some(false);
         let run_with = |args: &[&str]| {
-            run(
-                &args.iter().map(OsString::from).collect::<Vec<_>>(),
-                &user,
-                &paths,
-                &to,
-                Lang::En,
-            )
+            let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
+            run(action, &user, &paths, &to, Lang::En)
         };
         assert!(matches!(run_with(&["list"]), Err(Error::RehomeNoStore { .. })));
         let name = old_store.to_string_lossy().into_owned();

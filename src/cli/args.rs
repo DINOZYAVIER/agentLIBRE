@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 
 use crate::backend::ReasoningLevel;
+use crate::cli::forge::ForgeAction;
 use crate::error::Error;
 
 /// What the command line asks for.
@@ -22,9 +23,9 @@ pub enum Command {
     /// `agl init` (AGL-010): register the current directory as
     /// a project.
     Init,
-    /// `agl forge …` (AGL-007); the arguments after the word
-    /// `forge` are parsed in the forge surface.
-    Forge(Vec<OsString>),
+    /// `agl forge …` (AGL-007), parsed by the forge surface before any
+    /// settings load (AGL-061, D1).
+    Forge(ForgeAction),
     /// `agl function list|use` (AGL-036, D3).
     Function(FunctionAction),
     /// `agl search login` (AGL-043 F20).
@@ -131,10 +132,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
     let mut parsed = Args::default();
     let mut args = args.into_iter().peekable();
     let text = |arg: OsString| arg.into_string().map_err(|_| Error::InvalidUnicode);
-    // The forge surface parses its own arguments (AGL-007).
+    // The forge surface parses its own arguments (AGL-007), here, so that
+    // its help needs no settings (AGL-061, D1).
     if args.peek().is_some_and(|arg| arg == "forge") {
         args.next();
-        return Ok(Command::Forge(args.collect()));
+        let args: Vec<OsString> = args.collect();
+        if args.first().is_none_or(|arg| arg == "-h" || arg == "--help") {
+            return Ok(Command::Help);
+        }
+        return crate::cli::forge::parse(&args).map(Command::Forge);
     }
     if args.peek().is_some_and(|arg| arg == "init") {
         args.next();
@@ -656,12 +662,19 @@ mod tests {
     }
 
     #[test]
-    fn forge_keeps_the_rest_of_the_arguments() {
-        assert_eq!(parse_strs(&["forge"]).unwrap(), Command::Forge(Vec::new()));
+    fn forge_commands() {
         assert_eq!(
-            parse_strs(&["forge", "list", "-h", "x"]).unwrap(),
-            Command::Forge(vec!["list".into(), "-h".into(), "x".into()])
+            parse_strs(&["forge", "list"]).unwrap(),
+            Command::Forge(ForgeAction::List)
         );
+        assert_eq!(
+            parse_strs(&["forge", "new", "task-spec", "--title", "t"]).unwrap(),
+            Command::Forge(ForgeAction::New { title: "t".into(), name: None })
+        );
+        // The help needs no settings (AGL-061, D1).
+        for words in [&["forge"][..], &["forge", "-h"], &["forge", "--help"]] {
+            assert_eq!(parse_strs(words).unwrap(), Command::Help, "{words:?}");
+        }
         // Only the first word is a command; a message may say "forge".
         assert_eq!(
             parse_strs(&["-p", "forge"]).unwrap(),
