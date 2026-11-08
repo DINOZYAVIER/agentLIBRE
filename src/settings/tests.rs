@@ -456,8 +456,8 @@ fn function_precedence() {
     assert_eq!(resolve(&user, Some("project"), Some("cli")), "cli");
     assert_eq!(resolve(&user, Some("project"), None), "project");
     assert_eq!(resolve(&user, None, None), "user");
-    // The default (AGL-039, D32).
-    assert_eq!(resolve(&with_url(), None, None), "agentLIBRE-gpu-low");
+    // The default (AGL-052, D16).
+    assert_eq!(resolve(&with_url(), None, None), "agentLIBRE-cpu-low");
 }
 
 #[test]
