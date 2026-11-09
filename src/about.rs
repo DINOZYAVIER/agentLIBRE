@@ -156,7 +156,7 @@ mod tests {
             git_root: Some(Path::new("/w/project")),
             system: "linux",
             date: "2026-11-04",
-            version: "agl 0.0.1 (abc1234)",
+            version: "agl 0.0.2 (abc1234)",
             function: "f",
             function_file: Some(Path::new("/c/functions/f.nix")),
             server_kind: "llama",
@@ -180,7 +180,7 @@ mod tests {
              - date: 2026-11-04 (UTC)\n\
              \n\
              This agl:\n\
-             - version: agl 0.0.1 (abc1234) (`agl --version` tells it)\n\
+             - version: agl 0.0.2 (abc1234) (`agl --version` tells it)\n\
              - function: f (/c/functions/f.nix)\n\
              - server: llama at http://127.0.0.1:18080, context {context} tokens\n\
              - model: /m/model.gguf\n\
