@@ -269,7 +269,7 @@ fn run(
             let _ = writeln!(io::stdout(), "{}", tr!(*lang, m::NO_SESSIONS));
         }
         for session in found {
-            let _ = writeln!(io::stdout(), "{}  {}  {}", session.id, session.time, session.first);
+            let _ = writeln!(io::stdout(), "{}  {}  {}", session.id, session.time, session.label());
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -333,7 +333,13 @@ fn agent_session(
                     dir: paths.sessions(),
                 })?,
         ),
-        other => other.map(str::to_owned),
+        // A name first, as it was typed, then an id or the start of one
+        // (AGL-062, D1).
+        Some(key) => Some(
+            Session::id_named(&paths.sessions(), &project.project, key)
+                .unwrap_or_else(|| key.to_owned()),
+        ),
+        None => None,
     };
     let session = resume
         .as_deref()
