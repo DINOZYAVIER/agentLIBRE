@@ -119,6 +119,11 @@ pub enum Error {
     SessionNotFound { id: String, dir: PathBuf },
     /// More than one session id starts with `id` (D107).
     SessionAmbiguous { id: String, count: usize },
+    /// `/rename` to a text that is no name (AGL-062, D6).
+    SessionName { problem: NameProblem },
+    /// `/rename` to a name that another session of the project has
+    /// (AGL-062, D5).
+    SessionNameTaken { name: String, id: String },
     /// Line `line` of a session file is not a valid event.
     SessionLine {
         path: PathBuf,
@@ -375,6 +380,19 @@ pub enum TemplateProblem {
     NothingAfterValue,
     /// A `think` string is empty.
     Empty,
+}
+
+/// Why a text is no name of a session (AGL-062, D6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameProblem {
+    /// Nothing is left after trimming.
+    Empty,
+    /// It has more than one line.
+    Lines,
+    /// It is longer than `session::NAME_MAX`.
+    TooLong,
+    /// It is `last`, which `--resume` reads as the newest session.
+    Reserved,
 }
 
 /// What is wrong with a Function.

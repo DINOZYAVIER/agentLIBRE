@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 
 use crate::error::{
-    CredentialProblem, Error, Expected, FunctionProblem, ServerOwner, TemplateProblem,
+    CredentialProblem, Error, Expected, FunctionProblem, NameProblem, ServerOwner, TemplateProblem,
 };
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
@@ -693,8 +693,32 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::SessionNotFound`.
     pub const SESSION_NOT_FOUND: Msg = Msg {
-        en: "no session `{id}` in {dir}",
-        uk: "сесії `{id}` немає в {dir}",
+        en: "no session in {dir} is named `{id}` or has an id that starts with it",
+        uk: "у {dir} немає сесії з іменем `{id}` чи з id, що з нього починається",
+    };
+
+    /// `Error::SessionName` (AGL-062, D6).
+    pub const SESSION_NAME_EMPTY: Msg = Msg {
+        en: "a name cannot be empty",
+        uk: "ім'я не може бути порожнім",
+    };
+    pub const SESSION_NAME_LINES: Msg = Msg {
+        en: "a name is one line",
+        uk: "ім'я — один рядок",
+    };
+    pub const SESSION_NAME_LONG: Msg = Msg {
+        en: "a name has at most {max} characters",
+        uk: "ім'я має щонайбільше {max} символів",
+    };
+    pub const SESSION_NAME_RESERVED: Msg = Msg {
+        en: "`last` is no name: `--resume last` is the newest session",
+        uk: "`last` не може бути іменем: `--resume last` — найновіша сесія",
+    };
+
+    /// `Error::SessionNameTaken` (AGL-062, D5).
+    pub const SESSION_NAME_TAKEN: Msg = Msg {
+        en: "the session {id} of this project is named `{name}` already",
+        uk: "сесія {id} цього проєкту вже має ім'я `{name}`",
     };
 
     /// `Error::SessionAmbiguous`.
@@ -2684,6 +2708,17 @@ impl Error {
             }
             Error::SessionAmbiguous { id, count } => {
                 tr!(lang, m::SESSION_AMBIGUOUS, id = id, count = count)
+            }
+            Error::SessionName { problem } => match problem {
+                NameProblem::Empty => tr!(lang, m::SESSION_NAME_EMPTY).to_string(),
+                NameProblem::Lines => tr!(lang, m::SESSION_NAME_LINES).to_string(),
+                NameProblem::TooLong => {
+                    tr!(lang, m::SESSION_NAME_LONG, max = crate::session::NAME_MAX)
+                }
+                NameProblem::Reserved => tr!(lang, m::SESSION_NAME_RESERVED).to_string(),
+            },
+            Error::SessionNameTaken { name, id } => {
+                tr!(lang, m::SESSION_NAME_TAKEN, name = name, id = id)
             }
             Error::SessionLine { path, line, detail } => {
                 tr!(

@@ -690,3 +690,131 @@ fn a_session_is_the_users_alone_and_the_latest_are_listed() {
     assert!(Session::latest(&dir, Path::new("/none"), 20).is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_name_is_a_line_of_the_file_and_the_last_one_counts() {
+    // AGL-062, D4.
+    let dir = Dir::new("name-line");
+    let project = Path::new("/w/project");
+    let mut session = Session::create(&dir.0, "f", project).unwrap();
+    session.append(Event::User("fix the grammar".into())).unwrap();
+    assert_eq!(session.name, None);
+    session.rename(project, "  gemma grammar  ").unwrap();
+    assert_eq!(session.name.as_deref(), Some("gemma grammar"));
+    session.rename(project, "grammar").unwrap();
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(reopened.name.as_deref(), Some("grammar"));
+    // The line is no event: the history is what it was.
+    assert_eq!(reopened.events, session.events);
+    let text = fs::read_to_string(session.file_path()).unwrap();
+    assert_eq!(text.matches(r#""type":"name""#).count(), 2);
+    // The same name again writes nothing.
+    session.rename(project, "grammar").unwrap();
+    assert_eq!(fs::read_to_string(session.file_path()).unwrap(), text);
+}
+
+#[test]
+fn the_list_shows_the_name_in_place_of_the_first_line() {
+    // AGL-062, D3.
+    let dir = Dir::new("name-list");
+    let project = Path::new("/w/project");
+    let mut named = Session::create(&dir.0, "f", project).unwrap();
+    named.append(Event::User("fix the grammar".into())).unwrap();
+    named.rename(project, "grammar").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut plain = Session::create(&dir.0, "f", project).unwrap();
+    plain.append(Event::User("look at the build".into())).unwrap();
+    let latest = Session::latest(&dir.0, project, 20);
+    assert_eq!(latest[0].id, plain.id);
+    assert_eq!(latest[0].name, None);
+    assert_eq!(latest[0].label(), "look at the build");
+    assert_eq!(latest[1].id, named.id);
+    assert_eq!(latest[1].first, "fix the grammar");
+    assert_eq!(latest[1].label(), "grammar");
+}
+
+#[test]
+fn a_name_is_looked_up_exactly_in_the_project_before_any_id() {
+    // AGL-062, D1.
+    let dir = Dir::new("name-lookup");
+    let project = Path::new("/w/project");
+    let mut a = Session::create(&dir.0, "f", project).unwrap();
+    a.append(Event::User("a".into())).unwrap();
+    // A name that is not hex, a name that is, and one with a space.
+    a.rename(project, "refactor").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut b = Session::create(&dir.0, "f", project).unwrap();
+    b.append(Event::User("b".into())).unwrap();
+    b.rename(project, &a.id[..4]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut c = Session::create(&dir.0, "f", Path::new("/w/other")).unwrap();
+    c.rename(Path::new("/w/other"), "other work").unwrap();
+    assert_eq!(Session::id_named(&dir.0, project, "refactor"), Some(a.id.clone()));
+    assert_eq!(Session::id_named(&dir.0, project, "Refactor"), None);
+    // The name that looks like the start of an id is the name's session.
+    assert_eq!(Session::id_named(&dir.0, project, &a.id[..4]), Some(b.id.clone()));
+    // Another project's name is not found here.
+    assert_eq!(Session::id_named(&dir.0, project, "other work"), None);
+    assert_eq!(
+        Session::id_named(&dir.0, Path::new("/w/other"), "other work"),
+        Some(c.id.clone())
+    );
+}
+
+#[test]
+fn a_name_that_another_session_of_the_project_has_is_refused() {
+    // AGL-062, D5.
+    let dir = Dir::new("name-taken");
+    let project = Path::new("/w/project");
+    let mut first = Session::create(&dir.0, "f", project).unwrap();
+    first.rename(project, "work").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let mut second = Session::create(&dir.0, "f", project).unwrap();
+    match second.rename(project, "work") {
+        Err(Error::SessionNameTaken { name, id }) => {
+            assert_eq!(name, "work");
+            assert_eq!(id, first.id);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(second.name, None);
+    // A name the first one left is free again.
+    first.rename(project, "other").unwrap();
+    second.rename(project, "work").unwrap();
+    // Another project may have the same name.
+    let mut elsewhere = Session::create(&dir.0, "f", Path::new("/w/elsewhere")).unwrap();
+    elsewhere.rename(Path::new("/w/elsewhere"), "work").unwrap();
+}
+
+#[test]
+fn what_is_no_name_is_refused() {
+    // AGL-062, D6.
+    assert_eq!(check_name("  a name "), Ok("a name"));
+    assert_eq!(check_name(&"x".repeat(NAME_MAX)), Ok("x".repeat(NAME_MAX).as_str()));
+    assert_eq!(check_name(" \t "), Err(NameProblem::Empty));
+    assert_eq!(check_name("two\nlines"), Err(NameProblem::Lines));
+    assert_eq!(check_name(&"x".repeat(NAME_MAX + 1)), Err(NameProblem::TooLong));
+    assert_eq!(check_name("last"), Err(NameProblem::Reserved));
+    assert_eq!(check_name("last one"), Ok("last one"));
+    let dir = Dir::new("name-refused");
+    let mut session = Session::create(&dir.0, "f", Path::new("/w/project")).unwrap();
+    assert!(matches!(
+        session.rename(Path::new("/w/project"), "last"),
+        Err(Error::SessionName { problem: NameProblem::Reserved })
+    ));
+    assert_eq!(session.name, None);
+}
+
+#[test]
+fn text_that_looks_like_a_name_line_is_no_name() {
+    // AGL-062, D8: a user message holds the words, escaped.
+    let dir = Dir::new("name-quoted");
+    let project = Path::new("/w/project");
+    let mut session = Session::create(&dir.0, "f", project).unwrap();
+    session
+        .append(Event::User(r#"{"type":"name","name":"sneaky"}"#.into()))
+        .unwrap();
+    assert_eq!(Session::latest(&dir.0, project, 1)[0].name, None);
+    assert_eq!(Session::open(&dir.0, &session.id).unwrap().name, None);
+    assert_eq!(Session::id_named(&dir.0, project, "sneaky"), None);
+}

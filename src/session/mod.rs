@@ -12,7 +12,7 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::action::{Outcome, Value};
 use crate::backend::{Message, ToolCall};
-use crate::error::Error;
+use crate::error::{Error, NameProblem};
 use crate::media::{self, Frame, Kind, Media, Source};
 use crate::memory::Kind as MemoryKind;
 
@@ -225,6 +225,9 @@ pub struct Unfinished {
 /// An open session file.
 pub struct Session {
     pub id: String,
+    /// The name the human gave it, the last `name` line of the file
+    /// (AGL-062, D4).
+    pub name: Option<String>,
     pub function: String,
     pub workspace: PathBuf,
     pub events: Vec<Event>,
@@ -263,6 +266,7 @@ impl Session {
             .map_err(|source| write_error(&path, source))?;
         let mut session = Session {
             id,
+            name: None,
             function: function.into(),
             workspace: workspace.into(),
             events: Vec::new(),
@@ -286,22 +290,52 @@ impl Session {
     /// first, at most `limit` (AGL-058, D20). A file that cannot be read is left
     /// out: this only lists.
     pub fn latest(dir: &Path, project: &Path, limit: usize) -> Vec<SessionInfo> {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
-            .collect();
-        // A file's name sorts by time.
-        paths.sort();
-        paths
+        session_files(dir)
             .iter()
             .rev()
             .filter_map(|path| session_info(path, project))
             .take(limit)
             .collect()
+    }
+
+    /// The id of the newest session of the project at `project` whose name is
+    /// `name`, as it was typed (AGL-062, D1).
+    pub fn id_named(dir: &Path, project: &Path, name: &str) -> Option<String> {
+        session_files(dir)
+            .iter()
+            .rev()
+            .filter_map(|path| session_info(path, project))
+            .find(|info| info.name.as_deref() == Some(name))
+            .map(|info| info.id)
+    }
+
+    /// Gives the session the name `name` (AGL-062, D4-D6): a line at the end of
+    /// the file, and the last one counts. A name that another session of the
+    /// project at `project` has is refused; the session's own name is no change.
+    pub fn rename(&mut self, project: &Path, name: &str) -> Result<(), Error> {
+        let name = check_name(name).map_err(|problem| Error::SessionName { problem })?;
+        if self.name.as_deref() == Some(name) {
+            return Ok(());
+        }
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        let taken = session_files(dir)
+            .iter()
+            .filter_map(|path| session_info(path, project))
+            .find(|info| info.name.as_deref() == Some(name) && info.id != self.id);
+        if let Some(other) = taken {
+            return Err(Error::SessionNameTaken {
+                name: name.into(),
+                id: other.id,
+            });
+        }
+        self.write_line(&json!({
+            "type": "name",
+            "schema": 1,
+            "name": name,
+            "time": utc_now(),
+        }))?;
+        self.name = Some(name.into());
+        Ok(())
     }
 
     /// Opens the session whose id is or starts with `id` (D107). A call
@@ -343,12 +377,18 @@ impl Session {
         };
         let mut events = Vec::new();
         let mut prompt_inputs = BTreeMap::new();
+        let mut name = None;
         for (index, line) in lines {
             let json: Json = serde_json::from_str(line).map_err(|e| bad(index, &e.to_string()))?;
             // What the observer wrote is not an event, so it can reach
             // neither the history nor the replay (AGL-046).
             match json["type"].as_str() {
                 Some("transition" | "step" | "prefill" | "prompt_progress") => continue,
+                // The last name counts (AGL-062, D4); it is no event either.
+                Some("name") => {
+                    name = json["name"].as_str().map(str::to_owned).or(name);
+                    continue;
+                }
                 Some("prompt_input") => {
                     if let (Some(kind), Some(text)) = (json["kind"].as_str(), json["text"].as_str())
                     {
@@ -369,6 +409,7 @@ impl Session {
             })?;
         let mut session = Session {
             id: path.file_stem().unwrap().to_string_lossy().into_owned(),
+            name,
             function: function.into(),
             workspace: workspace.into(),
             events,
@@ -658,25 +699,84 @@ pub struct SessionInfo {
     pub time: String,
     /// The first line of its first message, short.
     pub first: String,
+    /// Its name, when it has one (AGL-062).
+    pub name: Option<String>,
+}
+
+impl SessionInfo {
+    /// What the list shows of the session: its name, else the first line of
+    /// its first message (AGL-062, D3).
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.first)
+    }
 }
 
 /// The most of a first message `agl --resume` shows.
 const FIRST_SHOWN: usize = 70;
 
-/// The session at `path`, when it is of the project at `project`. It reads only
-/// as far as the first message.
+/// The longest name (AGL-062, D6), in characters.
+pub const NAME_MAX: usize = 60;
+
+/// The word that `--resume` reads as the newest session, so no name
+/// (AGL-062, D6).
+const LAST: &str = "last";
+
+/// The name a human typed, trimmed, when it is one (AGL-062, D6).
+pub fn check_name(name: &str) -> Result<&str, NameProblem> {
+    let name = name.trim();
+    if name.is_empty() {
+        Err(NameProblem::Empty)
+    } else if name.contains(['\n', '\r']) {
+        Err(NameProblem::Lines)
+    } else if name.chars().count() > NAME_MAX {
+        Err(NameProblem::TooLong)
+    } else if name == LAST {
+        Err(NameProblem::Reserved)
+    } else {
+        Ok(name)
+    }
+}
+
+/// The session files of `dir`, the oldest first: a file's name sorts by time.
+fn session_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// The session at `path`, when it is of the project at `project`. It reads the
+/// whole file for the last name, parsing only the lines that can be the first
+/// message or a name (AGL-062, D8).
 fn session_info(path: &Path, project: &Path) -> Option<SessionInfo> {
     let mut lines = std::io::BufReader::new(File::open(path).ok()?).lines();
     let header: Json = serde_json::from_str(&lines.next()?.ok()?).ok()?;
     if header["type"] != "session" || !Path::new(header["workspace"].as_str()?).starts_with(project) {
         return None;
     }
-    let first = lines
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Json>(&line).ok())
-        .find(|line| line["type"] == "user")
-        .and_then(|line| line["text"].as_str().map(str::to_owned))
-        .unwrap_or_default();
+    let mut first: Option<String> = None;
+    let mut name = None;
+    for line in lines.map_while(Result::ok) {
+        if first.is_none() && line.contains(r#""type":"user""#) {
+            if let Ok(json) = serde_json::from_str::<Json>(&line)
+                && json["type"] == "user"
+            {
+                first = Some(json["text"].as_str().unwrap_or_default().to_owned());
+            }
+        } else if line.contains(r#""type":"name""#)
+            && let Ok(json) = serde_json::from_str::<Json>(&line)
+            && json["type"] == "name"
+        {
+            name = json["name"].as_str().map(str::to_owned).or(name);
+        }
+    }
+    let first = first.unwrap_or_default();
     let first = first.lines().next().unwrap_or_default();
     let mut shown: String = first.chars().take(FIRST_SHOWN).collect();
     if first.chars().count() > FIRST_SHOWN {
@@ -686,6 +786,7 @@ fn session_info(path: &Path, project: &Path) -> Option<SessionInfo> {
         id: path.file_stem()?.to_string_lossy().into_owned(),
         time: header["time"].as_str().unwrap_or_default().to_owned(),
         first: shown,
+        name,
     })
 }
 
