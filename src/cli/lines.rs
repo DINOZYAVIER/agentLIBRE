@@ -31,6 +31,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         stirred,
         mut session,
         sessions_dir,
+        project,
         mut context,
         server_url,
         lang,
@@ -185,6 +186,22 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                                 eprintln!("{text}");
                                 said.output.push(text);
                                 placeholders.push(placeholder);
+                            }
+                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
+                        }
+                    }
+                }
+                "/rename" => {
+                    let text = message["/rename".len()..].trim();
+                    if text.is_empty() {
+                        said.fail(tr!(lang, m::RENAME_USAGE).to_string());
+                    } else {
+                        match session.rename(project, text) {
+                            Ok(()) => {
+                                let named = session.name.clone().unwrap_or_default();
+                                let text = tr!(lang, m::RENAMED, name = named).to_string();
+                                eprintln!("{text}");
+                                said.output.push(text);
                             }
                             Err(error) => said.fail(format!("agl: {}", error.message(lang))),
                         }

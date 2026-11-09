@@ -109,6 +109,8 @@ pub struct Setup<'a> {
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
     pub sessions_dir: &'a Path,
+    /// The project of the session: a name is unique in it (AGL-062, D5).
+    pub project: &'a Path,
     /// The context size of the server when it already answered at the
     /// start; read at the first request otherwise (AGL-015, D10).
     pub context: Option<usize>,
@@ -590,6 +592,7 @@ fn agent_session(
             session,
             resumed,
             sessions_dir: &paths.sessions(),
+            project: &project.project,
             context,
             server_url: &settings.server_url,
             autostart: &autostart,

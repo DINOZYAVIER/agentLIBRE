@@ -71,6 +71,8 @@ struct Inner {
     compact: bool,
     /// `/remember name | text`, for the main thread to write (AGL-006).
     remember: Option<(String, String)>,
+    /// `/rename <name>`, for the main thread to write (AGL-062, D7).
+    rename: Option<String>,
     /// `/memory`, its line and action, for the main thread to run (AGL-060).
     memory: Option<(String, MemoryAction)>,
     /// A `/memory remove` waits for its `[y/N]` (AGL-060, D7).
@@ -342,6 +344,24 @@ impl Input {
                 // An ordinary message: the model names the entry (M37).
                 Remember::Turn(message) => self.submitted(message),
             },
+            // `/rename <name>` (AGL-062, D7): the main thread writes the name,
+            // which it holds the session for; not while a turn runs (as `/new`).
+            "/rename" => {
+                let text = trimmed["/rename".len()..].trim();
+                if text.is_empty() {
+                    self.notice(tr!(self.lang, m::RENAME_USAGE), Role::StatusPending);
+                    return;
+                }
+                let mut inner = self.control.lock();
+                if inner.busy() {
+                    drop(inner);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    return;
+                }
+                inner.rename = Some(text.to_owned());
+                drop(inner);
+                self.control.wake.notify_all();
+            }
             // `/memory` (AGL-060, D5): the main thread finds the store, which
             // takes the evaluation of its marker, too long for the keyboard to
             // wait; not while a turn runs, when the model can be writing it.
@@ -622,6 +642,8 @@ enum Next {
     New,
     Compact,
     Remember(String, String),
+    /// `/rename`: the name asked for (AGL-062).
+    Rename(String),
     /// `/memory`: its line and action (AGL-060).
     Memory(String, MemoryAction),
     /// `/function` (AGL-036, D9).
@@ -684,6 +706,9 @@ fn wait_for_next(control: &Control) -> Next {
         if let Some((name, text)) = inner.remember.take() {
             return Next::Remember(name, text);
         }
+        if let Some(name) = inner.rename.take() {
+            return Next::Rename(name);
+        }
         if let Some((line, action)) = inner.memory.take() {
             return Next::Memory(line, action);
         }
@@ -714,6 +739,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         mut session,
         resumed,
         sessions_dir,
+        project,
         context,
         server_url,
         theme,
@@ -903,6 +929,24 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = session.id), Role::Muted);
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
+                }
+            }
+            Next::Rename(name) => {
+                // `/rename <name>` (AGL-062, D7): the name is a line of the
+                // file. The model has the command from its record (AGL-047,
+                // D5), as with the others.
+                let line = format!("/rename {name}");
+                match session.rename(project, &name) {
+                    Ok(()) => {
+                        let named = session.name.clone().unwrap_or_default();
+                        presenter.show_notice(&tr!(lang, m::RENAMED, name = named), Role::Muted);
+                        record(&mut session, line, false, None);
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        record(&mut session, line, true, Some(text));
+                    }
                 }
             }
             Next::Remember(name, text) => {
@@ -1672,6 +1716,41 @@ mod tests {
         }
         assert!(f.output().contains("usage: /remember"));
         assert!(f.inner().remember.is_none());
+        assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn rename_is_for_the_main_thread_and_waits_for_no_turn() {
+        // AGL-062, D7.
+        let f = fixture();
+        f.type_text("/rename  gemma grammar ");
+        f.input.key(Key::Enter);
+        assert_eq!(f.inner().rename.as_deref(), Some("gemma grammar"));
+        assert!(f.inner().queue.is_empty());
+        // The main thread takes it before any message.
+        f.inner().queue.push_back("later".into());
+        assert!(matches!(
+            wait_for_next(&f.input.control),
+            Next::Rename(name) if name == "gemma grammar"
+        ));
+        assert!(f.inner().rename.is_none());
+        f.inner().queue.clear();
+        // During a turn it is refused, and nothing is kept.
+        f.inner().running = true;
+        f.type_text("/rename other");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("/rename is not available during a turn"));
+        assert!(f.inner().rename.is_none());
+    }
+
+    #[test]
+    fn rename_without_a_name_tells_the_usage() {
+        // AGL-062, D7.
+        let f = fixture();
+        f.type_text("/rename");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("usage: /rename <name>"));
+        assert!(f.inner().rename.is_none());
         assert!(f.inner().queue.is_empty());
     }
 

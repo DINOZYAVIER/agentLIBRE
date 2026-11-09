@@ -1446,6 +1446,23 @@ Forge (сховище артефактів робочої області, agentL
         uk: "зберегти нотатку в пам'яті робочої області: <назва> | <текст>",
     };
 
+    pub const CMD_RENAME: Msg = Msg {
+        en: "name this session, so that `agl --resume <name>` finds it: <name>",
+        uk: "дати цій сесії ім'я, щоб `agl --resume <ім'я>` її знаходило: <ім'я>",
+    };
+
+    /// `/rename` without a name (AGL-062, D7).
+    pub const RENAME_USAGE: Msg = Msg {
+        en: "usage: /rename <name>",
+        uk: "використання: /rename <ім'я>",
+    };
+
+    /// The session has the name (AGL-062, D7).
+    pub const RENAMED: Msg = Msg {
+        en: "this session is named `{name}`: agl --resume \"{name}\"",
+        uk: "ця сесія має ім'я `{name}`: agl --resume \"{name}\"",
+    };
+
     /// `/remember` without a text, or with an empty name or text.
     pub const REMEMBER_USAGE: Msg = Msg {
         en: "usage: /remember <name> | <text> (the entry is written at once), or /remember <text> (the model names it)",
@@ -3318,6 +3335,7 @@ pub mod repl {
             "/attach" => tr!(lang, m::CMD_ATTACH),
             "/remember" => tr!(lang, m::CMD_REMEMBER),
             "/memory" => tr!(lang, m::CMD_MEMORY),
+            "/rename" => tr!(lang, m::CMD_RENAME),
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             "/function" => tr!(lang, m::CMD_FUNCTION),
