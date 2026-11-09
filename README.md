@@ -1,60 +1,60 @@
 # agentLIBRE
 
-agentLIBRE is a local-first agentic system.
+agentLIBRE is a local-first agentic system. That's where I put everything needed for running agentic AI on your computer.
 
 ## Why agent?
 
-It utilizes LLM-powered agents, so that's why.
+It's agentic, which means you enable working with your computer agentically. Today, this agency is held by Large Language Models, which are also referred to as Artificial Intelligence.
 
 ## Why LIBRE?
 
-It's free (libre) and open-source.
+It's free (libre) and open-source. There are no reasons for making agentLIBRE proprietary software. I think we should have as much FOSS for everything as possible.
 
 ## What it does
 
-`agl` runs a model on your own machine and works in your project through tools: it runs commands, edits and reads files, searches, keeps a memory of the project and task specs. A message can carry images, video and audio, and Ctrl-R dictates one by voice. What the agent is and which model it runs are a **Function**, a small Nix file you can replace.
+By running `agl` in CLI, you will open a REPL-chat with your agent. If it's your first time running the command, it will help you download model files to run agentLIBRE.
+
+In the REPL-chat you can tell your agent to read and edit your files, as well as use the terminal. These basic operations are enough for performing almost anything.
+
+There are also additional tools. `agl memory` helps you with providing your agent with cross-session knowledge. `agl forge` is used for managing artifacts for workspaces.
+
+If you don't want your agent to do something, make it impossible for it to do. You need to have your security enforced and/or consider containerization.
+
+## How it does
+
+### agentFUNCTION
+
+What model, what settings and what agent is defined by a Function, a small Nix file you can replace. There are pre-installed Functions that you can use to create the Functions you need.
+
+A Function specifies the system prompt, states, and limits of steps and tokens. It also declares the kind of inference engine used for running your model, the weights of this model, the context size, the arguments for running the server and the sampling parameters, as well as where you can download these weights.
+
+agl has its store in XDG. It creates it when you run `agl` in a folder for the first time. That's where it stores `settings.nix` for this project, memory and forge. If you don't specify a Function by running `agl --function <name>`, it will choose the Function from `settings.nix`. If there is no Function in `settings.nix`, it will be taken from your global `settings.nix`.
+
+You can change the Function in your workspace-specific or global `settings.nix` by running `agl function use <name>` (adding `--user` changes the global `settings.nix`). If none of those declare a Function, it will run the hardcoded `agentLIBRE-cpu-low`.
+
+### Inference
+
+agl uses HTTP to connect to an inference engine, whether it's llama.cpp or Strata. If nothing answers at the address, agl starts a new server itself, with the arguments of the Function. It also closes the server that agl started by itself when you close the REPL-chat.
+
+In the case of llama.cpp, agl builds a grammar from the state the agent is in and sends it with the request. It helps ensure that the model does what the state allows. Tool calls are more likely to be valid this way.
+
+Strata has no grammar. agl checks the structure of the reply after it is generated and asks the model again, up to a specified number of times (`max_stirs` in a Function).
+
+### Finite state machines
+
+agentLIBRE utilizes finite state machines in different components. They can provide more determinism as a remedy for one of the issues with various applications of LLMs.
+
+There is an agent FSM that steers the agent. Each state specifies what the agent may do at the moment: what tools are available, can it answer, can it think, and how many steps it may spend there. The grammar (only for llama.cpp) is built from these allowed actions. For now built-in Functions feature only one state but this FSM will have more applications in the future.
+
+There is also a turn FSM that observes what happens during a turn: the server starting, the prompt being read, thinking, writing, a tool running, compacting, a retry. It is used to provide both agent and user with observability of agl working via logging these states into the session file. agl is capable of accessing its logs and working with them.
 
 ## Install
 
-agl runs on Linux with Nix, and on Windows in NixOS-WSL. It is built from source on the first install, as there is no binary cache yet.
-
-### Windows
-
-Download [`install-agl.cmd`](windows/install-agl.cmd) with "Download raw file" on that page, and double-click it. Windows may warn about a file from the internet: "More info", then "Run anyway".
-
-The file installs WSL, NixOS-WSL and agl. It asks for administrator rights once and for one restart of Windows, after which it goes on by itself. If something fails, it says what, and running it again goes on from there. It keeps a log in `%LOCALAPPDATA%\agentLIBRE\install`.
-
-It needs Windows 11 22H2 or later on x86-64, virtualization on in the BIOS, and the driver of your GPU. It writes `%UserProfile%\.wslconfig` with `networkingMode=mirrored`. If you have that file already it stays as it is, and you add this line under `[wsl2]` yourself.
-
-Then, in a terminal:
-
-```powershell
-wsl -d NixOS
-agl
-```
-
-agl starts the official Windows `llama-server.exe`, which sees the GPU directly and reads the weights from `%LOCALAPPDATA%\agentLIBRE\models`. To update agl, in NixOS:
-
-```sh
-sudo nixos-rebuild switch --flake github:DINOZYAVIER/agentLIBRE#wsl --refresh
-```
-
-### Linux
-
-With [Nix](https://nixos.org/download/), flakes on, and systemd, which starts the server:
-
-```sh
-git clone https://github.com/DINOZYAVIER/agentLIBRE
-cd agentLIBRE
-nix build
-./result/bin/agl
-```
-
-`nix profile add .` puts it on your `PATH`. The server runs on Vulkan, with the Mesa of the package unless the system has its own driver for Nix. AMD is checked; NVIDIA and Intel are not yet.
+agl runs on Linux with Nix and on Windows in NixOS-WSL. It is built from source on the first install, as there is no binary cache yet.
 
 ### NixOS
 
-In your flake:
+Add the input to your flake and the module to your system:
 
 ```nix
 inputs.agentlibre = {
@@ -63,44 +63,45 @@ inputs.agentlibre = {
 };
 ```
 
-Then add `inputs.agentlibre.nixosModules.default` to the modules of your system, with:
-
 ```nix
 programs.agl.enable = true;
 ```
 
-The module turns on `hardware.graphics`, as the server runs on Vulkan. AMD is checked; NVIDIA and Intel are not yet.
+### Linux
 
-### A server on another machine
+You need [Nix](https://nixos.org/download/) with flakes, and systemd.
 
-On NixOS, `programs.agl.package = inputs.agentlibre.packages.x86_64-linux.outside;` installs agl with no server of its own. `agl server command --function <name>` prints the line that starts the server over there and the links to its files, and `~/.config/agentLIBRE/settings.nix` names it:
+```sh
+git clone https://github.com/DINOZYAVIER/agentLIBRE
+cd agentLIBRE
+nix build
+./result/bin/agl
+```
+
+### macOS
+
+To be tested.
+
+### Windows
+
+Run [`install-agl.cmd`](windows/install-agl.cmd). It installs WSL, NixOS-WSL and agl, and may ask for administrator rights and a restart. If something fails, run it again.
+
+It needs Windows 11 22H2 or later, virtualization on in the BIOS and a GPU driver. Then:
+
+```powershell
+wsl -d NixOS
+agl
+```
+
+### External server
+
+`agl` can use a llama-server running on another machine. Set `programs.agl.package = inputs.agentlibre.packages.x86_64-linux.outside;` and name the server in `~/.config/agentLIBRE/settings.nix`:
 
 ```nix
 { agl, ... }: { server.llama = { url = "http://HOST:PORT"; external = true; }; }
 ```
 
-agl then neither starts nor stops that server, and refuses if it serves another model. Reach it over a network you trust: llama-server has no password by default.
-
-## Run
-
-```sh
-agl
-```
-
-agl offers to download the files of the Function it needs. `agl function list` shows the Functions, and `agl function use <name>` picks one:
-
-| Function | Model | Context | Memory | Download |
-| --- | --- | --- | --- | --- |
-| `agentLIBRE-cpu-low` | Gemma 4 E2B | 32K | 4.1 GB RAM | 3.7 GB |
-| `agentLIBRE-cpu-medium` | Gemma 4 E4B | 32K | 6.0 GB RAM | 5.3 GB |
-| `agentLIBRE-cpu-high` | Gemma 4 E4B | 64K | 6.3 GB RAM | 5.3 GB |
-| `agentLIBRE-cpu-very-high` | Gemma 4 E4B | 128K | 6.8 GB RAM | 5.3 GB |
-| `agentLIBRE-gpu-low` (default) | Gemma 4 E4B | 128K | 5.5 GB VRAM | 5.3 GB |
-| `agentLIBRE-gpu-medium` | Gemma 4 12B | 128K | 8.9 GB VRAM | 7.1 GB |
-| `agentLIBRE-gpu-high` | Qwen3.8 27B | 128K | 20.1 GB VRAM | 15.2 GB |
-| `agentLIBRE-gpu-very-high` | Qwen3.8 27B | 256K | 24.4 GB VRAM | 15.2 GB |
-
-The memory was measured on one machine with an RX 7900 XTX, on top of what the desktop takes. The Functions live in [agentLIBRE-functions](https://github.com/DINOZYAVIER/agentLIBRE-functions).
+`agl server command --function <name>` prints the line that starts the server there. Use a network you trust: llama-server has no password by default.
 
 ## License
 
