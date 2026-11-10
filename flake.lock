@@ -37,11 +37,11 @@
     "functions": {
       "flake": false,
       "locked": {
-        "lastModified": 1793917053,
-        "narHash": "sha256-6urSiFr7oq8Xb5N+CL231xwGrKD/CTBs/aVnuyUSRh8=",
+        "lastModified": 1794352338,
+        "narHash": "sha256-ABT5y2ISCFt89CaCdKDb7lGkqLMyfzQG9mAyEUHeuEo=",
         "owner": "DINOZYAVIER",
         "repo": "agentLIBRE-functions",
-        "rev": "e2bc6df88f74aa515b817c832d50ced310419a72",
+        "rev": "f9ffa9f73f830c315b892dbc16e312d92f77c072",
         "type": "github"
       },
       "original": {
