@@ -1,12 +1,39 @@
 //! Model formats: how a model writes thinking and tool calls (D12, D23,
 //! D77, D78, D81).
 
+use std::path::Path;
+
+use serde_json::{Value as Json, json};
+
 use crate::action::{Kind, Value};
 use crate::error::{Error, TemplateProblem};
 use crate::nix::Section;
 
 const NAME: &str = "{name}";
 const VALUE: &str = "{value}";
+
+/// The Qwen 3.8 format, as `nix/formats/qwen3.8.nix` writes it (the test
+/// `builtin_qwen_is_the_nix_one` keeps the two the same). The marks are
+/// joined from parts: the model that edits this file cannot write them
+/// whole.
+pub fn qwen_value() -> Json {
+    let think_open = concat!("<", "think", ">");
+    let think_close = concat!("<", "/", "think", ">");
+    let call_open = concat!("<", "tool_call", ">");
+    let call_close = concat!("<", "/", "tool_call", ">");
+    json!({
+        "think": {
+            "open": format!("{think_open}\n"),
+            "close": format!("\n{think_close}\n\n"),
+            "stray_close": think_close,
+        },
+        "call": {
+            "begin": format!("{call_open}\n<function={{name}}>\n"),
+            "param": "<parameter={name}>\n{value}\n</parameter>\n",
+            "end": format!("</function>\n{call_close}"),
+        },
+    })
+}
 
 /// A model format.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +124,15 @@ impl Call {
 }
 
 impl Format {
+    /// The Qwen 3.8 format, the default of the loose continue of a session
+    /// whose Function is not found (AGL-063, D4): the format of the model
+    /// the loose session was made with is unknown, and this is the common
+    /// one, told in the notice.
+    pub fn qwen() -> Format {
+        let section = Section::top(Path::new("<qwen>"), qwen_value()).expect("a set");
+        Self::from_section(section).expect("the qwen format parses")
+    }
+
     /// Reads the evaluated format `file` (the `model.format` of a
     /// Function: `agl.formats."qwen3.8"` or a file of its own, AGL-039,
     /// D18); agl looks no format up by name.
@@ -304,27 +340,11 @@ pub mod tests {
     use serde_json::{Value, json};
     use std::path::Path;
 
-    /// The Qwen3.8 format, as `nix/formats/qwen3.8.nix` writes it (the
-    /// test `builtin_qwen_is_the_nix_one` keeps the two the same).
-    pub fn qwen_value() -> Value {
-        json!({
-            "think": {
-                "open": "<think>\n",
-                "close": "\n</think>\n\n",
-                "stray_close": "</think>",
-            },
-            "call": {
-                "begin": "<tool_call>\n<function={name}>\n",
-                "param": "<parameter={name}>\n{value}\n</parameter>\n",
-                "end": "</function>\n</tool_call>",
-            },
-        })
-    }
-
     /// The built-in Qwen3.8 format.
     pub fn qwen() -> Format {
         parse(qwen_value()).unwrap()
     }
+
 
     /// The Gemma 4 format, as `nix/formats/gemma4.nix` writes it (the test
     /// `builtin_gemma_is_the_nix_one` keeps the two the same).

@@ -673,6 +673,31 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Function `{name}` не знайдено: немає {paths} і вбудованої Function з такою назвою",
     };
 
+    /// `Error::RunSchema`.
+    pub const RUN_SCHEMA: Msg = Msg {
+        en: "the session's `run` snapshot is of the schema {found}, this build reads {expected}",
+        uk: "снапшот `run` сесії зі схемою {found}, цей збір читає {expected}",
+    };
+
+    /// `Error::RunSnapshot`.
+    pub const RUN_SNAPSHOT: Msg = Msg {
+        en: "the session's `run` snapshot is unreadable: {detail}",
+        uk: "снапшот `run` сесії нечитабельний: {detail}",
+    };
+
+    /// A resume whose Function is not found continues loose (AGL-063, D4).
+    pub const LOOSE_CONTINUE: Msg = Msg {
+        en: "the Function `{function}` of this session is not available; continuing loose: the tools it used, no grammar, the budgets of its last step",
+        uk: "Function `{function}` цієї сесії недоступна; продовжую вільно: її інструменти, без грамматики, бюджети її останнього кроку",
+    };
+
+    /// The model of the session's snapshot differs from the model that runs
+    /// (AGL-063, D5).
+    pub const MODEL_DIFFERS: Msg = Msg {
+        en: "this session was made with the model `{recorded}`, the model that runs is `{running}`",
+        uk: "цю сесію зроблено з моделлю `{recorded}`, модель що працює — `{running}`",
+    };
+
     /// `Error::ServerUnreachable`.
     pub const SERVER_UNREACHABLE: Msg = Msg {
         en: "cannot reach {server} at {url}: {detail}\nTo start it: agl server start",
@@ -2600,6 +2625,10 @@ impl Error {
                     problem = function_problem(problem, lang)
                 )
             }
+            Error::RunSchema { expected, found } => {
+                tr!(lang, m::RUN_SCHEMA, expected = expected, found = found)
+            }
+            Error::RunSnapshot { detail } => tr!(lang, m::RUN_SNAPSHOT, detail = detail),
             Error::ServerUnreachable { kind, url, detail } => tr!(
                 lang,
                 m::SERVER_UNREACHABLE,

@@ -913,3 +913,88 @@ fn a_tools_output_follows_the_context_unless_the_function_says() {
     );
 }
 
+/// The evaluated value of a minimal Function (AGL-063, D4): the shape nix
+/// leaves after the evaluation, so the round trip needs no nix.
+fn snapshot_value() -> Json {
+    json!({
+        "policy": {
+            "system": "s",
+            "initial": "a",
+            "state": { "a": { "answer": true } }
+        },
+        "model": {
+            "kind": "llama",
+            "format": crate::format::qwen_value(),
+            "weights": "m.gguf"
+        }
+    })
+}
+
+#[test]
+fn the_run_snapshot_round_trips() {
+    // The resume of a session runs on the snapshot of its header (AGL-063,
+    // D4): the Function is read back, the file not needed.
+    let value = snapshot_value();
+    let function = Function::from_value(Path::new("f.nix"), value.clone()).unwrap();
+    let snapshot = function.snapshot();
+    assert_eq!(snapshot["schema"], 1);
+    assert_eq!(snapshot["source"], json!({ "path": "f.nix" }));
+    assert_eq!(snapshot["value"], value);
+    let again = Function::from_snapshot(&snapshot).unwrap();
+    assert_eq!(again.path, PathBuf::from("f.nix"));
+    assert_eq!(again.value, value);
+    assert_eq!(again.system, "s");
+    assert_eq!(again.initial, 0);
+    assert_eq!(again.states.len(), 1);
+    assert_eq!(again.format, function.format);
+    assert_eq!(again.model, function.model);
+}
+
+#[test]
+fn a_run_snapshot_of_another_schema_is_named() {
+    let bad = json!({ "schema": 2, "source": { "path": "f.nix" }, "value": {} });
+    match Function::from_snapshot(&bad) {
+        Err(Error::RunSchema { expected, found }) => {
+            assert_eq!(expected, 1);
+            assert_eq!(found, "2");
+        }
+        other => panic!("expected the schema error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_run_snapshot_without_a_value_is_named() {
+    let bad = json!({ "schema": 1, "source": { "path": "f.nix" } });
+    match Function::from_snapshot(&bad) {
+        Err(Error::RunSnapshot { detail }) => assert_eq!(detail, "the snapshot has no value"),
+        other => panic!("expected the snapshot error, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_loose_function_keeps_the_tools_and_the_budgets() {
+    // The continue of a session whose Function is not found (AGL-063, D4):
+    // one state, the built-in tools the session called (in order, the rest
+    // skipped), the answer allowed, the budgets of its last step.
+    let function = Function::loose(
+        &["bash".into(), "nope".into(), "edit".into()],
+        Some((1234, 567)),
+    );
+    assert_eq!(function.path, PathBuf::from("<loose-continue>"));
+    assert_eq!(function.format, Format::qwen());
+    assert_eq!(function.max_think_tokens, 1234);
+    assert_eq!(function.max_action_tokens, Some(567));
+    assert_eq!(function.initial, 0);
+    assert_eq!(function.states.len(), 1);
+    assert_eq!(function.states[0].name, "loose");
+    assert!(function.states[0].actions.answer);
+    let tools: Vec<&str> = function
+        .states[0]
+        .actions
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(tools, ["bash", "edit"]);
+}
+

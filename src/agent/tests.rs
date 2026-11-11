@@ -1471,7 +1471,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
         kinds(&session),
         ["user", "state", "thinking", "call", "result", "compact", "thinking", "answer"]
     );
-    let late = Function { compact_early: false, ..early };
+    let late = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&bash_call("true"), Stop::End),

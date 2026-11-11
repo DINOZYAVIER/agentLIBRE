@@ -210,7 +210,14 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 "/new" => {
                     said.record(&mut session, message);
                     said = Said::recorded();
-                    session = Session::create(sessions_dir, function_name, &workspace)?;
+                    // A new session records the `run` snapshot of its
+                    // Function (AGL-063, D4).
+                    session = Session::create_run(
+                        sessions_dir,
+                        function_name,
+                        &workspace,
+                        Some(&function.snapshot()),
+                    )?;
                     pending.clear();
                     placeholders.clear();
                     state = None;

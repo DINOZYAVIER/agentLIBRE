@@ -96,6 +96,11 @@ pub enum Error {
         key: String,
         problem: FunctionProblem,
     },
+    /// The schema of a session's `run` snapshot is not the one this build
+    /// reads (AGL-063, D4).
+    RunSchema { expected: u64, found: String },
+    /// A session's `run` snapshot is not a snapshot (AGL-063, D4).
+    RunSnapshot { detail: String },
     /// The server of `kind` cannot be reached (D97; AGL-038, D1).
     ServerUnreachable {
         kind: ServerKind,

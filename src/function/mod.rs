@@ -3,7 +3,10 @@
 //! D140; AGL-039, D7, D8, D10, D17-D21, D40, D41).
 
 use std::collections::VecDeque;
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde_json::{Value as Json, json};
 
 use crate::action::{self, Actions, Constraint, Kind, Outcome, Tool};
 use crate::backend::RUNTIME_PREFIX;
@@ -11,8 +14,14 @@ use crate::download::FileSource;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
+use crate::media::sha256_hex;
 use crate::nix::{self, Section};
 use crate::settings::{ServerFile, ServerKind};
+
+/// The version of the `run` snapshot of a session header (AGL-063, D4):
+/// the evaluated Function, so a resume runs on the configuration the
+/// session was made with, the Function file not needed.
+const RUN_SCHEMA: u64 = 1;
 
 /// `max_steps_total` when the Function does not set it (D40).
 const DEFAULT_MAX_STEPS_TOTAL: u32 = 50;
@@ -98,6 +107,11 @@ pub struct Function {
     /// The file the Function came from; a built-in says so
     /// (`<built-in>/functions/<name>.nix`).
     pub path: PathBuf,
+    /// The evaluated Nix value the Function was read from (AGL-063, D4):
+    /// the system, the policy figures, the sampling, the format, the server
+    /// profile and the states with their transitions, as Nix wrote them.
+    /// It is the content of a session's `run` snapshot.
+    value: Json,
     /// Where the files of its model come from (AGL-050, D8).
     pub sources: Vec<FileSource>,
     pub format: Format,
@@ -288,6 +302,9 @@ impl Function {
     /// Reads the evaluated Function `value` of the file `path` (AGL-039,
     /// D17): exactly `policy` and `model`, both required (D21).
     pub fn from_value(path: &Path, value: serde_json::Value) -> Result<Function, Error> {
+        // Kept for the `run` snapshot (AGL-063, D4); `Section::top` takes
+        // the value by value.
+        let snapshot = value.clone();
         let mut file = Section::top(path, value)?;
         file.check_keys(&["policy", "model"])?;
         let mut model = file.required_section("model")?;
@@ -355,6 +372,7 @@ impl Function {
         check_graph(path, &states, initial)?;
         Ok(Function {
             path: path.to_path_buf(),
+            value: snapshot,
             sources,
             format,
             system,
@@ -372,6 +390,104 @@ impl Function {
             states,
             model: server,
         })
+    }
+
+    /// The `run` snapshot for a session header (AGL-063, D4): the Function's
+    /// identity and its evaluated value, so a resume reconstructs the
+    /// Function in memory without the file.
+    pub fn snapshot(&self) -> Json {
+        let mut source = json!({ "path": self.path.to_string_lossy() });
+        // A real file carries its sha256; a built-in's pseudo path does
+        // not, and its name in the path is its identity.
+        if self.path.is_file()
+            && let Ok(bytes) = fs::read(&self.path)
+        {
+            source["sha256"] = sha256_hex(&bytes).into();
+        }
+        json!({
+            "schema": RUN_SCHEMA,
+            "source": source,
+            "value": self.value,
+        })
+    }
+
+    /// Reconstructs the Function of a session's `run` snapshot (AGL-063,
+    /// D4): the evaluated value is read as a Function, the file not needed.
+    /// The path is the one the snapshot records, for display and errors.
+    pub fn from_snapshot(snapshot: &Json) -> Result<Function, Error> {
+        if snapshot.get("schema").and_then(Json::as_u64) != Some(RUN_SCHEMA) {
+            return Err(Error::RunSchema {
+                expected: RUN_SCHEMA,
+                found: snapshot
+                    .get("schema")
+                    .and_then(Json::as_u64)
+                    .map_or_else(|| "unknown".into(), |v| v.to_string()),
+            });
+        }
+        let path = snapshot
+            .get("source")
+            .and_then(|source| source.get("path"))
+            .and_then(Json::as_str)
+            .unwrap_or("<run>");
+        let value = snapshot.get("value").cloned().ok_or_else(|| {
+            Error::RunSnapshot {
+                detail: "the snapshot has no value".into(),
+            }
+        })?;
+        Self::from_value(Path::new(path), value)
+    }
+
+    /// The loose-continue Function of a session whose Function is not found
+    /// (AGL-063, D4): one state, the built-in tools the session recorded
+    /// (their default parameters; a tool not among them is skipped), the
+    /// answer always allowed, the budgets of the last step, the Qwen format,
+    /// no grammar (the stirred mode). The server profile is empty, so the
+    /// settings of the machine run the server.
+    pub fn loose(tools: &[String], budgets: Option<(u32, u32)>) -> Function {
+        let builtin = action::builtin_tools();
+        let state_tools = tools
+            .iter()
+            .filter_map(|name| builtin.iter().find(|tool| &tool.name == name).cloned())
+            .collect();
+        let (max_think_tokens, max_action_tokens) = match budgets {
+            Some((think, action)) => (think, Some(action)),
+            None => (DEFAULT_MAX_THINK_TOKENS, None),
+        };
+        Function {
+            path: PathBuf::from("<loose-continue>"),
+            value: json!({}),
+            sources: Vec::new(),
+            format: Format::qwen(),
+            system: "The Function this session was made with is not available. \
+                    Continue the conversation with the tools it used."
+                .into(),
+            preserve_thinking: true,
+            max_steps_total: None,
+            max_think_tokens,
+            max_action_tokens,
+            max_tool_output_tokens: None,
+            max_stirs: DEFAULT_MAX_STIRS,
+            compact: DEFAULT_COMPACT.into(),
+            max_compact_tokens: None,
+            compact_early: false,
+            sampling: Sampling::default(),
+            initial: 0,
+            states: vec![State {
+                name: "loose".into(),
+                instruction: None,
+                actions: Actions {
+                    tools: state_tools,
+                    answer: true,
+                },
+                think: true,
+                max_steps: None,
+                max_visits: None,
+                on_limit: None,
+                transitions: Vec::new(),
+                otherwise: Some(0),
+            }],
+            model: ServerFile::default(),
+        }
     }
 }
 

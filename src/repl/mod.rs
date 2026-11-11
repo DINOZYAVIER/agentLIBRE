@@ -915,7 +915,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             },
             Next::New => {
                 record(&mut session, "/new".into(), false, None);
-                match Session::create(sessions_dir, function_name, &workspace) {
+                match Session::create_run(sessions_dir, function_name, &workspace, Some(&function.snapshot())) {
                 Ok(new) => {
                     session = new;
                     let mut inner = control.lock();

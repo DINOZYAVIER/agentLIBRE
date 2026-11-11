@@ -236,6 +236,13 @@ pub struct Session {
     pub function: String,
     pub workspace: PathBuf,
     pub events: Vec<Event>,
+    /// The `run` snapshot of the header (AGL-063, D4); `None` in the v1
+    /// files and in the sessions that do not record it.
+    pub run: Option<Json>,
+    /// The `think_budget` and `action_budget` of the last `step` line
+    /// (AGL-063, D4): the budgets the loose continue runs on; `None` before
+    /// a step was recorded.
+    pub last_budgets: Option<(u32, u32)>,
     path: PathBuf,
     file: File,
     /// What the prompt was last made of, by kind (AGL-046, D14).
@@ -248,6 +255,19 @@ pub struct Session {
 impl Session {
     /// Starts a session in `dir`, created if needed (D64).
     pub fn create(dir: &Path, function: &str, workspace: &Path) -> Result<Session, Error> {
+        Self::create_run(dir, function, workspace, None)
+    }
+
+    /// Starts a session that records the `run` snapshot of the evaluated
+    /// Function in its header (AGL-063, D4): a resume runs on the
+    /// configuration the session was made with, the Function file not
+    /// needed.
+    pub fn create_run(
+        dir: &Path,
+        function: &str,
+        workspace: &Path,
+        run: Option<&Json>,
+    ) -> Result<Session, Error> {
         let write_error = |path: &Path, source| Error::SessionWrite {
             path: path.into(),
             source,
@@ -275,18 +295,25 @@ impl Session {
             function: function.into(),
             workspace: workspace.into(),
             events: Vec::new(),
+            run: run.cloned(),
+            last_budgets: None,
             path,
             file,
             prompt_inputs: BTreeMap::new(),
             memory_index: None,
         };
-        let header = json!({
+        let mut header = json!({
             "type": "session",
             "version": VERSION,
             "function": function,
             "workspace": workspace.to_string_lossy(),
             "time": utc_now(),
         });
+        // The `run` snapshot (AGL-063, D4), absent in the v1 files and in
+        // the sessions that do not record it.
+        if let Some(run) = run {
+            header["run"] = run.clone();
+        }
         session.write_line(&header)?;
         Ok(session)
     }
@@ -389,12 +416,24 @@ impl Session {
         let mut events = Vec::new();
         let mut prompt_inputs = BTreeMap::new();
         let mut name = None;
+        // The budgets of the last `step` line (AGL-063, D4): the loose
+        // continue of a session whose Function is not found runs on them.
+        let mut last_budgets = None;
         for (index, line) in lines {
             let json: Json = serde_json::from_str(line).map_err(|e| bad(index, &e.to_string()))?;
             // What the observer wrote is not an event, so it can reach
             // neither the history nor the replay (AGL-046).
             match json["type"].as_str() {
-                Some("transition" | "step" | "prefill" | "prompt_progress") => continue,
+                Some("step") => {
+                    // The budgets the step ran on, the last one counts.
+                    if let (Some(think), Some(action)) =
+                        (json["think_budget"].as_u64(), json["action_budget"].as_u64())
+                    {
+                        last_budgets = Some((think as u32, action as u32));
+                    }
+                    continue;
+                }
+                Some("transition" | "prefill" | "prompt_progress") => continue,
                 // The last name counts (AGL-062, D4); it is no event either.
                 Some("name") => {
                     name = json["name"].as_str().map(str::to_owned).or(name);
@@ -432,6 +471,8 @@ impl Session {
             function: function.into(),
             workspace: workspace.into(),
             events,
+            run: header.get("run").cloned(),
+            last_budgets,
             path,
             file,
             prompt_inputs,
@@ -458,6 +499,21 @@ impl Session {
             })?;
         }
         Ok(session)
+    }
+
+    /// The tools the session's record calls, in the order of the first call
+    /// (AGL-063, D4): the tools of the loose continue of a session whose
+    /// Function is not found.
+    pub fn loose_tools(&self) -> Vec<String> {
+        let mut tools = Vec::new();
+        for event in &self.events {
+            if let Event::Call { call, .. } = event
+                && !tools.iter().any(|tool| tool == &call.name)
+            {
+                tools.push(call.name.clone());
+            }
+        }
+        tools
     }
 
     /// Appends `event` to the file at once and to `events`.

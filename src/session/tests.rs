@@ -841,3 +841,85 @@ fn text_that_looks_like_a_name_line_is_no_name() {
     assert_eq!(Session::open(&dir.0, &session.id).unwrap().name, None);
     assert_eq!(Session::id_named(&dir.0, project, "sneaky"), None);
 }
+
+#[test]
+fn the_run_of_the_header_round_trips() {
+    // The session that records the `run` snapshot of the Function: the
+    // header carries it, the reader gives it back (AGL-063, D4).
+    let dir = Dir::new("run-header");
+    let run = json!({ "schema": 1, "source": { "path": "f.nix" }, "value": {} });
+    let mut session =
+        Session::create_run(&dir.0, "coder", Path::new("/home/u/repos/a"), Some(&run)).unwrap();
+    session.append(Event::User("hi".into())).unwrap();
+    let text = fs::read_to_string(dir.0.join(format!("{}.jsonl", session.id))).unwrap();
+    let header: Json = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(header["version"], 2);
+    assert_eq!(header["run"], run);
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(reopened.run, Some(run));
+}
+
+#[test]
+fn a_session_without_a_run_has_none_and_no_budgets() {
+    // The v1 files and the sessions that do not record the snapshot
+    // (AGL-063, D2, D4).
+    let dir = Dir::new("no-run");
+    fs::create_dir_all(&dir.0).unwrap();
+    fs::write(
+        dir.0.join("dd.jsonl"),
+        "{\"type\":\"session\",\"version\":1,\"function\":\"f\",\"workspace\":\"/w\"}\n\
+         {\"type\":\"user\",\"text\":\"hi\"}\n",
+    )
+    .unwrap();
+    let reopened = Session::open(&dir.0, "dd").unwrap();
+    assert_eq!(reopened.run, None);
+    assert_eq!(reopened.last_budgets, None);
+    assert!(reopened.loose_tools().is_empty());
+}
+
+#[test]
+fn the_last_budgets_of_the_steps_are_the_last() {
+    // The budgets the `step` lines the observer wrote; the last counts, for
+    // the loose continue (AGL-063, D4).
+    let dir = Dir::new("budgets");
+    fs::create_dir_all(&dir.0).unwrap();
+    fs::write(
+        dir.0.join("bb.jsonl"),
+        "{\"type\":\"session\",\"version\":2,\"function\":\"f\",\"workspace\":\"/w\"}\n\
+         {\"type\":\"user\",\"text\":\"hi\"}\n\
+         {\"type\":\"step\",\"think_budget\":111,\"action_budget\":222}\n\
+         {\"type\":\"thinking\",\"text\":\"look\"}\n\
+         {\"type\":\"step\",\"think_budget\":333,\"action_budget\":444}\n",
+    )
+    .unwrap();
+    let reopened = Session::open(&dir.0, "bb").unwrap();
+    assert_eq!(reopened.last_budgets, Some((333, 444)));
+}
+
+#[test]
+fn the_loose_tools_are_the_calls_in_the_order_of_the_first() {
+    // The tools the session called, in the order of the first call (AGL-063,
+    // D4): the loose continue asks for them only.
+    let dir = Dir::new("loose-tools");
+    let mut session = Session::create(&dir.0, "coder", Path::new("/w")).unwrap();
+    session.append(call("c1", "ls")).unwrap();
+    session.append(result("c1", Outcome::Ok)).unwrap();
+    session
+        .append(Event::Call {
+            text: None,
+            call: ToolCall {
+                id: "c2".into(),
+                name: "edit".into(),
+                args: vec![],
+            },
+        })
+        .unwrap();
+    session.append(result("c2", Outcome::Ok)).unwrap();
+    session.append(call("c3", "pwd")).unwrap();
+    session.append(result("c3", Outcome::Ok)).unwrap();
+    let loose = session.loose_tools();
+    let tools: Vec<&str> = loose.iter().map(|tool| tool.as_str()).collect();
+    assert_eq!(tools, ["bash", "edit"]);
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(reopened.loose_tools(), session.loose_tools());
+}

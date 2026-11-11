@@ -53,7 +53,7 @@ use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
 use session::{Session, StopReason};
-use settings::{function_name, ReplSettings, ServerKind, Settings, UserFile};
+use settings::{function_name, ReplSettings, ServerFile, ServerKind, Settings, UserFile};
 use theme::Theme;
 
 /// Closes the engine agl launched itself (AGL-024, D3): when the guard
@@ -349,17 +349,47 @@ fn agent_session(
         .transpose()?;
     // A resumed session keeps its Function (D106).
     let resumed = session.as_ref().map(|s| s.function.as_str());
-    // The Function's name (D58, D59, AGL-015); the Function loads before
-    // the settings, because its `[server]` table is the model side of the
-    // settings when the file declares it (AGL-033, D1, D3).
-    let name = function_name(
-        resumed.or(args.function.as_deref()),
-        project.function.as_deref(),
-        user.function.as_deref(),
-    );
-    // The Function's tiers (AGL-028, D3): the workspace store's
-    // `functions/` directory, then the user's, then the built-ins.
-    let mut function = Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)?;
+    // The Function of a resumed session is the `run` snapshot of its header
+    // (AGL-063, D4): the session runs on the configuration it was made
+    // with, the Function file not needed. Without the snapshot (the v1
+    // files), the name lookup of today; a Function that is not found
+    // continues loose.
+    let mut function = match session.as_ref().and_then(|s| s.run.clone()) {
+        Some(snapshot) => Function::from_snapshot(&snapshot)?,
+        None => {
+            // The Function's name (D58, D59, AGL-015); the Function loads
+            // before the settings, because its `[server]` table is the model
+            // side of the settings when the file declares it (AGL-033, D1,
+            // D3).
+            let name = function_name(
+                resumed.or(args.function.as_deref()),
+                project.function.as_deref(),
+                user.function.as_deref(),
+            );
+            // The Function's tiers (AGL-028, D3): the workspace store's
+            // `functions/` directory, then the user's, then the built-ins.
+            match Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name) {
+                Ok(function) => function,
+                Err(Error::FunctionNotFound { .. }) if session.is_some() => {
+                    // The Function the session was made with is gone: it
+                    // continues loose (AGL-063, D4), with a notice.
+                    let session = session.as_ref().expect("a resumed session");
+                    eprintln!(
+                        "{}",
+                        tr!(lang, m::LOOSE_CONTINUE, function = &session.function)
+                    );
+                    Function::loose(&session.loose_tools(), session.last_budgets)
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    // The model the session was made with (AGL-063, D5): the snapshot's, to
+    // compare with the model that runs; `None` without the snapshot.
+    let session_model = session
+        .as_ref()
+        .and_then(|s| s.run.as_ref())
+        .and_then(|_| model_name(&function.model));
     let project_settings = settings::ProjectFile {
         function: project.function.clone(),
         server: project.server.clone(),
@@ -394,6 +424,17 @@ fn agent_session(
         &missing,
         lang,
     )?;
+    // The model of the session's snapshot against the model that runs
+    // (AGL-063, D5): a difference is told, never refused.
+    if let Some(recorded) = session_model
+        && let Some(running) = model_name(&settings.server)
+        && model_file(&recorded) != model_file(&running)
+    {
+        eprintln!(
+            "{}",
+            tr!(lang, m::MODEL_DIFFERS, recorded = recorded, running = running)
+        );
+    }
     // The tool `search` is there only where `[search]` is complete: no tool,
     // no grammar for it and no word of it in the prompt otherwise
     // (AGL-019, D5).
@@ -512,7 +553,14 @@ fn agent_session(
     let resumed = session.is_some();
     let mut session = match session {
         Some(session) => session,
-        None => Session::create(&paths.sessions(), &settings.function, &workspace)?,
+        // A new session records the `run` snapshot of its Function
+        // (AGL-063, D4).
+        None => Session::create_run(
+            &paths.sessions(),
+            &settings.function,
+            &workspace,
+            Some(&function.snapshot()),
+        )?,
     };
     // What the model is told of its environment and of this agl (AGL-048).
     let sessions_dir = paths.sessions();
@@ -672,6 +720,25 @@ fn agent_session(
     }
 }
 
+/// The model a server runs (AGL-063, D5): the weights of the llama kind,
+/// the config of the strata kind; `None` when the kind sets no model.
+fn model_name(server: &ServerFile) -> Option<String> {
+    match server.kind() {
+        ServerKind::Strata => server.strata_config.clone(),
+        ServerKind::Llama => server.model.clone(),
+    }
+}
+
+/// The name of a model file or config, for the comparison of D5: an
+/// absolute path is compared by its file name, so the recorded name and the
+/// resolved path of the same file agree.
+fn model_file(model: &str) -> &str {
+    Path::new(model)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +796,44 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec![forge::MARKER_FILE.to_string()]);
+    }
+
+    #[test]
+    fn the_model_of_the_server_is_the_weights_or_the_config() {
+        // The model that runs (AGL-063, D5): the weights of the llama kind,
+        // the config of the strata kind.
+        let llama = ServerFile {
+            kind: Some("llama".into()),
+            model: Some("m.gguf".into()),
+            ..ServerFile::default()
+        };
+        assert_eq!(model_name(&llama), Some("m.gguf".into()));
+        let strata = ServerFile {
+            kind: Some("strata".into()),
+            strata_config: Some("strata.nix".into()),
+            ..ServerFile::default()
+        };
+        assert_eq!(model_name(&strata), Some("strata.nix".into()));
+        assert_eq!(model_name(&ServerFile::default()), None);
+    }
+
+    #[test]
+    fn the_model_is_compared_by_its_file_name() {
+        // The resolved absolute path and the recorded file name of the same
+        // model agree (AGL-063, D5).
+        assert_eq!(
+            model_file("/home/u/models/ThinkingCap-Qwen3.8-27B-IQ4_XS.gguf"),
+            "ThinkingCap-Qwen3.8-27B-IQ4_XS.gguf"
+        );
+        assert_eq!(model_file("strata.nix"), "strata.nix");
+    }
+
+    #[test]
+    fn the_model_that_differs_is_told_not_refused() {
+        // The difference is told on stderr, the resume goes on (AGL-063, D5).
+        assert_eq!(
+            tr!(Lang::En, m::MODEL_DIFFERS, recorded = "a.gguf", running = "b.gguf"),
+            "this session was made with the model `a.gguf`, the model that runs is `b.gguf`"
+        );
     }
 }
