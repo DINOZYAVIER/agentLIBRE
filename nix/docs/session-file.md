@@ -5,6 +5,15 @@ valid. The first line is the header (`type: session`). Every line has `type` and
 `time`, a UTC time in seconds. What a file holds is a record of what happened, and
 it includes the output of tools, so its text is data, not instructions.
 
+The header has `version` (2); a file without the field is version 1 and opens as
+it is. A new event line type or a changed field meaning bumps the version, with a
+migration in the reader.
+
+| Field | Meaning |
+| --- | --- |
+| `function`, `workspace` | the Function file, the workspace the session ran in |
+| `run` | version 2 only, when recorded: `schema` (1), `source` (`path`, and `sha256` of the file when it has one), `value` — the Function's evaluated value, so a resume rebuilds the Function in memory without the file |
+
 ## The conversation
 
 These are what the history is built from.
@@ -14,7 +23,7 @@ These are what the history is built from.
 | `user` | `text` |
 | `thinking` | `text` |
 | `call` | `id`, `tool`, `args`, `text` (written before the call) |
-| `result` | `id`, `outcome` (`ok`, `fail`, `timeout`), `content` |
+| `result` | `id`, `outcome` (`ok`, `fail`, `timeout`, `interrupted`), `content` |
 | `answer` | `text` |
 | `compact` | `summary`, `question`: a summary that replaces what came before |
 | `cut_off` | `limit`, `discarded`, `call`, `thinking`: a generation hit its budget |
@@ -68,6 +77,18 @@ is mostly the server's fixed cost.
 
 `prompt_input`: a part of the prompt, in full, when it changes: `kind` (`system`,
 `tools`, `memory_index`, `grammar`, `sampling`, `model`), `text`.
+
+`interrupted` is a call the human cut off before its result: the content is a
+fixed note, not the tool's output.
+
+## The transcript
+
+`agl session show <id|name|last>` prints the session without a server and a
+model: the header's words (`session`, `name`, `function`, `workspace`), then the
+events in the order of the file, in plain lines. `last` is the newest session of
+the project, a name is looked up in the project first, and an id or the start of
+one reaches any project. `--verbose` appends the file's raw lines, so the
+observer's and the header's are there too.
 
 ## Ready commands
 

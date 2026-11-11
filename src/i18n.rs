@@ -327,6 +327,33 @@ Memory (the entries of the project, `memory/` of its store):
                                  нічим його не повернути",
     };
 
+    /// The usage of `agl session`.
+    pub const HELP_SESSION_USAGE: Msg = Msg {
+        en: "agl session show <id|name|last> [--verbose]",
+        uk: "agl session show <id|назва|last> [--verbose]",
+    };
+
+    /// The section of `agl session` in the help (AGL-063, D3).
+    pub const HELP_SESSION: Msg = Msg {
+        en: "\
+Sessions (the files of `sessions/`, per project):
+  session show <id|name|last>   the transcript of a session: its header and
+                                the events in the order of the file; `last` is
+                                the newest of the project, a name is looked up
+                                in the project first, an id or the start of one
+                                reaches any project
+  --verbose                     the lines the transcript skips: the observer's
+                                and the header's",
+        uk: "\
+Сесії (файли `sessions/`, за проєктом):
+  session show <id|назва|last>   транскрипт сесії: її заголовок і події в
+                                 порядку файлу; `last` — остання проєкту, назву
+                                 шукає спершу в проєкті, id або початок id
+                                 досягає будь-якого проєкту
+  --verbose                      рядки, які транскрипт пропускає: спостерігача
+                                 і заголовкові",
+    };
+
     /// The usage of `agl forge`.
     pub const HELP_FORGE_USAGE: Msg = Msg {
         en: "agl forge list|show|new|status|range|check|log|diff|rehome",

@@ -92,7 +92,7 @@ impl ForgeKind {
         ForgeKind::Renamed,
     ];
 
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             ForgeKind::Created => "created",
             ForgeKind::Edited => "edited",
@@ -1069,6 +1069,10 @@ fn event_from_json(json: &Json) -> Option<Event> {
                 call: json["call"].as_bool()?,
             })
         }
+        "stir" => Event::Stir {
+            attempt: u32::try_from(json["attempt"].as_u64()?).ok()?,
+            error: text("error")?,
+        },
         "stop" => Event::Stop(
             StopReason::ALL
                 .into_iter()

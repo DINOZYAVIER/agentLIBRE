@@ -32,6 +32,8 @@ pub enum Command {
     Search(SearchAction),
     /// `agl memory list|show|remove` (AGL-060).
     Memory(MemoryAction),
+    /// `agl session show <id|name|last>` (AGL-063, D3).
+    Session(SessionShow),
 }
 
 /// What `--help` shows (AGL-061, D3): the help of the program, or of one
@@ -44,7 +46,17 @@ pub enum HelpTopic {
     Function,
     Search,
     Memory,
+    Session,
     Forge,
+}
+
+/// `agl session show <id|name|last>` (AGL-063, D3): the transcript of a
+/// session file, with no server and no model; `verbose` prints the lines
+/// the transcript skips (the observer's and the non-events).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SessionShow {
+    pub key: String,
+    pub verbose: bool,
 }
 
 /// What `agl memory` and `/memory` ask for (AGL-060, D2, D5).
@@ -154,6 +166,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("function") => HelpTopic::Function,
         Some("search") => HelpTopic::Search,
         Some("memory") => HelpTopic::Memory,
+        Some("session") => HelpTopic::Session,
         Some("forge") => HelpTopic::Forge,
         // Only the first word is a command; a message may say "forge".
         _ => return run_args(args),
@@ -168,6 +181,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
             memory_action(words).map(Command::Memory)
         }
+        HelpTopic::Session => session_args(args),
         // The forge surface parses its own arguments (AGL-007), here, so
         // that its help needs no settings (AGL-061, D1).
         HelpTopic::Forge => crate::cli::forge::parse(&args.collect::<Vec<_>>()).map(Command::Forge),
@@ -230,6 +244,28 @@ fn search_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Erro
         return Err(Error::UnknownOption(text(extra)?));
     }
     Ok(Command::Search(action))
+}
+
+/// `agl session show <id|name|last> [--verbose]` (AGL-063, D3).
+fn session_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    match args.next().map(text).transpose()?.as_deref() {
+        Some("show") => {}
+        Some(other) => return Err(Error::UnknownOption(other.into())),
+        None => return Err(Error::MissingValue("session".into())),
+    }
+    let key = args
+        .next()
+        .ok_or_else(|| Error::MissingValue("show".into()))
+        .and_then(text)?;
+    let mut verbose = false;
+    for extra in args {
+        match text(extra)?.as_str() {
+            "--verbose" if !verbose => verbose = true,
+            "--verbose" => return Err(Error::RepeatedOption("--verbose".into())),
+            other => return Err(Error::UnknownOption(other.into())),
+        }
+    }
+    Ok(Command::Session(SessionShow { key, verbose }))
 }
 
 /// `agl server start|stop|status|command` and their options.
@@ -639,6 +675,58 @@ mod tests {
             parse_strs(&["-p", "memory"]).unwrap(),
             Command::Run(Args {
                 prompt: Some("memory".into()),
+                ..Args::default()
+            })
+        );
+    }
+
+    #[test]
+    fn session_commands() {
+        // AGL-063, D3.
+        assert_eq!(
+            parse_strs(&["session", "show", "last"]).unwrap(),
+            Command::Session(SessionShow {
+                key: "last".into(),
+                verbose: false
+            })
+        );
+        assert_eq!(
+            parse_strs(&["session", "show", "01a1", "--verbose"]).unwrap(),
+            Command::Session(SessionShow {
+                key: "01a1".into(),
+                verbose: true
+            })
+        );
+        assert!(matches!(
+            parse_strs(&["session", "show"]),
+            Err(Error::MissingValue(o)) if o == "show"
+        ));
+        // No action is the help of the command (AGL-061, D2, D4, D6).
+        assert_eq!(
+            parse_strs(&["session"]).unwrap(),
+            Command::Help(HelpTopic::Session)
+        );
+        assert!(matches!(
+            parse_strs(&["session", "log", "last"]),
+            Err(Error::UnknownOption(o)) if o == "log"
+        ));
+        assert!(matches!(
+            parse_strs(&["session", "show", "last", "more"]),
+            Err(Error::UnknownOption(o)) if o == "more"
+        ));
+        assert!(matches!(
+            parse_strs(&["session", "show", "last", "--verbose", "--verbose"]),
+            Err(Error::RepeatedOption(o)) if o == "--verbose"
+        ));
+        assert_eq!(
+            parse_strs(&["session", "--help"]).unwrap(),
+            Command::Help(HelpTopic::Session)
+        );
+        // Only the first word is a command; a message may say "session".
+        assert_eq!(
+            parse_strs(&["-p", "session"]).unwrap(),
+            Command::Run(Args {
+                prompt: Some("session".into()),
                 ..Args::default()
             })
         );

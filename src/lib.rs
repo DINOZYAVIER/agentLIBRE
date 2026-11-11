@@ -254,6 +254,11 @@ fn run(
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             return cli::memory::run(action, &user, &paths, &cwd, *lang);
         }
+        Command::Session(show) => {
+            let (paths, user) = loaded?;
+            let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
+            return cli::session::run(show, &user, &paths, &cwd, *lang);
+        }
     };
     let (paths, user) = loaded?;
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
