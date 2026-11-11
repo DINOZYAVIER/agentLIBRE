@@ -199,8 +199,10 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
     }
 
     if interrupted {
+        // The human cut the call off: an interruption, not a failure
+        // (AGL-063, D6).
         return ToolResult {
-            outcome: Outcome::Fail,
+            outcome: Outcome::Interrupted,
             content: INTERRUPTED.into(),
         };
     }

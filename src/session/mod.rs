@@ -16,11 +16,16 @@ use crate::error::{Error, NameProblem};
 use crate::media::{self, Frame, Kind, Media, Source};
 use crate::memory::Kind as MemoryKind;
 
-/// The session format version (D104).
-const VERSION: u64 = 1;
+/// The session format version (D104, AGL-063, D2): the v1 files open as
+/// they are, and a new event line type or a changed field meaning bumps
+/// it with the migration.
+const VERSION: u64 = 2;
 
-/// The result of a call cut off before it finished (D108).
-pub const INTERRUPTED: &str = "Interrupted before the result.";
+/// The oldest version the reader of this build reads (AGL-063, D2).
+const OLDEST_VERSION: u64 = 1;
+
+/// The result of a call cut off before it finished (D108, AGL-063, D6).
+pub const INTERRUPTED: &str = "The human interrupted before the result.";
 
 /// Why a turn stopped without an answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,8 +372,14 @@ impl Session {
         if header["type"] != "session" {
             return Err(bad(0, "the first line is not a session header"));
         }
-        if header["version"] != VERSION {
-            return Err(bad(0, "unsupported session version"));
+        // The versions this build reads (AGL-063, D2): v1 as it is, v2
+        // with the `run` field of the header and the `interrupted`
+        // outcome; anything else is named.
+        if !header["version"].as_u64().is_some_and(|v| (OLDEST_VERSION..=VERSION).contains(&v)) {
+            let version = header["version"]
+                .as_u64()
+                .map_or_else(|| "unknown".to_string(), |v| v.to_string());
+            return Err(bad(0, &format!("unsupported session version {version}")));
         }
         let (Some(function), Some(workspace)) =
             (header["function"].as_str(), header["workspace"].as_str())
@@ -398,7 +409,15 @@ impl Session {
                 }
                 _ => {}
             }
-            events.push(event_from_json(&json).ok_or_else(|| bad(index, "unknown event"))?);
+            // The line is not an event this reader knows (AGL-063, D2):
+            // the number and the type of the line are named, so the file
+            // is recognized as one of a newer version.
+            events.push(
+                event_from_json(&json).ok_or_else(|| {
+                    let type_name = json["type"].as_str().unwrap_or("missing");
+                    bad(index, &format!("unknown event of type {type_name}"))
+                })?,
+            );
         }
         let file = OpenOptions::new()
             .append(true)
@@ -429,10 +448,12 @@ impl Session {
                 })?;
         }
         if let Some(Event::Call { call, .. }) = session.events.last() {
+            // A call the human cut off before its result is an
+            // interruption, not a failure (D108, AGL-063, D6).
             let id = call.id.clone();
             session.append(Event::Result {
                 id,
-                outcome: Outcome::Fail,
+                outcome: Outcome::Interrupted,
                 content: INTERRUPTED.into(),
             })?;
         }
@@ -962,7 +983,7 @@ fn event_from_json(json: &Json) -> Option<Event> {
         }
         "result" => Event::Result {
             id: text("id")?,
-            outcome: [Outcome::Ok, Outcome::Fail, Outcome::Timeout]
+            outcome: [Outcome::Ok, Outcome::Fail, Outcome::Timeout, Outcome::Interrupted]
                 .into_iter()
                 .find(|o| json["outcome"] == o.name())?,
             content: text("content")?,

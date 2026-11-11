@@ -115,7 +115,8 @@ fn write_and_read_back() {
         ]
     );
     assert_eq!(lines.len(), events.len() + 1);
-    assert_eq!(lines[0]["version"], 1);
+    // The new sessions are written with the version 2 (AGL-063, D2).
+    assert_eq!(lines[0]["version"], 2);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
     assert_eq!(lines[4]["args"], json!({"command": "ls", "timeout": 30}));
     assert_eq!(lines[8]["summary"], "The test is fixed.");
@@ -380,11 +381,12 @@ fn opening_repairs_an_interrupted_end() {
     drop(file);
 
     let mut reopened = Session::open(&dir.0, &session.id[..8]).unwrap();
+    // The dangling call is an interruption, not a failure (AGL-063, D6).
     assert_eq!(
         reopened.events.last(),
         Some(&Event::Result {
             id: "c1".into(),
-            outcome: Outcome::Fail,
+            outcome: Outcome::Interrupted,
             content: INTERRUPTED.into(),
         })
     );
@@ -434,9 +436,11 @@ fn bad_files() {
     let dir = Dir::new("bad");
     fs::create_dir_all(&dir.0).unwrap();
     let write = |id: &str, text: &str| fs::write(dir.0.join(format!("{id}.jsonl")), text).unwrap();
+    // The version beyond this build is refused with the version named
+    // (AGL-063, D2); the v1 and the v2 open.
     write(
         "aa",
-        "{\"type\":\"session\",\"version\":2,\"function\":\"f\",\"workspace\":\"/w\"}\n",
+        "{\"type\":\"session\",\"version\":3,\"function\":\"f\",\"workspace\":\"/w\"}\n",
     );
     write(
         "bb",
@@ -445,7 +449,7 @@ fn bad_files() {
     write("cc", "not json\n");
     assert!(matches!(
         Session::open(&dir.0, "aa"),
-        Err(Error::SessionLine { line: 1, detail, .. }) if detail.contains("version")
+        Err(Error::SessionLine { line: 1, detail, .. }) if detail.contains("version 3")
     ));
     assert!(matches!(
         Session::open(&dir.0, "bb"),
@@ -455,6 +459,25 @@ fn bad_files() {
         Session::open(&dir.0, "cc"),
         Err(Error::SessionLine { line: 1, .. })
     ));
+}
+
+#[test]
+fn a_v1_session_opens_as_it_is() {
+    // The reader of v2 reads the v1 files as they are (AGL-063, D2).
+    let dir = Dir::new("v1");
+    fs::create_dir_all(&dir.0).unwrap();
+    fs::write(
+        dir.0.join("dd.jsonl"),
+        "{\"type\":\"session\",\"version\":1,\"function\":\"f\",\"workspace\":\"/w\"}\n\
+         {\"type\":\"user\",\"text\":\"hi\"}\n\
+         {\"type\":\"answer\",\"text\":\"hello\"}\n",
+    )
+    .unwrap();
+    let reopened = Session::open(&dir.0, "dd").unwrap();
+    assert_eq!(
+        reopened.events,
+        [Event::User("hi".into()), Event::Answer("hello".into())]
+    );
 }
 
 fn source(kind: Kind, bytes: &[u8], ext: &str, name: &str) -> Source {

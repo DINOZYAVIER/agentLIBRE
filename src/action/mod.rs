@@ -152,6 +152,9 @@ pub enum Outcome {
     Ok,
     Fail,
     Timeout,
+    /// The call was interrupted by the human before its result
+    /// (D108, AGL-063, D6).
+    Interrupted,
 }
 
 impl Outcome {
@@ -161,6 +164,7 @@ impl Outcome {
             Outcome::Ok => "ok",
             Outcome::Fail => "fail",
             Outcome::Timeout => "timeout",
+            Outcome::Interrupted => "interrupted",
         }
     }
 }

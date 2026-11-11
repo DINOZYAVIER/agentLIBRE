@@ -497,6 +497,7 @@ impl Presenter {
             Outcome::Ok => ("ok", Role::StatusSuccess),
             Outcome::Fail => ("fail", Role::StatusFailure),
             Outcome::Timeout => ("timeout", Role::StatusPending),
+            Outcome::Interrupted => ("interrupted", Role::Muted),
         };
         let mut lines = Vec::new();
         if self.settings.frame {

@@ -395,7 +395,13 @@ impl Searcher for Curl {
         }
         let output = match self.run(&request.json()) {
             Ok(output) => output,
-            Err(Failure::Interrupted) => return fail(INTERRUPTED.into()),
+            Err(Failure::Interrupted) => {
+                // The human cut the search off (AGL-063, D6).
+                return ToolResult {
+                    outcome: Outcome::Interrupted,
+                    content: INTERRUPTED.into(),
+                };
+            }
             Err(Failure::TimedOut) => return fail("The search timed out.".into()),
             Err(Failure::TooLarge) => {
                 return fail("The search service's answer is too large.".into());
