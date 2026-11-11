@@ -25,6 +25,7 @@ let
     };
     models = {
       "qwen3.8-27b-iq4_xs" = import ./models/qwen3.8-27b-iq4_xs.nix { inherit agl; };
+      "qwen3.8-27b-thinkingcap-iq4_xs" = import ./models/qwen3.8-27b-thinkingcap-iq4_xs.nix { inherit agl; };
       "gemma-4-e2b-qat" = import ./models/gemma-4-e2b-qat.nix { inherit agl; };
       "gemma-4-e4b-qat" = import ./models/gemma-4-e4b-qat.nix { inherit agl; };
       "gemma-4-12b-qat" = import ./models/gemma-4-12b-qat.nix { inherit agl; };
