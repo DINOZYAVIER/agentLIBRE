@@ -156,6 +156,31 @@ impl CommandRun {
     }
 }
 
+/// A `transition` line of the session file (AGL-066): one phase of a step
+/// and how long it took, written by the observer (AGL-046). The reader
+/// keeps the lines, in the order of the file: the compact frame and the
+/// inspect mode take the phases' times from them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransitionLine {
+    /// The turn the step is in, 1-based.
+    pub turn: usize,
+    /// The step of the turn, in the order of its steps.
+    pub step: usize,
+    /// The phase left, as [`crate::phase::Phase::name`].
+    pub from: String,
+    /// The phase entered, as [`crate::phase::Phase::name`].
+    pub to: String,
+    /// What moved the turn, as [`crate::phase::PhaseEvent::name`].
+    pub event: String,
+    /// The time spent in `from`, in milliseconds.
+    pub ms: u64,
+    /// The tokens decoded since the last transition, when the line holds
+    /// them.
+    pub tokens: Option<u64>,
+    /// The tool a `tool_start` names.
+    pub tool: Option<String>,
+}
+
 /// A session event (D104). The header line is not an event.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -236,6 +261,9 @@ pub struct Session {
     pub function: String,
     pub workspace: PathBuf,
     pub events: Vec<Event>,
+    /// The `transition` lines of the file, in its order (AGL-066): the
+    /// phases' times of the steps.
+    pub transitions: Vec<TransitionLine>,
     /// The `run` snapshot of the header (AGL-063, D4); `None` in the v1
     /// files and in the sessions that do not record it.
     pub run: Option<Json>,
@@ -295,6 +323,7 @@ impl Session {
             function: function.into(),
             workspace: workspace.into(),
             events: Vec::new(),
+            transitions: Vec::new(),
             run: run.cloned(),
             last_budgets: None,
             path,
@@ -414,6 +443,7 @@ impl Session {
             return Err(bad(0, "the header needs function and workspace"));
         };
         let mut events = Vec::new();
+        let mut transitions = Vec::new();
         let mut prompt_inputs = BTreeMap::new();
         let mut name = None;
         // The budgets of the last `step` line (AGL-063, D4): the loose
@@ -433,7 +463,15 @@ impl Session {
                     }
                     continue;
                 }
-                Some("transition" | "prefill" | "prompt_progress") => continue,
+                Some("transition") => {
+                    // The phases' times of the compact frame (AGL-066); a
+                    // line without its numbers is left out.
+                    if let Some(line) = transition_from_json(&json) {
+                        transitions.push(line);
+                    }
+                    continue;
+                }
+                Some("prefill" | "prompt_progress") => continue,
                 // The last name counts (AGL-062, D4); it is no event either.
                 Some("name") => {
                     name = json["name"].as_str().map(str::to_owned).or(name);
@@ -471,6 +509,7 @@ impl Session {
             function: function.into(),
             workspace: workspace.into(),
             events,
+            transitions,
             run: header.get("run").cloned(),
             last_budgets,
             path,
@@ -1006,7 +1045,20 @@ fn event_json(event: &Event) -> Json {
     }
 }
 
-fn event_from_json(json: &Json) -> Option<Event> {
+pub(crate) fn transition_from_json(json: &Json) -> Option<TransitionLine> {
+    Some(TransitionLine {
+        turn: usize::try_from(json["turn"].as_u64()?).ok()?,
+        step: usize::try_from(json["step"].as_u64()?).ok()?,
+        from: json["from"].as_str()?.to_owned(),
+        to: json["to"].as_str()?.to_owned(),
+        event: json["event"].as_str()?.to_owned(),
+        ms: json["ms"].as_u64()?,
+        tokens: json["tokens"].as_u64(),
+        tool: json["tool"].as_str().map(str::to_owned),
+    })
+}
+
+pub(crate) fn event_from_json(json: &Json) -> Option<Event> {
     let text = |key: &str| json[key].as_str().map(str::to_owned);
     Some(match json["type"].as_str()? {
         "user" => Event::User(text("text")?),

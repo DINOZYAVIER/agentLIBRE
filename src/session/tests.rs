@@ -149,6 +149,85 @@ fn write_and_read_back() {
 }
 
 #[test]
+fn the_transition_lines_are_read_beside_the_events() {
+    let dir = Dir::new("transitions");
+    let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
+    session.append(Event::User("Fix it".into())).unwrap();
+    session.append(call("c1", "ls")).unwrap();
+    session.append(result("c1", Outcome::Ok)).unwrap();
+    // The observer's transition lines (AGL-046) go between the events in
+    // the file (AGL-066).
+    let file = dir.0.join(format!("{}.jsonl", session.id));
+    let text = fs::read_to_string(&file).unwrap();
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let line = |value: Json| serde_json::to_string(&value).unwrap();
+    lines.splice(2..2, [
+        line(json!({"type":"transition","schema":1,"turn":1,"step":0,"from":"Ready","to":"Thinking","event":"step_start","ms":12,"time":"t"})),
+        line(json!({"type":"transition","schema":1,"turn":1,"step":0,"from":"Thinking","to":"Writing","event":"first_text","ms":300,"tokens":42,"time":"t"})),
+        // A line without its numbers is left out (a crash mid-write).
+        line(json!({"type":"transition","schema":1,"turn":1,"step":0,"from":"Writing","to":"Running","event":"tool_start","time":"t"})),
+        line(json!({"type":"transition","schema":1,"turn":1,"step":0,"from":"Writing","to":"Running","event":"tool_start","ms":80,"tool":"bash","time":"t"})),
+        line(json!({"type":"transition","schema":1,"turn":1,"step":1,"from":"Running","to":"Prefill","event":"tool_end","ms":55,"time":"t"})),
+    ]);
+    fs::write(&file, format!("{}\n", lines.join("\n"))).unwrap();
+    let reopened = Session::open(&dir.0, &session.id).unwrap();
+    assert_eq!(
+        reopened.transitions,
+        vec![
+            TransitionLine {
+                turn: 1,
+                step: 0,
+                from: "Ready".into(),
+                to: "Thinking".into(),
+                event: "step_start".into(),
+                ms: 12,
+                tokens: None,
+                tool: None,
+            },
+            TransitionLine {
+                turn: 1,
+                step: 0,
+                from: "Thinking".into(),
+                to: "Writing".into(),
+                event: "first_text".into(),
+                ms: 300,
+                tokens: Some(42),
+                tool: None,
+            },
+            TransitionLine {
+                turn: 1,
+                step: 0,
+                from: "Writing".into(),
+                to: "Running".into(),
+                event: "tool_start".into(),
+                ms: 80,
+                tokens: None,
+                tool: Some("bash".into()),
+            },
+            TransitionLine {
+                turn: 1,
+                step: 1,
+                from: "Running".into(),
+                to: "Prefill".into(),
+                event: "tool_end".into(),
+                ms: 55,
+                tokens: None,
+                tool: None,
+            },
+        ]
+    );
+    // The events keep their order, the transitions are not among them.
+    assert_eq!(
+        reopened.events,
+        vec![
+            Event::User("Fix it".into()),
+            call("c1", "ls"),
+            result("c1", Outcome::Ok),
+        ]
+    );
+}
+
+#[test]
 fn edit_arguments_keep_their_order() {
     let dir = Dir::new("order");
     let edit = Event::Call {
