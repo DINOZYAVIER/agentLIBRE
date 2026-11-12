@@ -1324,11 +1324,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сесія {id}",
     };
 
-    /// The tagline under the splash's version (AGL-065, D7): what
-    /// agentLIBRE is, as the repository's README says.
+    /// The splash's welcome phrase, above its version (AGL-065, D7,
+    /// D8): what agentLIBRE is, as the repository's README says.
     pub const SPLASH_TAGLINE: Msg = Msg {
-        en: "a local-first agentic system",
-        uk: "агентна система, що живе на вашому комп'ютері",
+        en: "agentLIBRE is a local-first agentic system.",
+        uk: "agentLIBRE — агентна система, що живе на вашому комп'ютері.",
     };
 
     /// The repository's address under the splash's tagline (AGL-065, D7).

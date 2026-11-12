@@ -62,8 +62,8 @@ fn cut(line: &str, columns: usize) -> &str {
 
 /// The splash as the lines of the transcript: the art, cut to the
 /// terminal's width and painted with the old color (D3), and under it,
-/// muted: the version (D6), the tagline and the repository's address
-/// (D7).
+/// muted: the welcome phrase (D7, D8), the version (D6) and the
+/// repository's address (D7).
 pub fn lines(theme: &Theme, columns: usize, lang: Lang, version: &str) -> Vec<String> {
     let short_art = short();
     let art = if columns >= full_width() { ART } else { short_art.as_str() };
@@ -72,8 +72,8 @@ pub fn lines(theme: &Theme, columns: usize, lang: Lang, version: &str) -> Vec<St
         .map(|line| theme.paint(Role::InputPrompt, cut(line, columns)))
         .collect();
     for line in [
-        version,
         tr!(lang, m::SPLASH_TAGLINE),
+        version,
         tr!(lang, m::SPLASH_URL),
     ] {
         out.push(theme.paint(Role::Muted, cut(line, columns)));
@@ -94,8 +94,11 @@ mod tests {
         let lines = lines(&theme(false), full_width(), Lang::En, "agl 0.0.2");
         assert_eq!(lines.len(), ART.lines().count() + 3);
         assert_eq!(lines[0], ART.lines().next().unwrap());
-        assert_eq!(lines[ART.lines().count()], "agl 0.0.2");
-        assert_eq!(lines[ART.lines().count() + 1], "a local-first agentic system");
+        assert_eq!(
+            lines[ART.lines().count()],
+            "agentLIBRE is a local-first agentic system."
+        );
+        assert_eq!(lines[ART.lines().count() + 1], "agl 0.0.2");
         assert_eq!(lines.last().unwrap(), "github.com/dinozyavier/agentLIBRE");
     }
 
@@ -121,14 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn the_version_tagline_and_url_follow_the_art_and_are_muted() {
+    fn the_tagline_version_and_url_follow_the_art_and_are_muted() {
         let lines = lines(&theme(true), full_width(), Lang::En, "agl 0.0.2 (abc1234)");
-        let version = &lines[ART.lines().count()];
-        let tagline = &lines[ART.lines().count() + 1];
+        let tagline = &lines[ART.lines().count()];
+        let version = &lines[ART.lines().count() + 1];
         let url = lines.last().unwrap();
+        assert!(tagline.contains("agentLIBRE is a local-first agentic system"));
         assert!(version.contains("agl 0.0.2 (abc1234)"));
         assert_eq!(width(version), "agl 0.0.2 (abc1234)".len());
-        assert!(tagline.contains("a local-first agentic system"));
         assert!(url.contains("github.com/dinozyavier/agentLIBRE"));
     }
 
@@ -136,8 +139,8 @@ mod tests {
     fn the_tagline_and_url_take_the_language() {
         let lines = lines(&theme(false), full_width(), Lang::Uk, "agl 0.0.2");
         assert_eq!(
-            lines[ART.lines().count() + 1],
-            "агентна система, що живе на вашому комп'ютері"
+            lines[ART.lines().count()],
+            "agentLIBRE — агентна система, що живе на вашому комп'ютері."
         );
         assert_eq!(lines.last().unwrap(), "github.com/dinozyavier/agentLIBRE");
     }
