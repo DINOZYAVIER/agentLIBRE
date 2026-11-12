@@ -45,6 +45,7 @@
           ./Cargo.toml
           ./Cargo.lock
           ./src
+          ./splash
           ./nix
         ];
       };
