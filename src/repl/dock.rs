@@ -158,6 +158,14 @@ impl Dock {
         self.lock().editor.buffer().to_owned()
     }
 
+    /// Draws the text of the inspect mode (AGL-066) to the output, without
+    /// a redraw of the dock.
+    pub fn write_raw(&self, text: &str) {
+        let mut state = self.lock();
+        let _ = state.out.write_all(text.as_bytes());
+        let _ = state.out.flush();
+    }
+
     /// The context size, once the server has answered (AGL-015).
     pub fn set_context_size(&self, size: usize) {
         let mut state = self.lock();

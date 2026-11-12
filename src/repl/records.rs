@@ -59,13 +59,6 @@ pub enum Record {
     },
 }
 
-impl Record {
-    /// Whether the record holds a call, for the inspect mode's expand.
-    pub fn is_call(&self) -> bool {
-        matches!(self, Record::Tool { .. })
-    }
-}
-
 /// A call's outcome as the transcript and the inspect mode print it;
 /// `None` is a call whose result is not known.
 pub fn status(outcome: Option<Outcome>) -> (String, Role) {

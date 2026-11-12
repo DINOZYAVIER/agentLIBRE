@@ -71,13 +71,19 @@ impl Ffmpeg {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         // The thread that starts it may block SIGINT (the REPL's input
-        // thread does, D131) and a child keeps the mask of the thread:
-        // ffmpeg must get the SIGINT that makes it finish its file.
+        // thread does, D131), or the process may ignore it (`cargo test`
+        // without a terminal does), and a child keeps the mask and the
+        // disposition of the parent: ffmpeg must get the SIGINT that
+        // makes it finish its file.
         unsafe {
             command.pre_exec(|| {
                 let mut set: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut set);
                 libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = libc::SIG_DFL;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
                 Ok(())
             });
         }

@@ -1,0 +1,649 @@
+//! The inspect mode of the session (AGL-066, D4, D5, D8): the alternate
+//! screen on which the records of the session are drawn in full — the
+//! outputs of the tools, the thinking, the text before a call — with the
+//! navigation between the records and the messages of the human. Leaving
+//! it puts the transcript back as it was.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use super::markdown;
+use super::records::{self, Record};
+use super::term::{self, Key};
+use super::text::{clean, hard_wrap, truncate};
+use super::transcript::{edge, notice_lines, thinking_line, user_lines};
+use crate::action::Value;
+use crate::backend::ToolCall;
+use crate::i18n::{Lang, m, repl as texts};
+use crate::session::{Event, TransitionLine};
+use crate::theme::{Role, Theme};
+use crate::tools::ToolResult;
+use crate::tr;
+
+/// The rows the screen keeps for the blank one and the hint (D8).
+const RESERVE: usize = 2;
+
+/// The records of a session and the navigation over them (D4, D5, D8).
+pub struct Inspect {
+    records: Vec<Record>,
+    /// The record the navigation points at.
+    selection: usize,
+    /// The records shown in full (D4).
+    expanded: BTreeSet<usize>,
+    /// The tail of the session is kept on screen (D8: `G`).
+    follow: bool,
+    /// The first row of the window, to keep it steady between redraws.
+    top: Option<usize>,
+}
+
+impl Inspect {
+    pub fn new(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Inspect {
+        let records = records::group(events, transitions, lang);
+        let selection = records.len().saturating_sub(1);
+        Inspect {
+            records,
+            selection,
+            expanded: BTreeSet::new(),
+            follow: true,
+            top: None,
+        }
+    }
+
+    /// Takes a key (D8); false when the mode is over.
+    pub fn key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Escape => false,
+            Key::Up => {
+                self.follow = false;
+                if self.selection > 0 {
+                    self.selection -= 1;
+                }
+                true
+            }
+            Key::Down => {
+                self.follow = false;
+                if self.selection + 1 < self.records.len() {
+                    self.selection += 1;
+                }
+                true
+            }
+            Key::Enter | Key::Right => {
+                self.expanded.insert(self.selection);
+                true
+            }
+            Key::Left => {
+                self.expanded.remove(&self.selection);
+                true
+            }
+            Key::Char('u') => {
+                self.jump_to_user(false);
+                true
+            }
+            Key::Char('U') => {
+                self.jump_to_user(true);
+                true
+            }
+            Key::Char('g') => {
+                self.selection = 0;
+                self.follow = false;
+                true
+            }
+            Key::Char('G') => {
+                self.selection = self.records.len().saturating_sub(1);
+                self.follow = true;
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// `u` and `U`: the previous and the next message of the human (D5);
+    /// the navigation stays when there is none.
+    fn jump_to_user(&mut self, next: bool) {
+        let found = if next {
+            (self.selection + 1..self.records.len())
+                .find(|&index| is_user(&self.records[index]))
+        } else {
+            (0..self.selection)
+                .rev()
+                .find(|&index| is_user(&self.records[index]))
+        };
+        if let Some(index) = found {
+            self.selection = index;
+            self.follow = false;
+        }
+    }
+
+    /// The whole screen: the window of the records, the blank row and the
+    /// hint (D4, D8), exactly `rows` rows.
+    pub fn render(
+        &self,
+        theme: &Theme,
+        lang: Lang,
+        columns: usize,
+        rows: usize,
+        outputs: &Path,
+    ) -> Vec<String> {
+        let body = rows.saturating_sub(RESERVE).max(1);
+        let (content, starts) = self.content(theme, lang, columns, outputs);
+        let len = content.len();
+        let max_top = len.saturating_sub(body.min(len));
+        let top = if self.follow {
+            max_top
+        } else {
+            let mut top = self.top.unwrap_or(max_top).min(max_top);
+            if let Some(start) = starts.get(self.selection) {
+                let start = *start;
+                let end = starts.get(self.selection + 1).copied().unwrap_or(len);
+                if start < top {
+                    top = start;
+                } else if end > top + body {
+                    top = end.saturating_sub(body);
+                }
+            }
+            top
+        };
+        let mut lines: Vec<String> = content[top..(top + body).min(len)].to_vec();
+        lines.resize(body, String::new());
+        lines.push(String::new());
+        lines.push(self.hint(theme, lang, columns));
+        lines
+    }
+
+    /// The lines of the records and, per record, the line it starts at.
+    fn content(
+        &self,
+        theme: &Theme,
+        lang: Lang,
+        columns: usize,
+        outputs: &Path,
+    ) -> (Vec<String>, Vec<usize>) {
+        let mut lines = Vec::new();
+        let mut starts = Vec::new();
+        for (index, record) in self.records.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
+            starts.push(lines.len());
+            lines.extend(self.block(record, index, theme, lang, columns, outputs));
+        }
+        (lines, starts)
+    }
+
+    /// One record: its compact lines, or its full data when it is
+    /// expanded (D1, D3, D4, D9).
+    fn block(
+        &self,
+        record: &Record,
+        index: usize,
+        theme: &Theme,
+        lang: Lang,
+        columns: usize,
+        outputs: &Path,
+    ) -> Vec<String> {
+        let expanded = self.expanded.contains(&index);
+        match record {
+            Record::User(message) => user_lines(theme, message, columns),
+            Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
+            Record::Think(thinking) => {
+                if expanded {
+                    let mut lines = vec![theme.paint(
+                        Role::Muted,
+                        &format!("{}:", tr!(lang, m::THINKING)),
+                    )];
+                    lines.extend(
+                        thinking
+                            .lines()
+                            .flat_map(|line| hard_wrap(&clean(line), columns))
+                            .map(|line| theme.paint(Role::Muted, &line)),
+                    );
+                    lines
+                } else {
+                    vec![theme.paint(
+                        Role::Muted,
+                        &thinking_line(lang, columns, thinking),
+                    )]
+                }
+            }
+            Record::Text(text) => {
+                let mut lines = markdown::render(text.trim(), columns, theme);
+                if !expanded && lines.len() > 3 {
+                    lines.truncate(3);
+                    lines
+                        .last_mut()
+                        .expect("three lines")
+                        .push_str(&theme.paint(Role::Muted, "…"));
+                }
+                lines
+            }
+            Record::Tool {
+                call,
+                result,
+                hint,
+                phases,
+                time,
+            } => {
+                let mut items = records::phase_items(phases);
+                if let Some(elapsed) = time {
+                    items.push(format!(
+                        "{} {}",
+                        call.name,
+                        texts::duration(elapsed.as_secs())
+                    ));
+                }
+                let mut lines =
+                    tool_lines(theme, lang, columns, call, result.as_ref(), hint, &items);
+                if expanded {
+                    // The input, in full, when the hint is not the whole (D4).
+                    let input = call_input(call);
+                    if input != *hint {
+                        for row in hard_wrap(&clean(&input), columns) {
+                            lines.push(theme.paint(Role::Muted, &row));
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.extend(tool_output(call, result.as_ref(), outputs, columns));
+                }
+                lines
+            }
+            Record::Answer(text, time) => {
+                let mut lines = markdown::render(text.trim(), columns, theme);
+                if expanded {
+                    let items: Vec<String> = time
+                        .iter()
+                        .map(|elapsed| {
+                            tr!(
+                                lang,
+                                m::WORKED_FOR,
+                                time = texts::duration(elapsed.as_secs())
+                            )
+                        })
+                        .collect();
+                    if !items.is_empty() {
+                        lines.push(edge(theme, columns, None, &items, Role::InputRule));
+                    }
+                }
+                lines
+            }
+            Record::Notice { line, role, detail } => {
+                let mut lines = notice_lines(theme, line, columns, *role);
+                if expanded
+                    && let Some(detail) = detail
+                    && !detail.is_empty()
+                {
+                    lines.push(String::new());
+                    lines.extend(
+                        detail
+                            .lines()
+                            .flat_map(|line| hard_wrap(&clean(line), columns))
+                            .map(|line| theme.paint(Role::Muted, &line)),
+                    );
+                }
+                lines
+            }
+        }
+    }
+
+    /// The position, the follow and the keys' hint (D8); the position is
+    /// first, so a narrow screen keeps it.
+    fn hint(&self, theme: &Theme, lang: Lang, columns: usize) -> String {
+        let rest = if self.follow {
+            format!("{} · {}", tr!(lang, m::INSPECT_FOLLOW), tr!(lang, m::INSPECT_HINT))
+        } else {
+            tr!(lang, m::INSPECT_HINT).into()
+        };
+        let hint = format!("{}/{} · {}", self.selection + 1, self.records.len(), rest);
+        theme.paint(Role::Muted, &truncate(&hint, columns))
+    }
+}
+
+/// Whether the record is a message of the human (D5).
+fn is_user(record: &Record) -> bool {
+    matches!(record, Record::User(_))
+}
+
+/// The compact frame of a call, as the inspect mode draws it (D6): the
+/// tool's line with its status, the lines of the input, the phases' row.
+fn tool_lines(
+    theme: &Theme,
+    lang: Lang,
+    columns: usize,
+    call: &ToolCall,
+    result: Option<&ToolResult>,
+    hint: &str,
+    items: &[String],
+) -> Vec<String> {
+    let gutter = theme.paint(Role::InputRule, "  │ ");
+    let inner = columns.saturating_sub(4).max(1);
+    let (status_text, status_role) = records::status(result.map(|result| result.outcome));
+    let mut lines = vec![format!(
+        "{}  {}",
+        theme.paint(
+            Role::Tool,
+            &format!("{} {}", tr!(lang, m::TOOL_LABEL), call.name)
+        ),
+        theme.paint(status_role, &status_text)
+    )];
+    for row in hard_wrap(&clean(hint), inner) {
+        lines.push(format!("{gutter}{row}"));
+    }
+    lines.push(edge(theme, columns, Some((status_text.as_str(), status_role)), items, Role::Rule));
+    lines
+}
+
+/// The full output of a call, when it is known (D4): the whole of it from
+/// the output's file when the call's output was cut (AGL-049), else the
+/// result's content.
+fn tool_output(
+    call: &ToolCall,
+    result: Option<&ToolResult>,
+    outputs: &Path,
+    columns: usize,
+) -> Vec<String> {
+    let Some(result) = result else {
+        return Vec::new();
+    };
+    let file = outputs.join(format!("{}.txt", call.id));
+    let text = if file.exists() {
+        match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(_) => result.content.clone(),
+        }
+    } else {
+        result.content.clone()
+    };
+    text.lines()
+        .flat_map(|line| hard_wrap(&clean(line), columns))
+        .collect()
+}
+
+/// What a call sent: the command, the edit with its lines, the search's
+/// query, the summary of a write to the forge or the memory.
+fn call_input(call: &ToolCall) -> String {
+    let text = |name: &str| {
+        call.args
+            .iter()
+            .find_map(|(key, value)| match value {
+                Value::Text(value) if key == name => Some(value.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    if call.name == "edit" {
+        let mut out = text("path").to_owned();
+        for (sign, name) in [('-', "old"), ('+', "new")] {
+            for line in text(name).split('\n') {
+                out.push_str(&format!("\n{sign} {line}"));
+            }
+        }
+        return out;
+    }
+    if call.name == "search" {
+        return format!(
+            "{}: {}",
+            text("source"),
+            text("query")
+        );
+    }
+    if call.name == "memory" || call.name == "forge" {
+        return crate::cli::report::call_summary(call);
+    }
+    text("command").to_owned()
+}
+
+/// The inspect mode on the terminal (D4, D8): the alternate screen, the
+/// full redraws, the keys until the escape. `write` is what the mode
+/// draws with, beside the dock.
+pub fn run(
+    write: &dyn Fn(&str),
+    theme: &Theme,
+    lang: Lang,
+    events: Vec<Event>,
+    transitions: Vec<TransitionLine>,
+    outputs: std::path::PathBuf,
+) {
+    let mut inspect = Inspect::new(&events, &transitions, lang);
+    let mut parser = term::Parser::default();
+    let mut buffer = [0u8; 4096];
+    let mut size = term::size();
+    write(term::ALT_ON);
+    loop {
+        if term::take_resized() {
+            size = term::size();
+        }
+        draw(write, &inspect, theme, lang, size.0, size.1, &outputs);
+        let keys = loop {
+            match term::read_input(&mut buffer, 100) {
+                Ok(None) => {
+                    if parser.waiting() {
+                        break parser.timeout();
+                    }
+                    continue;
+                }
+                // The end of input or a failed read leaves the mode.
+                Ok(Some(0)) | Err(_) => break vec![Key::Escape],
+                Ok(Some(n)) => break parser.feed(&buffer[..n]),
+            }
+        };
+        let mut open = true;
+        for key in keys {
+            if !inspect.key(key) {
+                open = false;
+                break;
+            }
+        }
+        if !open {
+            break;
+        }
+    }
+    write(term::ALT_OFF);
+}
+
+/// One redraw of the screen: the clear, the lines, the cursor at the
+/// bottom.
+fn draw(
+    write: &dyn Fn(&str),
+    inspect: &Inspect,
+    theme: &Theme,
+    lang: Lang,
+    columns: usize,
+    rows: usize,
+    outputs: &Path,
+) {
+    let lines = inspect.render(theme, lang, columns, rows, outputs);
+    let mut text = String::from(term::CLEAR);
+    for line in &lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push_str(&term::cursor_at(rows.max(1), 1));
+    write(&text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::Outcome;
+
+    fn call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            args: vec![("command".into(), Value::Text(command.into()))],
+        }
+    }
+
+    /// The records: 0 the user, 1 the thinking, 2 the text, 3 the call,
+    /// 4 the answer, 5 the user, 6 the compaction, 7 the answer.
+    fn session() -> Vec<Event> {
+        vec![
+            Event::User("First".into()),
+            Event::Thinking("let me look\nand more".into()),
+            Event::Call {
+                text: Some("I will run it.\nAnd explain why.\nAnd more.".into()),
+                call: call("c1", "ls"),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "a\nb\nc\nd\ne".into(),
+            },
+            Event::Answer("Done.".into()),
+            Event::User("Second".into()),
+            Event::Compact {
+                summary: "the summary of the long session".into(),
+                question: None,
+            },
+            Event::Answer("Ok.".into()),
+        ]
+    }
+
+    fn theme() -> Theme {
+        Theme::plain()
+    }
+
+    fn inspect() -> Inspect {
+        Inspect::new(&session(), &[], Lang::En)
+    }
+
+    /// The screen of `rows` rows, so that the records do not all fit.
+    fn screen(inspect: &Inspect, rows: usize) -> Vec<String> {
+        inspect.render(&theme(), Lang::En, 40, rows, &std::env::temp_dir())
+    }
+
+    #[test]
+    fn the_tail_is_on_screen_at_the_start() {
+        let inspect = inspect();
+        let lines = screen(&inspect, 10);
+        assert_eq!(lines.len(), 10);
+        let all = lines.join("\n");
+        // The last answer and the compaction's line; the hint has the
+        // position and the follow.
+        assert!(all.contains("Ok."), "{all}");
+        assert!(all.contains("Compacting"), "{all}");
+        assert!(lines.last().unwrap().contains("8/8"));
+        assert!(lines.last().unwrap().contains("follow"));
+    }
+
+    #[test]
+    fn the_keys_move_and_expand() {
+        let mut inspect = inspect();
+        // At the tail (7); up to the compaction (6): its summary is the
+        // detail, shown only when it is open.
+        assert!(inspect.key(Key::Up));
+        assert!(inspect.key(Key::Enter));
+        let all = screen(&inspect, 12).join("\n");
+        assert!(all.contains("the summary of the long session"), "{all}");
+        assert!(inspect.key(Key::Left));
+        let all = screen(&inspect, 12).join("\n");
+        assert!(!all.contains("the summary"), "{all}");
+        // Up to the call (3): its output, in full, when it is open.
+        assert!(inspect.key(Key::Up));
+        assert!(inspect.key(Key::Up));
+        assert!(inspect.key(Key::Up));
+        assert!(inspect.key(Key::Enter));
+        let all = screen(&inspect, 12).join("\n");
+        assert!(all.contains("TOOL bash  ok"), "{all}");
+        assert!(all.contains("a\nb\nc\nd\ne"), "{all}");
+    }
+
+    #[test]
+    fn the_keys_jump_between_the_users() {
+        let mut inspect = inspect();
+        // At the tail; `u` to the second message, `u` again to the first,
+        // `U` back.
+        assert!(inspect.key(Key::Char('u')));
+        assert!(inspect.key(Key::Char('u')));
+        let lines = screen(&inspect, 10);
+        assert!(lines.first().unwrap().contains("First"));
+        assert!(lines.last().unwrap().contains("1/8"));
+        assert!(inspect.key(Key::Char('U')));
+        let lines = screen(&inspect, 10);
+        assert!(lines.join("\n").contains("Second"));
+        assert!(lines.last().unwrap().contains("6/8"));
+    }
+
+    #[test]
+    fn the_keys_go_to_the_top_and_the_tail() {
+        let mut inspect = inspect();
+        assert!(inspect.key(Key::Char('g')));
+        let lines = screen(&inspect, 10);
+        assert!(lines.first().unwrap().contains("First"));
+        assert!(inspect.key(Key::Char('G')));
+        let lines = screen(&inspect, 10);
+        let all = lines.join("\n");
+        assert!(all.contains("Ok."), "{all}");
+        assert!(lines.last().unwrap().contains("follow"));
+    }
+
+    #[test]
+    fn the_expanded_thinking_shows_it_all() {
+        let mut inspect = inspect();
+        assert!(inspect.key(Key::Char('g')));
+        assert!(inspect.key(Key::Down));
+        assert!(inspect.key(Key::Enter));
+        let all = screen(&inspect, 10).join("\n");
+        assert!(all.contains("thinking:"), "{all}");
+        assert!(all.contains("let me look"), "{all}");
+        assert!(all.contains("and more"), "{all}");
+    }
+
+    #[test]
+    fn the_expanded_text_shows_it_all() {
+        // A text that wraps to more than three lines at the width:
+        // collapsed, it is the first three lines with the ellipsis (D9).
+        let events = vec![
+            Event::User("Go".into()),
+            Event::Call {
+                text: Some(
+                    "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod \
+                     tempor incididunt ut labore et dolore magna aliqua, ut enim ad minim \
+                     veniam, quis nostrud exercitation ullamco laboris"
+                        .into(),
+                ),
+                call: call("c1", "ls"),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "ok".into(),
+            },
+        ];
+        let mut inspect = Inspect::new(&events, &[], Lang::En);
+        assert!(inspect.key(Key::Char('g')));
+        assert!(inspect.key(Key::Down));
+        let all = screen(&inspect, 10).join("\n");
+        assert!(all.contains("…"), "{all}");
+        assert!(!all.contains("ullamco"), "{all}");
+        assert!(inspect.key(Key::Enter));
+        let lines = screen(&inspect, 10);
+        assert!(lines.join("\n").contains("ullamco"), "{lines:?}");
+        // The content lines are whole; the hint line may be truncated itself.
+        assert!(!lines[..lines.len() - 1].join("\n").contains("…"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_escape_leaves() {
+        let mut inspect = inspect();
+        assert!(inspect.key(Key::Down));
+        assert!(!inspect.key(Key::Escape));
+    }
+
+    #[test]
+    fn the_full_output_come_from_the_file_when_the_result_was_cut() {
+        let dir = std::env::temp_dir().join(format!("agl-inspect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("c1.txt"), "head\ncut\ntail").unwrap();
+        let events = session();
+        let mut inspect = Inspect::new(&events, &[], Lang::En);
+        assert!(inspect.key(Key::Char('g')));
+        assert!(inspect.key(Key::Down));
+        assert!(inspect.key(Key::Down));
+        assert!(inspect.key(Key::Down));
+        assert!(inspect.key(Key::Enter));
+        let lines = inspect.render(&theme(), Lang::En, 40, 10, &dir);
+        let all = lines.join("\n");
+        assert!(all.contains("head\ncut\ntail"), "{all}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

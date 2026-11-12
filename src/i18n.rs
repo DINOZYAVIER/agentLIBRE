@@ -1744,12 +1744,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "обірваний хід у стані {state}; наступне повідомлення продовжить його",
     };
 
-    /// The note under a cut-short card (D138).
-    pub const LIMITED: Msg = Msg {
-        en: "… limited to {lines} lines / {chars} chars",
-        uk: "… обмежено {lines} рядками / {chars} символами",
-    };
-
     /// The time a turn took.
     pub const WORKED_FOR: Msg = Msg {
         en: "Worked for {time}",
@@ -1816,6 +1810,19 @@ Forge (сховище артефактів робочої області, agentL
     pub const TOOL_LABEL: Msg = Msg {
         en: "TOOL",
         uk: "TOOL",
+    };
+
+    /// The keys of the inspect mode (AGL-066, D8).
+    pub const INSPECT_HINT: Msg = Msg {
+        en: "↑↓ move · ⏎ open · ← close · u/U user message · g top · G end · esc exit",
+        uk: "↑↓ рух · ⏎ відкрити · ← закрити · u/U повідомлення · g згори · G знизу · esc вийти",
+    };
+
+    /// The inspect mode keeps the tail of the session on screen (AGL-066,
+    /// D8).
+    pub const INSPECT_FOLLOW: Msg = Msg {
+        en: "follow",
+        uk: "хвіст",
     };
 
     /// `agl server start` begins (D146); `what` is the server, in a line

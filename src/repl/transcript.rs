@@ -9,14 +9,13 @@ use std::time::{Duration, Instant};
 use super::dock::grouped;
 use super::markdown;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
-use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
-use crate::action::{Outcome, Value};
+use super::records::{self, Record};
+use super::text::{StreamWrap, clean, hard_wrap, truncate, width, wrap_line};
 use crate::agent::Report;
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
-use crate::media::{Kind as MediaKind, Media};
 use crate::phase::{Phase, PhaseEvent, Transition};
-use crate::session::{CutOff, Event, ForgeKind};
+use crate::session::{CutOff, Event, ForgeKind, TransitionLine};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
@@ -125,7 +124,9 @@ pub struct Presenter {
     /// Whether the turn has entered its first state: only a change of state
     /// is shown (AGL-046, D13).
     state_entered: bool,
-    thinking: Option<StreamWrap>,
+    /// The thinking being decoded, as its pieces arrive (D3, D7): the
+    /// transcript shows one line with its first line.
+    thinking: Option<String>,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -229,40 +230,6 @@ impl Presenter {
         ));
     }
 
-    /// A medium the session took (AGL-043 F17): its placeholder and its
-    /// file name; the transcript of an audio, the count of the frames of a
-    /// video.
-    pub fn show_media(&self, medium: &Media) {
-        let head = format!("{} {}", medium.placeholder(), medium.name);
-        let line = match (&medium.kind, &medium.transcript) {
-            (MediaKind::Audio, Some(transcript)) => format!("{head} — “{transcript}”"),
-            (MediaKind::Video, _) => tr!(
-                self.lang,
-                m::MEDIA_EVENT_FRAMES,
-                head = head,
-                frames = medium.frames.len()
-            ),
-            _ => head,
-        };
-        self.screen.print(&notice_lines(
-            &self.theme,
-            &line,
-            self.screen.columns(),
-            Role::Muted,
-        ));
-    }
-
-    /// The rule where a summary replaced the history (D140; AGL-046, D13):
-    /// what is replayed knows no time and no tokens.
-    pub fn show_compacted(&self) {
-        let label = Activity::Compacting.label(self.lang);
-        self.screen.print(&[self.edge(
-            Some(("ok", Role::StatusSuccess)),
-            &[label],
-            Role::Rule,
-        )]);
-    }
-
     /// `[forge: …]` where the agent wrote to the forge (AGL-008).
     pub fn show_forge(&self, name: &str, kind: ForgeKind, section: Option<&str>) {
         let message = match kind {
@@ -311,22 +278,37 @@ impl Presenter {
         self.screen.print(&lines);
     }
 
+    /// The thinking's record (D3, D7): one line with a snippet of its
+    /// first line.
     pub fn show_thinking(&self, thinking: &str) {
-        let mut wrap = StreamWrap::new(self.screen.columns());
-        let mut lines = wrap.push(&format!("{}: {thinking}", tr!(self.lang, m::THINKING)));
-        lines.extend(wrap.finish());
-        let lines: Vec<String> = lines
-            .iter()
-            .map(|line| self.theme.paint(Role::Muted, line))
-            .collect();
-        self.screen.print(&lines);
+        self.screen
+            .print(&[self.theme.paint(Role::Muted, &self.thinking_line(thinking))]);
     }
 
-    /// Text before a call, rendered as Markdown.
+    /// The text before a call (D9): its first three lines; the rest is in
+    /// the inspect mode.
     pub fn show_text(&self, text: &str) {
+        self.screen.print(&self.text_block(text));
+    }
+
+    /// `thinking: …` with the first line of `thinking`, at the width.
+    fn thinking_line(&self, thinking: &str) -> String {
+        thinking_line(self.lang, self.screen.columns(), thinking)
+    }
+
+    /// The block of the text before a call (D9): its first three lines,
+    /// as Markdown, with `…` when more.
+    fn text_block(&self, text: &str) -> Vec<String> {
         let mut lines = markdown::render(text.trim(), self.screen.columns(), &self.theme);
+        if lines.len() > 3 {
+            lines.truncate(3);
+            lines
+                .last_mut()
+                .expect("three lines")
+                .push_str(&self.theme.paint(Role::Muted, "…"));
+        }
         lines.push(String::new());
-        self.screen.print(&lines);
+        lines
     }
 
     /// The answer between rules, with the time when it is known.
@@ -334,10 +316,6 @@ impl Presenter {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
         self.screen
             .print(&self.answer_lines(text, self.edge(None, &items, Role::InputRule)));
-    }
-
-    pub fn show_card(&self, call: &ToolCall, result: &ToolResult, elapsed: Option<Duration>) {
-        self.screen.print(&self.card(call, result, elapsed, &[]));
     }
 
     /// A line of the session itself: help, a stop, an error.
@@ -350,64 +328,36 @@ impl Presenter {
         ));
     }
 
-    /// Shows what a session already holds (D126).
-    pub fn replay(&self, events: &[Event]) {
-        let mut calls: Vec<&ToolCall> = Vec::new();
-        let mut state_entered = false;
-        for event in events {
-            match event {
-                Event::User(message) => {
-                    state_entered = false;
-                    self.show_user(message);
-                }
-                // Only a change of state is shown (AGL-046, D13).
-                Event::State(state) => {
-                    if std::mem::replace(&mut state_entered, true) {
-                        self.show_state(state);
-                    }
-                }
-                Event::Command(run) => {
-                    let role = if run.failed {
-                        Role::StatusFailure
-                    } else {
-                        Role::Muted
-                    };
-                    self.show_notice(&run.line, role);
-                }
-                Event::Thinking(thinking) => self.show_thinking(thinking),
-                Event::Call { text, call } => {
-                    if let Some(text) = text {
-                        self.show_text(text);
-                    }
-                    calls.push(call);
-                }
-                Event::Result {
-                    id,
-                    outcome,
-                    content,
+    /// Shows what a session already holds (D126), through its records
+    /// (AGL-066): compact by default, in full in the inspect mode.
+    /// `transitions` carry the phases' times of the steps.
+    pub fn replay(&self, events: &[Event], transitions: &[TransitionLine]) {
+        for record in records::group(events, transitions, self.lang) {
+            match &record {
+                Record::User(message) => self.show_user(message),
+                Record::State(state) => self.show_state(state),
+                Record::Think(thinking) => self.show_thinking(thinking),
+                Record::Text(text) => self.show_text(text),
+                Record::Tool {
+                    call,
+                    result,
+                    hint,
+                    phases,
+                    time,
                 } => {
-                    if let Some(call) = calls.iter().find(|call| call.id == *id) {
-                        let result = ToolResult {
-                            outcome: *outcome,
-                            content: content.clone(),
-                        };
-                        self.show_card(call, &result, None);
+                    let mut items = records::phase_items(phases);
+                    if let Some(elapsed) = time {
+                        items.push(format!(
+                            "{} {}",
+                            call.name,
+                            texts::duration(elapsed.as_secs())
+                        ));
                     }
+                    self.screen
+                        .print(&self.card(call, result.as_ref(), hint, &items));
                 }
-                Event::Answer(text) => self.show_answer(text, None),
-                Event::Compact { .. } => self.show_compacted(),
-                Event::CutOff(cut) => self.show_cut_off(cut),
-                Event::Forge {
-                    name,
-                    kind,
-                    section,
-                } => self.show_forge(name, *kind, section.as_deref()),
-                Event::Memory { name, kind, text } => {
-                    self.show_memory(name, *kind, text.as_deref());
-                }
-                Event::Media(medium) => self.show_media(medium),
-                Event::Stir { attempt, error } => self.show_stir(*attempt, error),
-                Event::Stop(_) => {}
+                Record::Answer(text, time) => self.show_answer(text, *time),
+                Record::Notice { line, role, .. } => self.show_notice(line, *role),
             }
         }
     }
@@ -457,48 +407,25 @@ impl Presenter {
             .collect()
     }
 
-    /// A rule that carries a status and the items of the row. A row too
-    /// long for the width is left to wrap (AGL-045).
+    /// A rule that carries a status and the items of the row (AGL-045).
     fn edge(&self, status: Option<(&str, Role)>, items: &[String], role: Role) -> String {
-        let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
-        if status.is_some() || !items.is_empty() {
-            parts.push((" ".into(), role));
-            if let Some((text, status_role)) = status {
-                parts.push((text.into(), status_role));
-                if !items.is_empty() {
-                    parts.push((" · ".into(), role));
-                }
-            }
-            if !items.is_empty() {
-                parts.push((items.join(" · "), role));
-            }
-            parts.push((" ".into(), role));
-        }
-        let used: usize = parts.iter().map(|(text, _)| width(text)).sum();
-        parts.push(("─".repeat(self.screen.columns().saturating_sub(used)), role));
-        parts
-            .iter()
-            .map(|(text, role)| self.theme.paint(*role, text))
-            .collect()
+        edge(&self.theme, self.screen.columns(), status, items, role)
     }
 
+    /// The compact frame of a finished step (AGL-066, D1, D2, D6): the
+    /// tool's name and status, one line of the input, the phases' times.
+    /// No output: the full data is in the inspect mode.
     fn card(
         &self,
         call: &ToolCall,
-        result: &ToolResult,
-        elapsed: Option<Duration>,
-        phases: &[(Activity, Duration)],
+        result: Option<&ToolResult>,
+        hint: &str,
+        items: &[String],
     ) -> Vec<String> {
         let columns = self.screen.columns();
         let gutter = self.theme.paint(Role::InputRule, "  │ ");
-        let gutter_width = 4;
-        let inner = columns.saturating_sub(gutter_width).max(1);
-        let (status_text, status_role) = match result.outcome {
-            Outcome::Ok => ("ok", Role::StatusSuccess),
-            Outcome::Fail => ("fail", Role::StatusFailure),
-            Outcome::Timeout => ("timeout", Role::StatusPending),
-            Outcome::Interrupted => ("interrupted", Role::Muted),
-        };
+        let inner = columns.saturating_sub(4).max(1);
+        let (status_text, status_role) = records::status(result.map(|result| result.outcome));
         let mut lines = Vec::new();
         if self.settings.frame {
             lines.push(String::new());
@@ -511,44 +438,17 @@ impl Presenter {
                 Role::Tool,
                 &format!("{} {}", tr!(self.lang, m::TOOL_LABEL), call.name)
             ),
-            self.theme.paint(status_role, status_text)
+            self.theme.paint(status_role, &status_text)
         ));
-        let mut limited = false;
-        let sections = [call_input(call), result.content.clone()];
-        for (index, section) in sections.iter().enumerate() {
-            let (preview, cut) =
-                preview(section, self.settings.tool_lines, self.settings.tool_chars);
-            limited |= cut;
-            if index == 1 && !preview.is_empty() {
-                lines.push(gutter.trim_end().to_owned());
-            }
-            for line in preview {
-                for row in hard_wrap(&clean(&line), inner) {
-                    lines.push(format!("{gutter}{row}"));
-                }
-            }
-        }
-        if limited {
-            lines.push(self.theme.paint(
-                Role::Muted,
-                &tr!(
-                    self.lang,
-                    m::LIMITED,
-                    lines = self.settings.tool_lines,
-                    chars = self.settings.tool_chars,
-                ),
-            ));
+        for row in hard_wrap(&clean(hint), inner) {
+            lines.push(format!("{gutter}{row}"));
         }
         if self.settings.frame {
-            let mut items = self.phase_items(phases);
-            if let Some(elapsed) = elapsed {
-                items.push(format!(
-                    "{} {}",
-                    call.name,
-                    texts::duration(elapsed.as_secs())
-                ));
-            }
-            lines.push(self.edge(Some((status_text, status_role)), &items, Role::Rule));
+            lines.push(self.edge(
+                Some((status_text.as_str(), status_role)),
+                items,
+                Role::Rule,
+            ));
         }
         lines
     }
@@ -584,10 +484,9 @@ impl Presenter {
     }
 
     fn close_thinking(&mut self) {
-        if let Some(mut wrap) = self.thinking.take() {
-            if let Some(rest) = wrap.finish() {
-                self.screen.print(&[self.theme.paint(Role::Muted, &rest)]);
-            }
+        if let Some(thinking) = self.thinking.take() {
+            self.screen
+                .print(&[self.theme.paint(Role::Muted, &self.thinking_line(&thinking))]);
             self.screen.live("");
         }
     }
@@ -620,23 +519,12 @@ impl Report for Presenter {
     fn thinking(&mut self, piece: &str) {
         if self.thinking.is_none() {
             self.close();
-            self.thinking = Some(StreamWrap::new(self.screen.columns()));
-            let label = format!("{}: ", tr!(self.lang, m::THINKING));
-            let wrap = self.thinking.as_mut().expect("just set");
-            let lines = wrap.push(&label);
-            debug_assert!(lines.is_empty());
+            self.thinking = Some(String::new());
         }
-        let wrap = self.thinking.as_mut().expect("open");
-        let lines: Vec<String> = wrap
-            .push(piece)
-            .iter()
-            .map(|line| self.theme.paint(Role::Muted, line))
-            .collect();
-        if !lines.is_empty() {
-            self.screen.print(&lines);
-        }
-        self.screen
-            .live(&self.theme.paint(Role::Muted, wrap.live()));
+        let thinking = self.thinking.as_mut().expect("just set");
+        thinking.push_str(piece);
+        let line = thinking_line(self.lang, self.screen.columns(), thinking);
+        self.screen.live(&self.theme.paint(Role::Muted, &line));
         self.piece();
     }
 
@@ -664,9 +552,7 @@ impl Report for Presenter {
 
     fn text(&mut self, text: &str) {
         self.generation_done();
-        let mut block = markdown::render(text.trim(), self.screen.columns(), &self.theme);
-        block.push(String::new());
-        self.replace_streamed(block);
+        self.replace_streamed(self.text_block(text));
     }
 
     fn answer(&mut self, text: &str) {
@@ -691,8 +577,14 @@ impl Report for Presenter {
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         let phases = std::mem::take(&mut self.phases);
+        let mut items = self.phase_items(&phases);
+        items.push(format!(
+            "{} {}",
+            call.name,
+            texts::duration(self.tool_time.as_secs())
+        ));
         self.screen
-            .print(&self.card(call, result, Some(self.tool_time), &phases));
+            .print(&self.card(call, Some(result), &records::call_hint(call), &items));
         self.prefill = None;
     }
 
@@ -856,6 +748,37 @@ pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Ve
         .collect()
 }
 
+/// A rule that carries a status and the items of the row. A row too long
+/// for the width is left to wrap (AGL-045).
+pub fn edge(
+    theme: &Theme,
+    columns: usize,
+    status: Option<(&str, Role)>,
+    items: &[String],
+    role: Role,
+) -> String {
+    let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
+    if status.is_some() || !items.is_empty() {
+        parts.push((" ".into(), role));
+        if let Some((text, status_role)) = status {
+            parts.push((text.into(), status_role));
+            if !items.is_empty() {
+                parts.push((" · ".into(), role));
+            }
+        }
+        if !items.is_empty() {
+            parts.push((items.join(" · "), role));
+        }
+        parts.push((" ".into(), role));
+    }
+    let used: usize = parts.iter().map(|(text, _)| width(text)).sum();
+    parts.push(("─".repeat(columns.saturating_sub(used)), role));
+    parts
+        .iter()
+        .map(|(text, role)| theme.paint(*role, text))
+        .collect()
+}
+
 /// The user's message as rows on the input background (D138).
 pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
     let columns = columns.max(4);
@@ -879,75 +802,11 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// What the card shows of a call: the command, or the file and the change.
-fn call_input(call: &ToolCall) -> String {
-    let text = |name: &str| {
-        call.args
-            .iter()
-            .find_map(|(n, value)| match value {
-                Value::Text(text) if n == name => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    };
-    if call.name == "edit" {
-        let mut out = text("path").to_owned();
-        for (sign, name) in [('-', "old"), ('+', "new")] {
-            for line in text(name).split('\n') {
-                out.push_str(&format!("\n{sign} {line}"));
-            }
-        }
-        return out;
-    }
-    if call.name == "search" {
-        return search_input(call);
-    }
-    if call.name == "memory" {
-        return crate::cli::report::call_summary(call);
-    }
-    text("command").to_owned()
-}
-
-/// What a `search` call shows: the source and the query.
-fn search_input(call: &ToolCall) -> String {
-    let text = |name: &str| {
-        call.args.iter().find_map(|(n, value)| match value {
-            Value::Text(text) if n == name => Some(text.as_str()),
-            _ => None,
-        })
-    };
-    format!(
-        "{}: {}",
-        text("source").unwrap_or_default(),
-        text("query").unwrap_or_default()
-    )
-}
-
-/// The first `lines` lines of `text`, at most `chars` characters in all;
-/// true when something was left out (D124).
-fn preview(text: &str, lines: usize, chars: usize) -> (Vec<String>, bool) {
-    let text = text.trim_end_matches('\n');
-    if text.is_empty() {
-        return (Vec::new(), false);
-    }
-    let mut out = Vec::new();
-    let mut left = chars;
-    let mut cut = false;
-    for (index, line) in text.split('\n').enumerate() {
-        if index == lines || left == 0 {
-            cut = true;
-            break;
-        }
-        let count = line.chars().count();
-        if count > left {
-            out.push(line.chars().take(left).collect());
-            cut = true;
-            break;
-        }
-        out.push(line.to_owned());
-        left -= count;
-    }
-    (out, cut)
+/// `thinking: …` with the first line of `thinking`, at the width (D3, D7).
+pub fn thinking_line(lang: Lang, columns: usize, thinking: &str) -> String {
+    let label = format!("{}: ", tr!(lang, m::THINKING));
+    let snippet = thinking.lines().next().unwrap_or_default();
+    truncate(&format!("{label}{snippet}"), columns)
 }
 
 #[cfg(test)]
@@ -955,6 +814,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::action::{Outcome, Value};
     use crate::phase::{Observed, Observer};
 
     /// A screen that records what was drawn.
@@ -1023,33 +883,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn previews_stop_at_the_first_limit() {
-        assert_eq!(
-            preview("a\nb\nc", 2, 100),
-            (vec!["a".into(), "b".into()], true)
-        );
-        assert_eq!(
-            preview("a\nb", 2, 100),
-            (vec!["a".into(), "b".into()], false)
-        );
-        assert_eq!(preview("abcdef\nx", 5, 4), (vec!["abcd".into()], true));
-        assert_eq!(
-            preview("ab\ncd", 5, 4),
-            (vec!["ab".into(), "cd".into()], false)
-        );
-        assert_eq!(preview("", 5, 4), (Vec::new(), false));
-        assert_eq!(preview("a\n\n", 5, 4), (vec!["a".into()], false));
+    /// The compact frame of `call` with its `items` (D1, D2, D6).
+    fn show_card(presenter: &Presenter, call: &ToolCall, result: &ToolResult, items: &[String]) {
+        presenter
+            .screen
+            .print(&presenter.card(call, Some(result), &records::call_hint(call), items));
     }
 
     #[test]
     fn framed_card() {
+        // AGL-066, D1, D6: the frame is the tool's line, one line of the
+        // input and the phases' row; no output.
         let (presenter, mock) = presenter(true);
         let result = ToolResult {
             outcome: Outcome::Fail,
             content: "one\ntwo\nthree\nexit code: 1".into(),
         };
-        presenter.show_card(&bash("cargo test"), &result, Some(Duration::from_secs(75)));
+        show_card(&presenter, &bash("cargo test"), &result, &["bash 1m 15s".to_owned()]);
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
@@ -1059,17 +909,15 @@ mod tests {
                 "",
                 "TOOL bash  fail",
                 "  │ cargo test",
-                "  │",
-                "  │ one",
-                "  │ two",
-                "… limited to 2 lines / 20 chars",
                 &format!("─ fail · bash 1m 15s {}", "─".repeat(19)),
             ]
         );
+        assert!(!printed.iter().any(|line| line.contains("one")), "{printed:?}");
     }
 
     #[test]
     fn unframed_card_and_edit_input() {
+        // AGL-066, D6: one line of the input — the file of an edit.
         let (presenter, mock) = presenter(false);
         let call = ToolCall {
             id: "c2".into(),
@@ -1084,14 +932,9 @@ mod tests {
             outcome: Outcome::Ok,
             content: "Replaced 1 occurrence in a.rs.".into(),
         };
-        presenter.show_card(&call, &result, None);
+        show_card(&presenter, &call, &result, &[]);
         let printed = mock.printed.lock().unwrap().clone();
-        // The input is cut at 2 lines; the output follows.
-        assert_eq!(printed[0], "TOOL edit  ok");
-        assert_eq!(printed[1], "  │ a.rs");
-        assert_eq!(printed[2], "  │ - x");
-        assert!(printed.contains(&"… limited to 2 lines / 20 chars".to_owned()));
-        assert!(!printed.iter().any(|line| line.starts_with('─')));
+        assert_eq!(printed, ["TOOL edit  ok", "  │ a.rs"]);
     }
 
     #[test]
@@ -1242,16 +1085,26 @@ mod tests {
         report.answer("Done");
         let answer = row(&mock.printed.lock().unwrap(), "─ ok");
         assert!(!answer.contains("Compacting"), "{answer}");
-        // A count that failed leaves the tokens out; so does a replay.
+        // A count that failed leaves the tokens out (the live row above);
+        // the replayed compaction is its one line (AGL-066, D1).
         mock.printed.lock().unwrap().clear();
         presenter.begin_turn();
         presenter.compacting();
         presenter.compacted();
-        presenter.show_compacted();
-        let printed = mock.printed.lock().unwrap();
-        assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
-        assert_eq!(row(&printed, "─ ok"), "─ ok · Compacting <1s");
-        assert_eq!(printed[1].trim_end_matches('─').trim_end(), "─ ok · Compacting");
+        {
+            let printed = mock.printed.lock().unwrap();
+            assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
+            assert_eq!(row(&printed, "─ ok"), "─ ok · Compacting <1s");
+        }
+        mock.printed.lock().unwrap().clear();
+        presenter.replay(
+            &[Event::Compact {
+                summary: "the summary".into(),
+                question: None,
+            }],
+            &[],
+        );
+        assert_eq!(*mock.printed.lock().unwrap(), ["Compacting"]);
     }
 
     #[test]
@@ -1370,13 +1223,14 @@ mod tests {
             theme: theme.clone(),
             ..presenter
         };
-        presenter.show_card(
+        show_card(
+            &presenter,
             &bash("ls"),
             &ToolResult {
                 outcome: Outcome::Ok,
                 content: "a".into(),
             },
-            Some(Duration::from_secs(1)),
+            &["bash 1s".to_owned()],
         );
         let green = theme.paint(Role::StatusSuccess, "ok");
         let printed = mock.printed.lock().unwrap();
@@ -1626,30 +1480,39 @@ mod tests {
             }),
             Event::Answer("Done".into()),
         ];
-        presenter.replay(&events);
+        presenter.replay(&events, &[]);
         let printed = mock.printed.lock().unwrap().clone();
         // The state a turn starts in is not shown (AGL-046, D13).
         assert!(!printed.contains(&"[work]".to_owned()));
-        // The memory marker, then the text written (AGL-006, M28).
-        let marker = printed
-            .iter()
-            .position(|line| line == "[memory: +build-and-test]")
-            .expect("the memory marker");
-        assert_eq!(printed[marker + 1], "Run cargo test.");
+        // AGL-066, D1: the compact view — the memory's marker alone; the
+        // text written is in the inspect mode.
+        assert!(printed.contains(&"[memory: +build-and-test]".to_owned()));
+        assert!(!printed.contains(&"Run cargo test.".to_owned()));
         assert!(printed.contains(&"thinking: hm".to_owned()));
         assert!(printed.contains(&"Running.".to_owned()));
-        assert!(printed.contains(&"TOOL bash  ok".to_owned()));
+        // The tool's frame: its name, its status, one line of the input; no
+        // output (D1, D6).
+        let tool = printed
+            .iter()
+            .position(|line| line == "TOOL bash  ok")
+            .expect("the tool's line");
+        assert_eq!(printed[tool + 1], "  │ ls");
+        assert!(!printed.contains(&"a".to_owned()));
         assert!(printed.contains(&"[forge: agl-009 +Progress]".to_owned()));
         // A line per medium (AGL-043 F17).
         assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
         assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
         // The stir and the cut-off with what it discarded (AGL-043 F8).
-        // The stir line wraps at the 40 columns of the test screen.
-        let all = printed.join("\n");
+        // Both wrap at the 40 columns of the test screen.
+        let all = printed
+            .join("\n")
+            .replace('\n', " ")
+            .replace("  ", " ");
         assert!(all.contains("[stir 1: `nope`"), "{all}");
-        assert!(printed.contains(
-            &"[cut off: 4000 tokens of thinking, 8288 of a tool call]".to_owned()
-        ));
+        assert!(
+            all.contains("[cut off: 4000 tokens of thinking, 8288 of a tool call]"),
+            "{all}"
+        );
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));

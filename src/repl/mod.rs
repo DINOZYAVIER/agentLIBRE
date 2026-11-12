@@ -3,6 +3,7 @@
 
 mod dock;
 mod editor;
+mod inspect;
 mod markdown;
 mod reading;
 mod records;
@@ -37,7 +38,7 @@ use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
 use crate::phase::{Observer, PhaseEvent};
-use crate::session::{CommandRun, Event, ForgeKind, Session, StopReason};
+use crate::session::{CommandRun, Event, ForgeKind, Session, StopReason, TransitionLine};
 use crate::status::{
     COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
     status_text,
@@ -179,6 +180,18 @@ struct Said {
     failed: bool,
 }
 
+/// What the inspect mode re-reads on its open (AGL-066, D4): the session's
+/// id and directory, to read the file fresh — its events and the
+/// transitions the observer wrote — and, when the read fails, the copy
+/// kept in memory.
+struct InspectData {
+    id: String,
+    sessions_dir: PathBuf,
+    events: Vec<Event>,
+    transitions: Vec<TransitionLine>,
+    outputs: PathBuf,
+}
+
 /// Reacts to what the user does at the prompt (D118, D120).
 struct Input {
     dock: Arc<Dock>,
@@ -191,6 +204,9 @@ struct Input {
     request_stop: Box<dyn Fn() -> bool + Send + Sync>,
     /// Leaves at once, after giving the terminal back (D120, D135).
     exit_now: Box<dyn Fn() + Send + Sync>,
+    /// Opens the inspect mode on the alternate screen (AGL-066, D4); it
+    /// runs here, in the input thread.
+    open_inspect: Box<dyn Fn() + Send + Sync>,
     /// What Ctrl-V reads (AGL-014, D21).
     clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
     /// Ctrl-R records the voice (AGL-016).
@@ -522,6 +538,12 @@ impl Input {
             self.paste();
             return;
         }
+        if key == Key::Ctrl('o') {
+            // The inspect mode takes the alternate screen and returns the
+            // terminal as it was (AGL-066, D4, D8).
+            (self.open_inspect)();
+            return;
+        }
         match self.dock.key(key) {
             Outcome::Edited => {}
             Outcome::Submit(message) => self.submitted(message),
@@ -809,6 +831,45 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // Only this thread gets the signal that wakes a blocked read (D131).
     term::block_sigint();
     let done = Arc::new(AtomicBool::new(false));
+    // What the inspect mode re-reads on its open (AGL-066, D4).
+    let inspect_data = Arc::new(Mutex::new(InspectData {
+        id: session.id.clone(),
+        sessions_dir: sessions_dir.to_owned(),
+        events: session.events.clone(),
+        transitions: Vec::new(),
+        outputs: session.outputs_dir(),
+    }));
+    let open_inspect = {
+        let data = inspect_data.clone();
+        let dock = dock.clone();
+        let theme = theme.clone();
+        move || {
+            // The file holds what the observer wrote of the phases; the
+            // in-memory copy is the fallback for when it cannot be read.
+            let (events, transitions, outputs) = {
+                let inner = data.lock().unwrap();
+                match Session::open(&inner.sessions_dir, &inner.id) {
+                    Ok(session) => {
+                        let outputs = session.outputs_dir();
+                        (session.events, session.transitions, outputs)
+                    }
+                    Err(_) => (
+                        inner.events.clone(),
+                        inner.transitions.clone(),
+                        inner.outputs.clone(),
+                    ),
+                }
+            };
+            inspect::run(
+                &|text| dock.write_raw(text),
+                &theme,
+                lang,
+                events,
+                transitions,
+                outputs,
+            );
+        }
+    };
     let input = Input {
         dock: dock.clone(),
         control: control.clone(),
@@ -823,6 +884,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         }),
         clipboard: Box::new(media::clipboard),
         voice: voice.clone(),
+        open_inspect: Box::new(open_inspect),
         said: Mutex::new(None),
     };
     let reader = {
@@ -856,7 +918,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     }
     presenter.show_notice(&tr!(lang, m::SESSION, id = session.id), Role::Muted);
     if resumed {
-        presenter.replay(&session.events);
+        presenter.replay(&session.events, &session.transitions);
         if let Some(state) = session.unfinished().and_then(|turn| turn.state) {
             control.lock().info.unfinished = Some(state.clone());
             presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
@@ -898,6 +960,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     loop {
         let next = wait_for_next(&control);
         record_commands(&control, &mut session);
+        // The inspect mode re-reads the file, this is the fallback and
+        // the new id of a `/new` (AGL-066).
+        {
+            let mut inner = inspect_data.lock().unwrap();
+            inner.id = session.id.clone();
+            inner.events = session.events.clone();
+            inner.outputs = session.outputs_dir();
+        }
         match next {
             Next::Quit => {
                 record(&mut session, "/quit".into(), false, None);
@@ -1240,6 +1310,7 @@ mod tests {
         sink: Sink,
         stops: Arc<AtomicUsize>,
         exits: Arc<AtomicUsize>,
+        inspects: Arc<AtomicUsize>,
         clip: Arc<Mutex<Clip>>,
         fake: Arc<Fake>,
     }
@@ -1332,6 +1403,7 @@ mod tests {
         );
         let stops = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(AtomicUsize::new(0));
+        let inspects = Arc::new(AtomicUsize::new(0));
         let clip = Arc::new(Mutex::new(Clip::Empty));
         let fake = Arc::new(Fake::default());
         *fake.text.lock().unwrap() = "hello world".into();
@@ -1383,6 +1455,12 @@ mod tests {
                     exits.fetch_add(1, Ordering::SeqCst);
                 })
             },
+            open_inspect: {
+                let inspects = inspects.clone();
+                Box::new(move || {
+                    inspects.fetch_add(1, Ordering::SeqCst);
+                })
+            },
             clipboard: {
                 let clip = clip.clone();
                 Box::new(move || clip.lock().unwrap().clone())
@@ -1395,6 +1473,7 @@ mod tests {
             sink,
             stops,
             exits,
+            inspects,
             clip,
             fake,
         }
@@ -1442,6 +1521,16 @@ mod tests {
     /// The text of the line being written.
     fn line(f: &Fixture) -> String {
         f.input.dock.input_text()
+    }
+
+    #[test]
+    fn ctrl_o_opens_the_inspect_mode() {
+        let f = fixture();
+        assert_eq!(f.inspects.load(Ordering::SeqCst), 0);
+        // Ctrl-O takes the alternate screen; it does not go to the editor.
+        f.input.key(Key::Ctrl('o'));
+        assert_eq!(f.inspects.load(Ordering::SeqCst), 1);
+        assert_eq!(line(&f), "");
     }
 
     #[test]

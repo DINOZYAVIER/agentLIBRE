@@ -595,11 +595,16 @@ impl Session {
         self.memory_index = None;
     }
 
-    /// Where the whole output of a call is kept, beside the session's file
-    /// (AGL-049, D2).
-    pub fn output_file(&self, call_id: &str) -> PathBuf {
+    /// The directory where the whole output of the calls is kept, beside
+    /// the session's file (AGL-049, D2).
+    pub fn outputs_dir(&self) -> PathBuf {
         let dir = self.path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-        dir.join("outputs").join(&self.id).join(format!("{call_id}.txt"))
+        dir.join("outputs").join(&self.id)
+    }
+
+    /// Where the whole output of a call is kept (AGL-049, D2).
+    pub fn output_file(&self, call_id: &str) -> PathBuf {
+        self.outputs_dir().join(format!("{call_id}.txt"))
     }
 
     /// The session's file (AGL-048).

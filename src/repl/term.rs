@@ -287,6 +287,20 @@ fn kitty_key(code: u32, mask: u32) -> Option<Key> {
     })
 }
 
+/// What the inspect mode turns on: the alternate screen buffer, and an
+/// invisible cursor while it redraws (AGL-066, D4). Leaving it puts the
+/// transcript back as it was.
+pub const ALT_ON: &str = "\x1b[?1049h\x1b[?25l";
+pub const ALT_OFF: &str = "\x1b[?25h\x1b[?1049l";
+
+/// Erases the whole screen, for the inspect mode's full redraws.
+pub const CLEAR: &str = "\x1b[2J";
+
+/// Moves the cursor to the 1-based `row` and `column`.
+pub fn cursor_at(row: usize, column: usize) -> String {
+    format!("\x1b[{row};{column}H")
+}
+
 /// The original terminal settings, kept for [`restore`].
 static ORIGINAL: Mutex<Option<libc::termios>> = Mutex::new(None);
 static RESIZED: AtomicBool = AtomicBool::new(false);
@@ -547,6 +561,15 @@ mod tests {
         assert_eq!(parser.feed(&[0xb1]), [Key::Char('б')]);
         assert!(parser.feed(&[0xf0, 0x9f]).is_empty());
         assert_eq!(parser.feed(&[0x98, 0x80]), [Key::Char('😀')]);
+    }
+
+    #[test]
+    fn the_alternate_screen_codes() {
+        assert_eq!(ALT_ON, "\x1b[?1049h\x1b[?25l");
+        assert_eq!(ALT_OFF, "\x1b[?25h\x1b[?1049l");
+        assert_eq!(CLEAR, "\x1b[2J");
+        assert_eq!(cursor_at(1, 1), "\x1b[1;1H");
+        assert_eq!(cursor_at(25, 80), "\x1b[25;80H");
     }
 
     #[test]
