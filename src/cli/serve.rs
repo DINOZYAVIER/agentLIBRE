@@ -35,6 +35,10 @@ const DEFAULT_CONTEXT: u32 = 16384;
 /// engine log in the project's store directory (AGL-035, D1).
 const STATE_FILE: &str = "server.state";
 
+/// Below the runtime directory, the directory of the files that tell
+/// other programs which servers agl started run (AGL-064, D1).
+const SERVERS_DIR: &str = "servers";
+
 /// How long `start` waits for `/health` (D149).
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(500);
@@ -75,6 +79,9 @@ pub struct Server {
     /// The project's store directory: the record of the launched server
     /// is there (AGL-035, D1).
     pub dir: PathBuf,
+    /// The runtime directory, where the file of the running server is
+    /// (AGL-064, D1); `None` where there is none (D7).
+    pub runtime: Option<PathBuf>,
     /// The model of the Function the run loads, its weights resolved
     /// (AGL-039, D21, D24): the kind and the model side of the server.
     pub model: ServerFile,
@@ -87,6 +94,7 @@ impl Server {
     /// error (D14).
     pub fn of(
         project: &Workspace,
+        runtime: Option<PathBuf>,
         settings: &ServerFile,
         model: ServerFile,
     ) -> Result<Server, Error> {
@@ -99,6 +107,7 @@ impl Server {
             settings: settings.clone(),
             url: String::new(),
             dir: project.dir.clone(),
+            runtime,
             model,
         };
         // The url of the effective kind (AGL-036, D2, D6).
@@ -197,8 +206,9 @@ pub fn run(
                 let what = read_record(&server.dir)
                     .and_then(|record| what_of(&record).ok())
                     .unwrap_or_else(|| tr!(lang, m::SERVER_OF_THE_PROJECT).to_owned());
+                let pid = unit_main_pid(&server.unit);
                 systemctl(&["stop", &server.unit])?;
-                remove_record(&server.dir);
+                remove_record(&server.dir, server.runtime.as_deref(), pid);
                 outln!("{}", tr!(lang, m::SERVER_SWITCH_STOPPED, old = what));
             } else if !whisper {
                 outln!("{}", texts::not_running(&server.unit, lang));
@@ -271,7 +281,15 @@ pub fn start(
     let what = server.what()?;
     // The server of the other kind that agl owns stops first (AGL-036,
     // D10): the two do not fit the GPU together.
-    switch_kind(&server.dir, Some(&server.unit), None, (url, &what), others, say, lang)?;
+    switch_kind(
+        (&server.dir, server.runtime.as_deref()),
+        Some(&server.unit),
+        None,
+        (url, &what),
+        others,
+        say,
+        lang,
+    )?;
     // A server answers at the url, this project's unit or a foreign one:
     // wait for it to be ready, then the check of D2 (AGL-033) — it
     // serves the effective settings, or a mismatch restarts it.
@@ -288,6 +306,9 @@ pub fn start(
         // process agl cannot stop, D7).
         let running = active_units()?;
         restart_consent(&what, others, lang)?;
+        // The pid of our unit, for its file (AGL-064, D3); the files of
+        // the other units go with their processes (D4).
+        let pid = if ours { unit_main_pid(&server.unit) } else { None };
         if ours {
             systemctl(&["stop", &server.unit])?;
         } else if running.is_empty() {
@@ -300,7 +321,7 @@ pub fn start(
                 systemctl(&["stop", unit])?;
             }
         }
-        remove_record(&server.dir);
+        remove_record(&server.dir, server.runtime.as_deref(), pid);
         let started = Instant::now();
         while port_open(&host, port) {
             if started.elapsed() >= Duration::from_secs(10) {
@@ -401,7 +422,16 @@ fn launch_unit(
         });
     }
     say(&texts::starting(&what, url, &server.unit, lang));
-    wait_ready(llama, Some(&server.unit), &what, say, lang)?;
+    // The file says so from the start of the process, before the weights
+    // load (AGL-064, D3); a wait that fails takes the file of a server
+    // that ended away.
+    if let Some(pid) = unit_main_pid(&server.unit) {
+        write_runtime_file(server.runtime.as_deref(), pid, effective)?;
+    }
+    if let Err(error) = wait_ready(llama, Some(&server.unit), &what, say, lang) {
+        remove_runtime_file(server.runtime.as_deref(), None);
+        return Err(error);
+    }
     // What the unit was launched with (AGL-035, D1).
     if let Some(pid) = unit_main_pid(&server.unit) {
         write_record(&server.dir, pid, effective)?;
@@ -467,6 +497,9 @@ pub struct Autostart<'a> {
     pub user_path: PathBuf,
     pub models: PathBuf,
     pub path_var: Option<OsString>,
+    /// The runtime directory, where the file of the running server is
+    /// (AGL-064, D1); `None` where there is none (D7).
+    pub runtime: Option<PathBuf>,
     pub lang: Lang,
     /// The consent of D2 (AGL-033): the restart asks, as the server
     /// commands do.
@@ -546,7 +579,7 @@ impl Autostart<'_> {
         }
         let unit = self.project.unit_key().map(|key| unit_name(&key));
         switch_kind(
-            &self.project.dir,
+            (&self.project.dir, self.runtime.as_deref()),
             unit.as_deref(),
             Some(&self.engine),
             (self.llama.url(), &self.what()?),
@@ -573,7 +606,12 @@ impl Autostart<'_> {
     /// The server of the kind starts as the unit of the project, the code
     /// of `agl server start` (AGL-035, D2).
     fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let server = Server::of(self.project, self.effective, self.effective.clone())?;
+        let server = Server::of(
+            self.project,
+            self.runtime.clone(),
+            self.effective,
+            self.effective.clone(),
+        )?;
         launch_unit(
             &server,
             self.effective,
@@ -590,11 +628,18 @@ impl Autostart<'_> {
     /// the port must be free, or it is busy (D7). Whether it was the unit
     /// (AGL-035, D2).
     fn stop_ours(&self) -> Result<bool, Error> {
-        if let Some(engine) = self.engine.lock().unwrap().take() {
+        let unit = self.project.unit_key().map(|key| unit_name(&key));
+        // The pid of the server for its file (AGL-064, D3): the child in
+        // hand, else the unit's.
+        let child = self.engine.lock().unwrap().take();
+        let pid = child
+            .as_ref()
+            .map(Engine::pid)
+            .or_else(|| unit.as_deref().and_then(unit_main_pid));
+        if let Some(engine) = child {
             engine.shutdown();
         }
-        remove_record(&self.project.dir);
-        let unit = self.project.unit_key().map(|key| unit_name(&key));
+        remove_record(&self.project.dir, self.runtime.as_deref(), pid);
         let mut was_unit = false;
         if let Some(unit) = &unit
             && unit_active(unit)?
@@ -652,7 +697,15 @@ impl Autostart<'_> {
         let mut guard = self.engine.lock().unwrap();
         *guard = Some(engine);
         let engine = guard.as_mut().expect("the engine just launched");
-        wait_child_ready(self.llama, engine, &log, what, say, self.lang)?;
+        // The file says so from the start of the process, before the
+        // weights load (AGL-064, D3).
+        write_runtime_file(self.runtime.as_deref(), engine.pid(), self.effective)?;
+        if let Err(error) = wait_child_ready(self.llama, engine, &log, what, say, self.lang) {
+            // A child that ended takes its file away; one that still
+            // runs keeps it until the guard ends it.
+            remove_runtime_file(self.runtime.as_deref(), None);
+            return Err(error);
+        }
         // What the child was launched with (AGL-035, D1).
         write_record(&self.project.dir, engine.pid(), self.effective)
     }
@@ -1187,9 +1240,96 @@ fn read_record(dir: &Path) -> Option<ServerFile> {
     ServerFile::from_json(record.get("server")?)
 }
 
-/// The record goes away with the server it describes (AGL-035, D1).
-pub(crate) fn remove_record(dir: &Path) {
+/// The record goes away with the server it describes (AGL-035, D1), and
+/// its file in the runtime directory (AGL-064, D3). `pid` is the server's
+/// when the caller has it in hand (the child, the unit); else the record's.
+pub(crate) fn remove_record(dir: &Path, runtime: Option<&Path>, pid: Option<u32>) {
+    let pid = pid.or_else(|| record_pid(dir));
     let _ = fs::remove_file(dir.join(STATE_FILE));
+    remove_runtime_file(runtime, pid);
+}
+
+/// The pid of the record, whether its process runs or not.
+fn record_pid(dir: &Path) -> Option<u32> {
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join(STATE_FILE)).ok()?).ok()?;
+    u32::try_from(record.get("pid")?.as_u64()?).ok()
+}
+
+/// The directory of the files of the running servers (AGL-064, D1).
+fn servers_dir(runtime: &Path) -> PathBuf {
+    runtime.join(SERVERS_DIR)
+}
+
+/// What the file of a running server holds (AGL-064, D2): `pid`, the
+/// `kind` and the `url` of the effective server, and its `model` as
+/// `model_of` names it, `null` where the settings name none.
+fn runtime_file(pid: u32, effective: &ServerFile) -> Result<serde_json::Value, Error> {
+    Ok(serde_json::json!({
+        "pid": pid,
+        "kind": effective.kind().name(),
+        "url": effective.url(),
+        "model": model_of(effective)?,
+    }))
+}
+
+/// Tells other programs that the server of `pid` runs (AGL-064, D1, D2):
+/// `servers/<pid>.json` below the runtime directory, written whole to a
+/// temporary name and renamed, so that a reader never sees half of it.
+/// Nothing where there is no runtime directory (D7). The files of the
+/// processes that are gone go first (D4).
+fn write_runtime_file(runtime: Option<&Path>, pid: u32, effective: &ServerFile) -> Result<(), Error> {
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
+    let dir = servers_dir(runtime);
+    fs::create_dir_all(&dir).map_err(|source| Error::Write {
+        path: dir.clone(),
+        source,
+    })?;
+    sweep_runtime_files(&dir);
+    let temporary = dir.join(format!("{pid}.json.tmp"));
+    let path = dir.join(format!("{pid}.json"));
+    fs::write(&temporary, format!("{}\n", runtime_file(pid, effective)?)).map_err(|source| {
+        Error::Write {
+            path: temporary.clone(),
+            source,
+        }
+    })?;
+    fs::rename(&temporary, &path).map_err(|source| Error::Write { path, source })
+}
+
+/// Takes the file of the server of `pid`, when the caller knows it, and
+/// the files of the processes that are gone away (AGL-064, D3, D4).
+fn remove_runtime_file(runtime: Option<&Path>, pid: Option<u32>) {
+    let Some(runtime) = runtime else {
+        return;
+    };
+    let dir = servers_dir(runtime);
+    if let Some(pid) = pid {
+        let _ = fs::remove_file(dir.join(format!("{pid}.json")));
+    }
+    sweep_runtime_files(&dir);
+}
+
+/// Removes the `<pid>.json` files of `dir` whose process is gone
+/// (`/proc/<pid>`, as `read_record` judges; AGL-064, D4).
+fn sweep_runtime_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let pid = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|pid| pid.parse::<u32>().ok());
+        if let Some(pid) = pid
+            && !Path::new(&format!("/proc/{pid}")).exists()
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// The main process of the unit, while it runs.
@@ -1306,7 +1446,7 @@ struct Elsewhere {
 /// starts: the child in `engine` and the project's `unit`; then its port
 /// must be free. A foreign server is not touched.
 fn switch_kind(
-    dir: &Path,
+    (dir, runtime): (&Path, Option<&Path>),
     unit: Option<&str>,
     engine: Option<&Mutex<Option<Engine>>>,
     (url, what): (&str, &str),
@@ -1328,7 +1468,14 @@ fn switch_kind(
         Err(Error::ServerRunning { .. } | Error::StartDeclined) => return Err(Error::SwitchDeclined),
         Err(error) => return Err(error),
     }
-    if let Some(engine) = engine.and_then(|engine| engine.lock().unwrap().take()) {
+    // The pid of the server for its file (AGL-064, D3): the child in
+    // hand, else the unit's.
+    let child = engine.and_then(|engine| engine.lock().unwrap().take());
+    let pid = child
+        .as_ref()
+        .map(Engine::pid)
+        .or_else(|| unit.and_then(unit_main_pid));
+    if let Some(engine) = child {
         engine.shutdown();
     }
     if let Some(unit) = unit
@@ -1336,7 +1483,7 @@ fn switch_kind(
     {
         systemctl(&["stop", unit])?;
     }
-    remove_record(dir);
+    remove_record(dir, runtime, pid);
     if let Some((host, port)) = elsewhere.url.as_deref().and_then(local_address) {
         let started = Instant::now();
         while port_open(&host, port) {
@@ -2059,7 +2206,7 @@ mod tests {
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&user);
         let server =
-            Server::of(&ws, &merged, model("big.gguf", 65536)).unwrap();
+            Server::of(&ws, None, &merged, model("big.gguf", 65536)).unwrap();
         assert_eq!(server.unit, "agentLIBRE-server-60af300abea6");
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
@@ -2077,13 +2224,13 @@ mod tests {
         };
         let ws = project(None, ServerFile::default());
         assert!(matches!(
-            Server::of(&ws, &user, model("m.gguf", 4096)),
+            Server::of(&ws, None, &user, model("m.gguf", 4096)),
             Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
         ));
         // With no url anywhere, the llama-server's default address (AGL-056, D5).
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
-        let server = Server::of(&ws, &ServerFile::default(), model("m.gguf", 4096));
+        let server = Server::of(&ws, None, &ServerFile::default(), model("m.gguf", 4096));
         assert_eq!(server.unwrap().url, crate::settings::DEFAULT_LLAMA_URL);
     }
 
@@ -2315,6 +2462,7 @@ mod tests {
             user_path: PathBuf::from("/c/settings.nix"),
             models: PathBuf::from("/m"),
             path_var: None,
+            runtime: None,
             lang: Lang::En,
             others: Others::Refuse,
             engine: Arc::new(Mutex::new(None)),
@@ -2492,10 +2640,133 @@ mod tests {
         fs::write(dir.join(STATE_FILE), "pid = \"x\"\n").unwrap();
         assert_eq!(read_record(&dir), None);
         write_record(&dir, std::process::id(), &effective).unwrap();
-        remove_record(&dir);
+        remove_record(&dir, None, None);
         assert_eq!(read_record(&dir), None);
         assert!(!dir.join(STATE_FILE).exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fresh runtime directory for a test, below the temp dir.
+    fn runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agentLIBRE-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn json_of(path: &Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_runtime_file_says_which_server_runs() {
+        // AGL-064, D1, D2: `servers/<pid>.json` holds pid, kind, url, model.
+        let runtime = runtime_dir("runtime-file");
+        let llama = ServerFile {
+            llama_url: Some("http://127.0.0.1:18080".into()),
+            model: Some("/m/big.gguf".into()),
+            context: Some(16384),
+            ..ServerFile::default()
+        };
+        let pid = std::process::id();
+        write_runtime_file(Some(&runtime), pid, &llama).unwrap();
+        let path = runtime.join("servers").join(format!("{pid}.json"));
+        assert_eq!(
+            json_of(&path),
+            serde_json::json!({
+                "pid": pid,
+                "kind": "llama",
+                "url": "http://127.0.0.1:18080",
+                "model": "/m/big.gguf",
+            })
+        );
+        // Written whole to a temporary name and renamed: nothing else stays.
+        let names: Vec<_> = fs::read_dir(runtime.join("servers"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(format!("{pid}.json"))]);
+        // The kind and the url of the Strata server; the model is the
+        // config's `model_name`.
+        let config = runtime.join("strata.json");
+        fs::write(&config, r#"{"model_name": "qwen"}"#).unwrap();
+        let strata = ServerFile {
+            kind: Some("strata".into()),
+            strata_url: Some("http://127.0.0.1:18090".into()),
+            strata_config: Some(config.to_str().unwrap().into()),
+            ..ServerFile::default()
+        };
+        write_runtime_file(Some(&runtime), pid, &strata).unwrap();
+        assert_eq!(
+            json_of(&path),
+            serde_json::json!({
+                "pid": pid,
+                "kind": "strata",
+                "url": "http://127.0.0.1:18090",
+                "model": "qwen",
+            })
+        );
+        fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn the_runtime_files_of_gone_processes_are_removed_by_the_next_write_or_removal() {
+        // AGL-064, D4: by `/proc/<pid>`, as `read_record` judges.
+        let runtime = runtime_dir("runtime-sweep");
+        let servers = runtime.join("servers");
+        fs::create_dir_all(&servers).unwrap();
+        let effective = model("m.gguf", 4096);
+        let gone = servers.join(format!("{}.json", u32::MAX));
+        let other = servers.join("notes.txt");
+        fs::write(&gone, "{}").unwrap();
+        fs::write(&other, "x").unwrap();
+        let pid = std::process::id();
+        write_runtime_file(Some(&runtime), pid, &effective).unwrap();
+        assert!(!gone.exists());
+        assert!(servers.join(format!("{pid}.json")).exists());
+        // What is no server file is left alone.
+        assert!(other.exists());
+        // A removal sweeps too, and takes the file of the pid in hand,
+        // not that of another process that runs.
+        let parent = std::os::unix::process::parent_id();
+        write_runtime_file(Some(&runtime), parent, &effective).unwrap();
+        fs::write(&gone, "{}").unwrap();
+        remove_runtime_file(Some(&runtime), Some(pid));
+        assert!(!gone.exists());
+        assert!(!servers.join(format!("{pid}.json")).exists());
+        assert!(servers.join(format!("{parent}.json")).exists());
+        fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn the_record_removed_takes_the_runtime_file_of_its_pid() {
+        // AGL-064, D3: the pid from `server.state`, or the one in hand.
+        let runtime = runtime_dir("runtime-record");
+        let dir = runtime.join("store");
+        fs::create_dir_all(&dir).unwrap();
+        let effective = model("m.gguf", 4096);
+        let pid = std::process::id();
+        let parent = std::os::unix::process::parent_id();
+        let file = |pid: u32| runtime.join("servers").join(format!("{pid}.json"));
+        write_record(&dir, pid, &effective).unwrap();
+        write_runtime_file(Some(&runtime), pid, &effective).unwrap();
+        write_runtime_file(Some(&runtime), parent, &effective).unwrap();
+        remove_record(&dir, Some(&runtime), None);
+        assert!(!dir.join(STATE_FILE).exists());
+        assert!(!file(pid).exists());
+        assert!(file(parent).exists());
+        // No record, the pid of the child in hand.
+        remove_record(&dir, Some(&runtime), Some(parent));
+        assert!(!file(parent).exists());
+        fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn without_a_runtime_directory_no_file_is_written_and_nothing_fails() {
+        // AGL-064, D7.
+        let effective = model("m.gguf", 4096);
+        write_runtime_file(None, std::process::id(), &effective).unwrap();
+        remove_runtime_file(None, Some(std::process::id()));
+        remove_record(&std::env::temp_dir().join("agentLIBRE-no-such-store"), None, Some(1));
     }
 
     /// A local url where nothing listens: a privileged port no test binds
@@ -2529,7 +2800,7 @@ mod tests {
         // The switch refused: the record stays, the error names the switch.
         let mut said = Vec::new();
         let refused = switch_kind(
-            &dir,
+            (&dir, None),
             None,
             None,
             (&strata, "the Strata server"),
@@ -2542,7 +2813,7 @@ mod tests {
         // The human's no in a terminal is the same refusal (AGL-034, F29).
         let no = |_question: &str, _lang: Lang| false;
         let answered = switch_kind(
-            &dir,
+            (&dir, None),
             None,
             None,
             (&strata, "the Strata server"),
@@ -2554,7 +2825,7 @@ mod tests {
         assert!(read_record(&dir).is_some());
         // Agreed: the owned server stops, the record goes, and it is told.
         switch_kind(
-            &dir,
+            (&dir, None),
             None,
             None,
             (&strata, "the Strata server"),
@@ -2568,7 +2839,7 @@ mod tests {
         // Nothing owned elsewhere: no question, nothing said.
         let mut silent = Vec::new();
         switch_kind(
-            &dir,
+            (&dir, None),
             None,
             None,
             (&strata, "the Strata server"),
@@ -2743,7 +3014,7 @@ mod tests {
         };
         let ws = project(Some(&origin), own);
         let merged = ws.server.over(&ServerFile::default());
-        let server = Server::of(&ws, &merged, model("function.gguf", 4096)).unwrap();
+        let server = Server::of(&ws, None, &merged, model("function.gguf", 4096)).unwrap();
         assert_eq!(
             server.effective_settings().unwrap(),
             ServerFile {

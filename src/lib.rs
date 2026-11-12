@@ -66,13 +66,17 @@ struct EngineGuard {
     /// The project's store directory, where the record of the launched
     /// server is (AGL-035, D1).
     dir: PathBuf,
+    /// The runtime directory, where the file of the server is
+    /// (AGL-064, D1, D3).
+    runtime: Option<PathBuf>,
 }
 
 impl Drop for EngineGuard {
     fn drop(&mut self) {
         if let Some(engine) = self.engine.lock().unwrap().take() {
+            let pid = engine.pid();
             engine.shutdown();
-            cli::serve::remove_record(&self.dir);
+            cli::serve::remove_record(&self.dir, self.runtime.as_deref(), Some(pid));
         }
     }
 }
@@ -225,7 +229,7 @@ fn run(
                 &missing,
                 *lang,
             )?;
-            let server = cli::serve::Server::of(&project, &settings, model)?;
+            let server = cli::serve::Server::of(&project, paths.runtime.clone(), &settings, model)?;
             return cli::serve::run(action, &server, &models, env("PATH"), yes, *lang);
         }
         Command::Init => {
@@ -294,6 +298,7 @@ fn run(
     let _engine_guard = EngineGuard {
         engine: Arc::clone(&engine),
         dir: project.dir.clone(),
+        runtime: paths.runtime.clone(),
     };
     let mut args = args;
     loop {
@@ -518,6 +523,7 @@ fn agent_session(
         user_path: user_path.clone(),
         models,
         path_var: env("PATH"),
+        runtime: paths.runtime.clone(),
         lang,
         // The consent of D2 (AGL-033): the restart asks, as the server
         // commands do — `--yes` skips, the terminal asks, a
