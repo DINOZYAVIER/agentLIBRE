@@ -1431,6 +1431,7 @@ fn data_paths(dir: &Path) -> crate::paths::Paths {
         config: dir.to_path_buf(),
         data: dir.to_path_buf(),
         state: dir.to_path_buf(),
+        runtime: None,
     }
 }
 

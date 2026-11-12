@@ -186,6 +186,7 @@ mod tests {
             config: data.to_path_buf(),
             data: data.to_path_buf(),
             state: data.to_path_buf(),
+            runtime: None,
         }
     }
 

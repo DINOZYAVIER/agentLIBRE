@@ -19,6 +19,10 @@ pub struct Paths {
     pub data: PathBuf,
     /// `$XDG_STATE_HOME/agentLIBRE` (D133).
     pub state: PathBuf,
+    /// `$XDG_RUNTIME_DIR/agentLIBRE` (AGL-064, D1); `None` where the
+    /// variable is unset, empty or relative (D7): there is no runtime
+    /// directory to write to, and no default below `HOME`.
+    pub runtime: Option<PathBuf>,
 }
 
 impl Paths {
@@ -36,6 +40,7 @@ impl Paths {
             config: base("XDG_CONFIG_HOME", ".config")?.join(APP_DIR),
             data: base("XDG_DATA_HOME", ".local/share")?.join(APP_DIR),
             state: base("XDG_STATE_HOME", ".local/state")?.join(APP_DIR),
+            runtime: absolute("XDG_RUNTIME_DIR").map(|dir| dir.join(APP_DIR)),
         })
     }
 
@@ -138,6 +143,18 @@ mod tests {
         assert_eq!(paths.config, PathBuf::from("/c/agentLIBRE"));
         assert_eq!(paths.data, PathBuf::from("/d/agentLIBRE"));
         assert_eq!(paths.state, PathBuf::from("/s/agentLIBRE"));
+    }
+
+    #[test]
+    fn the_runtime_directory_has_no_default() {
+        // AGL-064, D1, D7.
+        let with = paths(&[("HOME", "/home/u"), ("XDG_RUNTIME_DIR", "/run/user/1000")]).unwrap();
+        assert_eq!(with.runtime, Some(PathBuf::from("/run/user/1000/agentLIBRE")));
+        for value in [None, Some(""), Some("run")] {
+            let mut vars = vec![("HOME", "/home/u")];
+            vars.extend(value.map(|value| ("XDG_RUNTIME_DIR", value)));
+            assert_eq!(paths(&vars).unwrap().runtime, None);
+        }
     }
 
     #[test]

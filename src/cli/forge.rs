@@ -878,6 +878,7 @@ mod tests {
             config: data.to_path_buf(),
             data: data.to_path_buf(),
             state: data.to_path_buf(),
+            runtime: None,
         };
         let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
         run(action, &UserFile::default(), &paths, cwd, Lang::En)
@@ -1297,6 +1298,7 @@ mod tests {
             config: data.clone(),
             data: data.clone(),
             state: data.clone(),
+            runtime: None,
         };
         let mut user = UserFile::default();
         user.forge.auto_rehome = Some(false);
