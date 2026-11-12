@@ -842,11 +842,16 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     term::unblock_sigint();
 
     dock.start();
-    // The splash of the REPL's start (AGL-065, D2 to D6): the art and the
-    // version, above everything else.
+    // The splash of the REPL's start (AGL-065, D2 to D7): the art, and
+    // under it, muted, the version, the tagline and the address.
     if repl.splash {
         let rev = std::env::var(crate::about::REV_VAR).ok();
-        dock.print(&splash::lines(&theme, dock.columns(), &crate::about::version(rev.as_deref())));
+        dock.print(&splash::lines(
+            &theme,
+            dock.columns(),
+            lang,
+            &crate::about::version(rev.as_deref()),
+        ));
     }
     presenter.show_notice(&tr!(lang, m::SESSION, id = session.id), Role::Muted);
     if resumed {
