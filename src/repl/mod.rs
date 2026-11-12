@@ -860,6 +860,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     ),
                 }
             };
+            // The dock's rows of its moment (D14): the input prompt
+            // stays on the alternate screen.
+            let dock_rows = dock.layout().rows;
             inspect::run(
                 &|text| dock.write_raw(text),
                 &theme,
@@ -867,6 +870,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 events,
                 transitions,
                 outputs,
+                dock_rows,
             );
         }
     };

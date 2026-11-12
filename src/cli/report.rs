@@ -130,6 +130,24 @@ pub fn call_summary(call: &ToolCall) -> String {
         let summary = format!("{} {}", text("action"), about.unwrap_or_default());
         return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
     }
+    if call.name == "forge" {
+        // The action and what it is about: the name, the title of a new;
+        // plus what the action does to it (AGL-066, D10).
+        let action = text("action");
+        let about = if !text("name").is_empty() {
+            text("name")
+        } else {
+            text("title")
+        };
+        let extra = match action {
+            "append" => text("section"),
+            "status" => text("state"),
+            "rename" => text("new"),
+            _ => "",
+        };
+        let summary = format!("{action} {about} {extra}");
+        return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
+    }
     if call.name != "bash" {
         return text("path").to_owned();
     }
@@ -275,5 +293,65 @@ mod memory_tests {
         assert_eq!(call_summary(&call(&[("action", "add"), ("title", "Build"), ("text", "x")])), "add Build");
         assert_eq!(call_summary(&call(&[("action", "show"), ("name", "build")])), "show build");
         assert_eq!(call_summary(&call(&[("action", "show")])), "show");
+    }
+}
+
+#[cfg(test)]
+mod forge_tests {
+    use super::*;
+
+    fn call(args: &[(&str, &str)]) -> ToolCall {
+        ToolCall {
+            id: "c".into(),
+            name: "forge".into(),
+            args: args
+                .iter()
+                .map(|(n, v)| (n.to_string(), Value::Text(v.to_string())))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_forge_call_shows_the_action_what_it_is_about_and_what_it_does() {
+        assert_eq!(
+            call_summary(&call(&[
+                ("action", "append"),
+                ("name", "agl-066"),
+                ("section", "Progress"),
+                ("text", "the bullet"),
+            ])),
+            "append agl-066 Progress"
+        );
+        assert_eq!(
+            call_summary(&call(&[("action", "status"), ("name", "agl-066"), ("state", "done")])),
+            "status agl-066 done"
+        );
+        assert_eq!(
+            call_summary(&call(&[
+                ("action", "rename"),
+                ("name", "agl-066"),
+                ("new", "agl-067"),
+            ])),
+            "rename agl-066 agl-067"
+        );
+        assert_eq!(
+            call_summary(&call(&[("action", "new"), ("title", "The task")])),
+            "new The task"
+        );
+        assert_eq!(
+            call_summary(&call(&[("action", "show"), ("name", "agl-066")])),
+            "show agl-066"
+        );
+        assert_eq!(call_summary(&call(&[("action", "list")])), "list");
+        // The edit's replacement texts stay out of the summary.
+        assert_eq!(
+            call_summary(&call(&[
+                ("action", "edit"),
+                ("name", "agl-066"),
+                ("old", "the old words"),
+                ("new", "the new words"),
+            ])),
+            "edit agl-066"
+        );
     }
 }

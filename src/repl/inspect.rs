@@ -115,7 +115,8 @@ impl Inspect {
     }
 
     /// The whole screen: the window of the records, the blank row and the
-    /// hint (D4, D8), exactly `rows` rows.
+    /// hint (D4, D8), the dock's rows at the bottom (D14), exactly
+    /// `rows` rows.
     pub fn render(
         &self,
         theme: &Theme,
@@ -123,8 +124,12 @@ impl Inspect {
         columns: usize,
         rows: usize,
         outputs: &Path,
+        dock: &[String],
     ) -> Vec<String> {
-        let body = rows.saturating_sub(RESERVE).max(1);
+        let body = rows
+            .saturating_sub(RESERVE)
+            .saturating_sub(dock.len())
+            .max(1);
         let (content, starts) = self.content(theme, lang, columns, outputs);
         let len = content.len();
         let max_top = len.saturating_sub(body.min(len));
@@ -147,6 +152,13 @@ impl Inspect {
         lines.resize(body, String::new());
         lines.push(String::new());
         lines.push(self.hint(theme, lang, columns));
+        for row in dock {
+            if lines.len() >= rows {
+                break;
+            }
+            lines.push(row.clone());
+        }
+        lines.resize(rows, String::new());
         lines
     }
 
@@ -165,7 +177,18 @@ impl Inspect {
                 lines.push(String::new());
             }
             starts.push(lines.len());
-            lines.extend(self.block(record, index, theme, lang, columns, outputs));
+            let mut block = self.block(record, index, theme, lang, columns, outputs);
+            // The focus's marker at the head of the record the
+            // navigation points at (D13).
+            if index == self.selection
+                && let Some(first) = block.first_mut()
+            {
+                *first = format!(
+                    "{} {first}",
+                    theme.paint(Role::InputSelected, "▸")
+                );
+            }
+            lines.extend(block);
         }
         (lines, starts)
     }
@@ -386,14 +409,28 @@ fn call_input(call: &ToolCall) -> String {
         );
     }
     if call.name == "memory" || call.name == "forge" {
-        return crate::cli::report::call_summary(call);
+        // The whole input, argument by argument (D11); the summary
+        // stays the compact form.
+        let mut out = String::new();
+        for (key, value) in &call.args {
+            let Value::Text(value) = value else {
+                continue;
+            };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("{key}: {value}"));
+        }
+        return out;
     }
     text("command").to_owned()
 }
 
 /// The inspect mode on the terminal (D4, D8): the alternate screen, the
 /// full redraws, the keys until the escape. `write` is what the mode
-/// draws with, beside the dock.
+/// draws with; `dock` is the dock's rows, drawn at the bottom so the
+/// input prompt does not disappear (D14).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     write: &dyn Fn(&str),
     theme: &Theme,
@@ -401,6 +438,7 @@ pub fn run(
     events: Vec<Event>,
     transitions: Vec<TransitionLine>,
     outputs: std::path::PathBuf,
+    dock: Vec<String>,
 ) {
     let mut inspect = Inspect::new(&events, &transitions, lang);
     let mut parser = term::Parser::default();
@@ -411,7 +449,7 @@ pub fn run(
         if term::take_resized() {
             size = term::size();
         }
-        draw(write, &inspect, theme, lang, size.0, size.1, &outputs);
+        draw(write, &inspect, theme, lang, size.0, size.1, &outputs, &dock);
         let keys = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
@@ -441,6 +479,7 @@ pub fn run(
 
 /// One redraw of the screen: the clear, the lines, the cursor at the
 /// bottom.
+#[allow(clippy::too_many_arguments)]
 fn draw(
     write: &dyn Fn(&str),
     inspect: &Inspect,
@@ -449,8 +488,9 @@ fn draw(
     columns: usize,
     rows: usize,
     outputs: &Path,
+    dock: &[String],
 ) {
-    let lines = inspect.render(theme, lang, columns, rows, outputs);
+    let lines = inspect.render(theme, lang, columns, rows, outputs, dock);
     let mut text = String::from(term::CLEAR);
     for line in &lines {
         text.push_str(line);
@@ -508,7 +548,16 @@ mod tests {
 
     /// The screen of `rows` rows, so that the records do not all fit.
     fn screen(inspect: &Inspect, rows: usize) -> Vec<String> {
-        inspect.render(&theme(), Lang::En, 40, rows, &std::env::temp_dir())
+        screen_dock(inspect, rows, &[])
+    }
+
+    /// The screen of `rows` rows with the dock's rows at the bottom.
+    fn screen_dock(
+        inspect: &Inspect,
+        rows: usize,
+        dock: &[String],
+    ) -> Vec<String> {
+        inspect.render(&theme(), Lang::En, 40, rows, &std::env::temp_dir(), dock)
     }
 
     #[test]
@@ -641,9 +690,70 @@ mod tests {
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Enter));
-        let lines = inspect.render(&theme(), Lang::En, 40, 10, &dir);
+        let lines = inspect.render(&theme(), Lang::En, 40, 10, &dir, &[]);
         let all = lines.join("\n");
         assert!(all.contains("head\ncut\ntail"), "{all}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_focused_record_is_marked() {
+        let mut inspect = inspect();
+        assert!(inspect.key(Key::Char('g')));
+        let all = screen(&inspect, 10).join("\n");
+        // The first record (the user's "First") is the focus; the rest
+        // is not marked.
+        assert!(all.contains("▸ › First"), "{all}");
+        assert!(!all.contains("▸ Ok."), "{all}");
+        assert!(inspect.key(Key::Down));
+        let all = screen(&inspect, 10).join("\n");
+        assert!(all.contains("▸ thinking"), "{all}");
+        assert!(!all.contains("▸ › First"), "{all}");
+    }
+
+    #[test]
+    fn the_dock_stays_at_the_bottom_of_the_screen() {
+        let inspect = inspect();
+        let dock = vec!["›  ask".into(), "agentLIBRE · /home/dinozyavier/repos/agentLIBRE".into()];
+        let lines = screen_dock(&inspect, 10, &dock);
+        assert_eq!(lines.len(), 10);
+        // The dock's rows are the last rows of the screen, in order.
+        assert!(lines[lines.len() - 2].contains("›  ask"), "{lines:?}");
+        assert!(lines[lines.len() - 1].contains("agentLIBRE"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_expanded_write_shows_its_whole_input() {
+        let events = vec![
+            Event::User("Go".into()),
+            Event::Call {
+                text: None,
+                call: ToolCall {
+                    id: "c1".into(),
+                    name: "forge".into(),
+                    args: vec![
+                        ("action".into(), Value::Text("append".into())),
+                        ("name".into(), Value::Text("agl-066".into())),
+                        ("section".into(), Value::Text("Progress".into())),
+                        ("text".into(), Value::Text("the bullet".into())),
+                    ],
+                },
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "ok".into(),
+            },
+        ];
+        let mut inspect = Inspect::new(&events, &[], Lang::En);
+        assert!(inspect.key(Key::Char('g')));
+        assert!(inspect.key(Key::Down));
+        assert!(inspect.key(Key::Enter));
+        let all = screen(&inspect, 12).join("\n");
+        assert!(all.contains("append agl-066 Progress"), "{all}");
+        // The whole input, argument by argument (D11); the lines wrap at
+        // the width.
+        assert!(all.contains("section: Prog"), "{all}");
+        assert!(all.contains("text: the bullet"), "{all}");
     }
 }

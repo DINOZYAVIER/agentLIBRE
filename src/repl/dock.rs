@@ -248,6 +248,12 @@ impl Dock {
 }
 
 impl Dock {
+    /// The dock's rows, computed without drawing (the inspect mode
+    /// draws them at the bottom of its screen, AGL-066 D14).
+    pub fn layout(&self) -> Layout {
+        self.lock().layout()
+    }
+
     /// The time moves while a prompt is read, though nothing else tells the
     /// dock to draw (AGL-046, D19).
     pub fn tick(&self) {

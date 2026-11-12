@@ -148,7 +148,23 @@ pub fn call_hint(call: &ToolCall) -> String {
         "memory" | "forge" => crate::cli::report::call_summary(call),
         _ => text("command").to_owned(),
     };
-    head.lines().next().unwrap_or_default().to_owned()
+    let line = head.lines().next().unwrap_or_default();
+    if !line.is_empty() {
+        return line.to_owned();
+    }
+    // A call whose input has no line of its own keeps its first text
+    // argument (AGL-066, D12).
+    call.args
+        .iter()
+        .find_map(|(_, value)| match value {
+            Value::Text(value) => value
+                .lines()
+                .next()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// The label of a phase as the observer names it in the file, in
@@ -525,6 +541,34 @@ mod tests {
             ],
         };
         assert_eq!(call_hint(&search), "web: agentLIBRE");
+        let forge = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("append".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("section".into(), Value::Text("Progress".into())),
+                ("text".into(), Value::Text("the bullet".into())),
+            ],
+        };
+        assert_eq!(call_hint(&forge), "append agl-066 Progress");
+        let memory = ToolCall {
+            id: "c1".into(),
+            name: "memory".into(),
+            args: vec![
+                ("action".into(), Value::Text("add".into())),
+                ("title".into(), Value::Text("Build".into())),
+            ],
+        };
+        assert_eq!(call_hint(&memory), "add Build");
+        // A call whose input has no known line keeps its first text
+        // argument (D12).
+        let unknown = ToolCall {
+            id: "c1".into(),
+            name: "view".into(),
+            args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
+        };
+        assert_eq!(call_hint(&unknown), "/tmp/a.png");
     }
 
     #[test]
