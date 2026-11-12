@@ -21,6 +21,8 @@ pub struct ReplFile {
     pub max_record_seconds: Option<u32>,
     /// Whether the session starts the server as it starts (AGL-046).
     pub start_server: Option<bool>,
+    /// Whether the REPL shows the splash at its start (AGL-065, D5).
+    pub splash: Option<bool>,
 }
 
 /// `[repl]` with the defaults of the old agl (D130).
@@ -35,6 +37,8 @@ pub struct ReplSettings {
     /// Whether the session starts the server as it starts, not at the first
     /// message (AGL-046).
     pub start_server: bool,
+    /// Whether the REPL shows the splash at its start (AGL-065, D5).
+    pub splash: bool,
 }
 
 impl Default for ReplSettings {
@@ -45,6 +49,7 @@ impl Default for ReplSettings {
             frame: true,
             max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
             start_server: true,
+            splash: true,
         }
     }
 }
@@ -55,7 +60,7 @@ impl ReplFile {
         Ok(match section {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds", "start_server"])?;
+                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds", "start_server", "splash"])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -78,6 +83,7 @@ impl ReplFile {
                     frame: repl.bool("frame")?,
                     max_record_seconds,
                     start_server: repl.bool("start_server")?,
+                    splash: repl.bool("splash")?,
                 }
             }
         })

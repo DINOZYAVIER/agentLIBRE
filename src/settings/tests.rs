@@ -324,6 +324,7 @@ fn colors_repl_and_forge_tables() {
             frame: Some(false),
             max_record_seconds: Some(15),
             start_server: None,
+            splash: None,
         }
     );
     assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
@@ -342,6 +343,7 @@ fn colors_repl_and_forge_tables() {
             frame: false,
             max_record_seconds: 15,
             start_server: true,
+            splash: true,
         }
     );
     // The voice limit is 300 s unless set (AGL-016, D5; AGL-039, D20;
@@ -479,6 +481,16 @@ fn the_record_round_trips() {
 fn the_session_starts_the_server_unless_told_not_to() {
     // AGL-046.
     assert!(ReplSettings::default().start_server);
+}
+
+#[test]
+fn the_repl_shows_the_splash_unless_told_not_to() {
+    // AGL-065, D5.
+    assert!(ReplSettings::default().splash);
+    let loaded = user_of(r#"repl.splash = false;"#).unwrap();
+    assert_eq!(loaded.repl.splash, Some(false));
+    let settings = resolve_with(&loaded, &ProjectFile::default(), None, &llama_model()).unwrap();
+    assert!(!settings.repl.splash);
 }
 
 #[test]

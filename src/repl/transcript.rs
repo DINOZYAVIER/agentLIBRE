@@ -1009,6 +1009,7 @@ mod tests {
             frame,
             max_record_seconds: 60,
             start_server: true,
+            splash: true,
         };
         let presenter = Presenter::new(mock.clone(), Theme::plain(), settings, Lang::En);
         (presenter, mock)
