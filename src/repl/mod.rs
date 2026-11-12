@@ -5,6 +5,7 @@ mod dock;
 mod editor;
 mod markdown;
 mod reading;
+mod splash;
 mod transcript;
 mod text;
 pub(crate) mod term;
@@ -841,6 +842,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     term::unblock_sigint();
 
     dock.start();
+    // The splash of the REPL's start (AGL-065, D2 to D6): the art and the
+    // version, above everything else.
+    if repl.splash {
+        let rev = std::env::var(crate::about::REV_VAR).ok();
+        dock.print(&splash::lines(&theme, dock.columns(), &crate::about::version(rev.as_deref())));
+    }
     presenter.show_notice(&tr!(lang, m::SESSION, id = session.id), Role::Muted);
     if resumed {
         presenter.replay(&session.events);
@@ -2102,6 +2109,7 @@ mod tests {
             frame: true,
             max_record_seconds: 60,
             start_server: true,
+            splash: true,
         };
         let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
         presenter.begin_turn();
