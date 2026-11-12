@@ -26,7 +26,7 @@ const DEFAULT_TIMEOUT: u64 = 60;
 const GRACE: Duration = Duration::from_secs(2);
 
 /// What a tool call returns to the model.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolResult {
     pub outcome: Outcome,
     pub content: String,

@@ -5,6 +5,7 @@ mod dock;
 mod editor;
 mod markdown;
 mod reading;
+mod records;
 mod splash;
 mod transcript;
 mod text;
