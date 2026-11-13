@@ -181,6 +181,7 @@ roles! {
     Tool "tool" "bold #00FFFF",
     StatusSuccess "status_success" "bold #7BD88F",
     StatusFailure "status_failure" "bold #FF0000",
+    StatusWarn "status_warn" "bold #FFA500",
     StatusPending "status_pending" "bold #FFFF00",
     MarkdownHeading "markdown_heading" "bold #00FFFF",
     MarkdownCode "markdown_code" "dim",

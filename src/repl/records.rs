@@ -71,7 +71,10 @@ pub enum Record {
 pub fn status(outcome: Option<Outcome>) -> (String, Role) {
     match outcome {
         Some(Outcome::Ok) => ("ok".into(), Role::StatusSuccess),
-        Some(Outcome::Fail) => ("fail".into(), Role::StatusFailure),
+        // A failed call is not a fatal error: the agent sees it and calls
+        // again (AGL-066, D28), so the warn's orange, not the failure's
+        // red.
+        Some(Outcome::Fail) => ("fail".into(), Role::StatusWarn),
         Some(Outcome::Timeout) => ("timeout".into(), Role::StatusPending),
         Some(Outcome::Interrupted) => ("interrupted".into(), Role::Muted),
         None => ("…".into(), Role::StatusPending),
@@ -751,6 +754,7 @@ mod tests {
     #[test]
     fn the_status_of_an_outcome() {
         assert_eq!(status(Some(Outcome::Ok)), ("ok".into(), Role::StatusSuccess));
+        assert_eq!(status(Some(Outcome::Fail)), ("fail".into(), Role::StatusWarn));
         assert_eq!(status(None), ("…".into(), Role::StatusPending));
     }
 }

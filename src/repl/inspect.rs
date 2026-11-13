@@ -282,14 +282,15 @@ impl Inspect {
                         })
                         .collect();
                     if !items.is_empty() {
-                        // D26: the answer's phases in the activity's color.
+                        // D27: the answer's phases in the rule's color,
+                        // dark gray, as the body.
                         lines.push(edge(
                             theme,
                             columns,
                             None,
                             &items,
                             Role::InputRule,
-                            Role::InputActivity,
+                            Role::Rule,
                         ));
                     }
                 }

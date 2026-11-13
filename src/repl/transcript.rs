@@ -323,9 +323,10 @@ impl Presenter {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
         self.screen.print(&self.answer_lines(
             text,
-            // D26: the phases, as the dock's activity line, in the
-            // InputActivity's color.
-            self.edge(None, &items, Role::InputRule, Role::InputActivity),
+            // D27: the items in the rule's color, dark gray, as the body
+            // and the prompt's block — what stays above the dock's
+            // activity line is all in the dark.
+            self.edge(None, &items, Role::InputRule, Role::Rule),
         ));
     }
 
@@ -626,9 +627,8 @@ impl Report for Presenter {
             items.push(texts::speed(speed, self.lang));
         }
         let status = Some(("ok", Role::StatusSuccess));
-        // D26: the phases, the time and the speed, as the dock's activity
-        // line, in the InputActivity's color.
-        let edge = self.edge(status, &items, Role::InputRule, Role::InputActivity);
+        // D27: the items in the rule's color, dark gray, as the body.
+        let edge = self.edge(status, &items, Role::InputRule, Role::Rule);
         self.step_block();
         let block = self.answer_lines(text, edge);
         self.replace_streamed(block);
@@ -1099,8 +1099,7 @@ mod tests {
         let live = ops
             .iter()
             .filter_map(|op| op.strip_prefix("live "))
-            .filter(|text| text.contains("THINKING"))
-            .last()
+            .rfind(|text| text.contains("THINKING"))
             .expect("the live's line")
             .trim_matches('"');
         assert!(width(live) <= 40, "{live:?}");
@@ -1396,12 +1395,13 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_rule_keeps_the_activity_color() {
-        // AGL-066, D26: the items of the answer's rule — the phases, the
-        // time, the speed — are in the dock's activity color, as the
-        // Ready's row, the dashes in the input's rule color.
-        let green = crate::theme::Style::parse("#00FF00", false).expect("a color");
-        let theme = Theme::new(true, &[(Role::InputActivity, green)]);
+    fn the_answer_rule_is_dark_like_the_body() {
+        // AGL-066, D27: the items of the answer's rule — the phases, the
+        // time, the speed — are in the rule's color, dark gray, as the
+        // body and the prompt's block; the dashes in the input's rule
+        // color.
+        let red = crate::theme::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Rule, red)]);
         let (presenter, mock) = presenter(true);
         let presenter = Presenter {
             theme: theme.clone(),
@@ -1413,7 +1413,7 @@ mod tests {
             .iter()
             .find(|line| line.contains("Worked for"))
             .expect("the rule");
-        assert!(rule.contains("\x1b[38;2;0;255;0m"), "{rule:?}");
+        assert!(rule.contains("\x1b[38;2;255;0;0m"), "{rule:?}");
     }
 
     #[test]
