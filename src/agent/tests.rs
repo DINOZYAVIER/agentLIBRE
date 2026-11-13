@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::*;
-use crate::action::{Outcome, Value};
+use crate::action::{self, Outcome, Value};
 use crate::backend::{Generated, StructuredCall};
 use crate::function::tests::{CODER, function, function_on};
 use crate::forge::testutil::TempDir;
@@ -40,6 +40,8 @@ struct Script {
     orders: RefCell<Vec<Vec<&'static str>>>,
     /// The runtime messages of each structured generation (AGL-030, D9).
     structured: RefCell<Vec<Vec<String>>>,
+    /// Whether it takes a step the way the stirred mode does (AGL-067, D6).
+    stirred: std::cell::Cell<bool>,
 }
 
 impl Script {
@@ -74,6 +76,7 @@ impl Script {
             runtimes: RefCell::new(Vec::new()),
             orders: RefCell::new(Vec::new()),
             structured: RefCell::new(Vec::new()),
+            stirred: std::cell::Cell::new(false),
         }
     }
 
@@ -91,6 +94,23 @@ impl Script {
 }
 
 impl Backend for Script {
+    fn stirred(&self) -> bool {
+        self.stirred.get()
+    }
+
+    fn step(
+        &self,
+        session: &mut Session,
+        input: &crate::backend::StepInput<'_>,
+        sink: &mut dyn Sink,
+    ) -> Result<crate::backend::Stepped, Error> {
+        if self.stirred.get() {
+            crate::backend::structured_step(self, session, input, sink)
+        } else {
+            crate::backend::completion_step(self, session, input, sink)
+        }
+    }
+
     fn render(&self, prompt: &Prompt) -> Result<String, Error> {
         if let Some(Message::System(text)) = prompt.messages.first() {
             self.systems.borrow_mut().push(text.clone());
@@ -373,11 +393,11 @@ fn agent_searching<'a>(
     search: &'a dyn crate::search::Searcher,
     stirred: bool,
 ) -> Agent<'a> {
+    script.stirred.set(stirred);
     Agent {
         function,
         function_name: "f",
         backend: script,
-        stirred,
         session,
         workspace: &dir.0,
         context: 16384,
@@ -1120,31 +1140,6 @@ fn only_function_tools_are_listed() {
     let names: Vec<&str> = function_tools(&coder).iter().map(|d| d.name).collect();
     // The implicit forge (AGL-011) is a tool of the tool states.
     assert_eq!(names, ["bash", "edit", "forge"]);
-}
-
-#[test]
-fn text_stream_cuts_out_the_call() {
-    const BEGIN: &str = "<tool_call>\n<function=";
-    let run = |pieces: &[&str]| {
-        let mut stream = TextStream::new(BEGIN);
-        let mut shown = String::new();
-        for piece in pieces {
-            shown.extend(stream.push(piece));
-        }
-        shown.extend(stream.finish());
-        shown
-    };
-    assert_eq!(
-        run(&["Let me ", "look.\n\n", "<tool_call>\n<function=bash>"]),
-        "Let me look.\n\n"
-    );
-    // The start of a call split over pieces is never shown.
-    assert_eq!(run(&["a<", "tool", "_call>", "\n<function=x>"]), "a");
-    // A tail that only looks like the start of a call is shown at the end.
-    assert_eq!(run(&["x < y <", "tool"]), "x < y <tool");
-    assert_eq!(run(&["no call"]), "no call");
-    assert_eq!(run(&["<tool_call>\n<function=bash>"]), "");
-    assert_eq!(run(&["é", "<tool_call>\n<fu", "nction=bash>"]), "é");
 }
 
 #[test]

@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
-use crate::action::{self, Action};
+use crate::action::Action;
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stop, ToolCall,
+    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stepped, Stop,
+    StepInput, ToolCall,
 };
 use crate::error::Error;
 use crate::function::Function;
@@ -105,10 +106,6 @@ pub struct Agent<'a> {
     /// The Function's name, for errors.
     pub function_name: &'a str,
     pub backend: &'a dyn Backend,
-    /// The stirred mode (AGL-030, D1, D4): the action phase generates
-    /// unconstrained and a parse failure is a bounded corrective retry
-    /// instead of a stop. Set from the settings' `[server] kind`.
-    pub stirred: bool,
     pub session: &'a mut Session,
     pub workspace: &'a Path,
     /// The context size of the server, in tokens.
@@ -247,7 +244,7 @@ impl Agent<'_> {
             format,
         };
         let rendered = self.backend.render(&step_prompt)?;
-        let mut prompt = format.start_step(rendered, think);
+        let prompt = format.start_step(rendered, think);
 
         // The step must fit the context with its full generation (D32).
         let think_budget = if think {
@@ -282,232 +279,40 @@ impl Agent<'_> {
             };
         }
 
-        // The stirred mode generates the whole step in one structured
-        // request (AGL-030, D9).
-        if self.stirred {
-            return self.stirred_step(machine, report, messages, &expanded.uploads, &tools, think);
-        }
-
-        if let Some(markers) = format.think.as_ref().filter(|_| think) {
-            let close = markers.close.trim();
-            let call_start = format.call.begin_before.trim();
-            let cell = std::cell::RefCell::new(&mut *report);
-            let thinking = self.backend.generate_reading(
-                &Request {
-                    prompt: &prompt,
-                    grammar: None,
-                    stop: &[close, call_start],
-                    max_tokens: function.max_think_tokens,
-                    sampling: &function.sampling,
-                    media: &expanded.uploads,
-                    structured: None,
-                },
-                Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
-                &mut |_| {},
-                &mut |piece| cell.borrow_mut().send(Report::Thinking(piece.to_owned())),
-            )?;
-            report.send(Report::ThinkingDone);
-            if let Some(prefill) = thinking.prefill {
-                report.send(Report::PromptRead(prefill));
-            }
-            if !thinking.text.is_empty() {
-                report.send(Report::Decoded(self.backend.count_tokens(&thinking.text)?));
-            }
-            let text = thinking.text.trim_end().to_owned();
-            if !text.is_empty() {
-                self.session.append(Event::Thinking(text.clone()))?;
-            }
-            // A cut-off thinking or a call started inside it ends the
-            // thinking too (D110, D113).
-            prompt.push_str(&text);
-            prompt.push_str(&markers.close);
-        }
-
-        // The grammar of the actions (D3): the action phase generates under
-        // it.
-        let (grammar, mut root) = action::grammar(format, &state.actions);
-        // Its text is known only at the end of a step that may reason in the
-        // open (AGL-050).
-        let open_reasoning = !think && format.reasons_in_the_open();
-        if open_reasoning {
-            root = action::after_its_empty_block(format, root);
-        }
-        let grammar_str = grammar.render(&root);
-        self.session.record_input("grammar", &grammar_str)?;
-        let mut stream = TextStream::new(&format.call.begin_before);
-        let cell = std::cell::RefCell::new(&mut *report);
-        let generated = self.backend.generate_reading(
-            &Request {
-                prompt: &prompt,
-                grammar: Some(&grammar_str),
-                stop: &[],
-                max_tokens: action_budget,
-                sampling: &function.sampling,
-                media: &expanded.uploads,
-                structured: None,
-            },
-            Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
-            &mut |_| {},
-            &mut |piece| {
-                cell.borrow_mut().send(Report::ActionStarted);
-                if open_reasoning {
-                    return;
-                }
-                if let Some(text) = stream.push(piece) {
-                    cell.borrow_mut().send(Report::ActionText(text.to_string()));
-                }
-            },
-        )?;
-        if let Some(prefill) = generated.prefill {
-            report.send(Report::PromptRead(prefill));
-        }
-        let action_tokens = if generated.text.is_empty() {
-            0
-        } else {
-            self.backend.count_tokens(&generated.text)?
-        };
-        if action_tokens > 0 {
-            report.send(Report::Decoded(action_tokens));
-        }
-        let output = if open_reasoning && generated.stop != Stop::Limit {
-            format.outside_reasoning(&generated.text)
-        } else {
-            generated.text.as_str().into()
-        };
-        if open_reasoning {
-            if generated.stop != Stop::Limit && !output.starts_with(&format.call.begin_before) {
-                report.send(Report::ActionText(output.to_string()));
-            }
-        } else if let Some(text) = stream.finish() {
-            report.send(Report::ActionText(text.to_string()));
-        }
-        // Cut-off text may have been heading for a call: it is discarded
-        // and the model is told to split the work (D154).
-        if generated.stop == Stop::Limit {
-            let cut = CutOff {
-                limit: action_budget,
-                thinking: None,
-                discarded: u32::try_from(action_tokens).unwrap_or(u32::MAX),
-                call: generated.text.contains(format.call.begin_before.trim()),
-            };
-            return self.cut_off(machine, report, cut);
-        }
-        // The grammar allows nothing else, so the server broke it.
-        let action = action::parse(format, &state.actions, &output)
-            .map_err(|_| Error::OutsideGrammar(generated.text.clone()))?;
-        self.run_action(machine, report, action)
-    }
-
-    /// The step of the stirred mode (AGL-030, D4, D9, D10): one structured
-    /// generation — the server splits the thinking and the call from the
-    /// text —, the response mapped to an action by its structure, and a
-    /// malformed one a bounded corrective retry (the stir), then a stop.
-    fn stirred_step(
-        &mut self,
-        machine: &mut Machine,
-        report: &mut Reports<'_>,
-        mut messages: Vec<Message>,
-        uploads: &[String],
-        tools: &[&'static Spec],
-        think: bool,
-    ) -> Result<Option<TurnEnd>, Error> {
-        let function = self.function;
-        let state = machine.state();
+        // The step of the backend: its thinking and its action, the action
+        // parsed or the cut-off or what was wrong (AGL-067, D6). The stirred
+        // mode tells a malformed one back a bounded number of times
+        // (AGL-030, D4, D8).
         let state_name = state.name.clone();
         let instruction = state.instruction.clone();
         let actions = state.actions.clone();
-        // A state that does not think, or the `Off` level, silences the
-        // thinking (AGL-013, Q4).
-        let reasoning = if think {
-            self.reasoning
-        } else {
-            Some(ReasoningLevel::Off)
-        };
-        let max_tokens = function.action_tokens(self.context)
-            + if think { function.max_think_tokens } else { 0 };
         let mut stirs = 0u32;
-        let (generated, action) = loop {
-            let prompt = Prompt {
+        loop {
+            let step_prompt = Prompt {
                 messages: &messages,
                 instruction: instruction.as_deref(),
-                tools,
+                tools: &tools,
                 preserve_thinking: function.preserve_thinking,
                 reasoning,
-                format: &function.format,
+                format,
             };
-            // The thinking and the text stream to the same report; the
-            // thinking is over at the first piece of text.
-            let open = std::cell::Cell::new(think);
-            let cell = std::cell::RefCell::new(&mut *report);
-            let generated = self.backend.generate_reading(
-                &Request {
-                    prompt: "",
-                    grammar: None,
-                    stop: &[],
-                    max_tokens,
-                    sampling: &function.sampling,
-                    media: uploads,
-                    structured: Some(&prompt),
+            let stepped = self.backend.step(
+                self.session,
+                &StepInput {
+                    function,
+                    actions: &actions,
+                    prompt: &step_prompt,
+                    rendered: &prompt,
+                    think,
+                    media: &expanded.uploads,
+                    context: self.context,
                 },
-                Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
-                &mut |piece| cell.borrow_mut().send(Report::Thinking(piece.to_owned())),
-                &mut |piece| {
-                    if open.replace(false) {
-                        cell.borrow_mut().send(Report::ThinkingDone);
-                    }
-                    cell.borrow_mut().send(Report::ActionStarted);
-                    if !piece.is_empty() {
-                        cell.borrow_mut().send(Report::ActionText(piece.to_owned()));
-                    }
-                },
+                report,
             )?;
-            if open.replace(false) {
-                cell.borrow_mut().send(Report::ThinkingDone);
-            }
-            if let Some(prefill) = generated.prefill {
-                report.send(Report::PromptRead(prefill));
-            }
-            // The exact counts of the server's `usage` (AGL-030, D11).
-            if let Some(tokens) = generated.prompt_tokens {
-                report.send(Report::ContextUsed(tokens));
-            }
-            let thinking_tokens = || -> Result<usize, Error> {
-                match &generated.thinking {
-                    Some(thinking) => self.backend.count_tokens(thinking),
-                    None => Ok(0),
-                }
-            };
-            let decoded = match generated.completion_tokens {
-                Some(tokens) => tokens,
-                None => self.backend.count_tokens(&generated.text)? + thinking_tokens()?,
-            };
-            if decoded > 0 {
-                report.send(Report::Decoded(decoded));
-            }
-            // A step that hit its budget is a miss of the budget, not of
-            // the model: discarded, and the model is told to split the
-            // work (D154).
-            if generated.stop == Stop::Limit {
-                let tokens = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-                let thinking = if think {
-                    Some(tokens(thinking_tokens()?))
-                } else {
-                    None
-                };
-                let cut = CutOff {
-                    limit: max_tokens,
-                    // The thinking took its part of the one budget
-                    // (AGL-043 F8).
-                    thinking,
-                    discarded: tokens(self.backend.count_tokens(&generated.text)?),
-                    call: !generated.tool_calls.is_empty()
-                        || generated.text.contains(function.format.call.begin_before.trim()),
-                };
-                return self.cut_off(machine, report, cut);
-            }
-            match action::from_structured(&actions, &generated.text, &generated.tool_calls) {
-                Ok(action) => break (generated, action),
-                Err(detail) => {
+            match stepped {
+                Stepped::Action(action) => return self.run_action(machine, report, action),
+                Stepped::CutOff(cut) => return self.cut_off(machine, report, cut),
+                Stepped::Malformed(detail) => {
                     if stirs >= function.max_stirs {
                         return self.stop(StopReason::StirLimit);
                     }
@@ -521,21 +326,12 @@ impl Agent<'_> {
                         max: function.max_stirs,
                         error: detail.clone(),
                     });
-                    // The malformed output is discarded; the retry sees
-                    // the nudge as a runtime message (AGL-030, D4, D8).
+                    // The malformed output is discarded; the retry sees the
+                    // nudge as a runtime message (AGL-030, D4, D8).
                     messages.push(Message::Runtime(stir_nudge(&state_name, &detail)));
                 }
             }
-        };
-        if let Some(thinking) = generated
-            .thinking
-            .as_deref()
-            .map(str::trim_end)
-            .filter(|thinking| !thinking.is_empty())
-        {
-            self.session.append(Event::Thinking(thinking.into()))?;
         }
-        self.run_action(machine, report, action)
     }
 
     /// The action of the step ran out of tokens (D154): it is recorded and
@@ -684,7 +480,7 @@ impl Agent<'_> {
             },
             action_budget: function.action_tokens(self.context),
             context: self.context,
-            stirred: self.stirred,
+            stirred: self.backend.stirred(),
             reasoning: format!("{:?}", self.reasoning),
         }));
         Ok(())
@@ -802,7 +598,7 @@ impl Agent<'_> {
                 max_tokens: budget,
                 sampling: &function.sampling,
                 media: &expanded.uploads,
-                structured: self.stirred.then_some(&structured),
+                structured: self.backend.stirred().then_some(&structured),
             },
             &mut |_| {},
             &mut |_| {},
@@ -1037,61 +833,6 @@ fn message_chars(message: &Message) -> usize {
                 })
         }
         Message::Tool { content, .. } => content.len(),
-    }
-}
-
-/// Cuts the call out of the streamed action: passes the text before the
-/// start of a call and holds back what may still turn into that start
-/// (D131).
-struct TextStream<'a> {
-    begin: &'a str,
-    held: String,
-    in_call: bool,
-}
-
-impl<'a> TextStream<'a> {
-    fn new(begin: &'a str) -> TextStream<'a> {
-        TextStream {
-            begin,
-            held: String::new(),
-            in_call: false,
-        }
-    }
-
-    /// The text to show for `piece`, if any.
-    fn push(&mut self, piece: &str) -> Option<String> {
-        if self.in_call {
-            return None;
-        }
-        self.held.push_str(piece);
-        let (shown, kept) = match self.held.find(self.begin) {
-            Some(start) => {
-                self.in_call = true;
-                (start, self.held.len())
-            }
-            None => {
-                let keep_from = self
-                    .held
-                    .char_indices()
-                    .map(|(index, _)| index)
-                    .find(|index| self.begin.starts_with(&self.held[*index..]))
-                    .unwrap_or(self.held.len());
-                (keep_from, keep_from)
-            }
-        };
-        let text = self.held[..shown].to_owned();
-        if self.in_call {
-            self.held.clear();
-        } else {
-            self.held.drain(..kept);
-        }
-        (!text.is_empty()).then_some(text)
-    }
-
-    /// The held-back text when no call began.
-    fn finish(&mut self) -> Option<String> {
-        let text = std::mem::take(&mut self.held);
-        (!self.in_call && !text.is_empty()).then_some(text)
     }
 }
 

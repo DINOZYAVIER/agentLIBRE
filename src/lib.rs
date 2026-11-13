@@ -106,9 +106,6 @@ pub struct Setup<'a> {
     pub function: &'a Function,
     pub function_name: &'a str,
     pub backend: &'a dyn Backend,
-    /// The stirred mode (AGL-030, D1): the action phase generates
-    /// unconstrained and a parse failure is a bounded corrective retry.
-    pub stirred: bool,
     pub session: Session,
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
@@ -506,8 +503,7 @@ fn agent_session(
     // The backend is the Llama or the Strata backend, by the effective
     // settings' `[server] kind` (AGL-030, D1); the stirred mode runs on
     // Strata.
-    let stirred = settings.server.kind() == ServerKind::Strata;
-    let backend: Box<dyn Backend> = if stirred {
+    let backend: Box<dyn Backend> = if settings.server.kind() == ServerKind::Strata {
         Box::new(Strata::new(&settings.server_url))
     } else {
         Box::new(Llama::with_ca(
@@ -647,7 +643,6 @@ fn agent_session(
             function: &function,
             function_name: &settings.function,
             backend: backend.as_ref(),
-            stirred,
             session,
             resumed,
             sessions_dir: &paths.sessions(),
@@ -704,7 +699,6 @@ fn agent_session(
         function: &function,
         function_name: &settings.function,
         backend: backend.as_ref(),
-        stirred,
         session: &mut session,
         workspace: &workspace,
         context: context.expect("`-p` read the context size"),

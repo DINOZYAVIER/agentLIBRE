@@ -448,14 +448,16 @@ pub struct Reports<'a> {
     pub sink: &'a mut dyn Sink,
 }
 
-impl Reports<'_> {
-    pub fn send(&mut self, report: Report) {
+impl Sink for Reports<'_> {
+    fn send(&mut self, report: Report) {
         if let Some(transition) = self.observer.read(&report) {
             self.sink.send(Report::Transition(transition));
         }
         self.sink.send(report);
     }
+}
 
+impl Reports<'_> {
     /// See [`Observer::end`].
     pub fn end(&mut self, event: PhaseEvent) {
         self.observer.end(event, &mut *self.sink);

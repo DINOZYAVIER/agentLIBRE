@@ -2,11 +2,17 @@
 
 mod http;
 pub mod llama;
+mod step;
 pub mod strata;
 
+pub(crate) use step::{completion_step, structured_step};
+pub use step::{StepInput, Stepped};
+
 use crate::action::Value;
+use crate::agent::Sink;
 use crate::error::Error;
 use crate::function::Sampling;
+use crate::session::Session;
 use crate::tools::Spec;
 
 /// The text that opens every message of the runtime to the model
@@ -332,6 +338,25 @@ pub trait Backend {
     /// Whether the model hears an audio itself (AGL-014, D19).
     fn hears_audio(&self) -> Result<bool, Error> {
         Ok(false)
+    }
+    /// Whether the stirred mode drives the agent: a step whose output is not
+    /// an action is told back and tried again (AGL-030, D4).
+    fn stirred(&self) -> bool {
+        false
+    }
+    /// One step of the agent (AGL-067, D6): the thinking and the action for
+    /// the prompt, the state's actions and the budgets of `input`, giving
+    /// the action, the cut-off or what was wrong with the output. The way of
+    /// a completion server by default: the thinking to its mark, then the
+    /// action under the grammar. The thinking and the inputs of the step are
+    /// logged in `session`, the pieces go to `sink`.
+    fn step(
+        &self,
+        session: &mut Session,
+        input: &StepInput<'_>,
+        sink: &mut dyn Sink,
+    ) -> Result<Stepped, Error> {
+        completion_step(self, session, input, sink)
     }
 }
 
