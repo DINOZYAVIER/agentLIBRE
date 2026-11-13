@@ -69,23 +69,11 @@ struct Inner {
     commands: Vec<CommandRun>,
     /// A turn is running.
     running: bool,
-    quit: bool,
-    new_session: bool,
-    compact: bool,
-    /// `/remember name | text`, for the main thread to write (AGL-006).
-    remember: Option<(String, String)>,
-    /// `/rename <name>`, for the main thread to write (AGL-062, D7).
-    rename: Option<String>,
-    /// `/memory`, its line and action, for the main thread to run (AGL-060).
-    memory: Option<(String, MemoryAction)>,
+    /// What the input thread asks of the main thread, taken in the order of
+    /// [`Request::rank`] (AGL-067, F10).
+    requests: Requests,
     /// A `/memory remove` waits for its `[y/N]` (AGL-060, D7).
     question: Option<Question>,
-    /// `/function`: the list of the Functions, for the main thread to show
-    /// (AGL-036, D9).
-    functions: bool,
-    /// `/function <name>`: the switch, for the main thread to check
-    /// (AGL-036, D4).
-    switch: Option<String>,
     info: Info,
     /// The model's reasoning level (AGL-013); it survives `/new`.
     reasoning: Option<ReasoningLevel>,
@@ -165,6 +153,97 @@ impl Inner {
     }
 }
 
+/// What the input thread asks of the main thread (AGL-067, F10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Request {
+    /// `/quit`, `/exit`, Ctrl-D, Ctrl-C on an empty prompt.
+    Quit,
+    /// `/new`.
+    New,
+    /// `/function`: the list of the Functions (AGL-036, D9).
+    Functions,
+    /// `/function <name>`: the switch, for the main thread to check
+    /// (AGL-036, D4).
+    Switch(String),
+    /// `/remember name | text`, for the main thread to write (AGL-006).
+    Remember(String, String),
+    /// `/rename <name>`, for the main thread to write (AGL-062, D7).
+    Rename(String),
+    /// `/memory`, its line and action, for the main thread to run
+    /// (AGL-060).
+    Memory(String, MemoryAction),
+    /// `/compact`.
+    Compact,
+}
+
+impl Request {
+    /// The place in the order the main thread takes them: a quit first,
+    /// then a new session, the Functions, a switch, a remember, a rename,
+    /// the memory and a compaction.
+    fn rank(&self) -> u8 {
+        match self {
+            Request::Quit => 0,
+            Request::New => 1,
+            Request::Functions => 2,
+            Request::Switch(_) => 3,
+            Request::Remember(..) => 4,
+            Request::Rename(_) => 5,
+            Request::Memory(..) => 6,
+            Request::Compact => 7,
+        }
+    }
+}
+
+/// The requests that wait: one of each kind, a later one replaces the one of
+/// its kind that has not been taken.
+#[derive(Default)]
+struct Requests(Vec<Request>);
+
+impl Requests {
+    #[cfg(test)]
+    fn remember(&self) -> Option<(String, String)> {
+        self.0.iter().find_map(|request| match request {
+            Request::Remember(name, text) => Some((name.clone(), text.clone())),
+            _ => None,
+        })
+    }
+
+    #[cfg(test)]
+    fn rename(&self) -> Option<String> {
+        self.0.iter().find_map(|request| match request {
+            Request::Rename(name) => Some(name.clone()),
+            _ => None,
+        })
+    }
+
+    #[cfg(test)]
+    fn memory(&self) -> Option<(String, MemoryAction)> {
+        self.0.iter().find_map(|request| match request {
+            Request::Memory(line, action) => Some((line.clone(), action.clone())),
+            _ => None,
+        })
+    }
+
+    fn push(&mut self, request: Request) {
+        self.0.retain(|waiting| waiting.rank() != request.rank());
+        self.0.push(request);
+    }
+
+    /// The request of the first place in the order, if any waits.
+    fn take(&mut self) -> Option<Request> {
+        let first = (0..self.0.len()).min_by_key(|index| self.0[*index].rank())?;
+        Some(self.0.remove(first))
+    }
+
+    fn contains(&self, request: &Request) -> bool {
+        self.0.contains(request)
+    }
+
+    fn quit(&self) -> bool {
+        self.contains(&Request::Quit)
+    }
+}
+
 /// A removal waiting for the answer of the human (AGL-060, D7): the next line
 /// is the answer, and no turn starts until it comes.
 #[derive(Debug, PartialEq, Eq)]
@@ -235,7 +314,7 @@ impl Input {
                     name: question.name,
                     yes: true,
                 };
-                self.control.lock().memory = Some((question.line, action));
+                self.control.lock().requests.push(Request::Memory(question.line, action));
                 self.control.wake.notify_all();
             } else {
                 self.declined(question);
@@ -354,7 +433,7 @@ impl Input {
                             Role::StatusPending,
                         );
                     } else {
-                        inner.remember = Some((name, text));
+                        inner.requests.push(Request::Remember(name, text));
                         drop(inner);
                         self.control.wake.notify_all();
                     }
@@ -376,7 +455,7 @@ impl Input {
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
                     return;
                 }
-                inner.rename = Some(text.to_owned());
+                inner.requests.push(Request::Rename(text.to_owned()));
                 drop(inner);
                 self.control.wake.notify_all();
             }
@@ -395,7 +474,7 @@ impl Input {
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
                     return;
                 }
-                inner.memory = Some((trimmed.to_owned(), action));
+                inner.requests.push(Request::Memory(trimmed.to_owned(), action));
                 drop(inner);
                 self.control.wake.notify_all();
             }
@@ -411,8 +490,8 @@ impl Input {
                     return;
                 }
                 match function {
-                    Some(function) => inner.switch = Some(function),
-                    None => inner.functions = true,
+                    Some(function) => inner.requests.push(Request::Switch(function)),
+                    None => inner.requests.push(Request::Functions),
                 }
                 drop(inner);
                 self.control.wake.notify_all();
@@ -425,12 +504,12 @@ impl Input {
                     return;
                 }
                 if name == "/new" {
-                    inner.new_session = true;
+                    inner.requests.push(Request::New);
                     inner.pending.clear();
                 } else if name == "/compact" {
-                    inner.compact = true;
+                    inner.requests.push(Request::Compact);
                 } else {
-                    inner.quit = true;
+                    inner.requests.push(Request::Quit);
                 }
                 drop(inner);
                 self.control.wake.notify_all();
@@ -509,7 +588,7 @@ impl Input {
             drop(inner);
             self.dock.set_queued(0);
         } else if self.dock.input_is_empty() {
-            inner.quit = true;
+            inner.requests.push(Request::Quit);
             drop(inner);
             self.control.wake.notify_all();
         } else {
@@ -520,7 +599,7 @@ impl Input {
 
     /// Ctrl-D on an empty prompt, or the end of input.
     fn end_of_input(&self) {
-        self.control.lock().quit = true;
+        self.control.lock().requests.push(Request::Quit);
         self.control.wake.notify_all();
     }
 
@@ -681,39 +760,29 @@ fn record_commands(control: &Control, session: &mut Session) {
 fn wait_for_next(control: &Control) -> Next {
     let mut inner = control.lock();
     loop {
-        if inner.quit {
+        if inner.requests.quit() {
             return Next::Quit;
         }
         if inner.question.is_some() {
             inner = control.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
             continue;
         }
-        if inner.new_session {
-            inner.new_session = false;
-            return Next::New;
-        }
-        if inner.functions {
-            inner.functions = false;
-            return Next::Functions;
-        }
-        if let Some(name) = inner.switch.take() {
-            return Next::Switch(name);
-        }
-        if let Some((name, text)) = inner.remember.take() {
-            return Next::Remember(name, text);
-        }
-        if let Some(name) = inner.rename.take() {
-            return Next::Rename(name);
-        }
-        if let Some((line, action)) = inner.memory.take() {
-            return Next::Memory(line, action);
-        }
-        if inner.compact {
-            inner.compact = false;
-            // Ctrl-C stops the compaction as it stops a turn.
-            inner.running = true;
-            interrupt::reset();
-            return Next::Compact;
+        if let Some(request) = inner.requests.take() {
+            return match request {
+                Request::Quit => Next::Quit,
+                Request::New => Next::New,
+                Request::Functions => Next::Functions,
+                Request::Switch(name) => Next::Switch(name),
+                Request::Remember(name, text) => Next::Remember(name, text),
+                Request::Rename(name) => Next::Rename(name),
+                Request::Memory(line, action) => Next::Memory(line, action),
+                Request::Compact => {
+                    // Ctrl-C stops the compaction as it stops a turn.
+                    inner.running = true;
+                    interrupt::reset();
+                    Next::Compact
+                }
+            };
         }
         if let Some(message) = inner.queue.pop_front() {
             inner.running = true;
@@ -1535,7 +1604,7 @@ mod tests {
         f.input.key(Key::Ctrl('u'));
         f.type_text("/new");
         f.input.key(Key::Enter);
-        assert!(f.inner().new_session);
+        assert!(f.inner().requests.contains(&Request::New));
         assert!(f.inner().pending.is_empty());
     }
 
@@ -1681,7 +1750,7 @@ mod tests {
         f.type_text("/remember Build and test | cargo build / cargo test");
         f.input.key(Key::Enter);
         assert_eq!(
-            f.inner().remember,
+            f.inner().requests.remember(),
             Some(("Build and test".into(), "cargo build / cargo test".into()))
         );
         assert!(f.inner().queue.is_empty());
@@ -1691,13 +1760,13 @@ mod tests {
             wait_for_next(&f.input.control),
             Next::Remember(name, text) if name == "Build and test" && text == "cargo build / cargo test"
         ));
-        assert!(f.inner().remember.is_none());
+        assert!(f.inner().requests.remember().is_none());
         // During a turn it is refused, as `/new` is, and nothing is kept.
         f.inner().running = true;
         f.type_text("/remember Name | text");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/remember is not available during a turn"));
-        assert!(f.inner().remember.is_none());
+        assert!(f.inner().requests.remember().is_none());
     }
 
     #[test]
@@ -1707,7 +1776,7 @@ mod tests {
         f.type_text("/remember cargo build / cargo test");
         f.input.key(Key::Enter);
         assert_eq!(f.inner().texts(), ["remember: cargo build / cargo test"]);
-        assert!(f.inner().remember.is_none());
+        assert!(f.inner().requests.remember().is_none());
     }
 
     #[test]
@@ -1718,7 +1787,7 @@ mod tests {
             f.input.key(Key::Enter);
         }
         assert!(f.output().contains("usage: /remember"));
-        assert!(f.inner().remember.is_none());
+        assert!(f.inner().requests.remember().is_none());
         assert!(f.inner().queue.is_empty());
     }
 
@@ -1728,7 +1797,7 @@ mod tests {
         let f = fixture();
         f.type_text("/rename  gemma grammar ");
         f.input.key(Key::Enter);
-        assert_eq!(f.inner().rename.as_deref(), Some("gemma grammar"));
+        assert_eq!(f.inner().requests.rename().as_deref(), Some("gemma grammar"));
         assert!(f.inner().queue.is_empty());
         // The main thread takes it before any message.
         f.inner().queue.push_back("later".into());
@@ -1736,14 +1805,14 @@ mod tests {
             wait_for_next(&f.input.control),
             Next::Rename(name) if name == "gemma grammar"
         ));
-        assert!(f.inner().rename.is_none());
+        assert!(f.inner().requests.rename().is_none());
         f.inner().queue.clear();
         // During a turn it is refused, and nothing is kept.
         f.inner().running = true;
         f.type_text("/rename other");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/rename is not available during a turn"));
-        assert!(f.inner().rename.is_none());
+        assert!(f.inner().requests.rename().is_none());
     }
 
     #[test]
@@ -1753,7 +1822,7 @@ mod tests {
         f.type_text("/rename");
         f.input.key(Key::Enter);
         assert!(f.output().contains("usage: /rename <name>"));
-        assert!(f.inner().rename.is_none());
+        assert!(f.inner().requests.rename().is_none());
         assert!(f.inner().queue.is_empty());
     }
 
@@ -1764,7 +1833,7 @@ mod tests {
         f.type_text("/memory list");
         f.input.key(Key::Enter);
         assert_eq!(
-            f.inner().memory,
+            f.inner().requests.memory(),
             Some(("/memory list".into(), MemoryAction::List))
         );
         f.inner().queue.push_back("later".into());
@@ -1778,14 +1847,14 @@ mod tests {
         f.type_text("/memory remove tea");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/memory is not available during a turn"));
-        assert!(f.inner().memory.is_none());
+        assert!(f.inner().requests.memory().is_none());
         f.inner().running = false;
         // A wrong form tells the usage, recorded as a failure.
         std::mem::take(&mut f.inner().commands);
         f.type_text("/memory add x");
         f.input.key(Key::Enter);
         assert!(f.output().contains("usage: /memory"));
-        assert!(f.inner().memory.is_none());
+        assert!(f.inner().requests.memory().is_none());
         assert!(f.inner().commands[0].failed);
     }
 
@@ -1808,7 +1877,7 @@ mod tests {
             f.input.key(Key::Enter);
             assert!(f.inner().question.is_none());
             assert_eq!(
-                f.inner().memory,
+                f.inner().requests.memory(),
                 Some((
                     "/memory remove tea".into(),
                     MemoryAction::Remove { name: "tea".into(), yes: true }
@@ -1822,9 +1891,9 @@ mod tests {
             f.type_text(answer);
             f.input.key(Key::Enter);
             assert!(f.inner().question.is_none(), "{answer:?}");
-            assert!(f.inner().memory.is_none(), "{answer:?}");
+            assert!(f.inner().requests.memory().is_none(), "{answer:?}");
             assert!(f.inner().queue.is_empty(), "{answer:?}");
-            assert!(!f.inner().quit, "{answer:?}");
+            assert!(!f.inner().requests.quit(), "{answer:?}");
             assert!(f.output().contains("not removed: tea"), "{answer:?}");
             let commands = std::mem::take(&mut f.inner().commands);
             assert_eq!(
@@ -1845,8 +1914,8 @@ mod tests {
         f.type_text("y");
         f.input.key(Key::Ctrl('c'));
         assert!(f.inner().question.is_none());
-        assert!(f.inner().memory.is_none());
-        assert!(!f.inner().quit);
+        assert!(f.inner().requests.memory().is_none());
+        assert!(!f.inner().requests.quit());
         assert!(f.input.dock.input_is_empty());
         assert!(f.output().contains("not removed: tea"));
     }
@@ -1925,7 +1994,7 @@ mod tests {
             f.output()
                 .contains("/compact is not available during a turn")
         );
-        assert!(!f.inner().quit && !f.inner().new_session && !f.inner().compact);
+        assert!(f.inner().requests.0.is_empty());
         // /status still works and shows the state.
         f.inner().info.state = Some("verify".into());
         f.type_text("/status");
@@ -1935,14 +2004,14 @@ mod tests {
         f.inner().running = false;
         f.type_text("/new");
         f.input.key(Key::Enter);
-        assert!(f.inner().new_session);
-        f.inner().new_session = false;
+        assert!(f.inner().requests.contains(&Request::New));
+        f.inner().requests = Requests::default();
         f.type_text("/compact");
         f.input.key(Key::Enter);
-        assert!(f.inner().compact);
+        assert!(f.inner().requests.contains(&Request::Compact));
         f.type_text("/exit");
         f.input.key(Key::Enter);
-        assert!(f.inner().quit);
+        assert!(f.inner().requests.quit());
     }
 
     #[test]
@@ -1954,15 +2023,15 @@ mod tests {
         f.type_text("/function other");
         f.input.key(Key::Enter);
         assert!(f.output().contains("/function is not available during a turn"));
-        assert!(f.inner().switch.is_none());
+        assert!(f.inner().requests.0.is_empty());
         f.inner().running = false;
         f.type_text("/function");
         f.input.key(Key::Enter);
-        assert!(f.inner().functions);
-        f.inner().functions = false;
+        assert!(f.inner().requests.contains(&Request::Functions));
+        f.inner().requests = Requests::default();
         f.type_text("/function other");
         f.input.key(Key::Enter);
-        assert_eq!(f.inner().switch.as_deref(), Some("other"));
+        assert!(f.inner().requests.contains(&Request::Switch("other".into())));
     }
 
     #[test]
@@ -2018,10 +2087,10 @@ mod tests {
         f.type_text("draft");
         f.input.key(Key::Ctrl('c'));
         assert!(f.input.dock.input_is_empty());
-        assert!(!f.inner().quit);
+        assert!(!f.inner().requests.quit());
         assert_eq!(f.stops.load(Ordering::SeqCst), 0);
         f.input.key(Key::Ctrl('c'));
-        assert!(f.inner().quit);
+        assert!(f.inner().requests.quit());
     }
 
     #[test]
@@ -2029,11 +2098,11 @@ mod tests {
         let f = fixture();
         f.inner().running = true;
         f.input.key(Key::Ctrl('d'));
-        assert!(!f.inner().quit);
+        assert!(!f.inner().requests.quit());
         assert!(f.output().contains("Ctrl-D is not available during a turn"));
         f.inner().running = false;
         f.input.key(Key::Ctrl('d'));
-        assert!(f.inner().quit);
+        assert!(f.inner().requests.quit());
     }
 
     #[test]
@@ -2062,19 +2131,19 @@ mod tests {
         assert!(matches!(wait_for_next(&control), Next::Message(m) if m.text == "one"));
         assert!(control.lock().running);
         control.lock().running = false;
-        control.lock().new_session = true;
+        control.lock().requests.push(Request::New);
         assert!(matches!(wait_for_next(&control), Next::New));
         // `/function` (AGL-036, D4, D9).
-        control.lock().functions = true;
+        control.lock().requests.push(Request::Functions);
         assert!(matches!(wait_for_next(&control), Next::Functions));
-        control.lock().switch = Some("other".into());
+        control.lock().requests.push(Request::Switch("other".into()));
         assert!(matches!(wait_for_next(&control), Next::Switch(name) if name == "other"));
         assert!(!control.lock().running);
         // A compaction counts as running, so that Ctrl-C can stop it.
-        control.lock().compact = true;
+        control.lock().requests.push(Request::Compact);
         assert!(matches!(wait_for_next(&control), Next::Compact));
         assert!(control.lock().running);
-        control.lock().quit = true;
+        control.lock().requests.push(Request::Quit);
         assert!(matches!(wait_for_next(&control), Next::Quit));
     }
 
