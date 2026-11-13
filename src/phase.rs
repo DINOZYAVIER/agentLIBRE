@@ -24,7 +24,7 @@ use crate::tools::ToolResult;
 const SCHEMA: u32 = 1;
 
 /// What is happening during a turn (AGL-046, D10).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// No turn is running.
     Ready,
@@ -35,14 +35,17 @@ pub enum Phase {
     Prefill,
     Thinking,
     Writing,
-    Running,
+    /// A tool runs: its name.
+    Running(String),
     Compacting,
-    /// The stirred mode tries the step again.
-    Retry,
+    /// The stirred mode tries the step again: the number of the attempt
+    /// and the most there are.
+    Retry { attempt: u32, max: u32 },
 }
 
 impl Phase {
-    pub fn name(self) -> &'static str {
+    /// The name in the session file.
+    pub fn name(&self) -> &'static str {
         match self {
             Phase::Ready => "Ready",
             Phase::StartingServer => "StartingServer",
@@ -50,9 +53,9 @@ impl Phase {
             Phase::Prefill => "Prefill",
             Phase::Thinking => "Thinking",
             Phase::Writing => "Writing",
-            Phase::Running => "Running",
+            Phase::Running(_) => "Running",
             Phase::Compacting => "Compacting",
-            Phase::Retry => "Retry",
+            Phase::Retry { .. } => "Retry",
         }
     }
 }
@@ -120,9 +123,12 @@ impl PhaseEvent {
             | PhaseEvent::CutOff => Phase::Prefill,
             PhaseEvent::FirstThinking => Phase::Thinking,
             PhaseEvent::FirstText => Phase::Writing,
-            PhaseEvent::ToolStart { .. } => Phase::Running,
+            PhaseEvent::ToolStart { tool } => Phase::Running(tool.clone()),
             PhaseEvent::CompactStart => Phase::Compacting,
-            PhaseEvent::Stir { .. } => Phase::Retry,
+            PhaseEvent::Stir { attempt, max } => Phase::Retry {
+                attempt: *attempt,
+                max: *max,
+            },
             PhaseEvent::Answer | PhaseEvent::Stop(_) | PhaseEvent::Failed | PhaseEvent::Idle => {
                 Phase::Ready
             }
@@ -138,29 +144,29 @@ pub struct Violation {
 }
 
 /// The table of the FSM: the phase `event` leads to from `from`.
-pub fn next(from: Phase, event: &PhaseEvent) -> Result<Phase, Violation> {
+pub fn next(from: &Phase, event: &PhaseEvent) -> Result<Phase, Violation> {
     use Phase::*;
-    let generating = matches!(from, Prefill | Thinking | Writing | Retry);
+    let generating = matches!(from, Prefill | Thinking | Writing | Retry { .. });
     let legal = match event {
         PhaseEvent::ServerStart => matches!(from, Ready | StartingServer | Transcribing),
         PhaseEvent::Transcribe => matches!(from, Ready | StartingServer | Transcribing),
         PhaseEvent::StepStart => matches!(from, Ready | StartingServer | Transcribing | Prefill),
-        PhaseEvent::FirstThinking => matches!(from, Prefill | Retry | Thinking),
-        PhaseEvent::FirstText => matches!(from, Prefill | Thinking | Retry | Writing),
+        PhaseEvent::FirstThinking => matches!(from, Prefill | Retry { .. } | Thinking),
+        PhaseEvent::FirstText => matches!(from, Prefill | Thinking | Retry { .. } | Writing),
         PhaseEvent::ToolStart { .. }
         | PhaseEvent::CutOff
         | PhaseEvent::Stir { .. }
         | PhaseEvent::Answer => generating,
-        PhaseEvent::ToolEnd(_) => from == Running,
+        PhaseEvent::ToolEnd(_) => matches!(from, Running(_)),
         PhaseEvent::CompactStart => matches!(from, Ready | Prefill),
-        PhaseEvent::Compacted | PhaseEvent::CompactFailed => from == Compacting,
+        PhaseEvent::Compacted | PhaseEvent::CompactFailed => *from == Compacting,
         PhaseEvent::Stop(_) | PhaseEvent::Failed | PhaseEvent::Idle => true,
     };
     if legal {
         Ok(event.target())
     } else {
         Err(Violation {
-            from,
+            from: from.clone(),
             event: event.clone(),
         })
     }
@@ -267,8 +273,8 @@ impl Observer {
     /// Takes `event`. `None` when the phase goes on: a phase entered again
     /// is the same phase.
     pub fn on(&mut self, event: PhaseEvent) -> Option<Transition> {
-        let from = self.phase;
-        let (to, violation) = match next(from, &event) {
+        let from = self.phase.clone();
+        let (to, violation) = match next(&from, &event) {
             Ok(to) => (to, false),
             Err(violation) => {
                 assert!(!self.strict, "{violation:?}");
@@ -278,6 +284,7 @@ impl Observer {
         if to == from && !violation && !matches!(event, PhaseEvent::Stir { .. }) {
             return None;
         }
+        self.phase = to.clone();
         let transition = Transition {
             from,
             to,
@@ -286,7 +293,6 @@ impl Observer {
             violation,
         };
         self.since = Instant::now();
-        self.phase = to;
         self.write_transition(&transition);
         Some(transition)
     }
@@ -497,21 +503,32 @@ impl Report for Observed<'_> {
 mod tests {
     use super::*;
 
-    const ALL: [Phase; 9] = [
-        Phase::Ready,
-        Phase::StartingServer,
-        Phase::Transcribing,
-        Phase::Prefill,
-        Phase::Thinking,
-        Phase::Writing,
-        Phase::Running,
-        Phase::Compacting,
-        Phase::Retry,
-    ];
+    fn running() -> Phase {
+        Phase::Running("bash".into())
+    }
+
+    fn retry() -> Phase {
+        Phase::Retry { attempt: 1, max: 2 }
+    }
+
+    fn all() -> [Phase; 9] {
+        [
+            Phase::Ready,
+            Phase::StartingServer,
+            Phase::Transcribing,
+            Phase::Prefill,
+            Phase::Thinking,
+            Phase::Writing,
+            running(),
+            Phase::Compacting,
+            retry(),
+        ]
+    }
 
     fn legal_from(event: &PhaseEvent) -> Vec<Phase> {
-        ALL.into_iter()
-            .filter(|phase| next(*phase, event).is_ok())
+        all()
+            .into_iter()
+            .filter(|phase| next(phase, event).is_ok())
             .collect()
     }
 
@@ -529,19 +546,19 @@ mod tests {
                 PhaseEvent::ToolStart {
                     tool: "bash".into(),
                 },
-                Running,
+                running(),
             ),
-            (Running, PhaseEvent::ToolEnd(Outcome::Fail), Prefill),
+            (running(), PhaseEvent::ToolEnd(Outcome::Fail), Prefill),
             (Prefill, PhaseEvent::CompactStart, Compacting),
             (Compacting, PhaseEvent::Compacted, Prefill),
-            (Prefill, PhaseEvent::Stir { attempt: 1, max: 2 }, Retry),
-            (Retry, PhaseEvent::FirstText, Writing),
+            (Prefill, PhaseEvent::Stir { attempt: 1, max: 2 }, retry()),
+            (retry(), PhaseEvent::FirstText, Writing),
             (Writing, PhaseEvent::CutOff, Prefill),
             (Prefill, PhaseEvent::FirstText, Writing),
             (Writing, PhaseEvent::Answer, Ready),
         ];
         for (from, event, to) in walk {
-            assert_eq!(next(from, &event), Ok(to), "{from:?} {event:?}");
+            assert_eq!(next(&from, &event), Ok(to), "{from:?} {event:?}");
         }
     }
 
@@ -550,22 +567,22 @@ mod tests {
         use Phase::*;
         assert_eq!(
             legal_from(&PhaseEvent::ToolEnd(Outcome::Ok)),
-            [Running],
+            [running()],
             "a result needs a call"
         );
         assert_eq!(
             legal_from(&PhaseEvent::FirstThinking),
-            [Prefill, Thinking, Retry],
+            [Prefill, Thinking, retry()],
             "no thinking after the text"
         );
         assert_eq!(legal_from(&PhaseEvent::Compacted), [Compacting]);
         assert_eq!(legal_from(&PhaseEvent::CompactFailed), [Compacting]);
-        for phase in [Ready, StartingServer, Transcribing, Running, Compacting] {
-            assert!(next(phase, &PhaseEvent::Answer).is_err(), "{phase:?}");
-            assert!(next(phase, &PhaseEvent::CutOff).is_err(), "{phase:?}");
+        for phase in [Ready, StartingServer, Transcribing, running(), Compacting] {
+            assert!(next(&phase, &PhaseEvent::Answer).is_err(), "{phase:?}");
+            assert!(next(&phase, &PhaseEvent::CutOff).is_err(), "{phase:?}");
         }
-        assert!(next(Prefill, &PhaseEvent::ServerStart).is_err());
-        assert!(next(Running, &PhaseEvent::StepStart).is_err());
+        assert!(next(&Prefill, &PhaseEvent::ServerStart).is_err());
+        assert!(next(&running(), &PhaseEvent::StepStart).is_err());
     }
 
     #[test]
@@ -575,7 +592,7 @@ mod tests {
             PhaseEvent::Failed,
             PhaseEvent::Idle,
         ] {
-            assert_eq!(legal_from(&event), ALL);
+            assert_eq!(legal_from(&event), all());
         }
     }
 

@@ -2195,7 +2195,7 @@ mod tests {
         fn erase(&self, _count: usize) -> bool {
             true
         }
-        fn activity(&self, _activity: transcript::Activity) {}
+        fn activity(&self, _activity: crate::phase::Phase) {}
     }
 
     #[test]

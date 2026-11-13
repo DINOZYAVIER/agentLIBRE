@@ -14,49 +14,27 @@ use super::text::{StreamWrap, clean, hard_wrap, truncate, width, wrap_line};
 use crate::agent::Report;
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
-use crate::phase::{Phase, PhaseEvent, Transition};
+use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, ForgeKind, TransitionLine};
 use crate::settings::ReplSettings;
 use crate::theme::{Role, Theme};
 use crate::tools::ToolResult;
 use crate::tr;
 
-/// What the dock says the agent is doing (D135; AGL-043 F2).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Activity {
-    Ready,
-    /// The turn's start brings the server up.
-    StartingServer,
-    /// The turn's start transcribes an audio of the message.
-    Transcribing,
-    /// A step's prompt is rendered, counted and read by the server, until
-    /// its first token.
-    Prefill,
-    Thinking,
-    /// The action or the answer is being written.
-    Writing,
-    Running(String),
-    Compacting,
-    /// A stir of the stirred mode: the step is tried again.
-    Retry { attempt: u32, max: u32 },
-}
-
-impl Activity {
-    /// Its name, in the dock and on the rule of a step (AGL-045).
-    pub fn label(&self, lang: Lang) -> String {
-        match self {
-            Activity::Ready => tr!(lang, m::READY).to_string(),
-            Activity::StartingServer => tr!(lang, m::STARTING_SERVER).to_string(),
-            Activity::Transcribing => tr!(lang, m::TRANSCRIBING_ACTIVITY).to_string(),
-            Activity::Prefill => tr!(lang, m::PREFILL).to_string(),
-            Activity::Thinking => tr!(lang, m::THINKING_ACTIVITY).to_string(),
-            Activity::Writing => tr!(lang, m::WRITING).to_string(),
-            Activity::Retry { attempt, max } => {
-                tr!(lang, m::RETRY, attempt = attempt, max = max)
-            }
-            Activity::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
-            Activity::Compacting => tr!(lang, m::COMPACTING).to_string(),
+/// A phase's name, in the dock and on the rule of a step (D135; AGL-045).
+pub fn label(phase: &Phase, lang: Lang) -> String {
+    match phase {
+        Phase::Ready => tr!(lang, m::READY).to_string(),
+        Phase::StartingServer => tr!(lang, m::STARTING_SERVER).to_string(),
+        Phase::Transcribing => tr!(lang, m::TRANSCRIBING_ACTIVITY).to_string(),
+        Phase::Prefill => tr!(lang, m::PREFILL).to_string(),
+        Phase::Thinking => tr!(lang, m::THINKING_ACTIVITY).to_string(),
+        Phase::Writing => tr!(lang, m::WRITING).to_string(),
+        Phase::Retry { attempt, max } => {
+            tr!(lang, m::RETRY, attempt = attempt, max = max)
         }
+        Phase::Running(tool) => tr!(lang, m::RUNNING, tool = tool),
+        Phase::Compacting => tr!(lang, m::COMPACTING).to_string(),
     }
 }
 
@@ -73,7 +51,7 @@ pub trait Screen: Send + Sync {
     /// Erases the last `count` printed lines if they are all still on
     /// the screen; false when they are not.
     fn erase(&self, count: usize) -> bool;
-    fn activity(&self, activity: Activity);
+    fn activity(&self, phase: Phase);
     /// The tokens of the last prompt (D152).
     fn context(&self, _used: usize) {}
     /// The decoding speed of the current generation, in tokens per
@@ -105,9 +83,9 @@ pub struct Presenter {
     turn_started: Instant,
     /// The finished phases of the step, with their times, from the FSM of
     /// the turn (AGL-045, AGL-046).
-    phases: Vec<(Activity, Duration)>,
+    phases: Vec<(Phase, Duration)>,
     /// What the dock says now.
-    activity: Activity,
+    activity: Phase,
     /// The time of the last tool call and of the last compaction.
     tool_time: Duration,
     compact_time: Option<Duration>,
@@ -154,7 +132,7 @@ impl Presenter {
             lang,
             turn_started: Instant::now(),
             phases: Vec::new(),
-            activity: Activity::Ready,
+            activity: Phase::Ready,
             tool_time: Duration::ZERO,
             compact_time: None,
             prefill: None,
@@ -175,7 +153,7 @@ impl Presenter {
 
     /// The dock is idle again.
     pub fn set_ready(&self) {
-        self.screen.activity(Activity::Ready);
+        self.screen.activity(Phase::Ready);
     }
 
     /// A user message starts a turn.
@@ -388,18 +366,18 @@ impl Presenter {
     }
 
     /// The phases of a step as items of its rule (AGL-045).
-    fn phase_items(&self, phases: &[(Activity, Duration)]) -> Vec<String> {
+    fn phase_items(&self, phases: &[(Phase, Duration)]) -> Vec<String> {
         phases
             .iter()
             .map(|(phase, time)| {
                 let mut item = format!(
                     "{} {}",
-                    phase.label(self.lang),
+                    label(phase, self.lang),
                     texts::duration(time.as_secs())
                 );
                 // The speed of the reading (AGL-046): the server's own, so a
                 // cached part of the prompt does not count.
-                if *phase == Activity::Prefill
+                if *phase == Phase::Prefill
                     && let Some(prefill) =
                         self.prefill.filter(|p| p.tokens >= MIN_TOKENS_OF_A_SPEED)
                 {
@@ -654,7 +632,7 @@ impl Report for Presenter {
 
     fn compacted(&mut self) {
         let mut items: Vec<String> = Vec::new();
-        let label = Activity::Compacting.label(self.lang);
+        let label = label(&Phase::Compacting, self.lang);
         items.push(match self.compact_time {
             Some(time) => format!("{label} {}", texts::duration(time.as_secs())),
             None => label,
@@ -725,13 +703,13 @@ impl Report for Presenter {
     fn transition(&mut self, transition: &Transition) {
         match transition.from {
             Phase::Ready => {}
-            Phase::Running => self.tool_time = transition.time,
+            Phase::Running(_) => self.tool_time = transition.time,
             Phase::Compacting => self.compact_time = Some(transition.time),
             _ => self
                 .phases
                 .push((self.activity.clone(), transition.time)),
         }
-        self.activity = activity_of(transition);
+        self.activity = transition.to.clone();
         self.reading = (transition.to == Phase::Prefill)
             .then(|| Reading::new(Instant::now(), self.last_read_speed));
         self.screen.reading(self.reading.clone());
@@ -751,24 +729,6 @@ impl Report for Presenter {
 
     fn decoded(&mut self, tokens: usize) {
         self.turn_tokens += tokens;
-    }
-}
-
-/// What the dock says after `transition`.
-fn activity_of(transition: &Transition) -> Activity {
-    match (transition.to, &transition.event) {
-        (Phase::Ready, _) => Activity::Ready,
-        (Phase::StartingServer, _) => Activity::StartingServer,
-        (Phase::Transcribing, _) => Activity::Transcribing,
-        (Phase::Thinking, _) => Activity::Thinking,
-        (Phase::Writing, _) => Activity::Writing,
-        (Phase::Compacting, _) => Activity::Compacting,
-        (Phase::Running, PhaseEvent::ToolStart { tool }) => Activity::Running(tool.clone()),
-        (Phase::Retry, PhaseEvent::Stir { attempt, max }) => Activity::Retry {
-            attempt: *attempt,
-            max: *max,
-        },
-        _ => Activity::Prefill,
     }
 }
 
@@ -895,7 +855,7 @@ mod tests {
 
     use super::*;
     use crate::action::{Outcome, Value};
-    use crate::phase::{Observed, Observer};
+    use crate::phase::{Observed, Observer, PhaseEvent};
 
     /// A screen that records what was drawn.
     #[derive(Default)]
@@ -935,7 +895,7 @@ mod tests {
             self.ops.lock().unwrap().push(format!("erase {count}"));
             true
         }
-        fn activity(&self, activity: Activity) {
+        fn activity(&self, activity: Phase) {
             self.ops.lock().unwrap().push(format!("{activity:?}"));
         }
         fn speed(&self, speed: Option<f64>) {

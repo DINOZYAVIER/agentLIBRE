@@ -11,10 +11,11 @@ use std::time::Instant;
 
 use super::editor::{Editor, Outcome};
 use super::term::Key;
-use super::transcript::{Activity, Screen};
+use super::transcript::{Screen, label};
 use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::{Lang, m, repl as texts};
+use crate::phase::Phase;
 use crate::theme::{Role, Theme};
 use crate::tr;
 
@@ -93,7 +94,7 @@ struct State {
     /// The reading of the prompt going on (AGL-046, D19).
     reading: Option<Reading>,
     editor: Editor,
-    activity: Activity,
+    activity: Phase,
     queued: usize,
     live: Vec<String>,
     columns: usize,
@@ -131,7 +132,7 @@ impl Dock {
                 speed: None,
                 reading: None,
                 editor,
-                activity: Activity::Ready,
+                activity: Phase::Ready,
                 queued: 0,
                 live: Vec::new(),
                 columns: size.0.max(8),
@@ -332,7 +333,7 @@ impl Screen for Dock {
         true
     }
 
-    fn activity(&self, activity: Activity) {
+    fn activity(&self, activity: Phase) {
         let mut state = self.lock();
         if state.activity != activity {
             state.activity = activity;
@@ -455,7 +456,7 @@ impl State {
     /// `─ Ready ────` with the number of waiting messages.
     fn separator(&self) -> String {
         let lang = self.lang;
-        let mut label = self.activity.label(lang);
+        let mut label = label(&self.activity, lang);
         if let Some(reading) = &self.reading {
             label.push_str(&format!(" · {}", reading.label(Instant::now(), lang)));
         }
@@ -656,7 +657,7 @@ mod tests {
         dock.key(Key::Newline);
         type_text(&dock, "ab");
         dock.set_queued(2);
-        dock.activity(Activity::Running("bash".into()));
+        dock.activity(Phase::Running("bash".into()));
         let layout = dock.lock().layout();
         assert_eq!(
             layout.rows[0],
@@ -670,7 +671,7 @@ mod tests {
     #[test]
     fn the_separator_row_carries_the_decoding_speed() {
         let (dock, _) = dock(40, 20);
-        dock.activity(Activity::Writing);
+        dock.activity(Phase::Writing);
         let layout = dock.lock().layout();
         assert_eq!(layout.rows[0], format!("─ Writing {}", "─".repeat(30)));
         drop(layout);
@@ -801,7 +802,7 @@ mod tests {
         dock.set_voice(Some(VoiceLabel::Transcribing));
         assert!(separator(&dock).contains("Ready · Transcribing…"));
         // A turn runs beside it (AGL-016, D7): both are shown.
-        dock.activity(Activity::Writing);
+        dock.activity(Phase::Writing);
         assert!(separator(&dock).contains("Writing · Transcribing…"));
         dock.set_voice(None);
         assert!(!separator(&dock).contains("Transcribing"));
