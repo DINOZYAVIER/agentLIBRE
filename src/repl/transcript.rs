@@ -565,19 +565,14 @@ impl Report for Presenter {
         thinking.push_str(piece);
         // D24: the live's line is the card's two lines in one — the label
         // and the first line of the thinking under the gutter, both muted.
-        let columns = self.screen.columns();
-        let gutter = self.theme.paint(Role::InputRule, "  │ ");
-        let snippet = thinking.lines().next().unwrap_or_default();
-        let line = format!(
-            "{}{}{}",
-            self.theme.paint(Role::Muted, tr!(self.lang, m::THINKING)),
-            gutter,
-            self.theme.paint(
-                Role::Muted,
-                &truncate(snippet, columns.saturating_sub(4).max(1))
-            )
+        let card = thinking_lines(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            thinking,
+            Role::Muted,
         );
-        self.screen.live(&line);
+        self.screen.live(&format!("{}{}", card[0], card[1]));
         self.piece();
     }
 
@@ -875,17 +870,18 @@ pub fn thinking_lines(
     thinking: &str,
     role: Role,
 ) -> Vec<String> {
+    let label = tr!(lang, m::THINKING);
     let snippet = thinking.lines().next().unwrap_or_default();
     let gutter = theme.paint(Role::InputRule, "  │ ");
+    // The label and the gutter sit before the snippet on the live's line
+    // (the two lines in one): they take their columns too.
+    let inner = columns.saturating_sub(width(label) + 4).max(1);
     vec![
-        theme.paint(role, tr!(lang, m::THINKING)),
+        theme.paint(role, label),
         format!(
             "{}{}",
             gutter,
-            theme.paint(
-                Role::Muted,
-                &truncate(snippet, columns.saturating_sub(4).max(1))
-            )
+            theme.paint(Role::Muted, &truncate(snippet, inner))
         ),
     ]
 }
@@ -1073,6 +1069,24 @@ mod tests {
         presenter.show_thinking("hm\nmore");
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(printed, vec!["THINKING", "  │ hm"]);
+    }
+
+    #[test]
+    fn the_live_thinking_line_fits_the_columns() {
+        // AGL-066, D24: the live's line is the label, the gutter and the
+        // snippet in one; its width stays within the screen's columns —
+        // the label and the gutter take their columns too.
+        let (mut presenter, mock) = presenter(true);
+        presenter.thinking(&"a".repeat(80));
+        let ops = mock.ops.lock().unwrap().clone();
+        let live = ops
+            .iter()
+            .filter_map(|op| op.strip_prefix("live "))
+            .filter(|text| text.contains("THINKING"))
+            .last()
+            .expect("the live's line")
+            .trim_matches('"');
+        assert!(width(live) <= 40, "{live:?}");
     }
 
     /// The row of `printed` that starts with `start`, without its fill.
