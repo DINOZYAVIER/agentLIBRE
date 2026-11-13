@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::action::{self, Action, Actions};
-use crate::backend::{TOOL_DOCS, ToolCall};
+use crate::backend::ToolCall;
+use crate::tools::{SPECS, Spec};
 use crate::format::tests::qwen;
 use crate::test_server;
 
@@ -52,7 +53,7 @@ fn live_backend() {
     let llama = Llama::new(&test_server::url());
     assert!(llama.context_size().unwrap() >= 4096);
     assert!(llama.count_tokens("Hello, world!").unwrap() > 0);
-    let tools: Vec<&ToolDoc> = TOOL_DOCS.iter().collect();
+    let tools: Vec<&Spec> = SPECS.iter().collect();
 
     // preserve_thinking (D98).
     let messages = history();

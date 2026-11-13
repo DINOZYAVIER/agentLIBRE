@@ -1,5 +1,6 @@
 use super::*;
-use crate::backend::{TOOL_DOCS, ToolCall};
+use crate::backend::ToolCall;
+use crate::tools::SPECS;
 use crate::format::tests::{gemma, qwen};
 
 fn call(id: &str) -> ToolCall {
@@ -91,7 +92,7 @@ fn messages_in_template_form() {
 #[test]
 fn tool_schemas() {
     assert_eq!(
-        tool_json(&TOOL_DOCS[0]),
+        tool_json(&SPECS[0]),
         json!({
             "type": "function",
             "function": {
@@ -110,12 +111,12 @@ fn tool_schemas() {
             },
         })
     );
-    let edit = tool_json(&TOOL_DOCS[1]);
+    let edit = tool_json(&SPECS[1]);
     assert_eq!(
         edit["function"]["parameters"]["required"],
         json!(["path", "old", "new"])
     );
-    let forge = tool_json(&TOOL_DOCS[2]);
+    let forge = tool_json(&SPECS[2]);
     assert_eq!(forge["function"]["name"], "forge");
     let properties = &forge["function"]["parameters"]["properties"];
     let mut names = properties

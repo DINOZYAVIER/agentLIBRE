@@ -13,14 +13,15 @@ use super::llama::{messages_json, tool_json};
 use super::{
     Prefill, PromptProgress,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
-    StructuredCall, ToolDoc, kept_thinking,
+    StructuredCall, kept_thinking,
 };
-use crate::action::Value;
+use crate::action::{Kind, Value};
 use crate::error::Error;
 use crate::format::Format;
 use crate::function::Sampling;
 use crate::interrupt;
 use crate::settings::ServerKind;
+use crate::tools::Spec;
 
 /// How long connecting may take (D97).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -603,21 +604,21 @@ fn render_call(out: &mut String, format: &Format, name: &str, args: &[(String, V
 }
 
 /// A tool doc as a text block of the flat prompt (AGL-030, D2).
-fn render_tool_doc(out: &mut String, doc: &ToolDoc) {
+fn render_tool_doc(out: &mut String, doc: &Spec) {
     out.push_str("- ");
     out.push_str(doc.name);
     out.push_str(": ");
     out.push_str(doc.description);
     out.push('\n');
-    for &(name, integer, description, is_required) in doc.params {
+    for param in doc.params {
         out.push_str("  - ");
-        out.push_str(name);
-        out.push_str(if integer { " (integer" } else { " (string" });
-        if is_required {
+        out.push_str(param.name);
+        out.push_str(if param.kind() == Kind::Int { " (integer" } else { " (string" });
+        if param.required {
             out.push_str(", required");
         }
         out.push(')');
-        if let Some(description) = description {
+        if let Some(description) = param.description {
             out.push_str(": ");
             out.push_str(description);
         }
@@ -628,17 +629,24 @@ fn render_tool_doc(out: &mut String, doc: &ToolDoc) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Message, Prompt, Stop, ToolCall, ToolDoc};
+    use crate::backend::{Message, Prompt, Stop, ToolCall};
     use crate::format::tests::qwen;
+    use crate::tools::spec::{ParamSpec, Values};
 
     /// The doc of the `bash` tool, as the flat prompt shows it (AGL-030, D2).
-    const BASH: ToolDoc = ToolDoc {
+    const BASH: Spec = Spec {
         name: "bash",
         description: "Run a shell command.",
         params: &[
-            ("command", false, None, true),
-            ("timeout", true, Some("Seconds; default 60."), false),
+            ParamSpec::text("command", true, None),
+            ParamSpec::of(
+                "timeout",
+                false,
+                Values::Int { min: 1, max: 600 },
+                Some("Seconds; default 60."),
+            ),
         ],
+        outcomes: &[],
     };
 
     /// The flat prompt of a fixed conversation (AGL-030, D2): the system

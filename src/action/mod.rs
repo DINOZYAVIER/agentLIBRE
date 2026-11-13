@@ -40,110 +40,10 @@ pub struct Tool {
     pub params: Vec<Param>,
 }
 
-/// The built-in tools with unconstrained parameters (D24-D26, D80).
+/// The built-in tools with unconstrained parameters (D24-D26, D80), in
+/// the order of the table (AGL-067, D11).
 pub fn builtin_tools() -> Vec<Tool> {
-    let text = |name: &str| Param {
-        name: name.into(),
-        kind: Kind::Text,
-        required: true,
-        constraint: Constraint::Text,
-    };
-    let optional = |name: &str| Param {
-        name: name.into(),
-        kind: Kind::Text,
-        required: false,
-        constraint: Constraint::Text,
-    };
-    vec![
-        Tool {
-            name: "bash".into(),
-            params: vec![
-                text("command"),
-                Param {
-                    name: "timeout".into(),
-                    kind: Kind::Int,
-                    required: false,
-                    constraint: Constraint::Int { min: 1, max: 600 },
-                },
-            ],
-        },
-        Tool {
-            name: "edit".into(),
-            params: vec![text("path"), text("old"), text("new")],
-        },
-        // A medium into the conversation (AGL-014, D24).
-        Tool {
-            name: "view".into(),
-            params: vec![text("path")],
-        },
-        // The human's search service (AGL-019, D6). The parameters are in
-        // alphabetical order, as the template shows them (see `forge`);
-        // the two optional ones come first, the grammar lets them be skipped.
-        Tool {
-            name: "search".into(),
-            params: vec![
-                Param {
-                    name: "language".into(),
-                    kind: Kind::Text,
-                    required: false,
-                    constraint: Constraint::OneOf(
-                        crate::search::LANGUAGES.iter().map(|l| l.to_string()).collect(),
-                    ),
-                },
-                Param {
-                    name: "limit".into(),
-                    kind: Kind::Int,
-                    required: false,
-                    constraint: Constraint::Int {
-                        min: 1,
-                        max: crate::search::MAX_LIMIT,
-                    },
-                },
-                text("query"),
-                Param {
-                    name: "source".into(),
-                    kind: Kind::Text,
-                    required: true,
-                    constraint: Constraint::OneOf(
-                        crate::search::SOURCES.iter().map(|s| s.to_string()).collect(),
-                    ),
-                },
-            ],
-        },
-        // The memory of the workspace (AGL-006): one tool, an `action` plus
-        // the fields, in alphabetical order as `forge`'s are.
-        Tool {
-            name: "memory".into(),
-            params: vec![
-                text("action"),
-                optional("hook"),
-                optional("name"),
-                optional("new"),
-                optional("old"),
-                optional("text"),
-                optional("title"),
-            ],
-        },
-        // One tool, an `action` plus the per-action fields (AGL-008);
-        // which fields an action needs is the tool's check. The fields
-        // are in alphabetical order: the template shows the parameters
-        // ordered by key, and the grammar lets an optional parameter be
-        // skipped, so a call in the order the model reads them (`new`
-        // before `old`) would lose the parameter that comes "too late".
-        Tool {
-            name: "forge".into(),
-            params: vec![
-                text("action"),
-                optional("name"),
-                optional("new"),
-                optional("old"),
-                optional("section"),
-                optional("state"),
-                optional("text"),
-                optional("title"),
-            ],
-        },
-    ]
+    crate::tools::SPECS.iter().map(crate::tools::Spec::tool).collect()
 }
 
 /// How a tool call ended (D16, D25, D26).
@@ -166,14 +66,6 @@ impl Outcome {
             Outcome::Timeout => "timeout",
             Outcome::Interrupted => "interrupted",
         }
-    }
-}
-
-/// The outcomes a built-in tool can have.
-pub fn outcomes(tool: &str) -> &'static [Outcome] {
-    match tool {
-        "bash" => &[Outcome::Ok, Outcome::Fail, Outcome::Timeout],
-        _ => &[Outcome::Ok, Outcome::Fail],
     }
 }
 

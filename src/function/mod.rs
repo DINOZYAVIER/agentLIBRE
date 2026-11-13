@@ -695,6 +695,9 @@ fn read_state(
         // forge too (AGL-011, Q1; AGL-017, D5); an answer-only state stays
         // answer-only.
         tools.push(builtin_forge());
+        // In the table's order, as the prompt and the grammar list them
+        // (AGL-067, D11).
+        tools.sort_by_key(|tool| crate::tools::position(&tool.name));
         forge_tool = true;
     }
     let answer = section.bool("answer")?.unwrap_or(false);
@@ -760,7 +763,7 @@ fn read_state(
                     transitions.push((key.clone(), None, target));
                     continue;
                 }
-                let outcome = action::outcomes(&key)
+                let outcome = crate::tools::outcomes(&key)
                     .iter()
                     .find(|o| o.name() == name)
                     .ok_or_else(|| problem(&of_tool, &name, FunctionProblem::BadTransitionKey))?;
@@ -779,7 +782,7 @@ fn read_state(
     }
     // Every tool and outcome needs a transition (D21).
     for tool in &tools {
-        for &outcome in action::outcomes(&tool.name) {
+        for &outcome in crate::tools::outcomes(&tool.name) {
             let covered = otherwise.is_some()
                 || transitions
                     .iter()
@@ -811,21 +814,16 @@ fn read_state(
 
 /// Reads `tools`: the built-in tools a state allows and their constraints.
 fn read_tools(mut section: Section, format: &Format) -> Result<Vec<Tool>, Error> {
-    section.check_keys(&["bash", "edit", "forge", "memory", "search", "view"])?;
+    let mut names: Vec<&'static str> = crate::tools::SPECS.iter().map(|spec| spec.name).collect();
+    names.sort_unstable();
+    section.check_keys(&names)?;
     let mut tools = Vec::new();
-    for mut tool in action::builtin_tools() {
+    for (spec, mut tool) in crate::tools::SPECS.iter().zip(action::builtin_tools()) {
         let Some(mut constraints) = section.section(&tool.name)? else {
             continue;
         };
-        let params: &'static [&'static str] = match tool.name.as_str() {
-            "bash" => &["command", "timeout"],
-            "forge" => &["action", "name", "title", "old", "new", "section", "state", "text"],
-            "view" => &["path"],
-            "search" => &["language", "limit", "query", "source"],
-            "memory" => &["action", "hook", "name", "new", "old", "text", "title"],
-            _ => &["path", "old", "new"],
-        };
-        constraints.check_keys(params)?;
+        let params: Vec<&'static str> = spec.params.iter().map(|param| param.name).collect();
+        constraints.check_keys(&params)?;
         for param in &mut tool.params {
             if let Some(section) = constraints.section(&param.name)? {
                 let constraint = read_constraint(section, param.kind, &param.name, format)?;

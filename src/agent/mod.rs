@@ -8,8 +8,7 @@ use std::path::Path;
 use crate::action::{self, Action};
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stop, TOOL_DOCS, ToolCall,
-    ToolDoc,
+    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stop, ToolCall,
 };
 use crate::action::Outcome;
 use crate::error::Error;
@@ -20,7 +19,7 @@ use crate::media;
 use crate::phase::{Observed, Observer, PhaseEvent, StepRecord, Transition};
 use crate::search::Searcher;
 use crate::session::{CutOff, Event, ForgeKind, INTERRUPTED, Session, StopReason};
-use crate::tools::{self, ForgeEnv, ToolResult};
+use crate::tools::{self, ForgeEnv, Spec, ToolResult};
 
 /// What the user sees while a turn runs.
 pub trait Report {
@@ -397,7 +396,7 @@ impl Agent<'_> {
         report: &mut dyn Report,
         mut messages: Vec<Message>,
         uploads: &[String],
-        tools: &[&'static ToolDoc],
+        tools: &[&'static Spec],
         think: bool,
     ) -> Result<Option<TurnEnd>, Error> {
         let function = self.function;
@@ -760,7 +759,7 @@ impl Agent<'_> {
         report: &mut dyn Report,
         state: &crate::function::State,
         messages: &[Message],
-        tools: &[&'static ToolDoc],
+        tools: &[&'static Spec],
         prompt: &str,
         prompt_tokens: usize,
         think: bool,
@@ -1228,8 +1227,8 @@ fn system_prompt(function: &Function, context: usize) -> String {
 
 /// Every tool of any state, for the stable tool list of the prompt (D14,
 /// D113).
-fn function_tools(function: &Function) -> Vec<&'static ToolDoc> {
-    TOOL_DOCS
+fn function_tools(function: &Function) -> Vec<&'static Spec> {
+    tools::SPECS
         .iter()
         .filter(|doc| {
             function

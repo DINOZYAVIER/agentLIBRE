@@ -448,12 +448,6 @@ fn a_tool_with_optional_parameters_is_in_the_order_the_model_reads_them() {
     // than the model reads loses the parameter that comes "too late".
     for tool in builtin_tools() {
         let names: Vec<&str> = tool.params.iter().map(|p| p.name.as_str()).collect();
-        let doc = crate::backend::TOOL_DOCS
-            .iter()
-            .find(|doc| doc.name == tool.name)
-            .expect("every tool has its doc");
-        let documented: Vec<&str> = doc.params.iter().map(|p| p.0).collect();
-        assert_eq!(names, documented, "{}", tool.name);
         if tool.params.iter().any(|p| !p.required) {
             let mut sorted = names.clone();
             sorted.sort();
@@ -606,4 +600,20 @@ fn gemma_opens_its_block_only_empty_without_thinking() {
     assert!(matches(&grammar, &root, "Nine."));
     assert!(!matches(&grammar, &root, "<|channel>thought\nThe user asked.<channel|>Nine."));
     assert!(!matches(&grammar, &root, "<|channel>thought\n<channel|>"));
+}
+
+#[test]
+fn the_grammar_lists_the_tools_in_the_order_of_the_table() {
+    // AGL-067, D11: the prompt lists the tools in the table's order and the
+    // grammar lists the same calls in it.
+    let (grammar, root) = grammar(&qwen(), &builtin(false));
+    let text = grammar.render(&root);
+    let order = ["bash", "edit", "forge", "search", "memory", "view"];
+    let places: Vec<usize> = order
+        .iter()
+        .map(|name| text.find(&format!("<function={name}>")).expect(name))
+        .collect();
+    assert!(places.windows(2).all(|pair| pair[0] < pair[1]), "{places:?}");
+    let names: Vec<String> = builtin_tools().into_iter().map(|tool| tool.name).collect();
+    assert_eq!(names, order);
 }

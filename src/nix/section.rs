@@ -77,12 +77,12 @@ impl Section {
     }
 
     /// Rejects a key outside `allowed`.
-    pub fn check_keys(&self, allowed: &'static [&'static str]) -> Result<(), Error> {
+    pub fn check_keys(&self, allowed: &[&'static str]) -> Result<(), Error> {
         match self.map.keys().find(|key| !allowed.contains(&key.as_str())) {
             Some(key) => Err(Error::UnknownKey {
                 path: self.path.clone(),
                 key: self.key(key),
-                allowed,
+                allowed: allowed.to_vec(),
             }),
             None => Ok(()),
         }

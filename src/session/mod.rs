@@ -1200,16 +1200,10 @@ fn cut_off_notice(cut: &CutOff) -> String {
 
 /// `args` in the parameter order of the built-in tool `tool` (D79).
 fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Value)> {
-    let order: &[&str] = match tool {
-        "bash" => &["command", "timeout"],
-        "edit" => &["path", "old", "new"],
-        "view" => &["path"],
-        "search" => &["language", "limit", "query", "source"],
-        "memory" => &["action", "hook", "name", "new", "old", "text", "title"],
-        "forge" => &["action", "name", "new", "old", "section", "state", "text", "title"],
-        _ => &[],
-    };
-    args.sort_by_key(|(name, _)| order.iter().position(|o| o == name).unwrap_or(usize::MAX));
+    let order = crate::tools::spec(tool).map_or(&[][..], |spec| spec.params);
+    args.sort_by_key(|(name, _)| {
+        order.iter().position(|param| param.name == name).unwrap_or(usize::MAX)
+    });
     args
 }
 

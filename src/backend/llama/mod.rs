@@ -8,12 +8,13 @@ use serde_json::{Map, Value as Json, json};
 
 use super::{
     Prefill, PromptProgress,
-    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop, ToolDoc,
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
     kept_thinking,
 };
-use crate::action::Value;
+use crate::action::{Kind, Value};
 use crate::error::Error;
 use crate::function::Sampling;
+use crate::tools::Spec;
 use crate::interrupt;
 use crate::settings::ServerKind;
 
@@ -410,17 +411,18 @@ pub(crate) fn messages_json(prompt: &Prompt) -> Vec<Json> {
 }
 
 /// A tool as a JSON-schema function for the template (D95).
-pub(crate) fn tool_json(doc: &ToolDoc) -> Json {
+pub(crate) fn tool_json(doc: &Spec) -> Json {
     let mut properties = Map::new();
     let mut required = Vec::new();
-    for &(name, integer, description, is_required) in doc.params {
+    for param in doc.params {
+        let integer = param.kind() == Kind::Int;
         let mut property = json!({"type": if integer { "integer" } else { "string" }});
-        if let Some(description) = description {
+        if let Some(description) = param.description {
             property["description"] = description.into();
         }
-        properties.insert(name.into(), property);
-        if is_required {
-            required.push(name);
+        properties.insert(param.name.into(), property);
+        if param.required {
+            required.push(param.name);
         }
     }
     json!({

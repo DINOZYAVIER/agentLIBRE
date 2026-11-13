@@ -16,9 +16,11 @@ use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
 
 mod output;
+pub(crate) mod spec;
 
 use output::Capture;
 pub use output::{Output, limited, shown};
+pub use spec::{SPECS, Spec, outcomes, position, spec};
 
 /// `timeout` when the call does not give one (D26).
 const DEFAULT_TIMEOUT: u64 = 60;
