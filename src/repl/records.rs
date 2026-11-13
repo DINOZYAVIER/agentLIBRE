@@ -143,7 +143,10 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
 /// One line of a call's input (D6): the command, the file of an edit, the
 /// query of a search. The `result` is what a forge `list` shows of its
 /// output (D18).
-pub fn call_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
+/// One line of the input (D6): the command, the file, the query. A forge
+/// or a memory call carries no hint of its own — its action is on the
+/// tool's line (D28), the full input in the inspect mode.
+pub fn call_hint(call: &ToolCall) -> String {
     let text = |name: &str| {
         call.args
             .iter()
@@ -153,11 +156,12 @@ pub fn call_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
             })
             .unwrap_or_default()
     };
+    if matches!(call.name.as_str(), "forge" | "memory") {
+        return String::new();
+    }
     let head: String = match call.name.as_str() {
         "edit" => text("path").to_owned(),
         "search" => format!("{}: {}", text("source"), text("query")),
-        "forge" => forge_hint(call, result),
-        "memory" => crate::cli::report::call_summary(call),
         _ => text("command").to_owned(),
     };
     let line = head.lines().next().unwrap_or_default();
@@ -179,52 +183,15 @@ pub fn call_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
         .unwrap_or_default()
 }
 
-/// The hint of a forge call (D10, D18): its summary, or, for a `list`,
-/// the first tasks of its result, chronologically, the newest first.
-fn forge_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
-    let action = call
-        .args
+/// The action of a forge or a memory call, on the tool's line (D28).
+pub fn call_action(call: &ToolCall) -> Option<String> {
+    call.args
         .iter()
         .find_map(|(key, value)| match value {
-            Value::Text(value) if key == "action" => Some(value.as_str()),
+            Value::Text(value) if key == "action" => Some(value.as_str().to_owned()),
             _ => None,
         })
-        .unwrap_or_default();
-    if action == "list"
-        && let Some(result) = result
-        && result.outcome == Outcome::Ok
-        && let Some(brief) = forge_list_brief(result)
-    {
-        return format!("list {brief}");
-    }
-    crate::cli::report::call_summary(call)
-}
-
-/// The first tasks of a forge `list` result, the newest first (D18):
-/// `name status, … (+N)`.
-fn forge_list_brief(result: &ToolResult) -> Option<String> {
-    let mut tasks: Vec<(String, String)> = Vec::new();
-    for line in result.content.lines() {
-        let fields: Vec<&str> = line.split_whitespace().take(4).collect();
-        let [name, _type, status, date] = fields.as_slice() else {
-            continue;
-        };
-        // The date is `YYYY-MM-DD`, so the rows sort by it.
-        if date.len() == 10 && date.chars().filter(|ch| *ch == '-').count() == 2 {
-            tasks.push((date.to_string(), format!("{name} {status}")));
-        }
-    }
-    if tasks.is_empty() {
-        return None;
-    }
-    tasks.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    let shown: Vec<&str> = tasks.iter().take(3).map(|(_, task)| task.as_str()).collect();
-    let rest = tasks.len().saturating_sub(3);
-    let mut brief = shown.join(", ");
-    if rest > 0 {
-        brief.push_str(&format!(" (+{rest})"));
-    }
-    Some(brief)
+        .filter(|action| !action.is_empty())
 }
 
 /// The label of a phase as the observer names it in the file, in
@@ -309,7 +276,7 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 records.push(Record::Tool {
                     call: call.clone(),
                     result: None,
-                    hint: call_hint(call, None),
+                    hint: call_hint(call),
                     phases,
                     time,
                     thinking: pending_thinking.take(),
@@ -331,13 +298,11 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                     continue;
                 };
                 let index = records.len() - 1 - offset;
-                if let Record::Tool { call, result, hint, .. } = &mut records[index] {
+                if let Record::Tool { result, .. } = &mut records[index] {
                     *result = Some(ToolResult {
                         outcome: *outcome,
                         content: content.clone(),
                     });
-                    // The hint of a forge `list` is its result (D18).
-                    *hint = call_hint(call, result.as_ref());
                 }
             }
             Event::Answer(text) => records.push(Record::Answer {
@@ -601,7 +566,7 @@ mod tests {
 
     #[test]
     fn the_hint_is_one_line_of_the_input() {
-        assert_eq!(call_hint(&call("c1", "ls\npwd"), None), "ls");
+        assert_eq!(call_hint(&call("c1", "ls\npwd")), "ls");
         let edit = ToolCall {
             id: "c1".into(),
             name: "edit".into(),
@@ -611,7 +576,7 @@ mod tests {
                 ("new".into(), Value::Text("y".into())),
             ],
         };
-        assert_eq!(call_hint(&edit, None), "a.rs");
+        assert_eq!(call_hint(&edit), "a.rs");
         let search = ToolCall {
             id: "c1".into(),
             name: "search".into(),
@@ -620,7 +585,21 @@ mod tests {
                 ("query".into(), Value::Text("agentLIBRE".into())),
             ],
         };
-        assert_eq!(call_hint(&search, None), "web: agentLIBRE");
+        assert_eq!(call_hint(&search), "web: agentLIBRE");
+        // A call whose input has no known line keeps its first text
+        // argument (D12).
+        let unknown = ToolCall {
+            id: "c1".into(),
+            name: "view".into(),
+            args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
+        };
+        assert_eq!(call_hint(&unknown), "/tmp/a.png");
+    }
+
+    #[test]
+    fn the_forge_and_the_memory_carry_no_hint_of_their_own() {
+        // AGL-066, D28: the action is on the tool's line, the full input
+        // in the inspect mode; no summary row.
         let forge = ToolCall {
             id: "c1".into(),
             name: "forge".into(),
@@ -631,7 +610,8 @@ mod tests {
                 ("text".into(), Value::Text("the bullet".into())),
             ],
         };
-        assert_eq!(call_hint(&forge, None), "append agl-066 Progress");
+        assert_eq!(call_hint(&forge), "");
+        assert_eq!(call_action(&forge), Some("append".to_owned()));
         let memory = ToolCall {
             id: "c1".into(),
             name: "memory".into(),
@@ -640,61 +620,9 @@ mod tests {
                 ("title".into(), Value::Text("Build".into())),
             ],
         };
-        assert_eq!(call_hint(&memory, None), "add Build");
-        // A call whose input has no known line keeps its first text
-        // argument (D12).
-        let unknown = ToolCall {
-            id: "c1".into(),
-            name: "view".into(),
-            args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
-        };
-        assert_eq!(call_hint(&unknown, None), "/tmp/a.png");
-    }
-
-    #[test]
-    fn the_forge_list_hint_shows_the_newest_first() {
-        // AGL-066, D18: the first tasks of the result, chronologically,
-        // the newest first; the rows it does not name stay out.
-        let result = ToolResult {
-            outcome: Outcome::Ok,
-            content: "agl-001-a spec done 2026-11-01\nglitch\nagl-003-c spec open 2026-11-09\nagl-002-b spec in-progress 2026-11-05\nagl-004-d spec backlog 2026-11-11".into(),
-        };
-        let call = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![("action".into(), Value::Text("list".into()))],
-        };
-        assert_eq!(
-            call_hint(&call, Some(&result)),
-            "list agl-004-d backlog, agl-003-c open, agl-002-b in-progress (+1)"
-        );
-        // Without its result, the hint is the summary; a failed list keeps
-        // it too.
-        assert_eq!(call_hint(&call, None), "list");
-        let failed = ToolResult {
-            outcome: Outcome::Fail,
-            content: "no such store".into(),
-        };
-        assert_eq!(call_hint(&call, Some(&failed)), "list");
-    }
-
-    #[test]
-    fn the_forge_edit_hint_shows_what_changed() {
-        // AGL-066, D18: the edit's first lines of old and new.
-        let edit = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("edit".into())),
-                ("name".into(), Value::Text("agl-066".into())),
-                ("old".into(), Value::Text("the old words\nand more".into())),
-                ("new".into(), Value::Text("the new words".into())),
-            ],
-        };
-        assert_eq!(
-            call_hint(&edit, None),
-            "edit agl-066 “the old words” → “the new words”"
-        );
+        assert_eq!(call_hint(&memory), "");
+        assert_eq!(call_action(&memory), Some("add".to_owned()));
+        assert_eq!(call_action(&call("c1", "ls")), None);
     }
 
     #[test]

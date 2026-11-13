@@ -474,18 +474,24 @@ impl Presenter {
         let gutter = self.theme.paint(Role::InputRule, "  │ ");
         let inner = columns.saturating_sub(4).max(1);
         let (status_text, status_role) = records::status(result.map(|result| result.outcome));
+        // D28: a forge or a memory call carries its action on the line,
+        // and no row of its own.
+        let action = records::call_action(call);
         let mut lines = Vec::new();
         lines.push(format!(
-            "{}  {}",
+            "{}  {}{}",
             self.theme.paint(
                 Role::Tool,
                 &format!("{} {}", tr!(self.lang, m::TOOL_LABEL), call.name)
             ),
-            self.theme.paint(status_role, &status_text)
+            self.theme.paint(status_role, &status_text),
+            action.map_or(String::new(), |action| format!(" {action}"))
         ));
         // D26: the tool's row, like the thinking's, in the muted color.
-        for row in hard_wrap(&clean(hint), inner) {
-            lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
+        if !hint.is_empty() {
+            for row in hard_wrap(&clean(hint), inner) {
+                lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
+            }
         }
         if self.settings.frame {
             // D27: as the answer's rule — the phases in the activity's
@@ -651,7 +657,7 @@ impl Report for Presenter {
             call.name,
             texts::duration(self.tool_time.as_secs())
         ));
-        let hint = records::call_hint(call, Some(result));
+        let hint = records::call_hint(call);
         self.step_block();
         self.screen
             .print(&self.card(call, Some(result), &hint, &items));
@@ -987,7 +993,7 @@ mod tests {
     fn show_card(presenter: &Presenter, call: &ToolCall, result: &ToolResult, items: &[String]) {
         presenter
             .screen
-            .print(&presenter.card(call, Some(result), &records::call_hint(call, None), items));
+            .print(&presenter.card(call, Some(result), &records::call_hint(call), items));
     }
 
     #[test]
