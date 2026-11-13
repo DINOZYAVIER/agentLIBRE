@@ -10,12 +10,10 @@ use crate::agent::TurnEnd;
 use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
-use crate::cli::serve::ServerProgress;
 use crate::error::Error;
 use crate::i18n::{m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
-use crate::phase::{Observer, PhaseEvent};
 use crate::session::{CommandRun, Event, Session, StopReason};
 use crate::status::{
     Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
@@ -33,7 +31,6 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let function_name = plane.function_name;
     let backend = plane.backend;
     let lang = plane.lang;
-    let autostart = plane.autostart;
     let memory = plane.memory;
     let sessions_dir = plane.sessions_dir;
     let project = plane.project;
@@ -240,40 +237,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         let text = attach::with_placeholders(&placeholders, message);
         placeholders.clear();
         let attached = std::mem::take(&mut pending);
-        // The FSM of the turn sees the start too (AGL-046, D10).
-        let mut observer = Observer::new();
-        observer.attach(&plane.session);
-        // The server is started here when it does not answer, at the
-        // first request (AGL-015, D10, AGL-024).
-        let ready = autostart
-            .ensure(&mut |progress| match progress {
-                ServerProgress::Starting => {
-                    observer.enter(PhaseEvent::ServerStart, &mut report);
-                }
-                ServerProgress::Line(line) => eprintln!("{line}"),
-            })
-            .and_then(|()| backend.context_size());
-        let end = ready.and_then(|size| {
-            plane.context = Some(size);
-            // The media the message names are stored; an audio is
-            // transcribed here (AGL-014).
-            attach::store(
-                &mut plane.session,
-                attached,
-                &text,
-                backend,
-                autostart,
-                &mut |line| {
-                    observer.enter(PhaseEvent::Transcribe, &mut report);
-                    eprintln!("{line}");
-                },
-            )?;
-            plane
-                .agent(size)
-                .turn_observed(&text, &mut report, &mut observer)
-        });
-        // A start that failed never reached the agent.
-        observer.end(PhaseEvent::Failed, &mut report);
+        let end = plane.turn(&text, attached, &mut report);
         state = None;
         match end {
             Ok(TurnEnd::Answer(text)) => outln!("{text}"),

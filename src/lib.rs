@@ -662,24 +662,9 @@ fn agent_session(
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
     observer.attach(&plane.session);
-    let stored = attach::store(
-        &mut plane.session,
-        pending,
-        &message,
-        backend.as_ref(),
-        &autostart,
-        &mut |line| {
-            observer.on(phase::PhaseEvent::Transcribe);
-            eprintln!("{line}");
-        },
-    );
-    if stored.is_err() {
-        observer.on(phase::PhaseEvent::Failed);
-    }
-    stored?;
-    let mut agent = plane.agent(context.expect("`-p` read the context size"));
+    let size = context.expect("`-p` read the context size");
     let mut report = StderrReport::new(lang);
-    match agent.turn_observed(&message, &mut report, &mut observer)? {
+    match plane.turn_on(size, &message, pending, &mut observer, &mut report)? {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))

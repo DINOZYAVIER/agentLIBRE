@@ -6,16 +6,32 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::Agent;
-use crate::attach::Transcriber;
+use crate::agent::{Agent, Sink, TurnEnd};
+use crate::attach::{self, Pending, Transcriber};
 use crate::backend::{Backend, ReasoningLevel};
-use crate::cli::serve::Autostart;
+use crate::cli::serve::{Autostart, ServerProgress};
+use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::Lang;
 use crate::memory::Home;
+use crate::phase::{Observer, PhaseEvent};
 use crate::search::Searcher;
 use crate::session::Session;
 use crate::tools::ForgeEnv;
+
+/// What a surface gives a turn on the plane (AGL-067): where the reports go,
+/// and the few things it shows of the turn's start.
+pub trait Turn: Sink {
+    /// A line the start of the server or the transcription says (AGL-015,
+    /// AGL-043 F2).
+    fn line(&mut self, line: &str);
+    /// The server answered, with a context of `context` tokens.
+    fn context(&mut self, _context: usize) {}
+    /// The media the message names are stored in `session` (AGL-014).
+    fn stored(&mut self, _session: &Session) {}
+    /// The turn is over, before the FSM is closed.
+    fn over(&mut self) {}
+}
 
 pub struct Plane<'a> {
     pub function: &'a Function,
@@ -68,5 +84,72 @@ impl Plane<'_> {
             memory: self.memory,
             about: self.about,
         }
+    }
+
+    /// A turn for the message `message` and its `attached` media: the server
+    /// is brought up when it does not answer, at the first request (AGL-015,
+    /// D10, AGL-024), and its context size read; then [`Plane::turn_on`].
+    pub fn turn(
+        &mut self,
+        message: &str,
+        attached: Vec<Pending>,
+        surface: &mut dyn Turn,
+    ) -> Result<TurnEnd, Error> {
+        // The FSM of the turn sees the start too (AGL-046, D10).
+        let mut observer = Observer::new();
+        observer.attach(&self.session);
+        let ready = self
+            .autostart
+            .ensure(&mut |progress| match progress {
+                ServerProgress::Starting => observer.enter(PhaseEvent::ServerStart, &mut *surface),
+                ServerProgress::Line(line) => surface.line(line),
+            })
+            .and_then(|()| self.backend.context_size());
+        match ready {
+            Ok(size) => self.turn_on(size, message, attached, &mut observer, surface),
+            Err(error) => {
+                // A start that failed never reached the agent.
+                observer.end(PhaseEvent::Failed, &mut *surface);
+                surface.over();
+                Err(error)
+            }
+        }
+    }
+
+    /// The turn on a server that is up, with a context of `context` tokens:
+    /// the media the message names are stored, an audio is transcribed
+    /// (AGL-014), the agent takes the turn. `observer` saw what came before.
+    pub fn turn_on(
+        &mut self,
+        context: usize,
+        message: &str,
+        attached: Vec<Pending>,
+        observer: &mut Observer,
+        surface: &mut dyn Turn,
+    ) -> Result<TurnEnd, Error> {
+        self.context = Some(context);
+        surface.context(context);
+        let end = attach::store(
+            &mut self.session,
+            attached,
+            message,
+            self.backend,
+            self.autostart,
+            // A notice of the store is the whisper server's start or the
+            // transcription (AGL-043 F2).
+            &mut |line| {
+                observer.enter(PhaseEvent::Transcribe, &mut *surface);
+                surface.line(line);
+            },
+        )
+        .and_then(|()| {
+            surface.stored(&self.session);
+            self.agent(context)
+                .turn_observed(message, &mut *surface, observer)
+        });
+        surface.over();
+        // A start that failed never reached the agent.
+        observer.end(PhaseEvent::Failed, &mut *surface);
+        end
     }
 }

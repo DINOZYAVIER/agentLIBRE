@@ -20,6 +20,12 @@ pub struct StderrReport {
     call: Option<ToolCall>,
 }
 
+impl crate::plane::Turn for StderrReport {
+    fn line(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
 impl Sink for StderrReport {
     /// Takes what the turn tells (AGL-067, D3).
     fn send(&mut self, report: Report) {

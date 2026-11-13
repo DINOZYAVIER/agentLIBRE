@@ -29,7 +29,8 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
-use crate::attach::{self, Pending};
+use crate::plane::Turn;
+use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::serve::{ServerProgress, is_yes};
@@ -598,6 +599,39 @@ fn show(presenter: &mut Presenter, control: &Control, report: Report) {
     presenter.send(report);
 }
 
+/// A turn of the REPL: its reports are drawn, what the start says is shown
+/// as a notice, the dock and `/status` follow the server and the media.
+struct ReplTurn<'a> {
+    presenter: &'a mut Presenter,
+    control: &'a Control,
+    dock: &'a Dock,
+}
+
+impl Sink for ReplTurn<'_> {
+    fn send(&mut self, report: Report) {
+        show(self.presenter, self.control, report);
+    }
+}
+
+impl Turn for ReplTurn<'_> {
+    fn line(&mut self, line: &str) {
+        self.presenter.show_notice(line, Role::Muted);
+    }
+
+    fn context(&mut self, context: usize) {
+        self.dock.set_context_size(context);
+        self.control.lock().info.context = Some(context);
+    }
+
+    fn stored(&mut self, session: &Session) {
+        self.control.set_media_counts(session);
+    }
+
+    fn over(&mut self) {
+        self.presenter.close();
+    }
+}
+
 /// What the main thread waits for.
 enum Next {
     Message(Queued),
@@ -1094,52 +1128,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 dock.set_queued(control.lock().queue.len());
                 presenter.begin_turn();
                 presenter.show_user(&message);
-                // The FSM of the turn sees the start too (AGL-046, D10).
-                let mut observer = Observer::new();
-                observer.attach(&plane.session);
                 // The running turn keeps the level it started with (AGL-013).
                 plane.reasoning = control.lock().reasoning;
-                // The server is started here when it does not answer, at
-                // the first request, and its context size read (AGL-015,
-                // AGL-024).
-                let ready = autostart
-                    .ensure(&mut |progress| match progress {
-                        ServerProgress::Starting => {
-                            observer.enter(PhaseEvent::ServerStart, &mut presenter);
-                        }
-                        ServerProgress::Line(line) => presenter.show_notice(line, Role::Muted),
-                    })
-                    .and_then(|()| backend.context_size());
-                let result = ready.and_then(|context| {
-                    dock.set_context_size(context);
-                    control.lock().info.context = Some(context);
-                    // The media the message names are stored, an audio is
-                    // transcribed (AGL-014).
-                    attach::store(
-                        &mut plane.session,
-                        pending,
-                        &message,
-                        backend,
-                        autostart,
-                        // A notice of the store is the whisper server's
-                        // start or the transcription (AGL-043 F2).
-                        &mut |line| {
-                            observer.enter(PhaseEvent::Transcribe, &mut presenter);
-                            presenter.show_notice(line, Role::Muted)
-                        },
-                    )?;
-                    control.set_media_counts(&plane.session);
-                    plane
-                        .agent(context)
-                        .turn_observed(
-                        &message,
-                        &mut |report: Report| show(&mut presenter, &control, report),
-                        &mut observer,
-                    )
-                });
-                presenter.close();
-                // A start that failed never reached the agent.
-                observer.end(PhaseEvent::Failed, &mut presenter);
+                let result = plane.turn(
+                    &message,
+                    pending,
+                    &mut ReplTurn {
+                        presenter: &mut presenter,
+                        control: &control,
+                        dock: &dock,
+                    },
+                );
                 let mut failed = None;
                 match result {
                     Ok(TurnEnd::Answer(_)) => {}
