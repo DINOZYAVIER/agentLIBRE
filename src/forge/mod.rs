@@ -9,7 +9,10 @@
 //! body). The `forge/v2` envelope lives here; the `task-spec` type is in
 //! [`task_spec`].
 
+mod actions;
 pub mod task_spec;
+
+pub use actions::{change_status, find_artifact, new_task_spec, store_names};
 
 use std::fs;
 use std::os::unix::ffi::OsStrExt;

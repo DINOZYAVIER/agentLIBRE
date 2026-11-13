@@ -469,7 +469,7 @@ fn forge_show(
     let Some(name) = name else {
         return missing_field(lang, "show", "name");
     };
-    match find_artifact(ws, name) {
+    match crate::forge::find_artifact(ws, name) {
         Ok(artifact) => {
             let text = forge::render(&artifact);
             ToolResult {
@@ -482,59 +482,30 @@ fn forge_show(
 }
 
 /// `forge new` (AGL-008): the scaffold of a new task-spec, the same
-/// engine path as the CLI's `forge new`.
+/// engine path as the CLI's `forge new`; its name is the one the tool made.
 fn forge_new(
     ws: &crate::forge::Workspace,
     title: &Option<String>,
     lang: crate::i18n::Lang,
 ) -> (ToolResult, Option<String>) {
-    use crate::forge::{self, task_spec};
     use crate::i18n::m;
     use crate::tr;
     let Some(title) = title else {
         return (missing_field(lang, "new", "title"), None);
     };
-    let names = match store_names(ws) {
-        Ok(names) => names,
-        Err(error) => return (forge_fail(error.message(lang)), None),
-    };
-    let name = format!(
-        "agl-{:03}-{}",
-        task_spec::next_number(&names),
-        task_spec::slug(title)
-    );
-    if names.contains(&name) {
-        return (
-            forge_fail(
-                crate::error::Error::NameTaken {
-                    name: name.clone(),
-                    dir: ws.dir.join("forge"),
-                }
-                .message(lang),
-            ),
-            None,
-        );
+    // The marker line of a store materialized by the write is not tool
+    // output.
+    match crate::forge::new_task_spec(ws, lang, title, None) {
+        Ok(created) => {
+            let result = ToolResult {
+                outcome: Outcome::Ok,
+                content: tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display())
+                    .to_owned(),
+            };
+            (result, Some(created.name))
+        }
+        Err(error) => (forge_fail(error.message(lang)), None),
     }
-    // The store is materialized on the first write; the marker line is
-    // not tool output.
-    if let Err(error) = forge::materialize(ws, lang) {
-        return (forge_fail(error.message(lang)), None);
-    }
-    let path = ws
-        .dir
-        .join("forge")
-        .join(task_spec::TYPE)
-        .join(format!("{name}.md"));
-    let mut artifact = task_spec::scaffold(&name, &task_spec::today());
-    artifact.path = path.clone();
-    if let Err(error) = forge::write_artifact(&artifact) {
-        return (forge_fail(error.message(lang)), None);
-    }
-    let result = ToolResult {
-        outcome: Outcome::Ok,
-        content: tr!(lang, m::FORGE_NEW_CREATED, path = path.display()).to_owned(),
-    };
-    (result, Some(name))
 }
 
 /// `forge edit` (AGL-008): replaces one occurrence in the body, the
@@ -563,7 +534,7 @@ fn forge_edit(
     let Some(new) = new else {
         return missing_field(lang, "edit", "new");
     };
-    let mut artifact = match find_artifact(ws, name) {
+    let mut artifact = match crate::forge::find_artifact(ws, name) {
         Ok(artifact) => artifact,
         Err(error) => return forge_fail(error.message(lang)),
     };
@@ -681,7 +652,7 @@ fn forge_append(
     let Some(text) = text else {
         return missing_field(lang, "append", "text");
     };
-    let mut artifact = match find_artifact(ws, name) {
+    let mut artifact = match crate::forge::find_artifact(ws, name) {
         Ok(artifact) => artifact,
         Err(error) => return forge_fail(error.message(lang)),
     };
@@ -754,8 +725,6 @@ fn forge_status(
     lang: crate::i18n::Lang,
 ) -> ToolResult {
     use crate::error::Error;
-    use crate::forge::{self, task_spec};
-    use crate::forge::task_spec::Status;
     use crate::i18n::m;
     use crate::tr;
     let Some(name) = name else {
@@ -764,59 +733,22 @@ fn forge_status(
     let Some(state) = state else {
         return missing_field(lang, "status", "state");
     };
-    let mut artifact = match find_artifact(ws, name) {
-        Ok(artifact) => artifact,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
-    if artifact.type_name != task_spec::TYPE {
-        return not_task_spec(lang, name, artifact.type_name.clone(), "status");
-    }
-    let from =
-        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
-    let to = match Status::parse(state) {
-        Some(to) => to,
-        None => {
-            return forge_fail(
-                Error::BadState {
-                    state: state.clone(),
-                }
-                .message(lang),
+    match crate::forge::change_status(ws, name, state) {
+        Ok(changed) => ToolResult {
+            outcome: Outcome::Ok,
+            content: tr!(
+                lang,
+                m::FORGE_STATUS_CHANGED,
+                name = name,
+                from = changed.from.name(),
+                to = changed.to.name()
             )
+            .to_owned(),
+        },
+        Err(Error::NotTaskSpec { name, type_name }) => {
+            not_task_spec(lang, &name, type_name, "status")
         }
-    };
-    if from == to || !from.allows(to) {
-        if matches!(from, Status::Done | Status::Canceled) {
-            return forge_fail(
-                Error::TerminalState {
-                    name: name.to_string(),
-                    from: from.name().to_string(),
-                }
-                .message(lang),
-            );
-        }
-        return forge_fail(
-            Error::BadTransition {
-                from: from.name().to_string(),
-                to: to.name().to_string(),
-            }
-            .message(lang),
-        );
-    }
-    artifact.status = to.name().to_string();
-    artifact.updated = task_spec::today();
-    if let Err(error) = forge::write_artifact(&artifact) {
-        return forge_fail(error.message(lang));
-    }
-    ToolResult {
-        outcome: Outcome::Ok,
-        content: tr!(
-            lang,
-            m::FORGE_STATUS_CHANGED,
-            name = name,
-            from = from.name(),
-            to = to.name()
-        )
-        .to_owned(),
+        Err(error) => forge_fail(error.message(lang)),
     }
 }
 
@@ -837,7 +769,7 @@ fn forge_remove(
     let Some(name) = name else {
         return missing_field(lang, "remove", "name");
     };
-    let artifact = match find_artifact(ws, name) {
+    let artifact = match crate::forge::find_artifact(ws, name) {
         Ok(artifact) => artifact,
         Err(error) => return forge_fail(error.message(lang)),
     };
@@ -924,13 +856,13 @@ fn forge_rename(
             None,
         );
     }
-    let artifact = match find_artifact(ws, name) {
+    let artifact = match crate::forge::find_artifact(ws, name) {
         Ok(artifact) => artifact,
         Err(error) => return (forge_fail(error.message(lang)), None),
     };
     // The name is the front-matter field; a stray file with the new
     // stem in its type directory would be clobbered by the write.
-    let taken = match store_names(ws) {
+    let taken = match crate::forge::store_names(ws) {
         Ok(names) => names,
         Err(error) => return (forge_fail(error.message(lang)), None),
     };
@@ -1044,40 +976,6 @@ fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResu
         field = field,
         fields = fields
     ))
-}
-
-/// The artifact of the store of `ws` named `name` (AGL-008): the files
-/// are parsed one by one, the match is on the `name` field, the file is
-/// `forge/<type>/<name>.md` (the CLI's `find_artifact`).
-fn find_artifact(
-    ws: &crate::forge::Workspace,
-    name: &str,
-) -> Result<crate::forge::Artifact, crate::error::Error> {
-    use crate::error::Error;
-    use crate::forge;
-    for path in forge::artifact_files(&ws.dir)? {
-        if let Ok(artifact) = forge::load_artifact(&path)
-            && artifact.name == name
-        {
-            return Ok(artifact);
-        }
-    }
-    Err(Error::ArtifactNotFound {
-        name: name.to_owned(),
-        dir: ws.dir.join("forge"),
-    })
-}
-
-/// The `name`s of the artifacts of the store of `ws` (AGL-008).
-fn store_names(ws: &crate::forge::Workspace) -> Result<Vec<String>, crate::error::Error> {
-    use crate::forge::{self, Header};
-    let mut names = Vec::new();
-    for path in forge::artifact_files(&ws.dir)? {
-        if let Header::Artifact(artifact) = forge::read_header(&path)? {
-            names.push(artifact.name);
-        }
-    }
-    Ok(names)
 }
 
 /// For each of `lines`, whether it is part of a fenced code block (the

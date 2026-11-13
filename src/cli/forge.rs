@@ -11,7 +11,7 @@ use std::process::{ExitCode, Stdio};
 use crate::error::Error;
 use crate::forge;
 use crate::forge::task_spec;
-use crate::forge::task_spec::{GitFlag, Status};
+use crate::forge::task_spec::GitFlag;
 use crate::forge::{Artifact, Header, Workspace};
 use crate::i18n::{Lang, Msg, m};
 use crate::paths::Paths;
@@ -94,19 +94,19 @@ pub fn run(
     match action {
         ForgeAction::List => list(&workspace()?),
         ForgeAction::Show { name } => {
-            let artifact = find_artifact(paths, &workspace()?, &name)?;
+            let artifact = forge::find_artifact(&workspace()?, &name)?;
             // A closed pipe, as in `forge show x | head`, is not an error.
             let _ = write!(io::stdout(), "{}", forge::render(&artifact));
             Ok(ExitCode::SUCCESS)
         }
-        ForgeAction::New { title, name } => new_task_spec(paths, &workspace()?, lang, title, name),
-        ForgeAction::Status { name, state } => status(paths, &workspace()?, lang, &name, &state),
-        ForgeAction::Check { name } => check(paths, &workspace()?, cwd, lang, &name),
+        ForgeAction::New { title, name } => new_task_spec(&workspace()?, lang, title, name),
+        ForgeAction::Status { name, state } => status(&workspace()?, lang, &name, &state),
+        ForgeAction::Check { name } => check(&workspace()?, cwd, lang, &name),
         ForgeAction::Range { name, anchor, last } => {
-            range(paths, &workspace()?, lang, &name, anchor, last)
+            range(&workspace()?, lang, &name, anchor, last)
         }
-        ForgeAction::Log { name } => log(paths, &workspace()?, &name),
-        ForgeAction::Diff { name, commit } => diff(paths, &workspace()?, &name, commit.as_deref()),
+        ForgeAction::Log { name } => log(&workspace()?, &name),
+        ForgeAction::Diff { name, commit } => diff(&workspace()?, &name, commit.as_deref()),
         ForgeAction::Rehome { store, new_store } => {
             // The explicit form of the adoption: it does not go through
             // the lookup that asks.
@@ -270,45 +270,13 @@ fn git_flag_cell(artifact: &Artifact, project: &Path) -> Result<String, Error> {
 }
 
 /// `forge new task-spec --title <t> [--name <n>]`: the scaffold of a
-/// new task-spec, `agl-<max+1>-<slug(title)>` or `--name` verbatim.
-fn new_task_spec(
-    paths: &Paths,
-    ws: &Workspace,
-    lang: Lang,
-    title: String,
-    name: Option<String>,
-) -> Result<ExitCode, Error> {
-    let existing = artifact_names(ws)?;
-    let name = match name {
-        Some(name) => {
-            if !valid_name(&name) {
-                return Err(Error::InvalidName(name));
-            }
-            name
-        }
-        None => format!(
-            "agl-{:03}-{}",
-            task_spec::next_number(&existing),
-            task_spec::slug(&title)
-        ),
-    };
-    if existing.contains(&name) {
-        return Err(Error::NameTaken {
-            name: name.clone(),
-            dir: paths.forge_dir(&ws.key),
-        });
-    }
-    let path = paths
-        .forge_dir(&ws.key)
-        .join(task_spec::TYPE)
-        .join(format!("{name}.md"));
-    let mut artifact = task_spec::scaffold(&name, &task_spec::today());
-    artifact.path = path.clone();
-    for line in forge::materialize(ws, lang)? {
+/// new task-spec, named after the store's numbering or `--name` verbatim.
+fn new_task_spec(ws: &Workspace, lang: Lang, title: String, name: Option<String>) -> Result<ExitCode, Error> {
+    let created = forge::new_task_spec(ws, lang, &title, name.as_deref())?;
+    for line in &created.lines {
         outln!("{line}");
     }
-    forge::write_artifact(&artifact)?;
-    outln!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = path.display()));
+    outln!("{}", tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display()));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -353,60 +321,22 @@ fn new_args(args: &[OsString]) -> Result<ForgeAction, Error> {
     Ok(ForgeAction::New { title, name })
 }
 
-/// A name the human gave with `--name`: non-empty, no path separator.
-fn valid_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && !name.contains('\\')
-}
-
 /// `forge status <name> <state>`: validates the transition, bumps
 /// `updated`, rewrites the file with the body byte-identical, and prints
 /// the range of the task, which it does not touch (AGL-044 D2).
-fn status(
-    paths: &Paths,
-    ws: &Workspace,
-    lang: Lang,
-    name: &str,
-    state: &str,
-) -> Result<ExitCode, Error> {
-    let artifact = find_artifact(paths, ws, name)?;
-    if artifact.type_name != task_spec::TYPE {
-        return Err(Error::NotTaskSpec {
-            name: name.to_string(),
-            type_name: artifact.type_name,
-        });
-    }
-    let from = Status::parse(&artifact.status)
-        .ok_or_else(|| Error::BadState { state: artifact.status.clone() })?;
-    let to = Status::parse(state).ok_or_else(|| Error::BadState {
-        state: state.to_string(),
-    })?;
-    if from == to || !from.allows(to) {
-        if matches!(from, Status::Done | Status::Canceled) {
-            return Err(Error::TerminalState {
-                name: name.to_string(),
-                from: from.name().to_string(),
-            });
-        }
-        return Err(Error::BadTransition {
-            from: from.name().to_string(),
-            to: to.name().to_string(),
-        });
-    }
-    let mut artifact = artifact;
-    artifact.status = to.name().to_string();
-    artifact.updated = task_spec::today();
-    forge::write_artifact(&artifact)?;
+fn status(ws: &Workspace, lang: Lang, name: &str, state: &str) -> Result<ExitCode, Error> {
+    let changed = forge::change_status(ws, name, state)?;
     outln!(
         "{}",
         tr!(
             lang,
             m::FORGE_STATUS_CHANGED,
             name = name,
-            from = from.name(),
-            to = to.name()
+            from = changed.from.name(),
+            to = changed.to.name()
         )
     );
-    let spec = task_spec::take(&artifact)?;
+    let spec = task_spec::take(&changed.artifact)?;
     outln!("{}", range_line(lang, name, &spec));
     Ok(ExitCode::SUCCESS)
 }
@@ -435,14 +365,13 @@ fn range_line(lang: Lang, name: &str, spec: &task_spec::TaskSpec) -> String {
 /// does not move afterwards. An anchor that is no ancestor of the last is
 /// refused, the file unchanged. Without an option, it prints the range.
 fn range(
-    paths: &Paths,
     ws: &Workspace,
     lang: Lang,
     name: &str,
     anchor: Option<String>,
     last: Option<String>,
 ) -> Result<ExitCode, Error> {
-    let mut artifact = find_artifact(paths, ws, name)?;
+    let mut artifact = forge::find_artifact(ws, name)?;
     if artifact.type_name != task_spec::TYPE {
         return Err(Error::NotTaskSpec {
             name: name.to_string(),
@@ -487,13 +416,12 @@ fn range(
 /// directory and are skipped when it is not in a git repository. It
 /// writes nothing (AGL-044 D1). Silent on success; the failures are lines.
 fn check(
-    paths: &Paths,
     ws: &Workspace,
     cwd: &Path,
     lang: Lang,
     name: &str,
 ) -> Result<ExitCode, Error> {
-    let artifact = find_artifact(paths, ws, name)?;
+    let artifact = forge::find_artifact(ws, name)?;
     let mut failures: Vec<String> = Vec::new();
     // The name matches the file it is in.
     let stem = artifact
@@ -554,7 +482,7 @@ fn check(
         }
     }
     // `deps` and `supersedes` resolve in the store.
-    let names = artifact_names(ws)?;
+    let names = forge::store_names(ws)?;
     for (kind, list) in [("dep", &artifact.deps), ("supersedes", &artifact.supersedes)] {
         for dep in list {
             if !names.contains(dep) {
@@ -579,34 +507,6 @@ fn check(
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// The artifact of the store of `ws` named `name`; the files are
-/// parsed one by one, the match is on the `name` field, the file is
-/// `forge/<type>/<name>.md`.
-fn find_artifact(paths: &Paths, ws: &Workspace, name: &str) -> Result<Artifact, Error> {
-    for path in forge::artifact_files(&ws.dir)? {
-        if let Ok(artifact) = forge::load_artifact(&path)
-            && artifact.name == name
-        {
-            return Ok(artifact);
-        }
-    }
-    Err(Error::ArtifactNotFound {
-        name: name.to_string(),
-        dir: paths.forge_dir(&ws.key),
-    })
-}
-
-/// The `name`s of the artifacts of the store of `ws`.
-fn artifact_names(ws: &Workspace) -> Result<Vec<String>, Error> {
-    let mut names = Vec::new();
-    for path in forge::artifact_files(&ws.dir)? {
-        if let Header::Artifact(artifact) = forge::read_header(&path)? {
-            names.push(artifact.name);
-        }
-    }
-    Ok(names)
 }
 
 /// Whether `id` resolves to a commit in the repository at `cwd`.
@@ -649,8 +549,8 @@ fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> 
 
 /// `forge log <name>` (AGL-008): the commits of the artifact's file,
 /// `git log --oneline` in the store, streamed.
-fn log(paths: &Paths, ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
-    let artifact = find_artifact(paths, ws, name)?;
+fn log(ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
+    let artifact = forge::find_artifact(ws, name)?;
     git_scoped(&ws.dir, &log_args(&artifact, &ws.dir))
 }
 
@@ -667,12 +567,11 @@ fn log_args(artifact: &Artifact, dir: &Path) -> Vec<String> {
 /// `forge diff <name> [commit]` (AGL-008): the diff of the
 /// artifact's file, against `commit` or the index, streamed.
 fn diff(
-    paths: &Paths,
     ws: &Workspace,
     name: &str,
     commit: Option<&str>,
 ) -> Result<ExitCode, Error> {
-    let artifact = find_artifact(paths, ws, name)?;
+    let artifact = forge::find_artifact(ws, name)?;
     git_scoped(&ws.dir, &diff_args(&artifact, &ws.dir, commit))
 }
 
@@ -990,14 +889,6 @@ mod tests {
         // cannot be a subcommand.
         let result = parse(&[OsString::from_vec(vec![0xffu8])]);
         assert!(matches!(result, Err(Error::InvalidUnicode)));
-    }
-
-    #[test]
-    fn a_human_name_is_valid() {
-        assert!(valid_name("agl-008-x"));
-        assert!(!valid_name(""));
-        assert!(!valid_name("a/b"));
-        assert!(!valid_name("a\\b"));
     }
 
     #[test]
