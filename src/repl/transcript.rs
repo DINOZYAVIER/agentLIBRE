@@ -321,8 +321,12 @@ impl Presenter {
     /// The answer between rules, with the time when it is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
-        self.screen
-            .print(&self.answer_lines(text, self.edge(None, &items, Role::InputRule)));
+        self.screen.print(&self.answer_lines(
+            text,
+            // D26: the phases, as the dock's activity line, in the
+            // InputActivity's color.
+            self.edge(None, &items, Role::InputRule, Role::InputActivity),
+        ));
     }
 
     /// A line of the session itself: help, a stop, an error.
@@ -430,8 +434,14 @@ impl Presenter {
     }
 
     /// A rule that carries a status and the items of the row (AGL-045).
-    fn edge(&self, status: Option<(&str, Role)>, items: &[String], role: Role) -> String {
-        edge(&self.theme, self.screen.columns(), status, items, role)
+    fn edge(
+        &self,
+        status: Option<(&str, Role)>,
+        items: &[String],
+        role: Role,
+        item_role: Role,
+    ) -> String {
+        edge(&self.theme, self.screen.columns(), status, items, role, item_role)
     }
 
     /// The rule that begins a step's block, when the frame is on (D19).
@@ -471,13 +481,15 @@ impl Presenter {
             ),
             self.theme.paint(status_role, &status_text)
         ));
+        // D26: the tool's row, like the thinking's, in the muted color.
         for row in hard_wrap(&clean(hint), inner) {
-            lines.push(format!("{gutter}{row}"));
+            lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
         }
         if self.settings.frame {
             lines.push(self.edge(
                 Some((status_text.as_str(), status_role)),
                 items,
+                Role::Rule,
                 Role::Rule,
             ));
         }
@@ -614,7 +626,9 @@ impl Report for Presenter {
             items.push(texts::speed(speed, self.lang));
         }
         let status = Some(("ok", Role::StatusSuccess));
-        let edge = self.edge(status, &items, Role::InputRule);
+        // D26: the phases, the time and the speed, as the dock's activity
+        // line, in the InputActivity's color.
+        let edge = self.edge(status, &items, Role::InputRule, Role::InputActivity);
         self.step_block();
         let block = self.answer_lines(text, edge);
         self.replace_streamed(block);
@@ -677,6 +691,7 @@ impl Report for Presenter {
         self.screen.print(&[self.edge(
             Some(("ok", Role::StatusSuccess)),
             &items,
+            Role::Rule,
             Role::Rule,
         )]);
     }
@@ -806,14 +821,16 @@ pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Ve
         .collect()
 }
 
-/// A rule that carries a status and the items of the row. A row too long
-/// for the width is left to wrap (AGL-045).
+/// A rule that carries a status and the items of the row: the dashes in
+/// `role`, the items in `item_role` (AGL-066, D26). A row too long for the
+/// width is left to wrap (AGL-045).
 pub fn edge(
     theme: &Theme,
     columns: usize,
     status: Option<(&str, Role)>,
     items: &[String],
     role: Role,
+    item_role: Role,
 ) -> String {
     let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
     if status.is_some() || !items.is_empty() {
@@ -825,7 +842,7 @@ pub fn edge(
             }
         }
         if !items.is_empty() {
-            parts.push((items.join(" · "), role));
+            parts.push((items.join(" · "), item_role));
         }
         parts.push((" ".into(), role));
     }
@@ -1347,6 +1364,56 @@ mod tests {
         let rule = printed.last().expect("the rule");
         assert!(rule.contains(&green), "{rule:?}");
         assert!(rule.contains("bash 1s"), "{rule:?}");
+    }
+
+    #[test]
+    fn the_tool_row_is_muted_like_the_thinking() {
+        // AGL-066, D26: the line under the gutter, the tool's input, is
+        // in the muted color, as the thinking's line; the tool's line
+        // keeps the tool's and the status's colors.
+        let red = crate::theme::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Muted, red)]);
+        let (presenter, mock) = presenter(true);
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        show_card(
+            &presenter,
+            &bash("ls"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+            &["bash 1s".to_owned()],
+        );
+        let printed = mock.printed.lock().unwrap().clone();
+        let row = printed
+            .iter()
+            .find(|line| line.contains("ls") && !line.contains("TOOL"))
+            .expect("the tool's row");
+        assert!(row.contains("\x1b[38;2;255;0;0m"), "{row:?}");
+    }
+
+    #[test]
+    fn the_answer_rule_keeps_the_activity_color() {
+        // AGL-066, D26: the items of the answer's rule — the phases, the
+        // time, the speed — are in the dock's activity color, as the
+        // Ready's row, the dashes in the input's rule color.
+        let green = crate::theme::Style::parse("#00FF00", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::InputActivity, green)]);
+        let (presenter, mock) = presenter(true);
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        presenter.show_answer("done", Some(Duration::from_secs(2)));
+        let printed = mock.printed.lock().unwrap().clone();
+        let rule = printed
+            .iter()
+            .find(|line| line.contains("Worked for"))
+            .expect("the rule");
+        assert!(rule.contains("\x1b[38;2;0;255;0m"), "{rule:?}");
     }
 
     #[test]

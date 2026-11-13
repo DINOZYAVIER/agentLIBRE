@@ -282,7 +282,15 @@ impl Inspect {
                         })
                         .collect();
                     if !items.is_empty() {
-                        lines.push(edge(theme, columns, None, &items, Role::InputRule));
+                        // D26: the answer's phases in the activity's color.
+                        lines.push(edge(
+                            theme,
+                            columns,
+                            None,
+                            &items,
+                            Role::InputRule,
+                            Role::InputActivity,
+                        ));
                     }
                 }
                 lines
@@ -391,10 +399,18 @@ fn tool_lines(
         ),
         theme.paint(status_role, &status_text)
     )];
+    // D26: the tool's row, like the thinking's, in the muted color.
     for row in hard_wrap(&clean(hint), inner) {
-        lines.push(format!("{gutter}{row}"));
+        lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &row)));
     }
-    lines.push(edge(theme, columns, Some((status_text.as_str(), status_role)), items, Role::Rule));
+    lines.push(edge(
+        theme,
+        columns,
+        Some((status_text.as_str(), status_role)),
+        items,
+        Role::Rule,
+        Role::Rule,
+    ));
     lines
 }
 
