@@ -147,15 +147,7 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
 /// or a memory call carries no hint of its own — its action is on the
 /// tool's line (D28), the full input in the inspect mode.
 pub fn call_hint(call: &ToolCall) -> String {
-    let text = |name: &str| {
-        call.args
-            .iter()
-            .find_map(|(key, value)| match value {
-                Value::Text(value) if key == name => Some(value.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    };
+    let text = |name: &str| call.text(name).unwrap_or_default();
     if matches!(call.name.as_str(), "forge" | "memory") {
         return String::new();
     }
@@ -185,13 +177,9 @@ pub fn call_hint(call: &ToolCall) -> String {
 
 /// The action of a forge or a memory call, on the tool's line (D28).
 pub fn call_action(call: &ToolCall) -> Option<String> {
-    call.args
-        .iter()
-        .find_map(|(key, value)| match value {
-            Value::Text(value) if key == "action" => Some(value.as_str().to_owned()),
-            _ => None,
-        })
+    call.text("action")
         .filter(|action| !action.is_empty())
+        .map(str::to_owned)
 }
 
 /// The label of a phase as the observer names it in the file, in

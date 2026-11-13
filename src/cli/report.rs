@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use crate::action::{Outcome, Value};
+use crate::action::Outcome;
 use crate::agent::Report;
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
@@ -111,15 +111,7 @@ impl Report for StderrReport {
 /// `bash`: the command's first line, shortened; `search`: the source and
 /// the query; `edit`: the path.
 pub fn call_summary(call: &ToolCall) -> String {
-    let text = |name: &str| {
-        call.args
-            .iter()
-            .find_map(|(n, value)| match value {
-                Value::Text(text) if n == name => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    };
+    let text = |name: &str| call.text(name).unwrap_or_default();
     if call.name == "search" {
         let summary = format!("{}: {}", text("source"), text("query"));
         return summary.chars().take(COMMAND_WIDTH).collect();
@@ -216,7 +208,7 @@ pub fn result_summary(call: &ToolCall, result: &ToolResult, lang: Lang) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::Outcome;
+    use crate::action::{Outcome, Value};
 
     fn bash(command: &str) -> ToolCall {
         ToolCall {
@@ -266,6 +258,7 @@ mod tests {
 #[cfg(test)]
 mod search_tests {
     use super::*;
+    use crate::action::Value;
 
     fn call(args: &[(&str, &str)]) -> ToolCall {
         ToolCall {
@@ -299,6 +292,7 @@ mod search_tests {
 #[cfg(test)]
 mod memory_tests {
     use super::*;
+    use crate::action::Value;
 
     #[test]
     fn a_memory_call_shows_the_action_and_what_it_is_about() {
@@ -316,6 +310,7 @@ mod memory_tests {
 #[cfg(test)]
 mod forge_tests {
     use super::*;
+    use crate::action::Value;
 
     fn call(args: &[(&str, &str)]) -> ToolCall {
         ToolCall {

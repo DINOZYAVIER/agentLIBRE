@@ -41,6 +41,26 @@ pub struct ToolCall {
     pub args: Vec<(String, Value)>,
 }
 
+impl ToolCall {
+    /// The text argument `name`; `None` when the call has no such text
+    /// argument.
+    pub fn text(&self, name: &str) -> Option<&str> {
+        self.args.iter().find_map(|(n, value)| match value {
+            Value::Text(text) if n == name => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The integer argument `name`; `None` when the call has no such
+    /// integer argument.
+    pub fn int(&self, name: &str) -> Option<i64> {
+        self.args.iter().find_map(|(n, value)| match value {
+            Value::Int(number) if n == name => Some(*number),
+            _ => None,
+        })
+    }
+}
+
 /// How the template describes a tool to the model (D14, D95).
 #[derive(Debug, PartialEq, Eq)]
 pub struct ToolDoc {

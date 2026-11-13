@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::action::Value;
 
 /// A directory removed when dropped.
 struct TempDir(PathBuf);
@@ -49,8 +50,12 @@ fn text(name: &str, value: &str) -> (String, Value) {
     (name.into(), Value::Text(value.into()))
 }
 
-fn call(query: &str, source: &str) -> Vec<(String, Value)> {
-    vec![text("query", query), text("source", source)]
+fn call(query: &str, source: &str) -> ToolCall {
+    ToolCall {
+        id: "c1".into(),
+        name: "search".into(),
+        args: vec![text("query", query), text("source", source)],
+    }
 }
 
 // --- the request ---
@@ -68,8 +73,8 @@ fn a_call_gets_the_defaults_and_a_trimmed_query() {
         }
     );
     let mut args = call("Київ", "wikipedia");
-    args.push(text("language", "uk"));
-    args.push(("limit".into(), Value::Int(3)));
+    args.args.push(text("language", "uk"));
+    args.args.push(("limit".into(), Value::Int(3)));
     let request = Request::from_args(&args).unwrap();
     assert_eq!((request.language.as_str(), request.limit), ("uk", 3));
     assert_eq!(
@@ -80,7 +85,7 @@ fn a_call_gets_the_defaults_and_a_trimmed_query() {
 
 #[test]
 fn a_request_outside_the_bounds_is_refused() {
-    let refused = |args: Vec<(String, Value)>| Request::from_args(&args).unwrap_err();
+    let refused = |args: ToolCall| Request::from_args(&args).unwrap_err();
     assert!(refused(call("", "web")).contains("needs a query"));
     assert!(refused(call("   ", "web")).contains("needs a query"));
     assert!(refused(call(&"a".repeat(513), "web")).contains("512"));
@@ -90,11 +95,11 @@ fn a_request_outside_the_bounds_is_refused() {
     assert!(refused(call("a\u{7}b", "web")).contains("control"));
     assert!(refused(call("a", "news")).contains("web, wikipedia"));
     let mut args = call("a", "web");
-    args.push(text("language", "de"));
+    args.args.push(text("language", "de"));
     assert!(refused(args).contains("en, fr, ru, uk"));
     for limit in [0, 11, -1] {
         let mut args = call("a", "web");
-        args.push(("limit".into(), Value::Int(limit)));
+        args.args.push(("limit".into(), Value::Int(limit)));
         assert!(refused(args).contains("1 to 10"), "{limit}");
     }
 }
@@ -224,7 +229,7 @@ impl Fake {
         Curl::with_program(self.search.clone(), self.dir.0.join("curl").into())
     }
 
-    fn ask(&self, args: Vec<(String, Value)>) -> ToolResult {
+    fn ask(&self, args: ToolCall) -> ToolResult {
         self.curl().search(&Request::from_args(&args).unwrap())
     }
 
@@ -391,7 +396,7 @@ fn an_invalid_answer_is_refused_whole() {
     // The limit asked for bounds the list too: 3 results do not fit 2.
     fake.replies(&result_json(serde_json::json!({"results": vec![one; 3]})), 200);
     let mut args = call("a", "web");
-    args.push(("limit".into(), Value::Int(2)));
+    args.args.push(("limit".into(), Value::Int(2)));
     assert_eq!(fake.ask(args).outcome, Outcome::Fail);
 }
 
@@ -449,8 +454,8 @@ fn the_live_service_answers_web_and_wikipedia() {
     let curl = Curl::new(search).unwrap();
     for (source, language, query) in [("web", "en", "rust programming language"), ("wikipedia", "en", "Kyiv")] {
         let mut args = call(query, source);
-        args.push(text("language", language));
-        args.push(("limit".into(), Value::Int(3)));
+        args.args.push(text("language", language));
+        args.args.push(("limit".into(), Value::Int(3)));
         let result = curl.search(&Request::from_args(&args).unwrap());
         println!("--- {source}\n{}", result.content);
         assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);

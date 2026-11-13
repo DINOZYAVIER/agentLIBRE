@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use super::*;
+use crate::action::Value;
 
 /// A fresh directory, removed when dropped.
 struct Dir(std::path::PathBuf);
@@ -195,6 +196,15 @@ fn edit_results() {
     assert_eq!(edit(absolute, "aaa", "z").outcome, Outcome::Ok);
 }
 
+/// A call of `name` with `args`.
+fn tool_call(name: &str, args: Vec<(String, Value)>) -> ToolCall {
+    ToolCall {
+        id: "c1".into(),
+        name: name.into(),
+        args,
+    }
+}
+
 #[test]
 fn run_dispatches_calls() {
     let dir = Dir::new("run");
@@ -209,11 +219,13 @@ fn run_dispatches_calls() {
     let (result, write) = run(
         &dir.0,
         env,
-        "bash",
-        &[
-            ("command".into(), Value::Text("echo hi".into())),
-            ("timeout".into(), Value::Int(5)),
-        ],
+        &tool_call(
+            "bash",
+            vec![
+                ("command".into(), Value::Text("echo hi".into())),
+                ("timeout".into(), Value::Int(5)),
+            ],
+        ),
         &out(&dir),
     );
     assert_eq!(result.content, "hi\n");
@@ -222,12 +234,14 @@ fn run_dispatches_calls() {
     let (result, _) = run(
         &dir.0,
         env,
-        "edit",
-        &[
-            ("path".into(), Value::Text("f".into())),
-            ("old".into(), Value::Text("x".into())),
-            ("new".into(), Value::Text("y".into())),
-        ],
+        &tool_call(
+            "edit",
+            vec![
+                ("path".into(), Value::Text("f".into())),
+                ("old".into(), Value::Text("x".into())),
+                ("new".into(), Value::Text("y".into())),
+            ],
+        ),
         &out(&dir),
     );
     assert_eq!(result.outcome, Outcome::Ok);
@@ -237,8 +251,7 @@ fn run_dispatches_calls() {
     let (result, write) = run(
         &dir.0,
         env,
-        "forge",
-        &[("action".into(), Value::Text("list".into()))],
+        &tool_call("forge", vec![("action".into(), Value::Text("list".into()))]),
         &out(&dir),
     );
     assert_eq!(result.outcome, Outcome::Ok);
@@ -1258,13 +1271,16 @@ fn forge_edit_may_delete_text() {
 #[test]
 fn the_forge_arguments_keep_an_empty_new_only() {
     let text = |name: &str, value: &str| (name.to_string(), Value::Text(value.into()));
-    let args = forge_args(&[
-        text("action", "edit"),
-        text("name", "agl-001-d"),
-        text("old", "x"),
-        text("new", ""),
-        text("section", ""),
-    ]);
+    let args = forge_args(&tool_call(
+        "forge",
+        vec![
+            text("action", "edit"),
+            text("name", "agl-001-d"),
+            text("old", "x"),
+            text("new", ""),
+            text("section", ""),
+        ],
+    ));
     assert_eq!(
         args,
         ForgeArgs {
@@ -1276,7 +1292,7 @@ fn the_forge_arguments_keep_an_empty_new_only() {
         }
     );
     // Absent, `new` is none.
-    assert_eq!(forge_args(&[text("action", "list")]).new, None);
+    assert_eq!(forge_args(&tool_call("forge", vec![text("action", "list")])).new, None);
 }
 
 #[test]

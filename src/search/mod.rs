@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value as Json;
 
-use crate::action::{Outcome, Value};
+use crate::action::Outcome;
+use crate::backend::ToolCall;
 use crate::error::{CredentialProblem, Error};
 use crate::i18n::Lang;
 use crate::interrupt::{self, signal_group};
@@ -59,14 +60,8 @@ impl Request {
     /// The request of a call's arguments; the error is the sentence the
     /// model reads (D7). The grammar already holds the enums and the
     /// range; the query is checked here.
-    pub fn from_args(args: &[(String, Value)]) -> Result<Request, String> {
-        let text = |name: &str| {
-            args.iter().find_map(|(n, value)| match value {
-                Value::Text(text) if n == name => Some(text.as_str()),
-                _ => None,
-            })
-        };
-        let query = text("query").unwrap_or_default().trim();
+    pub fn from_args(call: &ToolCall) -> Result<Request, String> {
+        let query = call.text("query").unwrap_or_default().trim();
         if query.is_empty() {
             return Err("search needs a query.".into());
         }
@@ -76,21 +71,15 @@ impl Request {
         if query.chars().any(char::is_control) {
             return Err("The query must not contain control characters.".into());
         }
-        let source = text("source").unwrap_or_default();
+        let source = call.text("source").unwrap_or_default();
         if !SOURCES.contains(&source) {
             return Err(format!("The source must be one of: {}.", SOURCES.join(", ")));
         }
-        let language = text("language").unwrap_or(DEFAULT_LANGUAGE);
+        let language = call.text("language").unwrap_or(DEFAULT_LANGUAGE);
         if !LANGUAGES.contains(&language) {
             return Err(format!("The language must be one of: {}.", LANGUAGES.join(", ")));
         }
-        let limit = args
-            .iter()
-            .find_map(|(n, value)| match value {
-                Value::Int(limit) if n == "limit" => Some(*limit),
-                _ => None,
-            })
-            .unwrap_or(DEFAULT_LIMIT);
+        let limit = call.int("limit").unwrap_or(DEFAULT_LIMIT);
         if !(1..=MAX_LIMIT).contains(&limit) {
             return Err(format!("The limit must be from 1 to {MAX_LIMIT}."));
         }

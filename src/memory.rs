@@ -148,15 +148,8 @@ pub struct Args {
 impl Args {
     /// The tool's arguments from a parsed call: a field that is absent is
     /// empty.
-    pub fn from_call(args: &[(String, crate::action::Value)]) -> Args {
-        let text = |name: &str| {
-            args.iter()
-                .find_map(|(n, value)| match value {
-                    crate::action::Value::Text(text) if n == name => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        };
+    pub fn from_call(call: &crate::backend::ToolCall) -> Args {
+        let text = |name: &str| call.text(name).unwrap_or_default().to_owned();
         Args {
             action: text("action"),
             name: text("name"),

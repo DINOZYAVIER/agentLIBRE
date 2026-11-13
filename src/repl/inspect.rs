@@ -452,15 +452,7 @@ fn tool_output(
 /// What a call sent: the command, the edit with its lines, the search's
 /// query, the summary of a write to the forge or the memory.
 fn call_input(call: &ToolCall) -> String {
-    let text = |name: &str| {
-        call.args
-            .iter()
-            .find_map(|(key, value)| match value {
-                Value::Text(value) if key == name => Some(value.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    };
+    let text = |name: &str| call.text(name).unwrap_or_default();
     if call.name == "edit" {
         let mut out = text("path").to_owned();
         for (sign, name) in [('-', "old"), ('+', "new")] {

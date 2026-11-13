@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::action::{Outcome, Value};
+use crate::action::Outcome;
+use crate::backend::ToolCall;
 use crate::i18n::Lang;
 use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
@@ -53,40 +54,26 @@ pub struct ForgeWrite {
     pub section: Option<String>,
 }
 
-/// Runs the call of `tool` with `args` in `workspace`. Parsing has
-/// checked the arguments against the tool (task-03). A successful
-/// `forge` write comes back with the result.
+/// Runs `call` in `workspace`. Parsing has checked the arguments against
+/// the tool (task-03). A successful `forge` write comes back with the
+/// result.
 pub fn run(
     workspace: &Path,
     env: ForgeEnv<'_>,
-    tool: &str,
-    args: &[(String, Value)],
+    call: &ToolCall,
     output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
-    let text = |name: &str| {
-        args.iter()
-            .find_map(|(n, value)| match value {
-                Value::Text(text) if n == name => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    };
-    match tool {
+    let text = |name: &str| call.text(name).unwrap_or_default();
+    match call.name.as_str() {
         "bash" => {
-            let timeout = args
-                .iter()
-                .find_map(|(n, value)| match value {
-                    Value::Int(seconds) if n == "timeout" => Some(*seconds as u64),
-                    _ => None,
-                })
-                .unwrap_or(DEFAULT_TIMEOUT);
+            let timeout = call.int("timeout").map_or(DEFAULT_TIMEOUT, |seconds| seconds as u64);
             (
                 bash(workspace, text("command"), Duration::from_secs(timeout), output),
                 None,
             )
         }
         "edit" => (edit(workspace, text("path"), text("old"), text("new")), None),
-        "forge" => forge(workspace, env, &forge_args(args), output),
+        "forge" => forge(workspace, env, &forge_args(call), output),
         // The agent keeps the memory of the session, so it runs this one
         // itself (AGL-006).
         "memory" => (
@@ -114,7 +101,7 @@ pub fn run(
             },
             None,
         ),
-        _ => unreachable!("unknown tool {tool}"),
+        tool => unreachable!("unknown tool {tool}"),
     }
 }
 
@@ -328,20 +315,14 @@ pub struct ForgeArgs {
 /// The `forge` tool's arguments from the parsed call (AGL-008): a field
 /// that is absent or empty is none, except `new`, which may be empty —
 /// an edit then deletes the text of `old`.
-fn forge_args(args: &[(String, Value)]) -> ForgeArgs {
-    let text = |name: &str| {
-        args.iter().find_map(|(n, value)| match value {
-            Value::Text(text) if n == name => Some(text.as_str()),
-            _ => None,
-        })
-    };
-    let field = |name: &str| text(name).filter(|t| !t.is_empty()).map(str::to_owned);
+fn forge_args(call: &ToolCall) -> ForgeArgs {
+    let field = |name: &str| call.text(name).filter(|t| !t.is_empty()).map(str::to_owned);
     ForgeArgs {
-        action: text("action").unwrap_or_default().to_owned(),
+        action: call.text("action").unwrap_or_default().to_owned(),
         name: field("name"),
         title: field("title"),
         old: field("old"),
-        new: text("new").map(str::to_owned),
+        new: call.text("new").map(str::to_owned),
         section: field("section"),
         state: field("state"),
         text: field("text"),
