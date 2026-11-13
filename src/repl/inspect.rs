@@ -179,14 +179,23 @@ impl Inspect {
             starts.push(lines.len());
             let mut block = self.block(record, index, theme, lang, columns, outputs);
             // The focus's marker at the head of the record the
-            // navigation points at (D13).
+            // navigation points at (D13), on the focus's background (D16).
             if index == self.selection
                 && let Some(first) = block.first_mut()
             {
-                *first = format!(
-                    "{} {first}",
-                    theme.paint(Role::InputSelected, "▸")
-                );
+                let head = format!("{} ", theme.paint(Role::InputSelected, "▸"));
+                // The user's row pads itself to the width: trim its
+                // trailing spaces so the marker fits (D16).
+                let row = if super::text::width(first)
+                    > columns.saturating_sub(super::text::width(&head))
+                {
+                    super::text::trim_trailing_spaces(first)
+                } else {
+                    first.clone()
+                };
+                let marked = format!("{head}{row}");
+                let pad = " ".repeat(columns.saturating_sub(super::text::width(&marked)));
+                *first = theme.on_background(Role::FocusBackground, &format!("{marked}{pad}"));
             }
             lines.extend(block);
         }
@@ -208,12 +217,17 @@ impl Inspect {
         match record {
             Record::User(message) => user_lines(theme, message, columns),
             Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
-            Record::Think(thinking) => {
+            Record::Think(thinking, time) => {
+                let head = match time {
+                    Some(t) => format!(
+                        "{} {}: ",
+                        tr!(lang, m::THINKING),
+                        texts::duration(t.as_secs())
+                    ),
+                    None => format!("{}: ", tr!(lang, m::THINKING)),
+                };
                 if expanded {
-                    let mut lines = vec![theme.paint(
-                        Role::Muted,
-                        &format!("{}:", tr!(lang, m::THINKING)),
-                    )];
+                    let mut lines = vec![theme.paint(Role::Muted, &head)];
                     lines.extend(
                         thinking
                             .lines()
@@ -224,7 +238,7 @@ impl Inspect {
                 } else {
                     vec![theme.paint(
                         Role::Muted,
-                        &thinking_line(lang, columns, thinking),
+                        &thinking_line(lang, columns, thinking, *time),
                     )]
                 }
             }
@@ -478,7 +492,8 @@ pub fn run(
 }
 
 /// One redraw of the screen: the clear, the lines, the cursor at the
-/// bottom.
+/// bottom. The lines carry no trailing newline: a last one would scroll
+/// the screen up by a row and cut the window's first row (AGL-066, D15).
 #[allow(clippy::too_many_arguments)]
 fn draw(
     write: &dyn Fn(&str),
@@ -492,9 +507,12 @@ fn draw(
 ) {
     let lines = inspect.render(theme, lang, columns, rows, outputs, dock);
     let mut text = String::from(term::CLEAR);
-    for line in &lines {
+    text.push_str(term::HOME);
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
         text.push_str(line);
-        text.push('\n');
     }
     text.push_str(&term::cursor_at(rows.max(1), 1));
     write(&text);
@@ -755,5 +773,57 @@ mod tests {
         // the width.
         assert!(all.contains("section: Prog"), "{all}");
         assert!(all.contains("text: the bullet"), "{all}");
+    }
+
+    #[test]
+    fn draw_does_not_scroll_the_screen() {
+        // AGL-066, D15: the clear and the home, the lines without a
+        // trailing newline that would scroll the screen up, and the
+        // cursor at the bottom.
+        let inspect = inspect();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = written.clone();
+        let write = |text: &str| sink.lock().unwrap().push_str(text);
+        draw(
+            &write,
+            &inspect,
+            &Theme::plain(),
+            Lang::En,
+            40,
+            10,
+            &std::env::temp_dir(),
+            &[],
+        );
+        let written = written.lock().unwrap();
+        let lines = inspect.render(&Theme::plain(), Lang::En, 40, 10, &std::env::temp_dir(), &[]);
+        let home = format!("{CLEAR}{HOME}", CLEAR = term::CLEAR, HOME = term::HOME);
+        let bottom = term::cursor_at(10, 1);
+        assert!(written.starts_with(&home), "{written:?}");
+        assert!(written.ends_with(&bottom), "{written:?}");
+        let body = written[home.len()..written.len() - bottom.len()].to_owned();
+        // The window, whole, as rendered: no line lost at the top, none
+        // added at the bottom.
+        assert_eq!(body, lines.join("\n"), "{body:?}");
+        assert!(!body.ends_with('\n'), "{body:?}");
+    }
+
+    #[test]
+    fn the_focus_line_sits_on_its_background() {
+        // AGL-066, D16: the first line of the focused record, on the
+        // focus's background, as wide as the screen; the row's own
+        // resets re-assert the background.
+        let theme = Theme::new(true, &[]);
+        let mut inspect = inspect();
+        assert!(inspect.key(Key::Char('g')));
+        let lines = inspect.render(&theme, Lang::En, 40, 10, &std::env::temp_dir(), &[]);
+        let focus = lines
+            .iter()
+            .find(|line| line.contains('▸'))
+            .expect("the focus's line");
+        let start = theme.start(Role::FocusBackground);
+        assert!(focus.starts_with(&start), "{focus:?}");
+        assert!(focus.ends_with("\x1b[0m"), "{focus:?}");
+        assert!(focus.contains(&format!("\x1b[0m{start}")), "{focus:?}");
+        assert_eq!(crate::repl::text::width(focus), 40, "{focus:?}");
     }
 }

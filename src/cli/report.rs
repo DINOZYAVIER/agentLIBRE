@@ -132,18 +132,35 @@ pub fn call_summary(call: &ToolCall) -> String {
     }
     if call.name == "forge" {
         // The action and what it is about: the name, the title of a new;
-        // plus what the action does to it (AGL-066, D10).
+        // plus what the action does to it (AGL-066, D10), and, for an
+        // edit, what it changed (D18).
         let action = text("action");
         let about = if !text("name").is_empty() {
             text("name")
         } else {
             text("title")
         };
+        let first_line = |s: &str| -> String {
+            s.lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim())
+                .unwrap_or_default()
+                .to_owned()
+        };
         let extra = match action {
-            "append" => text("section"),
-            "status" => text("state"),
-            "rename" => text("new"),
-            _ => "",
+            "append" => text("section").to_owned(),
+            "status" => text("state").to_owned(),
+            "rename" => text("new").to_owned(),
+            "edit" => {
+                let old = first_line(text("old"));
+                let new = first_line(text("new"));
+                if old.is_empty() && new.is_empty() {
+                    String::new()
+                } else {
+                    format!("“{old}” → “{new}”")
+                }
+            }
+            _ => String::new(),
         };
         let summary = format!("{action} {about} {extra}");
         return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
@@ -343,7 +360,7 @@ mod forge_tests {
             "show agl-066"
         );
         assert_eq!(call_summary(&call(&[("action", "list")])), "list");
-        // The edit's replacement texts stay out of the summary.
+        // The edit shows the first lines of its texts (AGL-066, D18).
         assert_eq!(
             call_summary(&call(&[
                 ("action", "edit"),
@@ -351,7 +368,7 @@ mod forge_tests {
                 ("old", "the old words"),
                 ("new", "the new words"),
             ])),
-            "edit agl-066"
+            "edit agl-066 “the old words” → “the new words”"
         );
     }
 }

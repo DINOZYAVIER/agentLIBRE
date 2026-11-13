@@ -22,6 +22,51 @@ pub fn width(text: &str) -> usize {
     total + rest.width()
 }
 
+/// The row without the spaces after its last visible character, the
+/// escapes at its end kept (AGL-066, D16).
+pub fn trim_trailing_spaces(text: &str) -> String {
+    /// The end of the CSI sequence at the head of `rest`, or 1.
+    fn csi_end(rest: &str) -> usize {
+        rest.strip_prefix("\x1b[")
+            .and_then(|tail| tail.find(|c: char| ('@'..='~').contains(&c)).map(|n| n + 3))
+            .unwrap_or(1)
+    }
+    let mut chars = text.chars().peekable();
+    let mut body = String::new();
+    let mut tail = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            tail.push(ch);
+            if chars.peek() == Some(&'[') {
+                tail.push(chars.next().expect("peeked"));
+                while let Some(&c) = chars.peek() {
+                    tail.push(c);
+                    chars.next();
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else if ch == ' ' {
+            tail.push(ch);
+        } else {
+            body.push_str(&tail);
+            body.push(ch);
+            tail.clear();
+        }
+    }
+    // The tail is the spaces after the last character and the escapes
+    // that end the row: keep the escapes, drop the spaces.
+    let mut rest = tail.as_str();
+    while let Some(start) = rest.find('\x1b') {
+        rest = &rest[start..];
+        let end = csi_end(rest).min(rest.len());
+        body.push_str(&rest[..end]);
+        rest = &rest[end..];
+    }
+    body
+}
+
 /// Removes terminal controls from untrusted text but keeps line breaks;
 /// tabs become spaces (D138).
 pub fn clean(text: &str) -> String {
@@ -198,6 +243,24 @@ mod tests {
         assert_eq!(truncate_start("hi", 6), "hi");
         assert_eq!(hard_wrap("abcdefg", 3), ["abc", "def", "g"]);
         assert_eq!(hard_wrap("日本語", 4), ["日本", "語"]);
+    }
+
+    #[test]
+    fn trailing_spaces_are_trimmed_with_the_end_escapes_kept() {
+        assert_eq!(trim_trailing_spaces("abc   "), "abc");
+        assert_eq!(trim_trailing_spaces("abc"), "abc");
+        assert_eq!(trim_trailing_spaces("   "), "");
+        assert_eq!(trim_trailing_spaces(""), "");
+        // The row of a user message: the background, the marker and the
+        // text, the padding, the reset — the padding goes, the escapes
+        // stay, the inner space of the marker stays.
+        let row = "\x1b[48;2;1;2;3m\x1b[1m› \x1b[0m\x1b[38;2;4;5;6mFirst\x1b[0m\x1b[48;2;1;2;3m   \x1b[0m";
+        assert_eq!(
+            trim_trailing_spaces(row),
+            "\x1b[48;2;1;2;3m\x1b[1m› \x1b[0m\x1b[38;2;4;5;6mFirst\x1b[0m\x1b[48;2;1;2;3m\x1b[0m"
+        );
+        // A space between two characters is not a trailing one.
+        assert_eq!(trim_trailing_spaces("a b  "), "a b");
     }
 
     #[test]

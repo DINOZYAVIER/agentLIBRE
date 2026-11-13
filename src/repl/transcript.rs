@@ -125,8 +125,10 @@ pub struct Presenter {
     /// is shown (AGL-046, D13).
     state_entered: bool,
     /// The thinking being decoded, as its pieces arrive (D3, D7): the
-    /// transcript shows one line with its first line.
+    /// transcript shows its frame (D17).
     thinking: Option<String>,
+    /// When the first piece of the thinking arrived, for its time (D17).
+    thinking_started: Option<Instant>,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -161,6 +163,7 @@ impl Presenter {
             context_fresh: false,
             state_entered: false,
             thinking: None,
+            thinking_started: None,
             action: None,
             generation: None,
             turn_tokens: 0,
@@ -278,22 +281,41 @@ impl Presenter {
         self.screen.print(&lines);
     }
 
-    /// The thinking's record (D3, D7): one line with a snippet of its
-    /// first line.
-    pub fn show_thinking(&self, thinking: &str) {
-        self.screen
-            .print(&[self.theme.paint(Role::Muted, &self.thinking_line(thinking))]);
+    /// The thinking's record (D3, D7, D17): its first line under the
+    /// gutter, and the rule with its time.
+    pub fn show_thinking(&self, thinking: &str, time: Option<Duration>) {
+        self.screen.print(&self.thinking_frame(thinking, time));
+    }
+
+    /// The thinking's frame (D17), like the tool's card: its first line
+    /// under the gutter, and the rule with its time.
+    fn thinking_frame(&self, thinking: &str, time: Option<Duration>) -> Vec<String> {
+        let columns = self.screen.columns();
+        let gutter = self.theme.paint(Role::InputRule, "  │ ");
+        let inner = columns.saturating_sub(4).max(1);
+        let label = tr!(self.lang, m::THINKING);
+        let snippet = thinking.lines().next().unwrap_or_default();
+        let mut lines = Vec::new();
+        if self.settings.frame {
+            lines.push(String::new());
+        }
+        lines.push(format!(
+            "{gutter}{}",
+            self.theme
+                .paint(Role::Muted, &truncate(&format!("{label}: {snippet}"), inner))
+        ));
+        let items: Vec<String> = time
+            .iter()
+            .map(|t| format!("{label} {}", texts::duration(t.as_secs())))
+            .collect();
+        lines.push(self.edge(None, &items, Role::Rule));
+        lines
     }
 
     /// The text before a call (D9): its first three lines; the rest is in
     /// the inspect mode.
     pub fn show_text(&self, text: &str) {
         self.screen.print(&self.text_block(text));
-    }
-
-    /// `thinking: …` with the first line of `thinking`, at the width.
-    fn thinking_line(&self, thinking: &str) -> String {
-        thinking_line(self.lang, self.screen.columns(), thinking)
     }
 
     /// The block of the text before a call (D9): its first three lines,
@@ -336,7 +358,7 @@ impl Presenter {
             match &record {
                 Record::User(message) => self.show_user(message),
                 Record::State(state) => self.show_state(state),
-                Record::Think(thinking) => self.show_thinking(thinking),
+                Record::Think(thinking, time) => self.show_thinking(thinking, *time),
                 Record::Text(text) => self.show_text(text),
                 Record::Tool {
                     call,
@@ -485,8 +507,8 @@ impl Presenter {
 
     fn close_thinking(&mut self) {
         if let Some(thinking) = self.thinking.take() {
-            self.screen
-                .print(&[self.theme.paint(Role::Muted, &self.thinking_line(&thinking))]);
+            let time = self.thinking_started.take().map(|started| started.elapsed());
+            self.screen.print(&self.thinking_frame(&thinking, time));
             self.screen.live("");
         }
     }
@@ -520,10 +542,11 @@ impl Report for Presenter {
         if self.thinking.is_none() {
             self.close();
             self.thinking = Some(String::new());
+            self.thinking_started = Some(Instant::now());
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        let line = thinking_line(self.lang, self.screen.columns(), thinking);
+        let line = thinking_line(self.lang, self.screen.columns(), thinking, None);
         self.screen.live(&self.theme.paint(Role::Muted, &line));
         self.piece();
     }
@@ -583,8 +606,9 @@ impl Report for Presenter {
             call.name,
             texts::duration(self.tool_time.as_secs())
         ));
+        let hint = records::call_hint(call, Some(result));
         self.screen
-            .print(&self.card(call, Some(result), &records::call_hint(call), &items));
+            .print(&self.card(call, Some(result), &hint, &items));
         self.prefill = None;
     }
 
@@ -802,11 +826,16 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// `thinking: …` with the first line of `thinking`, at the width (D3, D7).
-pub fn thinking_line(lang: Lang, columns: usize, thinking: &str) -> String {
-    let label = format!("{}: ", tr!(lang, m::THINKING));
+/// `thinking: …` with the first line of `thinking`, at the width (D3, D7),
+/// with its time when it is known (D17).
+pub fn thinking_line(lang: Lang, columns: usize, thinking: &str, time: Option<Duration>) -> String {
+    let label = tr!(lang, m::THINKING);
     let snippet = thinking.lines().next().unwrap_or_default();
-    truncate(&format!("{label}{snippet}"), columns)
+    let head = match time {
+        Some(t) => format!("{label} {}: ", texts::duration(t.as_secs())),
+        None => format!("{label}: "),
+    };
+    truncate(&format!("{head}{snippet}"), columns)
 }
 
 #[cfg(test)]
@@ -887,7 +916,7 @@ mod tests {
     fn show_card(presenter: &Presenter, call: &ToolCall, result: &ToolResult, items: &[String]) {
         presenter
             .screen
-            .print(&presenter.card(call, Some(result), &records::call_hint(call), items));
+            .print(&presenter.card(call, Some(result), &records::call_hint(call, None), items));
     }
 
     #[test]
@@ -972,11 +1001,25 @@ mod tests {
         // The two streamed lines are erased, then the block is printed.
         assert!(ops.contains(&"erase 2".to_owned()), "{ops:?}");
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed[0], "thinking: hmm ok");
-        assert_eq!(printed[1], "");
-        assert_eq!(printed[2], "─".repeat(40));
+        // AGL-066, D17: the thinking's frame — its first line under the
+        // gutter, the rule with the time it took.
+        assert_eq!(printed[0], "");
+        assert_eq!(printed[1], "  │ thinking: hmm ok");
+        assert_eq!(printed[2], format!("─ thinking <1s {}", "─".repeat(25)));
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
+    }
+
+    #[test]
+    fn the_thinking_frame_carries_its_time() {
+        // AGL-066, D17: the replay and the inspect get the time of the
+        // thinking's phase, shown in the frame's rule.
+        let (presenter, mock) = presenter(true);
+        presenter.show_thinking("hm\nmore", Some(Duration::from_secs(3)));
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed[0], "");
+        assert_eq!(printed[1], "  │ thinking: hm");
+        assert_eq!(printed[2], format!("─ thinking 3s {}", "─".repeat(26)));
     }
 
     /// The row of `printed` that starts with `start`, without its fill.
@@ -1488,7 +1531,12 @@ mod tests {
         // text written is in the inspect mode.
         assert!(printed.contains(&"[memory: +build-and-test]".to_owned()));
         assert!(!printed.contains(&"Run cargo test.".to_owned()));
-        assert!(printed.contains(&"thinking: hm".to_owned()));
+        // AGL-066, D17: the thinking is a frame, its first line under the
+        // gutter; no time, as it is replayed.
+        assert!(
+            printed.iter().any(|line| line.contains("thinking: hm")),
+            "{printed:?}"
+        );
         assert!(printed.contains(&"Running.".to_owned()));
         // The tool's frame: its name, its status, one line of the input; no
         // output (D1, D6).

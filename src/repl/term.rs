@@ -296,6 +296,10 @@ pub const ALT_OFF: &str = "\x1b[?25h\x1b[?1049l";
 /// Erases the whole screen, for the inspect mode's full redraws.
 pub const CLEAR: &str = "\x1b[2J";
 
+/// Moves the cursor to the home row and column, so a redraw that does not
+/// end with a newline does not scroll the screen (AGL-066, D15).
+pub const HOME: &str = "\x1b[H";
+
 /// Moves the cursor to the 1-based `row` and `column`.
 pub fn cursor_at(row: usize, column: usize) -> String {
     format!("\x1b[{row};{column}H")
@@ -568,6 +572,7 @@ mod tests {
         assert_eq!(ALT_ON, "\x1b[?1049h\x1b[?25l");
         assert_eq!(ALT_OFF, "\x1b[?25h\x1b[?1049l");
         assert_eq!(CLEAR, "\x1b[2J");
+        assert_eq!(HOME, "\x1b[H");
         assert_eq!(cursor_at(1, 1), "\x1b[1;1H");
         assert_eq!(cursor_at(25, 80), "\x1b[25;80H");
     }

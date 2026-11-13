@@ -175,6 +175,7 @@ roles! {
     InputText "input_text" "oklch(0.936 0.032 17.717)",
     InputActivity "input_activity" "oklch(0.823 0.12 346.018)",
     InputSelected "input_selected" "bold oklch(0.518 0.253 323.949)",
+    FocusBackground "focus_background" "oklch(0.33 0 0)",
     Muted "muted" "dim",
     Rule "rule" "dim",
     Tool "tool" "bold #00FFFF",
@@ -195,7 +196,7 @@ roles! {
 impl Role {
     /// Whether the style sets a background color.
     pub fn is_background(self) -> bool {
-        self == Role::InputBackground
+        matches!(self, Role::InputBackground | Role::FocusBackground)
     }
 }
 
@@ -246,6 +247,18 @@ impl Theme {
         } else {
             format!("{start}{text}\x1b[0m")
         }
+    }
+
+    /// The already-painted `row` on the background of `role` (AGL-066,
+    /// D16): the background starts the row and is re-asserted after every
+    /// reset the row carries, so the row's own styles stay on it.
+    pub fn on_background(&self, role: Role, row: &str) -> String {
+        let start = self.start(role);
+        if start.is_empty() {
+            return row.to_owned();
+        }
+        let reassert = format!("\x1b[0m{start}");
+        format!("{start}{}\x1b[0m", row.replace("\x1b[0m", &reassert))
     }
 }
 
@@ -324,6 +337,25 @@ mod tests {
             "\x1b[1;38;2;123;216;143mok\x1b[0m"
         );
         assert!(theme.start(Role::InputBackground).contains("48;2"));
+    }
+
+    #[test]
+    fn the_background_is_kept_over_the_row_resets() {
+        let theme = Theme::new(true, &[]);
+        let row = format!(
+            "{}{}",
+            theme.paint(Role::Tool, "TOOL"),
+            theme.paint(Role::StatusSuccess, "ok")
+        );
+        let on = theme.on_background(Role::FocusBackground, &row);
+        // The background starts the row, is re-asserted after each reset,
+        // and one final reset ends it.
+        assert_eq!(on.matches("\x1b[0m").count(), 3);
+        assert!(on.starts_with("\x1b["));
+        assert!(on.ends_with("\x1b[0m"));
+        assert!(on.contains("48;2"));
+        let plain = Theme::plain();
+        assert_eq!(plain.on_background(Role::FocusBackground, "x"), "x");
     }
 
     #[test]

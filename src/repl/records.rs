@@ -3,6 +3,7 @@
 //! the records; how a record is drawn is a function of the record, the
 //! pluggable piece for the summaries of a small model later (D3).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::action::{Outcome, Value};
@@ -31,8 +32,9 @@ pub enum Record {
     User(String),
     /// A visit of a state (D138): `[state]`.
     State(String),
-    /// The model's thinking; one line by default (D3, D7).
-    Think(String),
+    /// The model's thinking; one line by default (D3, D7), with its time
+    /// when it is known (D17).
+    Think(String, Option<Duration>),
     /// The text the model wrote before a call; three lines by default (D9).
     Text(String),
     /// A tool call with its result; the compact frame shows the input's
@@ -131,8 +133,9 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
 }
 
 /// One line of a call's input (D6): the command, the file of an edit, the
-/// query of a search.
-pub fn call_hint(call: &ToolCall) -> String {
+/// query of a search. The `result` is what a forge `list` shows of its
+/// output (D18).
+pub fn call_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
     let text = |name: &str| {
         call.args
             .iter()
@@ -145,7 +148,8 @@ pub fn call_hint(call: &ToolCall) -> String {
     let head: String = match call.name.as_str() {
         "edit" => text("path").to_owned(),
         "search" => format!("{}: {}", text("source"), text("query")),
-        "memory" | "forge" => crate::cli::report::call_summary(call),
+        "forge" => forge_hint(call, result),
+        "memory" => crate::cli::report::call_summary(call),
         _ => text("command").to_owned(),
     };
     let line = head.lines().next().unwrap_or_default();
@@ -165,6 +169,54 @@ pub fn call_hint(call: &ToolCall) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// The hint of a forge call (D10, D18): its summary, or, for a `list`,
+/// the first tasks of its result, chronologically, the newest first.
+fn forge_hint(call: &ToolCall, result: Option<&ToolResult>) -> String {
+    let action = call
+        .args
+        .iter()
+        .find_map(|(key, value)| match value {
+            Value::Text(value) if key == "action" => Some(value.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if action == "list"
+        && let Some(result) = result
+        && result.outcome == Outcome::Ok
+        && let Some(brief) = forge_list_brief(result)
+    {
+        return format!("list {brief}");
+    }
+    crate::cli::report::call_summary(call)
+}
+
+/// The first tasks of a forge `list` result, the newest first (D18):
+/// `name status, … (+N)`.
+fn forge_list_brief(result: &ToolResult) -> Option<String> {
+    let mut tasks: Vec<(String, String)> = Vec::new();
+    for line in result.content.lines() {
+        let fields: Vec<&str> = line.split_whitespace().take(4).collect();
+        let [name, _type, status, date] = fields.as_slice() else {
+            continue;
+        };
+        // The date is `YYYY-MM-DD`, so the rows sort by it.
+        if date.len() == 10 && date.chars().filter(|ch| *ch == '-').count() == 2 {
+            tasks.push((date.to_string(), format!("{name} {status}")));
+        }
+    }
+    if tasks.is_empty() {
+        return None;
+    }
+    tasks.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let shown: Vec<&str> = tasks.iter().take(3).map(|(_, task)| task.as_str()).collect();
+    let rest = tasks.len().saturating_sub(3);
+    let mut brief = shown.join(", ");
+    if rest > 0 {
+        brief.push_str(&format!(" (+{rest})"));
+    }
+    Some(brief)
 }
 
 /// The label of a phase as the observer names it in the file, in
@@ -223,6 +275,18 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
     // Only a change of state is a record (AGL-046, D13), as in the
     // transcript: the first visit of a turn is not a change.
     let mut state_entered = false;
+    // The times of the steps' Thinking phases, in the order of the
+    // `transition` lines, for their thinking records (D17).
+    let mut thinking_times: HashMap<(usize, usize), (Vec<Duration>, usize)> = HashMap::new();
+    for line in transitions {
+        if line.from == "Thinking" {
+            thinking_times
+                .entry((line.turn, line.step))
+                .or_default()
+                .0
+                .push(Duration::from_millis(line.ms));
+        }
+    }
     for event in events {
         match event {
             Event::User(text) => {
@@ -236,7 +300,19 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                     records.push(Record::State(state.clone()));
                 }
             }
-            Event::Thinking(text) => records.push(Record::Think(text.clone())),
+            Event::Thinking(text) => {
+                // The thinking is before the call of its step, whose time
+                // is the next one (D17).
+                let time = thinking_times
+                    .get_mut(&(turn, step + 1))
+                    .and_then(|(times, index)| {
+                        (*index < times.len()).then(|| {
+                            *index += 1;
+                            times[*index - 1]
+                        })
+                    });
+                records.push(Record::Think(text.clone(), time));
+            }
             Event::Call { text, call } => {
                 step += 1;
                 if let Some(text) = text {
@@ -246,7 +322,7 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 records.push(Record::Tool {
                     call: call.clone(),
                     result: None,
-                    hint: call_hint(call),
+                    hint: call_hint(call, None),
                     phases,
                     time,
                 });
@@ -266,12 +342,13 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                     continue;
                 };
                 let index = records.len() - 1 - offset;
-                let record = &mut records[index];
-                if let Record::Tool { result, .. } = record {
+                if let Record::Tool { call, result, hint, .. } = &mut records[index] {
                     *result = Some(ToolResult {
                         outcome: *outcome,
                         content: content.clone(),
                     });
+                    // The hint of a forge `list` is its result (D18).
+                    *hint = call_hint(call, result.as_ref());
                 }
             }
             Event::Answer(text) => records.push(Record::Answer(text.clone(), None)),
@@ -384,7 +461,7 @@ mod tests {
             vec![
                 Record::User("Fix it".into()),
                 // The first visit of the turn is not a change (AGL-046, D13).
-                Record::Think("Let me look.\nMore thoughts.".into()),
+                Record::Think("Let me look.\nMore thoughts.".into(), None),
                 Record::Text("I will run it.".into()),
                 Record::Tool {
                     call: call("c1", "cargo test"),
@@ -521,7 +598,7 @@ mod tests {
 
     #[test]
     fn the_hint_is_one_line_of_the_input() {
-        assert_eq!(call_hint(&call("c1", "ls\npwd")), "ls");
+        assert_eq!(call_hint(&call("c1", "ls\npwd"), None), "ls");
         let edit = ToolCall {
             id: "c1".into(),
             name: "edit".into(),
@@ -531,7 +608,7 @@ mod tests {
                 ("new".into(), Value::Text("y".into())),
             ],
         };
-        assert_eq!(call_hint(&edit), "a.rs");
+        assert_eq!(call_hint(&edit, None), "a.rs");
         let search = ToolCall {
             id: "c1".into(),
             name: "search".into(),
@@ -540,7 +617,7 @@ mod tests {
                 ("query".into(), Value::Text("agentLIBRE".into())),
             ],
         };
-        assert_eq!(call_hint(&search), "web: agentLIBRE");
+        assert_eq!(call_hint(&search, None), "web: agentLIBRE");
         let forge = ToolCall {
             id: "c1".into(),
             name: "forge".into(),
@@ -551,7 +628,7 @@ mod tests {
                 ("text".into(), Value::Text("the bullet".into())),
             ],
         };
-        assert_eq!(call_hint(&forge), "append agl-066 Progress");
+        assert_eq!(call_hint(&forge, None), "append agl-066 Progress");
         let memory = ToolCall {
             id: "c1".into(),
             name: "memory".into(),
@@ -560,7 +637,7 @@ mod tests {
                 ("title".into(), Value::Text("Build".into())),
             ],
         };
-        assert_eq!(call_hint(&memory), "add Build");
+        assert_eq!(call_hint(&memory, None), "add Build");
         // A call whose input has no known line keeps its first text
         // argument (D12).
         let unknown = ToolCall {
@@ -568,7 +645,110 @@ mod tests {
             name: "view".into(),
             args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
         };
-        assert_eq!(call_hint(&unknown), "/tmp/a.png");
+        assert_eq!(call_hint(&unknown, None), "/tmp/a.png");
+    }
+
+    #[test]
+    fn the_forge_list_hint_shows_the_newest_first() {
+        // AGL-066, D18: the first tasks of the result, chronologically,
+        // the newest first; the rows it does not name stay out.
+        let result = ToolResult {
+            outcome: Outcome::Ok,
+            content: "agl-001-a spec done 2026-11-01\nglitch\nagl-003-c spec open 2026-11-09\nagl-002-b spec in-progress 2026-11-05\nagl-004-d spec backlog 2026-11-11".into(),
+        };
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![("action".into(), Value::Text("list".into()))],
+        };
+        assert_eq!(
+            call_hint(&call, Some(&result)),
+            "list agl-004-d backlog, agl-003-c open, agl-002-b in-progress (+1)"
+        );
+        // Without its result, the hint is the summary; a failed list keeps
+        // it too.
+        assert_eq!(call_hint(&call, None), "list");
+        let failed = ToolResult {
+            outcome: Outcome::Fail,
+            content: "no such store".into(),
+        };
+        assert_eq!(call_hint(&call, Some(&failed)), "list");
+    }
+
+    #[test]
+    fn the_forge_edit_hint_shows_what_changed() {
+        // AGL-066, D18: the edit's first lines of old and new.
+        let edit = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("edit".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("old".into(), Value::Text("the old words\nand more".into())),
+                ("new".into(), Value::Text("the new words".into())),
+            ],
+        };
+        assert_eq!(
+            call_hint(&edit, None),
+            "edit agl-066 “the old words” → “the new words”"
+        );
+    }
+
+    #[test]
+    fn the_thinking_records_carry_their_phase_times() {
+        // AGL-066, D17: the time of a thinking is the time of its phase
+        // from the `transition` lines of the step whose call follows; a
+        // thinking whose step holds no line keeps none.
+        let events = [
+            Event::User("go".into()),
+            Event::Thinking("hm".into()),
+            Event::Call {
+                text: None,
+                call: call("c1", "ls"),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "ok".into(),
+            },
+            Event::Thinking("again".into()),
+            Event::Call {
+                text: None,
+                call: call("c2", "pwd"),
+            },
+            Event::Result {
+                id: "c2".into(),
+                outcome: Outcome::Ok,
+                content: "here".into(),
+            },
+            Event::Thinking("last".into()),
+            Event::Call {
+                text: None,
+                call: call("c3", "who"),
+            },
+            Event::Result {
+                id: "c3".into(),
+                outcome: Outcome::Ok,
+                content: "me".into(),
+            },
+        ];
+        let transitions = [
+            line(1, 1, "Thinking", 2000),
+            line(1, 2, "Thinking", 500),
+        ];
+        let records = group(&events, &transitions, Lang::En);
+        let thinks: Vec<&Record> = records
+            .iter()
+            .filter(|record| matches!(record, Record::Think(..)))
+            .collect();
+        assert_eq!(
+            thinks,
+            vec![
+                &Record::Think("hm".into(), Some(Duration::from_millis(2000))),
+                &Record::Think("again".into(), Some(Duration::from_millis(500))),
+                &Record::Think("last".into(), None),
+            ]
+        );
     }
 
     #[test]
