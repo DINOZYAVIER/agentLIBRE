@@ -59,14 +59,7 @@ pub struct SessionShow {
     pub verbose: bool,
 }
 
-/// What `agl memory` and `/memory` ask for (AGL-060, D2, D5).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MemoryAction {
-    List,
-    Show { name: String },
-    /// `yes`: no question (D3).
-    Remove { name: String, yes: bool },
-}
+pub use crate::memory::MemoryAction;
 
 /// Reads the words after `memory`, of the command line and of `/memory`.
 pub fn memory_action(words: impl IntoIterator<Item = String>) -> Result<MemoryAction, Error> {

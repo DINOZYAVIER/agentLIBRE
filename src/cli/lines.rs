@@ -132,7 +132,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     Ok(MemoryAction::Remove { name, yes: true }) => {
                         let removed = memory
                             .look()
-                            .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
+                            .and_then(|dir| crate::memory::remove_entry(dir.as_deref(), &name));
                         match removed {
                             Ok((result, write)) => {
                                 plane.session.append(Event::Memory {
@@ -151,7 +151,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         }
                     }
                     Ok(action) => {
-                        match crate::cli::memory::looked_at(memory, &action, lang) {
+                        match crate::memory::looked_at(memory, &action, lang) {
                             Ok(text) => {
                                 let text = text.trim_end();
                                 outln!("{text}");

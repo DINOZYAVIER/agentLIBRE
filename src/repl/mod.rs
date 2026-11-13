@@ -1121,7 +1121,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
                 let found = memory
                     .look()
-                    .and_then(|dir| crate::cli::memory::entry_dir(dir.as_deref(), &name).map(drop));
+                    .and_then(|dir| crate::memory::entry_dir(dir.as_deref(), &name).map(drop));
                 match found {
                     Ok(()) => {
                         let question = tr!(lang, m::MEMORY_REMOVE_ASK, name = name);
@@ -1140,7 +1140,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
                 let removed = memory
                     .look()
-                    .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
+                    .and_then(|dir| crate::memory::remove_entry(dir.as_deref(), &name));
                 let (failed, output) = match removed {
                     Ok((result, write)) => {
                         if let Err(error) = plane.session.append(Event::Memory {
@@ -1162,7 +1162,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 record(&mut plane.session, line, failed, Some(output));
             }
             Next::Memory(line, action) => {
-                let (failed, output) = match crate::cli::memory::looked_at(memory, &action, lang) {
+                let (failed, output) = match crate::memory::looked_at(memory, &action, lang) {
                     Ok(text) => {
                         let text = text.trim_end().to_owned();
                         presenter.show_notice(&text, Role::Muted);
