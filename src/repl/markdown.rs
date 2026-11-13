@@ -286,7 +286,8 @@ impl Renderer<'_> {
                 format!(
                     "{quote}{}{}",
                     spaces(outer),
-                    self.theme.paint(Role::MarkdownBullet, marker)
+                    // D23: the marker is part of the body, muted with it.
+                    self.theme.paint(Role::Muted, marker)
                 )
             }
             None => rest.clone(),
@@ -315,13 +316,12 @@ impl Renderer<'_> {
         self.mark_shown();
     }
 
-    fn paint(&self, text: &str, role: Option<Role>) -> String {
-        match role {
-            Some(role) => self.theme.paint(role, text),
-            // The plain text carries the muted color, as the dock's
-            // status row draws the Function's name (AGL-066, D21).
-            None => self.theme.paint(Role::Muted, text),
-        }
+    fn paint(&self, text: &str, _role: Option<Role>) -> String {
+        // The whole body is one muted surface: the plain text carries the
+        // muted color, as the dock's status row draws the Function's name
+        // (AGL-066, D21), and the colored pieces (the headings, the
+        // emphasis, the code, the links) are muted too (D23).
+        self.theme.paint(Role::Muted, text)
     }
 
     /// Wraps `pieces` into lines of at most `avail` columns.
@@ -514,11 +514,12 @@ mod tests {
 
     #[test]
     fn headings_emphasis_and_code_spans() {
+        // AGL-066, D23: the colored pieces are muted with the body.
         let theme = Theme::new(true, &[]);
         let lines = render("# Title\n\ntext **bold** and `code`", 40, &theme);
-        assert_eq!(lines[0], theme.paint(Role::MarkdownHeading, "Title"));
-        assert!(lines[2].contains(&theme.paint(Role::MarkdownStrong, "bold")));
-        assert!(lines[2].contains(&theme.paint(Role::MarkdownInlineCode, "code")));
+        assert_eq!(lines[0], theme.paint(Role::Muted, "Title"));
+        assert!(lines[2].contains(&theme.paint(Role::Muted, "bold")));
+        assert!(lines[2].contains(&theme.paint(Role::Muted, "code")));
         // Punctuation stays with the word before it.
         assert_eq!(plain("**bold**, next", 40), ["bold, next"]);
     }

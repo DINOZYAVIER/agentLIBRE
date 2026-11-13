@@ -10,8 +10,8 @@ use std::path::Path;
 use super::markdown;
 use super::records::{self, Record};
 use super::term::{self, Key};
-use super::text::{clean, hard_wrap, truncate, width};
-use super::transcript::{edge, notice_lines, thinking_paint, user_lines};
+use super::text::{clean, hard_wrap, truncate};
+use super::transcript::{edge, notice_lines, thinking_lines, user_lines};
 use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
@@ -340,22 +340,19 @@ fn step_lines(
     let mut lines = Vec::new();
     if let Some(thinking) = thinking {
         if expanded {
-            let wrapped: Vec<String> = thinking
+            // D24: like the tool's card — the label, and every line of the
+            // thinking under the gutter, muted (D23).
+            let gutter = theme.paint(Role::InputRule, "  │ ");
+            let inner = columns.saturating_sub(4).max(1);
+            lines.push(theme.paint(Role::Tool, tr!(lang, m::THINKING)));
+            for line in thinking
                 .lines()
-                .flat_map(|line| hard_wrap(&clean(line), columns))
-                .collect();
-            if let Some(first) = wrapped.first() {
-                // D20: the label keeps the tool's color, the text is
-                // plain.
-                let label = format!("{}:", tr!(lang, m::THINKING));
-                let head = truncate(first, columns.saturating_sub(width(&label) + 1));
-                lines.push(format!("{} {}", theme.paint(Role::Tool, &label), head));
-                for line in wrapped.iter().skip(1) {
-                    lines.push(theme.paint(Role::Muted, line));
-                }
+                .flat_map(|line| hard_wrap(&clean(line), inner))
+            {
+                lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &line)));
             }
         } else {
-            lines.push(thinking_paint(theme, lang, columns, thinking, Role::Tool));
+            lines.extend(thinking_lines(theme, lang, columns, thinking, Role::Tool));
         }
     }
     if let Some(text) = text {
@@ -685,10 +682,11 @@ mod tests {
         assert!(inspect.key(Key::Char('g')));
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Enter));
+        // D24: the label's line and the thinking under the gutter.
         let all = screen(&inspect, 10).join("\n");
-        assert!(all.contains("THINKING:"), "{all}");
-        assert!(all.contains("let me look"), "{all}");
-        assert!(all.contains("and more"), "{all}");
+        assert!(all.contains("THINKING"), "{all}");
+        assert!(all.contains("  │ let me look"), "{all}");
+        assert!(all.contains("  │ and more"), "{all}");
     }
 
     #[test]

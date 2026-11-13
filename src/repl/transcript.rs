@@ -283,19 +283,18 @@ impl Presenter {
         self.screen.print(&lines);
     }
 
-    /// The step's thinking's line (D3, D19, D20): `thinking: <the first
-    /// line>`, on the top level; the label in the tool's color, the text
-    /// in the terminal's plain color. The time is in the step's rule, the
-    /// full text in the inspect mode.
+    /// The step's thinking's lines (D3, D19, D24): like the tool's card —
+    /// the label in the tool's color, and the first line of the thinking
+    /// under the gutter, muted. The time is in the step's rule, the full
+    /// text in the inspect mode.
     pub fn show_thinking(&self, thinking: &str) {
-        let line = thinking_paint(
+        self.screen.print(&thinking_lines(
             &self.theme,
             self.lang,
             self.screen.columns(),
             thinking,
             Role::Tool,
-        );
-        self.screen.print(&[line]);
+        ));
     }
 
     /// The text before a call (D9): its first three lines; the rest is in
@@ -564,13 +563,19 @@ impl Report for Presenter {
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        // D20: the label keeps the muted color, the text is plain.
-        let line = thinking_paint(
-            &self.theme,
-            self.lang,
-            self.screen.columns(),
-            thinking,
-            Role::Muted,
+        // D24: the live's line is the card's two lines in one — the label
+        // and the first line of the thinking under the gutter, both muted.
+        let columns = self.screen.columns();
+        let gutter = self.theme.paint(Role::InputRule, "  │ ");
+        let snippet = thinking.lines().next().unwrap_or_default();
+        let line = format!(
+            "{}{}{}",
+            self.theme.paint(Role::Muted, tr!(self.lang, m::THINKING)),
+            gutter,
+            self.theme.paint(
+                Role::Muted,
+                &truncate(snippet, columns.saturating_sub(4).max(1))
+            )
         );
         self.screen.live(&line);
         self.piece();
@@ -860,22 +865,29 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// The line of the thinking, its label painted for `role` and the text in
-/// the plain color of the terminal (D20).
-pub fn thinking_paint(
+/// The lines of the thinking, like the tool's card (D24): the label,
+/// painted for `role`, and the first line of the thinking under the
+/// gutter, in the muted color (D23).
+pub fn thinking_lines(
     theme: &Theme,
     lang: Lang,
     columns: usize,
     thinking: &str,
     role: Role,
-) -> String {
-    let label = format!("{}:", tr!(lang, m::THINKING));
+) -> Vec<String> {
     let snippet = thinking.lines().next().unwrap_or_default();
-    let text = truncate(
-        &format!(" {snippet}"),
-        columns.saturating_sub(width(&label)),
-    );
-    format!("{}{}", theme.paint(role, &label), text)
+    let gutter = theme.paint(Role::InputRule, "  │ ");
+    vec![
+        theme.paint(role, tr!(lang, m::THINKING)),
+        format!(
+            "{}{}",
+            gutter,
+            theme.paint(
+                Role::Muted,
+                &truncate(snippet, columns.saturating_sub(4).max(1))
+            )
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -1041,24 +1053,26 @@ mod tests {
         // The two streamed lines are erased, then the block is printed.
         assert!(ops.contains(&"erase 2".to_owned()), "{ops:?}");
         let printed = mock.printed.lock().unwrap().clone();
-        // AGL-066, D19: the step's block — the separator's rule, then the
-        // thinking's line on the top level, in the tool's style; the
-        // answer follows in the same block.
+        // AGL-066, D19, D24: the step's block — the separator's rule, then
+        // the thinking like the tool's card (the label, the line under the
+        // gutter); the answer follows in the same block.
         assert_eq!(printed[0], "");
         assert_eq!(printed[1], "─".repeat(40));
-        assert_eq!(printed[2], "THINKING: hmm ok");
+        assert_eq!(printed[2], "THINKING");
+        assert_eq!(printed[3], "  │ hmm ok");
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
     }
 
     #[test]
-    fn the_thinking_line_has_no_rule_of_its_own() {
-        // AGL-066, D19: the thinking's line is one line, `THINKING: <the
-        // first line>` (D21); the time of its phase is in the step's rule.
+    fn the_thinking_is_like_the_tools_card() {
+        // AGL-066, D24: the thinking is the label's line and its first
+        // line under the gutter, as the tool's card; no rule of its own —
+        // the time of its phase is in the step's rule.
         let (presenter, mock) = presenter(true);
         presenter.show_thinking("hm\nmore");
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, vec!["THINKING: hm"]);
+        assert_eq!(printed, vec!["THINKING", "  │ hm"]);
     }
 
     /// The row of `printed` that starts with `start`, without its fill.
@@ -1575,12 +1589,13 @@ mod tests {
         // text written is in the inspect mode.
         assert!(printed.contains(&"[memory: +build-and-test]".to_owned()));
         assert!(!printed.contains(&"Run cargo test.".to_owned()));
-        // AGL-066, D17: the thinking is a frame, its first line under the
-        // gutter; no time, as it is replayed.
-        assert!(
-            printed.iter().any(|line| line.contains("THINKING: hm")),
-            "{printed:?}"
-        );
+        // AGL-066, D17, D24: the thinking like the tool's card, its first
+        // line under the gutter; no time, as it is replayed.
+        let thinking = printed
+            .iter()
+            .position(|line| line == "THINKING")
+            .expect("the thinking's label");
+        assert_eq!(printed[thinking + 1], "  │ hm");
         assert!(printed.contains(&"Running.".to_owned()));
         // The tool's frame: its name, its status, one line of the input; no
         // output (D1, D6).
