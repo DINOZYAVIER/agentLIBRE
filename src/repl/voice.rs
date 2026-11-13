@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::dock::{Dock, VoiceLabel};
 use super::term::Key;
 use super::transcript::{Screen, notice_lines};
-use crate::cli::whisper::Dictation;
+use crate::whisper::Dictation;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::record::Recording;

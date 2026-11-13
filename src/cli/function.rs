@@ -172,7 +172,7 @@ impl Catalog {
     fn server_of(&self, name: &str) -> Result<(ServerKind, Option<String>), Error> {
         let function = Function::load(&self.workspace_dir, &self.user_dir, name)?;
         let server = self.settings.effective(&function.model);
-        Ok((server.kind(), super::serve::model_of(&server)?))
+        Ok((server.kind(), crate::engine::model_of(&server)?))
     }
 }
 
@@ -240,7 +240,7 @@ pub fn run(
                         listed: &user.models,
                         user_path: &paths.settings_file(),
                     },
-                    &super::serve::ask_line,
+                    &crate::engine::ask_line,
                     &|line| eprintln!("{line}"),
                     lang,
                 )?;

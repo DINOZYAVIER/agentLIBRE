@@ -35,7 +35,7 @@ pub fn run(
             let _ = write!(io::stdout(), "{}", show_text(dir, &name)?);
         }
         MemoryAction::Remove { name, yes } => {
-            let answer = |question: &str| crate::cli::serve::ask_terminal(question, lang);
+            let answer = |question: &str| crate::engine::ask_terminal(question, lang);
             let ask: Option<&dyn Fn(&str) -> bool> = if crate::tty::is_interactive() {
                 Some(&answer)
             } else {

@@ -3307,7 +3307,7 @@ mod tests {
 pub mod server {
     use super::Lang;
     use super::m;
-    use crate::cli::serve::Health;
+    use crate::engine::Health;
     use crate::settings::ServerKind;
 
     /// `agl server start` begins (D146); `what` is the server, in a line

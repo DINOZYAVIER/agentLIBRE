@@ -7,6 +7,7 @@ mod attach;
 mod backend;
 mod cli;
 mod download;
+mod engine;
 mod error;
 mod forge;
 mod format;
@@ -34,8 +35,9 @@ mod test_server;
 mod theme;
 mod tools;
 mod tty;
-mod wsl;
 mod weights;
+mod whisper;
+mod wsl;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -65,7 +67,7 @@ use theme::Theme;
 /// turn — closes the engine; a pre-existing server is not in the field and
 /// keeps running.
 struct EngineGuard {
-    engine: Arc<Mutex<Option<cli::serve::Engine>>>,
+    engine: Arc<Mutex<Option<engine::Engine>>>,
     /// The project's store directory, where the record of the launched
     /// server is (AGL-035, D1).
     dir: PathBuf,
@@ -79,7 +81,7 @@ impl Drop for EngineGuard {
         if let Some(engine) = self.engine.lock().unwrap().take() {
             let pid = engine.pid();
             engine.shutdown();
-            cli::serve::remove_record(&self.dir, self.runtime.as_deref(), Some(pid));
+            engine::remove_record(&self.dir, self.runtime.as_deref(), Some(pid));
         }
     }
 }
@@ -187,7 +189,7 @@ fn run(
             model.llama_private_ca = settings.llama_private_ca.clone();
             let missing = match action {
                 cli::args::ServerAction::Start if tty::is_interactive() => {
-                    weights::Missing::Ask(&cli::serve::ask_line, &|line| eprintln!("{line}"))
+                    weights::Missing::Ask(&engine::ask_line, &|line| eprintln!("{line}"))
                 }
                 cli::args::ServerAction::Start => weights::Missing::Fail,
                 _ => weights::Missing::Keep,
@@ -205,7 +207,7 @@ fn run(
                 &missing,
                 *lang,
             )?;
-            let server = cli::serve::Server::of(&project, paths.runtime.clone(), &settings, model)?;
+            let server = engine::Server::of(&project, paths.runtime.clone(), &settings, model)?;
             return cli::serve::run(action, &server, &models, env("PATH"), yes, *lang);
         }
         Command::Init => {
@@ -305,7 +307,7 @@ fn agent_session(
     cwd: &Path,
     project: &forge::Workspace,
     args: &cli::args::Args,
-    engine: &Arc<Mutex<Option<cli::serve::Engine>>>,
+    engine: &Arc<Mutex<Option<engine::Engine>>>,
     lang: Lang,
 ) -> Result<repl::End, Error> {
     let user_path = paths.settings_file();
@@ -393,7 +395,7 @@ fn agent_session(
     // file found nowhere is asked for in a terminal (AGL-039, D22-D24), and
     // offered for download; `-p` asks nobody (AGL-050, D10, D11).
     let missing = if tty::is_interactive() && args.prompt.is_none() {
-        weights::Missing::Ask(&cli::serve::ask_line, &|line| eprintln!("{line}"))
+        weights::Missing::Ask(&engine::ask_line, &|line| eprintln!("{line}"))
     } else {
         weights::Missing::Fail
     };
@@ -490,7 +492,7 @@ fn agent_session(
             settings.server.llama_private_ca.as_deref(),
         )?)
     };
-    let autostart = cli::serve::Autostart {
+    let autostart = engine::Autostart {
         llama: backend.as_ref(),
         project,
         effective: &settings.server,
@@ -504,11 +506,11 @@ fn agent_session(
         // commands do — `--yes` skips, the terminal asks, a
         // non-interactive terminal refuses.
         others: if args.yes {
-            cli::serve::Others::Yes
+            engine::Others::Yes
         } else if tty::is_interactive() {
-            cli::serve::Others::Ask(&cli::serve::ask_terminal)
+            engine::Others::Ask(&engine::ask_terminal)
         } else {
-            cli::serve::Others::Refuse
+            engine::Others::Refuse
         },
         engine: Arc::clone(engine),
     };
@@ -527,10 +529,10 @@ fn agent_session(
     let mut observer = phase::Observer::new();
     let context = if args.prompt.is_some() {
         autostart.ensure(&mut |progress| match progress {
-            cli::serve::ServerProgress::Starting => {
+            engine::ServerProgress::Starting => {
                 observer.on(phase::PhaseEvent::ServerStart);
             }
-            cli::serve::ServerProgress::Line(line) => eprintln!("{line}"),
+            engine::ServerProgress::Line(line) => eprintln!("{line}"),
         })?;
         Some(backend.context_size()?)
     } else {

@@ -16,4 +16,3 @@ pub mod report;
 pub mod search;
 pub mod serve;
 pub mod session;
-pub mod whisper;

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::agent::{Agent, Sink, TurnEnd};
 use crate::attach::{self, Pending, Transcriber};
 use crate::backend::{Backend, ReasoningLevel};
-use crate::cli::serve::{Autostart, ServerProgress};
+use crate::engine::{Autostart, ServerProgress};
 use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::Lang;

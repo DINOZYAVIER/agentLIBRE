@@ -33,7 +33,7 @@ use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
-use crate::cli::serve::ServerProgress;
+use crate::engine::ServerProgress;
 use crate::tty::is_yes;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
@@ -855,7 +855,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.set_media_counts(&plane.session);
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
-        Arc::new(crate::cli::whisper::Voice::of(autostart)),
+        Arc::new(crate::whisper::Voice::of(autostart)),
         Box::new(crate::record::start),
         repl.max_record_seconds,
         lang,
@@ -1323,7 +1323,7 @@ mod tests {
 
     struct FakeDictation(Arc<Fake>);
 
-    impl crate::cli::whisper::Dictation for FakeDictation {
+    impl crate::whisper::Dictation for FakeDictation {
         fn ready(&self) -> Result<(), Error> {
             if self.0.not_ready.load(Ordering::SeqCst) {
                 return Err(Error::WhisperNotSet {

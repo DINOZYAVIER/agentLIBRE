@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use crate::attach::Transcriber;
 use crate::backend::Backend;
 use crate::backend::llama::Llama;
-use crate::cli::serve::{
+use crate::engine::{
     Autostart, Health, find_program, health, local_address, port_open, unit_active, wait_ready,
 };
 use crate::error::Error;
