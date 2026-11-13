@@ -28,7 +28,7 @@ use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
-use crate::agent::{Agent, Report, Sink, TurnEnd};
+use crate::agent::{Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
@@ -694,30 +694,25 @@ fn wait_for_next(control: &Control) -> Next {
 /// The interactive session in a terminal (D115-D138).
 pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
-        function,
-        function_name,
-        backend,
-        mut session,
+        mut plane,
         resumed,
-        sessions_dir,
-        project,
-        context,
         server_url,
         theme,
         repl,
-        lang,
-        forge,
         history_file,
-        reasoning,
-        autostart,
-        search,
-        image_tokens,
-        memory,
-        about,
         catalog,
-        ..
     } = setup;
-    let workspace = session.workspace.clone();
+    let function = plane.function;
+    let function_name = plane.function_name;
+    let backend = plane.backend;
+    let lang = plane.lang;
+    let autostart = plane.autostart;
+    let memory = plane.memory;
+    let sessions_dir = plane.sessions_dir;
+    let project = plane.project;
+    let context = plane.context;
+    let reasoning = plane.reasoning;
+    let workspace = plane.workspace.clone();
     let facts = Facts {
         function: function_name.into(),
         workspace: display_path(&workspace),
@@ -746,13 +741,13 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     );
     let control = Arc::new(Control::new(
         Info {
-            session: session.id.clone(),
+            session: plane.session.id.clone(),
             context,
             ..Info::default()
         },
         reasoning,
     ));
-    control.set_media_counts(&session);
+    control.set_media_counts(&plane.session);
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
         Arc::new(crate::cli::whisper::Voice::of(autostart)),
@@ -770,11 +765,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let done = Arc::new(AtomicBool::new(false));
     // What the inspect mode re-reads on its open (AGL-066, D4).
     let inspect_data = Arc::new(Mutex::new(InspectData {
-        id: session.id.clone(),
+        id: plane.session.id.clone(),
         sessions_dir: sessions_dir.to_owned(),
-        events: session.events.clone(),
+        events: plane.session.events.clone(),
         transitions: Vec::new(),
-        outputs: session.outputs_dir(),
+        outputs: plane.session.outputs_dir(),
     }));
     let open_inspect = {
         let data = inspect_data.clone();
@@ -857,10 +852,10 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             &crate::about::version(rev.as_deref()),
         ));
     }
-    presenter.show_notice(&tr!(lang, m::SESSION, id = session.id), Role::Muted);
+    presenter.show_notice(&tr!(lang, m::SESSION, id = plane.session.id), Role::Muted);
     if resumed {
-        presenter.replay(&session.events, &session.transitions);
-        if let Some(state) = session.unfinished().and_then(|turn| turn.state) {
+        presenter.replay(&plane.session.events, &plane.session.transitions);
+        if let Some(state) = plane.session.unfinished().and_then(|turn| turn.state) {
             control.lock().info.unfinished = Some(state.clone());
             presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
         }
@@ -873,7 +868,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         control.lock().running = true;
         interrupt::reset();
         let mut observer = Observer::new();
-        observer.attach_between_turns(&session);
+        observer.attach_between_turns(&plane.session);
         let ready = autostart
             .ensure(&mut |progress| match progress {
                 ServerProgress::Starting => {
@@ -900,31 +895,31 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
         let next = wait_for_next(&control);
-        record_commands(&control, &mut session);
+        record_commands(&control, &mut plane.session);
         // The inspect mode re-reads the file, this is the fallback and
         // the new id of a `/new` (AGL-066).
         {
             let mut inner = inspect_data.lock().unwrap();
-            inner.id = session.id.clone();
-            inner.events = session.events.clone();
-            inner.outputs = session.outputs_dir();
+            inner.id = plane.session.id.clone();
+            inner.events = plane.session.events.clone();
+            inner.outputs = plane.session.outputs_dir();
         }
         match next {
             Next::Quit => {
-                record(&mut session, "/quit".into(), false, None);
+                record(&mut plane.session, "/quit".into(), false, None);
                 break;
             }
             Next::Functions => {
                 let list = catalog.lines(lang).join("\n");
                 presenter.show_notice(&list, Role::Muted);
-                record(&mut session, "/function".into(), false, Some(list));
+                record(&mut plane.session, "/function".into(), false, Some(list));
             }
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
             Next::Switch(name) => match catalog.check(&name) {
                 Ok(()) => {
                     presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
-                    record(&mut session, format!("/function {name}"), false, None);
+                    record(&mut plane.session, format!("/function {name}"), false, None);
                     end = End::Function {
                         name,
                         reasoning: control.lock().reasoning,
@@ -934,23 +929,23 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 Err(error) => {
                     let text = error.message(lang);
                     presenter.show_notice(&text, Role::StatusFailure);
-                    record(&mut session, format!("/function {name}"), true, Some(text));
+                    record(&mut plane.session, format!("/function {name}"), true, Some(text));
                 }
             },
             Next::New => {
-                record(&mut session, "/new".into(), false, None);
+                record(&mut plane.session, "/new".into(), false, None);
                 match Session::create_run(sessions_dir, function_name, &workspace, Some(&function.snapshot())) {
                 Ok(new) => {
-                    session = new;
+                    plane.session = new;
                     let mut inner = control.lock();
                     inner.info = Info {
-                        session: session.id.clone(),
+                        session: plane.session.id.clone(),
                         context: inner.info.context,
                         ..Info::default()
                     };
                     drop(inner);
-                    control.set_media_counts(&session);
-                    presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = session.id), Role::Muted);
+                    control.set_media_counts(&plane.session);
+                    presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = plane.session.id), Role::Muted);
                 }
                 Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
                 }
@@ -960,16 +955,16 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // file. The model has the command from its record (AGL-047,
                 // D5), as with the others.
                 let line = format!("/rename {name}");
-                match session.rename(project, &name) {
+                match plane.session.rename(project, &name) {
                     Ok(()) => {
-                        let named = session.name.clone().unwrap_or_default();
+                        let named = plane.session.name.clone().unwrap_or_default();
                         presenter.show_notice(&tr!(lang, m::RENAMED, name = named), Role::Muted);
-                        record(&mut session, line, false, None);
+                        record(&mut plane.session, line, false, None);
                     }
                     Err(error) => {
                         let text = error.message(lang);
                         presenter.show_notice(&text, Role::StatusFailure);
-                        record(&mut session, line, true, Some(text));
+                        record(&mut plane.session, line, true, Some(text));
                     }
                 }
             }
@@ -986,7 +981,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         let (result, write) = crate::memory::remember(&dir, &name, &text);
                         match write {
                             Some(write) => {
-                                if let Err(error) = session.append(Event::Memory {
+                                if let Err(error) = plane.session.append(Event::Memory {
                                     name: write.name.clone(),
                                     kind: write.kind,
                                     text: write.text.clone(),
@@ -1014,7 +1009,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         (true, reason)
                     }
                 };
-                record(&mut session, line, failed, Some(output));
+                record(&mut plane.session, line, failed, Some(output));
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
@@ -1031,7 +1026,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     Err(error) => {
                         let text = error.message(lang);
                         presenter.show_notice(&text, Role::StatusFailure);
-                        record(&mut session, line, true, Some(text));
+                        record(&mut plane.session, line, true, Some(text));
                     }
                 }
             }
@@ -1043,7 +1038,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
                 let (failed, output) = match removed {
                     Ok((result, write)) => {
-                        if let Err(error) = session.append(Event::Memory {
+                        if let Err(error) = plane.session.append(Event::Memory {
                             name: write.name.clone(),
                             kind: write.kind,
                             text: write.text.clone(),
@@ -1059,7 +1054,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         (true, text)
                     }
                 };
-                record(&mut session, line, failed, Some(output));
+                record(&mut plane.session, line, failed, Some(output));
             }
             Next::Memory(line, action) => {
                 let (failed, output) = match crate::cli::memory::looked_at(memory, &action, lang) {
@@ -1074,27 +1069,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         (true, text)
                     }
                 };
-                record(&mut session, line, failed, Some(output));
+                record(&mut plane.session, line, failed, Some(output));
             }
             Next::Compact => {
-                let reasoning = control.lock().reasoning;
+                plane.reasoning = control.lock().reasoning;
                 let result = backend.context_size().and_then(|context| {
-                    Agent {
-                        function,
-                        function_name,
-                        backend,
-                        session: &mut session,
-                        workspace: &workspace,
-                        context,
-                        forge,
-                        reasoning,
-                        image_tokens,
-                        whisper: autostart,
-                        search,
-                        memory,
-                        about,
-                    }
-                    .compact(&mut |report: Report| show(&mut presenter, &control, report))
+                    plane
+                        .agent(context)
+                        .compact(&mut |report: Report| show(&mut presenter, &control, report))
                 });
                 control.lock().running = false;
                 let notice = compact_notice(result, function, lang);
@@ -1102,7 +1084,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     presenter.show_notice(text, *role);
                 }
                 let failed = notice.as_ref().is_some_and(|(_, role)| *role != Role::Muted);
-                record(&mut session, "/compact".into(), failed, notice.map(|(text, _)| text));
+                record(&mut plane.session, "/compact".into(), failed, notice.map(|(text, _)| text));
                 presenter.set_ready();
             }
             Next::Message(Queued {
@@ -1114,9 +1096,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 presenter.show_user(&message);
                 // The FSM of the turn sees the start too (AGL-046, D10).
                 let mut observer = Observer::new();
-                observer.attach(&session);
+                observer.attach(&plane.session);
                 // The running turn keeps the level it started with (AGL-013).
-                let reasoning = control.lock().reasoning;
+                plane.reasoning = control.lock().reasoning;
                 // The server is started here when it does not answer, at
                 // the first request, and its context size read (AGL-015,
                 // AGL-024).
@@ -1134,7 +1116,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     // The media the message names are stored, an audio is
                     // transcribed (AGL-014).
                     attach::store(
-                        &mut session,
+                        &mut plane.session,
                         pending,
                         &message,
                         backend,
@@ -1146,23 +1128,10 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                             presenter.show_notice(line, Role::Muted)
                         },
                     )?;
-                    control.set_media_counts(&session);
-                    Agent {
-                        function,
-                        function_name,
-                        backend,
-                        session: &mut session,
-                        workspace: &workspace,
-                        context,
-                        forge,
-                        reasoning,
-                        image_tokens,
-                        whisper: autostart,
-                        search,
-                        memory,
-                        about,
-                    }
-                    .turn_observed(
+                    control.set_media_counts(&plane.session);
+                    plane
+                        .agent(context)
+                        .turn_observed(
                         &message,
                         &mut |report: Report| show(&mut presenter, &control, report),
                         &mut observer,
@@ -1186,7 +1155,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 let mut inner = control.lock();
                 inner.running = false;
                 inner.info.state = None;
-                inner.info.unfinished = session.unfinished().and_then(|turn| turn.state);
+                inner.info.unfinished = plane.session.unfinished().and_then(|turn| turn.state);
                 // A turn that failed leaves no queue behind (D127).
                 let cleared = failed.is_some() && !inner.queue.is_empty();
                 if failed.is_some() {
@@ -1205,7 +1174,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         }
     }
 
-    record_commands(&control, &mut session);
+    record_commands(&control, &mut plane.session);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
     let _ = ticker.join();

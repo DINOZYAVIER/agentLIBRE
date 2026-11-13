@@ -20,6 +20,7 @@ mod memory;
 mod nix;
 mod phase;
 mod paths;
+mod plane;
 mod programs;
 mod record;
 mod repl;
@@ -40,9 +41,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use agent::{Agent, TurnEnd};
+use agent::TurnEnd;
 use backend::Backend;
-use backend::ReasoningLevel;
 use backend::llama::Llama;
 use backend::strata::Strata;
 use cli::args::Command;
@@ -52,6 +52,7 @@ use function::Function;
 use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
+use plane::Plane;
 use session::{Session, StopReason};
 use settings::{function_name, ReplSettings, ServerFile, ServerKind, Settings, UserFile};
 use theme::Theme;
@@ -101,40 +102,16 @@ fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
 /// How many sessions `agl --resume` lists (AGL-058, D20).
 const SESSIONS_LISTED: usize = 20;
 
-/// Everything a session needs.
+/// Everything a session needs: the plane it runs on, and what the terminal
+/// draws with.
 pub struct Setup<'a> {
-    pub function: &'a Function,
-    pub function_name: &'a str,
-    pub backend: &'a dyn Backend,
-    pub session: Session,
+    pub plane: Plane<'a>,
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
-    pub sessions_dir: &'a Path,
-    /// The project of the session: a name is unique in it (AGL-062, D5).
-    pub project: &'a Path,
-    /// The context size of the server when it already answered at the
-    /// start; read at the first request otherwise (AGL-015, D10).
-    pub context: Option<usize>,
     pub server_url: &'a str,
-    /// Brings the server up when a request finds none (AGL-015).
-    pub autostart: &'a cli::serve::Autostart<'a>,
     pub theme: Theme,
     pub repl: ReplSettings,
-    pub lang: Lang,
-    /// What the agent's `forge` tool takes from the session (AGL-008).
-    pub forge: tools::ForgeEnv<'a>,
     pub history_file: PathBuf,
-    /// The model's reasoning level (AGL-013); the REPL's `/think`
-    /// changes it for the session.
-    pub reasoning: Option<ReasoningLevel>,
-    /// The most tokens one picture takes (AGL-014, D10).
-    pub image_tokens: usize,
-    /// Runs the `search` tool (AGL-019).
-    pub search: &'a dyn search::Searcher,
-    /// Where the memory of the workspace is (AGL-006).
-    pub memory: &'a dyn memory::Home,
-    /// What the model is told of its environment and of this agl (AGL-048).
-    pub about: Option<&'a str>,
     /// The Functions of the REPL's `/function` (AGL-036, D3).
     pub catalog: &'a cli::function::Catalog,
 }
@@ -558,7 +535,7 @@ fn agent_session(
         backend.context_size().ok()
     };
     let resumed = session.is_some();
-    let mut session = match session {
+    let session = match session {
         Some(session) => session,
         // A new session records the `run` snapshot of its Function
         // (AGL-063, D4).
@@ -625,6 +602,24 @@ fn agent_session(
         }
         .render()
     });
+    let plane = Plane {
+        function: &function,
+        function_name: &settings.function,
+        backend: backend.as_ref(),
+        session,
+        sessions_dir: &sessions_dir,
+        project: &project.project,
+        workspace: workspace.clone(),
+        context,
+        autostart: &autostart,
+        lang,
+        forge,
+        reasoning: args.reasoning,
+        image_tokens,
+        search,
+        memory: &memory,
+        about: about.as_deref(),
+    };
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
         let interactive = repl::term::is_interactive();
@@ -640,26 +635,12 @@ fn agent_session(
             autostart.switch(&mut |line| eprintln!("{line}"))?;
         }
         let setup = Setup {
-            function: &function,
-            function_name: &settings.function,
-            backend: backend.as_ref(),
-            session,
+            plane,
             resumed,
-            sessions_dir: &paths.sessions(),
-            project: &project.project,
-            context,
             server_url: &settings.server_url,
-            autostart: &autostart,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
             repl: settings.repl,
-            lang,
-            forge,
             history_file: paths.history_file(),
-            reasoning: args.reasoning,
-            image_tokens,
-            search,
-            memory: &memory,
-            about: about.as_deref(),
             catalog: &catalog,
         };
         return if interactive {
@@ -668,20 +649,21 @@ fn agent_session(
             cli::lines::run(setup).map(repl::End::Exit)
         };
     };
-    eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
+    let mut plane = plane;
+    eprintln!("{}", tr!(lang, m::SESSION, id = plane.session.id));
     interrupt::install();
-    let id = session.id.clone();
+    let id = plane.session.id.clone();
     // The attached files get their placeholders before the message and are
     // stored with the session; an audio is transcribed here (AGL-014).
     let mut pending = Vec::new();
     let placeholders: Vec<String> = sources
         .into_iter()
-        .map(|source| attach::add(&session, &mut pending, source))
+        .map(|source| attach::add(&plane.session, &mut pending, source))
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
-    observer.attach(&session);
+    observer.attach(&plane.session);
     let stored = attach::store(
-        &mut session,
+        &mut plane.session,
         pending,
         &message,
         backend.as_ref(),
@@ -695,21 +677,7 @@ fn agent_session(
         observer.on(phase::PhaseEvent::Failed);
     }
     stored?;
-    let mut agent = Agent {
-        function: &function,
-        function_name: &settings.function,
-        backend: backend.as_ref(),
-        session: &mut session,
-        workspace: &workspace,
-        context: context.expect("`-p` read the context size"),
-        forge,
-        reasoning: args.reasoning,
-        image_tokens,
-        whisper: &autostart,
-        search,
-        memory: &memory,
-        about: about.as_deref(),
-    };
+    let mut agent = plane.agent(context.expect("`-p` read the context size"));
     let mut report = StderrReport::new(lang);
     match agent.turn_observed(&message, &mut report, &mut observer)? {
         TurnEnd::Answer(text) => {

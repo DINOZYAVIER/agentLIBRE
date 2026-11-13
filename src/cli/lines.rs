@@ -6,7 +6,7 @@ use std::io::{self, BufRead};
 use std::process::ExitCode;
 
 use crate::Setup;
-use crate::agent::{Agent, TurnEnd};
+use crate::agent::TurnEnd;
 use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
@@ -25,32 +25,26 @@ use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
-        function,
-        function_name,
-        backend,
-        mut session,
-        sessions_dir,
-        project,
-        mut context,
+        mut plane,
         server_url,
-        lang,
-        forge,
-        reasoning,
-        autostart,
-        search,
-        image_tokens,
-        memory,
-        about,
         ..
     } = setup;
-    let workspace = session.workspace.clone();
+    let function = plane.function;
+    let function_name = plane.function_name;
+    let backend = plane.backend;
+    let lang = plane.lang;
+    let autostart = plane.autostart;
+    let memory = plane.memory;
+    let sessions_dir = plane.sessions_dir;
+    let project = plane.project;
+    let workspace = plane.workspace.clone();
     let facts = Facts {
         function: function_name.into(),
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
     interrupt::install();
-    eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
+    eprintln!("{}", tr!(lang, m::SESSION, id = plane.session.id));
     let mut state: Option<String> = None;
     // What `/attach` took since the last message (AGL-014, D18).
     let mut pending: Vec<Pending> = Vec::new();
@@ -76,7 +70,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             let mut said = Said::default();
             match name {
                 "/quit" | "/exit" => {
-                    said.record(&mut session, message);
+                    said.record(&mut plane.session, message);
                     break;
                 }
                 "/help" => {
@@ -86,12 +80,12 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 "/status" => {
                     let info = Info {
-                        session: session.id.clone(),
+                        session: plane.session.id.clone(),
                         state: state.clone(),
-                        unfinished: session.unfinished().and_then(|turn| turn.state),
-                        context,
+                        unfinished: plane.session.unfinished().and_then(|turn| turn.state),
+                        context: plane.context,
                     };
-                    let text = status_text(&facts, &info, reasoning, lang);
+                    let text = status_text(&facts, &info, plane.reasoning, lang);
                     outln!("{text}");
                     said.output.push(text.to_string());
                 }
@@ -103,7 +97,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             }
                             match crate::memory::remember(&dir, &name, &text) {
                                 (_, Some(write)) => {
-                                    session.append(Event::Memory {
+                                    plane.session.append(Event::Memory {
                                         name: write.name.clone(),
                                         kind: write.kind,
                                         text: write.text.clone(),
@@ -144,7 +138,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                             .and_then(|dir| crate::cli::memory::remove(dir.as_deref(), &name));
                         match removed {
                             Ok((result, write)) => {
-                                session.append(Event::Memory {
+                                plane.session.append(Event::Memory {
                                     name: write.name.clone(),
                                     kind: write.kind,
                                     text: write.text.clone(),
@@ -178,7 +172,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         match Source::from_file(std::path::Path::new(path)) {
                             Ok(source) => {
                                 let name = source.name.clone();
-                                let placeholder = attach::add(&session, &mut pending, source);
+                                let placeholder = attach::add(&plane.session, &mut pending, source);
                                 let text =
                                     tr!(lang, m::ATTACHED, placeholder = placeholder, name = name)
                                         .to_string();
@@ -195,9 +189,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     if text.is_empty() {
                         said.fail(tr!(lang, m::RENAME_USAGE).to_string());
                     } else {
-                        match session.rename(project, text) {
+                        match plane.session.rename(project, text) {
                             Ok(()) => {
-                                let named = session.name.clone().unwrap_or_default();
+                                let named = plane.session.name.clone().unwrap_or_default();
                                 let text = tr!(lang, m::RENAMED, name = named).to_string();
                                 eprintln!("{text}");
                                 said.output.push(text);
@@ -207,11 +201,11 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     }
                 }
                 "/new" => {
-                    said.record(&mut session, message);
+                    said.record(&mut plane.session, message);
                     said = Said::recorded();
                     // A new session records the `run` snapshot of its
                     // Function (AGL-063, D4).
-                    session = Session::create_run(
+                    plane.session = Session::create_run(
                         sessions_dir,
                         function_name,
                         &workspace,
@@ -220,27 +214,12 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     pending.clear();
                     placeholders.clear();
                     state = None;
-                    eprintln!("{}", tr!(lang, m::NEW_SESSION, id = session.id));
+                    eprintln!("{}", tr!(lang, m::NEW_SESSION, id = plane.session.id));
                 }
                 "/compact" => {
-                    let result = backend.context_size().and_then(|context| {
-                        Agent {
-                            function,
-                            function_name,
-                            backend,
-                            session: &mut session,
-                            workspace: &workspace,
-                            context,
-                            forge,
-                            reasoning,
-                            image_tokens,
-                            whisper: autostart,
-                            search,
-                            memory,
-                            about,
-                        }
-                        .compact(&mut StderrReport::new(lang))
-                    });
+                    let result = backend
+                        .context_size()
+                        .and_then(|context| plane.agent(context).compact(&mut StderrReport::new(lang)));
                     let interrupted = matches!(result, Err(Error::Interrupted));
                     if let Some((text, role)) = compact_notice(result, function, lang) {
                         eprintln!("{text}");
@@ -248,13 +227,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         said.output.push(text);
                     }
                     if interrupted {
-                        said.record(&mut session, message);
+                        said.record(&mut plane.session, message);
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
                     }
                 }
                 _ => said.fail(tr!(lang, m::UNKNOWN_COMMAND, name = name).to_string()),
             }
-            said.record(&mut session, message);
+            said.record(&mut plane.session, message);
             continue;
         }
         let mut report = StderrReport::new(lang);
@@ -263,7 +242,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         let attached = std::mem::take(&mut pending);
         // The FSM of the turn sees the start too (AGL-046, D10).
         let mut observer = Observer::new();
-        observer.attach(&session);
+        observer.attach(&plane.session);
         // The server is started here when it does not answer, at the
         // first request (AGL-015, D10, AGL-024).
         let ready = autostart
@@ -275,11 +254,11 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             })
             .and_then(|()| backend.context_size());
         let end = ready.and_then(|size| {
-            context = Some(size);
+            plane.context = Some(size);
             // The media the message names are stored; an audio is
             // transcribed here (AGL-014).
             attach::store(
-                &mut session,
+                &mut plane.session,
                 attached,
                 &text,
                 backend,
@@ -289,22 +268,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     eprintln!("{line}");
                 },
             )?;
-            Agent {
-                function,
-                function_name,
-                backend,
-                session: &mut session,
-                workspace: &workspace,
-                context: size,
-                forge,
-                reasoning,
-                image_tokens,
-                whisper: autostart,
-                search,
-                memory,
-                about,
-            }
-            .turn_observed(&text, &mut report, &mut observer)
+            plane
+                .agent(size)
+                .turn_observed(&text, &mut report, &mut observer)
         });
         // A start that failed never reached the agent.
         observer.end(PhaseEvent::Failed, &mut report);
