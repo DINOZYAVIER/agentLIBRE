@@ -716,7 +716,8 @@ fn agent_session(
         memory: &memory,
         about: about.as_deref(),
     };
-    match agent.turn_observed(&message, &mut StderrReport::new(lang), &mut observer)? {
+    let mut report = StderrReport::new(lang);
+    match agent.turn_observed(&message, &mut report, &mut observer)? {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))

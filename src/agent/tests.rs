@@ -9,6 +9,7 @@ use crate::backend::{Generated, StructuredCall};
 use crate::function::tests::{CODER, function, function_on};
 use crate::forge::testutil::TempDir;
 use crate::session::Event;
+use crate::tools::ToolResult;
 
 /// A backend that replays scripted generations.
 struct Script {
@@ -215,7 +216,39 @@ impl Backend for Script {
 /// tokens each generation decoded (AGL-012).
 struct Log(Vec<String>, Vec<usize>, Vec<usize>);
 
-impl Report for Log {
+impl Sink for Log {
+    fn send(&mut self, report: Report) {
+        match report {
+            Report::Event(Event::State(state)) => self.state(&state),
+            Report::Thinking(piece) => self.thinking(&piece),
+            Report::ActionText(piece) => self.action_text(&piece),
+            Report::Event(Event::Call { text, call }) => {
+                if let Some(text) = text {
+                    self.text(&text);
+                }
+                self.call(&call);
+            }
+            Report::Event(Event::Result { outcome, .. }) => self.result(outcome),
+            Report::Event(Event::Answer(text)) => self.answer(&text),
+            Report::Event(Event::Memory { name, kind, text }) => {
+                self.memory(&name, kind, text.as_deref())
+            }
+            Report::Event(Event::CutOff(_)) => self.cut_off(),
+            Report::Stirred {
+                attempt,
+                max,
+                error,
+            } => self.stirred(attempt, max, &error),
+            Report::Compacting => self.compacting(),
+            Report::Compacted => self.compacted(),
+            Report::ContextUsed(tokens) => self.context_used(tokens),
+            Report::Decoded(tokens) => self.decoded(tokens),
+            _ => {}
+        }
+    }
+}
+
+impl Log {
     fn state(&mut self, state: &str) {
         self.0.push(format!("[{state}]"));
     }
@@ -225,7 +258,6 @@ impl Report for Log {
             _ => self.0.push(format!("thinking: {piece}")),
         }
     }
-    fn thinking_done(&mut self) {}
     fn action_text(&mut self, piece: &str) {
         match self.0.last_mut() {
             Some(last) if last.starts_with("stream: ") => last.push_str(piece),
@@ -241,8 +273,8 @@ impl Report for Log {
     fn call(&mut self, call: &ToolCall) {
         self.0.push(format!("> {}", call.name));
     }
-    fn result(&mut self, _: &ToolCall, result: &ToolResult) {
-        self.0.push(format!("  {}", result.outcome.name()));
+    fn result(&mut self, outcome: Outcome) {
+        self.0.push(format!("  {}", outcome.name()));
     }
     fn compacting(&mut self) {
         self.0.push("compacting".into());
@@ -253,7 +285,7 @@ impl Report for Log {
     fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
         self.0.push(format!("memory {}{name} {}", kind.sign(), text.unwrap_or("-")));
     }
-    fn cut_off(&mut self, _cut: &CutOff) {
+    fn cut_off(&mut self) {
         self.0.push("[cut off]".into());
     }
     fn stirred(&mut self, attempt: u32, max: u32, error: &str) {

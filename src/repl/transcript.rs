@@ -11,7 +11,7 @@ use super::markdown;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use super::records::{self, Record};
 use super::text::{StreamWrap, clean, hard_wrap, truncate, width, wrap_line};
-use crate::agent::Report;
+use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
@@ -103,6 +103,8 @@ pub struct Presenter {
     /// Whether the turn has entered its first state: only a change of state
     /// is shown (AGL-046, D13).
     state_entered: bool,
+    /// The call whose result is next.
+    pending_call: Option<ToolCall>,
     /// The thinking being decoded, as its pieces arrive (D3, D19): the
     /// transcript shows its line with the record of its step.
     thinking: Option<String>,
@@ -142,6 +144,7 @@ impl Presenter {
             compact_before: None,
             context_fresh: false,
             state_entered: false,
+            pending_call: None,
             thinking: None,
             step_open: false,
             action: None,
@@ -524,7 +527,64 @@ impl Presenter {
     }
 }
 
-impl Report for Presenter {
+impl Sink for Presenter {
+    /// Takes what the turn tells (AGL-067, D3).
+    fn send(&mut self, report: Report) {
+        self.take(report);
+    }
+}
+
+impl Presenter {
+    fn take(&mut self, report: Report) {
+        match report {
+            Report::Event(Event::State(state)) => self.state(&state),
+            Report::Thinking(piece) => self.thinking(&piece),
+            Report::ThinkingDone => self.thinking_done(),
+            Report::ActionText(piece) => self.action_text(&piece),
+            Report::Event(Event::Call { text, call }) => {
+                if let Some(text) = text {
+                    self.text(&text);
+                }
+                self.call(&call);
+                self.pending_call = Some(call);
+            }
+            Report::Event(Event::Result {
+                outcome, content, ..
+            }) => {
+                if let Some(call) = self.pending_call.take() {
+                    self.result(&call, &ToolResult { outcome, content });
+                }
+            }
+            Report::Event(Event::Answer(text)) => self.answer(&text),
+            Report::Event(Event::Forge {
+                name,
+                kind,
+                section,
+            }) => self.forge(&name, kind, section.as_deref()),
+            Report::Event(Event::Memory { name, kind, text }) => {
+                self.show_memory(&name, kind, text.as_deref())
+            }
+            Report::Event(Event::CutOff(cut)) => self.cut_off(&cut),
+            Report::Stirred {
+                attempt,
+                max,
+                error,
+            } => self.stirred(attempt, max, &error),
+            Report::Compacting => self.compacting(),
+            Report::Compacted => self.compacted(),
+            Report::ContextUsed(tokens) => self.context_used(tokens),
+            Report::Decoded(tokens) => self.decoded(tokens),
+            Report::PromptProgress(progress) => self.prompt_progress(progress),
+            Report::PromptRead(prefill) => self.prompt_read(prefill),
+            Report::Transition(transition) => self.transition(&transition),
+            Report::Event(_)
+            | Report::Prefill
+            | Report::ActionStarted
+            | Report::CompactFailed
+            | Report::StepStarted(_) => {}
+        }
+    }
+
     fn state(&mut self, state: &str) {
         self.close();
         if std::mem::replace(&mut self.state_entered, true) {
@@ -855,7 +915,85 @@ mod tests {
 
     use super::*;
     use crate::action::{Outcome, Value};
-    use crate::phase::{Observed, Observer, PhaseEvent};
+    use crate::phase::{Observer, PhaseEvent, Reports};
+
+    /// What a test tells the presenter, in a word each: the reports of a
+    /// turn as the agent sends them (AGL-067).
+    trait Say {
+        fn prefill(&mut self);
+        fn thinking(&mut self, piece: &str);
+        fn thinking_done(&mut self);
+        fn action_text(&mut self, piece: &str);
+        fn answer(&mut self, text: &str);
+        fn call(&mut self, call: &ToolCall);
+        fn call_with_text(&mut self, text: &str, call: &ToolCall);
+        fn result(&mut self, call: &ToolCall, result: &ToolResult);
+        fn stirred(&mut self, attempt: u32, max: u32, error: &str);
+        fn context_used(&mut self, tokens: usize);
+        fn compacting(&mut self);
+        fn compacted(&mut self);
+        fn prompt_read(&mut self, prefill: Prefill);
+        fn prompt_progress(&mut self, progress: PromptProgress);
+    }
+
+    impl Say for Reports<'_> {
+        fn prefill(&mut self) {
+            self.send(Report::Prefill);
+        }
+        fn thinking(&mut self, piece: &str) {
+            self.send(Report::Thinking(piece.into()));
+        }
+        fn thinking_done(&mut self) {
+            self.send(Report::ThinkingDone);
+        }
+        fn action_text(&mut self, piece: &str) {
+            self.send(Report::ActionText(piece.into()));
+        }
+        fn answer(&mut self, text: &str) {
+            self.send(Report::Event(Event::Answer(text.into())));
+        }
+        fn call(&mut self, call: &ToolCall) {
+            self.send(Report::Event(Event::Call {
+                text: None,
+                call: call.clone(),
+            }));
+        }
+        fn call_with_text(&mut self, text: &str, call: &ToolCall) {
+            self.send(Report::Event(Event::Call {
+                text: Some(text.into()),
+                call: call.clone(),
+            }));
+        }
+        fn result(&mut self, call: &ToolCall, result: &ToolResult) {
+            self.send(Report::Event(Event::Result {
+                id: call.id.clone(),
+                outcome: result.outcome,
+                content: result.content.clone(),
+            }));
+        }
+        fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
+            self.send(Report::Stirred {
+                attempt,
+                max,
+                error: error.into(),
+            });
+        }
+        fn context_used(&mut self, tokens: usize) {
+            self.send(Report::ContextUsed(tokens));
+        }
+        fn compacting(&mut self) {
+            self.send(Report::Compacting);
+        }
+        fn compacted(&mut self) {
+            self.send(Report::Compacted);
+        }
+        fn prompt_read(&mut self, prefill: Prefill) {
+            self.send(Report::PromptRead(prefill));
+        }
+        fn prompt_progress(&mut self, progress: PromptProgress) {
+            self.send(Report::PromptProgress(progress));
+        }
+    }
 
     /// A screen that records what was drawn.
     #[derive(Default)]
@@ -1071,9 +1209,9 @@ mod tests {
         presenter.begin_turn();
         let mut observer = Observer::new();
         observer.enter(PhaseEvent::ServerStart, &mut presenter);
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut observer,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.prefill();
@@ -1111,9 +1249,9 @@ mod tests {
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
         let mut first = Observer::new();
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut first,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.thinking("hmm");
@@ -1121,9 +1259,9 @@ mod tests {
         presenter.close();
         presenter.begin_turn();
         let mut second = Observer::new();
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut second,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.answer("Done");
@@ -1140,9 +1278,9 @@ mod tests {
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
         let mut observer = Observer::new();
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut observer,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.context_used(52_400);
@@ -1187,9 +1325,9 @@ mod tests {
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
         let mut observer = Observer::new();
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut observer,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.prompt_read(Prefill {
@@ -1229,9 +1367,9 @@ mod tests {
         let (mut presenter, mock) = presenter(true);
         presenter.begin_turn();
         let mut observer = Observer::new();
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut observer,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.prompt_progress(PromptProgress {
@@ -1372,16 +1510,15 @@ mod tests {
         let mut observer = Observer::new();
         observer.enter(PhaseEvent::ServerStart, &mut presenter);
         observer.enter(PhaseEvent::Transcribe, &mut presenter);
-        let mut report = Observed {
+        let mut report = Reports {
             observer: &mut observer,
-            report: &mut presenter,
+            sink: &mut presenter,
         };
         report.prefill();
         report.thinking("hmm ");
         report.thinking_done();
         report.action_text("Looking.\n");
-        report.text("Looking.");
-        report.call(&bash("ls"));
+        report.call_with_text("Looking.", &bash("ls"));
         report.result(
             &bash("ls"),
             &ToolResult {

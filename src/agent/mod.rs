@@ -15,63 +15,67 @@ use crate::function::Function;
 use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::media;
-use crate::phase::{Observed, Observer, PhaseEvent, StepRecord, Transition};
+use crate::phase::{Observer, PhaseEvent, Reports, StepRecord, Transition};
 use crate::search::Searcher;
-use crate::session::{CutOff, Event, ForgeKind, INTERRUPTED, Session, StopReason};
-use crate::tools::{self, ForgeEnv, Spec, ToolResult};
+use crate::session::{CutOff, Event, INTERRUPTED, Session, StopReason};
+use crate::tools::{self, ForgeEnv, Spec};
 
-/// What the user sees while a turn runs.
-pub trait Report {
-    /// A visit of `state` begins.
-    fn state(&mut self, state: &str);
-    /// A piece of thinking as it streams.
-    fn thinking(&mut self, piece: &str);
-    /// Thinking of this step is over.
-    fn thinking_done(&mut self);
-    /// The first token of the action, shown or not: the text of a call is
-    /// not, and it is being written all the same (AGL-058, D7).
-    fn action_started(&mut self) {}
-    /// A piece of the action's text as it streams; never a piece of the
-    /// call itself (D131).
-    fn action_text(&mut self, _piece: &str) {}
-    /// Text the model wrote before a call (D114), whole.
-    fn text(&mut self, text: &str);
-    /// The answer, whole; the turn ends (D131).
-    fn answer(&mut self, _text: &str) {}
-    fn call(&mut self, call: &ToolCall);
-    fn result(&mut self, call: &ToolCall, result: &ToolResult);
-    /// A write of the agent's forge tool (AGL-008): the marker line.
-    fn forge(&mut self, _name: &str, _kind: ForgeKind, _section: Option<&str>) {}
-    /// A write of the memory tool (AGL-006): the marker line, then the text
-    /// that was written.
-    fn memory(&mut self, _name: &str, _kind: crate::memory::Kind, _text: Option<&str>) {}
-    /// The summary is being generated (D140).
-    fn compacting(&mut self) {}
-    /// A summary replaced the history (D139).
-    fn compacted(&mut self) {}
-    /// A generation hit its budget and was discarded (D154; AGL-043 F8).
-    fn cut_off(&mut self, _cut: &CutOff) {}
+/// What a turn tells while it runs (AGL-067, F3, D3): plain data, owned,
+/// so a surface can draw it where it is and a channel can carry it. An
+/// event of the session as it was appended, or what is not stored.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Report {
+    /// An event of the session, as it was appended: a visit of a state, a
+    /// call with the text before it, its result, the answer, a cut-off, a
+    /// write of the forge or of the memory.
+    Event(Event),
     /// A step begins: its prompt is rendered, counted and read by the
     /// server until the first token (AGL-043 F2).
-    fn prefill(&mut self) {}
-    /// The prompt of the next step has this many tokens (D152).
-    fn context_used(&mut self, _tokens: usize) {}
-    /// A generation decoded this many tokens (AGL-012).
-    fn decoded(&mut self, _tokens: usize) {}
+    Prefill,
+    /// A piece of thinking as it streams.
+    Thinking(String),
+    /// Thinking of this step is over.
+    ThinkingDone,
+    /// The first token of the action, shown or not: the text of a call is
+    /// not, and it is being written all the same (AGL-058, D7).
+    ActionStarted,
+    /// A piece of the action's text as it streams, or the whole of it at
+    /// the end; never a piece of the call itself (D131).
+    ActionText(String),
     /// A stir of the stirred mode: the `attempt`-th corrective retry of the
     /// step, of at most `max`, after the malformed output named by `error`
     /// (AGL-030, D4; AGL-043 F8).
-    fn stirred(&mut self, _attempt: u32, _max: u32, _error: &str) {}
+    Stirred { attempt: u32, max: u32, error: String },
+    /// The summary is being generated (D140).
+    Compacting,
+    /// A summary replaced the history (D139).
+    Compacted,
     /// A compaction that started made no summary (AGL-046).
-    fn compact_failed(&mut self) {}
-    /// A transition of the FSM during the turn (AGL-046).
-    fn transition(&mut self, _transition: &Transition) {}
+    CompactFailed,
+    /// The prompt of the next step has this many tokens (D152).
+    ContextUsed(usize),
+    /// A generation decoded this many tokens (AGL-012).
+    Decoded(usize),
     /// How the reading of a prompt goes, as the server says (AGL-046, D19).
-    fn prompt_progress(&mut self, _progress: PromptProgress) {}
+    PromptProgress(PromptProgress),
     /// How the server read the prompt of a generation (AGL-046).
-    fn prompt_read(&mut self, _prefill: Prefill) {}
+    PromptRead(Prefill),
     /// What a step's prompt is made of (AGL-046, D15).
-    fn step_started(&mut self, _record: &StepRecord) {}
+    StepStarted(StepRecord),
+    /// A transition of the FSM during the turn (AGL-046).
+    Transition(Transition),
+}
+
+/// Where the reports of a turn go (AGL-067, F3, D3): a closure, or a type
+/// that draws or logs them.
+pub trait Sink {
+    fn send(&mut self, report: Report);
+}
+
+impl<F: FnMut(Report)> Sink for F {
+    fn send(&mut self, report: Report) {
+        self(report)
+    }
 }
 
 /// What starts the runtime message with the index of the memory.
@@ -132,10 +136,14 @@ pub struct Agent<'a> {
 impl Agent<'_> {
     /// Runs the turn for the user `message`, with an observer of its own.
     #[cfg(test)]
-    pub fn turn(&mut self, message: &str, report: &mut dyn Report) -> Result<TurnEnd, Error> {
+    pub fn turn(
+        &mut self,
+        message: &str,
+        sink: &mut dyn Sink,
+    ) -> Result<TurnEnd, Error> {
         let mut observer = Observer::new();
         observer.attach(self.session);
-        self.turn_observed(message, report, &mut observer)
+        self.turn_observed(message, sink, &mut observer)
     }
 
     /// Runs the turn for the user `message`. A stop is logged; a server
@@ -145,20 +153,20 @@ impl Agent<'_> {
     pub fn turn_observed(
         &mut self,
         message: &str,
-        report: &mut dyn Report,
+        sink: &mut dyn Sink,
         observer: &mut Observer,
     ) -> Result<TurnEnd, Error> {
-        let mut observed = Observed { observer, report };
-        let end = self.run_turn(message, &mut observed);
+        let mut reports = Reports { observer, sink };
+        let end = self.run_turn(message, &mut reports);
         match &end {
             Ok(TurnEnd::Answer(_)) => {}
-            Ok(TurnEnd::Stopped(reason)) => observed.end(PhaseEvent::Stop(*reason)),
-            Err(_) => observed.end(PhaseEvent::Failed),
+            Ok(TurnEnd::Stopped(reason)) => reports.end(PhaseEvent::Stop(*reason)),
+            Err(_) => reports.end(PhaseEvent::Failed),
         }
         end
     }
 
-    fn run_turn(&mut self, message: &str, report: &mut dyn Report) -> Result<TurnEnd, Error> {
+    fn run_turn(&mut self, message: &str, report: &mut Reports<'_>) -> Result<TurnEnd, Error> {
         self.session.append(Event::User(message.into()))?;
         let unfinished = self.session.unfinished().expect("the turn has a message");
         let mut machine = Machine::resume(self.function, self.function_name, &unfinished)?;
@@ -188,9 +196,14 @@ impl Agent<'_> {
         }
     }
 
-    fn enter(&mut self, state: &str, report: &mut dyn Report) -> Result<(), Error> {
-        self.session.append(Event::State(state.into()))?;
-        report.state(state);
+    fn enter(&mut self, state: &str, report: &mut Reports<'_>) -> Result<(), Error> {
+        self.record(Event::State(state.into()), report)
+    }
+
+    /// Appends `event` to the session and reports it as it was appended.
+    fn record(&mut self, event: Event, report: &mut Reports<'_>) -> Result<(), Error> {
+        self.session.append(event.clone())?;
+        report.send(Report::Event(event));
         Ok(())
     }
 
@@ -198,9 +211,9 @@ impl Agent<'_> {
     fn step(
         &mut self,
         machine: &mut Machine,
-        report: &mut dyn Report,
+        report: &mut Reports<'_>,
     ) -> Result<Option<TurnEnd>, Error> {
-        report.prefill();
+        report.send(Report::Prefill);
         let function = self.function;
         let format = &function.format;
         let state = machine.state();
@@ -245,7 +258,7 @@ impl Agent<'_> {
         // A picture is counted by its bound, not by the marker (D10).
         let prompt_tokens = self.backend.count_prompt(&step_prompt, &prompt)?
             + expanded.pictures * self.image_tokens;
-        report.context_used(prompt_tokens);
+        report.send(Report::ContextUsed(prompt_tokens));
         self.record_step(report, state, &messages, &tools, &prompt, prompt_tokens, think)?;
         // The early compaction (AGL-038, D6, D9): the history plus the most
         // a step can add and the summary must fit, so the summary fits at
@@ -289,16 +302,16 @@ impl Agent<'_> {
                     media: &expanded.uploads,
                     structured: None,
                 },
-                Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
+                Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
                 &mut |_| {},
-                &mut |piece| cell.borrow_mut().thinking(piece),
+                &mut |piece| cell.borrow_mut().send(Report::Thinking(piece.to_owned())),
             )?;
-            report.thinking_done();
+            report.send(Report::ThinkingDone);
             if let Some(prefill) = thinking.prefill {
-                report.prompt_read(prefill);
+                report.send(Report::PromptRead(prefill));
             }
             if !thinking.text.is_empty() {
-                report.decoded(self.backend.count_tokens(&thinking.text)?);
+                report.send(Report::Decoded(self.backend.count_tokens(&thinking.text)?));
             }
             let text = thinking.text.trim_end().to_owned();
             if !text.is_empty() {
@@ -333,20 +346,20 @@ impl Agent<'_> {
                 media: &expanded.uploads,
                 structured: None,
             },
-            Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
+            Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
             &mut |_| {},
             &mut |piece| {
-                cell.borrow_mut().action_started();
+                cell.borrow_mut().send(Report::ActionStarted);
                 if open_reasoning {
                     return;
                 }
                 if let Some(text) = stream.push(piece) {
-                    cell.borrow_mut().action_text(&text);
+                    cell.borrow_mut().send(Report::ActionText(text.to_string()));
                 }
             },
         )?;
         if let Some(prefill) = generated.prefill {
-            report.prompt_read(prefill);
+            report.send(Report::PromptRead(prefill));
         }
         let action_tokens = if generated.text.is_empty() {
             0
@@ -354,7 +367,7 @@ impl Agent<'_> {
             self.backend.count_tokens(&generated.text)?
         };
         if action_tokens > 0 {
-            report.decoded(action_tokens);
+            report.send(Report::Decoded(action_tokens));
         }
         let output = if open_reasoning && generated.stop != Stop::Limit {
             format.outside_reasoning(&generated.text)
@@ -363,10 +376,10 @@ impl Agent<'_> {
         };
         if open_reasoning {
             if generated.stop != Stop::Limit && !output.starts_with(&format.call.begin_before) {
-                report.action_text(&output);
+                report.send(Report::ActionText(output.to_string()));
             }
         } else if let Some(text) = stream.finish() {
-            report.action_text(&text);
+            report.send(Report::ActionText(text.to_string()));
         }
         // Cut-off text may have been heading for a call: it is discarded
         // and the model is told to split the work (D154).
@@ -392,7 +405,7 @@ impl Agent<'_> {
     fn stirred_step(
         &mut self,
         machine: &mut Machine,
-        report: &mut dyn Report,
+        report: &mut Reports<'_>,
         mut messages: Vec<Message>,
         uploads: &[String],
         tools: &[&'static Spec],
@@ -436,27 +449,27 @@ impl Agent<'_> {
                     media: uploads,
                     structured: Some(&prompt),
                 },
-                Some(&mut |progress| cell.borrow_mut().prompt_progress(progress)),
-                &mut |piece| cell.borrow_mut().thinking(piece),
+                Some(&mut |progress| cell.borrow_mut().send(Report::PromptProgress(progress))),
+                &mut |piece| cell.borrow_mut().send(Report::Thinking(piece.to_owned())),
                 &mut |piece| {
                     if open.replace(false) {
-                        cell.borrow_mut().thinking_done();
+                        cell.borrow_mut().send(Report::ThinkingDone);
                     }
-                    cell.borrow_mut().action_started();
+                    cell.borrow_mut().send(Report::ActionStarted);
                     if !piece.is_empty() {
-                        cell.borrow_mut().action_text(piece);
+                        cell.borrow_mut().send(Report::ActionText(piece.to_owned()));
                     }
                 },
             )?;
             if open.replace(false) {
-                cell.borrow_mut().thinking_done();
+                cell.borrow_mut().send(Report::ThinkingDone);
             }
             if let Some(prefill) = generated.prefill {
-                report.prompt_read(prefill);
+                report.send(Report::PromptRead(prefill));
             }
             // The exact counts of the server's `usage` (AGL-030, D11).
             if let Some(tokens) = generated.prompt_tokens {
-                report.context_used(tokens);
+                report.send(Report::ContextUsed(tokens));
             }
             let thinking_tokens = || -> Result<usize, Error> {
                 match &generated.thinking {
@@ -469,7 +482,7 @@ impl Agent<'_> {
                 None => self.backend.count_tokens(&generated.text)? + thinking_tokens()?,
             };
             if decoded > 0 {
-                report.decoded(decoded);
+                report.send(Report::Decoded(decoded));
             }
             // A step that hit its budget is a miss of the budget, not of
             // the model: discarded, and the model is told to split the
@@ -503,7 +516,11 @@ impl Agent<'_> {
                         attempt: stirs,
                         error: detail.clone(),
                     })?;
-                    report.stirred(stirs, function.max_stirs, &detail);
+                    report.send(Report::Stirred {
+                        attempt: stirs,
+                        max: function.max_stirs,
+                        error: detail.clone(),
+                    });
                     // The malformed output is discarded; the retry sees
                     // the nudge as a runtime message (AGL-030, D4, D8).
                     messages.push(Message::Runtime(stir_nudge(&state_name, &detail)));
@@ -526,11 +543,10 @@ impl Agent<'_> {
     fn cut_off(
         &mut self,
         machine: &mut Machine,
-        report: &mut dyn Report,
+        report: &mut Reports<'_>,
         cut: CutOff,
     ) -> Result<Option<TurnEnd>, Error> {
-        report.cut_off(&cut);
-        self.session.append(Event::CutOff(cut))?;
+        self.record(Event::CutOff(cut), report)?;
         let progress = machine.after_cut_off();
         if machine.entered() {
             self.enter(machine.state().name.as_str(), report)?;
@@ -546,13 +562,12 @@ impl Agent<'_> {
     fn run_action(
         &mut self,
         machine: &mut Machine,
-        report: &mut dyn Report,
+        report: &mut Reports<'_>,
         action: Action,
     ) -> Result<Option<TurnEnd>, Error> {
         match action {
             Action::Answer(text) => {
-                self.session.append(Event::Answer(text.clone()))?;
-                report.answer(&text);
+                self.record(Event::Answer(text.clone()), report)?;
                 Ok(Some(TurnEnd::Answer(text)))
             }
             Action::Call { text, tool, args } => {
@@ -561,14 +576,13 @@ impl Agent<'_> {
                     name: tool,
                     args,
                 };
-                self.session.append(Event::Call {
-                    text: text.clone(),
-                    call: call.clone(),
-                })?;
-                if let Some(text) = &text {
-                    report.text(text);
-                }
-                report.call(&call);
+                self.record(
+                    Event::Call {
+                        text: text.clone(),
+                        call: call.clone(),
+                    },
+                    report,
+                )?;
                 let ran = tools::run(
                     &call,
                     text.as_deref(),
@@ -584,29 +598,31 @@ impl Agent<'_> {
                     },
                 );
                 let result = ran.result;
-                self.session.append(Event::Result {
-                    id: call.id.clone(),
-                    outcome: result.outcome,
-                    content: result.content.clone(),
-                })?;
-                report.result(&call, &result);
+                self.record(
+                    Event::Result {
+                        id: call.id.clone(),
+                        outcome: result.outcome,
+                        content: result.content.clone(),
+                    },
+                    report,
+                )?;
                 match ran.write {
-                    Some(tools::Written::Memory(write)) => {
-                        self.session.append(Event::Memory {
-                            name: write.name.clone(),
+                    Some(tools::Written::Memory(write)) => self.record(
+                        Event::Memory {
+                            name: write.name,
                             kind: write.kind,
-                            text: write.text.clone(),
-                        })?;
-                        report.memory(&write.name, write.kind, write.text.as_deref());
-                    }
-                    Some(tools::Written::Forge(write)) => {
-                        self.session.append(Event::Forge {
-                            name: write.name.clone(),
+                            text: write.text,
+                        },
+                        report,
+                    )?,
+                    Some(tools::Written::Forge(write)) => self.record(
+                        Event::Forge {
+                            name: write.name,
                             kind: write.kind,
-                            section: write.section.clone(),
-                        })?;
-                        report.forge(&write.name, write.kind, write.section.as_deref());
-                    }
+                            section: write.section,
+                        },
+                        report,
+                    )?,
                     None => {}
                 }
                 if interrupt::interrupted() {
@@ -630,7 +646,7 @@ impl Agent<'_> {
     #[allow(clippy::too_many_arguments)]
     fn record_step(
         &mut self,
-        report: &mut dyn Report,
+        report: &mut Reports<'_>,
         state: &crate::function::State,
         messages: &[Message],
         tools: &[&'static Spec],
@@ -656,8 +672,8 @@ impl Agent<'_> {
             .record_input("sampling", &format!("{:?}", function.sampling))?;
         self.session
             .record_input("model", &format!("{:?}", function.model))?;
-        report.step_started(&StepRecord {
-            state: &state.name,
+        report.send(Report::StepStarted(StepRecord {
+            state: state.name.clone(),
             prompt_sha256: media::sha256_hex(prompt.as_bytes()),
             prompt_tokens,
             think,
@@ -670,7 +686,7 @@ impl Agent<'_> {
             context: self.context,
             stirred: self.stirred,
             reasoning: format!("{:?}", self.reasoning),
-        });
+        }));
         Ok(())
     }
 
@@ -802,15 +818,15 @@ impl Agent<'_> {
     /// latest turn alone does not fit. The question that started the turn
     /// is kept after the summary, so the turn goes on from the summary and
     /// the question together and the summary need not repeat it (F31).
-    pub fn compact(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+    pub fn compact(&mut self, sink: &mut dyn Sink) -> Result<Compaction, Error> {
         let mut observer = Observer::new();
         observer.attach_between_turns(self.session);
-        let mut observed = Observed {
+        let mut reports = Reports {
             observer: &mut observer,
-            report,
+            sink,
         };
-        let result = self.compact_history(&mut observed);
-        observed.end(if result.is_ok() {
+        let result = self.compact_history(&mut reports);
+        reports.end(if result.is_ok() {
             PhaseEvent::Idle
         } else {
             PhaseEvent::Failed
@@ -819,19 +835,19 @@ impl Agent<'_> {
     }
 
     /// The compaction inside a turn or of [`Agent::compact`].
-    fn compact_history(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+    fn compact_history(&mut self, report: &mut Reports<'_>) -> Result<Compaction, Error> {
         let result = self.summarize_history(report)?;
         if matches!(result, Compaction::Impossible { .. }) {
-            report.compact_failed();
+            report.send(Report::CompactFailed);
         }
         Ok(result)
     }
 
-    fn summarize_history(&mut self, report: &mut dyn Report) -> Result<Compaction, Error> {
+    fn summarize_history(&mut self, report: &mut Reports<'_>) -> Result<Compaction, Error> {
         if !self.session.compactable() {
             return Ok(Compaction::Nothing);
         }
-        report.compacting();
+        report.send(Report::Compacting);
         let function = self.function;
         let budget = function.compact_tokens(self.context);
         let mut base = vec![Message::System(system_prompt(function, self.context))];
@@ -913,9 +929,9 @@ impl Agent<'_> {
         // compaction can name it (AGL-046, D13); a failed count does not
         // undo the compaction, the next step counts again.
         if let Ok(tokens) = self.history_tokens() {
-            report.context_used(tokens);
+            report.send(Report::ContextUsed(tokens));
         }
-        report.compacted();
+        report.send(Report::Compacted);
         Ok(Compaction::Done)
     }
 

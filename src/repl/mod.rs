@@ -28,9 +28,9 @@ use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
-use crate::agent::{Agent, Report, TurnEnd};
+use crate::agent::{Agent, Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
-use crate::backend::{Prefill, ReasoningLevel, ToolCall};
+use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::serve::{ServerProgress, is_yes};
 use crate::error::Error;
@@ -38,13 +38,12 @@ use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
 use crate::phase::{Observer, PhaseEvent};
-use crate::session::{CommandRun, Event, ForgeKind, Session, StopReason, TransitionLine};
+use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
 use crate::status::{
     COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
     status_text,
 };
 use crate::theme::{Role, Theme};
-use crate::tools::ToolResult;
 use crate::tr;
 
 /// A message that waits for its turn, with the media attached to it
@@ -590,74 +589,13 @@ fn input_loop(input: Input, done: Arc<AtomicBool>) {
     }
 }
 
-/// The report of a turn: the presenter, and what `/status` shows.
-struct Reporter<'a> {
-    presenter: &'a mut Presenter,
-    control: &'a Control,
-}
-
-impl Report for Reporter<'_> {
-    fn state(&mut self, state: &str) {
-        self.control.set_state(Some(state.into()));
-        self.presenter.state(state);
+/// What the REPL does with a report of a turn: `/status` shows the state,
+/// the presenter draws the rest.
+fn show(presenter: &mut Presenter, control: &Control, report: Report) {
+    if let Report::Event(Event::State(state)) = &report {
+        control.set_state(Some(state.clone()));
     }
-    fn thinking(&mut self, piece: &str) {
-        self.presenter.thinking(piece);
-    }
-    fn thinking_done(&mut self) {
-        self.presenter.thinking_done();
-    }
-    fn action_text(&mut self, piece: &str) {
-        self.presenter.action_text(piece);
-    }
-    fn text(&mut self, text: &str) {
-        self.presenter.text(text);
-    }
-    fn answer(&mut self, text: &str) {
-        self.presenter.answer(text);
-    }
-    fn call(&mut self, call: &ToolCall) {
-        self.presenter.call(call);
-    }
-    fn result(&mut self, call: &ToolCall, result: &ToolResult) {
-        self.presenter.result(call, result);
-    }
-    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        self.presenter.forge(name, kind, section);
-    }
-    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
-        self.presenter.show_memory(name, kind, text);
-    }
-    fn compacting(&mut self) {
-        self.presenter.compacting();
-    }
-    fn compacted(&mut self) {
-        self.presenter.compacted();
-    }
-    fn cut_off(&mut self, cut: &crate::session::CutOff) {
-        self.presenter.cut_off(cut);
-    }
-    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
-        self.presenter.stirred(attempt, max, error);
-    }
-    fn prefill(&mut self) {
-        self.presenter.prefill();
-    }
-    fn context_used(&mut self, tokens: usize) {
-        self.presenter.context_used(tokens);
-    }
-    fn transition(&mut self, transition: &crate::phase::Transition) {
-        self.presenter.transition(transition);
-    }
-    fn prompt_progress(&mut self, progress: crate::backend::PromptProgress) {
-        self.presenter.prompt_progress(progress);
-    }
-    fn prompt_read(&mut self, prefill: Prefill) {
-        self.presenter.prompt_read(prefill);
-    }
-    fn decoded(&mut self, tokens: usize) {
-        self.presenter.decoded(tokens);
-    }
+    presenter.send(report);
 }
 
 /// What the main thread waits for.
@@ -1158,10 +1096,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         memory,
                         about,
                     }
-                    .compact(&mut Reporter {
-                        presenter: &mut presenter,
-                        control: &control,
-                    })
+                    .compact(&mut |report: Report| show(&mut presenter, &control, report))
                 });
                 control.lock().running = false;
                 let notice = compact_notice(result, function, lang);
@@ -1232,10 +1167,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     }
                     .turn_observed(
                         &message,
-                        &mut Reporter {
-                            presenter: &mut presenter,
-                            control: &control,
-                        },
+                        &mut |report: Report| show(&mut presenter, &control, report),
                         &mut observer,
                     )
                 });
@@ -2213,13 +2145,9 @@ mod tests {
         let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
         presenter.begin_turn();
         let control = Control::new(Info::default(), None);
-        let mut reporter = Reporter {
-            presenter: &mut presenter,
-            control: &control,
-        };
-        reporter.decoded(30);
-        reporter.action_text("Done.");
-        reporter.answer("Done.");
+        show(&mut presenter, &control, Report::Decoded(30));
+        show(&mut presenter, &control, Report::ActionText("Done.".into()));
+        show(&mut presenter, &control, Report::Event(Event::Answer("Done.".into())));
         assert!(
             lines
                 .lock()

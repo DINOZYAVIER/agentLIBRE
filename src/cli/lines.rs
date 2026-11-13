@@ -6,7 +6,7 @@ use std::io::{self, BufRead};
 use std::process::ExitCode;
 
 use crate::Setup;
-use crate::agent::{Agent, Report, TurnEnd};
+use crate::agent::{Agent, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;

@@ -4,8 +4,8 @@
 //!
 //! Every transition goes through [`Observer::on`], which appends a line to
 //! the session file. Those lines are not events of the session, so the
-//! history the model reads cannot hold them. [`Observed`] puts the observer
-//! between the agent and its [`Report`], so all modes share it.
+//! history the model reads cannot hold them. [`Reports`] puts the observer
+//! between the agent and the sink of its [`Report`]s, so all modes share it.
 
 use std::fs::File;
 use std::io::Write;
@@ -14,11 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value as Json, json};
 
 use crate::action::Outcome;
-use crate::agent::Report;
-use crate::backend::{Prefill, PromptProgress, ToolCall};
-use crate::memory::Kind as MemoryKind;
-use crate::session::{CutOff, ForgeKind, Session, StopReason, utc_now};
-use crate::tools::ToolResult;
+use crate::agent::{Report, Sink};
+use crate::backend::{Prefill, PromptProgress};
+use crate::session::{Event, Session, StopReason, utc_now};
 
 /// The version of the lines this module writes.
 const SCHEMA: u32 = 1;
@@ -185,9 +183,9 @@ pub struct Transition {
 }
 
 /// What a step's prompt was made of (AGL-046, D15).
-#[derive(Clone, Debug)]
-pub struct StepRecord<'a> {
-    pub state: &'a str,
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepRecord {
+    pub state: String,
     pub prompt_sha256: String,
     pub prompt_tokens: usize,
     pub think: bool,
@@ -378,124 +376,89 @@ impl Observer {
         self.write(line);
     }
 
-    /// Takes `event` and tells `report` of the transition.
-    pub fn enter(&mut self, event: PhaseEvent, report: &mut dyn Report) {
+    /// Takes `event` and sends the transition it makes to `sink`.
+    pub fn enter(&mut self, event: PhaseEvent, sink: &mut dyn Sink) {
         if let Some(transition) = self.on(event) {
-            report.transition(&transition);
+            sink.send(Report::Transition(transition));
         }
     }
 
     /// Back to `Ready` unless the turn already is: every way out of a turn
     /// ends in the file.
-    pub fn end(&mut self, event: PhaseEvent, report: &mut dyn Report) {
+    pub fn end(&mut self, event: PhaseEvent, sink: &mut dyn Sink) {
         if self.phase != Phase::Ready {
-            self.enter(event, report);
+            self.enter(event, sink);
         }
+    }
+
+    /// Reads `report`: the transition it makes, if any, and the lines of
+    /// the session file it asks for (AGL-046).
+    fn read(&mut self, report: &Report) -> Option<Transition> {
+        let event = match report {
+            Report::Event(Event::Call { call, .. }) => PhaseEvent::ToolStart {
+                tool: call.name.clone(),
+            },
+            Report::Event(Event::Result { outcome, .. }) => PhaseEvent::ToolEnd(*outcome),
+            Report::Event(Event::Answer(_)) => PhaseEvent::Answer,
+            Report::Event(Event::CutOff(_)) => PhaseEvent::CutOff,
+            Report::Event(_) | Report::ThinkingDone | Report::Transition(_) => return None,
+            Report::Prefill => {
+                self.step += 1;
+                PhaseEvent::StepStart
+            }
+            Report::Thinking(_) => PhaseEvent::FirstThinking,
+            Report::ActionStarted | Report::ActionText(_) => PhaseEvent::FirstText,
+            Report::Stirred { attempt, max, .. } => PhaseEvent::Stir {
+                attempt: *attempt,
+                max: *max,
+            },
+            Report::Compacting => PhaseEvent::CompactStart,
+            Report::Compacted => PhaseEvent::Compacted,
+            Report::CompactFailed => PhaseEvent::CompactFailed,
+            Report::ContextUsed(tokens) => {
+                self.prompt_tokens = Some(*tokens);
+                return None;
+            }
+            Report::Decoded(tokens) => {
+                self.tokens += tokens;
+                return None;
+            }
+            Report::PromptProgress(progress) => {
+                self.write_progress(*progress);
+                return None;
+            }
+            Report::PromptRead(prefill) => {
+                self.write_prefill(*prefill);
+                return None;
+            }
+            Report::StepStarted(record) => {
+                self.write_step(record);
+                return None;
+            }
+        };
+        self.on(event)
     }
 }
 
-/// A [`Report`] that takes the transitions from what the agent reports and
-/// passes everything on.
-pub struct Observed<'a> {
+/// Where the reports of a turn go (AGL-067, F3): the observer reads each
+/// one and the transition it makes goes to the sink before it, then the
+/// report itself (AGL-046).
+pub struct Reports<'a> {
     pub observer: &'a mut Observer,
-    pub report: &'a mut dyn Report,
+    pub sink: &'a mut dyn Sink,
 }
 
-impl Observed<'_> {
-    fn enter(&mut self, event: PhaseEvent) {
-        self.observer.enter(event, &mut *self.report);
+impl Reports<'_> {
+    pub fn send(&mut self, report: Report) {
+        if let Some(transition) = self.observer.read(&report) {
+            self.sink.send(Report::Transition(transition));
+        }
+        self.sink.send(report);
     }
 
     /// See [`Observer::end`].
     pub fn end(&mut self, event: PhaseEvent) {
-        self.observer.end(event, &mut *self.report);
-    }
-}
-
-impl Report for Observed<'_> {
-    fn state(&mut self, state: &str) {
-        self.report.state(state);
-    }
-    fn thinking(&mut self, piece: &str) {
-        self.enter(PhaseEvent::FirstThinking);
-        self.report.thinking(piece);
-    }
-    fn thinking_done(&mut self) {
-        self.report.thinking_done();
-    }
-    fn action_started(&mut self) {
-        self.enter(PhaseEvent::FirstText);
-        self.report.action_started();
-    }
-    fn action_text(&mut self, piece: &str) {
-        self.enter(PhaseEvent::FirstText);
-        self.report.action_text(piece);
-    }
-    fn text(&mut self, text: &str) {
-        self.report.text(text);
-    }
-    fn answer(&mut self, text: &str) {
-        self.enter(PhaseEvent::Answer);
-        self.report.answer(text);
-    }
-    fn call(&mut self, call: &ToolCall) {
-        self.enter(PhaseEvent::ToolStart {
-            tool: call.name.clone(),
-        });
-        self.report.call(call);
-    }
-    fn result(&mut self, call: &ToolCall, result: &ToolResult) {
-        self.enter(PhaseEvent::ToolEnd(result.outcome));
-        self.report.result(call, result);
-    }
-    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        self.report.forge(name, kind, section);
-    }
-    fn memory(&mut self, name: &str, kind: MemoryKind, text: Option<&str>) {
-        self.report.memory(name, kind, text);
-    }
-    fn compacting(&mut self) {
-        self.enter(PhaseEvent::CompactStart);
-        self.report.compacting();
-    }
-    fn compacted(&mut self) {
-        self.enter(PhaseEvent::Compacted);
-        self.report.compacted();
-    }
-    fn compact_failed(&mut self) {
-        self.enter(PhaseEvent::CompactFailed);
-    }
-    fn cut_off(&mut self, cut: &CutOff) {
-        self.enter(PhaseEvent::CutOff);
-        self.report.cut_off(cut);
-    }
-    fn prefill(&mut self) {
-        self.observer.step += 1;
-        self.enter(PhaseEvent::StepStart);
-        self.report.prefill();
-    }
-    fn context_used(&mut self, tokens: usize) {
-        self.observer.prompt_tokens = Some(tokens);
-        self.report.context_used(tokens);
-    }
-    fn decoded(&mut self, tokens: usize) {
-        self.observer.tokens += tokens;
-        self.report.decoded(tokens);
-    }
-    fn stirred(&mut self, attempt: u32, max: u32, error: &str) {
-        self.enter(PhaseEvent::Stir { attempt, max });
-        self.report.stirred(attempt, max, error);
-    }
-    fn prompt_progress(&mut self, progress: PromptProgress) {
-        self.observer.write_progress(progress);
-        self.report.prompt_progress(progress);
-    }
-    fn prompt_read(&mut self, prefill: Prefill) {
-        self.observer.write_prefill(prefill);
-        self.report.prompt_read(prefill);
-    }
-    fn step_started(&mut self, record: &StepRecord) {
-        self.observer.write_step(record);
+        self.observer.end(event, &mut *self.sink);
     }
 }
 

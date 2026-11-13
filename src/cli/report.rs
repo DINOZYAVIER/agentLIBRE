@@ -3,10 +3,10 @@
 use std::io::{self, Write};
 
 use crate::action::Outcome;
-use crate::agent::Report;
+use crate::agent::{Report, Sink};
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
-use crate::session::{CutOff, ForgeKind};
+use crate::session::{CutOff, Event, ForgeKind};
 use crate::tools::ToolResult;
 use crate::tr;
 
@@ -16,6 +16,15 @@ const COMMAND_WIDTH: usize = 200;
 pub struct StderrReport {
     pub lang: Lang,
     thinking: bool,
+    /// The call whose result is next.
+    call: Option<ToolCall>,
+}
+
+impl Sink for StderrReport {
+    /// Takes what the turn tells (AGL-067, D3).
+    fn send(&mut self, report: Report) {
+        self.take(report);
+    }
 }
 
 impl StderrReport {
@@ -23,11 +32,48 @@ impl StderrReport {
         StderrReport {
             lang,
             thinking: false,
+            call: None,
         }
     }
-}
 
-impl Report for StderrReport {
+    fn take(&mut self, report: Report) {
+        match report {
+            Report::Event(Event::State(state)) => self.state(&state),
+            Report::Thinking(piece) => self.thinking(&piece),
+            Report::ThinkingDone => self.thinking_done(),
+            Report::Event(Event::Call { text, call }) => {
+                if let Some(text) = text {
+                    self.text(&text);
+                }
+                self.call(&call);
+                self.call = Some(call);
+            }
+            Report::Event(Event::Result {
+                outcome, content, ..
+            }) => {
+                if let Some(call) = self.call.take() {
+                    self.result(&call, &ToolResult { outcome, content });
+                }
+            }
+            Report::Event(Event::Memory { name, kind, text }) => {
+                self.memory(&name, kind, text.as_deref())
+            }
+            Report::Event(Event::Forge {
+                name,
+                kind,
+                section,
+            }) => self.forge(&name, kind, section.as_deref()),
+            Report::Event(Event::CutOff(cut)) => self.cut_off(&cut),
+            Report::Stirred {
+                attempt,
+                max,
+                error,
+            } => self.stirred(attempt, max, &error),
+            Report::Compacted => self.compacted(),
+            _ => {}
+        }
+    }
+
     fn state(&mut self, state: &str) {
         eprintln!("[{state}]");
     }
@@ -60,7 +106,7 @@ impl Report for StderrReport {
         eprintln!("  {}", result_summary(call, result, self.lang));
     }
 
-    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+    pub fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
         eprintln!("{}", crate::repl::records::memory_line(name, kind, self.lang));
         if let Some(text) = text {
             eprintln!("{text}");
