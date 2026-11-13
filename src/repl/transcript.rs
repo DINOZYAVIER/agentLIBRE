@@ -67,8 +67,9 @@ pub trait Screen: Send + Sync {
     fn reading(&self, _reading: Option<Reading>) {}
     /// Appends finished lines.
     fn print(&self, lines: &[String]);
-    /// The unfinished line below the printed ones; empty clears it.
-    fn live(&self, text: &str);
+    /// The unfinished lines below the printed ones, above the dock; empty
+    /// clears them.
+    fn live(&self, lines: &[String]);
     /// Erases the last `count` printed lines if they are all still on
     /// the screen; false when they are not.
     fn erase(&self, count: usize) -> bool;
@@ -197,7 +198,7 @@ impl Presenter {
             if let Some(rest) = streamed.wrap.finish() {
                 self.screen.print(&[rest]);
             }
-            self.screen.live("");
+            self.screen.live(&[]);
         }
         self.generation_done();
     }
@@ -531,7 +532,7 @@ impl Presenter {
         if let Some(thinking) = self.thinking.take() {
             self.step_block();
             self.show_thinking(&thinking);
-            self.screen.live("");
+            self.screen.live(&[]);
         }
     }
 
@@ -552,7 +553,7 @@ impl Presenter {
                 streamed.lines += 1;
                 self.screen.print(&[rest]);
             }
-            self.screen.live("");
+            self.screen.live(&[]);
             if streamed.columns == self.screen.columns() {
                 self.screen.erase(streamed.lines);
             }
@@ -576,16 +577,16 @@ impl Report for Presenter {
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        // D24: the live's line is the card's two lines in one — the label
-        // and the first line of the thinking under the gutter, both muted.
-        let card = thinking_lines(
+        // D29: the live's lines are the card's own two lines — the label
+        // in the tool's color, the first line under the gutter — so the
+        // thinking is formatted as it ends, from the first piece.
+        self.screen.live(&thinking_lines(
             &self.theme,
             self.lang,
             self.screen.columns(),
             thinking,
-            Role::Muted,
-        );
-        self.screen.live(&format!("{}{}", card[0], card[1]));
+            Role::Tool,
+        ));
         self.piece();
     }
 
@@ -608,7 +609,7 @@ impl Report for Presenter {
         if !lines.is_empty() {
             self.screen.print(&lines);
         }
-        self.screen.live(streamed.wrap.live());
+        self.screen.live(&[streamed.wrap.live().to_owned()]);
         self.piece();
     }
 
@@ -890,8 +891,9 @@ pub fn thinking_lines(
     let label = tr!(lang, m::THINKING);
     let snippet = thinking.lines().next().unwrap_or_default();
     let gutter = theme.paint(Role::InputRule, "  │ ");
-    // The label and the gutter sit before the snippet on the live's line
-    // (the two lines in one): they take their columns too.
+    // The label's width is reserved on the snippet's row too, so the
+    // live's lines (the card from the first piece, D29) and the printed
+    // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
     vec![
         theme.paint(role, label),
@@ -916,6 +918,7 @@ mod tests {
     struct Mock {
         ops: Mutex<Vec<String>>,
         printed: Mutex<Vec<String>>,
+        live: Mutex<Vec<String>>,
     }
 
     impl Screen for Mock {
@@ -929,8 +932,9 @@ mod tests {
                 .unwrap()
                 .push(format!("print {}", lines.len()));
         }
-        fn live(&self, text: &str) {
-            self.ops.lock().unwrap().push(format!("live {text:?}"));
+        fn live(&self, lines: &[String]) {
+            *self.live.lock().unwrap() = lines.to_vec();
+            self.ops.lock().unwrap().push(format!("live {}", lines.len()));
         }
         fn reading(&self, reading: Option<Reading>) {
             let now = Instant::now();
@@ -1089,20 +1093,19 @@ mod tests {
     }
 
     #[test]
-    fn the_live_thinking_line_fits_the_columns() {
-        // AGL-066, D24: the live's line is the label, the gutter and the
-        // snippet in one; its width stays within the screen's columns —
-        // the label and the gutter take their columns too.
+    fn the_live_thinking_is_the_card_from_the_first_piece() {
+        // AGL-066, D29: while the thinking streams, the live's lines are
+        // the card's two lines — the label, the snippet under the gutter —
+        // as they are printed when the thinking ends; each fits the screen.
         let (mut presenter, mock) = presenter(true);
         presenter.thinking(&"a".repeat(80));
-        let ops = mock.ops.lock().unwrap().clone();
-        let live = ops
-            .iter()
-            .filter_map(|op| op.strip_prefix("live "))
-            .rfind(|text| text.contains("THINKING"))
-            .expect("the live's line")
-            .trim_matches('"');
-        assert!(width(live) <= 40, "{live:?}");
+        let lines = mock.live.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "THINKING", "{lines:?}");
+        assert!(lines[1].starts_with("  │ "), "{lines:?}");
+        for line in &lines {
+            assert!(width(line) <= 40, "{line:?}");
+        }
     }
 
     /// The row of `printed` that starts with `start`, without its fill.

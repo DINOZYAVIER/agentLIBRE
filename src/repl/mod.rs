@@ -2191,7 +2191,7 @@ mod tests {
         fn print(&self, lines: &[String]) {
             self.0.lock().unwrap().extend_from_slice(lines);
         }
-        fn live(&self, _text: &str) {}
+        fn live(&self, _lines: &[String]) {}
         fn erase(&self, _count: usize) -> bool {
             true
         }

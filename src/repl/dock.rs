@@ -95,7 +95,7 @@ struct State {
     editor: Editor,
     activity: Activity,
     queued: usize,
-    live: String,
+    live: Vec<String>,
     columns: usize,
     rows: usize,
     /// Rows of the dock on the screen, and the row of the cursor in it.
@@ -133,7 +133,7 @@ impl Dock {
                 editor,
                 activity: Activity::Ready,
                 queued: 0,
-                live: String::new(),
+                live: Vec::new(),
                 columns: size.0.max(8),
                 rows: size.1.max(4),
                 drawn: None,
@@ -304,10 +304,10 @@ impl Screen for Dock {
         }
     }
 
-    fn live(&self, text: &str) {
+    fn live(&self, lines: &[String]) {
         let mut state = self.lock();
-        if state.live != text {
-            state.live = text.into();
+        if state.live != lines {
+            state.live = lines.to_vec();
             state.redraw("");
         }
     }
@@ -406,9 +406,7 @@ impl State {
         let theme = &self.theme;
         let columns = self.columns;
         let mut rows = Vec::new();
-        if !self.live.is_empty() {
-            rows.push(self.live.clone());
-        }
+        rows.extend(self.live.iter().cloned());
         rows.push(self.separator());
         rows.push(background_row(theme, &[], columns));
 
@@ -855,7 +853,7 @@ mod tests {
         let status = layout.rows.last().unwrap();
         assert_eq!(width(status), 16);
         assert!(status.contains('…'));
-        dock.live("partial");
+        dock.live(&["partial".into()]);
         assert_eq!(dock.lock().layout().rows[0], "partial");
     }
 }
