@@ -128,9 +128,8 @@ pub const SPECS: [Spec; 6] = [
         description: "Replace the only occurrence of `old` in the file at `path` with \
                       `new`. Fails when `old` is missing or appears more than once. A \
                       relative path is joined to the workspace; an absolute path is used \
-                      as given — that is a deliberate escape hatch (D7, AGL-032): it \
-                      bypasses the workspace rules, so prefer the forge and memory tools \
-                      for records.",
+                      as given — that is a deliberate escape hatch: it bypasses the \
+                      workspace rules, so prefer the forge and memory tools for records.",
         params: &[
             ParamSpec::text("path", true, None),
             ParamSpec::text("old", true, None),
@@ -314,4 +313,29 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
 /// The outcomes of the built-in tool `name`; none for a name that is not one.
 pub fn outcomes(name: &str) -> &'static [Outcome] {
     spec(name).map_or(&[], |spec| spec.outcomes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_the_model_reads_names_no_task_and_no_decision() {
+        // AGL-067, D5: the ids of the project's own records are not for the
+        // model; the words on the absolute path of `edit` stay (AGL-032).
+        for spec in &SPECS {
+            let texts = std::iter::once(spec.description)
+                .chain(spec.params.iter().filter_map(|param| param.description));
+            for text in texts {
+                assert!(!text.contains("AGL-"), "{text}");
+                assert!(
+                    !text.as_bytes().windows(3).any(|w| w[0] == b'(' && w[1] == b'D' && w[2].is_ascii_digit()),
+                    "{text}"
+                );
+            }
+        }
+        let edit = spec("edit").unwrap().description;
+        assert!(edit.contains("an absolute path is used as given"), "{edit}");
+        assert!(edit.contains("a deliberate escape hatch"), "{edit}");
+    }
 }
