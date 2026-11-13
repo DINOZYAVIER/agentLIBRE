@@ -404,13 +404,15 @@ fn tool_lines(
     for row in hard_wrap(&clean(hint), inner) {
         lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &row)));
     }
+    // D27: as the answer's rule — the phases in the activity's color, the
+    // dashes in the input's rule color.
     lines.push(edge(
         theme,
         columns,
         Some((status_text.as_str(), status_role)),
         items,
-        Role::Rule,
-        Role::Rule,
+        Role::InputRule,
+        Role::InputActivity,
     ));
     lines
 }

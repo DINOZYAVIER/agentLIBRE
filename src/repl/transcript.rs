@@ -488,11 +488,13 @@ impl Presenter {
             lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
         }
         if self.settings.frame {
+            // D27: as the answer's rule — the phases in the activity's
+            // color, the dashes in the input's rule color.
             lines.push(self.edge(
                 Some((status_text.as_str(), status_role)),
                 items,
-                Role::Rule,
-                Role::Rule,
+                Role::InputRule,
+                Role::InputActivity,
             ));
         }
         lines
