@@ -2,25 +2,7 @@ use std::process::Command;
 
 use super::*;
 use crate::action::Value;
-
-/// A fresh directory, removed when dropped.
-struct Dir(std::path::PathBuf);
-
-impl Dir {
-    fn new(name: &str) -> Dir {
-        let dir =
-            std::env::temp_dir().join(format!("agentLIBRE-tools-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use crate::forge::testutil::TempDir;
 
 /// Whether process `pid` runs. A killed process may stay a zombie until
 /// its new parent reaps it.
@@ -34,13 +16,13 @@ fn running(pid: &str) -> bool {
     }
 }
 
-fn sh(dir: &Dir, command: &str) -> ToolResult {
+fn sh(dir: &TempDir, command: &str) -> ToolResult {
     bash(&dir.0, command, Duration::from_secs(10), &out(dir))
 }
 
 #[test]
 fn bash_output_and_exit_codes() {
-    let dir = Dir::new("bash");
+    let dir = TempDir::new();
     assert_eq!(
         sh(&dir, "echo out; echo err >&2; echo again"),
         ToolResult {
@@ -66,7 +48,7 @@ fn bash_output_and_exit_codes() {
 #[test]
 fn bash_shows_the_start_and_end_of_long_output_and_keeps_all_of_it() {
     // AGL-049.
-    let dir = Dir::new("long");
+    let dir = TempDir::new();
     let result = sh(&dir, "seq 1 100000; echo LAST");
     let content = &result.content;
     assert!(content.starts_with("1\n2\n3\n"), "{}", &content[..40]);
@@ -81,14 +63,14 @@ fn bash_shows_the_start_and_end_of_long_output_and_keeps_all_of_it() {
 
 #[test]
 fn a_short_output_leaves_no_file() {
-    let dir = Dir::new("short");
+    let dir = TempDir::new();
     assert_eq!(sh(&dir, "echo hi").content, "hi\n");
     assert!(!out(&dir).file.exists());
 }
 
 #[test]
 fn bash_timeout() {
-    let dir = Dir::new("timeout");
+    let dir = TempDir::new();
     let started = Instant::now();
     let result = bash(&dir.0, "echo before; sleep 30", Duration::from_secs(1), &out(&dir));
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -108,7 +90,7 @@ fn bash_timeout() {
 
 #[test]
 fn background_processes_end_with_bash() {
-    let dir = Dir::new("background");
+    let dir = TempDir::new();
     let started = Instant::now();
     let result = sh(&dir, "sleep 30 & echo $! > pid; echo started");
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -119,7 +101,7 @@ fn background_processes_end_with_bash() {
 
 #[test]
 fn tmux_sessions_survive() {
-    let dir = Dir::new("tmux");
+    let dir = TempDir::new();
     let socket = dir.0.join("tmux.sock");
     let socket = socket.to_str().unwrap();
     let result = sh(
@@ -146,7 +128,7 @@ fn tmux_sessions_survive() {
 
 #[test]
 fn edit_results() {
-    let dir = Dir::new("edit");
+    let dir = TempDir::new();
     let file = dir.0.join("lib.rs");
     fs::write(&file, "fn a() {}\nfn b() {}\nfn b() {}\n").unwrap();
     let edit = |path: &str, old: &str, new: &str| edit(&dir.0, path, old, new);
@@ -207,7 +189,7 @@ fn tool_call(name: &str, args: Vec<(String, Value)>) -> ToolCall {
 
 #[test]
 fn the_workspace_tools_are_dispatched_by_name() {
-    let dir = Dir::new("run");
+    let dir = TempDir::new();
     // The stores of the test's own, not of the human's XDG tree (AGL-038,
     // F19).
     let data = dir.0.join("data");
@@ -291,15 +273,15 @@ fn git_init(dir: &Path) {
 /// The forge tool fixture: a git workspace, and its store under a
 /// temporary data directory, resolved the way the tool resolves it.
 struct ForgeStore {
-    _data: Dir,
-    _repo: Dir,
+    _data: TempDir,
+    _repo: TempDir,
     ws: Workspace,
 }
 
 impl ForgeStore {
-    fn new(name: &str) -> ForgeStore {
-        let data = Dir::new(name);
-        let repo = Dir::new(&format!("{name}-repo"));
+    fn new() -> ForgeStore {
+        let data = TempDir::new();
+        let repo = TempDir::new();
         git_init(&repo.0);
         let (ws, lines) = forge::resolve_store(&data.0, &repo.0, Lang::En, true).unwrap();
         assert!(lines.is_empty(), "a fresh store does not notify: {lines:?}");
@@ -386,19 +368,19 @@ impl ForgeStore {
 fn forge_new_takes_the_prefix_of_the_store() {
     // AGL-067, D7: a store of `ks-` specs gets the next `ks-` number, an
     // empty store `agl-001`.
-    let f = ForgeStore::new("forge-new-prefix");
+    let f = ForgeStore::new();
     f.write(&f.spec("ks-005-first", "open"));
     f.write(&f.spec("ks-031-second", "done"));
     let result = f.call("new", &[("title", "Third One")]);
     assert!(result.content.ends_with("ks-032-third-one.md"), "{}", result.content);
-    let empty = ForgeStore::new("forge-new-empty");
+    let empty = ForgeStore::new();
     let result = empty.call("new", &[("title", "Third One")]);
     assert!(result.content.ends_with("agl-001-third-one.md"), "{}", result.content);
 }
 
 #[test]
 fn forge_new_is_the_engine_scaffold() {
-    let f = ForgeStore::new("forge-new");
+    let f = ForgeStore::new();
     let path =
         f.ws.dir
             .join("forge")
@@ -445,7 +427,7 @@ fn forge_new_is_the_engine_scaffold() {
 
 #[test]
 fn forge_list_is_one_line_per_artifact() {
-    let f = ForgeStore::new("forge-list");
+    let f = ForgeStore::new();
     assert_eq!(f.call("list", &[]).content, "(no artifacts)");
     f.write(&f.spec("agl-002-b", "in-progress"));
     f.write(&f.spec("agl-001-a", "open"));
@@ -468,7 +450,7 @@ fn forge_list_is_one_line_per_artifact() {
 
 #[test]
 fn forge_show_is_the_rendered_artifact() {
-    let f = ForgeStore::new("forge-show");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-x", "open");
     f.write(&artifact);
     let result = f.call("show", &[("name", "agl-001-x")]);
@@ -500,7 +482,7 @@ fn the_status_keyed_rule() {
     let statuses = ["open", "in-progress", "backlog", "done", "canceled"];
     // edit is allowed in the alive states (D4, AGL-032): open,
     // in-progress, backlog; the closed records refuse.
-    let f = ForgeStore::new("rule-edit");
+    let f = ForgeStore::new();
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
         f.write(&f.spec(&name, status));
@@ -531,7 +513,7 @@ fn the_status_keyed_rule() {
     }
     // append is allowed while the spec works (D4, AGL-032): open or
     // in-progress; backlog and the closed records refuse.
-    let f = ForgeStore::new("rule-append");
+    let f = ForgeStore::new();
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
         f.write(&f.spec(&name, status));
@@ -563,7 +545,7 @@ fn the_status_keyed_rule() {
     }
     // remove is allowed for open, canceled, backlog (D5, AGL-032); a
     // refused file stays.
-    let f = ForgeStore::new("rule-remove");
+    let f = ForgeStore::new();
     for (i, status) in statuses.iter().enumerate() {
         let name = format!("agl-{i:03}-x");
         let path =
@@ -604,7 +586,7 @@ fn the_status_keyed_rule() {
 
 #[test]
 fn forge_edit_keeps_progress_append_only() {
-    let f = ForgeStore::new("forge-edit-progress");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-p", "in-progress");
     f.write(&artifact);
     // The body sections take the edit...
@@ -657,7 +639,7 @@ fn forge_edit_keeps_progress_append_only() {
 
 #[test]
 fn forge_edit_is_the_workspace_edit_on_the_body() {
-    let f = ForgeStore::new("forge-edit");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-d", "open");
     f.write(&artifact);
     // A unique `old`: the body is edited, `updated` is bumped.
@@ -723,7 +705,7 @@ fn forge_edit_is_the_workspace_edit_on_the_body() {
 
 #[test]
 fn forge_append_is_a_bullet_under_the_section() {
-    let f = ForgeStore::new("forge-append");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-p", "in-progress");
     f.write(&artifact);
     // A mid-body section: the bullet goes after the section's last
@@ -824,7 +806,7 @@ fn forge_append_is_a_bullet_under_the_section() {
 
 #[test]
 fn forge_append_refuses_a_multi_line_text() {
-    let f = ForgeStore::new("forge-append-oneline");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-l", "in-progress");
     f.write(&artifact);
     let before = forge::load_artifact(&artifact.path).unwrap();
@@ -868,7 +850,7 @@ fn forge_append_refuses_a_multi_line_text() {
 
 #[test]
 fn forge_status_walks_the_lifecycle() {
-    let f = ForgeStore::new("forge-status");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-s", "open");
     f.write(&artifact);
     let body_before = forge::load_artifact(&artifact.path).unwrap().body.clone();
@@ -909,7 +891,7 @@ fn forge_status_walks_the_lifecycle() {
 
 #[test]
 fn forge_status_refuses_the_rest() {
-    let f = ForgeStore::new("forge-status-refuse");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-s", "open");
     f.write(&artifact);
     // The same state is a refused transition.
@@ -989,7 +971,7 @@ fn forge_rename_is_identity_in_any_status() {
     // front-matter name move, the body stays.
     let statuses = ["open", "in-progress", "backlog", "done", "canceled"];
     for (i, status) in statuses.iter().enumerate() {
-        let f = ForgeStore::new(&format!("rename-any-{i}"));
+        let f = ForgeStore::new();
         let name = format!("agl-{i:03}-x");
         f.write(&f.spec(&name, status));
         let (result, write) = f.call_write(
@@ -1036,7 +1018,7 @@ fn forge_rename_is_identity_in_any_status() {
 
 #[test]
 fn forge_rename_rewrites_the_references_of_the_store() {
-    let f = ForgeStore::new("rename-refs");
+    let f = ForgeStore::new();
     let mut a = f.spec("agl-001-a", "open");
     a.deps = vec!["agl-002-b".into(), "agl-003-c".into()];
     a.supersedes = vec!["agl-002-b".into()];
@@ -1108,7 +1090,7 @@ fn forge_rename_rewrites_the_references_of_the_store() {
 
 #[test]
 fn forge_rename_refuses_the_misfires() {
-    let f = ForgeStore::new("rename-refusals");
+    let f = ForgeStore::new();
     let a = f.spec("agl-001-a", "open");
     let b = f.spec("agl-002-b", "open");
     f.write(&a);
@@ -1177,7 +1159,7 @@ fn forge_rename_refuses_the_misfires() {
 
 #[test]
 fn forge_writes_are_task_spec_only_and_reads_are_generic() {
-    let f = ForgeStore::new("forge-types");
+    let f = ForgeStore::new();
     let note = f.note("note-1");
     f.write(&note);
     // The reads work on any type.
@@ -1221,7 +1203,7 @@ fn forge_writes_are_task_spec_only_and_reads_are_generic() {
 
 #[test]
 fn the_store_is_the_workspace_git_repository() {
-    let f = ForgeStore::new("forge-git");
+    let f = ForgeStore::new();
     // The human's flow: the store directory is a git repository. A fresh
     // store is materialized on its first write; the human inits it first.
     fs::create_dir_all(&f.ws.dir).unwrap();
@@ -1259,7 +1241,7 @@ fn the_store_is_the_workspace_git_repository() {
 
 #[test]
 fn forge_edit_may_delete_text() {
-    let f = ForgeStore::new("forge-edit-delete");
+    let f = ForgeStore::new();
     let artifact = f.spec("agl-001-d", "open");
     f.write(&artifact);
     // An empty `new` is a deletion, as in the workspace `edit`.
@@ -1311,7 +1293,7 @@ fn the_forge_arguments_keep_an_empty_new_only() {
 
 #[test]
 fn the_forge_writes_come_back_from_the_tool() {
-    let f = ForgeStore::new("forge-writes");
+    let f = ForgeStore::new();
     // `new`: the name is the one the tool made, whatever the call says.
     let (result, write) = f.call_write("new", &[("title", "My First Task"), ("name", "evil")]);
     assert_eq!(result.outcome, Outcome::Ok);
@@ -1376,7 +1358,7 @@ fn the_forge_writes_come_back_from_the_tool() {
 
 #[test]
 fn forge_append_survives_a_missing_final_newline_and_fences() {
-    let f = ForgeStore::new("forge-append-edges");
+    let f = ForgeStore::new();
     // The section's last line has no newline: the bullet is appended
     // and the check accepts it.
     let mut spec = f.spec("agl-001-n", "in-progress");
@@ -1467,8 +1449,8 @@ fn data_paths(dir: &Path) -> crate::paths::Paths {
 
 #[test]
 fn the_forge_tool_honors_auto_rehome_and_the_language() {
-    let data = Dir::new("forge-env-data");
-    let root = Dir::new("forge-env-root");
+    let data = TempDir::new();
+    let root = TempDir::new();
     let paths = data_paths(&data.0);
     let list = ForgeArgs {
         action: "list".into(),
@@ -1522,7 +1504,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
 
 /// Where a test's output goes, at the limit of a 128k context, in text of
 /// four bytes per token.
-fn out(dir: &Dir) -> Output<'static> {
+fn out(dir: &TempDir) -> Output<'static> {
     Output {
         tokens: 4096,
         file: dir.0.join("outputs/c1.txt"),

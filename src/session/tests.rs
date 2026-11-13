@@ -1,22 +1,5 @@
 use super::*;
-
-/// A fresh directory, removed when dropped.
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new(name: &str) -> Dir {
-        let dir =
-            std::env::temp_dir().join(format!("agentLIBRE-session-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        Dir(dir)
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+use crate::forge::testutil::TempDir;
 
 fn call(id: &str, command: &str) -> Event {
     Event::Call {
@@ -71,7 +54,7 @@ fn uuid_v7_layout() {
 
 #[test]
 fn write_and_read_back() {
-    let dir = Dir::new("roundtrip");
+    let dir = TempDir::new();
     let events = [
         Event::User("Fix the test".into()),
         Event::State("explore".into()),
@@ -150,7 +133,7 @@ fn write_and_read_back() {
 
 #[test]
 fn the_transition_lines_are_read_beside_the_events() {
-    let dir = Dir::new("transitions");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     session.append(Event::User("Fix it".into())).unwrap();
     session.append(call("c1", "ls")).unwrap();
@@ -229,7 +212,7 @@ fn the_transition_lines_are_read_beside_the_events() {
 
 #[test]
 fn edit_arguments_keep_their_order() {
-    let dir = Dir::new("order");
+    let dir = TempDir::new();
     let edit = Event::Call {
         text: Some("Let me fix it.".into()),
         call: ToolCall {
@@ -249,7 +232,7 @@ fn edit_arguments_keep_their_order() {
 
 #[test]
 fn the_forge_event_round_trips() {
-    let dir = Dir::new("forge-event");
+    let dir = TempDir::new();
     let events = [
         Event::User("Track it in the forge".into()),
         Event::Forge {
@@ -297,7 +280,7 @@ fn the_forge_event_round_trips() {
 
 #[test]
 fn history_for_the_template() {
-    let dir = Dir::new("history");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     for event in [
         Event::User("u1".into()),
@@ -340,7 +323,7 @@ fn history_for_the_template() {
 
 #[test]
 fn history_after_a_summary() {
-    let dir = Dir::new("compact");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     assert!(!session.compactable());
     for event in [
@@ -398,7 +381,7 @@ fn history_after_a_summary() {
 
 #[test]
 fn unfinished_turns() {
-    let dir = Dir::new("unfinished");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "coder", Path::new("/w")).unwrap();
     assert_eq!(session.unfinished(), None);
     for event in [
@@ -449,7 +432,7 @@ fn unfinished_turns() {
 
 #[test]
 fn opening_repairs_an_interrupted_end() {
-    let dir = Dir::new("repair");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     session.append(Event::User("u".into())).unwrap();
     session.append(call("c1", "sleep 100")).unwrap();
@@ -477,7 +460,7 @@ fn opening_repairs_an_interrupted_end() {
 
 #[test]
 fn finding_sessions() {
-    let dir = Dir::new("find");
+    let dir = TempDir::new();
     assert!(matches!(
         Session::open(&dir.0, "0199"),
         Err(Error::SessionNotFound { .. })
@@ -512,7 +495,7 @@ fn finding_sessions() {
 
 #[test]
 fn bad_files() {
-    let dir = Dir::new("bad");
+    let dir = TempDir::new();
     fs::create_dir_all(&dir.0).unwrap();
     let write = |id: &str, text: &str| fs::write(dir.0.join(format!("{id}.jsonl")), text).unwrap();
     // The version beyond this build is refused with the version named
@@ -543,7 +526,7 @@ fn bad_files() {
 #[test]
 fn a_v1_session_opens_as_it_is() {
     // The reader of v2 reads the v1 files as they are (AGL-063, D2).
-    let dir = Dir::new("v1");
+    let dir = TempDir::new();
     fs::create_dir_all(&dir.0).unwrap();
     fs::write(
         dir.0.join("dd.jsonl"),
@@ -570,7 +553,7 @@ fn source(kind: Kind, bytes: &[u8], ext: &str, name: &str) -> Source {
 
 #[test]
 fn the_media_of_a_session_are_kept_numbered_by_kind_and_read_back() {
-    let dir = Dir::new("media");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     assert_eq!(session.media_dir(), dir.0.join("media"));
     assert_eq!(session.next_media_number(Kind::Image), 1);
@@ -615,7 +598,7 @@ fn the_frames_of_a_video_are_kept_with_their_times() {
     let Ok(ffmpeg) = crate::programs::program("ffmpeg") else {
         return;
     };
-    let dir = Dir::new("video");
+    let dir = TempDir::new();
     fs::create_dir_all(&dir.0).unwrap();
     let clip = dir.0.join("c.mp4");
     let made = std::process::Command::new(&ffmpeg)
@@ -641,7 +624,7 @@ fn the_frames_of_a_video_are_kept_with_their_times() {
 
 #[test]
 fn a_bad_media_event_is_a_bad_line() {
-    let dir = Dir::new("badmedia");
+    let dir = TempDir::new();
     let session = Session::create(&dir.0, "minimal", Path::new("/w")).unwrap();
     let id = session.id.clone();
     drop(session);
@@ -655,7 +638,7 @@ fn a_bad_media_event_is_a_bad_line() {
 #[test]
 fn the_memory_event_round_trips_and_is_not_part_of_the_history() {
     use crate::memory::Kind as MemoryKind;
-    let dir = Dir::new("memory-event");
+    let dir = TempDir::new();
     let events = [
         Event::User("Remember the tests".into()),
         Event::Memory {
@@ -796,7 +779,7 @@ fn a_session_is_the_users_alone_and_the_latest_are_listed() {
 #[test]
 fn a_name_is_a_line_of_the_file_and_the_last_one_counts() {
     // AGL-062, D4.
-    let dir = Dir::new("name-line");
+    let dir = TempDir::new();
     let project = Path::new("/w/project");
     let mut session = Session::create(&dir.0, "f", project).unwrap();
     session.append(Event::User("fix the grammar".into())).unwrap();
@@ -818,7 +801,7 @@ fn a_name_is_a_line_of_the_file_and_the_last_one_counts() {
 #[test]
 fn the_list_shows_the_name_in_place_of_the_first_line() {
     // AGL-062, D3.
-    let dir = Dir::new("name-list");
+    let dir = TempDir::new();
     let project = Path::new("/w/project");
     let mut named = Session::create(&dir.0, "f", project).unwrap();
     named.append(Event::User("fix the grammar".into())).unwrap();
@@ -838,7 +821,7 @@ fn the_list_shows_the_name_in_place_of_the_first_line() {
 #[test]
 fn a_name_is_looked_up_exactly_in_the_project_before_any_id() {
     // AGL-062, D1.
-    let dir = Dir::new("name-lookup");
+    let dir = TempDir::new();
     let project = Path::new("/w/project");
     let mut a = Session::create(&dir.0, "f", project).unwrap();
     a.append(Event::User("a".into())).unwrap();
@@ -866,7 +849,7 @@ fn a_name_is_looked_up_exactly_in_the_project_before_any_id() {
 #[test]
 fn a_name_that_another_session_of_the_project_has_is_refused() {
     // AGL-062, D5.
-    let dir = Dir::new("name-taken");
+    let dir = TempDir::new();
     let project = Path::new("/w/project");
     let mut first = Session::create(&dir.0, "f", project).unwrap();
     first.rename(project, "work").unwrap();
@@ -898,7 +881,7 @@ fn what_is_no_name_is_refused() {
     assert_eq!(check_name(&"x".repeat(NAME_MAX + 1)), Err(NameProblem::TooLong));
     assert_eq!(check_name("last"), Err(NameProblem::Reserved));
     assert_eq!(check_name("last one"), Ok("last one"));
-    let dir = Dir::new("name-refused");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "f", Path::new("/w/project")).unwrap();
     assert!(matches!(
         session.rename(Path::new("/w/project"), "last"),
@@ -910,7 +893,7 @@ fn what_is_no_name_is_refused() {
 #[test]
 fn text_that_looks_like_a_name_line_is_no_name() {
     // AGL-062, D8: a user message holds the words, escaped.
-    let dir = Dir::new("name-quoted");
+    let dir = TempDir::new();
     let project = Path::new("/w/project");
     let mut session = Session::create(&dir.0, "f", project).unwrap();
     session
@@ -925,7 +908,7 @@ fn text_that_looks_like_a_name_line_is_no_name() {
 fn the_run_of_the_header_round_trips() {
     // The session that records the `run` snapshot of the Function: the
     // header carries it, the reader gives it back (AGL-063, D4).
-    let dir = Dir::new("run-header");
+    let dir = TempDir::new();
     let run = json!({ "schema": 1, "source": { "path": "f.nix" }, "value": {} });
     let mut session =
         Session::create_run(&dir.0, "coder", Path::new("/home/u/repos/a"), Some(&run)).unwrap();
@@ -942,7 +925,7 @@ fn the_run_of_the_header_round_trips() {
 fn a_session_without_a_run_has_none_and_no_budgets() {
     // The v1 files and the sessions that do not record the snapshot
     // (AGL-063, D2, D4).
-    let dir = Dir::new("no-run");
+    let dir = TempDir::new();
     fs::create_dir_all(&dir.0).unwrap();
     fs::write(
         dir.0.join("dd.jsonl"),
@@ -960,7 +943,7 @@ fn a_session_without_a_run_has_none_and_no_budgets() {
 fn the_last_budgets_of_the_steps_are_the_last() {
     // The budgets the `step` lines the observer wrote; the last counts, for
     // the loose continue (AGL-063, D4).
-    let dir = Dir::new("budgets");
+    let dir = TempDir::new();
     fs::create_dir_all(&dir.0).unwrap();
     fs::write(
         dir.0.join("bb.jsonl"),
@@ -979,7 +962,7 @@ fn the_last_budgets_of_the_steps_are_the_last() {
 fn the_loose_tools_are_the_calls_in_the_order_of_the_first() {
     // The tools the session called, in the order of the first call (AGL-063,
     // D4): the loose continue asks for them only.
-    let dir = Dir::new("loose-tools");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "coder", Path::new("/w")).unwrap();
     session.append(call("c1", "ls")).unwrap();
     session.append(result("c1", Outcome::Ok)).unwrap();

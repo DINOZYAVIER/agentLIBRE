@@ -92,28 +92,9 @@ pub fn with_placeholders(placeholders: &[String], message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::fs;
-    use std::path::PathBuf;
-
     use super::*;
     use crate::backend::{Generated, Prompt, Request};
-
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(name: &str) -> Dir {
-            let dir = std::env::temp_dir().join(format!("agentLIBRE-attach-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Dir(dir)
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::forge::testutil::TempDir;
 
     /// A backend that only says whether it hears audio.
     struct Ears(bool);
@@ -172,13 +153,13 @@ mod tests {
         }
     }
 
-    fn session(dir: &Dir) -> Session {
+    fn session(dir: &TempDir) -> Session {
         Session::create(&dir.0.join("s"), "f", &dir.0).unwrap()
     }
 
     #[test]
     fn the_numbers_follow_the_session_and_the_pending_media_by_kind() {
-        let dir = Dir::new("numbers");
+        let dir = TempDir::new();
         let mut session = session(&dir);
         let mut pending = Vec::new();
         assert_eq!(add(&session, &mut pending, source(Kind::Image, "a.png")), "[Image#1]");
@@ -194,7 +175,7 @@ mod tests {
 
     #[test]
     fn only_the_media_the_message_names_are_stored() {
-        let dir = Dir::new("named");
+        let dir = TempDir::new();
         let mut session = session(&dir);
         let mut pending = Vec::new();
         add(&session, &mut pending, source(Kind::Image, "kept.png"));
@@ -210,7 +191,7 @@ mod tests {
 
     #[test]
     fn an_audio_is_transcribed_unless_the_model_hears() {
-        let dir = Dir::new("audio");
+        let dir = TempDir::new();
         let mut session = session(&dir);
         let mut pending = Vec::new();
         add(&session, &mut pending, source(Kind::Audio, "v.wav"));
@@ -237,7 +218,7 @@ mod tests {
                 })
             }
         }
-        let dir = Dir::new("fails");
+        let dir = TempDir::new();
         let mut session = session(&dir);
         let mut pending = Vec::new();
         add(&session, &mut pending, source(Kind::Audio, "v.wav"));

@@ -577,25 +577,7 @@ mod tests {
         assert!(!super::wav_is_silent(b"not a wav"));
     }
     use super::*;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> TempDir {
-            use std::sync::atomic::{AtomicUsize, Ordering};
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("agentLIBRE-media-{}-{n}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::forge::testutil::TempDir;
 
     #[test]
     fn the_kind_comes_from_the_extension() {

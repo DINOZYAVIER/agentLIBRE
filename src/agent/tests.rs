@@ -7,6 +7,7 @@ use super::*;
 use crate::action::{Outcome, Value};
 use crate::backend::{Generated, StructuredCall};
 use crate::function::tests::{CODER, function, function_on};
+use crate::forge::testutil::TempDir;
 use crate::session::Event;
 
 /// A backend that replays scripted generations.
@@ -266,24 +267,6 @@ impl Report for Log {
     }
 }
 
-struct Dir(PathBuf);
-
-impl Dir {
-    fn new(name: &str) -> Dir {
-        let dir =
-            std::env::temp_dir().join(format!("agentLIBRE-agent-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Dir(dir)
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 fn bash_call(command: &str) -> String {
     format!(
         "<tool_call>\n<function=bash>\n<parameter=command>\n{command}\n</parameter>\n</function>\n</tool_call>"
@@ -295,7 +278,7 @@ const THOUGHT: Stop = Stop::End;
 fn run(
     function: &Function,
     script: &Script,
-    dir: &Dir,
+    dir: &TempDir,
     message: &str,
 ) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
     run_level(function, script, dir, message, None)
@@ -304,7 +287,7 @@ fn run(
 fn run_level(
     function: &Function,
     script: &Script,
-    dir: &Dir,
+    dir: &TempDir,
     message: &str,
     reasoning: Option<ReasoningLevel>,
 ) -> (Result<TurnEnd, Error>, Vec<String>, Session) {
@@ -316,7 +299,7 @@ fn run_level(
 fn run_stirred(
     function: &Function,
     script: &Script,
-    dir: &Dir,
+    dir: &TempDir,
     message: &str,
     reasoning: Option<ReasoningLevel>,
     stirred: bool,
@@ -332,7 +315,7 @@ fn agent<'a>(
     function: &'a Function,
     script: &'a Script,
     session: &'a mut Session,
-    dir: &'a Dir,
+    dir: &'a TempDir,
     reasoning: Option<ReasoningLevel>,
 ) -> Agent<'a> {
     agent_stirred(function, script, session, dir, reasoning, false)
@@ -342,7 +325,7 @@ fn agent_stirred<'a>(
     function: &'a Function,
     script: &'a Script,
     session: &'a mut Session,
-    dir: &'a Dir,
+    dir: &'a TempDir,
     reasoning: Option<ReasoningLevel>,
     stirred: bool,
 ) -> Agent<'a> {
@@ -353,7 +336,7 @@ fn agent_searching<'a>(
     function: &'a Function,
     script: &'a Script,
     session: &'a mut Session,
-    dir: &'a Dir,
+    dir: &'a TempDir,
     reasoning: Option<ReasoningLevel>,
     search: &'a dyn crate::search::Searcher,
     stirred: bool,
@@ -460,7 +443,7 @@ fn results(session: &Session) -> Vec<(Outcome, String)> {
 
 #[test]
 fn search_runs_in_the_agent_and_its_text_is_the_result() {
-    let dir = Dir::new("search");
+    let dir = TempDir::new();
     let script = Script::new(&[
         ("Look it up.", THOUGHT),
         (&search_call(&[("language", "uk"), ("limit", "3"), ("query", "Київ"), ("source", "wikipedia")]), Stop::End),
@@ -490,7 +473,7 @@ fn search_runs_in_the_agent_and_its_text_is_the_result() {
 
 #[test]
 fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
-    let dir = Dir::new("searchfail");
+    let dir = TempDir::new();
     let script = Script::new(&[
         ("Try.", THOUGHT),
         (&search_call(&[("query", "rust"), ("source", "web")]), Stop::End),
@@ -565,7 +548,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
 
 #[test]
 fn a_call_then_an_answer() {
-    let dir = Dir::new("answer");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("I will list files", THOUGHT),
@@ -608,14 +591,14 @@ fn a_call_then_an_answer() {
 fn the_off_level_silences_the_thinking() {
     let function = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     // A level keeps the thinking: two generations.
-    let dir = Dir::new("think-level");
+    let dir = TempDir::new();
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
     let (end, log, session) = run_level(&function, &script, &dir, "hi", Some(ReasoningLevel::Low));
     assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
     assert!(log.iter().any(|line| line.starts_with("thinking: ")));
     assert_eq!(kinds(&session), ["user", "state", "thinking", "answer"]);
     // `Off` silences it: the one action generation, no thinking.
-    let dir = Dir::new("off");
+    let dir = TempDir::new();
     let script = Script::new(&[("Answer.", Stop::End)]);
     let (end, log, session) = run_level(&function, &script, &dir, "hi", Some(ReasoningLevel::Off));
     assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
@@ -627,7 +610,7 @@ fn the_off_level_silences_the_thinking() {
 fn a_step_without_thinking_shows_no_reasoning_in_the_open() {
     let function = Function::load(Path::new("/none"), Path::new("/none"), "fixture-gemma").unwrap();
     let call = "<|tool_call>call:bash{command:<|\"|>true<|\"|>}<tool_call|>";
-    let dir = Dir::new("open-reasoning");
+    let dir = TempDir::new();
     let script = Script::new(&[
         (&format!("The user wants it run.<channel|>{call}"), Stop::End),
         ("<|channel>thought\n<channel|>Done.", Stop::End),
@@ -648,14 +631,14 @@ fn a_state_without_thinking_is_rendered_at_the_off_level() {
              state.a = { tools.bash = { }; think = false; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
-    let dir = Dir::new("quiet-state");
+    let dir = TempDir::new();
     let script = Script::new(&[("Answer.", Stop::End)]);
     let (end, _, _) = run_level(&quiet, &script, &dir, "hi", Some(ReasoningLevel::Low));
     assert_eq!(end.unwrap(), TurnEnd::Answer("Answer.".into()));
     assert_eq!(*script.reasonings.borrow(), [Some(ReasoningLevel::Off)]);
     // A thinking state keeps the run's level.
     let thinking = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
-    let dir = Dir::new("thinking-state");
+    let dir = TempDir::new();
     let script = Script::new(&[("I will answer", THOUGHT), ("Answer.", Stop::End)]);
     run_level(&thinking, &script, &dir, "hi", Some(ReasoningLevel::Low)).0.unwrap();
     assert_eq!(script.reasonings.borrow()[0], Some(ReasoningLevel::Low));
@@ -663,7 +646,7 @@ fn a_state_without_thinking_is_rendered_at_the_off_level() {
 
 #[test]
 fn every_generation_reports_its_decoded_tokens() {
-    let dir = Dir::new("decoded");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let outputs: [(&str, Stop); 4] = [
         ("I will list files", THOUGHT),
@@ -689,7 +672,7 @@ fn every_generation_reports_its_decoded_tokens() {
 
 #[test]
 fn states_and_instructions() {
-    let dir = Dir::new("states");
+    let dir = TempDir::new();
     // Three steps: the edit, the failed test and the discarded action.
     let coder = function(&CODER.replace("max_steps_total = 50;", "max_steps_total = 3;")).unwrap();
     fs::write(dir.0.join("lib.rs"), "fn a() {}\n").unwrap();
@@ -733,7 +716,7 @@ fn states_and_instructions() {
 
 #[test]
 fn a_cut_off_action_is_discarded_and_the_model_is_told() {
-    let dir = Dir::new("cut-off");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
@@ -782,7 +765,7 @@ fn a_cut_off_action_is_discarded_and_the_model_is_told() {
 
 #[test]
 fn stops() {
-    let dir = Dir::new("stops");
+    let dir = TempDir::new();
     let one_step = function(
         r#"{ system = "s"; max_steps_total = 1; initial = "a";
              state.a = { tools.bash = { }; think = false; answer = true; next.otherwise = "a"; }; }"#,
@@ -876,7 +859,7 @@ fn stirred_function(policy: &str, model: &str) -> Function {
 /// usage is what the report is told (D11).
 #[test]
 fn stirred_runs_a_structured_call_and_answers() {
-    let dir = Dir::new("stir-call");
+    let dir = TempDir::new();
     let thinking = function(
         r#"{ system = "s"; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
@@ -920,7 +903,7 @@ fn stirred_runs_a_structured_call_and_answers() {
 /// bad value — and the turn completes when it lands (AGL-030, D4, D10).
 #[test]
 fn stirred_retries_a_malformed_call() {
-    let dir = Dir::new("stir-retry");
+    let dir = TempDir::new();
     let stirred = stirred_function("", "");
     let script = Script::structured(vec![
         structured_step(None, "", &[("nope", "{}")], Stop::End),
@@ -961,7 +944,7 @@ fn stirred_retries_a_malformed_call() {
 /// turn stops with `StirLimit`, no more stirs (AGL-030, D4, D5).
 #[test]
 fn stirred_stops_at_the_limit() {
-    let dir = Dir::new("stir-limit");
+    let dir = TempDir::new();
     let stirred = stirred_function("", "max_stirs = 2;");
     let bad = || structured_step(None, "", &[("nope", "{}")], Stop::End);
     let script = Script::structured(vec![bad(), bad(), bad()]);
@@ -983,7 +966,7 @@ fn stirred_stops_at_the_limit() {
 /// a call's arguments — is a cut-off, not a stir (AGL-030, D10, D154).
 #[test]
 fn stirred_cut_off_is_not_a_stir() {
-    let dir = Dir::new("stir-cut");
+    let dir = TempDir::new();
     let stirred = stirred_function("max_steps_total = 1;", "");
     let script = Script::structured(vec![structured_step(
         None,
@@ -1013,7 +996,7 @@ fn stirred_cut_off_is_not_a_stir() {
         r#"{ format = agl.formats."qwen3.8"; weights = "m.gguf"; }"#,
     )
     .unwrap();
-    let dir = Dir::new("stir-cut-thinking");
+    let dir = TempDir::new();
     let script = Script::structured(vec![structured_step(
         Some("a long thought"),
         "",
@@ -1084,7 +1067,7 @@ fn structured_output_maps_to_an_action() {
 
 #[test]
 fn thinking_at_the_limit_is_closed() {
-    let dir = Dir::new("limit");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("a long thought ", Stop::Limit), ("ok", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
@@ -1134,7 +1117,7 @@ fn text_stream_cuts_out_the_call() {
 
 #[test]
 fn text_before_a_call_streams_and_is_reported_whole() {
-    let dir = Dir::new("stream");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
@@ -1168,7 +1151,7 @@ const FITS: usize = 5_000;
 
 #[test]
 fn a_full_context_is_compacted_and_the_turn_goes_on() {
-    let dir = Dir::new("compact");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
@@ -1228,7 +1211,7 @@ fn a_full_context_is_compacted_and_the_turn_goes_on() {
 
 #[test]
 fn the_system_message_is_the_functions_system_and_nothing_more() {
-    let dir = Dir::new("system");
+    let dir = TempDir::new();
     let agentlibre =
         Function::load(Path::new("/none"), Path::new("/none"), "fixture-high").unwrap();
     let script = Script::new(&[
@@ -1258,7 +1241,7 @@ fn the_system_message_is_the_functions_system_and_nothing_more() {
 
 #[test]
 fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
-    let dir = Dir::new("agentLIBRE");
+    let dir = TempDir::new();
     let agentlibre =
         Function::load(Path::new("/none"), Path::new("/none"), "fixture-high").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
@@ -1273,7 +1256,7 @@ fn the_agentlibre_function_sends_the_persona_and_the_runtime_part() {
 
 #[test]
 fn the_minimal_function_sends_the_one_line_system() {
-    let dir = Dir::new("minimal");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("t1", THOUGHT), ("Hello.", Stop::End)]);
     let (end, _, _) = run(&minimal, &script, &dir, "hi");
@@ -1288,7 +1271,7 @@ fn the_minimal_function_sends_the_one_line_system() {
 
 #[test]
 fn the_prompt_size_of_every_step_is_reported() {
-    let dir = Dir::new("used");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
@@ -1313,7 +1296,7 @@ fn the_prompt_size_of_every_step_is_reported() {
 fn a_cut_summary_is_asked_again_shorter_then_kept_with_a_note() {
     // AGL-043 F6: the summary reached its budget (4096 at the test's
     // 16384 context): one more request, shorter; that one fits.
-    let dir = Dir::new("shorter");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("a long summary", Stop::Limit),
@@ -1354,7 +1337,7 @@ fn a_cut_summary_is_asked_again_shorter_then_kept_with_a_note() {
 
 #[test]
 fn a_context_that_compaction_cannot_free_stops_the_turn() {
-    let dir = Dir::new("no-room");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     // The compaction prompt itself does not fit.
     let script = Script::new(&[]).with_counts(&[OVERFLOW, 15_000]);
@@ -1387,7 +1370,7 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
     // AGL-038, D5: the summary request of 15000 tokens does not fit with
     // its 4096; the long tool result is cut to its head and tail, and the
     // second count fits.
-    let dir = Dir::new("cut-result");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t1", THOUGHT),
@@ -1420,7 +1403,7 @@ fn a_summary_request_over_the_context_is_cut_to_fit() {
 fn a_summary_request_without_results_to_cut_drops_the_oldest_turn() {
     // AGL-038, D5: no tool result to cut — the first turn goes, the latest
     // is kept.
-    let dir = Dir::new("cut-turn");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
         ("t", THOUGHT),
@@ -1450,7 +1433,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
     // action's eighth 8192 + 4096 + a tool's output 2048 + the summary's
     // 4096, AGL-043 F6, F14, AGL-049); a history of 50000 compacts early with
     // the setting on, and runs the step with it off.
-    let dir = Dir::new("early");
+    let dir = TempDir::new();
     let mut early = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     assert!(!early.compact_early);
     assert_eq!(super::early_reserve(&early, 65_536), 18_432);
@@ -1489,7 +1472,7 @@ fn the_early_compaction_keeps_room_for_the_summary() {
 
 #[test]
 fn compaction_on_request() {
-    let dir = Dir::new("on-request");
+    let dir = TempDir::new();
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[("t", THOUGHT), ("Hi.", Stop::End), ("Greeted.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
@@ -1541,7 +1524,7 @@ fn source(kind: media::Kind, bytes: &[u8], ext: &str) -> media::Source {
 fn turn_in(
     session: &mut Session,
     script: &Script,
-    dir: &Dir,
+    dir: &TempDir,
     message: &str,
 ) -> Result<TurnEnd, Error> {
     let minimal = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
@@ -1550,7 +1533,7 @@ fn turn_in(
 
 #[test]
 fn an_image_becomes_the_marker_and_goes_with_the_request() {
-    let dir = Dir::new("image");
+    let dir = TempDir::new();
     let script = Script::new(&[("I see it.", THOUGHT), ("A red square.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
@@ -1573,7 +1556,7 @@ fn an_image_becomes_the_marker_and_goes_with_the_request() {
 
 #[test]
 fn a_picture_is_counted_by_its_bound() {
-    let dir = Dir::new("bound");
+    let dir = TempDir::new();
     let script = Script::new(&[("Hm.", THOUGHT), ("Fine.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
@@ -1598,7 +1581,7 @@ fn a_picture_is_counted_by_its_bound() {
 
 #[test]
 fn a_bound_that_does_not_fit_stops_the_turn() {
-    let dir = Dir::new("toolarge");
+    let dir = TempDir::new();
     let script = Script::new(&[("Hm.", THOUGHT)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     for number in 1..=20 {
@@ -1613,7 +1596,7 @@ fn a_bound_that_does_not_fit_stops_the_turn() {
 
 #[test]
 fn a_video_is_its_frames_each_after_its_time() {
-    let dir = Dir::new("video");
+    let dir = TempDir::new();
     let script = Script::new(&[("Hm.", THOUGHT), ("A clip.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let media_dir = session.media_dir();
@@ -1648,7 +1631,7 @@ fn a_video_is_its_frames_each_after_its_time() {
 #[test]
 fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
     // With a transcript: text, nothing uploaded (D22).
-    let dir = Dir::new("audio");
+    let dir = TempDir::new();
     let script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
@@ -1679,7 +1662,7 @@ fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
 
 #[test]
 fn an_image_without_a_projector_is_an_error_that_says_so() {
-    let dir = Dir::new("noproj");
+    let dir = TempDir::new();
     let mut script = Script::new(&[]);
     script.marker = None;
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
@@ -1697,7 +1680,7 @@ fn an_image_without_a_projector_is_an_error_that_says_so() {
 
 #[test]
 fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
-    let dir = Dir::new("changed");
+    let dir = TempDir::new();
     let script = Script::new(&[]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let kept = session
@@ -1716,7 +1699,7 @@ fn view_call(path: &str) -> String {
 
 #[test]
 fn view_keeps_the_file_and_the_next_step_sees_it() {
-    let dir = Dir::new("view");
+    let dir = TempDir::new();
     fs::write(dir.0.join("shot.png"), b"SHOT").unwrap();
     let script = Script::new(&[
         ("Let me look.", THOUGHT),
@@ -1747,7 +1730,7 @@ fn view_keeps_the_file_and_the_next_step_sees_it() {
 
 #[test]
 fn view_of_something_else_is_a_failed_call_the_model_reads() {
-    let dir = Dir::new("viewbad");
+    let dir = TempDir::new();
     fs::write(dir.0.join("notes.txt"), b"x").unwrap();
     let script = Script::new(&[
         ("Look.", THOUGHT),
@@ -1777,7 +1760,7 @@ fn view_of_something_else_is_a_failed_call_the_model_reads() {
 
 #[test]
 fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
-    let dir = Dir::new("viewnoproj");
+    let dir = TempDir::new();
     fs::write(dir.0.join("shot.png"), b"SHOT").unwrap();
     let mut script = Script::new(&[
         ("Look.", THOUGHT),
@@ -1803,7 +1786,7 @@ fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
             Ok("good morning".into())
         }
     }
-    let dir = Dir::new("viewaudio");
+    let dir = TempDir::new();
     fs::write(dir.0.join("v.wav"), b"WAV").unwrap();
     let script = Script::new(&[
         ("Listen.", THOUGHT),
@@ -1832,7 +1815,7 @@ fn memory_call(fields: &[(&str, &str)]) -> String {
 fn turn_with_memory(
     memory: &dyn crate::memory::Home,
     script: &Script,
-    dir: &Dir,
+    dir: &TempDir,
     message: &str,
 ) -> (Result<TurnEnd, Error>, Log, Session) {
     let default = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
@@ -1847,7 +1830,7 @@ fn turn_with_memory(
 #[test]
 fn the_memory_index_stands_before_the_history_and_stays_for_the_session() {
     // AGL-047, D1, D2.
-    let dir = Dir::new("memfrozen");
+    let dir = TempDir::new();
     let memory = dir.0.join("memory");
     fs::create_dir_all(&memory).unwrap();
     fs::write(memory.join("MEMORY.md"), "- [One](one.md) — first\n").unwrap();
@@ -1906,7 +1889,7 @@ fn the_memory_index_stands_before_the_history_and_stays_for_the_session() {
 #[test]
 fn the_memory_index_comes_right_after_the_system_prompt() {
     // AGL-047, D1: the next step's history goes after it.
-    let dir = Dir::new("memorder");
+    let dir = TempDir::new();
     let memory = dir.0.join("memory");
     fs::create_dir_all(&memory).unwrap();
     fs::write(memory.join("MEMORY.md"), "- [One](one.md) — first\n").unwrap();
@@ -1925,7 +1908,7 @@ fn the_memory_index_comes_right_after_the_system_prompt() {
 
 #[test]
 fn the_memory_index_is_a_runtime_message_each_step_and_not_in_the_history() {
-    let dir = Dir::new("memindex");
+    let dir = TempDir::new();
     let memory = dir.0.join("memory");
     fs::create_dir_all(&memory).unwrap();
     fs::write(
@@ -1967,7 +1950,7 @@ fn the_memory_index_is_a_runtime_message_each_step_and_not_in_the_history() {
 
 #[test]
 fn the_memory_tool_writes_logs_an_event_and_shows_a_marker() {
-    let dir = Dir::new("memtool");
+    let dir = TempDir::new();
     let memory = dir.0.join("memory");
     let script = Script::new(&[
         ("I will note it.", THOUGHT),
@@ -2019,7 +2002,7 @@ fn the_memory_tool_writes_logs_an_event_and_shows_a_marker() {
 
 #[test]
 fn a_memory_call_without_a_store_fails_for_everything_but_add() {
-    let dir = Dir::new("memnone");
+    let dir = TempDir::new();
     let script = Script::new(&[
         ("t", THOUGHT),
         (&memory_call(&[("action", "show"), ("name", "x")]), Stop::End),
@@ -2055,7 +2038,7 @@ fn a_memory_call_without_a_store_fails_for_everything_but_add() {
 
 #[test]
 fn a_compaction_summary_is_kept_in_the_memory_directory_and_not_in_the_index() {
-    let dir = Dir::new("memsummary");
+    let dir = TempDir::new();
     let memory = dir.0.join("memory");
     let default = Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
     let script = Script::new(&[
@@ -2104,7 +2087,7 @@ fn lines_of(session: &Session, kind: &str) -> Vec<serde_json::Value> {
 #[test]
 fn the_session_file_holds_the_turn_and_the_history_does_not() {
     // AGL-046, D1, D9, D14, D15.
-    let dir = Dir::new("observed");
+    let dir = TempDir::new();
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
@@ -2151,7 +2134,7 @@ fn the_session_file_holds_the_turn_and_the_history_does_not() {
 #[test]
 fn a_part_of_the_prompt_is_written_again_only_when_it_changes() {
     // AGL-046, D14: a reopened session knows what it wrote.
-    let dir = Dir::new("inputs");
+    let dir = TempDir::new();
     let mut session = Session::create(&dir.0, "f", Path::new("/w")).unwrap();
     session.record_input("system", "one").unwrap();
     session.record_input("system", "one").unwrap();
@@ -2170,7 +2153,7 @@ fn a_part_of_the_prompt_is_written_again_only_when_it_changes() {
 fn the_model_is_told_of_its_environment_after_the_system_text() {
     // AGL-048: the context and the session's file filled in, and the same at
     // every step, so the prompt's early part does not change.
-    let dir = Dir::new("about");
+    let dir = TempDir::new();
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
@@ -2202,7 +2185,7 @@ fn the_model_is_told_of_its_environment_after_the_system_text() {
 #[test]
 fn a_long_output_names_its_file_beside_the_session_and_follows_the_context() {
     // AGL-049.
-    let dir = Dir::new("output");
+    let dir = TempDir::new();
     let function = Function::load(
         Path::new("/none"),
         Path::new("/none"),
@@ -2239,7 +2222,7 @@ fn a_long_output_names_its_file_beside_the_session_and_follows_the_context() {
 fn a_long_search_result_is_cut_and_kept_like_any_output() {
     // AGL-049: the context of these tests is 16384, so the limit is 512
     // tokens.
-    let dir = Dir::new("search-long");
+    let dir = TempDir::new();
     let script = Script::new(&[
         ("t1", THOUGHT),
         (&search_call(&[("language", "uk"), ("limit", "3"), ("query", "Київ"), ("source", "wikipedia")]), Stop::End),
@@ -2271,7 +2254,7 @@ fn a_long_search_result_is_cut_and_kept_like_any_output() {
 fn a_compaction_between_turns_does_not_ask_the_answered_question_again() {
     // F31 keeps the question of a turn that is going on; a question with its
     // answer is in the summary.
-    let dir = Dir::new("compact-answered");
+    let dir = TempDir::new();
     let minimal = Function::load(
         Path::new("/none"),
         Path::new("/none"),

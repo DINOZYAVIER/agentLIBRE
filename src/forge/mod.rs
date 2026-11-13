@@ -1112,6 +1112,15 @@ pub(crate) mod testutil {
             std::fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
         }
+
+        /// A file `name` with `text` and `mode`.
+        pub fn file(&self, name: &str, text: &str, mode: u32) -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        }
     }
 
     impl Drop for TempDir {

@@ -686,22 +686,7 @@ pub fn write_summary(dir: &Path, date: &str, session: &str, summary: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(name: &str) -> Dir {
-            let dir = std::env::temp_dir().join(format!("agentLIBRE-memory-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            Dir(dir)
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::forge::testutil::TempDir;
 
     fn added(dir: &Path, title: &str, hook: &str, text: &str) -> String {
         let (result, write) = add(dir, title, hook, text, None);
@@ -711,7 +696,7 @@ mod tests {
 
     #[test]
     fn add_writes_the_entry_and_its_index_line() {
-        let dir = Dir::new("add");
+        let dir = TempDir::new();
         let (result, write) = add(&dir.0, "Build and test", "cargo build / cargo test", "Run `cargo build`.\nThen `cargo test`.\n", None);
         assert_eq!(result.content, "Remembered `build-and-test`.");
         assert_eq!(
@@ -740,7 +725,7 @@ mod tests {
 
     #[test]
     fn a_clash_gets_a_number_and_a_bad_title_or_empty_field_is_refused() {
-        let dir = Dir::new("clash");
+        let dir = TempDir::new();
         assert_eq!(added(&dir.0, "Setup", "one", "a"), "setup");
         assert_eq!(added(&dir.0, "setup", "two", "b"), "setup-2");
         assert_eq!(added(&dir.0, "SETUP!", "three", "c"), "setup-3");
@@ -759,7 +744,7 @@ mod tests {
 
     #[test]
     fn add_takes_the_body_from_the_text_of_the_call_when_the_parameter_is_empty() {
-        let dir = Dir::new("call-body");
+        let dir = TempDir::new();
         let (result, write) = add(&dir.0, "Note", "the hook", "", Some("The body text.\nMore."));
         assert_eq!(
             result.content,
@@ -789,7 +774,7 @@ mod tests {
 
     #[test]
     fn add_names_the_missing_fields() {
-        let dir = Dir::new("missing-fields");
+        let dir = TempDir::new();
         fs::create_dir_all(&dir.0).unwrap();
         for (title, hook, text, want) in [
             ("", "h", "t", "`add` needs a title."),
@@ -809,7 +794,7 @@ mod tests {
 
     #[test]
     fn a_long_title_makes_a_short_name() {
-        let dir = Dir::new("long");
+        let dir = TempDir::new();
         let name = added(&dir.0, &"word ".repeat(40), "h", "t");
         assert!(name.chars().count() <= NAME_LIMIT, "{name}");
         assert!(!name.ends_with('-'));
@@ -819,7 +804,7 @@ mod tests {
 
     #[test]
     fn show_returns_the_text_and_cuts_a_long_one() {
-        let dir = Dir::new("show");
+        let dir = TempDir::new();
         let name = added(&dir.0, "Notes", "h", "short text");
         let shown = show(&dir.0, &name, &out());
         assert_eq!(shown.outcome, Outcome::Ok);
@@ -836,7 +821,7 @@ mod tests {
 
     #[test]
     fn edit_changes_one_unique_occurrence() {
-        let dir = Dir::new("edit");
+        let dir = TempDir::new();
         let name = added(&dir.0, "Servers", "h", "port 18080 and port 18081");
         let (result, write) = edit_entry(&dir.0, &name, "18080", "18090");
         assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
@@ -860,7 +845,7 @@ mod tests {
 
     #[test]
     fn update_rewrites_the_heading_and_the_index_line() {
-        let dir = Dir::new("update");
+        let dir = TempDir::new();
         let name = added(&dir.0, "One", "the old hook", "body text");
         let other = added(&dir.0, "Two", "second", "2");
         // Title only: the hook is kept, the other entry's line is untouched.
@@ -913,7 +898,7 @@ mod tests {
 
     #[test]
     fn update_refuses_the_misfires() {
-        let dir = Dir::new("update-misfires");
+        let dir = TempDir::new();
         let name = added(&dir.0, "One", "the hook", "body");
         // Neither field: nothing is written.
         let (result, write) = update(&dir.0, &name, "", "");
@@ -953,7 +938,7 @@ mod tests {
 
     #[test]
     fn remove_deletes_the_file_and_only_its_index_line() {
-        let dir = Dir::new("remove");
+        let dir = TempDir::new();
         let one = added(&dir.0, "One", "first", "1");
         let two = added(&dir.0, "Two", "second", "2");
         let (result, write) = remove(&dir.0, &one);
@@ -972,7 +957,7 @@ mod tests {
 
     #[test]
     fn run_picks_the_action_and_refuses_an_unknown_one() {
-        let dir = Dir::new("run");
+        let dir = TempDir::new();
         let args = Args {
             action: "add".into(),
             title: "T".into(),
@@ -999,7 +984,7 @@ mod tests {
 
     #[test]
     fn the_index_for_the_prompt_is_whole_when_small_and_the_newest_when_cut() {
-        let dir = Dir::new("index");
+        let dir = TempDir::new();
         assert_eq!(index_text(&dir.0), None);
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(dir.0.join(INDEX), "  \n\n").unwrap();
@@ -1029,7 +1014,7 @@ mod tests {
     #[test]
     fn a_line_over_the_cap_does_not_take_the_others_out() {
         // AGL-058, D10.
-        let dir = Dir::new("long-line");
+        let dir = TempDir::new();
         remember(&dir.0, "Old one", "an old note");
         let long = "пам'ять ".repeat(1500);
         remember(&dir.0, "Long one", &long);
@@ -1046,7 +1031,7 @@ mod tests {
 
     #[test]
     fn remember_writes_an_entry_whose_hook_is_the_text() {
-        let dir = Dir::new("remember");
+        let dir = TempDir::new();
         let (result, write) = remember(&dir.0, "Build and test", "cargo build / cargo test");
         assert_eq!(result.outcome, Outcome::Ok);
         assert_eq!(write.unwrap().name, "build-and-test");
@@ -1068,7 +1053,7 @@ mod tests {
     #[test]
     fn the_index_is_no_entry() {
         // AGL-060: `remove MEMORY` would take every line with it.
-        let dir = Dir::new("index-no-entry");
+        let dir = TempDir::new();
         added(&dir.0, "One", "first", "1");
         assert!(!exists(&dir.0, "MEMORY"));
         assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
@@ -1080,7 +1065,7 @@ mod tests {
     #[test]
     fn remove_takes_a_line_with_no_file_and_a_file_with_no_line() {
         // AGL-060, D8.
-        let dir = Dir::new("remove-out-of-step");
+        let dir = TempDir::new();
         added(&dir.0, "Gone", "first", "1");
         added(&dir.0, "Kept", "second", "2");
         added(&dir.0, "Stray", "third", "3");
@@ -1104,7 +1089,7 @@ mod tests {
     #[test]
     fn remove_does_not_empty_an_index_it_cannot_read() {
         // AGL-060.
-        let dir = Dir::new("remove-bad-index");
+        let dir = TempDir::new();
         let one = added(&dir.0, "One", "first", "1");
         fs::write(dir.0.join(INDEX), b"- [One](one.md) \xff\n").unwrap();
         let (result, write) = remove(&dir.0, &one);
@@ -1117,7 +1102,7 @@ mod tests {
     #[test]
     fn list_gives_the_lines_in_order_and_then_the_files_with_no_line() {
         // AGL-060, D4.
-        let dir = Dir::new("list");
+        let dir = TempDir::new();
         assert_eq!(list(&dir.0).unwrap(), Vec::new());
         added(&dir.0, "One", "first — with a dash", "1");
         added(&dir.0, "Gone", "second", "2");
@@ -1147,7 +1132,7 @@ mod tests {
     #[test]
     fn list_marks_the_lines_the_prompt_does_not_carry() {
         // AGL-060, D4: the same lines as the index of the prompt (M33).
-        let dir = Dir::new("list-cut");
+        let dir = TempDir::new();
         for n in 0..200 {
             added(&dir.0, &format!("Entry {n}"), &"x".repeat(40), "t");
         }
@@ -1165,7 +1150,7 @@ mod tests {
     #[test]
     fn list_tells_an_index_it_cannot_read_from_an_empty_memory() {
         // AGL-060.
-        let dir = Dir::new("list-bad-index");
+        let dir = TempDir::new();
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(dir.0.join(INDEX), b"\xff\n").unwrap();
         assert!(matches!(list(&dir.0), Err(Error::Read { .. })));
@@ -1174,7 +1159,7 @@ mod tests {
     #[test]
     fn whole_gives_a_long_entry_uncut() {
         // AGL-060.
-        let dir = Dir::new("whole");
+        let dir = TempDir::new();
         let long = "é".repeat(20_000);
         let name = added(&dir.0, "Long", "h", &long);
         assert_eq!(whole(&dir.0, &name).unwrap(), format!("# Long\n\n{long}\n"));
@@ -1185,7 +1170,7 @@ mod tests {
 
     #[test]
     fn a_summary_goes_to_the_summaries_directory_by_date_and_session() {
-        let dir = Dir::new("summary");
+        let dir = TempDir::new();
         write_summary(&dir.0, "2026-10-21", "01abc", "First summary.\n").unwrap();
         let path = dir.0.join(SUMMARIES).join("2026-10-21-01abc.md");
         assert_eq!(fs::read_to_string(&path).unwrap(), "First summary.\n");
