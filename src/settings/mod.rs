@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 use crate::error::Error;
 use crate::i18n::Lang;
 use crate::nix::{self, Section};
-use crate::theme::{COLOR_KEYS, Role, Style};
+use crate::style::{COLOR_KEYS, Role, Style};
 
 /// Name of the settings file, the user's and the project store's
 /// (AGL-039, D11).

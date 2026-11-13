@@ -16,7 +16,8 @@ use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::Phase;
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tr;
 
 /// The most input rows the dock shows.

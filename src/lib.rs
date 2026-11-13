@@ -28,6 +28,7 @@ mod search;
 mod session;
 mod settings;
 mod status;
+mod style;
 #[cfg(test)]
 mod test_server;
 mod theme;

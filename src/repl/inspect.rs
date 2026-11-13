@@ -16,7 +16,8 @@ use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::session::{Event, TransitionLine};
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tools::ToolResult;
 use crate::tr;
 

@@ -44,7 +44,8 @@ use crate::status::{
     COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
     status_text,
 };
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tr;
 
 /// A message that waits for its turn, with the media attached to it

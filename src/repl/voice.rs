@@ -14,7 +14,8 @@ use crate::cli::whisper::Dictation;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::record::Recording;
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tr;
 
 /// How often a recording is looked at: its time is shown and its end at

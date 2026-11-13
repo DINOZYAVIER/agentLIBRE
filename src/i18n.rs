@@ -8,7 +8,7 @@ use crate::error::{
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
-use crate::theme::StyleError;
+use crate::style::StyleError;
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

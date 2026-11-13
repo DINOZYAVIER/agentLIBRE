@@ -220,7 +220,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     let interrupted = matches!(result, Err(Error::Interrupted));
                     if let Some((text, role)) = compact_notice(result, function, lang) {
                         eprintln!("{text}");
-                        said.failed = role != crate::theme::Role::Muted;
+                        said.failed = role != crate::style::Role::Muted;
                         said.output.push(text);
                     }
                     if interrupted {

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::grammar::pattern::PatternError;
 use crate::settings::ServerKind;
-use crate::theme::StyleError;
+use crate::style::StyleError;
 
 /// An error that stops `agl`.
 #[derive(Debug)]

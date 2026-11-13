@@ -7,7 +7,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::text::width;
 use crate::i18n::{Lang, m};
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tr;
 
 /// The art, from the root file `splash` (D1).

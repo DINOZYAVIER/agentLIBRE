@@ -11,7 +11,7 @@ use crate::i18n::{Lang, m, repl as texts};
 use crate::media::{Kind as MediaKind, Media};
 use crate::memory::Kind as MemoryKind;
 use crate::session::{Event, ForgeKind, TransitionLine};
-use crate::theme::Role;
+use crate::style::Role;
 use crate::tools::ToolResult;
 use crate::tr;
 

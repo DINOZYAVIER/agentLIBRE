@@ -17,7 +17,8 @@ use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, ForgeKind, TransitionLine};
 use crate::settings::ReplSettings;
-use crate::theme::{Role, Theme};
+use crate::style::Role;
+use crate::theme::Theme;
 use crate::tools::ToolResult;
 use crate::tr;
 
@@ -1455,7 +1456,7 @@ mod tests {
         // AGL-066, D26: the line under the gutter, the tool's input, is
         // in the muted color, as the thinking's line; the tool's line
         // keeps the tool's and the status's colors.
-        let red = crate::theme::Style::parse("#FF0000", false).expect("a color");
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Muted, red)]);
         let (presenter, mock) = presenter(true);
         let presenter = Presenter {
@@ -1485,7 +1486,7 @@ mod tests {
         // time, the speed — are in the rule's color, dark gray, as the
         // body and the prompt's block; the dashes in the input's rule
         // color.
-        let red = crate::theme::Style::parse("#FF0000", false).expect("a color");
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Rule, red)]);
         let (presenter, mock) = presenter(true);
         let presenter = Presenter {

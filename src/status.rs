@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::session::{CutOff, StopReason};
-use crate::theme::Role;
+use crate::style::Role;
 use crate::tr;
 
 /// The line of a cut-off, in the transcript and on stderr (D154;
