@@ -67,11 +67,10 @@ pub fn new_task_spec(
             }
             name.to_owned()
         }
-        None => format!(
-            "agl-{:03}-{}",
-            task_spec::next_number(&existing),
-            task_spec::slug(title)
-        ),
+        None => {
+            let (prefix, number) = task_spec::next_number(&existing);
+            format!("{prefix}-{number:03}-{}", task_spec::slug(title))
+        }
     };
     if existing.contains(&name) {
         return Err(Error::NameTaken {

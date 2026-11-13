@@ -892,6 +892,24 @@ mod tests {
     }
 
     #[test]
+    fn new_takes_the_prefix_of_the_store() {
+        // AGL-067, D7: `--name` gives a store its own prefix, the next spec
+        // follows it.
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, _) = key_and_file(&data, &repo);
+        let first = ["new", "task-spec", "--title", "First", "--name", "ks-004-first"];
+        assert_eq!(forge(&data, &repo, &first).unwrap(), ExitCode::SUCCESS);
+        let second = ["new", "task-spec", "--title", "Second Task"];
+        assert_eq!(forge(&data, &repo, &second).unwrap(), ExitCode::SUCCESS);
+        assert!(data
+            .join(&key)
+            .join("forge/task-spec/ks-005-second-task.md")
+            .is_file());
+    }
+
+    #[test]
     fn new_scaffolds_the_next_number() {
         let dir = TempDir::new();
         let data = dir.0.join("data");

@@ -211,20 +211,43 @@ pub fn slug(title: &str) -> String {
         .join("-")
 }
 
-/// The next `agl-<NNN>` number: one past the max over the existing
-/// task-spec names.
-pub fn next_number(names: &[String]) -> u32 {
-    let mut max = 0u32;
+/// The prefix and the number of the next task-spec of a store, from the
+/// `names` in it (AGL-067, D7, D12): the prefix most of the numbered names
+/// carry, the first by the alphabet when two have as many, `agl` when none
+/// is numbered; the number one past the highest with that prefix. A numbered
+/// name is `<letters>-<digits>-<rest>`; the others are not counted.
+pub fn next_number(names: &[String]) -> (String, u32) {
+    // The prefix, how many names carry it and the highest number.
+    let mut prefixes: std::collections::BTreeMap<&str, (usize, u32)> = Default::default();
     for name in names {
-        let Some(rest) = name.strip_prefix("agl-") else {
-            continue;
-        };
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if let Ok(n) = digits.parse::<u32>() {
-            max = max.max(n);
+        if let Some((prefix, number)) = numbered(name) {
+            let entry = prefixes.entry(prefix).or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.max(number);
         }
     }
-    max + 1
+    // `BTreeMap` goes by the alphabet; only a larger count replaces.
+    let mut best: Option<(&str, (usize, u32))> = None;
+    for (prefix, found) in prefixes {
+        if best.is_none_or(|(_, held)| found.0 > held.0) {
+            best = Some((prefix, found));
+        }
+    }
+    match best {
+        Some((prefix, (_, max))) => (prefix.to_owned(), max + 1),
+        None => ("agl".to_owned(), 1),
+    }
+}
+
+/// The prefix and the number of a numbered name, `<letters>-<digits>-<rest>`.
+fn numbered(name: &str) -> Option<(&str, u32)> {
+    let (prefix, rest) = name.split_once('-')?;
+    let (digits, rest) = rest.split_once('-')?;
+    let all = |text: &str, test: fn(&char) -> bool| !text.is_empty() && text.chars().all(|c| test(&c));
+    if !all(prefix, char::is_ascii_alphabetic) || !all(digits, char::is_ascii_digit) || rest.is_empty() {
+        return None;
+    }
+    Some((prefix, digits.parse().ok()?))
 }
 
 /// Today's calendar date, `YYYY-MM-DD`, from the system clock.
@@ -327,16 +350,48 @@ mod tests {
         assert_eq!(slug("it's a title"), "its-a-title");
     }
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn the_next_number_is_one_past_the_max() {
-        assert_eq!(next_number(&[]), 1);
+        assert_eq!(next_number(&[]), ("agl".to_string(), 1));
         assert_eq!(
-            next_number(&["agl-003-x".into(), "agl-001-y".into()]),
-            4
+            next_number(&names(&["agl-003-x", "agl-001-y"])),
+            ("agl".to_string(), 4)
         );
-        // Non agl- names and broken numbers do not count.
-        let names = vec!["note-1".to_string(), "agl-x".to_string(), "agl-005-z".to_string()];
-        assert_eq!(next_number(&names), 6);
+        // A name that is not numbered does not count (AGL-067, D12).
+        assert_eq!(
+            next_number(&names(&["note-1", "agl-x", "agl-005-z"])),
+            ("agl".to_string(), 6)
+        );
+    }
+
+    #[test]
+    fn a_store_numbers_with_the_prefix_most_of_its_specs_carry() {
+        // AGL-067, D7: the prefix most of the specs carry, one past the
+        // highest number with that prefix.
+        assert_eq!(
+            next_number(&names(&["ks-005-a", "ks-032-b", "agl-040-c"])),
+            ("ks".to_string(), 33)
+        );
+        // D12: as many specs each, the first prefix by the alphabet.
+        assert_eq!(
+            next_number(&names(&["ks-005-a", "agl-009-b"])),
+            ("agl".to_string(), 10)
+        );
+        // D12: `<letters>-<digits>-<rest>` is a numbered name; the others are
+        // not counted, so a store of them is a store with no numbered spec.
+        assert_eq!(
+            next_number(&names(&["notes", "ks-1", "ks-x-y", "-002-x", "7-002-x", "ks-003-"])),
+            ("agl".to_string(), 1)
+        );
+        // A number that does not fit is not a number.
+        assert_eq!(
+            next_number(&names(&["ks-99999999999-a", "ks-002-b"])),
+            ("ks".to_string(), 3)
+        );
     }
 
     #[test]

@@ -383,6 +383,20 @@ impl ForgeStore {
 }
 
 #[test]
+fn forge_new_takes_the_prefix_of_the_store() {
+    // AGL-067, D7: a store of `ks-` specs gets the next `ks-` number, an
+    // empty store `agl-001`.
+    let f = ForgeStore::new("forge-new-prefix");
+    f.write(&f.spec("ks-005-first", "open"));
+    f.write(&f.spec("ks-031-second", "done"));
+    let result = f.call("new", &[("title", "Third One")]);
+    assert!(result.content.ends_with("ks-032-third-one.md"), "{}", result.content);
+    let empty = ForgeStore::new("forge-new-empty");
+    let result = empty.call("new", &[("title", "Third One")]);
+    assert!(result.content.ends_with("agl-001-third-one.md"), "{}", result.content);
+}
+
+#[test]
 fn forge_new_is_the_engine_scaffold() {
     let f = ForgeStore::new("forge-new");
     let path =
