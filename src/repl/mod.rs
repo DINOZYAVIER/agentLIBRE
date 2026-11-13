@@ -6,7 +6,7 @@ mod editor;
 mod inspect;
 mod markdown;
 mod reading;
-mod records;
+pub(crate) mod records;
 mod splash;
 mod transcript;
 mod text;

@@ -61,38 +61,14 @@ impl Report for StderrReport {
     }
 
     fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
-        let change = format!("{}{name}", kind.sign());
-        eprintln!("{}", tr!(self.lang, m::MEMORY_EVENT, change = change));
+        eprintln!("{}", crate::repl::records::memory_line(name, kind, self.lang));
         if let Some(text) = text {
             eprintln!("{text}");
         }
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        let message = match kind {
-            ForgeKind::Created => tr!(self.lang, m::FORGE_EVENT_CREATED, name = name),
-            ForgeKind::Edited => tr!(self.lang, m::FORGE_EVENT_EDITED, name = name),
-            ForgeKind::Appended => tr!(
-                self.lang,
-                m::FORGE_EVENT_APPENDED,
-                name = name,
-                section = section.unwrap_or_default()
-            ),
-            ForgeKind::Removed => tr!(self.lang, m::FORGE_EVENT_REMOVED, name = name),
-            ForgeKind::StatusChanged => tr!(
-                self.lang,
-                m::FORGE_EVENT_STATUS,
-                name = name,
-                to = section.unwrap_or_default()
-            ),
-            ForgeKind::Renamed => tr!(
-                self.lang,
-                m::FORGE_EVENT_RENAMED,
-                name = name,
-                old = section.unwrap_or_default()
-            ),
-        };
-        eprintln!("{message}");
+        eprintln!("{}", crate::repl::records::forge_line(name, kind, section, self.lang));
     }
 
     fn compacted(&mut self) {
