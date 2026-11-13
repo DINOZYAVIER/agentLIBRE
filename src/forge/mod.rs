@@ -1093,6 +1093,26 @@ pub fn artifact_files(dir: &Path) -> Result<Vec<PathBuf>, Error> {
     Ok(files)
 }
 
+/// The project of `cwd` for a run of the agent (AGL-010), by the rule of the
+/// forge; `ask` picks a store when the rule needs one. The notification lines
+/// go to stderr: stdout carries the answer of `-p`. A project not registered
+/// yet says nothing, it is registered at its first write.
+pub fn project_of(
+    paths: &crate::paths::Paths,
+    cwd: &Path,
+    auto_rehome: bool,
+    lang: crate::i18n::Lang,
+    ask: &dyn Fn(&[String]) -> Result<usize, Error>,
+) -> Result<Workspace, Error> {
+    let (ws, lines) = resolve(&paths.data, cwd, lang, auto_rehome, ask)?;
+    if ws.dir.is_dir() {
+        for line in lines {
+            eprintln!("{line}");
+        }
+    }
+    Ok(ws)
+}
+
 /// Test helpers of the forge tree: one counter for all the modules, so
 /// the temporary directories never collide between modules.
 #[cfg(test)]

@@ -155,28 +155,16 @@ fn resolve_workspace(
 }
 
 /// The project of `cwd` for a run of the agent (AGL-010), by the rule
-/// of the forge. The notification lines go to stderr: stdout carries
-/// the answer of `-p`. A project not registered yet says nothing, it
-/// is registered at its first write.
+/// of the forge, the store asked of the terminal.
 pub fn project_of(
     paths: &Paths,
     cwd: &Path,
     auto_rehome: bool,
     lang: Lang,
 ) -> Result<Workspace, Error> {
-    let (ws, lines) = forge::resolve(
-        &paths.data,
-        cwd,
-        lang,
-        auto_rehome,
-        &|options| ask_store(m::FORGE_ASK_STORE, options, lang),
-    )?;
-    if ws.dir.is_dir() {
-        for line in lines {
-            eprintln!("{line}");
-        }
-    }
-    Ok(ws)
+    forge::project_of(paths, cwd, auto_rehome, lang, &|options| {
+        ask_store(m::FORGE_ASK_STORE, options, lang)
+    })
 }
 
 /// The store ask: the names of the stores plus a new store. On a

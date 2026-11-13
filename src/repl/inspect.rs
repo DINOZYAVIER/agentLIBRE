@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use super::markdown;
-use super::records::{self, Record};
+use crate::records::{self, Record};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
 use super::transcript::{edge, notice_lines, thinking_lines, user_lines};

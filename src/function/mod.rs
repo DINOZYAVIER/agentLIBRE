@@ -923,5 +923,7 @@ fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Erro
     }
 }
 
+pub mod catalog;
+
 #[cfg(test)]
 pub mod tests;

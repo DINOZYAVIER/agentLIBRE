@@ -24,6 +24,7 @@ mod paths;
 mod plane;
 mod programs;
 mod record;
+mod records;
 mod repl;
 mod search;
 mod session;
@@ -117,7 +118,7 @@ pub struct Setup<'a> {
     pub repl: ReplSettings,
     pub history_file: PathBuf,
     /// The Functions of the REPL's `/function` (AGL-036, D3).
-    pub catalog: &'a cli::function::Catalog,
+    pub catalog: &'a function::catalog::Catalog,
 }
 
 pub fn cli() -> ExitCode {
@@ -629,9 +630,9 @@ fn agent_session(
         let interactive = tty::is_interactive();
         // The Functions of `/function` (AGL-036, D3, D9), the run's one
         // marked.
-        let catalog = cli::function::Catalog {
+        let catalog = function::catalog::Catalog {
             current: settings.function.clone(),
-            ..cli::function::Catalog::of(paths, project, user)
+            ..function::catalog::Catalog::of(paths, project, user)
         };
         // The switch of D10 (AGL-036) before the terminal is taken: its
         // question needs the plain terminal.

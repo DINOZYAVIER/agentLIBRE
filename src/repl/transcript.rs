@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::dock::grouped;
 use super::markdown;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
-use super::records::{self, Record};
+use crate::records::{self, Record};
 use super::text::{StreamWrap, clean, hard_wrap, truncate, width, wrap_line};
 use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
