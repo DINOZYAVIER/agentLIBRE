@@ -5,26 +5,23 @@
 //! the flat prompt is the client-side token estimate and the compaction.
 
 use std::io::{BufRead, BufReader};
-use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 
 use super::llama::{messages_json, tool_json};
+use super::http::Http;
 use super::{
-    Prefill, PromptProgress,
+    Prefill, PromptProgress, add_sampling,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
     StructuredCall, kept_thinking,
 };
 use crate::action::{Kind, Value};
 use crate::error::Error;
 use crate::format::Format;
-use crate::function::Sampling;
 use crate::interrupt;
 use crate::settings::ServerKind;
 use crate::tools::Spec;
 
-/// How long connecting may take (D97).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The model name the OpenAI-dialect request carries; Strata has one model
 /// loaded (AGL-030, D2).
 const MODEL: &str = "strata";
@@ -36,93 +33,26 @@ const DEFAULT_CONTEXT: usize = 32768;
 const CHAR_DENOM: f64 = 3.5;
 
 pub struct Strata {
-    url: String,
-    agent: ureq::Agent,
+    http: Http,
 }
 
 impl Strata {
     /// A client for the server at `url`, such as `http://127.0.0.1:18088`.
     pub fn new(url: &str) -> Strata {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .build()
-            .into();
         Strata {
-            url: url.trim_end_matches('/').into(),
-            agent,
+            http: Http::new(ServerKind::Strata, url),
         }
-    }
-
-    fn unreachable(&self, error: impl std::fmt::Display) -> Error {
-        Error::ServerUnreachable {
-            kind: ServerKind::Strata,
-            url: self.url.clone(),
-            detail: error.to_string(),
-        }
-    }
-
-    fn bad_reply(&self, detail: impl Into<String>) -> Error {
-        Error::ServerReply {
-            kind: ServerKind::Strata,
-            url: self.url.clone(),
-            detail: detail.into(),
-        }
-    }
-
-    /// Sends a request and returns the response if the status is 200.
-    fn send(
-        &self,
-        path: &str,
-        body: Option<&Json>,
-    ) -> Result<ureq::http::Response<ureq::Body>, Error> {
-        let url = format!("{}{path}", self.url);
-        let response = match body {
-            Some(body) => self
-                .agent
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .send(body.to_string()),
-            None => self.agent.get(&url).call(),
-        }
-        .map_err(|error| self.unreachable(error))?;
-        let status = response.status().as_u16();
-        if status == 200 {
-            return Ok(response);
-        }
-        let text = response.into_body().read_to_string().unwrap_or_default();
-        // The OpenAI dialect explains errors as {"error": {"message": ...}}.
-        let message = serde_json::from_str::<Json>(&text)
-            .ok()
-            .and_then(|reply| reply["error"]["message"].as_str().map(str::to_owned))
-            .unwrap_or(text);
-        Err(Error::ServerStatus {
-            kind: ServerKind::Strata,
-            url: self.url.clone(),
-            status,
-            message,
-        })
-    }
-
-    /// Sends a request and parses the JSON reply.
-    fn json(&self, path: &str, body: Option<&Json>) -> Result<Json, Error> {
-        let text = self
-            .send(path, body)?
-            .into_body()
-            .read_to_string()
-            .map_err(|error| self.unreachable(error))?;
-        serde_json::from_str(&text).map_err(|error| self.bad_reply(error.to_string()))
     }
 }
 
 impl Backend for Strata {
     fn url(&self) -> &str {
-        &self.url
+        &self.http.url
     }
 
     fn health(&self) -> Option<u16> {
-        let url = format!("{}/health", self.url);
-        let response = self.agent.get(&url).call().ok()?;
+        let url = format!("{}/health", self.http.url);
+        let response = self.http.agent.get(&url).call().ok()?;
         Some(response.status().as_u16())
     }
 
@@ -164,7 +94,7 @@ impl Backend for Strata {
         if on_progress.is_some() {
             body["return_progress"] = true.into();
         }
-        let response = self.send("/v1/chat/completions", Some(&body))?;
+        let response = self.http.send("/v1/chat/completions", Some(&body))?;
         let mut stream = Accumulator::default();
         let reader = BufReader::new(response.into_body().into_reader());
         for line in reader.lines() {
@@ -177,7 +107,7 @@ impl Backend for Strata {
                 if interrupt::interrupted() {
                     Error::Interrupted
                 } else {
-                    self.unreachable(error)
+                    self.http.unreachable(error)
                 }
             })?;
             let Some(data) = line.strip_prefix("data: ") else {
@@ -194,12 +124,12 @@ impl Backend for Strata {
             }
             let done = stream
                 .feed(data, on_thinking, on_text)
-                .map_err(|detail| self.bad_reply(detail))?;
+                .map_err(|detail| self.http.bad_reply(detail))?;
             if done {
                 break;
             }
         }
-        stream.finish().map_err(|detail| self.bad_reply(detail))
+        stream.finish().map_err(|detail| self.http.bad_reply(detail))
     }
 
     /// The tokens of the structured prompt as the server counts them: the
@@ -208,7 +138,7 @@ impl Backend for Strata {
     /// the request (AGL-030, D11). A server without the endpoint gets the
     /// count of the flat text.
     fn count_prompt(&self, prompt: &Prompt, flat: &str) -> Result<usize, Error> {
-        match self.json("/v1/messages/count_tokens", Some(&anthropic_body(prompt))) {
+        match self.http.json("/v1/messages/count_tokens", Some(&anthropic_body(prompt))) {
             Ok(reply) => match reply["input_tokens"].as_u64() {
                 Some(n) => Ok(n as usize),
                 None => self.count_tokens(flat),
@@ -224,7 +154,7 @@ impl Backend for Strata {
     /// server without that endpoint gets the estimate (AGL-030, D11).
     fn count_tokens(&self, text: &str) -> Result<usize, Error> {
         let body = json!({"model": MODEL, "messages": [{"role": "user", "content": text}]});
-        match self.json("/v1/messages/count_tokens", Some(&body)) {
+        match self.http.json("/v1/messages/count_tokens", Some(&body)) {
             Ok(reply) => Ok(reply["input_tokens"]
                 .as_u64()
                 .map_or_else(|| estimate_tokens(text), |n| n as usize)),
@@ -237,12 +167,12 @@ impl Backend for Strata {
         // The server's `/props` carries the context under
         // `default_generation_settings`, `/health` as `max_context`
         // (AGL-030, D2); the fallback is the configured maximum.
-        if let Ok(reply) = self.json("/props", None)
+        if let Ok(reply) = self.http.json("/props", None)
             && let Some(n) = reply["default_generation_settings"]["n_ctx"].as_u64()
         {
             return Ok(n as usize);
         }
-        if let Ok(reply) = self.json("/health", None)
+        if let Ok(reply) = self.http.json("/health", None)
             && let Some(n) = reply["max_context"].as_u64()
         {
             return Ok(n as usize);
@@ -251,7 +181,7 @@ impl Backend for Strata {
     }
 
     fn models(&self) -> Result<Option<String>, Error> {
-        let reply = self.json("/v1/models", None)?;
+        let reply = self.http.json("/v1/models", None)?;
         // The OpenAI dialect lists under `data`; the `id` is the model
         // name the server was started with (AGL-033, D2).
         let entry = reply["data"].as_array().and_then(|a| a.first());
@@ -260,25 +190,6 @@ impl Backend for Strata {
         };
         let name = entry["id"].as_str();
         Ok(name.filter(|s| !s.is_empty()).map(str::to_owned))
-    }
-}
-
-/// Adds the sampling settings that the Function sets (D89).
-fn add_sampling(body: &mut Json, sampling: &Sampling) {
-    let numbers = [
-        ("temperature", sampling.temperature),
-        ("top_p", sampling.top_p),
-        ("min_p", sampling.min_p),
-        ("presence_penalty", sampling.presence_penalty),
-        ("repeat_penalty", sampling.repeat_penalty),
-    ];
-    for (key, value) in numbers {
-        if let Some(value) = value {
-            body[key] = value.into();
-        }
-    }
-    if let Some(top_k) = sampling.top_k {
-        body["top_k"] = top_k.into();
     }
 }
 
@@ -631,6 +542,7 @@ mod tests {
     use super::*;
     use crate::backend::{Message, Prompt, Stop, ToolCall};
     use crate::format::tests::qwen;
+    use crate::function::Sampling;
     use crate::tools::spec::{ParamSpec, Values};
 
     /// The doc of the `bash` tool, as the flat prompt shows it (AGL-030, D2).

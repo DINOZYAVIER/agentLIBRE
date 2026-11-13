@@ -1,5 +1,6 @@
 //! Inference backends behind a minimal interface (D10, D29).
 
+mod http;
 pub mod llama;
 pub mod strata;
 
@@ -94,6 +95,25 @@ impl ReasoningLevel {
             ReasoningLevel::Medium => "medium",
             ReasoningLevel::Xhigh => "xhigh",
         }
+    }
+}
+
+/// Adds the sampling settings that the Function sets (D89).
+fn add_sampling(body: &mut serde_json::Value, sampling: &Sampling) {
+    let numbers = [
+        ("temperature", sampling.temperature),
+        ("top_p", sampling.top_p),
+        ("min_p", sampling.min_p),
+        ("presence_penalty", sampling.presence_penalty),
+        ("repeat_penalty", sampling.repeat_penalty),
+    ];
+    for (key, value) in numbers {
+        if let Some(value) = value {
+            body[key] = value.into();
+        }
+    }
+    if let Some(top_k) = sampling.top_k {
+        body["top_k"] = top_k.into();
     }
 }
 

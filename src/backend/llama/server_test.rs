@@ -4,6 +4,7 @@
 use super::*;
 use crate::action::{self, Action, Actions};
 use crate::backend::ToolCall;
+use crate::function::Sampling;
 use crate::tools::{SPECS, Spec};
 use crate::format::tests::qwen;
 use crate::test_server;

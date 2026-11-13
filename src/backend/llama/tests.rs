@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::ToolCall;
+use crate::function::Sampling;
 use crate::tools::SPECS;
 use crate::format::tests::{gemma, qwen};
 
