@@ -217,49 +217,23 @@ impl Inspect {
         match record {
             Record::User(message) => user_lines(theme, message, columns),
             Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
-            Record::Think(thinking, time) => {
-                let head = match time {
-                    Some(t) => format!(
-                        "{} {}: ",
-                        tr!(lang, m::THINKING),
-                        texts::duration(t.as_secs())
-                    ),
-                    None => format!("{}: ", tr!(lang, m::THINKING)),
-                };
-                if expanded {
-                    let mut lines = vec![theme.paint(Role::Muted, &head)];
-                    lines.extend(
-                        thinking
-                            .lines()
-                            .flat_map(|line| hard_wrap(&clean(line), columns))
-                            .map(|line| theme.paint(Role::Muted, &line)),
-                    );
-                    lines
-                } else {
-                    vec![theme.paint(
-                        Role::Muted,
-                        &thinking_line(lang, columns, thinking, *time),
-                    )]
-                }
-            }
-            Record::Text(text) => {
-                let mut lines = markdown::render(text.trim(), columns, theme);
-                if !expanded && lines.len() > 3 {
-                    lines.truncate(3);
-                    lines
-                        .last_mut()
-                        .expect("three lines")
-                        .push_str(&theme.paint(Role::Muted, "…"));
-                }
-                lines
-            }
             Record::Tool {
                 call,
                 result,
                 hint,
                 phases,
                 time,
+                thinking,
+                text,
             } => {
+                let mut lines = step_lines(
+                    theme,
+                    lang,
+                    columns,
+                    expanded,
+                    thinking.as_deref(),
+                    text.as_deref(),
+                );
                 let mut items = records::phase_items(phases);
                 if let Some(elapsed) = time {
                     items.push(format!(
@@ -268,8 +242,7 @@ impl Inspect {
                         texts::duration(elapsed.as_secs())
                     ));
                 }
-                let mut lines =
-                    tool_lines(theme, lang, columns, call, result.as_ref(), hint, &items);
+                lines.extend(tool_lines(theme, lang, columns, call, result.as_ref(), hint, &items));
                 if expanded {
                     // The input, in full, when the hint is not the whole (D4).
                     let input = call_input(call);
@@ -283,8 +256,20 @@ impl Inspect {
                 }
                 lines
             }
-            Record::Answer(text, time) => {
-                let mut lines = markdown::render(text.trim(), columns, theme);
+            Record::Answer {
+                text,
+                time,
+                thinking,
+            } => {
+                let mut lines = step_lines(
+                    theme,
+                    lang,
+                    columns,
+                    expanded,
+                    thinking.as_deref(),
+                    None,
+                );
+                lines.extend(markdown::render(text.trim(), columns, theme));
                 if expanded {
                     let items: Vec<String> = time
                         .iter()
@@ -337,6 +322,57 @@ impl Inspect {
 /// Whether the record is a message of the human (D5).
 fn is_user(record: &Record) -> bool {
     matches!(record, Record::User(_))
+}
+
+/// The compact frame of a call, as the inspect mode draws it (D6): the
+/// tool's line with its status, the lines of the input, the phases' row.
+/// The thinking and the text of a step's record, before its line (D19):
+/// the thinking's line in the tool's style when the record is compact,
+/// the full data when it is expanded.
+fn step_lines(
+    theme: &Theme,
+    lang: Lang,
+    columns: usize,
+    expanded: bool,
+    thinking: Option<&str>,
+    text: Option<&str>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(thinking) = thinking {
+        if expanded {
+            let wrapped: Vec<String> = thinking
+                .lines()
+                .flat_map(|line| hard_wrap(&clean(line), columns))
+                .collect();
+            if let Some(first) = wrapped.first() {
+                let head = truncate(
+                    &format!("{}: {}", tr!(lang, m::THINKING), first),
+                    columns,
+                );
+                lines.push(theme.paint(Role::Tool, &head));
+                for line in wrapped.iter().skip(1) {
+                    lines.push(theme.paint(Role::Muted, line));
+                }
+            }
+        } else {
+            lines.push(theme.paint(
+                Role::Tool,
+                &thinking_line(lang, columns, thinking),
+            ));
+        }
+    }
+    if let Some(text) = text {
+        let mut block = markdown::render(text.trim(), columns, theme);
+        if !expanded && block.len() > 3 {
+            block.truncate(3);
+            block
+                .last_mut()
+                .expect("three lines")
+                .push_str(&theme.paint(Role::Muted, "…"));
+        }
+        lines.extend(block);
+    }
+    lines
 }
 
 /// The compact frame of a call, as the inspect mode draws it (D6): the
@@ -531,8 +567,9 @@ mod tests {
         }
     }
 
-    /// The records: 0 the user, 1 the thinking, 2 the text, 3 the call,
-    /// 4 the answer, 5 the user, 6 the compaction, 7 the answer.
+    /// The records: 0 the user, 1 the step (the thinking, the text and
+    /// the call), 2 the answer, 3 the user, 4 the compaction, 5 the
+    /// answer.
     fn session() -> Vec<Event> {
         vec![
             Event::User("First".into()),
@@ -588,14 +625,14 @@ mod tests {
         // position and the follow.
         assert!(all.contains("Ok."), "{all}");
         assert!(all.contains("Compacting"), "{all}");
-        assert!(lines.last().unwrap().contains("8/8"));
+        assert!(lines.last().unwrap().contains("6/6"));
         assert!(lines.last().unwrap().contains("follow"));
     }
 
     #[test]
     fn the_keys_move_and_expand() {
         let mut inspect = inspect();
-        // At the tail (7); up to the compaction (6): its summary is the
+        // At the tail (5); up to the compaction (4): its summary is the
         // detail, shown only when it is open.
         assert!(inspect.key(Key::Up));
         assert!(inspect.key(Key::Enter));
@@ -604,12 +641,14 @@ mod tests {
         assert!(inspect.key(Key::Left));
         let all = screen(&inspect, 12).join("\n");
         assert!(!all.contains("the summary"), "{all}");
-        // Up to the call (3): its output, in full, when it is open.
+        // Up to the call (1): its output, in full, when it is open. The
+        // step's record is tall now (the thinking, the text, the tool),
+        // so a tall screen keeps it whole.
         assert!(inspect.key(Key::Up));
         assert!(inspect.key(Key::Up));
         assert!(inspect.key(Key::Up));
         assert!(inspect.key(Key::Enter));
-        let all = screen(&inspect, 12).join("\n");
+        let all = screen(&inspect, 24).join("\n");
         assert!(all.contains("TOOL bash  ok"), "{all}");
         assert!(all.contains("a\nb\nc\nd\ne"), "{all}");
     }
@@ -623,11 +662,11 @@ mod tests {
         assert!(inspect.key(Key::Char('u')));
         let lines = screen(&inspect, 10);
         assert!(lines.first().unwrap().contains("First"));
-        assert!(lines.last().unwrap().contains("1/8"));
+        assert!(lines.last().unwrap().contains("1/6"));
         assert!(inspect.key(Key::Char('U')));
         let lines = screen(&inspect, 10);
         assert!(lines.join("\n").contains("Second"));
-        assert!(lines.last().unwrap().contains("6/8"));
+        assert!(lines.last().unwrap().contains("4/6"));
     }
 
     #[test]
@@ -704,11 +743,13 @@ mod tests {
         let events = session();
         let mut inspect = Inspect::new(&events, &[], Lang::En);
         assert!(inspect.key(Key::Char('g')));
-        assert!(inspect.key(Key::Down));
-        assert!(inspect.key(Key::Down));
+        // The step's record (the thinking, the text and the call) is now
+        // one record after the user's.
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Enter));
-        let lines = inspect.render(&theme(), Lang::En, 40, 10, &dir, &[]);
+        // The step's record is tall now (the thinking and the text); a
+        // tall screen keeps the output on it.
+        let lines = inspect.render(&theme(), Lang::En, 40, 24, &dir, &[]);
         let all = lines.join("\n");
         assert!(all.contains("head\ncut\ntail"), "{all}");
         std::fs::remove_dir_all(&dir).ok();

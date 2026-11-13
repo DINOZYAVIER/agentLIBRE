@@ -124,11 +124,12 @@ pub struct Presenter {
     /// Whether the turn has entered its first state: only a change of state
     /// is shown (AGL-046, D13).
     state_entered: bool,
-    /// The thinking being decoded, as its pieces arrive (D3, D7): the
-    /// transcript shows its frame (D17).
+    /// The thinking being decoded, as its pieces arrive (D3, D19): the
+    /// transcript shows its line with the record of its step.
     thinking: Option<String>,
-    /// When the first piece of the thinking arrived, for its time (D17).
-    thinking_started: Option<Instant>,
+    /// Whether the step's block has begun: the separator is printed once
+    /// per step (D19).
+    step_open: bool,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -163,7 +164,7 @@ impl Presenter {
             context_fresh: false,
             state_entered: false,
             thinking: None,
-            thinking_started: None,
+            step_open: false,
             action: None,
             generation: None,
             turn_tokens: 0,
@@ -183,6 +184,7 @@ impl Presenter {
         self.prefill = None;
         self.state_entered = false;
         self.generation = None;
+        self.step_open = false;
         self.turn_tokens = 0;
         self.turn_decoding = Duration::ZERO;
         self.screen.speed(None);
@@ -281,35 +283,13 @@ impl Presenter {
         self.screen.print(&lines);
     }
 
-    /// The thinking's record (D3, D7, D17): its first line under the
-    /// gutter, and the rule with its time.
-    pub fn show_thinking(&self, thinking: &str, time: Option<Duration>) {
-        self.screen.print(&self.thinking_frame(thinking, time));
-    }
-
-    /// The thinking's frame (D17), like the tool's card: its first line
-    /// under the gutter, and the rule with its time.
-    fn thinking_frame(&self, thinking: &str, time: Option<Duration>) -> Vec<String> {
-        let columns = self.screen.columns();
-        let gutter = self.theme.paint(Role::InputRule, "  │ ");
-        let inner = columns.saturating_sub(4).max(1);
-        let label = tr!(self.lang, m::THINKING);
-        let snippet = thinking.lines().next().unwrap_or_default();
-        let mut lines = Vec::new();
-        if self.settings.frame {
-            lines.push(String::new());
-        }
-        lines.push(format!(
-            "{gutter}{}",
-            self.theme
-                .paint(Role::Muted, &truncate(&format!("{label}: {snippet}"), inner))
-        ));
-        let items: Vec<String> = time
-            .iter()
-            .map(|t| format!("{label} {}", texts::duration(t.as_secs())))
-            .collect();
-        lines.push(self.edge(None, &items, Role::Rule));
-        lines
+    /// The step's thinking's line (D3, D19): `thinking: <the first line>`,
+    /// on the top level, in the tool's color; the time is in the step's
+    /// rule, the full text in the inspect mode.
+    pub fn show_thinking(&self, thinking: &str) {
+        let line = thinking_line(self.lang, self.screen.columns(), thinking);
+        self.screen
+            .print(&[self.theme.paint(Role::Tool, &line)]);
     }
 
     /// The text before a call (D9): its first three lines; the rest is in
@@ -358,15 +338,22 @@ impl Presenter {
             match &record {
                 Record::User(message) => self.show_user(message),
                 Record::State(state) => self.show_state(state),
-                Record::Think(thinking, time) => self.show_thinking(thinking, *time),
-                Record::Text(text) => self.show_text(text),
                 Record::Tool {
                     call,
                     result,
                     hint,
                     phases,
                     time,
+                    thinking,
+                    text,
                 } => {
+                    self.screen.print(&self.step_separator());
+                    if let Some(thinking) = thinking {
+                        self.show_thinking(thinking);
+                    }
+                    if let Some(text) = text {
+                        self.show_text(text);
+                    }
                     let mut items = records::phase_items(phases);
                     if let Some(elapsed) = time {
                         items.push(format!(
@@ -378,7 +365,17 @@ impl Presenter {
                     self.screen
                         .print(&self.card(call, result.as_ref(), hint, &items));
                 }
-                Record::Answer(text, time) => self.show_answer(text, *time),
+                Record::Answer {
+                    text,
+                    time,
+                    thinking,
+                } => {
+                    self.screen.print(&self.step_separator());
+                    if let Some(thinking) = thinking {
+                        self.show_thinking(thinking);
+                    }
+                    self.show_answer(text, *time);
+                }
                 Record::Notice { line, role, .. } => self.show_notice(line, *role),
             }
         }
@@ -388,9 +385,7 @@ impl Presenter {
 
     fn answer_lines(&self, text: &str, edge: String) -> Vec<String> {
         let columns = self.screen.columns();
-        let rule = self.theme.paint(Role::InputRule, &"─".repeat(columns));
-        let mut lines = vec![String::new(), rule];
-        lines.push(String::new());
+        let mut lines = Vec::new();
         lines.extend(markdown::render(text.trim(), columns, &self.theme));
         lines.push(edge);
         lines.push(String::new());
@@ -434,6 +429,20 @@ impl Presenter {
         edge(&self.theme, self.screen.columns(), status, items, role)
     }
 
+    /// The rule that begins a step's block, when the frame is on (D19).
+    /// The block is the thinking's line, the text, and the tool's card;
+    /// the rule goes before all of it, so the step reads as one unit.
+    fn step_separator(&self) -> Vec<String> {
+        if !self.settings.frame {
+            return Vec::new();
+        }
+        vec![
+            String::new(),
+            self.theme
+                .paint(Role::Rule, &"─".repeat(self.screen.columns())),
+        ]
+    }
+
     /// The compact frame of a finished step (AGL-066, D1, D2, D6): the
     /// tool's name and status, one line of the input, the phases' times.
     /// No output: the full data is in the inspect mode.
@@ -449,11 +458,6 @@ impl Presenter {
         let inner = columns.saturating_sub(4).max(1);
         let (status_text, status_role) = records::status(result.map(|result| result.outcome));
         let mut lines = Vec::new();
-        if self.settings.frame {
-            lines.push(String::new());
-            lines.push(self.theme.paint(Role::Rule, &"─".repeat(columns)));
-            lines.push(String::new());
-        }
         lines.push(format!(
             "{}  {}",
             self.theme.paint(
@@ -507,10 +511,19 @@ impl Presenter {
 
     fn close_thinking(&mut self) {
         if let Some(thinking) = self.thinking.take() {
-            let time = self.thinking_started.take().map(|started| started.elapsed());
-            self.screen.print(&self.thinking_frame(&thinking, time));
+            self.step_block();
+            self.show_thinking(&thinking);
             self.screen.live("");
         }
+    }
+
+    /// The block of a step begins (D19): the separator, once per step.
+    fn step_block(&mut self) {
+        if self.step_open {
+            return;
+        }
+        self.step_open = true;
+        self.screen.print(&self.step_separator());
     }
 
     /// Replaces the streamed lines with the rendered block when they are
@@ -542,11 +555,10 @@ impl Report for Presenter {
         if self.thinking.is_none() {
             self.close();
             self.thinking = Some(String::new());
-            self.thinking_started = Some(Instant::now());
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        let line = thinking_line(self.lang, self.screen.columns(), thinking, None);
+        let line = thinking_line(self.lang, self.screen.columns(), thinking);
         self.screen.live(&self.theme.paint(Role::Muted, &line));
         self.piece();
     }
@@ -558,6 +570,7 @@ impl Report for Presenter {
 
     fn action_text(&mut self, piece: &str) {
         self.close_thinking();
+        self.step_block();
         let columns = self.screen.columns();
         let streamed = self.action.get_or_insert_with(|| Streamed {
             wrap: StreamWrap::new(columns),
@@ -589,8 +602,10 @@ impl Report for Presenter {
         }
         let status = Some(("ok", Role::StatusSuccess));
         let edge = self.edge(status, &items, Role::InputRule);
+        self.step_block();
         let block = self.answer_lines(text, edge);
         self.replace_streamed(block);
+        self.step_open = false;
         self.prefill = None;
     }
 
@@ -607,8 +622,10 @@ impl Report for Presenter {
             texts::duration(self.tool_time.as_secs())
         ));
         let hint = records::call_hint(call, Some(result));
+        self.step_block();
         self.screen
             .print(&self.card(call, Some(result), &hint, &items));
+        self.step_open = false;
         self.prefill = None;
     }
 
@@ -654,11 +671,15 @@ impl Report for Presenter {
     fn cut_off(&mut self, cut: &CutOff) {
         self.close();
         self.show_cut_off(cut);
+        // The step goes on as a new block (D19).
+        self.step_open = false;
     }
 
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
         self.close();
         self.show_stir(attempt, error);
+        // The retry is a new block of the step (D19).
+        self.step_open = false;
     }
 
     fn prompt_progress(&mut self, progress: PromptProgress) {
@@ -826,16 +847,11 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// `thinking: …` with the first line of `thinking`, at the width (D3, D7),
-/// with its time when it is known (D17).
-pub fn thinking_line(lang: Lang, columns: usize, thinking: &str, time: Option<Duration>) -> String {
+/// `thinking: …` with the first line of `thinking`, at the width (D3, D19).
+pub fn thinking_line(lang: Lang, columns: usize, thinking: &str) -> String {
     let label = tr!(lang, m::THINKING);
     let snippet = thinking.lines().next().unwrap_or_default();
-    let head = match time {
-        Some(t) => format!("{label} {}: ", texts::duration(t.as_secs())),
-        None => format!("{label}: "),
-    };
-    truncate(&format!("{head}{snippet}"), columns)
+    truncate(&format!("{label}: {snippet}"), columns)
 }
 
 #[cfg(test)]
@@ -930,12 +946,12 @@ mod tests {
         };
         show_card(&presenter, &bash("cargo test"), &result, &["bash 1m 15s".to_owned()]);
         let printed = mock.printed.lock().unwrap().clone();
+        // AGL-066, D19: the card is the tool's line, one line of the
+        // input and the phases' row; the step's separator goes before the
+        // block, not in the card.
         assert_eq!(
             printed,
             [
-                "",
-                &"─".repeat(40),
-                "",
                 "TOOL bash  fail",
                 "  │ cargo test",
                 &format!("─ fail · bash 1m 15s {}", "─".repeat(19)),
@@ -967,16 +983,15 @@ mod tests {
     }
 
     #[test]
-    fn answer_between_rules() {
+    fn the_answer_keeps_its_rule_with_the_time() {
+        // AGL-066, D19: the step's separator goes before the block; the
+        // answer's own rule carries the time of the turn.
         let (presenter, mock) = presenter(true);
         presenter.show_answer("**Done**", Some(Duration::from_secs(5)));
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
             [
-                "".to_owned(),
-                "─".repeat(40),
-                "".into(),
                 "Done".into(),
                 format!("─ Worked for 5s {}", "─".repeat(24)),
                 "".into(),
@@ -984,7 +999,8 @@ mod tests {
         );
         mock.printed.lock().unwrap().clear();
         presenter.show_answer("old", None);
-        assert_eq!(mock.printed.lock().unwrap()[4], "─".repeat(40));
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed, ["old".to_owned(), "─".repeat(40), "".to_owned()]);
     }
 
     #[test]
@@ -1001,25 +1017,24 @@ mod tests {
         // The two streamed lines are erased, then the block is printed.
         assert!(ops.contains(&"erase 2".to_owned()), "{ops:?}");
         let printed = mock.printed.lock().unwrap().clone();
-        // AGL-066, D17: the thinking's frame — its first line under the
-        // gutter, the rule with the time it took.
+        // AGL-066, D19: the step's block — the separator's rule, then the
+        // thinking's line on the top level, in the tool's style; the
+        // answer follows in the same block.
         assert_eq!(printed[0], "");
-        assert_eq!(printed[1], "  │ thinking: hmm ok");
-        assert_eq!(printed[2], format!("─ thinking <1s {}", "─".repeat(25)));
+        assert_eq!(printed[1], "─".repeat(40));
+        assert_eq!(printed[2], "thinking: hmm ok");
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
     }
 
     #[test]
-    fn the_thinking_frame_carries_its_time() {
-        // AGL-066, D17: the replay and the inspect get the time of the
-        // thinking's phase, shown in the frame's rule.
+    fn the_thinking_line_has_no_rule_of_its_own() {
+        // AGL-066, D19: the thinking's line is one line, `thinking: <the
+        // first line>`; the time of its phase is in the step's rule.
         let (presenter, mock) = presenter(true);
-        presenter.show_thinking("hm\nmore", Some(Duration::from_secs(3)));
+        presenter.show_thinking("hm\nmore");
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed[0], "");
-        assert_eq!(printed[1], "  │ thinking: hm");
-        assert_eq!(printed[2], format!("─ thinking 3s {}", "─".repeat(26)));
+        assert_eq!(printed, vec!["thinking: hm"]);
     }
 
     /// The row of `printed` that starts with `start`, without its fill.
@@ -1355,8 +1370,13 @@ mod tests {
             },
         );
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed[0], "Looking at it.");
-        assert_eq!(printed[1], "");
+        // AGL-066, D19: the step's block — the separator, the text before
+        // the call (the streamed line is replaced, not repeated), and the
+        // tool's card, one unit.
+        assert_eq!(printed[0], "");
+        assert_eq!(printed[1], "─".repeat(40));
+        assert_eq!(printed[2], "Looking at it.");
+        assert_eq!(printed[3], "");
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
     }
 

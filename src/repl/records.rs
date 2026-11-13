@@ -3,7 +3,6 @@
 //! the records; how a record is drawn is a function of the record, the
 //! pluggable piece for the summaries of a small model later (D3).
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::action::{Outcome, Value};
@@ -32,13 +31,10 @@ pub enum Record {
     User(String),
     /// A visit of a state (D138): `[state]`.
     State(String),
-    /// The model's thinking; one line by default (D3, D7), with its time
-    /// when it is known (D17).
-    Think(String, Option<Duration>),
-    /// The text the model wrote before a call; three lines by default (D9).
-    Text(String),
-    /// A tool call with its result; the compact frame shows the input's
-    /// hint and the phases' times (D1, D2, D6).
+    /// A step: the model's thinking and the text it wrote, then its tool
+    /// call with the result (D19). The block's line begins with the
+    /// thinking's line, in the tool's style; the compact frame shows the
+    /// input's hint and the phases' times (D1, D2, D6).
     Tool {
         call: ToolCall,
         result: Option<ToolResult>,
@@ -48,9 +44,18 @@ pub enum Record {
         phases: Vec<PhaseSpan>,
         /// The time the call took, when it is known.
         time: Option<Duration>,
+        /// The model's thinking of the step, before the call (D3, D19).
+        thinking: Option<String>,
+        /// The text the model wrote before the call (D9).
+        text: Option<String>,
     },
-    /// The turn's answer, the main content, in full (D1).
-    Answer(String, Option<Duration>),
+    /// The turn's answer, the main content, in full (D1); its step's
+    /// thinking's line goes before it (D19).
+    Answer {
+        text: String,
+        time: Option<Duration>,
+        thinking: Option<String>,
+    },
     /// A line of the session itself: a stir, a cut off, a write of the
     /// forge or the memory, a medium, a compaction, a command.
     Notice {
@@ -275,18 +280,9 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
     // Only a change of state is a record (AGL-046, D13), as in the
     // transcript: the first visit of a turn is not a change.
     let mut state_entered = false;
-    // The times of the steps' Thinking phases, in the order of the
-    // `transition` lines, for their thinking records (D17).
-    let mut thinking_times: HashMap<(usize, usize), (Vec<Duration>, usize)> = HashMap::new();
-    for line in transitions {
-        if line.from == "Thinking" {
-            thinking_times
-                .entry((line.turn, line.step))
-                .or_default()
-                .0
-                .push(Duration::from_millis(line.ms));
-        }
-    }
+    // The thinking of a step goes with its record: the call of the step,
+    // or the answer (D19).
+    let mut pending_thinking: Option<String> = None;
     for event in events {
         match event {
             Event::User(text) => {
@@ -301,23 +297,11 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 }
             }
             Event::Thinking(text) => {
-                // The thinking is before the call of its step, whose time
-                // is the next one (D17).
-                let time = thinking_times
-                    .get_mut(&(turn, step + 1))
-                    .and_then(|(times, index)| {
-                        (*index < times.len()).then(|| {
-                            *index += 1;
-                            times[*index - 1]
-                        })
-                    });
-                records.push(Record::Think(text.clone(), time));
+                // The thinking goes with the record of its step (D19).
+                pending_thinking = Some(text.clone());
             }
             Event::Call { text, call } => {
                 step += 1;
-                if let Some(text) = text {
-                    records.push(Record::Text(text.clone()));
-                }
                 let (phases, time) = step_phases(turn, step, transitions, &call.name, lang);
                 records.push(Record::Tool {
                     call: call.clone(),
@@ -325,6 +309,8 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                     hint: call_hint(call, None),
                     phases,
                     time,
+                    thinking: pending_thinking.take(),
+                    text: text.clone(),
                 });
             }
             Event::Result {
@@ -351,7 +337,11 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                     *hint = call_hint(call, result.as_ref());
                 }
             }
-            Event::Answer(text) => records.push(Record::Answer(text.clone(), None)),
+            Event::Answer(text) => records.push(Record::Answer {
+                text: text.clone(),
+                time: None,
+                thinking: pending_thinking.take(),
+            }),
             Event::CutOff(cut) => records.push(notice(
                 crate::status::cut_off_line(cut, lang),
                 Role::Muted,
@@ -460,9 +450,9 @@ mod tests {
             records,
             vec![
                 Record::User("Fix it".into()),
-                // The first visit of the turn is not a change (AGL-046, D13).
-                Record::Think("Let me look.\nMore thoughts.".into(), None),
-                Record::Text("I will run it.".into()),
+                // The thinking and the text go with the record of their
+                // step (D19); the first visit of the turn is not a change
+                // (AGL-046, D13).
                 Record::Tool {
                     call: call("c1", "cargo test"),
                     result: Some(ToolResult {
@@ -472,6 +462,8 @@ mod tests {
                     hint: "cargo test".into(),
                     phases: Vec::new(),
                     time: None,
+                    thinking: Some("Let me look.\nMore thoughts.".into()),
+                    text: Some("I will run it.".into()),
                 },
                 Record::Tool {
                     call: call("c2", "ls"),
@@ -482,8 +474,14 @@ mod tests {
                     hint: "ls".into(),
                     phases: Vec::new(),
                     time: None,
+                    thinking: None,
+                    text: None,
                 },
-                Record::Answer("Done.".into(), None),
+                Record::Answer {
+                    text: "Done.".into(),
+                    time: None,
+                    thinking: None,
+                },
                 Record::User("Thanks".into()),
                 // The first visit of the turn is not a change.
                 Record::State("done".into()),
@@ -509,6 +507,8 @@ mod tests {
                 hint: "ls".into(),
                 phases: Vec::new(),
                 time: None,
+                thinking: None,
+                text: None,
             }
         );
     }
@@ -695,10 +695,9 @@ mod tests {
     }
 
     #[test]
-    fn the_thinking_records_carry_their_phase_times() {
-        // AGL-066, D17: the time of a thinking is the time of its phase
-        // from the `transition` lines of the step whose call follows; a
-        // thinking whose step holds no line keeps none.
+    fn the_thinking_of_a_step_goes_with_its_record() {
+        // AGL-066, D19: the thinking belongs to the record of its step;
+        // the time of its Thinking phase stays in the step's phases.
         let events = [
             Event::User("go".into()),
             Event::Thinking("hm".into()),
@@ -721,34 +720,32 @@ mod tests {
                 outcome: Outcome::Ok,
                 content: "here".into(),
             },
-            Event::Thinking("last".into()),
-            Event::Call {
-                text: None,
-                call: call("c3", "who"),
-            },
-            Event::Result {
-                id: "c3".into(),
-                outcome: Outcome::Ok,
-                content: "me".into(),
-            },
+            Event::Answer("Done.".into()),
         ];
         let transitions = [
             line(1, 1, "Thinking", 2000),
             line(1, 2, "Thinking", 500),
         ];
         let records = group(&events, &transitions, Lang::En);
-        let thinks: Vec<&Record> = records
+        let (first, second, answer) = match &records[..] {
+            [_, first, second, answer] => (first, second, answer),
+            other => panic!("unexpected records: {other:?}"),
+        };
+        let Record::Tool { thinking, phases, .. } = first else {
+            panic!("the first step is a tool: {first:?}")
+        };
+        assert_eq!(thinking.as_deref(), Some("hm"));
+        assert!(phases
             .iter()
-            .filter(|record| matches!(record, Record::Think(..)))
-            .collect();
-        assert_eq!(
-            thinks,
-            vec![
-                &Record::Think("hm".into(), Some(Duration::from_millis(2000))),
-                &Record::Think("again".into(), Some(Duration::from_millis(500))),
-                &Record::Think("last".into(), None),
-            ]
-        );
+            .any(|span| span.time == Duration::from_millis(2000)));
+        let Record::Tool { thinking, .. } = second else {
+            panic!("the second step is a tool: {second:?}")
+        };
+        assert_eq!(thinking.as_deref(), Some("again"));
+        let Record::Answer { thinking, .. } = answer else {
+            panic!("the last record is the answer: {answer:?}")
+        };
+        assert_eq!(thinking.as_deref(), None);
     }
 
     #[test]
