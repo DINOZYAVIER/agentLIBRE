@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::*;
-use crate::action::Value;
+use crate::action::{Outcome, Value};
 use crate::backend::{Generated, StructuredCall};
 use crate::function::tests::{CODER, function, function_on};
 use crate::session::Event;

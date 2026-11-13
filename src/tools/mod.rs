@@ -16,10 +16,12 @@ use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
 
 mod output;
+mod reach;
 pub(crate) mod spec;
 
 use output::Capture;
 pub use output::{Output, limited, shown};
+pub use reach::{Reach, Written, run};
 pub use spec::{SPECS, Spec, outcomes, position, spec};
 
 /// `timeout` when the call does not give one (D26).
@@ -56,10 +58,10 @@ pub struct ForgeWrite {
     pub section: Option<String>,
 }
 
-/// Runs `call` in `workspace`. Parsing has checked the arguments against
-/// the tool (task-03). A successful `forge` write comes back with the
-/// result.
-pub fn run(
+/// Runs `call` of `bash`, `edit` or `forge` in `workspace`. Parsing has
+/// checked the arguments against the tool (task-03). A successful `forge`
+/// write comes back with the result.
+fn run_local(
     workspace: &Path,
     env: ForgeEnv<'_>,
     call: &ToolCall,
@@ -76,34 +78,7 @@ pub fn run(
         }
         "edit" => (edit(workspace, text("path"), text("old"), text("new")), None),
         "forge" => forge(workspace, env, &forge_args(call), output),
-        // The agent keeps the memory of the session, so it runs this one
-        // itself (AGL-006).
-        "memory" => (
-            ToolResult {
-                outcome: Outcome::Fail,
-                content: "The memory tool is run by the agent.".into(),
-            },
-            None,
-        ),
-        // The agent keeps the media of the session, so it runs this one
-        // itself (AGL-014, D24).
-        "view" => (
-            ToolResult {
-                outcome: Outcome::Fail,
-                content: "The view tool is run by the agent.".into(),
-            },
-            None,
-        ),
-        // The agent holds the searcher, so it runs this one itself
-        // (AGL-019).
-        "search" => (
-            ToolResult {
-                outcome: Outcome::Fail,
-                content: "The search tool is run by the agent.".into(),
-            },
-            None,
-        ),
-        tool => unreachable!("unknown tool {tool}"),
+        tool => unreachable!("{tool} is not run in the workspace"),
     }
 }
 

@@ -206,7 +206,7 @@ fn tool_call(name: &str, args: Vec<(String, Value)>) -> ToolCall {
 }
 
 #[test]
-fn run_dispatches_calls() {
+fn the_workspace_tools_are_dispatched_by_name() {
     let dir = Dir::new("run");
     // The stores of the test's own, not of the human's XDG tree (AGL-038,
     // F19).
@@ -216,7 +216,7 @@ fn run_dispatches_calls() {
         auto_rehome: true,
         data: &data,
     };
-    let (result, write) = run(
+    let (result, write) = run_local(
         &dir.0,
         env,
         &tool_call(
@@ -231,7 +231,7 @@ fn run_dispatches_calls() {
     assert_eq!(result.content, "hi\n");
     assert_eq!(write, None);
     fs::write(dir.0.join("f"), "x").unwrap();
-    let (result, _) = run(
+    let (result, _) = run_local(
         &dir.0,
         env,
         &tool_call(
@@ -248,7 +248,7 @@ fn run_dispatches_calls() {
     // forge: the store of the workspace, resolved from the environment
     // (a fresh store, an empty list; a hint line when other stores exist).
     git_init(&dir.0);
-    let (result, write) = run(
+    let (result, write) = run_local(
         &dir.0,
         env,
         &tool_call("forge", vec![("action".into(), Value::Text("list".into()))]),

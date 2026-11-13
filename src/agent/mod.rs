@@ -10,7 +10,6 @@ use crate::attach::Transcriber;
 use crate::backend::{
     Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stop, ToolCall,
 };
-use crate::action::Outcome;
 use crate::error::Error;
 use crate::function::Function;
 use crate::interrupt;
@@ -570,62 +569,45 @@ impl Agent<'_> {
                     report.text(text);
                 }
                 report.call(&call);
-                let (result, write, memory_write) = match call.name.as_str() {
-                    "view" => (self.view(&call), None, None),
-                    "search" => {
-                        let mut result = self.search(&call);
-                        // The service's reply is cut like any tool's output
-                        // (AGL-049).
-                        result.content = tools::shown(
-                            &result.content,
-                            &tools::Output {
-                                tokens: self.function.output_tokens(self.context),
-                                file: self.session.output_file(&call.id),
-                                count: &|text| self.backend.count_tokens(text).ok(),
-                            },
-                        );
-                        (result, None, None)
-                    }
-                    "memory" => {
-                        let (result, write) = self.memory_tool(&call, text.as_deref());
-                        (result, None, write)
-                    }
-                    _ => {
-                        let (result, write) =
-                            tools::run(
-                                self.workspace,
-                                self.forge,
-                                &call,
-                                &tools::Output {
-                                    tokens: self.function.output_tokens(self.context),
-                                    file: self.session.output_file(&call.id),
-                                    count: &|text| self.backend.count_tokens(text).ok(),
-                                },
-                            );
-                        (result, write, None)
-                    }
-                };
+                let ran = tools::run(
+                    &call,
+                    text.as_deref(),
+                    &mut tools::Reach {
+                        workspace: self.workspace,
+                        forge: self.forge,
+                        output_tokens: self.function.output_tokens(self.context),
+                        session: &mut *self.session,
+                        backend: self.backend,
+                        whisper: self.whisper,
+                        search: self.search,
+                        memory: self.memory,
+                    },
+                );
+                let result = ran.result;
                 self.session.append(Event::Result {
                     id: call.id.clone(),
                     outcome: result.outcome,
                     content: result.content.clone(),
                 })?;
                 report.result(&call, &result);
-                if let Some(write) = memory_write {
-                    self.session.append(Event::Memory {
-                        name: write.name.clone(),
-                        kind: write.kind,
-                        text: write.text.clone(),
-                    })?;
-                    report.memory(&write.name, write.kind, write.text.as_deref());
-                }
-                if let Some(write) = write {
-                    self.session.append(Event::Forge {
-                        name: write.name.clone(),
-                        kind: write.kind,
-                        section: write.section.clone(),
-                    })?;
-                    report.forge(&write.name, write.kind, write.section.as_deref());
+                match ran.write {
+                    Some(tools::Written::Memory(write)) => {
+                        self.session.append(Event::Memory {
+                            name: write.name.clone(),
+                            kind: write.kind,
+                            text: write.text.clone(),
+                        })?;
+                        report.memory(&write.name, write.kind, write.text.as_deref());
+                    }
+                    Some(tools::Written::Forge(write)) => {
+                        self.session.append(Event::Forge {
+                            name: write.name.clone(),
+                            kind: write.kind,
+                            section: write.section.clone(),
+                        })?;
+                        report.forge(&write.name, write.kind, write.section.as_deref());
+                    }
+                    None => {}
                 }
                 if interrupt::interrupted() {
                     debug_assert_eq!(result.content, INTERRUPTED);
@@ -640,114 +622,6 @@ impl Agent<'_> {
                     Progress::StepLimit => self.stop(StopReason::StepLimit),
                 }
             }
-        }
-    }
-
-    /// The `search` tool (AGL-019): a call the service or the check of its
-    /// arguments refuses is a failed result the model reads, not a stop
-    /// (D7).
-    fn search(&self, call: &ToolCall) -> ToolResult {
-        match crate::search::Request::from_args(call) {
-            Ok(request) => self.search.search(&request),
-            Err(sentence) => ToolResult {
-                outcome: Outcome::Fail,
-                content: sentence,
-            },
-        }
-    }
-
-    /// The `memory` tool (AGL-006, M32): `add` registers the workspace's
-    /// store when it is not yet (M23); the other actions need the memory
-    /// that is there. `call_text` is the text of the call that preceded it
-    /// (AGL-029, D1): the body of `add` when its `text` field is empty.
-    fn memory_tool(
-        &mut self,
-        call: &ToolCall,
-        call_text: Option<&str>,
-    ) -> (ToolResult, Option<crate::memory::Write>) {
-        let args = crate::memory::Args::from_call(call);
-        let fail = |content: String| {
-            (
-                ToolResult {
-                    outcome: Outcome::Fail,
-                    content,
-                },
-                None,
-            )
-        };
-        let (dir, lines) = if args.action == "add" {
-            match self.memory.write() {
-                Ok(found) => found,
-                Err(error) => return fail(error.message(crate::i18n::Lang::En)),
-            }
-        } else {
-            match self.memory.read() {
-                Some(dir) => (dir, Vec::new()),
-                None => return fail("The memory of this workspace has no entries yet.".into()),
-            }
-        };
-        let (mut result, write) = crate::memory::run(
-            &dir,
-            &args,
-            call_text,
-            &tools::Output {
-                tokens: self.function.output_tokens(self.context),
-                file: Default::default(),
-                count: &|text| self.backend.count_tokens(text).ok(),
-            },
-        );
-        // A store that moved or was adopted on the way: said once.
-        if !lines.is_empty() {
-            result.content.insert_str(0, &(lines.join("\n") + "\n"));
-        }
-        (result, write)
-    }
-
-    /// The `view` tool (AGL-014, D24): keeps the file as a medium of the
-    /// session, as `/attach` does, and answers with its placeholder, which
-    /// becomes the marker, the frames or the transcript at the next step.
-    fn view(&mut self, call: &ToolCall) -> ToolResult {
-        let fail = |content: String| ToolResult {
-            outcome: Outcome::Fail,
-            content,
-        };
-        let Some(path) = call.text("path") else {
-            return fail("view needs a path.".into());
-        };
-        let path = self.workspace.join(path);
-        let source = match media::Source::from_file(&path) {
-            Ok(source) => source,
-            Err(Error::MediaKind { .. }) => {
-                return fail(format!(
-                    "{} is not an image, a video or an audio.",
-                    path.display()
-                ));
-            }
-            Err(error) => return fail(error.message(crate::i18n::Lang::En)),
-        };
-        // The picture needs the projector; ask before the file is kept.
-        if source.kind != media::Kind::Audio && self.backend.media_marker().is_err() {
-            return fail("The server has no multimodal projector, so it cannot take images.".into());
-        }
-        let transcript = if source.kind == media::Kind::Audio {
-            match self.backend.hears_audio() {
-                Ok(true) => None,
-                Ok(false) => match self.whisper.transcribe(&source, &mut |_| {}) {
-                    Ok(text) => Some(text),
-                    Err(error) => return fail(error.message(crate::i18n::Lang::En)),
-                },
-                Err(error) => return fail(error.message(crate::i18n::Lang::En)),
-            }
-        } else {
-            None
-        };
-        let number = self.session.next_media_number(source.kind);
-        match self.session.store_media(&source, number, transcript) {
-            Ok(kept) => ToolResult {
-                outcome: Outcome::Ok,
-                content: format!("{} {}", kept.placeholder(), kept.name),
-            },
-            Err(error) => fail(error.message(crate::i18n::Lang::En)),
         }
     }
 
