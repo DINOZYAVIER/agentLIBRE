@@ -1276,10 +1276,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "шаблон, байт {at}: некоректний діапазон у класі",
     };
 
-    /// The label of streamed thinking (D109).
+    /// The label of streamed thinking (D109), in caps as the tool's
+    /// label (AGL-066, D21).
     pub const THINKING: Msg = Msg {
-        en: "thinking",
-        uk: "міркування",
+        en: "THINKING",
+        uk: "МІРКУВАННЯ",
     };
 
     /// One line of output (`lines`).

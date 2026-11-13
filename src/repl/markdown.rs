@@ -318,7 +318,9 @@ impl Renderer<'_> {
     fn paint(&self, text: &str, role: Option<Role>) -> String {
         match role {
             Some(role) => self.theme.paint(role, text),
-            None => text.to_owned(),
+            // The plain text carries the muted color, as the dock's
+            // status row draws the Function's name (AGL-066, D21).
+            None => self.theme.paint(Role::Muted, text),
         }
     }
 
@@ -519,6 +521,22 @@ mod tests {
         assert!(lines[2].contains(&theme.paint(Role::MarkdownInlineCode, "code")));
         // Punctuation stays with the word before it.
         assert_eq!(plain("**bold**, next", 40), ["bold, next"]);
+    }
+
+    #[test]
+    fn the_plain_text_carries_the_muted_color() {
+        // AGL-066, D21: the body's text is drawn as the Function's name in
+        // the dock's status row.
+        let theme = Theme::new(true, &[]);
+        let lines = render("hello world", 40, &theme);
+        assert_eq!(
+            lines[0],
+            format!(
+                "{} {}",
+                theme.paint(Role::Muted, "hello"),
+                theme.paint(Role::Muted, "world")
+            )
+        );
     }
 
     #[test]

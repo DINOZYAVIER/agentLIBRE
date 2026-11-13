@@ -1046,19 +1046,19 @@ mod tests {
         // answer follows in the same block.
         assert_eq!(printed[0], "");
         assert_eq!(printed[1], "─".repeat(40));
-        assert_eq!(printed[2], "thinking: hmm ok");
+        assert_eq!(printed[2], "THINKING: hmm ok");
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
     }
 
     #[test]
     fn the_thinking_line_has_no_rule_of_its_own() {
-        // AGL-066, D19: the thinking's line is one line, `thinking: <the
-        // first line>`; the time of its phase is in the step's rule.
+        // AGL-066, D19: the thinking's line is one line, `THINKING: <the
+        // first line>` (D21); the time of its phase is in the step's rule.
         let (presenter, mock) = presenter(true);
         presenter.show_thinking("hm\nmore");
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, vec!["thinking: hm"]);
+        assert_eq!(printed, vec!["THINKING: hm"]);
     }
 
     /// The row of `printed` that starts with `start`, without its fill.
@@ -1578,7 +1578,7 @@ mod tests {
         // AGL-066, D17: the thinking is a frame, its first line under the
         // gutter; no time, as it is replayed.
         assert!(
-            printed.iter().any(|line| line.contains("thinking: hm")),
+            printed.iter().any(|line| line.contains("THINKING: hm")),
             "{printed:?}"
         );
         assert!(printed.contains(&"Running.".to_owned()));

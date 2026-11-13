@@ -686,7 +686,7 @@ mod tests {
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Enter));
         let all = screen(&inspect, 10).join("\n");
-        assert!(all.contains("thinking:"), "{all}");
+        assert!(all.contains("THINKING:"), "{all}");
         assert!(all.contains("let me look"), "{all}");
         assert!(all.contains("and more"), "{all}");
     }
@@ -763,7 +763,7 @@ mod tests {
         assert!(!all.contains("▸ Ok."), "{all}");
         assert!(inspect.key(Key::Down));
         let all = screen(&inspect, 10).join("\n");
-        assert!(all.contains("▸ thinking"), "{all}");
+        assert!(all.contains("▸ THINKING"), "{all}");
         assert!(!all.contains("▸ › First"), "{all}");
     }
 
