@@ -319,18 +319,18 @@ pub fn forge(
     output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
     let lang = env.lang;
-    let (ws, lines) =
-        match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
-            Ok(resolved) => resolved,
-            Err(error) => return (forge_fail(error.message(lang)), None),
-        };
-    let (mut result, write) = forge_run(&ws, args, lang, output);
-    // A store that moved or was adopted on the way: say so, once.
-    if !lines.is_empty() {
-        let head = lines.join("\n") + "\n";
-        result.content.insert_str(0, &head);
+    match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
+        Ok((ws, lines)) => {
+            let (mut result, write) = forge_run(&ws, args, lang, output);
+            // A store that moved or was adopted on the way: say so, once.
+            if !lines.is_empty() {
+                let head = lines.join("\n") + "\n";
+                result.content.insert_str(0, &head);
+            }
+            (result, write)
+        }
+        Err(error) => (forge_fail(error.message(lang)), None),
     }
-    (result, write)
 }
 
 /// The `forge` tool over the resolved workspace `ws` (AGL-008): the
@@ -346,31 +346,34 @@ pub fn forge_run(
     use crate::tr;
     // A write of `kind` to the artifact the call named: the name matched
     // an artifact's `name` exactly, so it is the artifact's.
-    let write = |result: ToolResult, kind: ForgeKind, section: Option<String>| {
-        let write = (result.outcome == Outcome::Ok)
-            .then(|| {
-                args.name.clone().map(|name| ForgeWrite {
+    let write = |result: Result<String, Refusal>, kind: ForgeKind, section: Option<String>| {
+        match result {
+            Ok(content) => {
+                let write = args.name.clone().map(|name| ForgeWrite {
                     name,
                     kind,
                     section,
-                })
-            })
-            .flatten();
-        (result, write)
+                });
+                (done(content), write)
+            }
+            Err(refusal) => (refusal.told(lang), None),
+        }
     };
     match args.action.as_str() {
-        "list" => (forge_list(ws, lang), None),
-        "show" => (forge_show(ws, &args.name, lang, output), None),
-        "new" => {
+        "list" => (told(forge_list(ws), lang), None),
+        "show" => (told(forge_show(ws, &args.name, lang, output), lang), None),
+        "new" => match forge_new(ws, &args.title, lang) {
             // The name is the one the tool made, not an argument.
-            let (result, name) = forge_new(ws, &args.title, lang);
-            let write = name.map(|name| ForgeWrite {
-                name,
-                kind: ForgeKind::Created,
-                section: None,
-            });
-            (result, write)
-        }
+            Ok((content, name)) => (
+                done(content),
+                Some(ForgeWrite {
+                    name,
+                    kind: ForgeKind::Created,
+                    section: None,
+                }),
+            ),
+            Err(refusal) => (refusal.told(lang), None),
+        },
         "edit" => write(
             forge_edit(ws, &args.name, &args.old, &args.new, lang),
             ForgeKind::Edited,
@@ -386,20 +389,22 @@ pub fn forge_run(
             ForgeKind::StatusChanged,
             args.state.clone(),
         ),
-        "rename" => {
+        "rename" => match forge_rename(ws, &args.name, &args.new, lang) {
             // The event carries the new name; the old one rides the
             // section slot of the marker line.
-            let (result, new_name) = forge_rename(ws, &args.name, &args.new, lang);
-            let write = new_name.map(|name| ForgeWrite {
-                name,
-                kind: ForgeKind::Renamed,
-                section: args.name.clone(),
-            });
-            (result, write)
-        }
+            Ok((content, name)) => (
+                done(content),
+                Some(ForgeWrite {
+                    name,
+                    kind: ForgeKind::Renamed,
+                    section: args.name.clone(),
+                }),
+            ),
+            Err(refusal) => (refusal.told(lang), None),
+        },
         "remove" => write(forge_remove(ws, &args.name, lang), ForgeKind::Removed, None),
         other => (
-            forge_fail(tr!(lang, m::FORGE_TOOL_UNKNOWN_ACTION, action = other)),
+            Refusal::from(tr!(lang, m::FORGE_TOOL_UNKNOWN_ACTION, action = other)).told(lang),
             None,
         ),
     }
@@ -413,48 +418,83 @@ fn forge_fail(content: String) -> ToolResult {
     }
 }
 
+/// The `forge` tool's success with the message `content`.
+fn done(content: String) -> ToolResult {
+    ToolResult {
+        outcome: Outcome::Ok,
+        content,
+    }
+}
+
+/// Why an action of the `forge` tool did not do what it was asked (AGL-067,
+/// F7): an error of the forge, told in the session's language, or a refusal
+/// whose text is the catalog's or the tool's own.
+enum Refusal {
+    Error(crate::error::Error),
+    Text(String),
+}
+
+impl From<crate::error::Error> for Refusal {
+    fn from(error: crate::error::Error) -> Refusal {
+        Refusal::Error(error)
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(text: String) -> Refusal {
+        Refusal::Text(text)
+    }
+}
+
+impl Refusal {
+    /// The failed result the model reads.
+    fn told(self, lang: crate::i18n::Lang) -> ToolResult {
+        match self {
+            Refusal::Error(error) => forge_fail(error.message(lang)),
+            Refusal::Text(text) => forge_fail(text),
+        }
+    }
+}
+
+/// The result of an action that gives its message or refuses.
+fn told(result: Result<String, Refusal>, lang: crate::i18n::Lang) -> ToolResult {
+    match result {
+        Ok(content) => done(content),
+        Err(refusal) => refusal.told(lang),
+    }
+}
+
 /// `forge list` (AGL-008): the store's artifacts, one line each — name,
 /// type, status, updated, deps; no git flags (they are the human's).
-fn forge_list(ws: &crate::forge::Workspace, lang: crate::i18n::Lang) -> ToolResult {
+fn forge_list(ws: &crate::forge::Workspace) -> Result<String, Refusal> {
     use crate::forge::{self, Header};
-    let files = match forge::artifact_files(&ws.dir) {
-        Ok(files) => files,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
-    let mut lines = Vec::new();
+    let files = forge::artifact_files(&ws.dir)?;
     // One evaluation of all the front matters (AGL-041).
-    let headers = match forge::read_headers(&files) {
-        Ok(headers) => headers,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
+    let headers = forge::read_headers(&files)?;
+    let mut lines = Vec::new();
     for (path, header) in files.iter().zip(headers) {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match Ok::<Header, crate::error::Error>(header) {
-            Ok(Header::Artifact(artifact)) => lines.push(format!(
+        lines.push(match header {
+            Header::Artifact(artifact) => format!(
                 "{} {} {} {} deps=[{}]",
                 artifact.name,
                 artifact.type_name,
                 artifact.status,
                 artifact.updated,
                 artifact.deps.join(", ")
-            )),
-            Ok(Header::UnknownSchema { schema }) => lines.push(format!("{stem} !schema {schema}")),
-            Ok(Header::Broken { detail }) => lines.push(format!("{stem} !parse {detail}")),
-            Err(error) => return forge_fail(error.message(lang)),
-        }
+            ),
+            Header::UnknownSchema { schema } => format!("{stem} !schema {schema}"),
+            Header::Broken { detail } => format!("{stem} !parse {detail}"),
+        });
     }
-    let content = if lines.is_empty() {
+    Ok(if lines.is_empty() {
         "(no artifacts)".to_owned()
     } else {
         lines.join("\n")
-    };
-    ToolResult {
-        outcome: Outcome::Ok,
-        content,
-    }
+    })
 }
 
 /// `forge show` (AGL-008): the rendered artifact, cut like any tool's output
@@ -464,21 +504,12 @@ fn forge_show(
     name: &Option<String>,
     lang: crate::i18n::Lang,
     output: &Output<'_>,
-) -> ToolResult {
+) -> Result<String, Refusal> {
     use crate::forge;
-    let Some(name) = name else {
-        return missing_field(lang, "show", "name");
-    };
-    match crate::forge::find_artifact(ws, name) {
-        Ok(artifact) => {
-            let text = forge::render(&artifact);
-            ToolResult {
-                outcome: Outcome::Ok,
-                content: output::limited(&text, output.tokens, &artifact.path, output.count),
-            }
-        }
-        Err(error) => forge_fail(error.message(lang)),
-    }
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "show", "name"))?;
+    let artifact = forge::find_artifact(ws, name)?;
+    let text = forge::render(&artifact);
+    Ok(output::limited(&text, output.tokens, &artifact.path, output.count))
 }
 
 /// `forge new` (AGL-008): the scaffold of a new task-spec, the same
@@ -487,25 +518,15 @@ fn forge_new(
     ws: &crate::forge::Workspace,
     title: &Option<String>,
     lang: crate::i18n::Lang,
-) -> (ToolResult, Option<String>) {
+) -> Result<(String, String), Refusal> {
     use crate::i18n::m;
     use crate::tr;
-    let Some(title) = title else {
-        return (missing_field(lang, "new", "title"), None);
-    };
+    let title = title.as_deref().ok_or_else(|| missing_field(lang, "new", "title"))?;
     // The marker line of a store materialized by the write is not tool
     // output.
-    match crate::forge::new_task_spec(ws, lang, title, None) {
-        Ok(created) => {
-            let result = ToolResult {
-                outcome: Outcome::Ok,
-                content: tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display())
-                    .to_owned(),
-            };
-            (result, Some(created.name))
-        }
-        Err(error) => (forge_fail(error.message(lang)), None),
-    }
+    let created = crate::forge::new_task_spec(ws, lang, title, None)?;
+    let content = tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display()).to_owned();
+    Ok((content, created.name))
 }
 
 /// `forge edit` (AGL-008): replaces one occurrence in the body, the
@@ -519,47 +540,34 @@ fn forge_edit(
     old: &Option<String>,
     new: &Option<String>,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
     use crate::forge::{self, task_spec};
     use crate::i18n::m;
     use crate::tr;
-    let Some(name) = name else {
-        return missing_field(lang, "edit", "name");
-    };
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "edit", "name"))?;
     // An empty `old` would match everywhere: it is no `old`.
-    let Some(old) = old.as_ref().filter(|old| !old.is_empty()) else {
-        return missing_field(lang, "edit", "old");
-    };
-    let Some(new) = new else {
-        return missing_field(lang, "edit", "new");
-    };
-    let mut artifact = match crate::forge::find_artifact(ws, name) {
-        Ok(artifact) => artifact,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
-    if artifact.type_name != task_spec::TYPE {
-        return not_task_spec(lang, name, artifact.type_name.clone(), "edit");
-    }
-    let status =
-        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
+    let old = old
+        .as_deref()
+        .filter(|old| !old.is_empty())
+        .ok_or_else(|| missing_field(lang, "edit", "old"))?;
+    let new = new.as_deref().ok_or_else(|| missing_field(lang, "edit", "new"))?;
+    let (mut artifact, status) = task_spec_of(ws, name, "edit", lang)?;
     // The closed records stay (D4, AGL-032); the alive states take the
     // edit.
     if matches!(status, Status::Done | Status::Canceled) {
-        return forge_fail(tr!(
+        return Err(tr!(
             lang,
             m::FORGE_TOOL_EDIT_CLOSED,
             name = name,
             status = status.name()
-        ));
+        )
+        .into());
     }
     let body = &artifact.body;
     let starts = occurrences(body, old);
-    let content = match starts.as_slice() {
-        [] => {
-            let content = format!("`old` was not found in {name}.");
-            return forge_fail(content);
-        }
+    match starts.as_slice() {
+        [] => Err(format!("`old` was not found in {name}.").into()),
         [start] => {
             // The `## Progress` section stays append-only (D4, AGL-032):
             // a unique `old` that touches it is refused, in any alive
@@ -568,7 +576,7 @@ fn forge_edit(
                 && *start < p_end
                 && *start + old.len() > p_start
             {
-                return forge_fail(tr!(lang, m::FORGE_TOOL_EDIT_PROGRESS, name = name));
+                return Err(tr!(lang, m::FORGE_TOOL_EDIT_PROGRESS, name = name).into());
             }
             let mut edited = String::with_capacity(body.len() + new.len());
             edited.push_str(&body[..*start]);
@@ -576,10 +584,8 @@ fn forge_edit(
             edited.push_str(&body[start + old.len()..]);
             artifact.body = edited;
             artifact.updated = task_spec::today();
-            match forge::write_artifact(&artifact) {
-                Ok(()) => format!("Replaced 1 occurrence in {name}."),
-                Err(error) => return forge_fail(error.message(lang)),
-            }
+            forge::write_artifact(&artifact)?;
+            Ok(format!("Replaced 1 occurrence in {name}."))
         }
         starts => {
             let mut lines: Vec<String> = starts
@@ -590,17 +596,13 @@ fn forge_edit(
             if starts.len() > 10 {
                 lines.push("…".into());
             }
-            let content = format!(
+            Err(format!(
                 "`old` appears {} times in {name} (lines {}); add context to make it unique.",
                 starts.len(),
                 lines.join(", ")
-            );
-            return forge_fail(content);
+            )
+            .into())
         }
-    };
-    ToolResult {
-        outcome: Outcome::Ok,
-        content,
     }
 }
 
@@ -638,79 +640,66 @@ fn forge_append(
     section: &Option<String>,
     text: &Option<String>,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
     use crate::forge::{self, task_spec};
     use crate::i18n::m;
     use crate::tr;
-    let Some(name) = name else {
-        return missing_field(lang, "append", "name");
-    };
-    let Some(section) = section else {
-        return missing_field(lang, "append", "section");
-    };
-    let Some(text) = text else {
-        return missing_field(lang, "append", "text");
-    };
-    let mut artifact = match crate::forge::find_artifact(ws, name) {
-        Ok(artifact) => artifact,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
-    if artifact.type_name != task_spec::TYPE {
-        return not_task_spec(lang, name, artifact.type_name.clone(), "append");
-    }
-    let status =
-        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "append", "name"))?;
+    let section = section
+        .as_deref()
+        .ok_or_else(|| missing_field(lang, "append", "section"))?;
+    let text = text.as_deref().ok_or_else(|| missing_field(lang, "append", "text"))?;
+    let (mut artifact, status) = task_spec_of(ws, name, "append", lang)?;
     // The working states take the bullet (D4, AGL-032); `backlog` and
     // the closed records refuse.
     if !matches!(status, Status::Open | Status::InProgress) {
-        return forge_fail(tr!(
+        return Err(tr!(
             lang,
             m::FORGE_TOOL_APPEND_NOT_ACTIVE,
             name = name,
             status = status.name()
-        ));
+        )
+        .into());
     }
     // A bullet is one line (AGL-031): a multi-line text would fail the
     // append-only check below, so name the rule and the count up front.
     let newlines = text.matches('\n').count();
     if newlines > 0 {
-        return forge_fail(tr!(
+        return Err(tr!(
             lang,
             m::FORGE_TOOL_APPEND_MULTI_LINE,
             name = name,
             n = newlines
-        ));
+        )
+        .into());
     }
     let bullet = format!("- {text}\n");
     let old_body = artifact.body.clone();
     let Some(new_body) = append_bullet_lines(&old_body, section, text) else {
-        return forge_fail(tr!(
+        return Err(tr!(
             lang,
             m::FORGE_TOOL_NO_SECTION,
             name = name,
             section = section
-        ));
+        )
+        .into());
     };
     // The append-only check: the new body is the old body plus the one
     // bullet line; the re-render touches only that line and `updated`.
     if !one_line_inserted(&old_body, &new_body, &bullet) {
-        return forge_fail(tr!(
+        return Err(tr!(
             lang,
             m::FORGE_TOOL_APPEND_VIOLATION,
             name = name,
             section = section
-        ));
+        )
+        .into());
     }
     artifact.body = new_body;
     artifact.updated = task_spec::today();
-    if let Err(error) = forge::write_artifact(&artifact) {
-        return forge_fail(error.message(lang));
-    }
-    ToolResult {
-        outcome: Outcome::Ok,
-        content: format!("appended a bullet to ## {section} in {name}"),
-    }
+    forge::write_artifact(&artifact)?;
+    Ok(format!("appended a bullet to ## {section} in {name}"))
 }
 
 /// `forge status` (AGL-023): moves the task-spec through the lifecycle,
@@ -723,33 +712,24 @@ fn forge_status(
     name: &Option<String>,
     state: &Option<String>,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> Result<String, Refusal> {
     use crate::error::Error;
     use crate::i18n::m;
     use crate::tr;
-    let Some(name) = name else {
-        return missing_field(lang, "status", "name");
-    };
-    let Some(state) = state else {
-        return missing_field(lang, "status", "state");
-    };
-    match crate::forge::change_status(ws, name, state) {
-        Ok(changed) => ToolResult {
-            outcome: Outcome::Ok,
-            content: tr!(
-                lang,
-                m::FORGE_STATUS_CHANGED,
-                name = name,
-                from = changed.from.name(),
-                to = changed.to.name()
-            )
-            .to_owned(),
-        },
-        Err(Error::NotTaskSpec { name, type_name }) => {
-            not_task_spec(lang, &name, type_name, "status")
-        }
-        Err(error) => forge_fail(error.message(lang)),
-    }
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "status", "name"))?;
+    let state = state.as_deref().ok_or_else(|| missing_field(lang, "status", "state"))?;
+    let changed = crate::forge::change_status(ws, name, state).map_err(|error| match error {
+        Error::NotTaskSpec { name, type_name } => not_task_spec(lang, &name, type_name, "status"),
+        error => error.into(),
+    })?;
+    Ok(tr!(
+        lang,
+        m::FORGE_STATUS_CHANGED,
+        name = name,
+        from = changed.from.name(),
+        to = changed.to.name()
+    )
+    .to_owned())
 }
 
 /// `forge remove` (AGL-008): deletes the artifact file; allowed for
@@ -760,45 +740,26 @@ fn forge_remove(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
     lang: crate::i18n::Lang,
-) -> ToolResult {
+) -> Result<String, Refusal> {
     use crate::error::Error;
-    use crate::forge::task_spec;
     use crate::forge::task_spec::Status;
     use crate::i18n::m;
     use crate::tr;
-    let Some(name) = name else {
-        return missing_field(lang, "remove", "name");
-    };
-    let artifact = match crate::forge::find_artifact(ws, name) {
-        Ok(artifact) => artifact,
-        Err(error) => return forge_fail(error.message(lang)),
-    };
-    if artifact.type_name != task_spec::TYPE {
-        return not_task_spec(lang, name, artifact.type_name.clone(), "remove");
-    }
-    let status =
-        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "remove", "name"))?;
+    let (artifact, status) = task_spec_of(ws, name, "remove", lang)?;
     // D5, AGL-032: the live work is protected — an in-progress spec is
     // canceled first, then removed; a done spec is a historical fact.
     if status == Status::InProgress {
-        return forge_fail(tr!(lang, m::FORGE_TOOL_REMOVE_IN_PROGRESS, name = name));
+        return Err(tr!(lang, m::FORGE_TOOL_REMOVE_IN_PROGRESS, name = name).into());
     }
     if status == Status::Done {
-        return forge_fail(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name));
+        return Err(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name).into());
     }
-    if let Err(error) = fs::remove_file(&artifact.path) {
-        return forge_fail(
-            Error::Remove {
-                path: artifact.path.clone(),
-                source: error,
-            }
-            .message(lang),
-        );
-    }
-    ToolResult {
-        outcome: Outcome::Ok,
-        content: format!("removed {name}"),
-    }
+    fs::remove_file(&artifact.path).map_err(|source| Error::Remove {
+        path: artifact.path.clone(),
+        source,
+    })?;
+    Ok(format!("removed {name}"))
 }
 
 /// A name the agent gives with `forge rename` (D6, AGL-032): the slug
@@ -823,76 +784,43 @@ fn forge_rename(
     name: &Option<String>,
     new: &Option<String>,
     lang: crate::i18n::Lang,
-) -> (ToolResult, Option<String>) {
+) -> Result<(String, String), Refusal> {
     use crate::error::Error;
     use crate::forge::{self, task_spec};
     use crate::i18n::m;
     use crate::tr;
-    let Some(name) = name else {
-        return (missing_field(lang, "rename", "name"), None);
-    };
+    let name = name.as_deref().ok_or_else(|| missing_field(lang, "rename", "name"))?;
     // `new` may be empty (the `edit` deletion) — empty is no name.
-    let Some(new) = new.as_ref().filter(|new| !new.is_empty()) else {
-        return (missing_field(lang, "rename", "new"), None);
-    };
+    let new = new
+        .as_deref()
+        .filter(|new| !new.is_empty())
+        .ok_or_else(|| missing_field(lang, "rename", "new"))?;
     if !rename_valid_name(new) {
-        return (
-            forge_fail(tr!(
-                lang,
-                m::FORGE_TOOL_RENAME_INVALID_NAME,
-                new = new
-            )),
-            None,
-        );
+        return Err(tr!(lang, m::FORGE_TOOL_RENAME_INVALID_NAME, new = new).into());
     }
     if new == name {
-        return (
-            forge_fail(tr!(
-                lang,
-                m::FORGE_TOOL_RENAME_SAME_NAME,
-                name = name,
-                new = new
-            )),
-            None,
-        );
+        return Err(tr!(lang, m::FORGE_TOOL_RENAME_SAME_NAME, name = name, new = new).into());
     }
-    let artifact = match crate::forge::find_artifact(ws, name) {
-        Ok(artifact) => artifact,
-        Err(error) => return (forge_fail(error.message(lang)), None),
-    };
+    let artifact = forge::find_artifact(ws, name)?;
     // The name is the front-matter field; a stray file with the new
     // stem in its type directory would be clobbered by the write.
-    let taken = match crate::forge::store_names(ws) {
-        Ok(names) => names,
-        Err(error) => return (forge_fail(error.message(lang)), None),
-    };
+    let taken = forge::store_names(ws)?;
     let new_path = artifact.path.with_file_name(format!("{new}.md"));
-    if taken.contains(new) || new_path.exists() {
-        return (
-            forge_fail(
-                Error::NameTaken {
-                    name: new.clone(),
-                    dir: ws.dir.join("forge"),
-                }
-                .message(lang),
-            ),
-            None,
-        );
+    if taken.iter().any(|taken| taken == new) || new_path.exists() {
+        return Err(Error::NameTaken {
+            name: new.to_owned(),
+            dir: ws.dir.join("forge"),
+        }
+        .into());
     }
     let mut renamed = artifact.clone();
-    renamed.name = new.clone();
+    renamed.name = new.to_owned();
     renamed.path = new_path;
     renamed.updated = task_spec::today();
-    if let Err(error) = forge::write_artifact(&renamed) {
-        return (forge_fail(error.message(lang)), None);
-    }
+    forge::write_artifact(&renamed)?;
     // Every reference to the old name in the store points to the new
     // one; an artifact is rewritten only when it changed.
-    let files = match forge::artifact_files(&ws.dir) {
-        Ok(files) => files,
-        Err(error) => return (forge_fail(error.message(lang)), None),
-    };
-    for path in files {
+    for path in forge::artifact_files(&ws.dir)? {
         if path == artifact.path {
             continue;
         }
@@ -903,37 +831,21 @@ fn forge_rename(
         for list in [&mut other.deps, &mut other.supersedes] {
             for item in list.iter_mut() {
                 if item == name {
-                    *item = new.clone();
+                    *item = new.to_owned();
                     changed = true;
                 }
             }
         }
         if changed {
             other.updated = task_spec::today();
-            if let Err(error) = forge::write_artifact(&other) {
-                return (forge_fail(error.message(lang)), None);
-            }
+            forge::write_artifact(&other)?;
         }
     }
-    if let Err(error) = fs::remove_file(&artifact.path) {
-        return (
-            forge_fail(
-                Error::Remove {
-                    path: artifact.path.clone(),
-                    source: error,
-                }
-                .message(lang),
-            ),
-            None,
-        );
-    }
-    (
-        ToolResult {
-            outcome: Outcome::Ok,
-            content: format!("renamed {name} to {new}"),
-        },
-        Some(new.clone()),
-    )
+    fs::remove_file(&artifact.path).map_err(|source| Error::Remove {
+        path: artifact.path.clone(),
+        source,
+    })?;
+    Ok((format!("renamed {name} to {new}"), new.to_owned()))
 }
 
 /// The forge tool's refusal of a write on a non-`task-spec` artifact
@@ -943,20 +855,39 @@ fn not_task_spec(
     name: &str,
     type_name: String,
     action: &str,
-) -> ToolResult {
+) -> Refusal {
     use crate::i18n::m;
     use crate::tr;
-    forge_fail(tr!(
+    tr!(
         lang,
         m::FORGE_TOOL_NOT_TASK_SPEC,
         name = name,
         type_name = type_name,
         action = action
-    ))
+    )
+    .into()
+}
+
+/// The task-spec `name` of the store with its status, for a write of
+/// `action`; the writes apply to the `task-spec` type only.
+fn task_spec_of(
+    ws: &crate::forge::Workspace,
+    name: &str,
+    action: &str,
+    lang: crate::i18n::Lang,
+) -> Result<(crate::forge::Artifact, crate::forge::task_spec::Status), Refusal> {
+    use crate::forge::task_spec::{self, Status};
+    let artifact = crate::forge::find_artifact(ws, name)?;
+    if artifact.type_name != task_spec::TYPE {
+        return Err(not_task_spec(lang, name, artifact.type_name, action));
+    }
+    let status =
+        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
+    Ok((artifact, status))
 }
 
 /// The forge tool's `missing field` refusal.
-fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResult {
+fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> Refusal {
     use crate::i18n::m;
     use crate::tr;
     // The fields the action takes: the model that sent a wrong one
@@ -969,13 +900,14 @@ fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> ToolResu
         "rename" => "name, new",
         _ => "name",
     };
-    forge_fail(tr!(
+    tr!(
         lang,
         m::FORGE_TOOL_MISSING_FIELD,
         action = action,
         field = field,
         fields = fields
-    ))
+    )
+    .into()
 }
 
 /// For each of `lines`, whether it is part of a fenced code block (the
