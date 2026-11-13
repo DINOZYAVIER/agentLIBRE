@@ -175,7 +175,7 @@ pub fn run(
         ServerAction::Start => {
             let others = if yes {
                 Others::Yes
-            } else if crate::repl::term::is_interactive() {
+            } else if crate::tty::is_interactive() {
                 Others::Ask(&ask_terminal)
             } else {
                 Others::Refuse
@@ -1509,7 +1509,7 @@ pub(crate) fn ask_terminal(question: &str, _lang: Lang) -> bool {
     if io::stdin().lock().read_line(&mut line).is_err() {
         return false;
     }
-    is_yes(&line)
+    crate::tty::is_yes(&line)
 }
 
 /// Asks `question` in the terminal and returns the line answered, `None`
@@ -1521,11 +1521,6 @@ pub(crate) fn ask_line(question: &str) -> Option<String> {
     io::stdin().lock().read_line(&mut line).ok()?;
     let line = line.trim();
     (!line.is_empty()).then(|| line.to_owned())
-}
-
-/// Whether the answer to a yes/no question is yes.
-pub fn is_yes(answer: &str) -> bool {
-    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 pub(super) fn health(llama: &dyn Backend) -> Health {
@@ -2271,16 +2266,6 @@ mod tests {
         assert!(restart_consent("llama-server", &Others::Ask(&no), Lang::En)
             .is_err_and(|error| matches!(error, Error::RestartDeclined)));
         assert!(restart_consent("llama-server", &Others::Yes, Lang::En).is_ok());
-    }
-
-    #[test]
-    fn the_answer_is_yes_only_for_y_and_yes() {
-        for answer in ["y", "Y\n", " yes ", "YES"] {
-            assert!(is_yes(answer), "{answer:?}");
-        }
-        for answer in ["", "\n", "n", "no", "yep", "ye"] {
-            assert!(!is_yes(answer), "{answer:?}");
-        }
     }
 
     #[test]

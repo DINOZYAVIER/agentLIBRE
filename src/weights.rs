@@ -19,8 +19,8 @@ use crate::tr;
 /// What a file found nowhere does.
 pub enum Missing<'a> {
     /// Ask the human for its folder (an interactive terminal, D24c): the
-    /// answer, `None` when there is none.
-    Ask(&'a dyn Fn(&str) -> Option<String>),
+    /// answer, `None` when there is none; and the line to say of a download.
+    Ask(&'a dyn Fn(&str) -> Option<String>, &'a dyn Fn(&str)),
     /// Fail with `WeightsNotFound` (a run without a terminal, D24c), or
     /// `WeightsNotDownloaded` for a file with a source (AGL-050, D11).
     Fail,
@@ -65,6 +65,7 @@ pub fn offer(
     sources: &[FileSource],
     folders: &Folders,
     ask: &dyn Fn(&str) -> Option<String>,
+    say: &dyn Fn(&str),
     lang: Lang,
 ) -> Result<(), Error> {
     let looked_in = folders.all();
@@ -74,7 +75,7 @@ pub fn offer(
         .filter(|source| names.iter().any(|name| name.as_deref() == Some(&source.name)));
     let (here, absent): (Vec<_>, Vec<_>) =
         of_model.partition(|source| find(&source.name, &looked_in).is_some());
-    let yes = |question: &str| ask(question).is_some_and(|answer| crate::cli::serve::is_yes(&answer));
+    let yes = |question: &str| ask(question).is_some_and(|answer| crate::tty::is_yes(&answer));
     if !absent.is_empty() {
         let files: Vec<String> = absent
             .iter()
@@ -90,7 +91,7 @@ pub fn offer(
         if yes(&question) {
             download::check_space(&absent, &folders.own)?;
             for source in absent {
-                download::fetch(source, &folders.own, lang)?;
+                download::fetch(source, &folders.own, lang, say)?;
             }
         }
     }
@@ -108,7 +109,7 @@ pub fn offer(
                 want = download::gigabytes(source.size)
             );
             if yes(&question) {
-                download::fetch(source, &folders.own, lang)?;
+                download::fetch(source, &folders.own, lang, say)?;
             }
         }
     }
@@ -127,8 +128,8 @@ pub fn resolve(
 ) -> Result<(), Error> {
     // The files of a server outside are where it runs (AGL-052, D4).
     let external = server.external();
-    if !external && let Missing::Ask(ask) = missing {
-        offer(server, sources, folders, *ask, lang)?;
+    if !external && let Missing::Ask(ask, say) = missing {
+        offer(server, sources, folders, *ask, *say, lang)?;
     }
     let mut found = folders.all();
     let mut listed = folders.listed.to_vec();
@@ -157,7 +158,7 @@ pub fn resolve(
                     None => Error::WeightsNotFound { name, folders: found },
                 });
             }
-            Missing::Ask(ask) => {
+            Missing::Ask(ask, _) => {
                 let question = tr!(lang, m::WEIGHTS_ASK, name = name.as_str());
                 let folder = ask(&question)
                     .map(|answer| PathBuf::from(answer.trim()))
@@ -274,7 +275,7 @@ mod tests {
             Some(format!("  {answer}\n"))
         };
         let mut model = server("m.gguf");
-        resolve(&mut model, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&ask), Lang::En).unwrap();
+        resolve(&mut model, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&ask, &|_| {}), Lang::En).unwrap();
         assert_eq!(model.model, Some(elsewhere.join("m.gguf").to_string_lossy().into_owned()));
         assert_eq!(asked.borrow().len(), 1);
         assert!(asked.borrow()[0].contains("m.gguf"));
@@ -284,12 +285,12 @@ mod tests {
         let nothing = |_: &str| None;
         let mut other = server("n.gguf");
         assert!(matches!(
-            resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&nothing), Lang::En),
+            resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&nothing, &|_| {}), Lang::En),
             Err(Error::WeightsNotFound { .. })
         ));
         let wrong = |_: &str| Some(answer.clone());
         assert!(matches!(
-            resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&wrong), Lang::En),
+            resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&wrong, &|_| {}), Lang::En),
             Err(Error::WeightsNotFound { .. })
         ));
     }
@@ -328,7 +329,7 @@ mod tests {
             draft: Some("d.gguf".into()),
             ..ServerFile::default()
         };
-        resolve(&mut model, &mut WhisperFile::default(), &folders, &sources, &Missing::Ask(&ask), Lang::En).unwrap();
+        resolve(&mut model, &mut WhisperFile::default(), &folders, &sources, &Missing::Ask(&ask, &|_| {}), Lang::En).unwrap();
         assert_eq!(model.model, Some(own.join("m.gguf").to_string_lossy().into_owned()));
         assert_eq!(model.draft, Some(own.join("d.gguf").to_string_lossy().into_owned()));
         assert_eq!(fs::read(own.join("m.gguf")).unwrap(), b"weights");
@@ -351,7 +352,7 @@ mod tests {
             Some("n".to_owned())
         };
         let mut model = server("m.gguf");
-        let result = resolve(&mut model, &mut WhisperFile::default(), &folders, &sources, &Missing::Ask(&ask), Lang::En);
+        let result = resolve(&mut model, &mut WhisperFile::default(), &folders, &sources, &Missing::Ask(&ask, &|_| {}), Lang::En);
         assert!(matches!(result, Err(Error::WeightsNotFound { .. })), "{result:?}");
         assert_eq!(*asked.borrow(), 2);
         assert!(!dir.0.join("own/m.gguf").exists());
@@ -381,13 +382,13 @@ mod tests {
             assert!(question.contains("m.gguf"));
             Some("n".to_owned())
         };
-        offer(&server("m.gguf"), &sources, &folders, &no, Lang::En).unwrap();
+        offer(&server("m.gguf"), &sources, &folders, &no, &|_| {}, Lang::En).unwrap();
         assert_eq!(fs::read(own.join("m.gguf")).unwrap(), b"an older one");
         let yes = |_: &str| Some("yes".to_owned());
-        offer(&server("m.gguf"), &sources, &folders, &yes, Lang::En).unwrap();
+        offer(&server("m.gguf"), &sources, &folders, &yes, &|_| {}, Lang::En).unwrap();
         assert_eq!(fs::read(own.join("m.gguf")).unwrap(), b"weights");
         // The right size asks nothing.
         let never = |question: &str| -> Option<String> { panic!("asked: {question}") };
-        offer(&server("m.gguf"), &sources, &folders, &never, Lang::En).unwrap();
+        offer(&server("m.gguf"), &sources, &folders, &never, &|_| {}, Lang::En).unwrap();
     }
 }

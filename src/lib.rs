@@ -33,6 +33,7 @@ mod style;
 mod test_server;
 mod theme;
 mod tools;
+mod tty;
 mod wsl;
 mod weights;
 
@@ -185,8 +186,8 @@ fn run(
             model.llama_external = settings.llama_external;
             model.llama_private_ca = settings.llama_private_ca.clone();
             let missing = match action {
-                cli::args::ServerAction::Start if repl::term::is_interactive() => {
-                    weights::Missing::Ask(&cli::serve::ask_line)
+                cli::args::ServerAction::Start if tty::is_interactive() => {
+                    weights::Missing::Ask(&cli::serve::ask_line, &|line| eprintln!("{line}"))
                 }
                 cli::args::ServerAction::Start => weights::Missing::Fail,
                 _ => weights::Missing::Keep,
@@ -391,8 +392,8 @@ fn agent_session(
     // The weights files become absolute paths before anything starts; a
     // file found nowhere is asked for in a terminal (AGL-039, D22-D24), and
     // offered for download; `-p` asks nobody (AGL-050, D10, D11).
-    let missing = if repl::term::is_interactive() && args.prompt.is_none() {
-        weights::Missing::Ask(&cli::serve::ask_line)
+    let missing = if tty::is_interactive() && args.prompt.is_none() {
+        weights::Missing::Ask(&cli::serve::ask_line, &|line| eprintln!("{line}"))
     } else {
         weights::Missing::Fail
     };
@@ -504,7 +505,7 @@ fn agent_session(
         // non-interactive terminal refuses.
         others: if args.yes {
             cli::serve::Others::Yes
-        } else if repl::term::is_interactive() {
+        } else if tty::is_interactive() {
             cli::serve::Others::Ask(&cli::serve::ask_terminal)
         } else {
             cli::serve::Others::Refuse
@@ -623,7 +624,7 @@ fn agent_session(
     };
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
-        let interactive = repl::term::is_interactive();
+        let interactive = tty::is_interactive();
         // The Functions of `/function` (AGL-036, D3, D9), the run's one
         // marked.
         let catalog = cli::function::Catalog {

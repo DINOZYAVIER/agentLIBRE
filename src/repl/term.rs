@@ -418,11 +418,6 @@ pub fn size() -> (usize, usize) {
     }
 }
 
-/// Whether stdin and stdout are terminals (D128).
-pub fn is_interactive() -> bool {
-    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 }
-}
-
 /// Reads input bytes, waiting at most `timeout_ms`: `Ok(None)` after a
 /// timeout, `Ok(Some(0))` at the end of input.
 pub fn read_input(buffer: &mut [u8], timeout_ms: i32) -> io::Result<Option<usize>> {

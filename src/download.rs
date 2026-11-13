@@ -35,7 +35,12 @@ pub fn gigabytes(bytes: u64) -> String {
 
 /// The file of `source` in `dir`: fetched, resumed and checked. A file already
 /// there under its name is replaced only once the new one is checked.
-pub fn fetch(source: &FileSource, dir: &Path, lang: Lang) -> Result<PathBuf, Error> {
+pub fn fetch(
+    source: &FileSource,
+    dir: &Path,
+    lang: Lang,
+    say: &dyn Fn(&str),
+) -> Result<PathBuf, Error> {
     fs::create_dir_all(dir).map_err(|error| failed(source, &error.to_string()))?;
     let path = dir.join(&source.name);
     let part = dir.join(format!("{}.part", source.name));
@@ -54,14 +59,11 @@ pub fn fetch(source: &FileSource, dir: &Path, lang: Lang) -> Result<PathBuf, Err
     })?;
     // A whole `.part` has nothing to resume: a server refuses the range.
     if needed > 0 {
-        eprintln!(
-            "{}",
-            tr!(lang, m::DOWNLOAD_START, name = source.name, size = gigabytes(source.size))
-        );
+        say(&tr!(lang, m::DOWNLOAD_START, name = source.name, size = gigabytes(source.size)));
         run_curl(source, &part)?;
     }
     // It takes a while, with nothing else on the screen (AGL-058, D26).
-    eprintln!("{}", tr!(lang, m::DOWNLOAD_CHECK, name = source.name));
+    say(&tr!(lang, m::DOWNLOAD_CHECK, name = source.name));
     let got = checksum(source, &part)?;
     if got != source.sha256 {
         remove(source, &part)?;
@@ -197,7 +199,7 @@ mod tests {
         let dir = TempDir::new();
         let source = served(&dir.0.join("server"), b"the weights");
         let models = dir.0.join("models");
-        let path = fetch(&source, &models, Lang::En).unwrap();
+        let path = fetch(&source, &models, Lang::En, &|_| {}).unwrap();
         assert_eq!(path, models.join("m.gguf"));
         assert_eq!(fs::read(&path).unwrap(), b"the weights");
         assert!(!models.join("m.gguf.part").exists());
@@ -210,7 +212,7 @@ mod tests {
         let models = dir.0.join("models");
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join("m.gguf.part"), b"the wei").unwrap();
-        let path = fetch(&source, &models, Lang::En).unwrap();
+        let path = fetch(&source, &models, Lang::En, &|_| {}).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"the weights");
     }
 
@@ -222,7 +224,7 @@ mod tests {
         let models = dir.0.join("models");
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join("m.gguf.part"), b"the weights").unwrap();
-        assert!(fetch(&source, &models, Lang::En).is_ok());
+        assert!(fetch(&source, &models, Lang::En, &|_| {}).is_ok());
     }
 
     #[test]
@@ -233,7 +235,7 @@ mod tests {
         let models = dir.0.join("models");
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join("m.gguf"), b"the old one").unwrap();
-        let error = fetch(&source, &models, Lang::En).unwrap_err();
+        let error = fetch(&source, &models, Lang::En, &|_| {}).unwrap_err();
         assert!(matches!(error, Error::DownloadMismatch { .. }), "{error:?}");
         assert_eq!(fs::read(models.join("m.gguf")).unwrap(), b"the old one");
         assert!(!models.join("m.gguf.part").exists());
@@ -246,7 +248,7 @@ mod tests {
         let models = dir.0.join("models");
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join("m.gguf.part"), b"not the weights at all").unwrap();
-        assert_eq!(fs::read(fetch(&source, &models, Lang::En).unwrap()).unwrap(), b"the weights");
+        assert_eq!(fs::read(fetch(&source, &models, Lang::En, &|_| {}).unwrap()).unwrap(), b"the weights");
     }
 
     #[test]
@@ -255,7 +257,7 @@ mod tests {
         let mut source = served(&dir.0.join("server"), b"the weights");
         source.size = u64::MAX;
         let models = dir.0.join("models");
-        let error = fetch(&source, &models, Lang::En).unwrap_err();
+        let error = fetch(&source, &models, Lang::En, &|_| {}).unwrap_err();
         assert!(matches!(error, Error::DownloadNoSpace { .. }), "{error:?}");
         assert!(!models.join("m.gguf.part").exists());
     }
@@ -265,7 +267,7 @@ mod tests {
         let dir = TempDir::new();
         let mut source = served(&dir.0.join("server"), b"the weights");
         source.url = "file:///nowhere".into();
-        let error = fetch(&source, &dir.0.join("models"), Lang::En).unwrap_err();
+        let error = fetch(&source, &dir.0.join("models"), Lang::En, &|_| {}).unwrap_err();
         assert!(matches!(error, Error::DownloadFailed { name, .. } if name == "m.gguf"));
     }
 

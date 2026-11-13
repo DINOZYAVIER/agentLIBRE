@@ -184,7 +184,7 @@ pub fn project_of(
 /// `forge rehome`.
 pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, Error> {
     let stores = options[..options.len() - 1].to_vec();
-    if !crate::repl::term::is_interactive() {
+    if !crate::tty::is_interactive() {
         return Err(Error::RehomeNoStore { stores });
     }
     outln!("{}", tr!(lang, question));
@@ -710,7 +710,7 @@ fn rehome(
         return rehome_new(ws, lang, current);
     }
     let Some(name) = store else {
-        if !crate::repl::term::is_interactive() {
+        if !crate::tty::is_interactive() {
             return Err(Error::RehomeNoStore {
                 stores: found.iter().map(forge::Store::name).collect(),
             });
