@@ -10,8 +10,8 @@ use std::path::Path;
 use super::markdown;
 use super::records::{self, Record};
 use super::term::{self, Key};
-use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{edge, notice_lines, thinking_line, user_lines};
+use super::text::{clean, hard_wrap, truncate, width};
+use super::transcript::{edge, notice_lines, thinking_paint, user_lines};
 use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
@@ -345,20 +345,17 @@ fn step_lines(
                 .flat_map(|line| hard_wrap(&clean(line), columns))
                 .collect();
             if let Some(first) = wrapped.first() {
-                let head = truncate(
-                    &format!("{}: {}", tr!(lang, m::THINKING), first),
-                    columns,
-                );
-                lines.push(theme.paint(Role::Tool, &head));
+                // D20: the label keeps the tool's color, the text is
+                // plain.
+                let label = format!("{}:", tr!(lang, m::THINKING));
+                let head = truncate(first, columns.saturating_sub(width(&label) + 1));
+                lines.push(format!("{} {}", theme.paint(Role::Tool, &label), head));
                 for line in wrapped.iter().skip(1) {
                     lines.push(theme.paint(Role::Muted, line));
                 }
             }
         } else {
-            lines.push(theme.paint(
-                Role::Tool,
-                &thinking_line(lang, columns, thinking),
-            ));
+            lines.push(thinking_paint(theme, lang, columns, thinking, Role::Tool));
         }
     }
     if let Some(text) = text {

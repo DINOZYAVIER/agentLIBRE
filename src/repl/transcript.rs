@@ -283,13 +283,19 @@ impl Presenter {
         self.screen.print(&lines);
     }
 
-    /// The step's thinking's line (D3, D19): `thinking: <the first line>`,
-    /// on the top level, in the tool's color; the time is in the step's
-    /// rule, the full text in the inspect mode.
+    /// The step's thinking's line (D3, D19, D20): `thinking: <the first
+    /// line>`, on the top level; the label in the tool's color, the text
+    /// in the terminal's plain color. The time is in the step's rule, the
+    /// full text in the inspect mode.
     pub fn show_thinking(&self, thinking: &str) {
-        let line = thinking_line(self.lang, self.screen.columns(), thinking);
-        self.screen
-            .print(&[self.theme.paint(Role::Tool, &line)]);
+        let line = thinking_paint(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            thinking,
+            Role::Tool,
+        );
+        self.screen.print(&[line]);
     }
 
     /// The text before a call (D9): its first three lines; the rest is in
@@ -558,8 +564,15 @@ impl Report for Presenter {
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        let line = thinking_line(self.lang, self.screen.columns(), thinking);
-        self.screen.live(&self.theme.paint(Role::Muted, &line));
+        // D20: the label keeps the muted color, the text is plain.
+        let line = thinking_paint(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            thinking,
+            Role::Muted,
+        );
+        self.screen.live(&line);
         self.piece();
     }
 
@@ -847,11 +860,22 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// `thinking: …` with the first line of `thinking`, at the width (D3, D19).
-pub fn thinking_line(lang: Lang, columns: usize, thinking: &str) -> String {
-    let label = tr!(lang, m::THINKING);
+/// The line of the thinking, its label painted for `role` and the text in
+/// the plain color of the terminal (D20).
+pub fn thinking_paint(
+    theme: &Theme,
+    lang: Lang,
+    columns: usize,
+    thinking: &str,
+    role: Role,
+) -> String {
+    let label = format!("{}:", tr!(lang, m::THINKING));
     let snippet = thinking.lines().next().unwrap_or_default();
-    truncate(&format!("{label}: {snippet}"), columns)
+    let text = truncate(
+        &format!(" {snippet}"),
+        columns.saturating_sub(width(&label)),
+    );
+    format!("{}{}", theme.paint(role, &label), text)
 }
 
 #[cfg(test)]
