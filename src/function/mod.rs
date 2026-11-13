@@ -819,7 +819,7 @@ fn read_tools(mut section: Section, format: &Format) -> Result<Vec<Tool>, Error>
         };
         let params: &'static [&'static str] = match tool.name.as_str() {
             "bash" => &["command", "timeout"],
-            "forge" => &["action", "name", "title", "old", "new", "section", "text"],
+            "forge" => &["action", "name", "title", "old", "new", "section", "state", "text"],
             "view" => &["path"],
             "search" => &["language", "limit", "query", "source"],
             "memory" => &["action", "hook", "name", "new", "old", "text", "title"],

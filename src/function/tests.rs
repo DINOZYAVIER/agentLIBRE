@@ -276,6 +276,20 @@ fn the_explicit_forge_tool() {
     assert_eq!(a.next("forge", Outcome::Ok), 0);
 }
 
+#[test]
+fn a_function_constrains_the_forge_state_like_the_other_parameters() {
+    // AGL-067, F6: `state` is a parameter of the forge tool since AGL-023;
+    // the keys a Function may constrain under `tools.forge` are its own.
+    let function = one_state(
+        r#"tools.forge.state.enum = [ "done" ]; next = { forge.any = "a"; otherwise = "a"; };"#,
+    )
+    .unwrap();
+    let forge = &function.states[0].actions.tools[0];
+    assert_eq!(forge.name, "forge");
+    let state = forge.params.iter().find(|p| p.name == "state").unwrap();
+    assert_eq!(state.constraint, Constraint::OneOf(vec!["done".into()]));
+}
+
 /// A Function file of the policy `policy` on the test model.
 fn file_text(policy: &str) -> String {
     format!("{{ agl, ... }}: {{ policy = {policy}; model = {MODEL}; }}")
