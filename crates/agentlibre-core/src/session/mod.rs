@@ -1050,7 +1050,7 @@ fn event_json(event: &Event) -> Json {
     }
 }
 
-pub(crate) fn transition_from_json(json: &Json) -> Option<TransitionLine> {
+pub fn transition_from_json(json: &Json) -> Option<TransitionLine> {
     Some(TransitionLine {
         turn: usize::try_from(json["turn"].as_u64()?).ok()?,
         step: usize::try_from(json["step"].as_u64()?).ok()?,
@@ -1063,7 +1063,7 @@ pub(crate) fn transition_from_json(json: &Json) -> Option<TransitionLine> {
     })
 }
 
-pub(crate) fn event_from_json(json: &Json) -> Option<Event> {
+pub fn event_from_json(json: &Json) -> Option<Event> {
     let text = |key: &str| json[key].as_str().map(str::to_owned);
     Some(match json["type"].as_str()? {
         "user" => Event::User(text("text")?),

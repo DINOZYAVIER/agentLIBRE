@@ -132,7 +132,7 @@ pub struct Agent<'a> {
 
 impl Agent<'_> {
     /// Runs the turn for the user `message`, with an observer of its own.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testutil"))]
     pub fn turn(
         &mut self,
         message: &str,

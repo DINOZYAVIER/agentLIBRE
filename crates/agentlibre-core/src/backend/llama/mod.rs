@@ -268,7 +268,7 @@ fn reasoning_kwargs(level: Option<ReasoningLevel>) -> Option<Json> {
 
 /// The messages in the OpenAI-style form of `/apply-template`, then the
 /// state instruction as a last user message (D19).
-pub(crate) fn messages_json(prompt: &Prompt) -> Vec<Json> {
+pub fn messages_json(prompt: &Prompt) -> Vec<Json> {
     let kept = kept_thinking(prompt.messages, prompt.preserve_thinking);
     let mut out: Vec<Json> = prompt
         .messages
@@ -327,7 +327,7 @@ pub(crate) fn messages_json(prompt: &Prompt) -> Vec<Json> {
 }
 
 /// A tool as a JSON-schema function for the template (D95).
-pub(crate) fn tool_json(doc: &Spec) -> Json {
+pub fn tool_json(doc: &Spec) -> Json {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for param in doc.params {

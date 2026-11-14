@@ -12,7 +12,7 @@ use crate::theme::Theme;
 use crate::tr;
 
 /// The art, from the root file `splash` (D1).
-const ART: &str = include_str!("../../splash");
+const ART: &str = include_str!("../../../../splash");
 
 /// The columns of the short variant, as the old CLI had them (D4): the
 /// characters `[start, end]` of each line, joined by two spaces.

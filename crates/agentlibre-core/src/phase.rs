@@ -225,7 +225,7 @@ impl Default for Observer {
             since: Instant::now(),
             tokens: 0,
             prompt_tokens: None,
-            strict: cfg!(test),
+            strict: cfg!(any(test, feature = "testutil")),
         }
     }
 }

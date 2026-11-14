@@ -37,7 +37,7 @@ pub fn nix_dir() -> Result<PathBuf, Error> {
 }
 
 /// The directory of the Functions behind `agl.functions` (AGL-053, D6).
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "testutil")))]
 fn functions_dir() -> Result<PathBuf, Error> {
     std::env::var_os(FUNCTIONS_VAR)
         .map(PathBuf::from)
@@ -47,7 +47,7 @@ fn functions_dir() -> Result<PathBuf, Error> {
 
 /// The tests' Functions, so that a change in the repository of the Functions
 /// does not break them (AGL-053, D8).
-#[cfg(test)]
+#[cfg(any(test, feature = "testutil"))]
 fn functions_dir() -> Result<PathBuf, Error> {
     Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/function/fixtures"))
 }

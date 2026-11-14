@@ -1,0 +1,30 @@
+[package]
+name = "agentLIBRE"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "agentLIBRE -- free and open-source agentic system"
+
+[lib]
+name = "agentlibre"
+
+# The commands are `agl` and `agentLIBRE` (bf27187); both run the
+# `agentlibre` library.
+[[bin]]
+name = "agl"
+path = "src/bin/agl.rs"
+
+[[bin]]
+name = "agentLIBRE"
+path = "src/bin/agentLIBRE.rs"
+
+[dependencies]
+agentlibre-core = { path = "../agentlibre-core" }
+libc = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
+serde_json = "1"
+unicode-width = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+agentlibre-core = { path = "../agentlibre-core", features = ["testutil"] }

@@ -331,7 +331,7 @@ fn launch_unit(
 /// Waits until `/health` answers ready (D149). `unit` is the unit that
 /// loads the model, when it is ours: it stopping is a failure. `what` is
 /// the server, in a line (AGL-033, D2).
-pub(super) fn wait_ready(
+pub fn wait_ready(
     llama: &dyn Backend,
     unit: Option<&str>,
     what: &str,
@@ -401,7 +401,7 @@ pub struct Autostart<'a> {
 impl Autostart<'_> {
     /// The server, in a line (AGL-033, D2): the effective settings, by
     /// `what_of`.
-    pub(super) fn what(&self) -> Result<String, Error> {
+    pub fn what(&self) -> Result<String, Error> {
         what_of(self.effective)
     }
 
@@ -773,7 +773,7 @@ pub fn what_of(effective: &ServerFile) -> Result<String, Error> {
 /// The model of the settings, by its name (AGL-033, D2; AGL-036, D3): the
 /// model file of the llama kind, the config's `model_name` of the strata
 /// kind; `None` when the settings name none.
-pub(crate) fn model_of(settings: &ServerFile) -> Result<Option<String>, Error> {
+pub fn model_of(settings: &ServerFile) -> Result<Option<String>, Error> {
     match settings.kind() {
         ServerKind::Strata => Ok(settings
             .strata_config
@@ -1112,7 +1112,7 @@ pub fn read_record(dir: &Path) -> Option<ServerFile> {
 /// The record goes away with the server it describes (AGL-035, D1), and
 /// its file in the runtime directory (AGL-064, D3). `pid` is the server's
 /// when the caller has it in hand (the child, the unit); else the record's.
-pub(crate) fn remove_record(dir: &Path, runtime: Option<&Path>, pid: Option<u32>) {
+pub fn remove_record(dir: &Path, runtime: Option<&Path>, pid: Option<u32>) {
     let pid = pid.or_else(|| record_pid(dir));
     let _ = fs::remove_file(dir.join(STATE_FILE));
     remove_runtime_file(runtime, pid);
@@ -1371,7 +1371,7 @@ fn switch_kind(
 
 /// The answer to a question on a terminal (D9, D13; AGL-033): the
 /// question is a line, the answer a line of stdin, `y` or `yes` agrees.
-pub(crate) fn ask_terminal(question: &str, _lang: Lang) -> bool {
+pub fn ask_terminal(question: &str, _lang: Lang) -> bool {
     print!("{question} ");
     let _ = io::stdout().flush();
     let mut line = String::new();
@@ -1383,7 +1383,7 @@ pub(crate) fn ask_terminal(question: &str, _lang: Lang) -> bool {
 
 /// Asks `question` in the terminal and returns the line answered, `None`
 /// when it is empty or cannot be read (AGL-039, D24c).
-pub(crate) fn ask_line(question: &str) -> Option<String> {
+pub fn ask_line(question: &str) -> Option<String> {
     print!("{question} ");
     let _ = io::stdout().flush();
     let mut line = String::new();
@@ -1392,7 +1392,7 @@ pub(crate) fn ask_line(question: &str) -> Option<String> {
     (!line.is_empty()).then(|| line.to_owned())
 }
 
-pub(super) fn health(llama: &dyn Backend) -> Health {
+pub fn health(llama: &dyn Backend) -> Health {
     match llama.health() {
         Some(200) => Health::Ready,
         Some(_) => Health::Loading,
@@ -1401,7 +1401,7 @@ pub(super) fn health(llama: &dyn Backend) -> Health {
 }
 
 /// Whether something accepts connections at `host:port`.
-pub(super) fn port_open(host: &str, port: u16) -> bool {
+pub fn port_open(host: &str, port: u16) -> bool {
     (host, port)
         .to_socket_addrs()
         .into_iter()
@@ -1412,7 +1412,7 @@ pub(super) fn port_open(host: &str, port: u16) -> bool {
 }
 
 /// Whether the unit runs.
-pub(super) fn unit_active(unit: &str) -> Result<bool, Error> {
+pub fn unit_active(unit: &str) -> Result<bool, Error> {
     let status = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", unit])
         .stdin(Stdio::null())
@@ -1478,7 +1478,7 @@ pub fn systemctl(args: &[&str]) -> Result<(), Error> {
 }
 
 /// The host and port of an `http://` URL whose host is local (D148).
-pub(super) fn local_address(url: &str) -> Option<(String, u16)> {
+pub fn local_address(url: &str) -> Option<(String, u16)> {
     let (host, port) = http_address(url)?;
     LOCAL_HOSTS.contains(&host).then(|| (host.to_owned(), port))
 }
@@ -1502,7 +1502,7 @@ fn url_port(url: &str) -> Option<u16> {
 /// The speculative part of the launch (AGL-025, D2): the type and the
 /// resolved draft model; both `None` when the settings set none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Spec {
+pub struct Spec {
     spec_type: Option<String>,
     draft: Option<PathBuf>,
 }
@@ -1511,7 +1511,7 @@ pub(super) struct Spec {
 /// the `draft` must be a file in the models directory, and it needs a
 /// `spec_type` — the build's `--spec-type` default is `none`, so a draft
 /// model alone would not run.
-pub(super) fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> {
+pub fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> {
     let draft = match &settings.draft {
         Some(name) => {
             let path = models.join(name);
@@ -1536,7 +1536,7 @@ pub(super) fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> 
     })
 }
 
-pub(super) fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec<OsString>, Error> {
+pub fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec<OsString>, Error> {
     let mut projector: Vec<OsString> = Vec::new();
     if let Some(name) = &settings.mmproj {
         let file = models.join(name);
@@ -1581,7 +1581,7 @@ fn packaged_engine(dir: Option<&Path>, name: &str) -> Option<PathBuf> {
 }
 
 /// The first executable `name` in `path_var` (D147).
-pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
+pub fn find_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(&path_var?)
         .filter(|dir| dir.is_absolute())
@@ -1597,7 +1597,7 @@ pub(super) fn find_program(name: &str, path_var: Option<OsString>) -> Option<Pat
 /// the speculative decoding, the extra of `[server] args` (AGL-024, D4;
 /// AGL-025, D2): the one source of the launch arguments, the systemd
 /// and the child paths alike.
-pub(super) fn engine_args(
+pub fn engine_args(
     engine: &Path,
     model: &Path,
     (context, host, port): (u32, &str, u16),

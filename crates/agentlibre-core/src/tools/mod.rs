@@ -17,7 +17,7 @@ use crate::session::{ForgeKind, INTERRUPTED};
 
 mod output;
 mod reach;
-pub(crate) mod spec;
+pub mod spec;
 
 use output::Capture;
 pub use output::{Output, limited, shown};
@@ -217,7 +217,7 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<std::process::Exit
 
 /// The byte offsets of every occurrence of `old` in `text` (overlapping
 /// ones count too: `aa` in `aaa` is ambiguous).
-pub(crate) fn occurrences(text: &str, old: &str) -> Vec<usize> {
+pub fn occurrences(text: &str, old: &str) -> Vec<usize> {
     text.char_indices()
         .map(|(i, _)| i)
         .chain([text.len()])

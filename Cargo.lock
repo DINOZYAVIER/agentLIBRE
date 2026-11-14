@@ -6,10 +6,19 @@ version = 4
 name = "agentLIBRE"
 version = "0.0.2"
 dependencies = [
+ "agentlibre-core",
  "libc",
  "pulldown-cmark",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "agentlibre-core"
+version = "0.0.2"
+dependencies = [
+ "libc",
+ "serde_json",
  "ureq",
 ]
 

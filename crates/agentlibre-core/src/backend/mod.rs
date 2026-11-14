@@ -5,7 +5,7 @@ pub mod llama;
 mod step;
 pub mod strata;
 
-pub(crate) use step::{completion_step, structured_step};
+pub use step::{completion_step, structured_step};
 pub use step::{StepInput, Stepped};
 
 use crate::action::Value;

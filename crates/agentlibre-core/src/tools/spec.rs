@@ -40,7 +40,7 @@ pub enum Values {
 }
 
 impl ParamSpec {
-    pub(crate) const fn text(
+    pub const fn text(
         name: &'static str,
         required: bool,
         description: Option<&'static str>,
@@ -53,7 +53,7 @@ impl ParamSpec {
         }
     }
 
-    pub(crate) const fn of(
+    pub const fn of(
         name: &'static str,
         required: bool,
         values: Values,

@@ -1,27 +1,11 @@
-[package]
-name = "agentLIBRE"
+[workspace]
+members = ["crates/agentlibre-core", "crates/agentlibre-terminal"]
+resolver = "3"
+
+# One version for both crates: `about::version` reads it in the core and
+# shows what it shows today (AGL-067, D2).
+[workspace.package]
 version = "0.0.2"
 edition = "2024"
 license = "LGPL-3.0-or-later"
-description = "agentLIBRE -- free and open-source agentic system"
 publish = false
-
-[lib]
-name = "agentlibre"
-
-# The commands are `agl` and `agentLIBRE` (bf27187); both run the
-# `agentlibre` library.
-[[bin]]
-name = "agl"
-path = "src/bin/agl.rs"
-
-[[bin]]
-name = "agentLIBRE"
-path = "src/bin/agentLIBRE.rs"
-
-[dependencies]
-libc = "0.2"
-pulldown-cmark = { version = "0.13", default-features = false }
-serde_json = "1"
-unicode-width = { version = "0.2", default-features = false }
-ureq = { version = "3", default-features = false, features = ["rustls"] }

@@ -53,7 +53,7 @@ pub fn is_identity(value: &str) -> bool {
 
 /// The sha256 of `data` (FIPS 180-4); the workspace identity and the
 /// media of a session need it and the forge adds no dependencies.
-pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -137,7 +137,7 @@ pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Runs `git <args>` in `cwd` and returns the trimmed stdout; a spawn
 /// failure or a nonzero exit is an error.
-pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
+pub fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
     let output = Process::new(crate::programs::program("git")?)
         .args(args)
         .current_dir(cwd)
@@ -1115,8 +1115,8 @@ pub fn project_of(
 
 /// Test helpers of the forge tree: one counter for all the modules, so
 /// the temporary directories never collide between modules.
-#[cfg(test)]
-pub(crate) mod testutil {
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A directory removed when dropped.
@@ -1124,6 +1124,9 @@ pub(crate) mod testutil {
     pub struct TempDir(pub std::path::PathBuf);
 
     impl TempDir {
+        /// There is no `Default`: every `new()` takes the next number of
+        /// the counter.
+        #[allow(clippy::new_without_default)]
         pub fn new() -> TempDir {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);

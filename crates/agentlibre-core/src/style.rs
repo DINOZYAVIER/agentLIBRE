@@ -139,7 +139,6 @@ macro_rules! roles {
             pub const ALL: &'static [Role] = &[$(Role::$variant,)*];
 
             /// The key in `[colors]`.
-            #[cfg(test)]
             pub fn key(self) -> &'static str {
                 match self {
                     $(Role::$variant => $key,)*

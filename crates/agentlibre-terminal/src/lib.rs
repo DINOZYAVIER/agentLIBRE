@@ -1,44 +1,44 @@
 //! agentLIBRE: free and open-source agentic system.
 
-mod action;
-mod about;
-mod agent;
-mod attach;
-mod backend;
 mod cli;
-mod download;
-mod engine;
-mod error;
-mod forge;
-mod format;
-mod function;
-mod grammar;
-mod i18n;
-mod interrupt;
-mod machine;
-mod media;
-mod memory;
-mod nix;
-mod phase;
-mod paths;
-mod plane;
-mod programs;
-mod record;
-mod records;
 mod repl;
-mod search;
-mod session;
-mod settings;
-mod status;
-mod style;
-#[cfg(test)]
-mod test_server;
 mod theme;
-mod tools;
-mod tty;
-mod weights;
-mod whisper;
-mod wsl;
+
+// The core's modules under the names the terminal's code always used.
+pub(crate) use agentlibre_core::{
+    about,
+    action,
+    agent,
+    attach,
+    backend,
+    engine,
+    error,
+    forge,
+    function,
+    i18n,
+    interrupt,
+    machine,
+    media,
+    memory,
+    nix,
+    paths,
+    phase,
+    plane,
+    programs,
+    record,
+    records,
+    search,
+    session,
+    settings,
+    status,
+    style,
+    tools,
+    tty,
+    weights,
+    whisper,
+    wsl,
+};
+pub(crate) use agentlibre_core::tr;
 
 use std::ffi::OsString;
 use std::io::{self, Write};

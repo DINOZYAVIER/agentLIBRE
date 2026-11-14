@@ -21,7 +21,10 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       lib = pkgs.lib;
-      cargo = lib.importTOML ./Cargo.toml;
+      # The name and the description from the terminal's crate, the version
+      # of the workspace, one for both crates (AGL-067, D2).
+      cargo = lib.importTOML ./crates/agentlibre-terminal/Cargo.toml;
+      version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
       # The helper programs agl runs by their absolute paths (AGL-040;
       # AGL-039, D15). systemd-run and systemctl stay the system's (AGL-039,
@@ -44,7 +47,7 @@
         fileset = lib.fileset.unions [
           ./Cargo.toml
           ./Cargo.lock
-          ./src
+          ./crates
           ./splash
           ./nix
         ];
@@ -96,7 +99,7 @@
 
       agl = pkgs.rustPlatform.buildRustPackage {
         pname = cargo.package.name;
-        version = cargo.package.version;
+        inherit version;
         inherit src;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [ pkgs.makeWrapper ];

@@ -48,7 +48,7 @@ pub enum Stepped {
 /// The step of a completion server: the thinking to its mark, then the action
 /// under the grammar, parsed (D3, D110, D113, D131, D154; AGL-050). The
 /// thinking and the grammar are logged in `session` as they come.
-pub(crate) fn completion_step<B: Backend + ?Sized>(
+pub fn completion_step<B: Backend + ?Sized>(
     backend: &B,
     session: &mut Session,
     input: &StepInput<'_>,
@@ -173,7 +173,7 @@ pub(crate) fn completion_step<B: Backend + ?Sized>(
 /// one structured generation — the server splits the thinking and the call
 /// from the text —, the response mapped to an action by its structure; a
 /// malformed one is told back for the agent's stir.
-pub(crate) fn structured_step<B: Backend + ?Sized>(
+pub fn structured_step<B: Backend + ?Sized>(
     backend: &B,
     session: &mut Session,
     input: &StepInput<'_>,
@@ -269,14 +269,14 @@ pub(crate) fn structured_step<B: Backend + ?Sized>(
 /// Cuts the call out of the streamed action: passes the text before the
 /// start of a call and holds back what may still turn into that start
 /// (D131).
-pub(crate) struct TextStream<'a> {
+pub struct TextStream<'a> {
     begin: &'a str,
     held: String,
     in_call: bool,
 }
 
 impl<'a> TextStream<'a> {
-    pub(crate) fn new(begin: &'a str) -> TextStream<'a> {
+    pub fn new(begin: &'a str) -> TextStream<'a> {
         TextStream {
             begin,
             held: String::new(),
@@ -285,7 +285,7 @@ impl<'a> TextStream<'a> {
     }
 
     /// The text to show for `piece`, if any.
-    pub(crate) fn push(&mut self, piece: &str) -> Option<String> {
+    pub fn push(&mut self, piece: &str) -> Option<String> {
         if self.in_call {
             return None;
         }
@@ -315,7 +315,7 @@ impl<'a> TextStream<'a> {
     }
 
     /// The held-back text when no call began.
-    pub(crate) fn finish(&mut self) -> Option<String> {
+    pub fn finish(&mut self) -> Option<String> {
         let text = std::mem::take(&mut self.held);
         (!self.in_call && !text.is_empty()).then_some(text)
     }
