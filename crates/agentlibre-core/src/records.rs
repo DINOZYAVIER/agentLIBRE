@@ -140,16 +140,32 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
     Record::Notice { line, role, detail }
 }
 
-/// One line of a call's input (D6): the command, the file of an edit, the
-/// query of a search. The `result` is what a forge `list` shows of its
-/// output (D18).
-/// One line of the input (D6): the command, the file, the query. A forge
-/// or a memory call carries no hint of its own — its action is on the
-/// tool's line (D28), the full input in the inspect mode.
+/// One line of the input (D6): the command, the file of an edit, the
+/// query of a search. A forge or a memory call says what it did: the
+/// action, the entry (the title of a `new`), and the action's detail —
+/// the section of an append, the state of a status, the new name of a
+/// rename (AGL-068).
 pub fn call_hint(call: &ToolCall) -> String {
     let text = |name: &str| call.text(name).unwrap_or_default();
     if matches!(call.name.as_str(), "forge" | "memory") {
-        return String::new();
+        let action = text("action");
+        let entry = if text("name").is_empty() {
+            text("title").to_owned()
+        } else {
+            text("name").to_owned()
+        };
+        let mut hint = if entry.is_empty() {
+            action.to_owned()
+        } else {
+            format!("{action} {entry}")
+        };
+        match (call.name.as_str(), action) {
+            ("forge", "append") => hint.push_str(&format!(" {}", text("section"))),
+            ("forge", "status") => hint.push_str(&format!(" {}", text("state"))),
+            ("forge", "rename") => hint.push_str(&format!(" → {}", text("new"))),
+            _ => {}
+        }
+        return hint;
     }
     let head: String = match call.name.as_str() {
         "edit" => text("path").to_owned(),
@@ -308,21 +324,10 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 Role::Muted,
                 Some(error.clone()),
             )),
-            Event::Stop(_) => {}
-            Event::Forge {
-                name,
-                kind,
-                section,
-            } => records.push(notice(
-                forge_line(name, *kind, section.as_deref(), lang),
-                Role::Muted,
-                None,
-            )),
-            Event::Memory { name, kind, text } => records.push(notice(
-                memory_line(name, *kind, lang),
-                Role::Muted,
-                text.clone(),
-            )),
+            // AGL-068: a forge or a memory write is in the record of its
+            // call (the hint row says what it did); the events keep the
+            // writes in the session's file.
+            Event::Forge { .. } | Event::Memory { .. } | Event::Stop(_) => {}
             Event::Media(medium) => records.push(notice(media_line(medium, lang), Role::Muted, None)),
             Event::Compact { summary, .. } => records.push(notice(
                 tr!(lang, m::COMPACTING).to_string(),
@@ -585,10 +590,10 @@ mod tests {
     }
 
     #[test]
-    fn the_forge_and_the_memory_carry_no_hint_of_their_own() {
-        // AGL-066, D28: the action is on the tool's line, the full input
-        // in the inspect mode; no summary row.
-        let forge = ToolCall {
+    fn the_forge_and_the_memory_say_what_they_did() {
+        // AGL-068: the hint row under the gutter is the action, the entry
+        // and the action's detail.
+        let append = ToolCall {
             id: "c1".into(),
             name: "forge".into(),
             args: vec![
@@ -598,8 +603,54 @@ mod tests {
                 ("text".into(), Value::Text("the bullet".into())),
             ],
         };
-        assert_eq!(call_hint(&forge), "");
-        assert_eq!(call_action(&forge), Some("append".to_owned()));
+        assert_eq!(call_hint(&append), "append agl-066 Progress");
+        assert_eq!(call_action(&append), Some("append".to_owned()));
+        let new = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("new".into())),
+                ("title".into(), Value::Text("My task".into())),
+            ],
+        };
+        assert_eq!(call_hint(&new), "new My task");
+        let status = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("status".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("state".into(), Value::Text("done".into())),
+            ],
+        };
+        assert_eq!(call_hint(&status), "status agl-066 done");
+        let rename = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("rename".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("new".into(), Value::Text("agl-067".into())),
+            ],
+        };
+        assert_eq!(call_hint(&rename), "rename agl-066 → agl-067");
+        let edit = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("edit".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("old".into(), Value::Text("a".into())),
+                ("new".into(), Value::Text("b".into())),
+            ],
+        };
+        assert_eq!(call_hint(&edit), "edit agl-066");
+        let list = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![("action".into(), Value::Text("list".into()))],
+        };
+        assert_eq!(call_hint(&list), "list");
         let memory = ToolCall {
             id: "c1".into(),
             name: "memory".into(),
@@ -608,8 +659,19 @@ mod tests {
                 ("title".into(), Value::Text("Build".into())),
             ],
         };
-        assert_eq!(call_hint(&memory), "");
+        assert_eq!(call_hint(&memory), "add Build");
         assert_eq!(call_action(&memory), Some("add".to_owned()));
+        let memory_edit = ToolCall {
+            id: "c1".into(),
+            name: "memory".into(),
+            args: vec![
+                ("action".into(), Value::Text("edit".into())),
+                ("name".into(), Value::Text("build".into())),
+                ("old".into(), Value::Text("a".into())),
+                ("new".into(), Value::Text("b".into())),
+            ],
+        };
+        assert_eq!(call_hint(&memory_edit), "edit build");
         assert_eq!(call_action(&call("c1", "ls")), None);
     }
 

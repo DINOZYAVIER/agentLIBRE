@@ -393,17 +393,14 @@ fn tool_lines(
     let gutter = theme.paint(Role::InputRule, "  │ ");
     let inner = columns.saturating_sub(4).max(1);
     let (status_text, status_role) = records::status(result.map(|result| result.outcome));
-    // D28: a forge or a memory call carries its action on the line, and
-    // no row of its own.
-    let action = records::call_action(call);
+    // AGL-068: the action of a forge or a memory call is in the hint row.
     let mut lines = vec![format!(
-        "{}  {}{}",
+        "{}  {}",
         theme.paint(
             Role::Tool,
             &format!("{} {}", tr!(lang, m::TOOL_LABEL), call.name)
         ),
-        theme.paint(status_role, &status_text),
-        action.map_or(String::new(), |action| format!(" {action}"))
+        theme.paint(status_role, &status_text)
     )];
     // D26: the tool's row, like the thinking's, in the muted color.
     if !hint.is_empty() {

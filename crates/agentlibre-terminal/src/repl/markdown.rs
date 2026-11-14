@@ -287,8 +287,9 @@ impl Renderer<'_> {
                 format!(
                     "{quote}{}{}",
                     spaces(outer),
-                    // D23: the marker is part of the body, muted with it.
-                    self.theme.paint(Role::Muted, marker)
+                    // D23, AGL-068: the marker is part of the body, in
+                    // the body's color with it.
+                    self.theme.paint(Role::InputText, marker)
                 )
             }
             None => rest.clone(),
@@ -318,11 +319,11 @@ impl Renderer<'_> {
     }
 
     fn paint(&self, text: &str, _role: Option<Role>) -> String {
-        // The whole body is one muted surface: the plain text carries the
-        // muted color, as the dock's status row draws the Function's name
-        // (AGL-066, D21), and the colored pieces (the headings, the
-        // emphasis, the code, the links) are muted too (D23).
-        self.theme.paint(Role::Muted, text)
+        // The whole body is one surface in the input's text color (AGL-068):
+        // the plain text carries it, as the user's message carries it on
+        // the input's background, and the colored pieces (the headings,
+        // the emphasis, the code, the links) are in it too (D21, D23).
+        self.theme.paint(Role::InputText, text)
     }
 
     /// Wraps `pieces` into lines of at most `avail` columns.
@@ -515,28 +516,29 @@ mod tests {
 
     #[test]
     fn headings_emphasis_and_code_spans() {
-        // AGL-066, D23: the colored pieces are muted with the body.
+        // AGL-068, D23: the colored pieces are in the body's color with
+        // it.
         let theme = Theme::new(true, &[]);
         let lines = render("# Title\n\ntext **bold** and `code`", 40, &theme);
-        assert_eq!(lines[0], theme.paint(Role::Muted, "Title"));
-        assert!(lines[2].contains(&theme.paint(Role::Muted, "bold")));
-        assert!(lines[2].contains(&theme.paint(Role::Muted, "code")));
+        assert_eq!(lines[0], theme.paint(Role::InputText, "Title"));
+        assert!(lines[2].contains(&theme.paint(Role::InputText, "bold")));
+        assert!(lines[2].contains(&theme.paint(Role::InputText, "code")));
         // Punctuation stays with the word before it.
         assert_eq!(plain("**bold**, next", 40), ["bold, next"]);
     }
 
     #[test]
-    fn the_plain_text_carries_the_muted_color() {
-        // AGL-066, D21: the body's text is drawn as the Function's name in
-        // the dock's status row.
+    fn the_plain_text_carries_the_input_color() {
+        // AGL-068: the body's text is the color the input's text is typed
+        // in, as the user's message on the input's background.
         let theme = Theme::new(true, &[]);
         let lines = render("hello world", 40, &theme);
         assert_eq!(
             lines[0],
             format!(
                 "{} {}",
-                theme.paint(Role::Muted, "hello"),
-                theme.paint(Role::Muted, "world")
+                theme.paint(Role::InputText, "hello"),
+                theme.paint(Role::InputText, "world")
             )
         );
     }

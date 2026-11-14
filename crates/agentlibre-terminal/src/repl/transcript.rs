@@ -15,7 +15,7 @@ use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
-use crate::session::{CutOff, Event, ForgeKind, TransitionLine};
+use crate::session::{CutOff, Event, TransitionLine};
 use crate::settings::ReplSettings;
 use crate::style::Role;
 use crate::theme::Theme;
@@ -216,13 +216,6 @@ impl Presenter {
             self.screen.columns(),
             Role::Muted,
         ));
-    }
-
-    /// `[forge: …]` where the agent wrote to the forge (AGL-008).
-    pub fn show_forge(&self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        let message = records::forge_line(name, kind, section, self.lang);
-        self.screen
-            .print(&[self.theme.paint(Role::Muted, &message)]);
     }
 
     /// `[memory: +name]` where the memory was written, then the text that
@@ -432,20 +425,18 @@ impl Presenter {
         let gutter = self.theme.paint(Role::InputRule, "  │ ");
         let inner = columns.saturating_sub(4).max(1);
         let (status_text, status_role) = records::status(result.map(|result| result.outcome));
-        // D28: a forge or a memory call carries its action on the line,
-        // and no row of its own.
-        let action = records::call_action(call);
         let mut lines = Vec::new();
         lines.push(format!(
-            "{}  {}{}",
+            "{}  {}",
             self.theme.paint(
                 Role::Tool,
                 &format!("{} {}", tr!(self.lang, m::TOOL_LABEL), call.name)
             ),
-            self.theme.paint(status_role, &status_text),
-            action.map_or(String::new(), |action| format!(" {action}"))
+            self.theme.paint(status_role, &status_text)
         ));
-        // D26: the tool's row, like the thinking's, in the muted color.
+        // AGL-068: the row under the gutter says what the call did — the
+        // command, the file, the query, or the action of a forge or a
+        // memory call — in the muted color, as the thinking's (D26).
         if !hint.is_empty() {
             for row in hard_wrap(&clean(hint), inner) {
                 lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
@@ -557,14 +548,8 @@ impl Presenter {
                 }
             }
             Report::Event(Event::Answer(text)) => self.answer(&text),
-            Report::Event(Event::Forge {
-                name,
-                kind,
-                section,
-            }) => self.forge(&name, kind, section.as_deref()),
-            Report::Event(Event::Memory { name, kind, text }) => {
-                self.show_memory(&name, kind, text.as_deref())
-            }
+            // AGL-068: the forge's and the memory's rows ride the card's
+            // hint row; the events stay in the session's record.
             Report::Event(Event::CutOff(cut)) => self.cut_off(&cut),
             Report::Stirred {
                 attempt,
@@ -600,8 +585,8 @@ impl Presenter {
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        // D29: the live's lines are the card's own two lines — the label
-        // in the tool's color, the first line under the gutter — so the
+        // D29: the live's lines are the card's own lines — the label in
+        // the tool's color, the thinking's rows under the gutter — so the
         // thinking is formatted as it ends, from the first piece.
         self.screen.live(&thinking_lines(
             &self.theme,
@@ -678,11 +663,6 @@ impl Presenter {
             .print(&self.card(call, Some(result), &hint, &items));
         self.step_open = false;
         self.prefill = None;
-    }
-
-    fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        self.close();
-        self.show_forge(name, kind, section);
     }
 
     fn compacting(&mut self) {
@@ -883,9 +863,13 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
+/// The lines of the thinking the transcript shows by default (AGL-068);
+/// the full text is in the inspect mode.
+pub const THINKING_LINES: usize = 5;
+
 /// The lines of the thinking, like the tool's card (D24): the label,
-/// painted for `role`, and the first line of the thinking under the
-/// gutter, in the muted color (D23).
+/// painted for `role`, and up to `THINKING_LINES` lines of the thinking
+/// under the gutter, in the muted color (D23).
 pub fn thinking_lines(
     theme: &Theme,
     lang: Lang,
@@ -894,20 +878,24 @@ pub fn thinking_lines(
     role: Role,
 ) -> Vec<String> {
     let label = tr!(lang, m::THINKING);
-    let snippet = thinking.lines().next().unwrap_or_default();
     let gutter = theme.paint(Role::InputRule, "  │ ");
-    // The label's width is reserved on the snippet's row too, so the
+    // The label's width is reserved on the snippet's rows too, so the
     // live's lines (the card from the first piece, D29) and the printed
     // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
-    vec![
-        theme.paint(role, label),
-        format!(
+    let mut lines = vec![theme.paint(role, label)];
+    for line in thinking
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(THINKING_LINES)
+    {
+        lines.push(format!(
             "{}{}",
             gutter,
-            theme.paint(Role::Muted, &truncate(snippet, inner))
-        ),
-    ]
+            theme.paint(Role::Muted, &truncate(line, inner))
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -917,6 +905,7 @@ mod tests {
     use super::*;
     use crate::action::{Outcome, Value};
     use crate::phase::{Observer, PhaseEvent, Reports};
+    use crate::session::ForgeKind;
 
     /// What a test tells the presenter, in a word each: the reports of a
     /// turn as the agent sends them (AGL-067).
@@ -1166,20 +1155,38 @@ mod tests {
 
     #[test]
     fn the_thinking_is_like_the_tools_card() {
-        // AGL-066, D24: the thinking is the label's line and its first
-        // line under the gutter, as the tool's card; no rule of its own —
-        // the time of its phase is in the step's rule.
-        let (presenter, mock) = presenter(true);
-        presenter.show_thinking("hm\nmore");
+        // AGL-066, D24, AGL-068: the thinking is the label's line and its
+        // lines under the gutter — up to THINKING_LINES of them, the empty
+        // ones skipped — as the tool's card; no rule of its own, the time
+        // of its phase is in the step's rule.
+        let (first, mock) = presenter(true);
+        first.show_thinking("hm\nmore\n\nthird");
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, vec!["THINKING", "  │ hm"]);
+        assert_eq!(
+            printed,
+            vec!["THINKING", "  │ hm", "  │ more", "  │ third"]
+        );
+        let (second, mock) = presenter(true);
+        second.show_thinking("a\nb\nc\nd\ne\nf");
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(
+            printed,
+            vec![
+                "THINKING",
+                "  │ a",
+                "  │ b",
+                "  │ c",
+                "  │ d",
+                "  │ e"
+            ]
+        );
     }
 
     #[test]
     fn the_live_thinking_is_the_card_from_the_first_piece() {
         // AGL-066, D29: while the thinking streams, the live's lines are
-        // the card's two lines — the label, the snippet under the gutter —
-        // as they are printed when the thinking ends; each fits the screen.
+        // the card's lines — the label, its rows under the gutter — as
+        // they are printed when the thinking ends; each fits the screen.
         let (mut presenter, mock) = presenter(true);
         presenter.thinking(&"a".repeat(80));
         let lines = mock.live.lock().unwrap().clone();
@@ -1751,9 +1758,10 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         // The state a turn starts in is not shown (AGL-046, D13).
         assert!(!printed.contains(&"[work]".to_owned()));
-        // AGL-066, D1: the compact view — the memory's marker alone; the
-        // text written is in the inspect mode.
-        assert!(printed.contains(&"[memory: +build-and-test]".to_owned()));
+        // AGL-068: a forge or a memory write rides the card of its call;
+        // no row of its own, and the text written is not printed.
+        assert!(!printed.iter().any(|line| line.starts_with("[memory:")));
+        assert!(!printed.iter().any(|line| line.starts_with("[forge:")));
         assert!(!printed.contains(&"Run cargo test.".to_owned()));
         // AGL-066, D17, D24: the thinking like the tool's card, its first
         // line under the gutter; no time, as it is replayed.
@@ -1771,7 +1779,6 @@ mod tests {
             .expect("the tool's line");
         assert_eq!(printed[tool + 1], "  │ ls");
         assert!(!printed.contains(&"a".to_owned()));
-        assert!(printed.contains(&"[forge: agl-009 +Progress]".to_owned()));
         // A line per medium (AGL-043 F17).
         assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
         assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
