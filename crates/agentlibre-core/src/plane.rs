@@ -12,12 +12,15 @@ use crate::backend::{Backend, ReasoningLevel};
 use crate::engine::{Autostart, ServerProgress};
 use crate::error::Error;
 use crate::function::Function;
-use crate::i18n::Lang;
-use crate::memory::Home;
+use crate::i18n::{m, Lang};
+use crate::memory::{self, Home, MemoryAction, Write};
 use crate::phase::{Observer, PhaseEvent};
 use crate::search::Searcher;
-use crate::session::Session;
+use crate::session::{Event, Session};
+use crate::status::compact_notice;
+use crate::style::Role;
 use crate::tools::ForgeEnv;
+use crate::tr;
 
 /// What a surface gives a turn on the plane (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
@@ -31,6 +34,81 @@ pub trait Turn: Sink {
     fn stored(&mut self, _session: &Session) {}
     /// The turn is over, before the FSM is closed.
     fn over(&mut self) {}
+}
+
+/// A line a slash command says (AGL-067, F2). Its kinds are what a surface
+/// needs: the stdin session writes `Output` to stdout, says `Fault` on
+/// stderr with `agl: ` before it, and puts both in the session's record;
+/// the REPL paints each in its role.
+#[derive(Debug)]
+pub enum Told {
+    /// The command's answer: `/memory list`, `/memory show`.
+    Output(String),
+    /// What the command did: a new session, a new name, a moved store.
+    Notice(String),
+    /// A refusal of the program's own: a wrong usage, an entry not written.
+    Refusal(String),
+    /// What went wrong, in an [`Error`]'s words.
+    Fault(String),
+    /// A command the human cut short.
+    Pending(String),
+}
+
+/// What a slash command did (AGL-067, F2): the plane does the work once, and
+/// each surface shows [`Told`] and writes the session's record its own way
+/// (D4). What the record holds is `content`, or, for the stdin session, the
+/// lines it was told.
+#[derive(Default)]
+pub struct Said {
+    /// What to say, in its order.
+    pub lines: Vec<Told>,
+    /// A memory entry the command wrote, for the memory line of the surface.
+    pub memory: Option<Write>,
+    /// What the record of the command holds.
+    pub content: Option<String>,
+    /// A command that did not do what was asked.
+    pub failed: bool,
+    /// `/compact` cut short, which ends a stdin session with its code.
+    pub interrupted: bool,
+    /// A line the session would not take: a stdin session ends on it, the
+    /// REPL says it and goes on (D4).
+    pub record_error: Option<Error>,
+}
+
+impl Said {
+    /// A command that met an error.
+    fn fault(error: &Error, lang: Lang) -> Said {
+        Said {
+            lines: vec![Told::Fault(error.message(lang))],
+            failed: true,
+            ..Said::default()
+        }
+    }
+
+    /// A command whose whole saying is one line, recorded as that line.
+    fn told(told: Told) -> Said {
+        let text = match &told {
+            Told::Output(text)
+            | Told::Notice(text)
+            | Told::Refusal(text)
+            | Told::Fault(text)
+            | Told::Pending(text) => text.clone(),
+        };
+        Said {
+            lines: vec![told],
+            content: Some(text),
+            ..Said::default()
+        }
+    }
+}
+
+/// The `Event` of a written memory entry (AGL-047, D5).
+fn written(write: &Write) -> Event {
+    Event::Memory {
+        name: write.name.clone(),
+        kind: write.kind,
+        text: write.text.clone(),
+    }
 }
 
 pub struct Plane<'a> {
@@ -151,5 +229,147 @@ impl Plane<'_> {
         // A start that failed never reached the agent.
         observer.end(PhaseEvent::Failed, &mut *surface);
         end
+    }
+
+    /// `/remember name | text` (AGL-006, M34, M37): the entry is written with
+    /// no turn; the model has it from the record of the command (AGL-047, D5).
+    pub fn remember(&mut self, name: &str, text: &str) -> Said {
+        let (dir, lines) = match self.memory.write() {
+            Ok(both) => both,
+            // A store that will not resolve is said as a failed remembering
+            // in both surfaces, and the REPL records the error's text.
+            Err(error) => {
+                let reason = error.message(self.lang);
+                return Said {
+                    lines: vec![Told::Refusal(
+                        tr!(self.lang, m::REMEMBER_FAILED, reason = reason.clone()).to_string(),
+                    )],
+                    content: Some(reason),
+                    failed: true,
+                    ..Said::default()
+                };
+            }
+        };
+        let (result, write) = memory::remember(&dir, name, text);
+        let mut said = Said {
+            lines: lines.into_iter().map(Told::Notice).collect(),
+            content: Some(result.content),
+            ..Said::default()
+        };
+        match write {
+            Some(write) => {
+                said.memory = Some(write);
+                let event = written(said.memory.as_ref().unwrap());
+                self.keep(&mut said, event);
+            }
+            None => {
+                let content = said.content.clone().unwrap_or_default();
+                said.lines.push(Told::Refusal(
+                    tr!(self.lang, m::REMEMBER_FAILED, reason = content).to_string(),
+                ));
+                said.failed = true;
+            }
+        }
+        said
+    }
+
+    /// `/memory remove <name>` once the human agreed (AGL-060, D7).
+    pub fn remove(&mut self, name: &str) -> Said {
+        let removed = self
+            .memory
+            .look()
+            .and_then(|dir| memory::remove_entry(dir.as_deref(), name));
+        match removed {
+            Ok((content, write)) => {
+                let event = written(&write);
+                let mut said = Said {
+                    memory: Some(write),
+                    content: Some(content),
+                    ..Said::default()
+                };
+                self.keep(&mut said, event);
+                said
+            }
+            Err(error) => Said::fault(&error, self.lang),
+        }
+    }
+
+    /// `/memory list`, `/memory show` (AGL-060, D5).
+    pub fn looked_at(&mut self, action: &MemoryAction) -> Said {
+        match memory::looked_at(self.memory, action, self.lang) {
+            Ok(text) => {
+                let text = text.trim_end().to_owned();
+                Said {
+                    lines: vec![Told::Output(text.clone())],
+                    content: Some(text),
+                    ..Said::default()
+                }
+            }
+            Err(error) => Said::fault(&error, self.lang),
+        }
+    }
+
+    /// `/rename <name>` (AGL-062, D7): the name is a line of the session's file.
+    pub fn rename(&mut self, name: &str) -> Said {
+        match self.session.rename(self.project, name) {
+            Ok(()) => {
+                let named = self.session.name.clone().unwrap_or_default();
+                Said::told(Told::Notice(
+                    tr!(self.lang, m::RENAMED, name = named).to_string(),
+                ))
+            }
+            Err(error) => Said::fault(&error, self.lang),
+        }
+    }
+
+    /// `/new`: a new session on the plane with the `run` snapshot of its
+    /// Function (AGL-063, D4). A surface clears what the old session held.
+    /// A session that cannot be made ends the run: nothing else works.
+    pub fn new_session(&mut self) -> Result<Said, Error> {
+        let new = Session::create_run(
+            self.sessions_dir,
+            self.function_name,
+            &self.workspace,
+            Some(&self.function.snapshot()),
+        )?;
+        self.session = new;
+        Ok(Said::told(Told::Notice(
+            tr!(self.lang, m::NEW_SESSION, id = self.session.id).to_string(),
+        )))
+    }
+
+    /// `/compact`: the summary of the session's start; the reports of the
+    /// turn that makes it go to `sink`.
+    pub fn compact(&mut self, sink: &mut dyn Sink) -> Said {
+        let result = self
+            .backend
+            .context_size()
+            .and_then(|context| self.agent(context).compact(sink));
+        let interrupted = matches!(result, Err(Error::Interrupted));
+        let mut said = Said {
+            interrupted,
+            ..Said::default()
+        };
+        if let Some((text, role)) = compact_notice(result, self.function, self.lang) {
+            said.failed = role != Role::Muted;
+            // The interrupted one is pending, the rest of them a refusal:
+            // a stdin session says none of these with `agl: ` before it.
+            said.lines
+                .push(match role {
+                    Role::Muted => Told::Notice(text.clone()),
+                    Role::StatusPending => Told::Pending(text.clone()),
+                    _ => Told::Refusal(text.clone()),
+                });
+            said.content = Some(text);
+        }
+        said
+    }
+
+    /// The line of a command for the session (AGL-047, D5); a session that
+    /// will not take it is the surface's trouble (D4).
+    fn keep(&mut self, said: &mut Said, event: Event) {
+        if let Err(error) = self.session.append(event) {
+            said.record_error = Some(error);
+        }
     }
 }

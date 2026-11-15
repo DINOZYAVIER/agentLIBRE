@@ -28,6 +28,7 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
+use crate::plane::Told;
 use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
@@ -41,8 +42,7 @@ use crate::media::{self, Clip, Kind, Source};
 use crate::phase::{Observer, PhaseEvent};
 use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
 use crate::status::{
-    COMMANDS, Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember,
-    status_text,
+    COMMANDS, Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use crate::style::Role;
 use crate::theme::Theme;
@@ -750,6 +750,27 @@ fn record(session: &mut Session, line: String, failed: bool, output: Option<Stri
     }));
 }
 
+/// What a command of the plane said (AGL-067, F2): an answer and a notice
+/// muted, a refusal and an error's text as a failure, a command cut short
+/// pending, and the memory line of an entry the command wrote.
+fn show_said(presenter: &Presenter, said: &crate::plane::Said, lang: Lang) {
+    for told in &said.lines {
+        let (text, role) = match told {
+            Told::Output(text) | Told::Notice(text) => (text, Role::Muted),
+            Told::Refusal(text) | Told::Fault(text) => (text, Role::StatusFailure),
+            Told::Pending(text) => (text, Role::StatusPending),
+        };
+        presenter.show_notice(text, role);
+    }
+    if let Some(write) = &said.memory {
+        presenter.show_memory(&write.name, write.kind, write.text.as_deref());
+    }
+    if let Some(error) = &said.record_error {
+        let text = error.message(lang);
+        presenter.show_notice(&text, Role::StatusFailure);
+    }
+}
+
 /// The commands run at the prompt go to the session between turns, so that
 /// none stands between a call and its result (AGL-047, D5).
 fn record_commands(control: &Control, session: &mut Session) {
@@ -813,7 +834,6 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let autostart = plane.autostart;
     let memory = plane.memory;
     let sessions_dir = plane.sessions_dir;
-    let project = plane.project;
     let context = plane.context;
     let reasoning = plane.reasoning;
     let workspace = plane.workspace.clone();
@@ -1038,20 +1058,22 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             },
             Next::New => {
                 record(&mut plane.session, "/new".into(), false, None);
-                match Session::create_run(sessions_dir, function_name, &workspace, Some(&function.snapshot())) {
-                Ok(new) => {
-                    plane.session = new;
-                    let mut inner = control.lock();
-                    inner.info = Info {
-                        session: plane.session.id.clone(),
-                        context: inner.info.context,
-                        ..Info::default()
-                    };
-                    drop(inner);
-                    control.set_media_counts(&plane.session);
-                    presenter.show_notice(&tr!(lang, m::NEW_SESSION, id = plane.session.id), Role::Muted);
-                }
-                Err(error) => presenter.show_notice(&error.message(lang), Role::StatusFailure),
+                match plane.new_session() {
+                    Ok(said) => {
+                        show_said(&presenter, &said, lang);
+                        let mut inner = control.lock();
+                        inner.info = Info {
+                            session: plane.session.id.clone(),
+                            context: inner.info.context,
+                            ..Info::default()
+                        };
+                        drop(inner);
+                        control.set_media_counts(&plane.session);
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                    }
                 }
             }
             Next::Rename(name) => {
@@ -1059,61 +1081,20 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // file. The model has the command from its record (AGL-047,
                 // D5), as with the others.
                 let line = format!("/rename {name}");
-                match plane.session.rename(project, &name) {
-                    Ok(()) => {
-                        let named = plane.session.name.clone().unwrap_or_default();
-                        presenter.show_notice(&tr!(lang, m::RENAMED, name = named), Role::Muted);
-                        record(&mut plane.session, line, false, None);
-                    }
-                    Err(error) => {
-                        let text = error.message(lang);
-                        presenter.show_notice(&text, Role::StatusFailure);
-                        record(&mut plane.session, line, true, Some(text));
-                    }
-                }
+                let said = plane.rename(&name);
+                let (failed, output) = (said.failed, said.content.clone());
+                show_said(&presenter, &said, lang);
+                record(&mut plane.session, line, failed, output);
             }
             Next::Remember(name, text) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
                 // writes the entry, no turn. The model has it from the
                 // record of the command (AGL-047, D5).
                 let line = format!("/remember {name} | {text}");
-                let (failed, output) = match memory.write() {
-                    Ok((dir, lines)) => {
-                        for line in lines {
-                            presenter.show_notice(&line, Role::Muted);
-                        }
-                        let (result, write) = crate::memory::remember(&dir, &name, &text);
-                        match write {
-                            Some(write) => {
-                                if let Err(error) = plane.session.append(Event::Memory {
-                                    name: write.name.clone(),
-                                    kind: write.kind,
-                                    text: write.text.clone(),
-                                }) {
-                                    presenter.show_notice(&error.message(lang), Role::StatusFailure);
-                                }
-                                presenter.show_memory(&write.name, write.kind, write.text.as_deref());
-                                (false, result.content)
-                            }
-                            None => {
-                                presenter.show_notice(
-                                    &tr!(lang, m::REMEMBER_FAILED, reason = result.content),
-                                    Role::StatusFailure,
-                                );
-                                (true, result.content)
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let reason = error.message(lang);
-                        presenter.show_notice(
-                            &tr!(lang, m::REMEMBER_FAILED, reason = reason),
-                            Role::StatusFailure,
-                        );
-                        (true, reason)
-                    }
-                };
-                record(&mut plane.session, line, failed, Some(output));
+                let said = plane.remember(&name, &text);
+                let (failed, output) = (said.failed, said.content.clone());
+                show_said(&presenter, &said, lang);
+                record(&mut plane.session, line, failed, output);
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
@@ -1137,58 +1118,25 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             // The model learns of it from the record, as of `/remember`
             // (AGL-060, D6).
             Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
-                let removed = memory
-                    .look()
-                    .and_then(|dir| crate::memory::remove_entry(dir.as_deref(), &name));
-                let (failed, output) = match removed {
-                    Ok((result, write)) => {
-                        if let Err(error) = plane.session.append(Event::Memory {
-                            name: write.name.clone(),
-                            kind: write.kind,
-                            text: write.text.clone(),
-                        }) {
-                            presenter.show_notice(&error.message(lang), Role::StatusFailure);
-                        }
-                        presenter.show_memory(&write.name, write.kind, write.text.as_deref());
-                        (false, result)
-                    }
-                    Err(error) => {
-                        let text = error.message(lang);
-                        presenter.show_notice(&text, Role::StatusFailure);
-                        (true, text)
-                    }
-                };
-                record(&mut plane.session, line, failed, Some(output));
+                let said = plane.remove(&name);
+                let (failed, output) = (said.failed, said.content.clone());
+                show_said(&presenter, &said, lang);
+                record(&mut plane.session, line, failed, output);
             }
             Next::Memory(line, action) => {
-                let (failed, output) = match crate::memory::looked_at(memory, &action, lang) {
-                    Ok(text) => {
-                        let text = text.trim_end().to_owned();
-                        presenter.show_notice(&text, Role::Muted);
-                        (false, text)
-                    }
-                    Err(error) => {
-                        let text = error.message(lang);
-                        presenter.show_notice(&text, Role::StatusFailure);
-                        (true, text)
-                    }
-                };
-                record(&mut plane.session, line, failed, Some(output));
+                let said = plane.looked_at(&action);
+                let (failed, output) = (said.failed, said.content.clone());
+                show_said(&presenter, &said, lang);
+                record(&mut plane.session, line, failed, output);
             }
             Next::Compact => {
                 plane.reasoning = control.lock().reasoning;
-                let result = backend.context_size().and_then(|context| {
-                    plane
-                        .agent(context)
-                        .compact(&mut |report: Report| show(&mut presenter, &control, report))
-                });
+                let said =
+                    plane.compact(&mut |report: Report| show(&mut presenter, &control, report));
                 control.lock().running = false;
-                let notice = compact_notice(result, function, lang);
-                if let Some((text, role)) = &notice {
-                    presenter.show_notice(text, *role);
-                }
-                let failed = notice.as_ref().is_some_and(|(_, role)| *role != Role::Muted);
-                record(&mut plane.session, "/compact".into(), failed, notice.map(|(text, _)| text));
+                let (failed, output) = (said.failed, said.content.clone());
+                show_said(&presenter, &said, lang);
+                record(&mut plane.session, "/compact".into(), failed, output);
                 presenter.set_ready();
             }
             Next::Message(Queued {
@@ -1260,6 +1208,7 @@ mod tests {
 
     use super::*;
     use crate::agent::Compaction;
+    use crate::status::compact_notice;
     use crate::function::Function;
     use crate::settings::ReplSettings;
 

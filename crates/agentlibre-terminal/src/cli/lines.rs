@@ -11,12 +11,13 @@ use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
-use crate::i18n::{m, repl as texts};
+use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
+use crate::plane::{Said, Told};
 use crate::session::{CommandRun, Event, Session, StopReason};
 use crate::status::{
-    Facts, Info, Remember, compact_notice, display_path, help_text, parse_remember, status_text,
+    Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use crate::tr;
 use crate::outln;
@@ -29,11 +30,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     } = setup;
     let function = plane.function;
     let function_name = plane.function_name;
-    let backend = plane.backend;
     let lang = plane.lang;
-    let memory = plane.memory;
-    let sessions_dir = plane.sessions_dir;
-    let project = plane.project;
     let workspace = plane.workspace.clone();
     let facts = Facts {
         function: function_name.into(),
@@ -64,7 +61,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         if message.starts_with('/') {
             let name = message.split_whitespace().next().unwrap_or(message);
             // What the command says goes to the session too (AGL-047, D5).
-            let mut said = Said::default();
+            let mut said = Record::default();
             match name {
                 "/quit" | "/exit" => {
                     said.record(&mut plane.session, message);
@@ -87,36 +84,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     said.output.push(text.to_string());
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
-                    Remember::Entry { name, text } => match memory.write() {
-                        Ok((dir, lines)) => {
-                            for line in lines {
-                                eprintln!("{line}");
-                            }
-                            match crate::memory::remember(&dir, &name, &text) {
-                                (_, Some(write)) => {
-                                    plane.session.append(Event::Memory {
-                                        name: write.name.clone(),
-                                        kind: write.kind,
-                                        text: write.text.clone(),
-                                    })?;
-                                    StderrReport::new(lang).memory(
-                                        &write.name,
-                                        write.kind,
-                                        write.text.as_deref(),
-                                    );
-                                    said.output.push(format!("Remembered `{}`.", write.name));
-                                }
-                                (result, None) => said.fail(
-                                    tr!(lang, m::REMEMBER_FAILED, reason = result.content)
-                                        .to_string(),
-                                ),
-                            }
-                        }
-                        Err(error) => said.fail(
-                            tr!(lang, m::REMEMBER_FAILED, reason = error.message(lang))
-                                .to_string(),
-                        ),
-                    },
+                    Remember::Entry { name, text } => {
+                        said.tell(plane.remember(&name, &text), lang)?;
+                    }
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
                         said.fail(tr!(lang, m::REMEMBER_USAGE).to_string());
@@ -130,36 +100,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         Error::MemoryRemoveNeedsYes { name }.message(lang)
                     )),
                     Ok(MemoryAction::Remove { name, yes: true }) => {
-                        let removed = memory
-                            .look()
-                            .and_then(|dir| crate::memory::remove_entry(dir.as_deref(), &name));
-                        match removed {
-                            Ok((result, write)) => {
-                                plane.session.append(Event::Memory {
-                                    name: write.name.clone(),
-                                    kind: write.kind,
-                                    text: write.text.clone(),
-                                })?;
-                                StderrReport::new(lang).memory(
-                                    &write.name,
-                                    write.kind,
-                                    write.text.as_deref(),
-                                );
-                                said.output.push(result);
-                            }
-                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
-                        }
+                        said.tell(plane.remove(&name), lang)?;
                     }
-                    Ok(action) => {
-                        match crate::memory::looked_at(memory, &action, lang) {
-                            Ok(text) => {
-                                let text = text.trim_end();
-                                outln!("{text}");
-                                said.output.push(text.to_owned());
-                            }
-                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
-                        }
-                    }
+                    Ok(action) => said.tell(plane.looked_at(&action), lang)?,
                 },
                 "/attach" => {
                     let path = unquote(message["/attach".len()..].trim());
@@ -182,47 +125,27 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     }
                 }
                 "/rename" => {
-                    let text = message["/rename".len()..].trim();
-                    if text.is_empty() {
+                    let name = message["/rename".len()..].trim();
+                    if name.is_empty() {
                         said.fail(tr!(lang, m::RENAME_USAGE).to_string());
                     } else {
-                        match plane.session.rename(project, text) {
-                            Ok(()) => {
-                                let named = plane.session.name.clone().unwrap_or_default();
-                                let text = tr!(lang, m::RENAMED, name = named).to_string();
-                                eprintln!("{text}");
-                                said.output.push(text);
-                            }
-                            Err(error) => said.fail(format!("agl: {}", error.message(lang))),
-                        }
+                        said.tell(plane.rename(name), lang)?;
                     }
                 }
                 "/new" => {
                     said.record(&mut plane.session, message);
-                    said = Said::recorded();
+                    said = Record::recorded();
                     // A new session records the `run` snapshot of its
                     // Function (AGL-063, D4).
-                    plane.session = Session::create_run(
-                        sessions_dir,
-                        function_name,
-                        &workspace,
-                        Some(&function.snapshot()),
-                    )?;
+                    said.tell(plane.new_session()?, lang)?;
                     pending.clear();
                     placeholders.clear();
                     state = None;
-                    eprintln!("{}", tr!(lang, m::NEW_SESSION, id = plane.session.id));
                 }
                 "/compact" => {
-                    let result = backend
-                        .context_size()
-                        .and_then(|context| plane.agent(context).compact(&mut StderrReport::new(lang)));
-                    let interrupted = matches!(result, Err(Error::Interrupted));
-                    if let Some((text, role)) = compact_notice(result, function, lang) {
-                        eprintln!("{text}");
-                        said.failed = role != crate::style::Role::Muted;
-                        said.output.push(text);
-                    }
+                    let ran = plane.compact(&mut StderrReport::new(lang));
+                    let interrupted = ran.interrupted;
+                    said.tell(ran, lang)?;
                     if interrupted {
                         said.record(&mut plane.session, message);
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
@@ -269,18 +192,18 @@ fn unquote(path: &str) -> &str {
 
 /// What a slash command said, for the session (AGL-047, D5).
 #[derive(Default)]
-struct Said {
+struct Record {
     output: Vec<String>,
     failed: bool,
     recorded: bool,
 }
 
-impl Said {
+impl Record {
     /// For a command already written to the session it leaves, as `/new`.
-    fn recorded() -> Said {
-        Said {
+    fn recorded() -> Record {
+        Record {
             recorded: true,
-            ..Said::default()
+            ..Record::default()
         }
     }
 
@@ -288,6 +211,46 @@ impl Said {
         eprintln!("{text}");
         self.output.push(text);
         self.failed = true;
+    }
+
+    /// What a command of the plane did (AGL-067, F2): its answer to stdout,
+    /// a notice to stderr, a refusal plain and an error's text with the
+    /// `agl: ` this session puts before it; the answer, a refusal and an
+    /// error go into the record, and what the command did when no answer was
+    /// printed. A session that would not take the command's line ends the
+    /// run (D4).
+    fn tell(&mut self, said: Said, lang: Lang) -> Result<(), Error> {
+        let Said {
+            lines,
+            memory,
+            content,
+            failed: _,
+            interrupted: _,
+            record_error,
+        } = said;
+        if let Some(error) = record_error {
+            return Err(error);
+        }
+        let mut answer = false;
+        for told in lines {
+            match told {
+                Told::Output(text) => {
+                    outln!("{text}");
+                    self.output.push(text);
+                    answer = true;
+                }
+                Told::Notice(text) | Told::Pending(text) => eprintln!("{text}"),
+                Told::Refusal(text) => self.fail(text),
+                Told::Fault(text) => self.fail(format!("agl: {text}")),
+            }
+        }
+        if let Some(write) = memory {
+            StderrReport::new(lang).memory(&write.name, write.kind, write.text.as_deref());
+        }
+        if !self.failed && !answer && let Some(text) = content {
+            self.output.push(text);
+        }
+        Ok(())
     }
 
     /// A session that cannot be written to says so at the next turn.
