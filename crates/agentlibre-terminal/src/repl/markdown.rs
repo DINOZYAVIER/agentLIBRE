@@ -318,12 +318,13 @@ impl Renderer<'_> {
         self.mark_shown();
     }
 
-    fn paint(&self, text: &str, _role: Option<Role>) -> String {
-        // The whole body is one surface in the input's text color (AGL-068):
-        // the plain text carries it, as the user's message carries it on
-        // the input's background, and the colored pieces (the headings,
-        // the emphasis, the code, the links) are in it too (D21, D23).
-        self.theme.paint(Role::InputText, text)
+    fn paint(&self, text: &str, role: Option<Role>) -> String {
+        // The body's principal color is the input's text color (AGL-068): the
+        // plain text carries it, as the user's message carries it on the
+        // input's background, and every role paints its own style over it --
+        // a role with a color wins on the color, one without keeps the body's
+        // (AGL-066 D21 and D23 as AGL-072 D2 reads them).
+        self.theme.paint_over(Role::InputText, role, text)
     }
 
     /// Wraps `pieces` into lines of at most `avail` columns.
@@ -456,7 +457,11 @@ impl Renderer<'_> {
                         Some(cell) => {
                             let pad = " ".repeat(widths[column] - width(&cell.plain));
                             let text = if index < table.header_rows {
-                                self.theme.paint(Role::MarkdownStrong, &cell.plain)
+                                self.theme.paint_over(
+                                    Role::InputText,
+                                    Some(Role::MarkdownStrong),
+                                    &cell.plain,
+                                )
                             } else {
                                 cell.styled.clone()
                             };
@@ -516,13 +521,18 @@ mod tests {
 
     #[test]
     fn headings_emphasis_and_code_spans() {
-        // AGL-068, D23: the colored pieces are in the body's color with
-        // it.
+        // AGL-072, D2: every role paints its style over the body's color.
         let theme = Theme::new(true, &[]);
+        let over = |role: Role, text: &str| theme.paint_over(Role::InputText, Some(role), text);
         let lines = render("# Title\n\ntext **bold** and `code`", 40, &theme);
-        assert_eq!(lines[0], theme.paint(Role::InputText, "Title"));
-        assert!(lines[2].contains(&theme.paint(Role::InputText, "bold")));
-        assert!(lines[2].contains(&theme.paint(Role::InputText, "code")));
+        assert_eq!(lines[0], over(Role::MarkdownHeading, "Title"));
+        assert!(lines[2].contains(&over(Role::MarkdownStrong, "bold")));
+        assert!(lines[2].contains(&over(Role::MarkdownInlineCode, "code")));
+        // The bold keeps the body's color under its attribute, and the
+        // heading's own color wins over it.
+        let base = theme.start(Role::InputText);
+        assert!(over(Role::MarkdownStrong, "bold").starts_with(&format!("{base}\x1b[1m")));
+        assert!(over(Role::MarkdownHeading, "Title").starts_with(&format!("{base}\x1b[1;")));
         // Punctuation stays with the word before it.
         assert_eq!(plain("**bold**, next", 40), ["bold, next"]);
     }
@@ -540,6 +550,15 @@ mod tests {
                 theme.paint(Role::InputText, "hello"),
                 theme.paint(Role::InputText, "world")
             )
+        );
+    }
+
+    #[test]
+    fn styles_are_plain_when_colors_are_off() {
+        // AGL-072: with colors off a styled body carries no escape at all.
+        assert_eq!(
+            plain("# Title\n\ntext **bold** and *em*", 40),
+            ["Title", "", "text bold and em"]
         );
     }
 

@@ -54,6 +54,22 @@ impl Theme {
         }
     }
 
+    /// `text` in the style of `role` over the base style of `base`
+    /// (AGL-072, D2): the base starts, the role follows, so the role's color
+    /// wins over the base's and its attributes add while a role without a
+    /// color keeps the base's. `None` is the base alone; colors off give no
+    /// escape at all.
+    pub fn paint_over(&self, base: Role, role: Option<Role>, text: &str) -> String {
+        let start = match role {
+            Some(role) => format!("{}{}", self.start(base), self.start(role)),
+            None => self.start(base),
+        };
+        if start.is_empty() {
+            return text.into();
+        }
+        format!("{start}{text}{}", self.reset())
+    }
+
     /// The already-painted `row` on the background of `role` (AGL-066,
     /// D16): the background starts the row and is re-asserted after every
     /// reset the row carries, so the row's own styles stay on it.
@@ -99,6 +115,30 @@ mod tests {
             "\x1b[1;38;2;123;216;143mok\x1b[0m"
         );
         assert!(theme.start(Role::InputBackground).contains("48;2"));
+    }
+
+    #[test]
+    fn a_role_paints_over_its_base() {
+        // AGL-072, D2: the base starts, the role follows; the role's color
+        // wins over the base's and an attribute-only role keeps it.
+        let theme = Theme::new(true, &[]);
+        assert_eq!(
+            theme.paint_over(Role::InputText, Some(Role::MarkdownStrong), "x"),
+            "\x1b[38;2;255;226;226m\x1b[1mx\x1b[0m"
+        );
+        assert_eq!(
+            theme.paint_over(Role::InputText, Some(Role::StatusSuccess), "x"),
+            "\x1b[38;2;255;226;226m\x1b[1;38;2;123;216;143mx\x1b[0m"
+        );
+        // No role is the base alone, and colors off give no escape.
+        assert_eq!(
+            theme.paint_over(Role::InputText, None, "x"),
+            theme.paint(Role::InputText, "x")
+        );
+        assert_eq!(
+            Theme::plain().paint_over(Role::InputText, Some(Role::Tool), "x"),
+            "x"
+        );
     }
 
     #[test]
