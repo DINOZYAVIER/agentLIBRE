@@ -34,6 +34,9 @@ const LONG_LINE_SHOWN: usize = 1024;
 /// The longest file name of an entry, without `.md`.
 const NAME_LIMIT: usize = 64;
 
+/// What starts the runtime message with the index of the memory.
+pub const MEMORY_MESSAGE: &str = "workspace memory\n";
+
 /// Where the memory of the workspace is (AGL-006): the agent asks it at
 /// each step and for each write; the interactive session asks it for
 /// `/remember`.
@@ -51,6 +54,73 @@ pub trait Home: Send + Sync {
     /// yet (M23); the lines say what the resolution did (a move, an
     /// adoption, the store made).
     fn write(&self) -> Result<(PathBuf, Vec<String>), Error>;
+    /// The workspace's memory to read, when a write or a look names it in
+    /// a plane (AGL-077, D8); outside a plane, the same as [`Home::read`].
+    fn read_workspace(&self) -> Option<PathBuf> {
+        self.read()
+    }
+    /// The workspace's memory to write (AGL-077, D8).
+    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        self.write()
+    }
+    /// The memory message the model is shown (AGL-006, M27): its heading
+    /// line, then the index; in a plane, the plane's and the workspace's,
+    /// each marked (AGL-077, D8). `None` when there is nothing.
+    fn index(&self) -> Option<String> {
+        self.read()
+            .and_then(|dir| index_text(&dir))
+            .map(|index| format!("{MEMORY_MESSAGE}{index}"))
+    }
+}
+
+/// The memory of a run in a plane (AGL-077, D8): the plane's, which a write
+/// goes to, and the workspace's beside it.
+pub struct PlaneHome {
+    /// The plane's name, for the mark of its index.
+    pub name: String,
+    /// The plane's `memory/`.
+    pub dir: PathBuf,
+    /// The workspace's memory.
+    pub workspace: Box<dyn Home>,
+}
+
+impl Home for PlaneHome {
+    fn read(&self) -> Option<PathBuf> {
+        Some(self.dir.clone())
+    }
+
+    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        fs::create_dir_all(&self.dir).map_err(|source| Error::Write {
+            path: self.dir.clone(),
+            source,
+        })?;
+        Ok((self.dir.clone(), Vec::new()))
+    }
+
+    fn read_workspace(&self) -> Option<PathBuf> {
+        self.workspace.read()
+    }
+
+    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        self.workspace.write()
+    }
+
+    fn index(&self) -> Option<String> {
+        let plane = index_text(&self.dir);
+        let workspace = self.workspace.read().and_then(|dir| index_text(&dir));
+        if plane.is_none() && workspace.is_none() {
+            return None;
+        }
+        let none = "(no entries)";
+        Some(format!(
+            "memory of the plane {name} and of the workspace\n\
+             [the plane {name}; writes go here]\n{plane}\n\n\
+             [the workspace; write here with store=workspace]\n{workspace}",
+            name = self.name,
+            plane = plane.as_deref().unwrap_or(none),
+            workspace = workspace.as_deref().unwrap_or(none),
+        ))
+    }
 }
 
 /// The memory in the store of the project of `workspace`, found the way
@@ -137,6 +207,8 @@ pub struct Write {
 /// not use is empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Args {
+    /// `workspace`: in a plane, the workspace's memory (AGL-077, D8).
+    pub store: String,
     pub action: String,
     pub name: String,
     pub title: String,
@@ -152,6 +224,7 @@ impl Args {
     pub fn from_call(call: &crate::backend::ToolCall) -> Args {
         let text = |name: &str| call.text(name).unwrap_or_default().to_owned();
         Args {
+            store: text("store"),
             action: text("action"),
             name: text("name"),
             title: text("title"),
@@ -1479,5 +1552,50 @@ mod listing_tests {
             remove_asked(None, "one", true, None, Lang::En),
             Err(Error::MemoryNoEntry { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod plane_tests {
+    use super::*;
+    use crate::forge::testutil::TempDir;
+
+    /// The workspace's memory of a test: a directory, or none.
+    struct Dir(Option<PathBuf>);
+
+    impl Home for Dir {
+        fn read(&self) -> Option<PathBuf> {
+            self.0.clone()
+        }
+
+        fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+            Ok((self.0.clone().unwrap(), Vec::new()))
+        }
+    }
+
+    #[test]
+    fn in_a_plane_the_model_sees_both_indexes_and_writes_go_to_the_planes() {
+        // AGL-077, D8.
+        let dir = TempDir::new();
+        let (plane_dir, workspace_dir) = (dir.0.join("plane"), dir.0.join("workspace"));
+        let home = PlaneHome {
+            name: "work".into(),
+            dir: plane_dir.clone(),
+            workspace: Box::new(Dir(Some(workspace_dir.clone()))),
+        };
+        assert_eq!(home.index(), None, "nothing in either");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        let (result, _) = add(&workspace_dir, "Build", "how to build", "cargo build", None);
+        assert_eq!(result.outcome, Outcome::Ok);
+        let index = home.index().unwrap();
+        assert!(index.starts_with("memory of the plane work and of the workspace\n"), "{index}");
+        assert!(index.contains("[the plane work; writes go here]\n(no entries)"), "{index}");
+        assert!(index.contains("[the workspace; write here with store=workspace]\n- [Build]"), "{index}");
+        let (written, _) = home.write().unwrap();
+        assert_eq!(written, plane_dir);
+        assert!(plane_dir.is_dir());
+        assert_eq!(home.write_workspace().unwrap().0, workspace_dir);
+        // Outside a plane the heading is the workspace's, as before.
+        assert!(Dir(Some(workspace_dir)).index().unwrap().starts_with(MEMORY_MESSAGE));
     }
 }

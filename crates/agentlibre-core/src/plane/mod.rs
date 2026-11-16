@@ -435,10 +435,19 @@ impl Plane {
             .server
             .image_max_tokens
             .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
-        let memory = memory::StoreHome {
+        let store = memory::StoreHome {
             workspace: workspace.clone(),
             auto_rehome,
             lang,
+        };
+        // In a plane, the plane's memory beside the workspace's (D8).
+        let memory: Arc<dyn Home> = match &plane_file {
+            Some(plane) => Arc::new(memory::PlaneHome {
+                name: plane.name.clone(),
+                dir: plane.memory_dir(),
+                workspace: Box::new(store),
+            }),
+            None => Arc::new(store),
         };
         // The settings' `server` is the effective one (the function's
         // `[server]` table when the file declares it, AGL-033, D1, D3), and
@@ -520,7 +529,7 @@ impl Plane {
             reasoning,
             image_tokens,
             search,
-            memory: Arc::new(memory),
+            memory,
             about,
             stop,
         };
@@ -656,8 +665,14 @@ impl Plane {
 
     /// `/remember name | text` (AGL-006, M34, M37): the entry is written with
     /// no turn; the model has it from the record of the command (AGL-047, D5).
-    pub fn remember(&mut self, name: &str, text: &str) -> Said {
-        let (dir, lines) = match self.memory.write() {
+    pub fn remember(&mut self, name: &str, text: &str, workspace: bool) -> Said {
+        // The plane's memory, the workspace's by `--workspace` (AGL-077, D8).
+        let found = if workspace {
+            self.memory.write_workspace()
+        } else {
+            self.memory.write()
+        };
+        let (dir, lines) = match found {
             Ok(both) => both,
             // A store that will not resolve is said as a failed remembering
             // in both surfaces, and the REPL records the error's text.

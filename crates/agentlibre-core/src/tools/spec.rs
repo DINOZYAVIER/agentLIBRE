@@ -277,6 +277,14 @@ pub const SPECS: [Spec; 6] = [
                 false,
                 Some("For edit: the exact text to replace in the entry; it must appear once."),
             ),
+            ParamSpec::text(
+                "store",
+                false,
+                Some(
+                    "In a plane: `workspace` acts on the workspace's memory instead of the \
+                     plane's. Outside a plane it is not used.",
+                ),
+            ),
             ParamSpec::text("text", false, Some("For add: the full text of the entry.")),
             ParamSpec::text(
                 "title",

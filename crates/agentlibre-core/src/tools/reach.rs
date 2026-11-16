@@ -113,13 +113,18 @@ fn memory_tool(
             None,
         )
     };
+    // In a plane, the plane's memory, the workspace's by `store`
+    // (AGL-077, D8).
+    let workspace = args.store == "workspace";
     let (dir, lines) = if args.action == "add" {
-        match home.write() {
+        let found = if workspace { home.write_workspace() } else { home.write() };
+        match found {
             Ok(found) => found,
             Err(error) => return fail(error.message(Lang::En)),
         }
     } else {
-        match home.read() {
+        let found = if workspace { home.read_workspace() } else { home.read() };
+        match found {
             Some(dir) => (dir, Vec::new()),
             None => return fail("The memory of this workspace has no entries yet.".into()),
         }

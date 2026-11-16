@@ -30,8 +30,8 @@ pub enum Command {
         reasoning: Option<ReasoningLevel>,
         observer: Option<Observer>,
     },
-    /// `/remember name | text` (AGL-006).
-    Remember { name: String, text: String },
+    /// `/remember [--workspace] name | text` (AGL-006; AGL-077, D8).
+    Remember { name: String, text: String, workspace: bool },
     /// `/memory remove <name>` once agreed (AGL-060, D7).
     Remove { name: String },
     /// `/memory list`, `/memory show` (AGL-060, D5).
@@ -213,7 +213,11 @@ impl Plane {
                 };
                 (Some(end), None)
             }
-            Command::Remember { name, text } => (None, Some(Ok(self.remember(&name, &text)))),
+            Command::Remember {
+                name,
+                text,
+                workspace,
+            } => (None, Some(Ok(self.remember(&name, &text, workspace)))),
             Command::Remove { name } => (None, Some(Ok(self.remove(&name)))),
             Command::LookAt(action) => (None, Some(Ok(self.looked_at(&action)))),
             Command::Rename(name) => (None, Some(Ok(self.rename(&name)))),

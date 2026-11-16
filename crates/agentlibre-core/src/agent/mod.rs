@@ -78,9 +78,6 @@ impl<F: FnMut(Report)> Sink for F {
     }
 }
 
-/// What starts the runtime message with the index of the memory.
-const MEMORY_MESSAGE: &str = "workspace memory\n";
-
 /// How a turn ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TurnEnd {
@@ -459,7 +456,8 @@ impl Agent<'_> {
             .collect();
         self.session.record_input("tools", &tool_docs.join("\n"))?;
         let memory = match messages.get(1) {
-            Some(Message::Runtime(text)) => text.strip_prefix(MEMORY_MESSAGE).unwrap_or(""),
+            // The index without its heading line.
+            Some(Message::Runtime(text)) => text.split_once('\n').map_or("", |(_, index)| index),
             _ => "",
         };
         self.session.record_input("memory_index", memory)?;
@@ -505,11 +503,9 @@ impl Agent<'_> {
         }
         let mut messages = vec![Message::System(system)];
         let memory = self.memory;
-        let index = self
-            .session
-            .memory_index(|| memory.read().and_then(|dir| crate::memory::index_text(&dir)));
-        if let Some(index) = index {
-            messages.push(Message::Runtime(format!("{MEMORY_MESSAGE}{index}")));
+        // The heading and the index, both marked in a plane (AGL-077, D8).
+        if let Some(index) = self.session.memory_index(|| memory.index()) {
+            messages.push(Message::Runtime(index));
         }
         messages.extend(self.session.history());
         messages

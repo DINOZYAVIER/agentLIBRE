@@ -49,8 +49,10 @@ pub const COMMANDS: [&str; 12] = [
 pub enum Remember {
     /// Nothing after the command.
     Usage,
-    /// `/remember name | text`: the program writes the entry itself.
-    Entry { name: String, text: String },
+    /// `/remember [--workspace] name | text`: the program writes the entry
+    /// itself; `workspace` names the workspace's memory in a plane
+    /// (AGL-077, D8).
+    Entry { name: String, text: String, workspace: bool },
     /// `/remember text`: an ordinary turn with this message; the model
     /// names the entry.
     Turn(String),
@@ -60,10 +62,16 @@ pub enum Remember {
 /// the text after (M37); an empty name or text is the usage.
 pub fn parse_remember(rest: &str) -> Remember {
     let rest = rest.trim();
+    // `--workspace` first: the workspace's memory in a plane (AGL-077, D8).
+    let (workspace, rest) = match rest.strip_prefix("--workspace") {
+        Some(after) if after.is_empty() || after.starts_with(char::is_whitespace) => (true, after.trim()),
+        _ => (false, rest),
+    };
     if rest.is_empty() {
         return Remember::Usage;
     }
     match rest.split_once('|') {
+        None if workspace => Remember::Turn(format!("remember, in the workspace's memory: {rest}")),
         None => Remember::Turn(format!("remember: {rest}")),
         Some((name, text)) => {
             let (name, text) = (name.trim(), text.trim());
@@ -73,6 +81,7 @@ pub fn parse_remember(rest: &str) -> Remember {
                 Remember::Entry {
                     name: name.to_owned(),
                     text: text.to_owned(),
+                    workspace,
                 }
             }
         }
@@ -192,6 +201,7 @@ mod tests {
             Remember::Entry {
                 name: "Build and test".into(),
                 text: "cargo build / cargo test".into(),
+                workspace: false,
             }
         );
         // Only the first bar divides; the text may hold more.
@@ -200,6 +210,15 @@ mod tests {
             Remember::Entry {
                 name: "Pipes".into(),
                 text: "a | b".into(),
+                workspace: false,
+            }
+        );
+        assert_eq!(
+            parse_remember("--workspace Build | cargo build"),
+            Remember::Entry {
+                name: "Build".into(),
+                text: "cargo build".into(),
+                workspace: true,
             }
         );
         // No name or no text: the usage.

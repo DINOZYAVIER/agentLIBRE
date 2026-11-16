@@ -102,8 +102,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     said.output.push(text.to_string());
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
-                    Remember::Entry { name, text } => {
-                        let done = ask(Command::Remember { name, text }, &mut session)?;
+                    Remember::Entry { name, text, workspace } => {
+                        let done = ask(Command::Remember { name, text, workspace }, &mut session)?;
                         said.tell(done.said.expect("a command's saying")?, lang)?;
                     }
                     // The turn form was made a message above.

@@ -170,7 +170,7 @@ enum Request {
     /// (AGL-036, D4).
     Switch(String),
     /// `/remember name | text`, for the main thread to write (AGL-006).
-    Remember(String, String),
+    Remember(String, String, bool),
     /// `/rename <name>`, for the main thread to write (AGL-062, D7).
     Rename(String),
     /// `/memory`, its line and action, for the main thread to run
@@ -207,7 +207,7 @@ impl Requests {
     #[cfg(test)]
     fn remember(&self) -> Option<(String, String)> {
         self.0.iter().find_map(|request| match request {
-            Request::Remember(name, text) => Some((name.clone(), text.clone())),
+            Request::Remember(name, text, _) => Some((name.clone(), text.clone())),
             _ => None,
         })
     }
@@ -428,7 +428,11 @@ impl Input {
                 }
                 // The entry is written by the main thread, which holds the
                 // session: not while a turn runs (as `/new`).
-                Remember::Entry { name, text } => {
+                Remember::Entry {
+                    name,
+                    text,
+                    workspace,
+                } => {
                     let mut inner = self.control.lock();
                     if inner.busy() {
                         drop(inner);
@@ -437,7 +441,7 @@ impl Input {
                             Role::StatusPending,
                         );
                     } else {
-                        inner.requests.push(Request::Remember(name, text));
+                        inner.requests.push(Request::Remember(name, text, workspace));
                         drop(inner);
                         self.control.wake.notify_all();
                     }
@@ -720,7 +724,7 @@ enum Next {
     Message(Queued),
     New,
     Compact,
-    Remember(String, String),
+    Remember(String, String, bool),
     /// `/rename`: the name asked for (AGL-062).
     Rename(String),
     /// `/memory`: its line and action (AGL-060).
@@ -832,7 +836,7 @@ fn wait_for_next(control: &Control) -> Next {
                 Request::New => Next::New,
                 Request::Functions => Next::Functions,
                 Request::Switch(name) => Next::Switch(name),
-                Request::Remember(name, text) => Next::Remember(name, text),
+                Request::Remember(name, text, workspace) => Next::Remember(name, text, workspace),
                 Request::Rename(name) => Next::Rename(name),
                 Request::Memory(line, action) => Next::Memory(line, action),
                 Request::Compact => {
@@ -1213,12 +1217,13 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // D5), as with the others.
                 said(&ask, &record, &presenter, Command::Rename(name.clone()), format!("/rename {name}"), lang)
             }
-            Next::Remember(name, text) => {
+            Next::Remember(name, text, workspace) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
                 // writes the entry, no turn. The model has it from the
                 // record of the command (AGL-047, D5).
-                let line = format!("/remember {name} | {text}");
-                said(&ask, &record, &presenter, Command::Remember { name, text }, line, lang)
+                let flag = if workspace { "--workspace " } else { "" };
+                let line = format!("/remember {flag}{name} | {text}");
+                said(&ask, &record, &presenter, Command::Remember { name, text, workspace }, line, lang)
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
@@ -1869,7 +1874,7 @@ mod tests {
         f.inner().queue.push_back("later".into());
         assert!(matches!(
             wait_for_next(&f.input.control),
-            Next::Remember(name, text) if name == "Build and test" && text == "cargo build / cargo test"
+            Next::Remember(name, text, _) if name == "Build and test" && text == "cargo build / cargo test"
         ));
         assert!(f.inner().requests.remember().is_none());
         // During a turn it is refused, as `/new` is, and nothing is kept.
