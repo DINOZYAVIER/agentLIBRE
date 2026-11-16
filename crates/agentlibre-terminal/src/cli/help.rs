@@ -5,13 +5,14 @@ use crate::cli::args::HelpTopic;
 use crate::i18n::{Lang, Msg, m};
 
 /// The usage and the section of each command, in the order of the help.
-const COMMANDS: [(HelpTopic, Msg, Msg); 7] = [
+const COMMANDS: [(HelpTopic, Msg, Msg); 8] = [
     (HelpTopic::Init, m::HELP_INIT_USAGE, m::HELP_INIT),
     (HelpTopic::Server, m::HELP_SERVER_USAGE, m::HELP_SERVER),
     (HelpTopic::Function, m::HELP_FUNCTION_USAGE, m::HELP_FUNCTION),
     (HelpTopic::Search, m::HELP_SEARCH_USAGE, m::HELP_SEARCH),
     (HelpTopic::Memory, m::HELP_MEMORY_USAGE, m::HELP_MEMORY),
     (HelpTopic::Session, m::HELP_SESSION_USAGE, m::HELP_SESSION),
+    (HelpTopic::Notify, m::HELP_NOTIFY_USAGE, m::HELP_NOTIFY),
     (HelpTopic::Forge, m::HELP_FORGE_USAGE, m::HELP_FORGE),
 ];
 

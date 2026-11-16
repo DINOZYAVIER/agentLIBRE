@@ -34,6 +34,9 @@ pub enum Command {
     Memory(MemoryAction),
     /// `agl session show <id|name|last>` (AGL-063, D3).
     Session(SessionShow),
+    /// `agl notify`: the running sessions told on the desktop (AGL-074,
+    /// D2).
+    Notify,
 }
 
 /// What `--help` shows (AGL-061, D3): the help of the program, or of one
@@ -47,6 +50,7 @@ pub enum HelpTopic {
     Search,
     Memory,
     Session,
+    Notify,
     Forge,
 }
 
@@ -160,6 +164,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("search") => HelpTopic::Search,
         Some("memory") => HelpTopic::Memory,
         Some("session") => HelpTopic::Session,
+        Some("notify") => HelpTopic::Notify,
         Some("forge") => HelpTopic::Forge,
         // Only the first word is a command; a message may say "forge".
         _ => return run_args(args),
@@ -175,6 +180,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             memory_action(words).map(Command::Memory)
         }
         HelpTopic::Session => session_args(args),
+        HelpTopic::Notify => notify_args(args),
         // The forge surface parses its own arguments (AGL-007), here, so
         // that its help needs no settings (AGL-061, D1).
         HelpTopic::Forge => crate::cli::forge::parse(&args.collect::<Vec<_>>()).map(Command::Forge),
@@ -189,6 +195,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             Ok(Command::Help(topic))
         }
         parsed => parsed,
+    }
+}
+
+/// `agl notify`: no arguments (AGL-074, D2).
+fn notify_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    match args.next() {
+        None => Ok(Command::Notify),
+        Some(other) => Err(Error::UnknownOption(text(other)?)),
     }
 }
 

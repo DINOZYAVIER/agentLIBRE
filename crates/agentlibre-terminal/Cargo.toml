@@ -25,6 +25,8 @@ libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
 unicode-width = { version = "0.2", default-features = false }
+# `agl notify` speaks to the desktop's notification server (AGL-074, D2).
+zbus = "5"
 
 [dev-dependencies]
 agentlibre-core = { path = "../agentlibre-core", features = ["testutil"] }

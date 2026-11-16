@@ -177,6 +177,11 @@ pub enum Error {
     EngineSpawn { engine: String, source: io::Error },
     /// `systemd-run` or `systemctl` failed.
     Systemd { detail: String },
+    /// `agl notify` has no runtime directory to find the sessions in
+    /// (AGL-074, D3).
+    NotifyNoRuntime,
+    /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
+    Notify { detail: String },
     /// The server stopped before it was ready (D149; AGL-024, D2).
     ServerFailed { owner: ServerOwner },
     /// The server was not ready in time (D149; AGL-024, D2).

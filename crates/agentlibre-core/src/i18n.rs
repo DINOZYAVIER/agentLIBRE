@@ -328,6 +328,29 @@ Memory (the entries of the project, `memory/` of its store):
     };
 
     /// The usage of `agl session`.
+    pub const HELP_NOTIFY_USAGE: Msg = Msg {
+        en: "agl notify",
+        uk: "agl notify",
+    };
+
+    /// The section of `agl notify` in the help (AGL-074, D2).
+    pub const HELP_NOTIFY: Msg = Msg {
+        en: "\
+Notifications (the desktop's, for every running session):
+  notify   tells what each interactive session does, a card a session:
+           thinking, a tool, writing the answer, with Stop; at a turn's end
+           the answer's beginning, a field to answer in, Terminal and
+           Session; a stop, a failed tool and a cut-off as critical cards.
+           It runs until stopped, as a user unit does.",
+        uk: "\
+Сповіщення (стільниці, для кожної запущеної сесії):
+  notify   каже, що робить кожна інтерактивна сесія, картка на сесію:
+           думає, інструмент, пише відповідь, з кнопкою Зупинити; в кінці
+           ходу початок відповіді, поле для відповіді, Термінал і Сесія;
+           зупинка, помилка інструмента й обрізання як критичні картки.
+           Працює, доки його не зупинять, як user unit.",
+    };
+
     pub const HELP_SESSION_USAGE: Msg = Msg {
         en: "agl session show <id|name|last> [--verbose]",
         uk: "agl session show <id|назва|last> [--verbose]",
@@ -903,6 +926,72 @@ Forge (сховище артефактів робочої області, agentL
     pub const SYSTEMD: Msg = Msg {
         en: "systemd failed: {detail}",
         uk: "помилка systemd: {detail}",
+    };
+
+    /// `agl notify` without `XDG_RUNTIME_DIR` (AGL-074, D3).
+    pub const NOTIFY_NO_RUNTIME: Msg = Msg {
+        en: "notify: XDG_RUNTIME_DIR is not set, so no session's socket can be found",
+        uk: "notify: XDG_RUNTIME_DIR не задано, тож сокетів сесій не знайти",
+    };
+
+    /// `agl notify` and the session bus (AGL-074, D2).
+    pub const NOTIFY_FAILED: Msg = Msg {
+        en: "notify: the session bus: {detail}",
+        uk: "notify: сесійна шина: {detail}",
+    };
+
+    /// The cards of `agl notify` (AGL-074, D5, D8): what a turn does.
+    pub const NOTIFY_THINKING: Msg = Msg {
+        en: "thinking",
+        uk: "думає",
+    };
+    pub const NOTIFY_WRITING: Msg = Msg {
+        en: "writing the answer",
+        uk: "пише відповідь",
+    };
+    pub const NOTIFY_COMPACTING: Msg = Msg {
+        en: "compacting",
+        uk: "стискає історію",
+    };
+    /// The live card's button.
+    pub const NOTIFY_STOP: Msg = Msg {
+        en: "Stop",
+        uk: "Зупинити",
+    };
+    /// The end card's buttons and its field's placeholder.
+    pub const NOTIFY_TERMINAL: Msg = Msg {
+        en: "Terminal",
+        uk: "Термінал",
+    };
+    pub const NOTIFY_SESSION: Msg = Msg {
+        en: "Session",
+        uk: "Сесія",
+    };
+    pub const NOTIFY_ANSWER: Msg = Msg {
+        en: "Answer the agent",
+        uk: "Відповісти агентові",
+    };
+    /// An answer sent while a turn runs (D4).
+    pub const NOTIFY_QUEUED: Msg = Msg {
+        en: "queued: {text}",
+        uk: "у черзі: {text}",
+    };
+    /// The critical cards.
+    pub const NOTIFY_STOPPED: Msg = Msg {
+        en: "stopped: {reason}",
+        uk: "зупинено: {reason}",
+    };
+    pub const NOTIFY_TOOL_FAILED: Msg = Msg {
+        en: "{tool} failed",
+        uk: "{tool}: помилка",
+    };
+    pub const NOTIFY_TOOL_TIMEOUT: Msg = Msg {
+        en: "{tool} timed out",
+        uk: "{tool}: час вийшов",
+    };
+    pub const NOTIFY_CUT_OFF: Msg = Msg {
+        en: "a generation was cut off at its token budget",
+        uk: "генерацію обрізано на її ліміті токенів",
     };
 
     /// `Error::ProjectNotRegistered` (AGL-015, D14).
@@ -2730,6 +2819,8 @@ impl Error {
                 tr!(lang, m::ENGINE_SPAWN, engine = engine, source = source).to_string()
             }
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
+            Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
+            Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
             Error::WhisperNotSet {
