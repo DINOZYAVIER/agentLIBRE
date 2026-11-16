@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::Source;
-use crate::plane::{Said, Told};
+use crate::run::{Said, Told};
 use crate::session::{CommandRun, Event, Session, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
@@ -24,21 +24,21 @@ use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
-        mut plane,
+        mut run,
         server_url,
         ..
     } = setup;
-    let function = plane.function;
-    let function_name = plane.function_name;
-    let lang = plane.lang;
-    let workspace = plane.workspace.clone();
+    let function = run.function;
+    let function_name = run.function_name;
+    let lang = run.lang;
+    let workspace = run.workspace.clone();
     let facts = Facts {
         function: function_name.into(),
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
     interrupt::install();
-    eprintln!("{}", tr!(lang, m::SESSION, id = plane.session.id));
+    eprintln!("{}", tr!(lang, m::SESSION, id = run.session.id));
     let mut state: Option<String> = None;
     // What `/attach` took since the last message (AGL-014, D18).
     let mut pending: Vec<Pending> = Vec::new();
@@ -64,7 +64,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             let mut said = Record::default();
             match name {
                 "/quit" | "/exit" => {
-                    said.record(&mut plane.session, message);
+                    said.record(&mut run.session, message);
                     break;
                 }
                 "/help" => {
@@ -74,18 +74,18 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 "/status" => {
                     let info = Info {
-                        session: plane.session.id.clone(),
+                        session: run.session.id.clone(),
                         state: state.clone(),
-                        unfinished: plane.session.unfinished().and_then(|turn| turn.state),
-                        context: plane.context,
+                        unfinished: run.session.unfinished().and_then(|turn| turn.state),
+                        context: run.context,
                     };
-                    let text = status_text(&facts, &info, plane.reasoning, lang);
+                    let text = status_text(&facts, &info, run.reasoning, lang);
                     outln!("{text}");
                     said.output.push(text.to_string());
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
                     Remember::Entry { name, text } => {
-                        said.tell(plane.remember(&name, &text), lang)?;
+                        said.tell(run.remember(&name, &text), lang)?;
                     }
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
@@ -100,9 +100,9 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         Error::MemoryRemoveNeedsYes { name }.message(lang)
                     )),
                     Ok(MemoryAction::Remove { name, yes: true }) => {
-                        said.tell(plane.remove(&name), lang)?;
+                        said.tell(run.remove(&name), lang)?;
                     }
-                    Ok(action) => said.tell(plane.looked_at(&action), lang)?,
+                    Ok(action) => said.tell(run.looked_at(&action), lang)?,
                 },
                 "/attach" => {
                     let path = unquote(message["/attach".len()..].trim());
@@ -112,7 +112,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         match Source::from_file(std::path::Path::new(path)) {
                             Ok(source) => {
                                 let name = source.name.clone();
-                                let placeholder = attach::add(&plane.session, &mut pending, source);
+                                let placeholder = attach::add(&run.session, &mut pending, source);
                                 let text =
                                     tr!(lang, m::ATTACHED, placeholder = placeholder, name = name)
                                         .to_string();
@@ -129,38 +129,38 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     if name.is_empty() {
                         said.fail(tr!(lang, m::RENAME_USAGE).to_string());
                     } else {
-                        said.tell(plane.rename(name), lang)?;
+                        said.tell(run.rename(name), lang)?;
                     }
                 }
                 "/new" => {
-                    said.record(&mut plane.session, message);
+                    said.record(&mut run.session, message);
                     said = Record::recorded();
                     // A new session records the `run` snapshot of its
                     // Function (AGL-063, D4).
-                    said.tell(plane.new_session()?, lang)?;
+                    said.tell(run.new_session()?, lang)?;
                     pending.clear();
                     placeholders.clear();
                     state = None;
                 }
                 "/compact" => {
-                    let ran = plane.compact(&mut StderrReport::new(lang));
+                    let ran = run.compact(&mut StderrReport::new(lang));
                     let interrupted = ran.interrupted;
                     said.tell(ran, lang)?;
                     if interrupted {
-                        said.record(&mut plane.session, message);
+                        said.record(&mut run.session, message);
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
                     }
                 }
                 _ => said.fail(tr!(lang, m::UNKNOWN_COMMAND, name = name).to_string()),
             }
-            said.record(&mut plane.session, message);
+            said.record(&mut run.session, message);
             continue;
         }
         let mut report = StderrReport::new(lang);
         let text = attach::with_placeholders(&placeholders, message);
         placeholders.clear();
         let attached = std::mem::take(&mut pending);
-        let end = plane.turn(&text, attached, &mut report);
+        let end = run.turn(&text, attached, &mut report);
         state = None;
         match end {
             Ok(TurnEnd::Answer(text)) => outln!("{text}"),
@@ -213,7 +213,7 @@ impl Record {
         self.failed = true;
     }
 
-    /// What a command of the plane did (AGL-067, F2): its answer to stdout,
+    /// What a command of the run did (AGL-067, F2): its answer to stdout,
     /// a notice to stderr, a refusal plain and an error's text with the
     /// `agl: ` this session puts before it; the answer, a refusal and an
     /// error go into the record, and what the command did when no answer was

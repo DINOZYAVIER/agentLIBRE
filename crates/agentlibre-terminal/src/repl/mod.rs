@@ -29,8 +29,8 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
-use crate::plane::Told;
-use crate::plane::Turn;
+use crate::run::Told;
+use crate::run::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
@@ -752,10 +752,10 @@ fn record(session: &mut Session, line: String, failed: bool, output: Option<Stri
     }));
 }
 
-/// What a command of the plane said (AGL-067, F2): an answer and a notice
+/// What a command of the run said (AGL-067, F2): an answer and a notice
 /// muted, a refusal and an error's text as a failure, a command cut short
 /// pending, and the memory line of an entry the command wrote.
-fn show_said(presenter: &Presenter, said: &crate::plane::Said, lang: Lang) {
+fn show_said(presenter: &Presenter, said: &crate::run::Said, lang: Lang) {
     for told in &said.lines {
         let (text, role) = match told {
             Told::Output(text) | Told::Notice(text) => (text, Role::Muted),
@@ -864,7 +864,7 @@ fn answer(
 /// The interactive session in a terminal (D115-D138).
 pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
-        mut plane,
+        mut run,
         resumed,
         server_url,
         theme,
@@ -873,16 +873,16 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         catalog,
         runtime,
     } = setup;
-    let function = plane.function;
-    let function_name = plane.function_name;
-    let backend = plane.backend;
-    let lang = plane.lang;
-    let autostart = plane.autostart;
-    let memory = plane.memory;
-    let sessions_dir = plane.sessions_dir;
-    let context = plane.context;
-    let reasoning = plane.reasoning;
-    let workspace = plane.workspace.clone();
+    let function = run.function;
+    let function_name = run.function_name;
+    let backend = run.backend;
+    let lang = run.lang;
+    let autostart = run.autostart;
+    let memory = run.memory;
+    let sessions_dir = run.sessions_dir;
+    let context = run.context;
+    let reasoning = run.reasoning;
+    let workspace = run.workspace.clone();
     let facts = Facts {
         function: function_name.into(),
         workspace: display_path(&workspace),
@@ -911,13 +911,13 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     );
     let control = Arc::new(Control::new(
         Info {
-            session: plane.session.id.clone(),
+            session: run.session.id.clone(),
             context,
             ..Info::default()
         },
         reasoning,
     ));
-    control.set_media_counts(&plane.session);
+    control.set_media_counts(&run.session);
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
         Arc::new(crate::whisper::Voice::of(autostart)),
@@ -935,11 +935,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let done = Arc::new(AtomicBool::new(false));
     // What the inspect mode re-reads on its open (AGL-066, D4).
     let inspect_data = Arc::new(Mutex::new(InspectData {
-        id: plane.session.id.clone(),
+        id: run.session.id.clone(),
         sessions_dir: sessions_dir.to_owned(),
-        events: plane.session.events.clone(),
+        events: run.session.events.clone(),
         transitions: Vec::new(),
-        outputs: plane.session.outputs_dir(),
+        outputs: run.session.outputs_dir(),
     }));
     let open_inspect = {
         let data = inspect_data.clone();
@@ -1011,12 +1011,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // The control socket (AGL-074, D3): its thread is made while SIGINT is
     // blocked, as the others, so that a `stop` wakes the main thread.
     let identity = Arc::new(Mutex::new((
-        plane.session.id.clone(),
-        plane.session.name.clone(),
+        run.session.id.clone(),
+        run.session.name.clone(),
     )));
     let socket = socket::Socket::start(
         runtime.as_deref(),
-        &plane.session.id,
+        &run.session.id,
         answer(control.clone(), dock.clone(), identity.clone(), || {
             interrupt::request(true)
         }),
@@ -1035,7 +1035,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             &crate::about::version(rev.as_deref()),
         ));
     }
-    presenter.show_notice(&tr!(lang, m::SESSION, id = plane.session.id), Role::Muted);
+    presenter.show_notice(&tr!(lang, m::SESSION, id = run.session.id), Role::Muted);
     match &socket {
         Ok(_) | Err(socket::NoSocket::NoRuntime) => {}
         Err(socket::NoSocket::Taken(path)) => presenter.show_notice(
@@ -1048,8 +1048,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         ),
     }
     if resumed {
-        presenter.replay(&plane.session.events, &plane.session.transitions);
-        if let Some(state) = plane.session.unfinished().and_then(|turn| turn.state) {
+        presenter.replay(&run.session.events, &run.session.transitions);
+        if let Some(state) = run.session.unfinished().and_then(|turn| turn.state) {
             control.lock().info.unfinished = Some(state.clone());
             presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
         }
@@ -1062,7 +1062,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         control.lock().running = true;
         interrupt::reset();
         let mut observer = Observer::new();
-        observer.attach_between_turns(&plane.session);
+        observer.attach_between_turns(&run.session);
         let ready = autostart
             .ensure(&mut |progress| match progress {
                 ServerProgress::Starting => {
@@ -1089,31 +1089,31 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
         let next = wait_for_next(&control);
-        record_commands(&control, &mut plane.session);
+        record_commands(&control, &mut run.session);
         // The inspect mode re-reads the file, this is the fallback and
         // the new id of a `/new` (AGL-066).
         {
             let mut inner = inspect_data.lock().unwrap();
-            inner.id = plane.session.id.clone();
-            inner.events = plane.session.events.clone();
-            inner.outputs = plane.session.outputs_dir();
+            inner.id = run.session.id.clone();
+            inner.events = run.session.events.clone();
+            inner.outputs = run.session.outputs_dir();
         }
         match next {
             Next::Quit => {
-                record(&mut plane.session, "/quit".into(), false, None);
+                record(&mut run.session, "/quit".into(), false, None);
                 break;
             }
             Next::Functions => {
                 let list = catalog.lines(lang).join("\n");
                 presenter.show_notice(&list, Role::Muted);
-                record(&mut plane.session, "/function".into(), false, Some(list));
+                record(&mut run.session, "/function".into(), false, Some(list));
             }
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
             Next::Switch(name) => match catalog.check(&name) {
                 Ok(()) => {
                     presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
-                    record(&mut plane.session, format!("/function {name}"), false, None);
+                    record(&mut run.session, format!("/function {name}"), false, None);
                     end = End::Function {
                         name,
                         reasoning: control.lock().reasoning,
@@ -1123,22 +1123,22 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 Err(error) => {
                     let text = error.message(lang);
                     presenter.show_notice(&text, Role::StatusFailure);
-                    record(&mut plane.session, format!("/function {name}"), true, Some(text));
+                    record(&mut run.session, format!("/function {name}"), true, Some(text));
                 }
             },
             Next::New => {
-                record(&mut plane.session, "/new".into(), false, None);
-                match plane.new_session() {
+                record(&mut run.session, "/new".into(), false, None);
+                match run.new_session() {
                     Ok(said) => {
                         show_said(&presenter, &said, lang);
                         let mut inner = control.lock();
                         inner.info = Info {
-                            session: plane.session.id.clone(),
+                            session: run.session.id.clone(),
                             context: inner.info.context,
                             ..Info::default()
                         };
                         drop(inner);
-                        control.set_media_counts(&plane.session);
+                        control.set_media_counts(&run.session);
                     }
                     Err(error) => {
                         let text = error.message(lang);
@@ -1151,20 +1151,20 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // file. The model has the command from its record (AGL-047,
                 // D5), as with the others.
                 let line = format!("/rename {name}");
-                let said = plane.rename(&name);
+                let said = run.rename(&name);
                 let (failed, output) = (said.failed, said.content.clone());
                 show_said(&presenter, &said, lang);
-                record(&mut plane.session, line, failed, output);
+                record(&mut run.session, line, failed, output);
             }
             Next::Remember(name, text) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
                 // writes the entry, no turn. The model has it from the
                 // record of the command (AGL-047, D5).
                 let line = format!("/remember {name} | {text}");
-                let said = plane.remember(&name, &text);
+                let said = run.remember(&name, &text);
                 let (failed, output) = (said.failed, said.content.clone());
                 show_said(&presenter, &said, lang);
-                record(&mut plane.session, line, failed, output);
+                record(&mut run.session, line, failed, output);
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
@@ -1181,32 +1181,32 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     Err(error) => {
                         let text = error.message(lang);
                         presenter.show_notice(&text, Role::StatusFailure);
-                        record(&mut plane.session, line, true, Some(text));
+                        record(&mut run.session, line, true, Some(text));
                     }
                 }
             }
             // The model learns of it from the record, as of `/remember`
             // (AGL-060, D6).
             Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
-                let said = plane.remove(&name);
+                let said = run.remove(&name);
                 let (failed, output) = (said.failed, said.content.clone());
                 show_said(&presenter, &said, lang);
-                record(&mut plane.session, line, failed, output);
+                record(&mut run.session, line, failed, output);
             }
             Next::Memory(line, action) => {
-                let said = plane.looked_at(&action);
+                let said = run.looked_at(&action);
                 let (failed, output) = (said.failed, said.content.clone());
                 show_said(&presenter, &said, lang);
-                record(&mut plane.session, line, failed, output);
+                record(&mut run.session, line, failed, output);
             }
             Next::Compact => {
-                plane.reasoning = control.lock().reasoning;
+                run.reasoning = control.lock().reasoning;
                 let said =
-                    plane.compact(&mut |report: Report| show(&mut presenter, &control, report));
+                    run.compact(&mut |report: Report| show(&mut presenter, &control, report));
                 control.lock().running = false;
                 let (failed, output) = (said.failed, said.content.clone());
                 show_said(&presenter, &said, lang);
-                record(&mut plane.session, "/compact".into(), failed, output);
+                record(&mut run.session, "/compact".into(), failed, output);
                 presenter.set_ready();
             }
             Next::Message(Queued {
@@ -1217,8 +1217,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 presenter.begin_turn();
                 presenter.show_user(&message);
                 // The running turn keeps the level it started with (AGL-013).
-                plane.reasoning = control.lock().reasoning;
-                let result = plane.turn(
+                run.reasoning = control.lock().reasoning;
+                let result = run.turn(
                     &message,
                     pending,
                     &mut ReplTurn {
@@ -1242,7 +1242,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 let mut inner = control.lock();
                 inner.running = false;
                 inner.info.state = None;
-                inner.info.unfinished = plane.session.unfinished().and_then(|turn| turn.state);
+                inner.info.unfinished = run.session.unfinished().and_then(|turn| turn.state);
                 // A turn that failed leaves no queue behind (D127).
                 let cleared = failed.is_some() && !inner.queue.is_empty();
                 if failed.is_some() {
@@ -1262,13 +1262,13 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         // `hello` names the session as it is now; a `/new` moves the
         // socket to the new one.
         *identity.lock().unwrap_or_else(|e| e.into_inner()) =
-            (plane.session.id.clone(), plane.session.name.clone());
+            (run.session.id.clone(), run.session.name.clone());
         if let Ok(socket) = &socket {
-            let _ = socket.rename(&plane.session.id);
+            let _ = socket.rename(&run.session.id);
         }
     }
 
-    record_commands(&control, &mut plane.session);
+    record_commands(&control, &mut run.session);
     drop(socket);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();

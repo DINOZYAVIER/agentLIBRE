@@ -1,8 +1,9 @@
-//! The plane a Function runs on (AGL-067, F1, D10): what a session holds
-//! beside its Function — the backend, the session, the memory, the searcher,
-//! the engine's start. It outlives a session: `/new` and `/function` start a
-//! new one on it. The surfaces — `-p`, the stdin session, the REPL — read
-//! their input and draw what comes out; the plane takes a turn.
+//! The run of a Function in a session (AGL-075, D5; the `Plane` of AGL-067,
+//! F1, D10): what a session holds beside its Function — the backend, the
+//! session, the memory, the searcher, the engine's start. It outlives a
+//! session: `/new` and `/function` start a new one on it. The surfaces —
+//! `-p`, the stdin session, the REPL — read their input and draw what comes
+//! out; the run takes a turn.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,7 @@ use crate::style::Role;
 use crate::tools::ForgeEnv;
 use crate::tr;
 
-/// What a surface gives a turn on the plane (AGL-067): where the reports go,
+/// What a surface gives a turn of the run (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
 pub trait Turn: Sink {
     /// A line the start of the server or the transcription says (AGL-015,
@@ -54,7 +55,7 @@ pub enum Told {
     Pending(String),
 }
 
-/// What a slash command did (AGL-067, F2): the plane does the work once, and
+/// What a slash command did (AGL-067, F2): the run does the work once, and
 /// each surface shows [`Told`] and writes the session's record its own way
 /// (D4). What the record holds is `content`, or, for the stdin session, the
 /// lines it was told.
@@ -111,7 +112,7 @@ fn written(write: &Write) -> Event {
     }
 }
 
-pub struct Plane<'a> {
+pub struct Run<'a> {
     pub function: &'a Function,
     pub function_name: &'a str,
     pub backend: &'a dyn Backend,
@@ -143,8 +144,8 @@ pub struct Plane<'a> {
     pub about: Option<&'a str>,
 }
 
-impl Plane<'_> {
-    /// The agent of a turn on this plane, for a server with a context of
+impl Run<'_> {
+    /// The agent of a turn of this run, for a server with a context of
     /// `context` tokens: the one place an [`Agent`] is built.
     pub fn agent(&mut self, context: usize) -> Agent<'_> {
         Agent {
@@ -166,7 +167,7 @@ impl Plane<'_> {
 
     /// A turn for the message `message` and its `attached` media: the server
     /// is brought up when it does not answer, at the first request (AGL-015,
-    /// D10, AGL-024), and its context size read; then [`Plane::turn_on`].
+    /// D10, AGL-024), and its context size read; then [`Run::turn_on`].
     pub fn turn(
         &mut self,
         message: &str,
@@ -322,9 +323,9 @@ impl Plane<'_> {
         }
     }
 
-    /// `/new`: a new session on the plane with the `run` snapshot of its
+    /// `/new`: a new session of the run with the `run` snapshot of its
     /// Function (AGL-063, D4). A surface clears what the old session held.
-    /// A session that cannot be made ends the run: nothing else works.
+    /// A session that cannot be made ends the run of agl: nothing else works.
     pub fn new_session(&mut self) -> Result<Said, Error> {
         let new = Session::create_run(
             self.sessions_dir,

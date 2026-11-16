@@ -24,10 +24,10 @@ pub(crate) use agentlibre_core::{
     nix,
     paths,
     phase,
-    plane,
     programs,
     record,
     records,
+    run,
     search,
     session,
     settings,
@@ -58,7 +58,7 @@ use function::Function;
 use i18n::{Lang, m};
 use machine::Machine;
 use paths::Paths;
-use plane::Plane;
+use run::Run;
 use session::{Session, StopReason};
 use settings::{function_name, ReplSettings, ServerFile, ServerKind, Settings, UserFile};
 use theme::Theme;
@@ -108,10 +108,10 @@ fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
 /// How many sessions `agl --resume` lists (AGL-058, D20).
 const SESSIONS_LISTED: usize = 20;
 
-/// Everything a session needs: the plane it runs on, and what the terminal
+/// Everything a session needs: its run, and what the terminal
 /// draws with.
 pub struct Setup<'a> {
-    pub plane: Plane<'a>,
+    pub run: Run<'a>,
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
     pub server_url: &'a str,
@@ -615,7 +615,7 @@ fn agent_session(
         }
         .render()
     });
-    let plane = Plane {
+    let run = Run {
         function: &function,
         function_name: &settings.function,
         backend: backend.as_ref(),
@@ -648,7 +648,7 @@ fn agent_session(
             autostart.switch(&mut |line| eprintln!("{line}"))?;
         }
         let setup = Setup {
-            plane,
+            run,
             resumed,
             server_url: &settings.server_url,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
@@ -663,22 +663,22 @@ fn agent_session(
             cli::lines::run(setup).map(repl::End::Exit)
         };
     };
-    let mut plane = plane;
-    eprintln!("{}", tr!(lang, m::SESSION, id = plane.session.id));
+    let mut run = run;
+    eprintln!("{}", tr!(lang, m::SESSION, id = run.session.id));
     interrupt::install();
-    let id = plane.session.id.clone();
+    let id = run.session.id.clone();
     // The attached files get their placeholders before the message and are
     // stored with the session; an audio is transcribed here (AGL-014).
     let mut pending = Vec::new();
     let placeholders: Vec<String> = sources
         .into_iter()
-        .map(|source| attach::add(&plane.session, &mut pending, source))
+        .map(|source| attach::add(&run.session, &mut pending, source))
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
-    observer.attach(&plane.session);
+    observer.attach(&run.session);
     let size = context.expect("`-p` read the context size");
     let mut report = StderrReport::new(lang);
-    match plane.turn_on(size, &message, pending, &mut observer, &mut report)? {
+    match run.turn_on(size, &message, pending, &mut observer, &mut report)? {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))
