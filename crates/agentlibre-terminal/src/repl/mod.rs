@@ -984,7 +984,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         theme: theme.clone(),
         lang,
         history_file,
-        request_stop: Box::new(|| interrupt::request()),
+        request_stop: Box::new(interrupt::request),
         exit_now: Box::new(|| {
             term::restore();
             unsafe { libc::_exit(i32::from(interrupt::EXIT_CODE)) }
