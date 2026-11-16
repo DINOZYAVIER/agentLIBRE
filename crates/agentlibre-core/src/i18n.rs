@@ -3050,6 +3050,7 @@ impl Error {
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
+            Error::Said { text } => text.clone(),
             Error::DaemonNoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
             Error::DaemonRunning { path } => tr!(lang, m::DAEMON_RUNNING, path = path.display()),
             Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),

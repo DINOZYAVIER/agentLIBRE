@@ -10,6 +10,7 @@ pub mod attach;
 pub mod control;
 pub mod daemon;
 pub mod backend;
+pub mod client;
 pub mod download;
 pub mod engine;
 pub mod error;

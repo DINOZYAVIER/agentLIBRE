@@ -180,11 +180,19 @@ impl Daemon {
             Request::Hello { .. } => Some(Reply::Ok),
             Request::Open(open) => {
                 thread::spawn(move || {
-                    let reply = match self.open(client, lang, open) {
-                        Ok(opened) => Reply::Opened(opened),
-                        Err(error) => Reply::Refused { error: error.message(lang) },
-                    };
-                    self.send_to(client, &reply);
+                    let start = open.start_server;
+                    match self.open(client, lang, open) {
+                        Ok(opened) => {
+                            let id = opened.session.id.clone();
+                            self.send_to(client, &Reply::Opened(opened));
+                            // The server's start follows the reply, so that
+                            // the client has the session before its reports.
+                            if start {
+                                let _ = self.command(&id, |_| Command::Start, true);
+                            }
+                        }
+                        Err(error) => self.send_to(client, &Reply::Refused { error: error.message(lang) }),
+                    }
                 });
                 None
             }
@@ -233,13 +241,14 @@ impl Daemon {
                 }, true)
                 .map_or_else(refused, |()| Some(Reply::Ok))
             }
-            Request::Stop { session } => match self.lock().sessions.get(&session) {
-                Some(entry) => {
+            // `stop` and `answer` have no reply: a client sends them from any
+            // of its threads while another waits for a reply.
+            Request::Stop { session } => {
+                if let Some(entry) = self.lock().sessions.get(&session) {
                     entry.stop.request();
-                    Some(Reply::Ok)
                 }
-                None => refused(Error::DaemonNoSession { id: session }),
-            },
+                None
+            }
             Request::Remember {
                 session,
                 name,
@@ -282,7 +291,7 @@ impl Daemon {
                 if let Some((_, waiting)) = self.lock().questions.remove(&question) {
                     let _ = waiting.send(answer);
                 }
-                Some(Reply::Ok)
+                None
             }
             Request::Close { session } => {
                 self.release(client, Some(&session));
@@ -401,8 +410,14 @@ impl Daemon {
         };
         let voice = Arc::new(Voice::of(&plane.autostart));
         let id = plane.session.id.clone();
+        // The FSM of a run of one request writes to the session from now.
+        let observer = open.one_request.then(|| {
+            let mut observer = observer;
+            observer.attach(&plane.session);
+            observer
+        });
         let parts = plane.start().into_parts();
-        let mut entry = Entry {
+        let entry = Entry {
             commands: parts.commands,
             stop: parts.stop,
             opened: reply.clone(),
@@ -410,14 +425,11 @@ impl Daemon {
             holders: HashSet::from([client]),
             subscribers: HashSet::from([client]),
             busy: false,
-            observer: open.one_request.then_some(observer),
+            observer,
             voice,
             engine,
             project_dir: project.dir.clone(),
         };
-        if open.start_server {
-            entry.busy = entry.commands.send(Command::Start).is_ok();
-        }
         self.lock().sessions.insert(id.clone(), entry);
         let daemon = Arc::clone(self);
         let sent = parts.sent;

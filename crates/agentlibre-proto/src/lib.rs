@@ -5,7 +5,8 @@
 //! later — links it alone.
 //!
 //! A client says [`Request`]s; the daemon answers each with a [`Reply`] in
-//! the order they came, and sends besides, unasked, what the sessions it
+//! the order they came, but `stop` and `answer`, which have none, and sends
+//! besides, unasked, what the sessions it
 //! subscribed to do ([`Reply::Sent`], [`Reply::Done`]) and the questions of
 //! the planes it opened ([`Reply::Question`]).
 

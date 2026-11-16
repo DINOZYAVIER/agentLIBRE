@@ -366,7 +366,6 @@ impl Settings {
         // The url of the kind (AGL-036, D2, D6).
         let server_url = server.url();
         let function = function_name(cli_function, project.function.as_deref(), user.function.as_deref());
-        let defaults = ReplSettings::default();
         Ok(Settings {
             server_url,
             server,
@@ -375,17 +374,7 @@ impl Settings {
             function,
             colors: user.colors.clone(),
             about: user.about.clone(),
-            repl: ReplSettings {
-                tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
-                tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),
-                frame: user.repl.frame.unwrap_or(defaults.frame),
-                max_record_seconds: user
-                    .repl
-                    .max_record_seconds
-                    .unwrap_or(defaults.max_record_seconds),
-                start_server: user.repl.start_server.unwrap_or(defaults.start_server),
-                splash: user.repl.splash.unwrap_or(defaults.splash),
-            },
+            repl: ReplSettings::of(user),
         })
     }
 }

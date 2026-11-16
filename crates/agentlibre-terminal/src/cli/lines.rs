@@ -13,7 +13,9 @@ use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
+use crate::backend::ReasoningLevel;
 use crate::interrupt;
+use crate::remote;
 use crate::media::Source;
 use crate::plane::{Command, Done, Said, Sent, SessionView, Told};
 use crate::session::{CommandRun, Event, StopReason};
@@ -25,29 +27,28 @@ use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
-        plane,
-        server_url,
+        remote,
+        opened,
+        lang,
         ..
     } = setup;
-    let lang = plane.lang;
-    let workspace = plane.workspace.clone();
     let facts = Facts {
-        function: plane.function_name.clone(),
-        workspace: display_path(&workspace),
-        plane: plane.file.as_ref().map(|file| file.name.clone()),
-        server: server_url.into(),
+        function: opened.function.clone(),
+        workspace: display_path(std::path::Path::new(&opened.workspace)),
+        plane: opened.session.plane.clone(),
+        server: opened.server_url.clone(),
     };
-    let reasoning = plane.reasoning;
-    let context = Cell::new(plane.context);
-    // What this session holds of the plane's session, after each command.
-    let mut session = SessionView::of(&plane.session);
+    let reasoning = opened.reasoning.as_deref().and_then(ReasoningLevel::parse);
+    let context = Cell::new(opened.context);
+    // What this session holds of its session, after each command.
+    let mut session = agentlibre_core::plane::wire::view_of(opened.session.clone());
     interrupt::install();
+    remote::forward_stop(&remote);
     eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
-    // The plane takes the commands on a thread of its own (AGL-075, D7).
-    let handle = plane.start();
+    // The plane takes the commands in the daemon (AGL-076, D5).
     let mut ask = |command: Command, session: &mut SessionView| -> Result<Done, Error> {
         let mut report = StderrReport::new(lang);
-        let done = handle
+        let done = remote
             .ask(command, &mut |sent| {
                 if let Sent::Context(size) = sent {
                     context.set(Some(size));

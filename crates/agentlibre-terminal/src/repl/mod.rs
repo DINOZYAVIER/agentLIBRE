@@ -6,7 +6,6 @@ mod editor;
 mod inspect;
 mod markdown;
 mod reading;
-mod socket;
 mod splash;
 mod transcript;
 mod text;
@@ -30,19 +29,16 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
-use crate::plane::{Command, Done, Sent, SessionView, Told};
+use crate::plane::{Command, Done, Sent, Told};
 use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
-use crate::control;
-use crate::engine::ServerProgress;
 use crate::tty::is_yes;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
-use crate::phase::{Observer, PhaseEvent};
 use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
 use crate::status::{
     COMMANDS, Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
@@ -892,73 +888,30 @@ fn wait_for_next(control: &Control) -> Next {
     }
 }
 
-/// What the control socket's requests do (AGL-074, D3, D4): `say` is the
-/// next message, as if typed, queued while a turn runs; `stop` is Ctrl-C on
-/// a running turn, its queue dropped; `hello` tells who the session is.
-fn answer(
-    control: Arc<Control>,
-    dock: Arc<Dock>,
-    identity: Arc<Mutex<(String, Option<String>)>>,
-    request_stop: impl Fn() -> bool + Send + 'static,
-) -> impl FnMut(control::Request) -> control::Reply + Send + 'static {
-    move |request| match request {
-        control::Request::Say(text) => {
-            let mut inner = control.lock();
-            let queued = inner.busy();
-            inner.queue.push_back(Queued::from(text.as_str()));
-            let waiting = inner.queue.len();
-            drop(inner);
-            dock.set_queued(waiting);
-            control.wake.notify_all();
-            control::Reply::Said { queued }
-        }
-        control::Request::Stop => {
-            let mut inner = control.lock();
-            if inner.busy() {
-                request_stop();
-                inner.queue.clear();
-                drop(inner);
-                dock.set_queued(0);
-            }
-            control::Reply::Stopped
-        }
-        control::Request::Hello => {
-            let busy = control.lock().busy();
-            let (session, name) = identity.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            control::Reply::Hello(control::Hello {
-                pid: std::process::id(),
-                session,
-                name,
-                busy,
-            })
-        }
-    }
-}
-
 /// The interactive session in a terminal (D115-D138).
 pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
-        plane,
-        resumed,
-        server_url,
+        remote,
+        opened,
+        session: file,
+        lang,
         theme,
         repl,
         history_file,
         catalog,
-        runtime,
         paths,
+        voice: dictation,
     } = setup;
-    let backend = Arc::clone(&plane.backend);
-    let lang = plane.lang;
-    let sessions_dir = plane.sessions_dir.clone();
-    let context = plane.context;
-    let reasoning = plane.reasoning;
-    let workspace = plane.workspace.clone();
+    let resumed = opened.resumed;
+    let sessions_dir = paths.sessions();
+    let context = opened.context;
+    let reasoning = opened.reasoning.as_deref().and_then(crate::backend::ReasoningLevel::parse);
+    let workspace = PathBuf::from(&opened.workspace);
     let facts = Facts {
-        function: plane.function_name.clone(),
+        function: opened.function.clone(),
         workspace: display_path(&workspace),
-        plane: plane.file.as_ref().map(|file| file.name.clone()),
-        server: server_url.into(),
+        plane: opened.session.plane.clone(),
+        server: opened.server_url.clone(),
     };
     let commands: Vec<MenuItem> = COMMANDS
         .iter()
@@ -983,16 +936,16 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     );
     let control = Arc::new(Control::new(
         Info {
-            session: plane.session.id.clone(),
+            session: file.id.clone(),
             context,
             ..Info::default()
         },
         reasoning,
     ));
-    control.set_media_counts(&plane.session);
+    control.set_media_counts(&file);
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
-        Arc::new(crate::whisper::Voice::of(&plane.autostart)),
+        dictation,
         Box::new(crate::record::start),
         repl.max_record_seconds,
         lang,
@@ -1002,17 +955,19 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
 
     interrupt::install_request_only();
+    // Ctrl-C, its flag set, is sent to the daemon as `stop` (AGL-076, D5).
+    crate::remote::forward_stop(&remote);
     // A SIGINT from outside comes to this thread only (D131); the stop
     // wakes the thread of the turn itself (AGL-075).
     term::block_sigint();
     let done = Arc::new(AtomicBool::new(false));
     // What the inspect mode re-reads on its open (AGL-066, D4).
     let inspect_data = Arc::new(Mutex::new(InspectData {
-        id: plane.session.id.clone(),
+        id: file.id.clone(),
         sessions_dir: sessions_dir.clone(),
-        events: plane.session.events.clone(),
+        events: file.events.clone(),
         transitions: Vec::new(),
-        outputs: plane.session.outputs_dir(),
+        outputs: file.outputs_dir(),
     }));
     let open_inspect = {
         let data = inspect_data.clone();
@@ -1081,19 +1036,6 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             }
         })
     };
-    // The control socket (AGL-074, D3): its thread is made while SIGINT is
-    // blocked, as the others; its `stop` is the turn's (AGL-075).
-    let identity = Arc::new(Mutex::new((
-        plane.session.id.clone(),
-        plane.session.name.clone(),
-    )));
-    let socket = socket::Socket::start(
-        runtime.as_deref(),
-        &plane.session.id,
-        answer(control.clone(), dock.clone(), identity.clone(), || {
-            interrupt::request()
-        }),
-    );
     term::unblock_sigint();
 
     dock.start();
@@ -1108,68 +1050,46 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             &crate::about::version(rev.as_deref()),
         ));
     }
-    presenter.show_notice(&tr!(lang, m::SESSION, id = plane.session.id), Role::Muted);
-    match &socket {
-        Ok(_) | Err(socket::NoSocket::NoRuntime) => {}
-        Err(socket::NoSocket::Taken(path)) => presenter.show_notice(
-            &tr!(lang, m::SOCKET_TAKEN, path = path.display()),
-            Role::StatusPending,
-        ),
-        Err(socket::NoSocket::Io(path, error)) => presenter.show_notice(
-            &tr!(lang, m::SOCKET_FAILED, path = path.display(), error = error),
-            Role::StatusPending,
-        ),
-    }
+    presenter.show_notice(&tr!(lang, m::SESSION, id = file.id), Role::Muted);
     if resumed {
-        presenter.replay(&plane.session.events, &plane.session.transitions);
-        if let Some(state) = plane.session.unfinished().and_then(|turn| turn.state) {
+        presenter.replay(&file.events, &file.transitions);
+        if let Some(state) = file.unfinished().and_then(|turn| turn.state) {
             control.lock().info.unfinished = Some(state.clone());
             presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
         }
     }
 
-    // The server comes up as the session starts (AGL-046). It runs like a
-    // turn: what the human types meanwhile waits in the queue. A server
-    // that fails is told here and tried again at the first message.
+    // The server comes up as the session starts (AGL-046), in the daemon,
+    // which was asked so at the open. It runs like a turn: what the human
+    // types meanwhile waits in the queue. A server that fails is told here
+    // and tried again at the first message.
     if repl.start_server {
         control.lock().running = true;
         interrupt::reset();
-        let mut observer = Observer::new();
-        observer.attach_between_turns(&plane.session);
-        let ready = plane
-            .autostart
-            .ensure(&mut |progress| match progress {
-                ServerProgress::Starting => {
-                    observer.enter(PhaseEvent::ServerStart, &mut presenter);
-                }
-                ServerProgress::Line(line) => presenter.show_notice(line, Role::Muted),
-            })
-            .and_then(|()| backend.context_size());
-        match ready {
-            Ok(size) => {
-                observer.end(PhaseEvent::Idle, &mut presenter);
+        let done = remote.wait(&mut |sent| match sent {
+            Sent::Line(line) => presenter.show_notice(&line, Role::Muted),
+            Sent::Context(size) => {
                 dock.set_context_size(size);
                 control.lock().info.context = Some(size);
             }
-            Err(error) => {
-                observer.end(PhaseEvent::Failed, &mut presenter);
-                presenter.show_notice(&error.message(lang), Role::StatusFailure);
-            }
+            Sent::Report(report) => show(&mut presenter, &control, report),
+            _ => {}
+        });
+        if let Some(Some(Err(error))) = done.map(|done| done.said) {
+            presenter.show_notice(&error.message(lang), Role::StatusFailure);
         }
         control.lock().running = false;
         presenter.set_ready();
     }
 
-    // What the REPL keeps beside the run: its memory, for the question of
-    // a removal; and what its session is after each command.
-    let memory = Arc::clone(&plane.memory);
-    let plane_name = plane.file.as_ref().map(|file| file.name.clone());
-    let session = RefCell::new(SessionView::of(&plane.session));
-    // The plane takes the commands on a thread of its own (AGL-075, D7).
-    let handle = plane.start();
-    // A command and its end; `None` when the plane's thread is gone.
+    // What the REPL keeps beside the plane: what its session is after each
+    // command.
+    let plane_name = opened.session.plane.clone();
+    let session = RefCell::new(agentlibre_core::plane::wire::view_of(opened.session.clone()));
+    // The plane takes the commands in the daemon (AGL-076, D5).
+    // A command and its end; `None` when the daemon is gone.
     let ask = |command: Command, each: &mut dyn FnMut(Sent)| -> Option<Done> {
-        let done = handle.ask(command, each)?;
+        let done = remote.ask(command, each)?;
         *session.borrow_mut() = done.session.clone();
         Some(done)
     };
@@ -1305,9 +1225,19 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
             Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
-                let found = memory
-                    .look()
-                    .and_then(|dir| crate::memory::entry_dir(dir.as_deref(), &name).map(drop));
+                // The entry must be there before the question (AGL-060, D7).
+                let found = match ask(Command::LookAt(MemoryAction::Show { name: name.clone() }), &mut drop) {
+                    Some(done) => match done.said {
+                        Some(Ok(said)) if !said.failed => Ok(()),
+                        Some(Ok(said)) => Err(said.lines.iter().find_map(|told| match told {
+                            Told::Fault(text) | Told::Refusal(text) => Some(text.clone()),
+                            _ => None,
+                        }).unwrap_or_default()),
+                        Some(Err(error)) => Err(error.message(lang)),
+                        None => Ok(()),
+                    },
+                    None => Err(Error::PlaneGone.message(lang)),
+                };
                 match found {
                     Ok(()) => {
                         let question = tr!(lang, m::MEMORY_REMOVE_ASK, name = name);
@@ -1315,8 +1245,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         presenter.show_notice(&question, Role::StatusPending);
                         true
                     }
-                    Err(error) => {
-                        let text = error.message(lang);
+                    Err(text) => {
                         presenter.show_notice(&text, Role::StatusFailure);
                         record(line, true, Some(text))
                     }
@@ -1416,22 +1345,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             gone = true;
             break;
         }
-        // `hello` names the session as it is now; a `/new` moves the
-        // socket to the new one.
-        *identity.lock().unwrap_or_else(|e| e.into_inner()) =
-            (session.borrow().id.clone(), session.borrow().name.clone());
-        if let Ok(socket) = &socket {
-            let _ = socket.rename(&session.borrow().id);
-        }
     }
 
     let commands = take_commands(&control);
     if !gone && !commands.is_empty() {
         ask(Command::Append(commands), &mut drop);
     }
-    // The plane's thread ends with its last command.
-    drop(handle);
-    drop(socket);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
     let _ = ticker.join();
@@ -2292,46 +2211,6 @@ mod tests {
         // A second Ctrl-C during the same turn leaves at once (D120).
         f.input.key(Key::Ctrl('c'));
         assert_eq!(f.exits.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn the_sockets_say_is_the_next_message_and_its_stop_is_ctrl_c() {
-        let f = fixture();
-        let stops = Arc::new(AtomicUsize::new(0));
-        let identity = Arc::new(Mutex::new(("s1".to_owned(), None)));
-        let mut answer = {
-            let stops = stops.clone();
-            answer(
-                f.input.control.clone(),
-                f.input.dock.clone(),
-                identity.clone(),
-                move || stops.fetch_add(1, Ordering::SeqCst) > 0,
-            )
-        };
-        let said = |text: &str| control::Request::Say(text.into());
-        assert_eq!(answer(said("one")), control::Reply::Said { queued: false });
-        assert_eq!(f.inner().texts(), ["one"]);
-        assert_eq!(answer(said("two")), control::Reply::Said { queued: true }, "one waits");
-        f.inner().queue.clear();
-        f.inner().running = true;
-        assert_eq!(answer(said("/new")), control::Reply::Said { queued: true });
-        assert_eq!(f.inner().texts(), ["/new"], "a message, not a command");
-        let control::Reply::Hello(hello) = answer(control::Request::Hello) else {
-            panic!("no hello");
-        };
-        assert_eq!((hello.session.as_str(), hello.busy), ("s1", true));
-        assert_eq!(hello.pid, std::process::id());
-        *identity.lock().unwrap() = ("s2".into(), Some("tea".into()));
-        let control::Reply::Hello(hello) = answer(control::Request::Hello) else {
-            panic!("no hello");
-        };
-        assert_eq!((hello.session.as_str(), hello.name.as_deref()), ("s2", Some("tea")));
-        assert_eq!(answer(control::Request::Stop), control::Reply::Stopped);
-        assert_eq!(stops.load(Ordering::SeqCst), 1);
-        assert!(f.inner().queue.is_empty(), "what waited is dropped");
-        f.inner().running = false;
-        assert_eq!(answer(control::Request::Stop), control::Reply::Stopped);
-        assert_eq!(stops.load(Ordering::SeqCst), 1, "nothing to stop when idle");
     }
 
     #[test]

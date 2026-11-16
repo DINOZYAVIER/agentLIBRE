@@ -41,6 +41,22 @@ pub struct ReplSettings {
     pub splash: bool,
 }
 
+impl ReplSettings {
+    /// The user's `[repl]` over the defaults: the REPL's settings are the
+    /// user's alone (AGL-076: the terminal reads them itself).
+    pub fn of(user: &super::UserFile) -> ReplSettings {
+        let defaults = ReplSettings::default();
+        ReplSettings {
+            tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
+            tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),
+            frame: user.repl.frame.unwrap_or(defaults.frame),
+            max_record_seconds: user.repl.max_record_seconds.unwrap_or(defaults.max_record_seconds),
+            start_server: user.repl.start_server.unwrap_or(defaults.start_server),
+            splash: user.repl.splash.unwrap_or(defaults.splash),
+        }
+    }
+}
+
 impl Default for ReplSettings {
     fn default() -> ReplSettings {
         ReplSettings {

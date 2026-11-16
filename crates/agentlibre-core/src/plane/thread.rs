@@ -96,7 +96,7 @@ pub struct Done {
 }
 
 /// What a surface holds of its plane's session after a command.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SessionView {
     pub id: String,
     pub name: Option<String>,

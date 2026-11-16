@@ -196,6 +196,8 @@ pub enum Error {
     PlaneFile { path: PathBuf, detail: String },
     /// `agl plane remove` of a directory the plane does not have.
     PlaneDirectoryNotIn { name: String, directory: PathBuf },
+    /// What the daemon refused, in its words (AGL-076).
+    Said { text: String },
     /// `agl daemon` has no runtime directory for its socket (AGL-076, D7).
     DaemonNoRuntime,
     /// Another daemon answers on the socket.
