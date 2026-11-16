@@ -37,6 +37,10 @@ use crate::tr;
 use crate::weights;
 use crate::wsl;
 
+mod thread;
+
+pub use thread::{Command, Done, Handle, Sent, SessionView};
+
 /// What a surface gives a turn of the run (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
 pub trait Turn: Sink {

@@ -35,7 +35,21 @@ pub fn next_number(session: &Session, pending: &[Pending], kind: Kind) -> u32 {
 
 /// Adds `source` to `pending` and returns its placeholder.
 pub fn add(session: &Session, pending: &mut Vec<Pending>, source: Source) -> String {
-    let number = next_number(session, pending, source.kind);
+    add_counted(&media_counts(session), pending, source)
+}
+
+/// The media of each kind the session holds, in the order of [`Kind::ALL`].
+pub fn media_counts(session: &Session) -> [u32; 3] {
+    Kind::ALL.map(|kind| session.next_media_number(kind) - 1)
+}
+
+/// [`add`] after `counts` media of each kind the session holds, in the
+/// order of [`Kind::ALL`]: for a surface that holds what its run told it.
+pub fn add_counted(counts: &[u32; 3], pending: &mut Vec<Pending>, source: Source) -> String {
+    let index = Kind::ALL.iter().position(|kind| *kind == source.kind).unwrap_or(0);
+    let number = counts[index]
+        + pending.iter().filter(|p| p.source.kind == source.kind).count() as u32
+        + 1;
     let item = Pending { number, source };
     let placeholder = item.placeholder();
     pending.push(item);

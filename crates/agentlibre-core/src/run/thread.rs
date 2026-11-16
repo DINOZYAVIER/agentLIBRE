@@ -1,0 +1,465 @@
+//! A run on a thread of its own (AGL-075, D7): a surface holds a [`Handle`]
+//! that sends the run its [`Command`]s and takes what it [`Sent`] by a
+//! channel, the shape of a socket. A command sent while a turn runs waits
+//! for the turn's end. A turn is stopped by the run's stop, which the handle
+//! holds too.
+
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
+
+use super::{Run, Said, Turn};
+use crate::agent::{Report, Sink, TurnEnd};
+use crate::attach::{self, Pending};
+use crate::backend::ReasoningLevel;
+use crate::error::Error;
+use crate::memory::MemoryAction;
+use crate::phase::Observer;
+use crate::session::{Event, Session};
+use crate::stop::Stop;
+
+/// What a surface asks of its run.
+pub enum Command {
+    /// A message and the media it names, at the reasoning level of the
+    /// surface (AGL-013). `observer` saw the server's start of a run of one
+    /// request, whose context is read (AGL-046, D10); the turn goes on from
+    /// there.
+    Say {
+        message: String,
+        attached: Vec<Pending>,
+        reasoning: Option<ReasoningLevel>,
+        observer: Option<Observer>,
+    },
+    /// `/remember name | text` (AGL-006).
+    Remember { name: String, text: String },
+    /// `/memory remove <name>` once agreed (AGL-060, D7).
+    Remove { name: String },
+    /// `/memory list`, `/memory show` (AGL-060, D5).
+    LookAt(MemoryAction),
+    /// `/rename <name>` (AGL-062, D7).
+    Rename(String),
+    /// `/new`: a new session of the run.
+    New,
+    /// `/compact`, at the reasoning level of the surface.
+    Compact { reasoning: Option<ReasoningLevel> },
+    /// Lines of the session's record a surface writes: its commands
+    /// (AGL-047, D5).
+    Append(Vec<Event>),
+}
+
+/// What a run sends while it takes a command, and at its end.
+pub enum Sent {
+    /// What the turn tells (AGL-067, D3).
+    Report(Report),
+    /// A line of the server's start or of the transcription.
+    Line(String),
+    /// The server answered, with a context of this many tokens.
+    Context(usize),
+    /// The media of the message are stored: the session's media of each
+    /// kind (`attach::media_counts`).
+    Stored([u32; 3]),
+    /// The turn is over, before its FSM is closed.
+    Over,
+    /// The command is done.
+    Done(Box<Done>),
+}
+
+/// The end of a command.
+pub struct Done {
+    /// A message's turn.
+    pub turn: Option<Result<TurnEnd, Error>>,
+    /// What a slash command said; `/new` fails as an error.
+    pub said: Option<Result<Said, Error>>,
+    /// The session as it is after the command.
+    pub session: SessionView,
+}
+
+/// What a surface holds of its run's session after a command.
+#[derive(Clone, Debug)]
+pub struct SessionView {
+    pub id: String,
+    pub name: Option<String>,
+    pub events: Vec<Event>,
+    pub outputs: PathBuf,
+    /// The state of an unfinished turn (D105).
+    pub unfinished: Option<String>,
+    /// The media of each kind (`attach::media_counts`).
+    pub media: [u32; 3],
+}
+
+impl SessionView {
+    pub fn of(session: &Session) -> SessionView {
+        SessionView {
+            id: session.id.clone(),
+            name: session.name.clone(),
+            events: session.events.clone(),
+            outputs: session.outputs_dir(),
+            unfinished: session.unfinished().and_then(|turn| turn.state),
+            media: attach::media_counts(session),
+        }
+    }
+}
+
+/// The surface's end of a run on its thread. Dropping it ends the thread
+/// once its command is done.
+pub struct Handle {
+    commands: Option<Sender<Command>>,
+    sent: Receiver<Sent>,
+    stop: Stop,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Handle {
+    /// The stop of the run's turns.
+    pub fn stop(&self) -> &Stop {
+        &self.stop
+    }
+
+    /// Sends a command; false when the run's thread is gone.
+    pub fn send(&self, command: Command) -> bool {
+        self.commands
+            .as_ref()
+            .is_some_and(|commands| commands.send(command).is_ok())
+    }
+
+    /// What the run sent next; `None` when its thread is gone.
+    pub fn recv(&self) -> Option<Sent> {
+        self.sent.recv().ok()
+    }
+
+    /// Sends `command` and waits for its end; what the run sends before it
+    /// goes to `each`. `None` when the run's thread is gone.
+    pub fn ask(&self, command: Command, each: &mut dyn FnMut(Sent)) -> Option<Done> {
+        if !self.send(command) {
+            return None;
+        }
+        loop {
+            match self.recv()? {
+                Sent::Done(done) => return Some(*done),
+                sent => each(sent),
+            }
+        }
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.commands.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Run {
+    /// Moves the run to a thread of its own (D7).
+    pub fn start(self) -> Handle {
+        let (commands, inbox) = mpsc::channel();
+        let (outbox, sent) = mpsc::channel();
+        let stop = self.stop.clone();
+        let thread = thread::Builder::new()
+            .name(format!("run {}", self.session.id))
+            .spawn(move || self.serve(inbox, outbox))
+            .expect("a thread for the run");
+        Handle {
+            commands: Some(commands),
+            sent,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn serve(mut self, inbox: Receiver<Command>, outbox: Sender<Sent>) {
+        for command in inbox {
+            let done = self.take(command, &outbox);
+            if outbox.send(Sent::Done(Box::new(done))).is_err() {
+                break;
+            }
+        }
+    }
+
+    fn take(&mut self, command: Command, outbox: &Sender<Sent>) -> Done {
+        let mut forward = Forward(outbox.clone());
+        let (turn, said) = match command {
+            Command::Say {
+                message,
+                attached,
+                reasoning,
+                observer,
+            } => {
+                self.reasoning = reasoning;
+                let end = match (observer, self.context) {
+                    (Some(mut observer), Some(context)) => {
+                        self.turn_on(context, &message, attached, &mut observer, &mut forward)
+                    }
+                    _ => self.turn(&message, attached, &mut forward),
+                };
+                (Some(end), None)
+            }
+            Command::Remember { name, text } => (None, Some(Ok(self.remember(&name, &text)))),
+            Command::Remove { name } => (None, Some(Ok(self.remove(&name)))),
+            Command::LookAt(action) => (None, Some(Ok(self.looked_at(&action)))),
+            Command::Rename(name) => (None, Some(Ok(self.rename(&name)))),
+            Command::New => (None, Some(self.new_session())),
+            Command::Compact { reasoning } => {
+                self.reasoning = reasoning;
+                (None, Some(Ok(self.compact(&mut forward))))
+            }
+            Command::Append(events) => {
+                for event in events {
+                    let _ = self.session.append(event);
+                }
+                (None, None)
+            }
+        };
+        Done {
+            turn,
+            said,
+            session: SessionView::of(&self.session),
+        }
+    }
+}
+
+/// The surface of a turn on the run's thread: what it is told goes to the
+/// handle.
+struct Forward(Sender<Sent>);
+
+impl Sink for Forward {
+    fn send(&mut self, report: Report) {
+        let _ = self.0.send(Sent::Report(report));
+    }
+}
+
+impl Turn for Forward {
+    fn line(&mut self, line: &str) {
+        let _ = self.0.send(Sent::Line(line.to_owned()));
+    }
+
+    fn context(&mut self, context: usize) {
+        let _ = self.0.send(Sent::Context(context));
+    }
+
+    fn stored(&mut self, session: &Session) {
+        let _ = self.0.send(Sent::Stored(attach::media_counts(session)));
+    }
+
+    fn over(&mut self) {
+        let _ = self.0.send(Sent::Over);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::backend::{Backend, Generated, Prompt, Request};
+    use crate::engine::{Autostart, Others};
+    use crate::forge::testutil::TempDir;
+    use crate::function::Function;
+    use crate::i18n::Lang;
+    use crate::memory::StoreHome;
+    use crate::search::NoSearch;
+    use crate::session::StopReason;
+
+    /// A server that thinks, then answers; while `hold` is set it writes
+    /// until its turn is stopped.
+    #[derive(Default)]
+    struct Fake {
+        hold: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl Backend for Fake {
+        fn render(&self, _prompt: &Prompt) -> Result<String, Error> {
+            Ok("prompt".into())
+        }
+
+        fn generate(
+            &self,
+            _request: &Request,
+            _on_thinking: &mut dyn FnMut(&str),
+            _on_text: &mut dyn FnMut(&str),
+        ) -> Result<Generated, Error> {
+            while self.hold.load(Ordering::SeqCst) {
+                if crate::stop::requested() {
+                    return Err(Error::Interrupted);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Generated {
+                text: if call.is_multiple_of(2) { "Let me answer." } else { "Done." }.into(),
+                stop: crate::backend::Stop::End,
+                thinking: None,
+                tool_calls: Vec::new(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                prefill: None,
+            })
+        }
+
+        fn count_tokens(&self, text: &str) -> Result<usize, Error> {
+            Ok(text.len())
+        }
+
+        fn context_size(&self) -> Result<usize, Error> {
+            Ok(16384)
+        }
+
+        fn health(&self) -> Option<u16> {
+            Some(200)
+        }
+
+        fn url(&self) -> &str {
+            "http://127.0.0.1:1"
+        }
+    }
+
+    /// A run on `fake`, its session in `dir`, its server answering.
+    fn run(dir: &TempDir, fake: Arc<Fake>) -> Run {
+        let cwd = dir.0.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (project, _) = crate::forge::resolve(&dir.0.join("data"), &cwd, Lang::En, true, &|_| {
+            Err(Error::Interrupted)
+        })
+        .unwrap();
+        let function =
+            Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
+        let sessions = dir.0.join("sessions");
+        let session =
+            Session::create_run(&sessions, "fixture-minimal", &cwd, Some(&function.snapshot()))
+                .unwrap();
+        let backend: Arc<dyn Backend + Send + Sync> = fake;
+        Run {
+            function,
+            function_name: "fixture-minimal".into(),
+            backend: Arc::clone(&backend),
+            session,
+            sessions_dir: sessions,
+            project: project.project.clone(),
+            workspace: cwd.clone(),
+            context: Some(16384),
+            autostart: Autostart {
+                llama: backend,
+                project,
+                effective: Default::default(),
+                whisper: Default::default(),
+                user_path: dir.0.join("settings.nix"),
+                models: dir.0.join("models"),
+                path_var: None,
+                runtime: None,
+                lang: Lang::En,
+                others: Others::Refuse,
+                engine: Arc::new(Mutex::new(None)),
+            },
+            lang: Lang::En,
+            data: dir.0.join("data"),
+            auto_rehome: true,
+            reasoning: None,
+            image_tokens: 1000,
+            search: Box::new(NoSearch),
+            memory: Box::new(StoreHome {
+                workspace: cwd,
+                auto_rehome: true,
+                lang: Lang::En,
+            }),
+            about: None,
+            stop: Stop::new(),
+        }
+    }
+
+    fn say(message: &str) -> Command {
+        Command::Say {
+            message: message.into(),
+            attached: Vec::new(),
+            reasoning: None,
+            observer: None,
+        }
+    }
+
+    #[test]
+    fn a_message_is_answered_on_the_runs_thread() {
+        let dir = TempDir::new();
+        let handle = run(&dir, Arc::default()).start();
+        let mut reports = 0;
+        let done = handle
+            .ask(say("Hello"), &mut |sent| {
+                if matches!(sent, Sent::Report(_)) {
+                    reports += 1;
+                }
+            })
+            .unwrap();
+        assert!(matches!(done.turn, Some(Ok(TurnEnd::Answer(ref text))) if text == "Done."));
+        assert!(reports > 0);
+        assert!(done.session.events.iter().any(|e| matches!(e, Event::User(text) if text == "Hello")));
+    }
+
+    #[test]
+    fn each_run_is_stopped_by_its_own_stop() {
+        let dir = TempDir::new();
+        let (held, free) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
+        held.hold.store(true, Ordering::SeqCst);
+        free.hold.store(true, Ordering::SeqCst);
+        let (first, second) = (run(&dir, held).start(), run(&dir, free.clone()).start());
+        assert!(first.send(say("one")) && second.send(say("two")));
+        thread::sleep(Duration::from_millis(50));
+        first.stop().request();
+        let first_end = loop {
+            if let Sent::Done(done) = first.recv().unwrap() {
+                break done;
+            }
+        };
+        assert!(matches!(
+            first_end.turn,
+            Some(Ok(TurnEnd::Stopped(StopReason::Interrupted)))
+        ));
+        // The other turn goes on: it ends when its server lets it.
+        assert!(!second.stop().requested());
+        free.hold.store(false, Ordering::SeqCst);
+        let second_end = loop {
+            if let Sent::Done(done) = second.recv().unwrap() {
+                break done;
+            }
+        };
+        assert!(matches!(second_end.turn, Some(Ok(TurnEnd::Answer(_)))));
+    }
+
+    #[test]
+    fn a_message_sent_while_a_turn_runs_waits_for_its_end() {
+        let dir = TempDir::new();
+        let fake = Arc::new(Fake::default());
+        fake.hold.store(true, Ordering::SeqCst);
+        let handle = run(&dir, fake.clone()).start();
+        assert!(handle.send(say("first")) && handle.send(say("second")));
+        let release = {
+            let fake = fake.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                fake.hold.store(false, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let mut ends = Vec::new();
+        while ends.len() < 2 {
+            if let Sent::Done(done) = handle.recv().unwrap() {
+                let users: Vec<String> = done
+                    .session
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        Event::User(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                ends.push(users);
+            }
+        }
+        release.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert_eq!(ends, [vec!["first".to_owned()], vec!["first".into(), "second".into()]]);
+    }
+}
