@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agentlibre-core", "crates/agentlibre-terminal"]
+members = ["crates/agentlibre-core", "crates/agentlibre-proto", "crates/agentlibre-terminal"]
 resolver = "3"
 
 # One version for both crates: `about::version` reads it in the core and

@@ -1,0 +1,170 @@
+use super::*;
+
+/// `message` written as a line and read back.
+fn round<T: Serialize + for<'de> Deserialize<'de>>(message: &T) -> (String, T) {
+    let mut out = Vec::new();
+    send(&mut out, message).unwrap();
+    let line = String::from_utf8(out.clone()).unwrap();
+    assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "{line}");
+    let back = Lines::new(&out[..]).read().unwrap().unwrap();
+    (line, back)
+}
+
+#[test]
+fn every_request_round_trips_as_one_line() {
+    let requests = [
+        Request::Hello {
+            version: VERSION,
+            human: true,
+            lang: "uk".into(),
+        },
+        Request::Open(Open {
+            dir: "/w".into(),
+            plane: Some("work".into()),
+            one_request: true,
+            ..Open::default()
+        }),
+        Request::Sessions,
+        Request::Subscribe { session: None },
+        Request::Say {
+            session: "s".into(),
+            message: "hi\nthere".into(),
+            attached: vec![Attached {
+                number: 1,
+                kind: MediaKind::Image,
+                name: "a.png".into(),
+                ext: "png".into(),
+                base64: base64::encode(b"\x89PNG"),
+            }],
+            reasoning: Some("low".into()),
+        },
+        Request::Stop { session: "s".into() },
+        Request::Remember {
+            session: "s".into(),
+            name: "n".into(),
+            text: "t".into(),
+            workspace: true,
+        },
+        Request::Remove {
+            session: "s".into(),
+            name: "n".into(),
+        },
+        Request::Look {
+            session: "s".into(),
+            look: Look::Show { name: "n".into() },
+        },
+        Request::Rename {
+            session: "s".into(),
+            name: "n".into(),
+        },
+        Request::New { session: "s".into() },
+        Request::Compact {
+            session: "s".into(),
+            reasoning: None,
+        },
+        Request::Record {
+            session: "s".into(),
+            lines: vec![CommandLine {
+                line: "/status".into(),
+                failed: false,
+                output: Some("…".into()),
+            }],
+        },
+        Request::Transcribe {
+            dir: "/w".into(),
+            plane: None,
+            audio: Attached {
+                number: 1,
+                kind: MediaKind::Audio,
+                name: "voice.wav".into(),
+                ext: "wav".into(),
+                base64: String::new(),
+            },
+        },
+        Request::Answer {
+            question: 3,
+            answer: Some("y".into()),
+        },
+        Request::Close { session: "s".into() },
+    ];
+    for request in requests {
+        let (line, back) = round(&request);
+        assert_eq!(back, request, "{line}");
+    }
+    let (line, _) = round(&Request::Stop { session: "s".into() });
+    assert_eq!(line, "{\"request\":\"stop\",\"session\":\"s\"}\n");
+}
+
+#[test]
+fn what_a_plane_sends_round_trips() {
+    let call = Event::Call {
+        text: Some("let me look".into()),
+        call: ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: vec![("command".into(), Value::Text("ls".into())), ("timeout".into(), Value::Int(5))],
+        },
+    };
+    let replies = [
+        Reply::Hello { version: VERSION, pid: 7 },
+        Reply::Refused { error: "no".into() },
+        Reply::Ok,
+        Reply::Opened(Opened::default()),
+        Reply::Sent {
+            session: "s".into(),
+            sent: Sent::Report(Report::Event(call)),
+        },
+        Reply::Sent {
+            session: "s".into(),
+            sent: Sent::Report(Report::Transition(Transition {
+                from: Phase::Running("bash".into()),
+                to: Phase::Retry { attempt: 1, max: 3 },
+                event: PhaseEvent::ToolEnd(Outcome::Timeout),
+                micros: 1500,
+                violation: false,
+            })),
+        },
+        Reply::Sent {
+            session: "s".into(),
+            sent: Sent::Stored([1, 0, 2]),
+        },
+        Reply::Done {
+            session: "s".into(),
+            done: Done {
+                turn: Some(Ok(TurnEnd::Stopped(StopReason::Interrupted))),
+                why: Some("interrupted".into()),
+                said: Some(Err("no store".into())),
+                session: SessionView::default(),
+            },
+        },
+        Reply::Question {
+            question: 1,
+            session: "s".into(),
+            ask: Ask::Yes,
+            text: "restart? [y/N]".into(),
+        },
+    ];
+    for reply in replies {
+        let (line, back) = round(&reply);
+        assert_eq!(back, reply, "{line}");
+    }
+}
+
+#[test]
+fn a_line_that_is_no_message_is_invalid_data() {
+    let mut lines = Lines::new(&b"{\"request\":\"nope\"}\n"[..]);
+    let error = lines.read::<Request>().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(Lines::new(&b""[..]).read::<Request>().unwrap().is_none());
+}
+
+#[test]
+fn base64_goes_both_ways() {
+    for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", &[0, 255, 128, 7]] {
+        assert_eq!(base64::decode(&base64::encode(bytes)).unwrap(), bytes);
+    }
+    assert_eq!(base64::encode(b"foobar"), "Zm9vYmFy");
+    assert_eq!(base64::encode(b"fo"), "Zm8=");
+    assert!(base64::decode("Zm8").is_none());
+    assert!(base64::decode("Zm=8").is_none());
+}

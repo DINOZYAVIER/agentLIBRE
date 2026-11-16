@@ -24,6 +24,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentlibre-proto"
+version = "0.0.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
