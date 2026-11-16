@@ -17,6 +17,7 @@ fn every_request_round_trips_as_one_line() {
             version: VERSION,
             human: true,
             lang: "uk".into(),
+            pid: 42,
         },
         Request::Open(Open {
             dir: "/w".into(),
@@ -136,6 +137,7 @@ fn what_a_plane_sends_round_trips() {
                 said: Some(Err("no store".into())),
                 session: SessionView::default(),
             },
+            yours: true,
         },
         Reply::Question {
             question: 1,

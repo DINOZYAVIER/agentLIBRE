@@ -35,6 +35,8 @@ pub enum Request {
         version: u32,
         human: bool,
         lang: String,
+        /// The client's process, for a bridge to find its window.
+        pid: u32,
     },
     /// A session's plane: made or resumed, and started (D10).
     Open(Open),
@@ -130,8 +132,13 @@ pub enum Reply {
     Transcribed { text: String },
     /// What a subscribed session does (D3).
     Sent { session: String, sent: Sent },
-    /// The end of a command of a subscribed session.
-    Done { session: String, done: Done },
+    /// The end of a command of a subscribed session; `yours` when this
+    /// client sent the command (D12: the commands of two clients queue).
+    Done {
+        session: String,
+        done: Done,
+        yours: bool,
+    },
     /// A plane's question to the client that opened it (D11).
     Question {
         question: u64,
@@ -173,8 +180,9 @@ pub struct SessionInfo {
     pub plane: Option<String>,
     pub workspace: String,
     pub function: String,
-    /// The pid of the daemon, for a bridge's window lookup.
-    pub pid: u32,
+    /// The processes of the clients that hold it, for a bridge to find
+    /// their windows.
+    pub pids: Vec<u32>,
     pub busy: bool,
 }
 

@@ -76,6 +76,7 @@ impl Client {
                 version: proto::VERSION,
                 human,
                 lang: code.into(),
+                pid: std::process::id(),
             },
             &mut |_| {},
         )? {
@@ -279,7 +280,7 @@ impl Remote {
         }
         loop {
             match self.client.next().ok()? {
-                Reply::Done { session: of, done } if of == session => {
+                Reply::Done { session: of, done, yours: true } if of == session => {
                     let done = done_of(done);
                     *self.session.lock().unwrap_or_else(|e| e.into_inner()) = done.session.id.clone();
                     return Some(done);
@@ -296,7 +297,7 @@ impl Remote {
         let session = self.session();
         loop {
             match self.client.next().ok()? {
-                Reply::Done { session: of, done } if of == session => return Some(done_of(done)),
+                Reply::Done { session: of, done, yours: true } if of == session => return Some(done_of(done)),
                 reply => self.unasked(&session, reply, each),
             }
         }

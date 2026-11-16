@@ -5,7 +5,7 @@
 //! a second `open` of a running session attaches to its plane (D12); an
 //! engine a plane launched is stopped when no plane uses it any more (D16).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -99,6 +99,7 @@ struct Client {
     out: Arc<Mutex<UnixStream>>,
     human: bool,
     lang: Lang,
+    pid: u32,
 }
 
 /// A session's plane in the daemon.
@@ -110,6 +111,8 @@ struct Entry {
     /// The clients that opened it (D12) and those that follow it (D3).
     holders: HashSet<u64>,
     subscribers: HashSet<u64>,
+    /// Who sent each command that waits for its end, in their order (D12).
+    origins: VecDeque<u64>,
     busy: bool,
     /// The FSM that saw the server's start of a run of one request: its
     /// first message goes on from it (AGL-046, D10).
@@ -131,10 +134,13 @@ impl Daemon {
         let Ok(out) = stream.try_clone() else { return };
         let out = Arc::new(Mutex::new(out));
         let mut lines = Lines::new(BufReader::new(stream));
-        let (human, lang) = match lines.read::<Request>() {
-            Ok(Some(Request::Hello { version, human, lang })) if version == proto::VERSION => {
-                (human, Lang::from_code(&lang).unwrap_or(Lang::En))
-            }
+        let (human, lang, pid) = match lines.read::<Request>() {
+            Ok(Some(Request::Hello {
+                version,
+                human,
+                lang,
+                pid,
+            })) if version == proto::VERSION => (human, Lang::from_code(&lang).unwrap_or(Lang::En), pid),
             Ok(Some(Request::Hello { version, lang, .. })) => {
                 let lang = Lang::from_code(&lang).unwrap_or(Lang::En);
                 let error = tr!(lang, m::DAEMON_VERSION, theirs = version, ours = proto::VERSION);
@@ -153,6 +159,7 @@ impl Daemon {
                     out: Arc::clone(&out),
                     human,
                     lang,
+                    pid,
                 },
             );
             id
@@ -188,7 +195,7 @@ impl Daemon {
                             // The server's start follows the reply, so that
                             // the client has the session before its reports.
                             if start {
-                                let _ = self.command(&id, |_| Command::Start, true);
+                                let _ = self.command(client, &id, |_| Command::Start, true);
                             }
                         }
                         Err(error) => self.send_to(client, &Reply::Refused { error: error.message(lang) }),
@@ -207,7 +214,11 @@ impl Daemon {
                         plane: entry.plane.clone(),
                         workspace: entry.opened.workspace.clone(),
                         function: entry.opened.function.clone(),
-                        pid: std::process::id(),
+                        pids: entry
+                            .holders
+                            .iter()
+                            .filter_map(|holder| state.clients.get(holder).map(|client| client.pid))
+                            .collect(),
                         busy: entry.busy,
                     })
                     .collect();
@@ -233,7 +244,7 @@ impl Daemon {
             } => {
                 let attached = attached.into_iter().filter_map(wire::attached_of).collect();
                 let reasoning = reasoning.as_deref().and_then(ReasoningLevel::parse);
-                self.command(&session, |entry| Command::Say {
+                self.command(client, &session, |entry| Command::Say {
                     message,
                     attached,
                     reasoning,
@@ -254,20 +265,20 @@ impl Daemon {
                 name,
                 text,
                 workspace,
-            } => self.plain(&session, Command::Remember { name, text, workspace }, lang),
-            Request::Remove { session, name } => self.plain(&session, Command::Remove { name }, lang),
+            } => self.plain(client, &session, Command::Remember { name, text, workspace }, lang),
+            Request::Remove { session, name } => self.plain(client, &session, Command::Remove { name }, lang),
             Request::Look { session, look } => {
                 let action = match look {
                     proto::Look::List => MemoryAction::List,
                     proto::Look::Show { name } => MemoryAction::Show { name },
                 };
-                self.plain(&session, Command::LookAt(action), lang)
+                self.plain(client, &session, Command::LookAt(action), lang)
             }
-            Request::Rename { session, name } => self.plain(&session, Command::Rename(name), lang),
-            Request::New { session } => self.plain(&session, Command::New, lang),
+            Request::Rename { session, name } => self.plain(client, &session, Command::Rename(name), lang),
+            Request::New { session } => self.plain(client, &session, Command::New, lang),
             Request::Compact { session, reasoning } => {
                 let reasoning = reasoning.as_deref().and_then(ReasoningLevel::parse);
-                self.command(&session, |_| Command::Compact { reasoning }, true)
+                self.command(client, &session, |_| Command::Compact { reasoning }, true)
                     .map_or_else(refused, |()| Some(Reply::Ok))
             }
             Request::Record { session, lines } => {
@@ -275,7 +286,7 @@ impl Daemon {
                     .into_iter()
                     .map(|line| crate::session::Event::Command(wire::command_of(line)))
                     .collect();
-                self.plain(&session, Command::Append(events), lang)
+                self.plain(client, &session, Command::Append(events), lang)
             }
             Request::Transcribe { dir, plane, audio } => {
                 thread::spawn(move || {
@@ -301,9 +312,9 @@ impl Daemon {
     }
 
     /// A command that is not a turn.
-    fn plain(&self, session: &str, command: Command, lang: Lang) -> Option<Reply> {
+    fn plain(&self, client: u64, session: &str, command: Command, lang: Lang) -> Option<Reply> {
         let mut command = Some(command);
-        Some(match self.command(session, |_| command.take().expect("one command"), false) {
+        Some(match self.command(client, session, |_| command.take().expect("one command"), false) {
             Ok(()) => Reply::Ok,
             Err(error) => Reply::Refused { error: error.message(lang) },
         })
@@ -313,6 +324,7 @@ impl Daemon {
     /// turn until its end.
     fn command(
         &self,
+        client: u64,
         session: &str,
         make: impl FnOnce(&mut Entry) -> Command,
         busy: bool,
@@ -323,11 +335,10 @@ impl Daemon {
             .get_mut(session)
             .ok_or_else(|| Error::DaemonNoSession { id: session.into() })?;
         let command = make(entry);
+        entry.commands.send(command).map_err(|_| Error::PlaneGone)?;
         entry.busy |= busy;
-        entry
-            .commands
-            .send(command)
-            .map_err(|_| Error::PlaneGone)
+        entry.origins.push_back(client);
+        Ok(())
     }
 
     /// Opens a session's plane for `client`, or attaches it to the running
@@ -424,6 +435,7 @@ impl Daemon {
             plane: plane_name,
             holders: HashSet::from([client]),
             subscribers: HashSet::from([client]),
+            origins: VecDeque::new(),
             busy: false,
             observer,
             voice,
@@ -453,9 +465,11 @@ impl Daemon {
         let mut targets: HashSet<u64> = entry.subscribers.clone();
         let plane = entry.plane.clone();
         let mut next = id.to_owned();
+        let mut origin = None;
         let message = match item {
             Sent::Done(done) => {
-                entry.busy = false;
+                origin = entry.origins.pop_front();
+                entry.busy = !entry.origins.is_empty();
                 let done = *done;
                 // `/new`: the entry follows the new session.
                 if done.session.id != id {
@@ -484,6 +498,7 @@ impl Daemon {
                 Message::Done(done) => Reply::Done {
                     session: id.to_owned(),
                     done: wire::done(done, plane.as_deref(), to.lang),
+                    yours: origin == Some(client),
                 },
             };
             write(&to.out, &reply);
@@ -701,6 +716,7 @@ mod tests {
                 version,
                 human: false,
                 lang: "en".into(),
+                pid: std::process::id(),
             });
             (client, hello)
         }
@@ -782,7 +798,7 @@ mod tests {
             Reply::Ok
         );
         for client in [&mut first, &mut second] {
-            let Reply::Done { session, done } = client.next() else {
+            let Reply::Done { session, done, .. } = client.next() else {
                 panic!("no end")
             };
             assert_eq!(session, id);
