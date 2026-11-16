@@ -195,6 +195,14 @@ pub const SPECS: [Spec; 6] = [
                 ),
             ),
             ParamSpec::text(
+                "store",
+                false,
+                Some(
+                    "In a plane: `workspace` acts on the workspace's forge instead of the \
+                     plane's. Outside a plane it is not used.",
+                ),
+            ),
+            ParamSpec::text(
                 "text",
                 false,
                 Some("For append: the text of the new bullet."),

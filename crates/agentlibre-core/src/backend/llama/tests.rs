@@ -129,7 +129,7 @@ fn tool_schemas() {
     names.sort();
     assert_eq!(
         names,
-        ["action", "name", "new", "old", "section", "state", "text", "title"]
+        ["action", "name", "new", "old", "section", "state", "store", "text", "title"]
     );
     // Every field is a string with a description that says which action
     // it is for.
@@ -141,6 +141,8 @@ fn tool_schemas() {
     assert!(description("name").contains("not its title"));
     assert!(description("new").contains("empty deletes"));
     assert!(description("section").contains("Not for edit"));
+    // In a plane the workspace's forge is named by `store` (AGL-077, D9).
+    assert!(description("store").contains("workspace"));
     assert_eq!(
         forge["function"]["parameters"]["required"],
         json!(["action"])

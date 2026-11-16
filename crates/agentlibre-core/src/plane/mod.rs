@@ -194,6 +194,8 @@ pub struct Plane {
     /// The plane's store, its id, name and directories, when the run is
     /// in one (AGL-077, D6, D15).
     pub file: Option<PlaneFile>,
+    /// The plane's forge, which the forge tool acts on (AGL-077, D9).
+    pub plane_forge: Option<Workspace>,
     pub function: Function,
     pub function_name: String,
     pub backend: Arc<dyn Backend + Send + Sync>,
@@ -513,6 +515,7 @@ impl Plane {
             .unwrap_or(true)
             .then(|| about_of(env, paths, project, plane_file.as_ref(), &settings, &workspace, &user_path));
         let plane = Plane {
+            plane_forge: plane_file.as_ref().map(PlaneFile::forge_store),
             file: plane_file,
             function,
             function_name: settings.function.clone(),
@@ -547,6 +550,7 @@ impl Plane {
             lang: self.lang,
             auto_rehome: self.auto_rehome,
             data: &self.data,
+            plane: self.plane_forge.as_ref(),
         }
     }
 
@@ -564,6 +568,7 @@ impl Plane {
                 lang: self.lang,
                 auto_rehome: self.auto_rehome,
                 data: &self.data,
+                plane: self.plane_forge.as_ref(),
             },
             reasoning: self.reasoning,
             image_tokens: self.image_tokens,

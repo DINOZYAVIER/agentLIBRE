@@ -364,6 +364,7 @@ mod tests {
         let backend: Arc<dyn Backend + Send + Sync> = fake;
         Plane {
             file: None,
+            plane_forge: None,
             function,
             function_name: "fixture-minimal".into(),
             backend: Arc::clone(&backend),

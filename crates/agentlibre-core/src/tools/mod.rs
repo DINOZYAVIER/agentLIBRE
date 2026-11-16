@@ -45,6 +45,9 @@ pub struct ForgeEnv<'a> {
     pub lang: Lang,
     pub auto_rehome: bool,
     pub data: &'a Path,
+    /// The plane's forge, which the tool acts on in a plane; the
+    /// workspace's by `store` (AGL-077, D9).
+    pub plane: Option<&'a crate::forge::Workspace>,
 }
 
 /// A successful write of the `forge` tool: the artifact it touched, as
@@ -285,6 +288,8 @@ pub fn edit(workspace: &Path, path: &str, old: &str, new: &str) -> ToolResult {
 /// the tool's check.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ForgeArgs {
+    /// `workspace`: in a plane, the workspace's forge (AGL-077, D9).
+    pub store: Option<String>,
     pub action: String,
     pub name: Option<String>,
     pub title: Option<String>,
@@ -301,6 +306,7 @@ pub struct ForgeArgs {
 fn forge_args(call: &ToolCall) -> ForgeArgs {
     let field = |name: &str| call.text(name).filter(|t| !t.is_empty()).map(str::to_owned);
     ForgeArgs {
+        store: field("store"),
         action: call.text("action").unwrap_or_default().to_owned(),
         name: field("name"),
         title: field("title"),
@@ -325,6 +331,12 @@ pub fn forge(
     output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
     let lang = env.lang;
+    // In a plane, its forge; the workspace's by `store` (AGL-077, D9).
+    if let Some(plane) = env.plane
+        && args.store.as_deref() != Some("workspace")
+    {
+        return forge_run(plane, args, lang, output);
+    }
     match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
         Ok((ws, lines)) => {
             let (mut result, write) = forge_run(&ws, args, lang, output);

@@ -197,6 +197,22 @@ impl PlaneFile {
         self.dir.join("memory")
     }
 
+    /// The plane's store as the forge acts on it (D9): its `forge/` is a
+    /// workspace's, and the plane needs no workspace's marker.
+    pub fn forge_store(&self) -> crate::forge::Workspace {
+        crate::forge::Workspace {
+            project: self.dir.clone(),
+            identity: format!("plane:{}", self.id),
+            key: self.name.clone(),
+            dir: self.dir.clone(),
+            function: None,
+            server: Default::default(),
+            whisper: Default::default(),
+            search: Default::default(),
+            origin: None,
+        }
+    }
+
     /// The plane as a session's header records it (D18).
     pub fn of_session(&self) -> crate::session::SessionPlane {
         crate::session::SessionPlane {

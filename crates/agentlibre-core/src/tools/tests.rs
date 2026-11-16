@@ -197,6 +197,7 @@ fn the_workspace_tools_are_dispatched_by_name() {
         lang: Lang::En,
         auto_rehome: true,
         data: &data,
+        plane: None,
     };
     let (result, write) = run_local(
         &dir.0,
@@ -351,6 +352,7 @@ impl ForgeStore {
                 .map(|(_, value)| value.to_string())
         };
         let args = ForgeArgs {
+            store: None,
             action: action.to_string(),
             name: field("name"),
             title: field("title"),
@@ -1460,6 +1462,7 @@ fn the_forge_tool_honors_auto_rehome_and_the_language() {
         lang,
         auto_rehome,
         data: &paths.data,
+        plane: None,
     };
     // A project with a store, then moved.
     let from = root.0.join("a/proj");
@@ -1525,3 +1528,43 @@ fn no_file() -> Output<'static> {
     }
 }
 
+
+#[test]
+fn in_a_plane_the_forge_is_the_planes_and_the_workspaces_by_store() {
+    // AGL-077, D9: the plane's forge, the workspace's by store=workspace;
+    // a write makes no workspace's marker in the plane's store.
+    let dir = TempDir::new();
+    let paths = crate::paths::Paths {
+        config: dir.0.join("config"),
+        data: dir.0.join("data"),
+        state: dir.0.join("state"),
+        runtime: None,
+    };
+    let repo = dir.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let plane = crate::plane::PlaneFile::create(&paths, "work", std::slice::from_ref(&repo)).unwrap();
+    let store = plane.forge_store();
+    let env = ForgeEnv {
+        lang: Lang::En,
+        auto_rehome: true,
+        data: &paths.data,
+        plane: Some(&store),
+    };
+    let call = |args: &[(&str, &str)]| {
+        let call = tool_call(
+            "forge",
+            args.iter()
+                .map(|(name, value)| ((*name).to_owned(), Value::Text((*value).to_owned())))
+                .collect(),
+        );
+        forge(&repo, env, &forge_args(&call), &no_file()).0
+    };
+    let made = call(&[("action", "new"), ("title", "In the plane")]);
+    assert!(made.content.contains("planes/work/forge/task-spec/agl-001-in-the-plane.md"), "{}", made.content);
+    assert!(!plane.dir.join(crate::settings::SETTINGS_FILE).exists(), "no marker");
+    let theirs = call(&[("action", "new"), ("title", "In the workspace"), ("store", "workspace")]);
+    assert_eq!(theirs.outcome, Outcome::Ok, "{}", theirs.content);
+    assert!(!theirs.content.contains("planes/work"), "{}", theirs.content);
+    let listed = call(&[("action", "list")]).content;
+    assert!(listed.contains("agl-001-in-the-plane") && !listed.contains("in-the-workspace"), "{listed}");
+}

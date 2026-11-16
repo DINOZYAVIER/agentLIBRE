@@ -405,6 +405,7 @@ fn agent_searching<'a>(
             lang: crate::i18n::Lang::En,
             auto_rehome: true,
             data: &dir.0,
+            plane: None,
         },
         reasoning,
         image_tokens: 1000,
