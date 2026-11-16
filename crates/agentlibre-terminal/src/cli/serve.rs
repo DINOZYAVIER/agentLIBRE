@@ -41,7 +41,7 @@ pub fn run(
             let others = if yes {
                 Others::Yes
             } else if crate::tty::is_interactive() {
-                Others::Ask(&ask_terminal)
+                Others::Ask(std::sync::Arc::new(ask_terminal))
             } else {
                 Others::Refuse
             };

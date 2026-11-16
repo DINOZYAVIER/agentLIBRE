@@ -133,12 +133,16 @@ pub fn unit_name(key: &str) -> String {
     format!("{UNIT_PREFIX}-{key}")
 }
 
+/// Asks the human a question of yes or no; `true` agrees.
+pub type AskYes = Arc<dyn Fn(&str, Lang) -> bool + Send + Sync>;
+
 /// The consent of the server commands (D9, D13; AGL-033, D2): what a
 /// question gets — the start of a server that another unit holds, or the
 /// restart of D2.
-pub enum Others<'a> {
+#[derive(Clone)]
+pub enum Others {
     /// Ask the human; `true` agrees.
-    Ask(&'a dyn Fn(&str, Lang) -> bool),
+    Ask(AskYes),
     /// `--yes`: agree without asking.
     Yes,
     /// Nobody can answer and there is no `--yes`: refuse.
@@ -373,16 +377,16 @@ pub enum ServerProgress<'a> {
 /// D6, D10); the same code as `agl server start`: the check of D2
 /// (AGL-033) beside the health check, the launch of both kinds, the
 /// consent of the restart.
-pub struct Autostart<'a> {
+pub struct Autostart {
     /// The backend the turn runs on: the `Llama` or the `Strata` backend,
-    /// by the settings' `[server] kind` (AGL-030, D1).
-    pub llama: &'a dyn Backend,
-    pub project: &'a Workspace,
+    /// by the settings' `[server] kind` (AGL-030, D1); the run's own.
+    pub llama: Arc<dyn Backend + Send + Sync>,
+    pub project: Workspace,
     /// The settings that actually run (AGL-033, D1): the function's
     /// `[server]` table when the file declares it, else `settings`.
-    pub effective: &'a ServerFile,
+    pub effective: ServerFile,
     /// The project's `[whisper]` over the user's (AGL-014, D22).
-    pub whisper: &'a crate::settings::WhisperFile,
+    pub whisper: crate::settings::WhisperFile,
     pub user_path: PathBuf,
     pub models: PathBuf,
     pub path_var: Option<OsString>,
@@ -392,17 +396,17 @@ pub struct Autostart<'a> {
     pub lang: Lang,
     /// The consent of D2 (AGL-033): the restart asks, as the server
     /// commands do.
-    pub others: Others<'a>,
+    pub others: Others,
     /// The engine child agl launched itself (AGL-024, D2, D3): `None`
     /// while agl uses a server it does not own.
     pub engine: Arc<Mutex<Option<Engine>>>,
 }
 
-impl Autostart<'_> {
+impl Autostart {
     /// The server, in a line (AGL-033, D2): the effective settings, by
     /// `what_of`.
     pub fn what(&self) -> Result<String, Error> {
-        what_of(self.effective)
+        what_of(&self.effective)
     }
 
     /// Returns when the server answers and serves the effective settings
@@ -412,14 +416,14 @@ impl Autostart<'_> {
     /// with the consent as today. `progress` is told when the wait for a
     /// server begins (AGL-046) and takes the progress lines.
     pub fn ensure(&self, progress: &mut dyn FnMut(ServerProgress)) -> Result<(), Error> {
-        let llama = self.llama;
+        let llama = &*self.llama;
         let what = self.what()?;
         if self.effective.external() {
             if health(llama) == Health::Loading {
                 progress(ServerProgress::Starting);
             }
             let mut say = |line: &str| progress(ServerProgress::Line(line));
-            return check_outside(llama, self.effective, &what, &mut say, self.lang);
+            return check_outside(llama, &self.effective, &what, &mut say, self.lang);
         }
         // The server of the other kind that agl owns stops first
         // (AGL-036, D10): the two do not fit the GPU together.
@@ -428,7 +432,7 @@ impl Autostart<'_> {
             // The server is ready: the check of D2 (AGL-033) decides —
             // it serves the effective settings, or a mismatch restarts.
             Health::Ready => {
-                if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
+                if serves(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
                     Ok(())
                 } else {
                     progress(ServerProgress::Starting);
@@ -441,7 +445,7 @@ impl Autostart<'_> {
                 progress(ServerProgress::Starting);
                 let mut say = |line: &str| progress(ServerProgress::Line(line));
                 wait_ready(llama, None, &what, &mut say, self.lang)?;
-                if serves(llama, read_record(&self.project.dir).as_ref(), self.effective, &self.models)? {
+                if serves(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
                     Ok(())
                 } else {
                     self.restart(&what, &mut say)
@@ -496,17 +500,17 @@ impl Autostart<'_> {
     /// of `agl server start` (AGL-035, D2).
     fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let server = Server::of(
-            self.project,
+            &self.project,
             self.runtime.clone(),
-            self.effective,
+            &self.effective,
             self.effective.clone(),
         )?;
         launch_unit(
             &server,
-            self.effective,
+            &self.effective,
             &self.models,
             self.path_var.clone(),
-            self.llama,
+            &*self.llama,
             say,
             self.lang,
         )
@@ -560,7 +564,7 @@ impl Autostart<'_> {
     fn launch(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let (engine, log) = match self.effective.kind() {
             ServerKind::Strata => {
-                let launch = strata_launch(self.effective, self.llama.url())?;
+                let launch = strata_launch(&self.effective, self.llama.url())?;
                 // The log beside the config when it names one, else beside
                 // the project.
                 let log = launch
@@ -574,7 +578,7 @@ impl Autostart<'_> {
             ServerKind::Llama => {
                 let log = self.project.dir.join("server.log");
                 let engine = Engine::launch(
-                    self.effective,
+                    &self.effective,
                     self.llama.url(),
                     &self.models,
                     self.path_var.clone(),
@@ -588,15 +592,15 @@ impl Autostart<'_> {
         let engine = guard.as_mut().expect("the engine just launched");
         // The file says so from the start of the process, before the
         // weights load (AGL-064, D3).
-        write_runtime_file(self.runtime.as_deref(), engine.pid(), self.effective)?;
-        if let Err(error) = wait_child_ready(self.llama, engine, &log, what, say, self.lang) {
+        write_runtime_file(self.runtime.as_deref(), engine.pid(), &self.effective)?;
+        if let Err(error) = wait_child_ready(&*self.llama, engine, &log, what, say, self.lang) {
             // A child that ended takes its file away; one that still
             // runs keeps it until the guard ends it.
             remove_runtime_file(self.runtime.as_deref(), None);
             return Err(error);
         }
         // What the child was launched with (AGL-035, D1).
-        write_record(&self.project.dir, engine.pid(), self.effective)
+        write_record(&self.project.dir, engine.pid(), &self.effective)
     }
 }
 
@@ -2117,10 +2121,10 @@ mod tests {
         assert!(consent(question, &Others::Skip, Lang::En).is_ok());
         // The human answers.
         let yes = |question: &str, lang: Lang| question == question && lang == Lang::En;
-        assert!(consent(question, &Others::Ask(&yes), Lang::En).is_ok());
+        assert!(consent(question, &Others::Ask(Arc::new(yes)), Lang::En).is_ok());
         let no = |_question: &str, _lang: Lang| false;
         assert!(matches!(
-            consent(question, &Others::Ask(&no), Lang::En),
+            consent(question, &Others::Ask(Arc::new(no)), Lang::En),
             Err(Error::StartDeclined)
         ));
         // No terminal and no `--yes`: refused, no units named (AGL-033, D2).
@@ -2132,7 +2136,7 @@ mod tests {
         // the human's no in a terminal (AGL-034, F29).
         assert!(restart_consent("llama-server", &Others::Refuse, Lang::En)
             .is_err_and(|error| matches!(error, Error::RestartDeclined)));
-        assert!(restart_consent("llama-server", &Others::Ask(&no), Lang::En)
+        assert!(restart_consent("llama-server", &Others::Ask(Arc::new(no)), Lang::En)
             .is_err_and(|error| matches!(error, Error::RestartDeclined)));
         assert!(restart_consent("llama-server", &Others::Yes, Lang::En).is_ok());
     }
@@ -2297,22 +2301,12 @@ mod tests {
         url
     }
 
-    fn autostart<'a>(
-        llama: &'a Llama,
-        project: &'a Workspace,
-        effective: &'a ServerFile,
-    ) -> Autostart<'a> {
-        static NO_WHISPER: crate::settings::WhisperFile = crate::settings::WhisperFile {
-            url: None,
-            model: None,
-            args: None,
-            private_ca: None,
-        };
+    fn autostart(llama: Llama, project: &Workspace, effective: &ServerFile) -> Autostart {
         Autostart {
-            llama,
-            project,
-            effective,
-            whisper: &NO_WHISPER,
+            llama: Arc::new(llama),
+            project: project.clone(),
+            effective: effective.clone(),
+            whisper: crate::settings::WhisperFile::default(),
             user_path: PathBuf::from("/c/settings.nix"),
             models: PathBuf::from("/m"),
             path_var: None,
@@ -2331,7 +2325,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut told = Vec::new();
-        autostart(&llama, &ws, &settings)
+        autostart(llama, &ws, &settings)
             .ensure(&mut |progress| {
                 told.push(match progress {
                     ServerProgress::Starting => "starting".to_owned(),
@@ -2349,7 +2343,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut told = Vec::new();
-        autostart(&llama, &ws, &settings)
+        autostart(llama, &ws, &settings)
             .ensure(&mut |progress| told.push(progress == ServerProgress::Starting))
             .unwrap();
         assert!(told.is_empty());
@@ -2363,7 +2357,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings)
+        autostart(llama, &ws, &settings)
             .ensure(&mut |progress| {
                 if let ServerProgress::Line(line) = progress {
                     said.push(line.to_owned());
@@ -2380,7 +2374,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         let settings = ServerFile::default();
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings)
+        autostart(llama, &ws, &settings)
             .ensure(&mut |progress| {
                 if let ServerProgress::Line(line) = progress {
                     said.push(line.to_owned());
@@ -2408,7 +2402,7 @@ mod tests {
             ..ServerFile::default()
         };
         let mut said = Vec::new();
-        let result = autostart(&llama, &ws, &settings)
+        let result = autostart(llama, &ws, &settings)
             .ensure(&mut |progress| {
                 if let ServerProgress::Line(line) = progress {
                     said.push(line.to_owned());
@@ -2671,7 +2665,7 @@ mod tests {
             None,
             None,
             (&strata, "the Strata server"),
-            &Others::Ask(&no),
+            &Others::Ask(Arc::new(no)),
             &mut |line| said.push(line.to_owned()),
             Lang::En,
         );
@@ -2719,7 +2713,7 @@ mod tests {
             ..ServerFile::default()
         };
         let mut said = Vec::new();
-        autostart(&llama, &ws, &settings)
+        autostart(llama, &ws, &settings)
             .ensure(&mut |progress| {
                 if let ServerProgress::Line(line) = progress {
                     said.push(line.to_owned());
@@ -2744,7 +2738,7 @@ mod tests {
         };
         let mut said = Vec::new();
         assert!(matches!(
-            autostart(&llama, &ws, &settings)
+            autostart(llama, &ws, &settings)
                 .ensure(&mut |progress| {
                 if let ServerProgress::Line(line) = progress {
                     said.push(line.to_owned());

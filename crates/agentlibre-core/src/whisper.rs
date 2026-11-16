@@ -309,9 +309,9 @@ impl Dictation for Voice {
     }
 }
 
-impl Transcriber for Autostart<'_> {
+impl Transcriber for Autostart {
     fn transcribe(&self, source: &Source, say: &mut dyn FnMut(&str)) -> Result<String, Error> {
-        let server = WhisperServer::of(self.project, self.whisper, &self.user_path)?;
+        let server = WhisperServer::of(&self.project, &self.whisper, &self.user_path)?;
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
         say(&tr!(self.lang, m::TRANSCRIBING, name = source.name));
         let wav = media::audio_to_wav(&source.bytes)?;

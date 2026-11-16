@@ -128,7 +128,7 @@ pub struct Run<'a> {
     /// start; read at the first request otherwise (AGL-015, D10).
     pub context: Option<usize>,
     /// Brings the server up when a request finds none (AGL-015).
-    pub autostart: &'a Autostart<'a>,
+    pub autostart: &'a Autostart,
     pub lang: Lang,
     /// What the agent's `forge` tool takes from the session (AGL-008).
     pub forge: ForgeEnv<'a>,

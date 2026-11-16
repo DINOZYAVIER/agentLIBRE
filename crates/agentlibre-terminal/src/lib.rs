@@ -494,19 +494,19 @@ fn agent_session(
     // The backend is the Llama or the Strata backend, by the effective
     // settings' `[server] kind` (AGL-030, D1); the stirred mode runs on
     // Strata.
-    let backend: Box<dyn Backend> = if settings.server.kind() == ServerKind::Strata {
-        Box::new(Strata::new(&settings.server_url))
+    let backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
+        Arc::new(Strata::new(&settings.server_url))
     } else {
-        Box::new(Llama::with_ca(
+        Arc::new(Llama::with_ca(
             &settings.server_url,
             settings.server.llama_private_ca.as_deref(),
         )?)
     };
     let autostart = engine::Autostart {
-        llama: backend.as_ref(),
-        project,
-        effective: &settings.server,
-        whisper: &settings.whisper,
+        llama: Arc::clone(&backend),
+        project: project.clone(),
+        effective: settings.server.clone(),
+        whisper: settings.whisper.clone(),
         user_path: user_path.clone(),
         models,
         path_var: env("PATH"),
@@ -518,7 +518,7 @@ fn agent_session(
         others: if args.yes {
             engine::Others::Yes
         } else if tty::is_interactive() {
-            engine::Others::Ask(&engine::ask_terminal)
+            engine::Others::Ask(Arc::new(engine::ask_terminal))
         } else {
             engine::Others::Refuse
         },
