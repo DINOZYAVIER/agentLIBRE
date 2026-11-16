@@ -17,7 +17,6 @@ pub mod format;
 pub mod function;
 pub mod grammar;
 pub mod i18n;
-pub mod interrupt;
 pub mod machine;
 pub mod media;
 pub mod memory;
@@ -32,6 +31,7 @@ pub mod search;
 pub mod session;
 pub mod settings;
 pub mod status;
+pub mod stop;
 pub mod style;
 #[cfg(test)]
 mod test_server;

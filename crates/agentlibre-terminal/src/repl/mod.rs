@@ -930,7 +930,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
 
     interrupt::install_request_only();
-    // Only this thread gets the signal that wakes a blocked read (D131).
+    // A SIGINT from outside comes to this thread only (D131); the stop
+    // wakes the thread of the turn itself (AGL-075).
     term::block_sigint();
     let done = Arc::new(AtomicBool::new(false));
     // What the inspect mode re-reads on its open (AGL-066, D4).
@@ -983,7 +984,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         theme: theme.clone(),
         lang,
         history_file,
-        request_stop: Box::new(|| interrupt::request(true)),
+        request_stop: Box::new(|| interrupt::request()),
         exit_now: Box::new(|| {
             term::restore();
             unsafe { libc::_exit(i32::from(interrupt::EXIT_CODE)) }
@@ -1009,7 +1010,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         })
     };
     // The control socket (AGL-074, D3): its thread is made while SIGINT is
-    // blocked, as the others, so that a `stop` wakes the main thread.
+    // blocked, as the others; its `stop` is the turn's (AGL-075).
     let identity = Arc::new(Mutex::new((
         run.session.id.clone(),
         run.session.name.clone(),
@@ -1018,7 +1019,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         runtime.as_deref(),
         &run.session.id,
         answer(control.clone(), dock.clone(), identity.clone(), || {
-            interrupt::request(true)
+            interrupt::request()
         }),
     );
     term::unblock_sigint();

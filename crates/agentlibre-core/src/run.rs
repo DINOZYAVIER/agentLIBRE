@@ -19,6 +19,7 @@ use crate::phase::{Observer, PhaseEvent};
 use crate::search::Searcher;
 use crate::session::{Event, Session};
 use crate::status::compact_notice;
+use crate::stop::Stop;
 use crate::style::Role;
 use crate::tools::ForgeEnv;
 use crate::tr;
@@ -142,6 +143,8 @@ pub struct Run<'a> {
     pub memory: &'a dyn Home,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<&'a str>,
+    /// What stops a turn of this run (AGL-075): its turns run in its scope.
+    pub stop: Stop,
 }
 
 impl Run<'_> {
@@ -174,6 +177,16 @@ impl Run<'_> {
         attached: Vec<Pending>,
         surface: &mut dyn Turn,
     ) -> Result<TurnEnd, Error> {
+        let stop = self.stop.clone();
+        stop.scope(|| self.turn_scoped(message, attached, surface))
+    }
+
+    fn turn_scoped(
+        &mut self,
+        message: &str,
+        attached: Vec<Pending>,
+        surface: &mut dyn Turn,
+    ) -> Result<TurnEnd, Error> {
         // The FSM of the turn sees the start too (AGL-046, D10).
         let mut observer = Observer::new();
         observer.attach(&self.session);
@@ -185,7 +198,7 @@ impl Run<'_> {
             })
             .and_then(|()| self.backend.context_size());
         match ready {
-            Ok(size) => self.turn_on(size, message, attached, &mut observer, surface),
+            Ok(size) => self.turn_on_scoped(size, message, attached, &mut observer, surface),
             Err(error) => {
                 // A start that failed never reached the agent.
                 observer.end(PhaseEvent::Failed, &mut *surface);
@@ -199,6 +212,18 @@ impl Run<'_> {
     /// the media the message names are stored, an audio is transcribed
     /// (AGL-014), the agent takes the turn. `observer` saw what came before.
     pub fn turn_on(
+        &mut self,
+        context: usize,
+        message: &str,
+        attached: Vec<Pending>,
+        observer: &mut Observer,
+        surface: &mut dyn Turn,
+    ) -> Result<TurnEnd, Error> {
+        let stop = self.stop.clone();
+        stop.scope(|| self.turn_on_scoped(context, message, attached, observer, surface))
+    }
+
+    fn turn_on_scoped(
         &mut self,
         context: usize,
         message: &str,
@@ -342,10 +367,12 @@ impl Run<'_> {
     /// `/compact`: the summary of the session's start; the reports of the
     /// turn that makes it go to `sink`.
     pub fn compact(&mut self, sink: &mut dyn Sink) -> Said {
-        let result = self
-            .backend
-            .context_size()
-            .and_then(|context| self.agent(context).compact(sink));
+        let stop = self.stop.clone();
+        let result = stop.scope(|| {
+            self.backend
+                .context_size()
+                .and_then(|context| self.agent(context).compact(sink))
+        });
         let interrupted = matches!(result, Err(Error::Interrupted));
         let mut said = Said {
             interrupted,

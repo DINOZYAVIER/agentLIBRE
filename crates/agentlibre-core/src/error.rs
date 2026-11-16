@@ -490,7 +490,7 @@ impl Error {
     /// Process exit status for this error.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Interrupted => crate::interrupt::EXIT_CODE,
+            Error::Interrupted => crate::stop::EXIT_CODE,
             _ if self.is_usage() => 2,
             _ => 1,
         }

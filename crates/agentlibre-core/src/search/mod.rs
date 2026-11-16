@@ -19,7 +19,7 @@ use crate::action::Outcome;
 use crate::backend::ToolCall;
 use crate::error::{CredentialProblem, Error};
 use crate::i18n::Lang;
-use crate::interrupt::{self, signal_group};
+use crate::tools::signal_group;
 use crate::session::INTERRUPTED;
 use crate::settings::Search;
 use crate::tools::ToolResult;
@@ -315,7 +315,7 @@ impl Curl {
                 Ok(None) => {}
                 Err(_) => break,
             }
-            if interrupt::interrupted() {
+            if crate::stop::requested() {
                 stopped = Some(Failure::Interrupted);
             } else if exceeded.load(Ordering::SeqCst) {
                 stopped = Some(Failure::TooLarge);

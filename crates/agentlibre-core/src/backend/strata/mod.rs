@@ -20,7 +20,6 @@ use crate::action::{Kind, Value};
 use crate::agent::Sink;
 use crate::error::Error;
 use crate::format::Format;
-use crate::interrupt;
 use crate::session::Session;
 use crate::settings::ServerKind;
 use crate::tools::Spec;
@@ -116,11 +115,11 @@ impl Backend for Strata {
         for line in reader.lines() {
             // Ctrl-C interrupts the read (D111); dropping the response
             // closes the connection, and the server stops generating.
-            if interrupt::interrupted() {
+            if crate::stop::requested() {
                 return Err(Error::Interrupted);
             }
             let line = line.map_err(|error| {
-                if interrupt::interrupted() {
+                if crate::stop::requested() {
                     Error::Interrupted
                 } else {
                     self.http.unreachable(error)

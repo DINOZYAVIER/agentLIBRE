@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use crate::action::Outcome;
 use crate::backend::ToolCall;
 use crate::i18n::Lang;
-use crate::interrupt::{self, signal_group};
 use crate::session::{ForgeKind, INTERRUPTED};
 
 mod output;
@@ -142,7 +141,7 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
     let group = child.id();
     let status = wait_until(&mut child, Instant::now() + timeout);
     // Ctrl-C stops the command like a timeout (D111).
-    let interrupted = status.is_none() && interrupt::interrupted();
+    let interrupted = status.is_none() && crate::stop::requested();
     let timed_out = status.is_none() && !interrupted;
     // End what the command left running, gently first (D102, D103).
     signal_group(group, libc::SIGTERM);
@@ -201,13 +200,20 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
     ToolResult { outcome, content }
 }
 
+/// Sends `signal` to the process group `group`; an empty group is fine.
+pub fn signal_group(group: u32, signal: libc::c_int) {
+    unsafe {
+        libc::kill(-(group as libc::pid_t), signal);
+    }
+}
+
 /// Waits for `child` until `deadline` or Ctrl-C; `None` if it is still
 /// running.
 fn wait_until(child: &mut Child, deadline: Instant) -> Option<std::process::ExitStatus> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() < deadline && !interrupt::interrupted() => {
+            Ok(None) if Instant::now() < deadline && !crate::stop::requested() => {
                 thread::sleep(Duration::from_millis(10))
             }
             _ => return None,

@@ -1,6 +1,7 @@
 //! agentLIBRE: free and open-source agentic system.
 
 mod cli;
+mod interrupt;
 mod repl;
 mod theme;
 
@@ -17,7 +18,6 @@ pub(crate) use agentlibre_core::{
     forge,
     function,
     i18n,
-    interrupt,
     machine,
     media,
     memory,
@@ -32,6 +32,7 @@ pub(crate) use agentlibre_core::{
     session,
     settings,
     status,
+    stop,
     style,
     tools,
     tty,
@@ -632,6 +633,7 @@ fn agent_session(
         search,
         memory: &memory,
         about: about.as_deref(),
+        stop: interrupt::stop().clone(),
     };
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).

@@ -13,7 +13,6 @@ use crate::backend::{
 };
 use crate::error::Error;
 use crate::function::Function;
-use crate::interrupt;
 use crate::machine::{Machine, Progress};
 use crate::media;
 use crate::phase::{Observer, PhaseEvent, Reports, StepRecord, Transition};
@@ -421,7 +420,7 @@ impl Agent<'_> {
                     )?,
                     None => {}
                 }
-                if interrupt::interrupted() {
+                if crate::stop::requested() {
                     debug_assert_eq!(result.content, INTERRUPTED);
                     return Err(Error::Interrupted);
                 }
