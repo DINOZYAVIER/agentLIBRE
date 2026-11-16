@@ -32,6 +32,8 @@ pub enum Command {
     Search(SearchAction),
     /// `agl memory list|show|remove` (AGL-060).
     Memory(MemoryAction),
+    /// `agl plane new|list|show|rename|add|remove|delete` (AGL-077, D11).
+    Plane(PlaneAction),
     /// `agl session show <id|name|last>` (AGL-063, D3).
     Session(SessionShow),
     /// `agl notify`: the running sessions told on the desktop (AGL-074,
@@ -49,6 +51,7 @@ pub enum HelpTopic {
     Function,
     Search,
     Memory,
+    Plane,
     Session,
     Notify,
     Forge,
@@ -102,6 +105,88 @@ pub fn memory_action(words: impl IntoIterator<Item = String>) -> Result<MemoryAc
         Some(extra) => Err(Error::UnknownOption(extra)),
         None => Ok(parsed),
     }
+}
+
+/// `agl plane …` (AGL-077, D11): a directory is the current one when it
+/// is not named.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PlaneAction {
+    /// `new <name> [--empty]`: with the current directory, or none.
+    New { name: String, empty: bool },
+    List,
+    /// `show [<name>]`: none, the planes of the current directory.
+    Show { name: Option<String> },
+    Rename { old: String, new: String },
+    Add { name: String, dir: Option<String> },
+    Remove { name: String, dir: Option<String> },
+    /// `delete <name> [--yes]` (D14).
+    Delete { name: String, yes: bool },
+}
+
+/// Reads the words after `plane`.
+fn plane_args(args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
+    let mut words = words.into_iter();
+    let action = words
+        .next()
+        .ok_or_else(|| Error::MissingValue("plane".into()))?;
+    // The one flag an action has, when it has one.
+    let flag_name = match action.as_str() {
+        "new" => Some("--empty"),
+        "delete" => Some("--yes"),
+        _ => None,
+    };
+    let mut values = Vec::new();
+    let mut flag = false;
+    for word in words {
+        match flag_name {
+            Some(name) if word == name && flag => return Err(Error::RepeatedOption(word)),
+            Some(name) if word == name => flag = true,
+            _ if word.starts_with('-') => return Err(Error::UnknownOption(word)),
+            _ => values.push(word),
+        }
+    }
+    let (least, most) = match action.as_str() {
+        "list" => (0, 0),
+        "show" => (0, 1),
+        "new" | "delete" => (1, 1),
+        "rename" => (2, 2),
+        "add" | "remove" => (1, 2),
+        _ => return Err(Error::UnknownOption(action)),
+    };
+    if values.len() < least {
+        return Err(Error::MissingValue(action));
+    }
+    if let Some(extra) = values.get(most) {
+        return Err(Error::UnknownOption(extra.clone()));
+    }
+    let mut values = values.into_iter();
+    let mut next = || values.next();
+    let parsed = match action.as_str() {
+        "new" => PlaneAction::New {
+            name: next().unwrap_or_default(),
+            empty: flag,
+        },
+        "list" => PlaneAction::List,
+        "show" => PlaneAction::Show { name: next() },
+        "rename" => PlaneAction::Rename {
+            old: next().unwrap_or_default(),
+            new: next().unwrap_or_default(),
+        },
+        "add" => PlaneAction::Add {
+            name: next().unwrap_or_default(),
+            dir: next(),
+        },
+        "remove" => PlaneAction::Remove {
+            name: next().unwrap_or_default(),
+            dir: next(),
+        },
+        _ => PlaneAction::Delete {
+            name: next().unwrap_or_default(),
+            yes: flag,
+        },
+    };
+    Ok(Command::Plane(parsed))
 }
 
 /// `agl search login` (AGL-043 F20).
@@ -163,6 +248,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("function") => HelpTopic::Function,
         Some("search") => HelpTopic::Search,
         Some("memory") => HelpTopic::Memory,
+        Some("plane") => HelpTopic::Plane,
         Some("session") => HelpTopic::Session,
         Some("notify") => HelpTopic::Notify,
         Some("forge") => HelpTopic::Forge,
@@ -179,6 +265,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
             let words = args.map(text).collect::<Result<Vec<_>, _>>()?;
             memory_action(words).map(Command::Memory)
         }
+        HelpTopic::Plane => plane_args(args),
         HelpTopic::Session => session_args(args),
         HelpTopic::Notify => notify_args(args),
         // The forge surface parses its own arguments (AGL-007), here, so

@@ -308,6 +308,105 @@ Search (`search` of the user's settings.nix):
         uk: "agl memory list|show <назва>|remove <назва> [--yes]",
     };
 
+    /// The usage of `agl plane` (AGL-077, D11).
+    pub const HELP_PLANE_USAGE: Msg = Msg {
+        en: "agl plane new <name> [--empty]|list|show [<name>]|rename <old> <new>\n\
+             agl plane add|remove <name> [<dir>]|delete <name> [--yes]",
+        uk: "agl plane new <назва> [--empty]|list|show [<назва>]|rename <стара> <нова>\n\
+             agl plane add|remove <назва> [<тека>]|delete <назва> [--yes]",
+    };
+
+    /// The section of `agl plane` in the help (AGL-077, D11).
+    pub const HELP_PLANE: Msg = Msg {
+        en: "\
+Planes (where a project is worked on: its sessions, its forge, memory,
+settings and Functions, and any directories; `planes/<name>/` of the data):
+  plane new <name> [--empty]    make a plane with the current directory, or none
+  plane list                    the planes; `*` marks those of the current directory
+  plane show [<name>]           its store, id, directories and sessions; with no
+                                name, the planes of the current directory
+  plane rename <old> <new>      a new name; the id and the sessions stay
+  plane add <name> [<dir>]      add a directory (the current one when not named)
+  plane remove <name> [<dir>]   take a directory out; its files are not touched
+  plane delete <name> [--yes]   remove the plane's store; it asks first; the
+                                sessions keep their files
+  agl --plane <name>            a run in the plane",
+        uk: "\
+Plane (де йде робота над проєктом: його сесії, forge, пам'ять, налаштування
+і Functions, і будь-які теки; `planes/<назва>/` у даних):
+  plane new <назва> [--empty]    створити plane з поточною текою або без тек
+  plane list                     усі plane; `*` позначає plane поточної теки
+  plane show [<назва>]           сховище, id, теки і сесії; без назви — plane
+                                 поточної теки
+  plane rename <стара> <нова>    нова назва; id і сесії лишаються
+  plane add <назва> [<тека>]     додати теку (поточну, коли не названо)
+  plane remove <назва> [<тека>]  прибрати теку з plane; її файли не чіпає
+  plane delete <назва> [--yes]   видалити сховище plane; спершу питає; файли
+                                 сесій лишаються
+  agl --plane <назва>            запуск у plane",
+    };
+
+    pub const PLANE_MADE: Msg = Msg {
+        en: "made the plane `{name}`: {dir}",
+        uk: "створено plane `{name}`: {dir}",
+    };
+
+    pub const PLANE_RENAMED: Msg = Msg {
+        en: "the plane `{old}` is `{new}` now: {dir}",
+        uk: "plane `{old}` тепер `{new}`: {dir}",
+    };
+
+    pub const PLANE_ADDED: Msg = Msg {
+        en: "{directory} is in the plane `{name}`",
+        uk: "{directory} тепер у plane `{name}`",
+    };
+
+    pub const PLANE_HAD: Msg = Msg {
+        en: "{directory} was in the plane `{name}` already",
+        uk: "{directory} вже був у plane `{name}`",
+    };
+
+    pub const PLANE_TAKEN_OUT: Msg = Msg {
+        en: "{directory} is no longer in the plane `{name}`; its files are as they were",
+        uk: "{directory} більше не в plane `{name}`; його файли не змінено",
+    };
+
+    pub const PLANE_DELETE_ASK: Msg = Msg {
+        en: "delete the plane `{name}` and its store {dir} (its forge, memory, settings and Functions)? [y/N]",
+        uk: "видалити plane `{name}` і його сховище {dir} (forge, пам'ять, налаштування і Functions)? [y/N]",
+    };
+
+    pub const PLANE_DELETED: Msg = Msg {
+        en: "deleted the plane `{name}`; its sessions keep their files",
+        uk: "plane `{name}` видалено; файли його сесій лишилися",
+    };
+
+    pub const PLANE_KEPT: Msg = Msg {
+        en: "the plane `{name}` is kept",
+        uk: "plane `{name}` лишається",
+    };
+
+    pub const PLANE_NONE: Msg = Msg {
+        en: "no plane; `agl plane new <name>` makes one",
+        uk: "жодного plane; `agl plane new <назва>` створить",
+    };
+
+    pub const PLANE_NONE_HERE: Msg = Msg {
+        en: "the current directory is in no plane",
+        uk: "поточна тека не входить у жоден plane",
+    };
+
+    pub const PLANE_SHOW: Msg = Msg {
+        en: "plane: {name}\nid: {id}\nstore: {dir}\nsessions: {sessions}\ndirectories:",
+        uk: "plane: {name}\nid: {id}\nсховище: {dir}\nсесій: {sessions}\nтеки:",
+    };
+
+    /// `Error::PlaneDeleteNeedsYes`.
+    pub const PLANE_DELETE_NEEDS_YES: Msg = Msg {
+        en: "the plane `{name}` is not deleted: there is no terminal to ask on; add --yes",
+        uk: "plane `{name}` не видалено: немає термінала, щоб спитати; додай --yes",
+    };
+
     /// The section of `agl memory` in the help (AGL-061, D3).
     pub const HELP_MEMORY: Msg = Msg {
         en: "\
@@ -2855,6 +2954,7 @@ impl Error {
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
             Error::PlaneName { name } => tr!(lang, m::PLANE_NAME, name = name),
+            Error::PlaneDeleteNeedsYes { name } => tr!(lang, m::PLANE_DELETE_NEEDS_YES, name = name),
             Error::PlaneExists { name } => tr!(lang, m::PLANE_EXISTS, name = name),
             Error::PlaneNotFound { name } => tr!(lang, m::PLANE_NOT_FOUND, name = name),
             Error::PlaneFile { path, detail } => {

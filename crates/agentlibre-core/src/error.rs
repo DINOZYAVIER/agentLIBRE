@@ -184,6 +184,8 @@ pub enum Error {
     Notify { detail: String },
     /// A plane's name that cannot be its store's directory (AGL-077, D5).
     PlaneName { name: String },
+    /// `agl plane delete` with no terminal to ask on and no `--yes` (D14).
+    PlaneDeleteNeedsYes { name: String },
     /// A plane of that name exists (AGL-077, D5).
     PlaneExists { name: String },
     /// No plane has that name (AGL-077).

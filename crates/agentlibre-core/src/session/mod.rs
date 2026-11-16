@@ -359,6 +359,21 @@ impl Session {
             .collect()
     }
 
+    /// How many sessions in `dir` are of the plane whose id is `plane`
+    /// (AGL-077, D13, D18): their header names it.
+    pub fn count_of_plane(dir: &Path, plane: &str) -> usize {
+        session_files(dir)
+            .iter()
+            .filter(|path| {
+                File::open(path)
+                    .ok()
+                    .and_then(|file| std::io::BufReader::new(file).lines().next()?.ok())
+                    .and_then(|line| serde_json::from_str::<Json>(&line).ok())
+                    .is_some_and(|header| header["plane"]["id"] == plane)
+            })
+            .count()
+    }
+
     /// The id of the newest session of the project at `project` whose name is
     /// `name`, as it was typed (AGL-062, D1).
     pub fn id_named(dir: &Path, project: &Path, name: &str) -> Option<String> {
