@@ -164,6 +164,9 @@ pub struct Opening<'a> {
     pub resume: Option<&'a str>,
     /// `--function`.
     pub function: Option<&'a str>,
+    /// `--plane`: the plane of the run (AGL-077, D6); a resumed session
+    /// keeps its own.
+    pub plane: Option<&'a str>,
     pub reasoning: Option<ReasoningLevel>,
     /// One request (`-p`): the server is brought up before the session is
     /// made, and its context size must be read (AGL-015, D10).
@@ -188,6 +191,9 @@ pub struct Opened {
 }
 
 pub struct Plane {
+    /// The plane's store, its id, name and directories, when the run is
+    /// in one (AGL-077, D6, D15).
+    pub file: Option<PlaneFile>,
     pub function: Function,
     pub function_name: String,
     pub backend: Arc<dyn Backend + Send + Sync>,
@@ -236,6 +242,7 @@ impl Plane {
             project,
             resume,
             function: cli_function,
+            plane: plane_name,
             reasoning,
             one_request,
             engine,
@@ -270,6 +277,45 @@ impl Plane {
             .as_deref()
             .map(|id| Session::open(&sessions_dir, id))
             .transpose()?;
+        // The plane of the run (AGL-077, D6): named at the start; a resumed
+        // session keeps the plane its header records (D13), as it keeps its
+        // Function (D106), and goes on in none when the plane is gone.
+        if plane_name.is_some() && session.is_some() {
+            return Err(Error::PlaneWithResume);
+        }
+        let plane_file = match (session.as_ref().and_then(|s| s.plane.as_ref()), plane_name) {
+            (Some(recorded), _) => {
+                let found = PlaneFile::with_id(paths, &recorded.id)?;
+                if found.is_none() {
+                    say(&tr!(lang, m::PLANE_GONE_LOOSE, name = &recorded.name));
+                }
+                found
+            }
+            (None, Some(name)) => Some(PlaneFile::open(paths, name)?),
+            (None, None) => None,
+        };
+        let plane_settings = plane_file
+            .as_ref()
+            .map(PlaneFile::settings)
+            .transpose()?
+            .unwrap_or_default();
+        let workspace_settings = settings::ProjectFile {
+            function: project.function.clone(),
+            server: project.server.clone(),
+            whisper: project.whisper.clone(),
+            search: project.search.clone(),
+        };
+        // The plane's settings over the workspace's (D7).
+        let layered = plane_settings.over(&workspace_settings);
+        // The Functions of the plane, the workspace and the user (D7).
+        let plane_functions = plane_file.as_ref().map(PlaneFile::functions_dir);
+        let workspace_functions = paths.functions_dir(&project.key);
+        let user_functions = paths.functions();
+        let function_dirs: Vec<&Path> = plane_functions
+            .iter()
+            .map(PathBuf::as_path)
+            .chain([workspace_functions.as_path(), user_functions.as_path()])
+            .collect();
         // A resumed session keeps its Function (D106).
         let resumed = session.as_ref().map(|s| s.function.as_str());
         // The Function of a resumed session is the `run` snapshot of its
@@ -286,12 +332,12 @@ impl Plane {
                 // (AGL-033, D1, D3).
                 let name = function_name(
                     resumed.or(cli_function),
-                    project.function.as_deref(),
+                    layered.function.as_deref(),
                     user.function.as_deref(),
                 );
                 // The Function's tiers (AGL-028, D3): the workspace store's
                 // `functions/` directory, then the user's, then the built-ins.
-                match Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name) {
+                match Function::load(&function_dirs, &name) {
                     Ok(function) => function,
                     Err(Error::FunctionNotFound { .. }) if session.is_some() => {
                         // The Function the session was made with is gone: it
@@ -310,16 +356,16 @@ impl Plane {
             .as_ref()
             .and_then(|s| s.run.as_ref())
             .and_then(|_| model_name(&function.model));
-        let project_settings = settings::ProjectFile {
-            function: project.function.clone(),
-            server: project.server.clone(),
-            whisper: project.whisper.clone(),
-            search: project.search.clone(),
+        // A missing key of `search` names the file that has one, the plane's
+        // first.
+        let settings_path = match &plane_file {
+            Some(plane) if !plane_settings.search.is_empty() => plane.settings_file(),
+            _ => project.dir.join(settings::SETTINGS_FILE),
         };
         let mut settings = Settings::resolve(
             user,
             &user_path,
-            (&project.dir.join(settings::SETTINGS_FILE), &project_settings),
+            (&settings_path, &layered),
             resumed.or(cli_function),
             &function.model,
         )?;
@@ -444,19 +490,21 @@ impl Plane {
             Some(session) => session,
             // A new session records the `run` snapshot of its Function
             // (AGL-063, D4).
-            None => Session::create_run(
+            None => Session::create_in(
                 &sessions_dir,
                 &settings.function,
                 &workspace,
                 Some(&function.snapshot()),
+                plane_file.as_ref().map(PlaneFile::of_session).as_ref(),
             )?,
         };
         let about = settings
             .about
             .enabled
             .unwrap_or(true)
-            .then(|| about_of(env, paths, project, &settings, &workspace, &user_path));
+            .then(|| about_of(env, paths, project, plane_file.as_ref(), &settings, &workspace, &user_path));
         let plane = Plane {
+            file: plane_file,
             function,
             function_name: settings.function.clone(),
             backend,
@@ -756,6 +804,7 @@ fn about_of(
     env: &dyn Fn(&str) -> Option<OsString>,
     paths: &Paths,
     project: &Workspace,
+    plane: Option<&PlaneFile>,
     settings: &Settings,
     workspace: &Path,
     user_path: &Path,
@@ -763,11 +812,13 @@ fn about_of(
     let nix_dir = env(nix::NIX_VAR).map(PathBuf::from);
     let functions_dir = env(nix::FUNCTIONS_VAR).map(PathBuf::from);
     let name = format!("{}.nix", settings.function);
-    let function_file = [
-        paths.functions_dir(&project.key).join(&name),
-        paths.functions().join(&name),
-    ]
-    .into_iter()
+    let function_file = plane
+        .map(|plane| plane.functions_dir().join(&name))
+        .into_iter()
+        .chain([
+            paths.functions_dir(&project.key).join(&name),
+            paths.functions().join(&name),
+        ])
     .find(|file| file.is_file())
     .or_else(|| {
         functions_dir
@@ -810,6 +861,7 @@ fn about_of(
         session_format: session_format.as_deref(),
         user_settings: user_path,
         project_store: &project.dir,
+        plane: plane.map(|plane| (plane.name.as_str(), plane.dir.as_path())),
         source: settings.about.source.as_deref(),
     }
     .render()

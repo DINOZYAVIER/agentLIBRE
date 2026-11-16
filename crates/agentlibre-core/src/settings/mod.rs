@@ -121,6 +121,28 @@ impl ProjectFile {
     }
 }
 
+impl ProjectFile {
+    /// The settings file `path` of a store, its identity's keys left out;
+    /// the defaults when it does not exist (AGL-077, D1).
+    pub fn read(path: &Path) -> Result<ProjectFile, Error> {
+        match evaluate(path)? {
+            Some(file) => ProjectFile::from_section(file, path),
+            None => Ok(ProjectFile::default()),
+        }
+    }
+
+    /// These settings over `below`, key by key: the plane's over the
+    /// workspace's (AGL-077, D7).
+    pub fn over(&self, below: &ProjectFile) -> ProjectFile {
+        ProjectFile {
+            function: self.function.clone().or_else(|| below.function.clone()),
+            server: self.server.over(&below.server),
+            whisper: self.whisper.over(&below.whisper),
+            search: self.search.over(&below.search),
+        }
+    }
+}
+
 /// Evaluates the settings file `path`; `None` when it does not exist.
 fn evaluate(path: &Path) -> Result<Option<Section>, Error> {
     if !path.exists() {

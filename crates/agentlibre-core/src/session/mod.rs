@@ -253,6 +253,14 @@ pub struct Unfinished {
 }
 
 /// An open session file.
+/// The plane a session is in, as its header records it (AGL-077, D10,
+/// D13, D18): its id, and its name when the session was made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionPlane {
+    pub id: String,
+    pub name: String,
+}
+
 pub struct Session {
     pub id: String,
     /// The name the human gave it, the last `name` line of the file
@@ -267,6 +275,9 @@ pub struct Session {
     /// The `run` snapshot of the header (AGL-063, D4); `None` in the v1
     /// files and in the sessions that do not record it.
     pub run: Option<Json>,
+    /// The plane of the session (AGL-077, D10); `None` for a session in no
+    /// plane.
+    pub plane: Option<SessionPlane>,
     /// The `think_budget` and `action_budget` of the last `step` line
     /// (AGL-063, D4): the budgets the loose continue runs on; `None` before
     /// a step was recorded.
@@ -295,6 +306,18 @@ impl Session {
         function: &str,
         workspace: &Path,
         run: Option<&Json>,
+    ) -> Result<Session, Error> {
+        Self::create_in(dir, function, workspace, run, None)
+    }
+
+    /// [`Session::create_run`] in the plane `plane` (AGL-077, D10, D18): its
+    /// header records the plane's id and name.
+    pub fn create_in(
+        dir: &Path,
+        function: &str,
+        workspace: &Path,
+        run: Option<&Json>,
+        plane: Option<&SessionPlane>,
     ) -> Result<Session, Error> {
         let write_error = |path: &Path, source| Error::SessionWrite {
             path: path.into(),
@@ -325,6 +348,7 @@ impl Session {
             events: Vec::new(),
             transitions: Vec::new(),
             run: run.cloned(),
+            plane: plane.cloned(),
             last_budgets: None,
             path,
             file,
@@ -342,6 +366,9 @@ impl Session {
         // the sessions that do not record it.
         if let Some(run) = run {
             header["run"] = run.clone();
+        }
+        if let Some(plane) = plane {
+            header["plane"] = json!({ "id": plane.id, "name": plane.name });
         }
         session.write_line(&header)?;
         Ok(session)
@@ -526,6 +553,13 @@ impl Session {
             events,
             transitions,
             run: header.get("run").cloned(),
+            plane: match (header["plane"]["id"].as_str(), header["plane"]["name"].as_str()) {
+                (Some(id), Some(name)) => Some(SessionPlane {
+                    id: id.into(),
+                    name: name.into(),
+                }),
+                _ => None,
+            },
             last_budgets,
             path,
             file,

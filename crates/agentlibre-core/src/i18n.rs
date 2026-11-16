@@ -166,10 +166,10 @@ pub mod m {
     pub const HELP_RUN_USAGE: Msg = Msg {
         en: "\
 agl [-p <message> [--attach <path>]...] [--resume [<id>|last]] [--function <name>]
-    [--think <level>] [--yes]",
+    [--plane <name>] [--think <level>] [--yes]",
         uk: "\
 agl [-p <повідомлення> [--attach <шлях>]...] [--resume [<id>|last]] [--function <назва>]
-[--think <level>] [--yes]",
+[--plane <назва>] [--think <level>] [--yes]",
     };
 
     /// The options of a run of `agl`, in the help of the program.
@@ -182,6 +182,7 @@ Options:
   --resume <id>       continue session <id>; `last` is the last one of this
                       project; with no id, it lists the latest ones
   --function <name>   use Function <name>
+  --plane <name>      work in the plane <name> (`agl plane --help`)
   --think <level>     the model's reasoning level: off, low, medium or xhigh
   --attach <path>     with -p: attach an image, a video or an audio; repeatable
   --yes               start or switch the server of the project without
@@ -196,6 +197,7 @@ Options:
   --resume <id>       продовжити сесію <id>; `last` це остання сесія цього
                       проєкту; без id показує список останніх
   --function <назва>  використати Function <назва>
+  --plane <назва>     працювати в plane <назва> (`agl plane --help`)
   --think <level>     рівень міркувань моделі: off, low, medium або xhigh
   --attach <шлях>     разом з -p: прикріпити зображення, відео чи аудіо; можна
                       повторювати
@@ -518,6 +520,11 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `agl function list`: a Function of the workspace's `functions/`
     /// (AGL-036, D3).
+    pub const FUNCTION_SOURCE_PLANE: Msg = Msg {
+        en: "plane",
+        uk: "plane",
+    };
+
     pub const FUNCTION_SOURCE_WORKSPACE: Msg = Msg {
         en: "workspace",
         uk: "воркспейс",
@@ -599,6 +606,18 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNCTION_WITH_RESUME: Msg = Msg {
         en: "`--function` cannot go with `--resume`: the session keeps its Function",
         uk: "`--function` не можна разом із `--resume`: сесія має свою Function",
+    };
+
+    /// `Error::PlaneWithResume`.
+    pub const PLANE_WITH_RESUME: Msg = Msg {
+        en: "`--plane` cannot go with `--resume`: the session keeps its plane",
+        uk: "`--plane` не можна разом із `--resume`: сесія має свій plane",
+    };
+
+    /// A resumed session whose plane's store is gone (AGL-077, D14).
+    pub const PLANE_GONE_LOOSE: Msg = Msg {
+        en: "the plane `{name}` of this session is gone; the session goes on in no plane",
+        uk: "plane `{name}` цієї сесії вже немає; сесія триває без plane",
     };
 
     /// `Error::BadReasoningLevel`.
@@ -2758,6 +2777,7 @@ impl Error {
             Error::MissingValue(arg) => tr!(lang, m::MISSING_VALUE, arg = arg),
             Error::RepeatedOption(arg) => tr!(lang, m::REPEATED_OPTION, arg = arg),
             Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
+            Error::PlaneWithResume => tr!(lang, m::PLANE_WITH_RESUME).to_string(),
             Error::BadReasoningLevel { value } => {
                 tr!(lang, m::BAD_REASONING_LEVEL, value = value)
             }

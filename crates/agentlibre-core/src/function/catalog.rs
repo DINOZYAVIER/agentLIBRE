@@ -16,6 +16,8 @@ use crate::tr;
 /// Where a Function comes from, in the order a run looks (AGL-028, D3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
+    /// The plane's `functions/` (AGL-077, D7).
+    Plane,
     Workspace,
     User,
     BuiltIn,
@@ -24,6 +26,7 @@ pub enum Source {
 impl Source {
     fn label(self, lang: Lang) -> &'static str {
         match self {
+            Source::Plane => tr!(lang, m::FUNCTION_SOURCE_PLANE),
             Source::Workspace => tr!(lang, m::FUNCTION_SOURCE_WORKSPACE),
             Source::User => tr!(lang, m::FUNCTION_SOURCE_USER),
             Source::BuiltIn => tr!(lang, m::FUNCTION_SOURCE_BUILTIN),
@@ -52,6 +55,8 @@ pub struct Entry {
 /// The Functions of a workspace (AGL-036, D3): the workspace's, the
 /// user's and the built-ins, against the settings of the workspace.
 pub struct Catalog {
+    /// The plane's Functions, which win over the others (AGL-077, D7).
+    pub plane_dir: Option<PathBuf>,
     pub workspace_dir: PathBuf,
     pub user_dir: PathBuf,
     /// The project's `server` over the user's: the urls and the engine.
@@ -64,6 +69,7 @@ impl Catalog {
     /// The catalog of `project`, with the user file `user`.
     pub fn of(paths: &Paths, project: &Workspace, user: &UserFile) -> Catalog {
         Catalog {
+            plane_dir: None,
             workspace_dir: paths.functions_dir(&project.key),
             user_dir: paths.functions(),
             settings: project.server.over(&user.server),
@@ -71,15 +77,47 @@ impl Catalog {
         }
     }
 
+    /// The catalog of `project` in `plane`, whose settings are `planes`
+    /// (AGL-077, D7): the plane's Functions and settings win.
+    pub fn in_plane(
+        paths: &Paths,
+        project: &Workspace,
+        user: &UserFile,
+        plane: &crate::plane::PlaneFile,
+        settings: &crate::settings::ProjectFile,
+    ) -> Catalog {
+        Catalog {
+            plane_dir: Some(plane.functions_dir()),
+            settings: settings.server.over(&project.server).over(&user.server),
+            current: function_name(
+                None,
+                settings.function.as_deref().or(project.function.as_deref()),
+                user.function.as_deref(),
+            ),
+            ..Catalog::of(paths, project, user)
+        }
+    }
+
+    /// The directories a Function is looked for in, in their order.
+    fn dirs(&self) -> Vec<&Path> {
+        self.plane_dir
+            .iter()
+            .map(PathBuf::as_path)
+            .chain([self.workspace_dir.as_path(), self.user_dir.as_path()])
+            .collect()
+    }
+
     /// Every Function by name, with its source and its server.
     pub fn entries(&self, lang: Lang) -> Vec<Entry> {
+        let plane = self.plane_dir.as_deref().map(names_in).unwrap_or_default();
         let workspace = names_in(&self.workspace_dir);
         let user = names_in(&self.user_dir);
         // Without agl's `nix/` there is no built-in; each Function then
         // says why it does not load.
         let builtins = super::builtin_names().unwrap_or_default();
-        let mut names: Vec<String> = workspace
+        let mut names: Vec<String> = plane
             .iter()
+            .chain(&workspace)
             .chain(&user)
             .chain(&builtins)
             .cloned()
@@ -90,6 +128,9 @@ impl Catalog {
             .into_iter()
             .map(|name| {
                 let mut sources = Vec::new();
+                if plane.contains(&name) {
+                    sources.push(Source::Plane);
+                }
                 if workspace.contains(&name) {
                     sources.push(Source::Workspace);
                 }
@@ -166,7 +207,7 @@ impl Catalog {
 
     /// The kind and the model of the Function `name` (AGL-039, D21).
     fn server_of(&self, name: &str) -> Result<(ServerKind, Option<String>), Error> {
-        let function = Function::load(&self.workspace_dir, &self.user_dir, name)?;
+        let function = Function::load(&self.dirs(), name)?;
         let server = self.settings.effective(&function.model);
         Ok((server.kind(), crate::engine::model_of(&server)?))
     }
@@ -208,6 +249,7 @@ mod tests {
 
     fn catalog(dir: &Path) -> Catalog {
         Catalog {
+            plane_dir: None,
             workspace_dir: dir.join("workspace"),
             user_dir: dir.join("user"),
             settings: ServerFile {

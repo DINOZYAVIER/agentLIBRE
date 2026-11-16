@@ -85,7 +85,7 @@ fn none() -> &'static Path {
 
 #[test]
 fn a_built_in_on_the_minimal_policy() {
-    let function = Function::load(none(), none(), "fixture-minimal").unwrap();
+    let function = Function::load(&[none(), none()], "fixture-minimal").unwrap();
     assert_eq!(
         function.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
@@ -299,24 +299,24 @@ fn file_text(policy: &str) -> String {
 fn files_and_names() {
     let dir = TempDir::new();
     fs::write(dir.0.join("fixture-high.nix"), file_text(CODER)).unwrap();
-    let replaced = Function::load(&dir.0, none(), "fixture-high");
-    let missing = Function::load(&dir.0, none(), "coder");
+    let replaced = Function::load(&[&dir.0, none()], "fixture-high");
+    let missing = Function::load(&[&dir.0, none()], "coder");
     assert_eq!(replaced.unwrap().states.len(), 3);
     assert!(matches!(missing, Err(Error::FunctionNotFound { name, .. }) if name == "coder"));
     assert!(matches!(
-        Function::load(none(), none(), "../default"),
+        Function::load(&[none(), none()], "../default"),
         Err(Error::InvalidName(_))
     ));
     // A file that is not a function of `{ agl, ... }` (AGL-039, D8).
     fs::write(dir.0.join("plain.nix"), format!("{{ policy = {CODER}; }}")).unwrap();
     assert!(matches!(
-        Function::load(&dir.0, none(), "plain"),
+        Function::load(&[&dir.0, none()], "plain"),
         Err(Error::NixNotAFunction { .. })
     ));
     // A file that does not evaluate names the file.
     fs::write(dir.0.join("broken.nix"), "{ agl, ... }: { policy = ; }").unwrap();
     assert!(matches!(
-        Function::load(&dir.0, none(), "broken"),
+        Function::load(&[&dir.0, none()], "broken"),
         Err(Error::NixEval { path, .. }) if path == dir.0.join("broken.nix")
     ));
 }
@@ -334,18 +334,18 @@ fn the_load_tiers() {
     fs::write(workspace.0.join("same.nix"), text("workspace")).unwrap();
     fs::write(user.0.join("same.nix"), text("user")).unwrap();
     fs::write(user.0.join("user-only.nix"), text("user only")).unwrap();
-    let workspace_wins = Function::load(&workspace.0, &user.0, "same").unwrap();
+    let workspace_wins = Function::load(&[&workspace.0, &user.0], "same").unwrap();
     assert_eq!(workspace_wins.system, "workspace");
-    let user_over_builtin = Function::load(&workspace.0, &user.0, "user-only").unwrap();
+    let user_over_builtin = Function::load(&[&workspace.0, &user.0], "user-only").unwrap();
     assert_eq!(user_over_builtin.system, "user only");
-    let built_in = Function::load(&workspace.0, &user.0, "fixture-minimal").unwrap();
+    let built_in = Function::load(&[&workspace.0, &user.0], "fixture-minimal").unwrap();
     assert_eq!(
         built_in.system,
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
-    let skipped = Function::load(none(), &user.0, "same").unwrap();
+    let skipped = Function::load(&[none(), &user.0], "same").unwrap();
     assert_eq!(skipped.system, "user");
-    let missing = Function::load(&workspace.0, &user.0, "no-such");
+    let missing = Function::load(&[&workspace.0, &user.0], "no-such");
     assert!(matches!(
         missing,
         Err(Error::FunctionNotFound { ref name, ref paths })
@@ -754,8 +754,8 @@ fn the_system_text_gets_the_two_words_of_the_runtime_and_keeps_other_braces() {
 
 #[test]
 fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
-    let high = Function::load(none(), none(), "fixture-high").unwrap();
-    let minimal = Function::load(none(), none(), "fixture-minimal").unwrap();
+    let high = Function::load(&[none(), none()], "fixture-high").unwrap();
+    let minimal = Function::load(&[none(), none()], "fixture-minimal").unwrap();
     // `minimal` is laconic and nameless (AGL-018, D1; AGL-039, D31). The
     // other is the persona and the runtime part: the prefix and the size
     // of an action (AGL-009, AGL-018, D2).
@@ -805,7 +805,7 @@ fn the_gemma_models_have_their_files_and_their_drafts() {
             r#"{{ agl, ... }}: {{ policy = agl.policies.minimal; model = agl.models."{name}"; }}"#
         );
         fs::write(dir.0.join(format!("{name}.nix")), text).unwrap();
-        let function = Function::load(&dir.0, none(), name).unwrap();
+        let function = Function::load(&[&dir.0, none()], name).unwrap();
         assert_eq!(function.model.model.as_deref(), Some(weights), "{name}");
         assert_eq!(function.model.spec_type.as_deref(), Some("draft-mtp,ngram-mod"), "{name}");
         assert!(function.format.think.as_ref().unwrap().open.contains("channel"), "{name}");
@@ -868,7 +868,7 @@ fn the_search_tool_is_read_with_its_parameters_and_constraints() {
 #[test]
 fn the_built_in_functions_have_the_search_tool() {
     for name in builtin_names().unwrap() {
-        let function = Function::load(none(), none(), &name).unwrap();
+        let function = Function::load(&[none(), none()], &name).unwrap();
         let tools: Vec<&str> = function.states[function.initial]
             .actions
             .tools

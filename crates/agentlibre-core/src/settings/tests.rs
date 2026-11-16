@@ -520,3 +520,30 @@ fn a_llama_server_may_be_outside_and_a_strata_one_not() {
     assert!(!outside.effective(&strata).external());
     assert!(outside.effective(&ServerFile::default()).external());
 }
+
+#[test]
+fn the_planes_settings_win_over_the_workspaces_key_by_key() {
+    // AGL-077, D7: the user's, the workspace's, the plane's.
+    let workspace = ProjectFile {
+        function: Some("coder".into()),
+        whisper: WhisperFile {
+            url: Some("http://127.0.0.1:18081".into()),
+            model: Some("w.bin".into()),
+            ..WhisperFile::default()
+        },
+        ..ProjectFile::default()
+    };
+    let plane = ProjectFile {
+        whisper: WhisperFile {
+            model: Some("plane.bin".into()),
+            ..WhisperFile::default()
+        },
+        ..ProjectFile::default()
+    };
+    let layered = plane.over(&workspace);
+    assert_eq!(layered.function.as_deref(), Some("coder"));
+    assert_eq!(layered.whisper.url.as_deref(), Some("http://127.0.0.1:18081"));
+    assert_eq!(layered.whisper.model.as_deref(), Some("plane.bin"));
+    let dir = TempDir::new();
+    assert_eq!(ProjectFile::read(&dir.0.join("none.nix")).unwrap(), ProjectFile::default());
+}

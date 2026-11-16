@@ -230,14 +230,9 @@ impl Function {
     /// (`user_functions`), then the built-in `agl.functions.<name>`. An
     /// absent directory is simply skipped. A file is a function of
     /// `{ agl, ... }` (D8).
-    pub fn load(
-        workspace_functions: &Path,
-        user_functions: &Path,
-        name: &str,
-    ) -> Result<Function, Error> {
+    pub fn load(dirs: &[&Path], name: &str) -> Result<Function, Error> {
         check_name(name)?;
-        let looked = [workspace_functions, user_functions];
-        for dir in looked {
+        for dir in dirs {
             let path = dir.join(format!("{name}.nix"));
             if path.is_file() {
                 return Function::from_value(&path, nix::eval_file(&path)?);
@@ -248,7 +243,7 @@ impl Function {
         if value.is_null() {
             return Err(Error::FunctionNotFound {
                 name: name.into(),
-                paths: looked.iter().map(|dir| dir.to_path_buf()).collect(),
+                paths: dirs.iter().map(|dir| dir.to_path_buf()).collect(),
             });
         }
         Function::from_value(&path, value)

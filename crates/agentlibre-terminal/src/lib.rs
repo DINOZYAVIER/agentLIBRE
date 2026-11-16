@@ -178,7 +178,7 @@ fn run(
                 project.function.as_deref(),
                 user.function.as_deref(),
             );
-            let function = Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)?;
+            let function = Function::load(&[&paths.functions_dir(&project.key), &paths.functions()], &name)?;
             if action == cli::args::ServerAction::Command {
                 return cli::serve::print_command(&name, &function, &settings);
             }
@@ -293,9 +293,14 @@ fn run(
             repl::End::Exit(code) => return Ok(code),
             // `/function <name>` (AGL-036, D4): a new session with that
             // Function, the reasoning level kept.
-            repl::End::Function { name, reasoning } => {
+            repl::End::Function {
+                name,
+                reasoning,
+                plane,
+            } => {
                 args = cli::args::Args {
                     function: Some(name),
+                    plane,
                     reasoning,
                     yes: args.yes,
                     ..cli::args::Args::default()
@@ -334,6 +339,7 @@ fn agent_session(
         project,
         resume: args.resume.as_deref(),
         function: args.function.as_deref(),
+        plane: args.plane.as_deref(),
         reasoning: args.reasoning,
         one_request: args.prompt.is_some(),
         engine: Arc::clone(engine),

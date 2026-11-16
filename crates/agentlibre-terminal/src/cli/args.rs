@@ -223,6 +223,8 @@ pub struct Args {
     pub list_sessions: bool,
     /// `--function <name>`.
     pub function: Option<String>,
+    /// `--plane <name>`: the plane of the run (AGL-077, D6).
+    pub plane: Option<String>,
     /// `--think <level>`: the model's reasoning level (AGL-013).
     pub reasoning: Option<ReasoningLevel>,
     /// `--yes`: start the server of the project even when another
@@ -432,6 +434,7 @@ fn run_args(args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
             "-p" => &mut parsed.prompt,
             "--resume" => &mut parsed.resume,
             "--function" => &mut parsed.function,
+            "--plane" => &mut parsed.plane,
             "--think" => &mut think,
             _ => return Err(Error::UnknownOption(arg)),
         };
@@ -468,7 +471,7 @@ mod tests {
 
     #[test]
     fn all_options() {
-        let command = parse_strs(&["--function", "coder", "-p", "hi there", "--resume", "id"]);
+        let command = parse_strs(&["--function", "coder", "-p", "hi there", "--resume", "id", "--plane", "work"]);
         assert_eq!(
             command.unwrap(),
             Command::Run(Args {
@@ -476,6 +479,7 @@ mod tests {
                 resume: Some("id".into()),
                 list_sessions: false,
                 function: Some("coder".into()),
+                plane: Some("work".into()),
                 reasoning: None,
                 yes: false,
                 attach: Vec::new(),

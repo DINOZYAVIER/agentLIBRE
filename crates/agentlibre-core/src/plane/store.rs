@@ -172,6 +172,39 @@ impl PlaneFile {
         })
     }
 
+    /// The plane's `settings.nix` (D1).
+    pub fn settings_file(&self) -> PathBuf {
+        self.dir.join(crate::settings::SETTINGS_FILE)
+    }
+
+    /// The plane's settings; none when it has no `settings.nix` (D1, D7).
+    pub fn settings(&self) -> Result<crate::settings::ProjectFile, Error> {
+        crate::settings::ProjectFile::read(&self.settings_file())
+    }
+
+    /// The plane's `functions/` (D1, D7).
+    pub fn functions_dir(&self) -> PathBuf {
+        self.dir.join("functions")
+    }
+
+    /// The plane's `forge/` (D1, D9).
+    pub fn forge_dir(&self) -> PathBuf {
+        self.dir.join("forge")
+    }
+
+    /// The plane's `memory/` (D1, D8).
+    pub fn memory_dir(&self) -> PathBuf {
+        self.dir.join("memory")
+    }
+
+    /// The plane as a session's header records it (D18).
+    pub fn of_session(&self) -> crate::session::SessionPlane {
+        crate::session::SessionPlane {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        }
+    }
+
     fn push(&mut self, directory: &Path) -> Result<bool, Error> {
         let directory = absolute(directory)?;
         if self.directories.contains(&directory) {

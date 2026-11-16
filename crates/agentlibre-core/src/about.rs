@@ -69,6 +69,8 @@ pub struct About<'a> {
     pub session_format: Option<&'a Path>,
     pub user_settings: &'a Path,
     pub project_store: &'a Path,
+    /// The plane of the run, its name and store (AGL-077).
+    pub plane: Option<(&'a str, &'a Path)>,
     pub source: Option<&'a str>,
 }
 
@@ -127,6 +129,12 @@ impl About<'_> {
             "- this project's store: {} (settings.nix, server.log, memory, forge)",
             self.project_store.display()
         ));
+        if let Some((name, store)) = self.plane {
+            lines.push(format!(
+                "- this run's plane: {name}, its store {} (settings.nix, memory, forge, functions)",
+                store.display()
+            ));
+        }
         if let Some(source) = self.source {
             lines.push(format!("- agl's source: {source}"));
         }
@@ -166,6 +174,7 @@ mod tests {
             session_format: Some(Path::new("/s/docs/session-file.md")),
             user_settings: Path::new("/c/settings.nix"),
             project_store: Path::new("/d/project-abc"),
+            plane: None,
             source: Some("/r/agentLIBRE"),
         }
     }
@@ -215,6 +224,19 @@ mod tests {
         for absent in ["git ", "(/", "model:", "format of", "agl's source"] {
             assert!(!text.contains(absent), "{absent} in {text}");
         }
+    }
+
+    #[test]
+    fn a_run_in_a_plane_is_told_its_plane() {
+        let text = About {
+            plane: Some(("work", Path::new("/d/planes/work"))),
+            ..about()
+        }
+        .render();
+        assert!(
+            text.contains("- this run's plane: work, its store /d/planes/work (settings.nix, memory, forge, functions)"),
+            "{text}"
+        );
     }
 
     #[test]

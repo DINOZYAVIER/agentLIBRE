@@ -20,6 +20,8 @@ pub enum Error {
     RepeatedOption(String),
     /// `--function` with `--resume`: the session names its Function (D106).
     FunctionWithResume,
+    /// `--plane` with `--resume`: the session keeps its plane (AGL-077).
+    PlaneWithResume,
     /// `--think` names a level outside the four (AGL-013).
     BadReasoningLevel { value: String },
     /// Neither `var` nor `HOME` is an absolute path.
@@ -497,6 +499,7 @@ impl Error {
                 | Error::MissingValue(_)
                 | Error::RepeatedOption(_)
                 | Error::FunctionWithResume
+                | Error::PlaneWithResume
                 | Error::BadReasoningLevel { .. }
                 | Error::AttachWithoutPrompt
         )

@@ -985,3 +985,25 @@ fn the_loose_tools_are_the_calls_in_the_order_of_the_first() {
     let reopened = Session::open(&dir.0, &session.id).unwrap();
     assert_eq!(reopened.loose_tools(), session.loose_tools());
 }
+
+#[test]
+fn the_plane_of_the_header_round_trips() {
+    // A session in a plane records its id and name; one in none records no
+    // field (AGL-077, D10, D18).
+    let dir = TempDir::new();
+    let plane = SessionPlane {
+        id: "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".into(),
+        name: "work".into(),
+    };
+    let session = Session::create_in(&dir.0, "coder", Path::new("/w"), None, Some(&plane)).unwrap();
+    let text = fs::read_to_string(dir.0.join(format!("{}.jsonl", session.id))).unwrap();
+    let header: Json = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(header["plane"], json!({ "id": plane.id, "name": "work" }));
+    assert_eq!(Session::open(&dir.0, &session.id).unwrap().plane, Some(plane.clone()));
+    assert_eq!(Session::count_of_plane(&dir.0, &plane.id), 1);
+    let none = Session::create_run(&dir.0, "coder", Path::new("/w"), None).unwrap();
+    let text = fs::read_to_string(dir.0.join(format!("{}.jsonl", none.id))).unwrap();
+    assert!(!text.lines().next().unwrap().contains("plane"));
+    assert_eq!(Session::open(&dir.0, &none.id).unwrap().plane, None);
+    assert_eq!(Session::count_of_plane(&dir.0, &plane.id), 1);
+}

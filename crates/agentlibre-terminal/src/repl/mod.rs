@@ -737,9 +737,12 @@ enum Next {
 /// reasoning level of this one.
 pub enum End {
     Exit(ExitCode),
+    /// `/function <name>`: a new session with that Function, in the same
+    /// plane (AGL-077, D6).
     Function {
         name: String,
         reasoning: Option<ReasoningLevel>,
+        plane: Option<String>,
     },
 }
 
@@ -1119,6 +1122,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // What the REPL keeps beside the run: its memory, for the question of
     // a removal; and what its session is after each command.
     let memory = Arc::clone(&plane.memory);
+    let plane_name = plane.file.as_ref().map(|file| file.name.clone());
     let session = RefCell::new(SessionView::of(&plane.session));
     // The plane takes the commands on a thread of its own (AGL-075, D7).
     let handle = plane.start();
@@ -1168,6 +1172,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     end = End::Function {
                         name,
                         reasoning: control.lock().reasoning,
+                        plane: plane_name.clone(),
                     };
                     break;
                 }
@@ -2254,7 +2259,7 @@ mod tests {
     #[test]
     fn what_compact_tells() {
         let none = Path::new("/none");
-        let function = Function::load(none, none, "fixture-minimal").unwrap();
+        let function = Function::load(&[none, none], "fixture-minimal").unwrap();
         let notice = |result| compact_notice(result, &function, Lang::En);
         assert_eq!(notice(Ok(Compaction::Done)), None);
         assert_eq!(

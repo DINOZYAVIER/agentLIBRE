@@ -352,13 +352,14 @@ mod tests {
         })
         .unwrap();
         let function =
-            Function::load(Path::new("/none"), Path::new("/none"), "fixture-minimal").unwrap();
+            Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
         let sessions = dir.0.join("sessions");
         let session =
             Session::create_run(&sessions, "fixture-minimal", &cwd, Some(&function.snapshot()))
                 .unwrap();
         let backend: Arc<dyn Backend + Send + Sync> = fake;
         Plane {
+            file: None,
             function,
             function_name: "fixture-minimal".into(),
             backend: Arc::clone(&backend),

@@ -52,7 +52,7 @@ pub fn run(
             if crate::tty::is_interactive()
                 && project.server.over(&user.server).llama_external != Some(true)
                 && let Ok(function) =
-                    Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name)
+                    Function::load(&[&paths.functions_dir(&project.key), &paths.functions()], &name)
             {
                 crate::weights::offer(
                     &function.model,
