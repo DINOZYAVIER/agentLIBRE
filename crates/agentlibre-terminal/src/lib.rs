@@ -11,6 +11,7 @@ pub(crate) use agentlibre_core::{
     agent,
     attach,
     backend,
+    control,
     engine,
     error,
     forge,
@@ -119,6 +120,9 @@ pub struct Setup<'a> {
     pub history_file: PathBuf,
     /// The Functions of the REPL's `/function` (AGL-036, D3).
     pub catalog: &'a function::catalog::Catalog,
+    /// agentLIBRE's runtime directory, where the REPL's control socket is
+    /// made (AGL-074, D3).
+    pub runtime: Option<PathBuf>,
 }
 
 pub fn cli() -> ExitCode {
@@ -647,6 +651,7 @@ fn agent_session(
             repl: settings.repl,
             history_file: paths.history_file(),
             catalog: &catalog,
+            runtime: paths.runtime.clone(),
         };
         return if interactive {
             repl::run(setup)

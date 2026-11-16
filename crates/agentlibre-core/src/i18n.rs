@@ -1325,6 +1325,18 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сесія {id}",
     };
 
+    /// The session's control socket is another agl's (AGL-074, D3).
+    pub const SOCKET_TAKEN: Msg = Msg {
+        en: "no control socket: another agl answers on {path}",
+        uk: "без сокета керування: на {path} відповідає інший agl",
+    };
+
+    /// The session's control socket could not be made (AGL-074, D3).
+    pub const SOCKET_FAILED: Msg = Msg {
+        en: "no control socket: {path}: {error}",
+        uk: "без сокета керування: {path}: {error}",
+    };
+
     /// The splash's welcome phrase, above its version (AGL-065, D7,
     /// D8): what agentLIBRE is, as the repository's README says.
     pub const SPLASH_TAGLINE: Msg = Msg {

@@ -6,6 +6,7 @@ mod editor;
 mod inspect;
 mod markdown;
 mod reading;
+mod socket;
 mod splash;
 mod transcript;
 mod text;
@@ -33,6 +34,7 @@ use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::cli::args::{MemoryAction, memory_action};
+use crate::control;
 use crate::engine::ServerProgress;
 use crate::tty::is_yes;
 use crate::error::Error;
@@ -816,6 +818,49 @@ fn wait_for_next(control: &Control) -> Next {
     }
 }
 
+/// What the control socket's requests do (AGL-074, D3, D4): `say` is the
+/// next message, as if typed, queued while a turn runs; `stop` is Ctrl-C on
+/// a running turn, its queue dropped; `hello` tells who the session is.
+fn answer(
+    control: Arc<Control>,
+    dock: Arc<Dock>,
+    identity: Arc<Mutex<(String, Option<String>)>>,
+    request_stop: impl Fn() -> bool + Send + 'static,
+) -> impl FnMut(control::Request) -> control::Reply + Send + 'static {
+    move |request| match request {
+        control::Request::Say(text) => {
+            let mut inner = control.lock();
+            let queued = inner.busy();
+            inner.queue.push_back(Queued::from(text.as_str()));
+            let waiting = inner.queue.len();
+            drop(inner);
+            dock.set_queued(waiting);
+            control.wake.notify_all();
+            control::Reply::Said { queued }
+        }
+        control::Request::Stop => {
+            let mut inner = control.lock();
+            if inner.busy() {
+                request_stop();
+                inner.queue.clear();
+                drop(inner);
+                dock.set_queued(0);
+            }
+            control::Reply::Stopped
+        }
+        control::Request::Hello => {
+            let busy = control.lock().busy();
+            let (session, name) = identity.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            control::Reply::Hello(control::Hello {
+                pid: std::process::id(),
+                session,
+                name,
+                busy,
+            })
+        }
+    }
+}
+
 /// The interactive session in a terminal (D115-D138).
 pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
@@ -826,6 +871,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         repl,
         history_file,
         catalog,
+        runtime,
     } = setup;
     let function = plane.function;
     let function_name = plane.function_name;
@@ -962,6 +1008,19 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             }
         })
     };
+    // The control socket (AGL-074, D3): its thread is made while SIGINT is
+    // blocked, as the others, so that a `stop` wakes the main thread.
+    let identity = Arc::new(Mutex::new((
+        plane.session.id.clone(),
+        plane.session.name.clone(),
+    )));
+    let socket = socket::Socket::start(
+        runtime.as_deref(),
+        &plane.session.id,
+        answer(control.clone(), dock.clone(), identity.clone(), || {
+            interrupt::request(true)
+        }),
+    );
     term::unblock_sigint();
 
     dock.start();
@@ -977,6 +1036,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         ));
     }
     presenter.show_notice(&tr!(lang, m::SESSION, id = plane.session.id), Role::Muted);
+    match &socket {
+        Ok(_) | Err(socket::NoSocket::NoRuntime) => {}
+        Err(socket::NoSocket::Taken(path)) => presenter.show_notice(
+            &tr!(lang, m::SOCKET_TAKEN, path = path.display()),
+            Role::StatusPending,
+        ),
+        Err(socket::NoSocket::Io(path, error)) => presenter.show_notice(
+            &tr!(lang, m::SOCKET_FAILED, path = path.display(), error = error),
+            Role::StatusPending,
+        ),
+    }
     if resumed {
         presenter.replay(&plane.session.events, &plane.session.transitions);
         if let Some(state) = plane.session.unfinished().and_then(|turn| turn.state) {
@@ -1189,9 +1259,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 presenter.set_ready();
             }
         }
+        // `hello` names the session as it is now; a `/new` moves the
+        // socket to the new one.
+        *identity.lock().unwrap_or_else(|e| e.into_inner()) =
+            (plane.session.id.clone(), plane.session.name.clone());
+        if let Ok(socket) = &socket {
+            let _ = socket.rename(&plane.session.id);
+        }
     }
 
     record_commands(&control, &mut plane.session);
+    drop(socket);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
     let _ = ticker.join();
@@ -2029,6 +2107,46 @@ mod tests {
         // A second Ctrl-C during the same turn leaves at once (D120).
         f.input.key(Key::Ctrl('c'));
         assert_eq!(f.exits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_sockets_say_is_the_next_message_and_its_stop_is_ctrl_c() {
+        let f = fixture();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let identity = Arc::new(Mutex::new(("s1".to_owned(), None)));
+        let mut answer = {
+            let stops = stops.clone();
+            answer(
+                f.input.control.clone(),
+                f.input.dock.clone(),
+                identity.clone(),
+                move || stops.fetch_add(1, Ordering::SeqCst) > 0,
+            )
+        };
+        let said = |text: &str| control::Request::Say(text.into());
+        assert_eq!(answer(said("one")), control::Reply::Said { queued: false });
+        assert_eq!(f.inner().texts(), ["one"]);
+        assert_eq!(answer(said("two")), control::Reply::Said { queued: true }, "one waits");
+        f.inner().queue.clear();
+        f.inner().running = true;
+        assert_eq!(answer(said("/new")), control::Reply::Said { queued: true });
+        assert_eq!(f.inner().texts(), ["/new"], "a message, not a command");
+        let control::Reply::Hello(hello) = answer(control::Request::Hello) else {
+            panic!("no hello");
+        };
+        assert_eq!((hello.session.as_str(), hello.busy), ("s1", true));
+        assert_eq!(hello.pid, std::process::id());
+        *identity.lock().unwrap() = ("s2".into(), Some("tea".into()));
+        let control::Reply::Hello(hello) = answer(control::Request::Hello) else {
+            panic!("no hello");
+        };
+        assert_eq!((hello.session.as_str(), hello.name.as_deref()), ("s2", Some("tea")));
+        assert_eq!(answer(control::Request::Stop), control::Reply::Stopped);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(f.inner().queue.is_empty(), "what waited is dropped");
+        f.inner().running = false;
+        assert_eq!(answer(control::Request::Stop), control::Reply::Stopped);
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "nothing to stop when idle");
     }
 
     #[test]
