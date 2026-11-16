@@ -49,8 +49,9 @@ pub trait Turn: Sink {
     fn line(&mut self, line: &str);
     /// The server answered, with a context of `context` tokens.
     fn context(&mut self, _context: usize) {}
-    /// The media the message names are stored in `session` (AGL-014).
-    fn stored(&mut self, _session: &Session) {}
+    /// The media the message names are stored (AGL-014): the session's
+    /// media of each kind now (`attach::media_counts`).
+    fn stored(&mut self, _media: [u32; 3]) {}
     /// The turn is over, before the FSM is closed.
     fn over(&mut self) {}
 }
@@ -212,7 +213,7 @@ pub struct Run {
     /// Runs the `search` tool (AGL-019).
     pub search: Box<dyn Searcher + Send>,
     /// Where the memory of the workspace is (AGL-006).
-    pub memory: Box<dyn Home>,
+    pub memory: Arc<dyn Home>,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<String>,
     /// What stops a turn of this run (AGL-075): its turns run in its scope.
@@ -468,7 +469,7 @@ impl Run {
             reasoning,
             image_tokens,
             search,
-            memory: Box::new(memory),
+            memory: Arc::new(memory),
             about,
             stop,
         };
@@ -592,7 +593,7 @@ impl Run {
             },
         )
         .and_then(|()| {
-            surface.stored(&self.session);
+            surface.stored(attach::media_counts(&self.session));
             self.agent(context)
                 .turn_observed(message, &mut *surface, observer)
         });

@@ -64,10 +64,27 @@ pub enum Sent {
     Done(Box<Done>),
 }
 
+impl Sent {
+    /// Gives what the run sent to the surface of the turn; a command's end
+    /// is not for it.
+    pub fn give(self, surface: &mut dyn Turn) {
+        match self {
+            Sent::Report(report) => surface.send(report),
+            Sent::Line(line) => surface.line(&line),
+            Sent::Context(context) => surface.context(context),
+            Sent::Stored(media) => surface.stored(media),
+            Sent::Over => surface.over(),
+            Sent::Done(_) => {}
+        }
+    }
+}
+
 /// The end of a command.
 pub struct Done {
     /// A message's turn.
     pub turn: Option<Result<TurnEnd, Error>>,
+    /// Why a turn stopped, in the words of its Function (`i18n::repl::stopped`).
+    pub why: Option<String>,
     /// What a slash command said; `/new` fails as an error.
     pub said: Option<Result<Said, Error>>,
     /// The session as it is after the command.
@@ -212,8 +229,15 @@ impl Run {
                 (None, None)
             }
         };
+        let why = match &turn {
+            Some(Ok(TurnEnd::Stopped(reason))) => {
+                Some(crate::i18n::repl::stopped(*reason, &self.function, self.lang))
+            }
+            _ => None,
+        };
         Done {
             turn,
+            why,
             said,
             session: SessionView::of(&self.session),
         }
@@ -239,8 +263,8 @@ impl Turn for Forward {
         let _ = self.0.send(Sent::Context(context));
     }
 
-    fn stored(&mut self, session: &Session) {
-        let _ = self.0.send(Sent::Stored(attach::media_counts(session)));
+    fn stored(&mut self, media: [u32; 3]) {
+        let _ = self.0.send(Sent::Stored(media));
     }
 
     fn over(&mut self) {
@@ -362,7 +386,7 @@ mod tests {
             reasoning: None,
             image_tokens: 1000,
             search: Box::new(NoSearch),
-            memory: Box::new(StoreHome {
+            memory: Arc::new(StoreHome {
                 workspace: cwd,
                 auto_rehome: true,
                 lang: Lang::En,

@@ -2,6 +2,7 @@
 //! message; the answers go to stdout and the progress to stderr, as with
 //! `-p` (D109).
 
+use std::cell::Cell;
 use std::io::{self, BufRead};
 use std::process::ExitCode;
 
@@ -11,11 +12,11 @@ use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::{Lang, m};
 use crate::interrupt;
 use crate::media::Source;
-use crate::run::{Said, Told};
-use crate::session::{CommandRun, Event, Session, StopReason};
+use crate::run::{Command, Done, Said, Sent, SessionView, Told};
+use crate::session::{CommandRun, Event, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -24,7 +25,7 @@ use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
-        mut run,
+        run,
         server_url,
         ..
     } = setup;
@@ -35,8 +36,27 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
+    let reasoning = run.reasoning;
+    let context = Cell::new(run.context);
+    // What this session holds of the run's session, after each command.
+    let mut session = SessionView::of(&run.session);
     interrupt::install();
-    eprintln!("{}", tr!(lang, m::SESSION, id = run.session.id));
+    eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
+    // The run takes the commands on a thread of its own (AGL-075, D7).
+    let handle = run.start();
+    let mut ask = |command: Command, session: &mut SessionView| -> Result<Done, Error> {
+        let mut report = StderrReport::new(lang);
+        let done = handle
+            .ask(command, &mut |sent| {
+                if let Sent::Context(size) = sent {
+                    context.set(Some(size));
+                }
+                sent.give(&mut report);
+            })
+            .ok_or(Error::RunGone)?;
+        *session = done.session.clone();
+        Ok(done)
+    };
     let mut state: Option<String> = None;
     // What `/attach` took since the last message (AGL-014, D18).
     let mut pending: Vec<Pending> = Vec::new();
@@ -62,7 +82,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             let mut said = Record::default();
             match name {
                 "/quit" | "/exit" => {
-                    said.record(&mut run.session, message);
+                    said.record(&mut ask, &mut session, message)?;
                     break;
                 }
                 "/help" => {
@@ -72,18 +92,19 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 "/status" => {
                     let info = Info {
-                        session: run.session.id.clone(),
+                        session: session.id.clone(),
                         state: state.clone(),
-                        unfinished: run.session.unfinished().and_then(|turn| turn.state),
-                        context: run.context,
+                        unfinished: session.unfinished.clone(),
+                        context: context.get(),
                     };
-                    let text = status_text(&facts, &info, run.reasoning, lang);
+                    let text = status_text(&facts, &info, reasoning, lang);
                     outln!("{text}");
                     said.output.push(text.to_string());
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
                     Remember::Entry { name, text } => {
-                        said.tell(run.remember(&name, &text), lang)?;
+                        let done = ask(Command::Remember { name, text }, &mut session)?;
+                        said.tell(done.said.expect("a command's saying")?, lang)?;
                     }
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
@@ -98,9 +119,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         Error::MemoryRemoveNeedsYes { name }.message(lang)
                     )),
                     Ok(MemoryAction::Remove { name, yes: true }) => {
-                        said.tell(run.remove(&name), lang)?;
+                        let done = ask(Command::Remove { name }, &mut session)?;
+                        said.tell(done.said.expect("a command's saying")?, lang)?;
                     }
-                    Ok(action) => said.tell(run.looked_at(&action), lang)?,
+                    Ok(action) => {
+                        let done = ask(Command::LookAt(action), &mut session)?;
+                        said.tell(done.said.expect("a command's saying")?, lang)?;
+                    }
                 },
                 "/attach" => {
                     let path = unquote(message["/attach".len()..].trim());
@@ -110,7 +135,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         match Source::from_file(std::path::Path::new(path)) {
                             Ok(source) => {
                                 let name = source.name.clone();
-                                let placeholder = attach::add(&run.session, &mut pending, source);
+                                let placeholder =
+                                    attach::add_counted(&session.media, &mut pending, source);
                                 let text =
                                     tr!(lang, m::ATTACHED, placeholder = placeholder, name = name)
                                         .to_string();
@@ -127,51 +153,57 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     if name.is_empty() {
                         said.fail(tr!(lang, m::RENAME_USAGE).to_string());
                     } else {
-                        said.tell(run.rename(name), lang)?;
+                        let done = ask(Command::Rename(name.to_owned()), &mut session)?;
+                        said.tell(done.said.expect("a command's saying")?, lang)?;
                     }
                 }
                 "/new" => {
-                    said.record(&mut run.session, message);
+                    said.record(&mut ask, &mut session, message)?;
                     said = Record::recorded();
                     // A new session records the `run` snapshot of its
                     // Function (AGL-063, D4).
-                    said.tell(run.new_session()?, lang)?;
+                    let done = ask(Command::New, &mut session)?;
+                    said.tell(done.said.expect("a command's saying")?, lang)?;
                     pending.clear();
                     placeholders.clear();
                     state = None;
                 }
                 "/compact" => {
-                    let ran = run.compact(&mut StderrReport::new(lang));
+                    let done = ask(Command::Compact { reasoning }, &mut session)?;
+                    let ran = done.said.expect("a command's saying")?;
                     let interrupted = ran.interrupted;
                     said.tell(ran, lang)?;
                     if interrupted {
-                        said.record(&mut run.session, message);
+                        said.record(&mut ask, &mut session, message)?;
                         return Ok(ExitCode::from(interrupt::EXIT_CODE));
                     }
                 }
                 _ => said.fail(tr!(lang, m::UNKNOWN_COMMAND, name = name).to_string()),
             }
-            said.record(&mut run.session, message);
+            said.record(&mut ask, &mut session, message)?;
             continue;
         }
-        let mut report = StderrReport::new(lang);
         let text = attach::with_placeholders(&placeholders, message);
         placeholders.clear();
         let attached = std::mem::take(&mut pending);
-        let end = run.turn(&text, attached, &mut report);
+        let done = ask(
+            Command::Say {
+                message: text,
+                attached,
+                reasoning,
+                observer: None,
+            },
+            &mut session,
+        )?;
         state = None;
-        match end {
+        let why = done.why.unwrap_or_default();
+        match done.turn.expect("a message's turn") {
             Ok(TurnEnd::Answer(text)) => outln!("{text}"),
             Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
-                eprintln!(
-                    "{}",
-                    texts::stopped(StopReason::Interrupted, &run.function, lang)
-                );
+                eprintln!("{why}");
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
-            Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agl: {}", texts::stopped(reason, &run.function, lang));
-            }
+            Ok(TurnEnd::Stopped(_)) => eprintln!("agl: {why}"),
             Err(error) => eprintln!("agl: {}", error.message(lang)),
         }
     }
@@ -252,15 +284,22 @@ impl Record {
     }
 
     /// A session that cannot be written to says so at the next turn.
-    fn record(&self, session: &mut Session, line: &str) {
+    /// The command's line goes to the session's record, by its run.
+    fn record(
+        &self,
+        ask: &mut impl FnMut(Command, &mut SessionView) -> Result<Done, Error>,
+        session: &mut SessionView,
+        line: &str,
+    ) -> Result<(), Error> {
         if self.recorded {
-            return;
+            return Ok(());
         }
-        let _ = session.append(Event::Command(CommandRun {
+        let event = Event::Command(CommandRun {
             line: line.to_owned(),
             failed: self.failed,
             output: Some(self.output.join("\n")).filter(|output| !output.is_empty()),
-        }));
+        });
+        ask(Command::Append(vec![event]), session).map(drop)
     }
 }
 

@@ -14,6 +14,7 @@ pub(crate) mod term;
 mod voice;
 
 use std::collections::VecDeque;
+use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -29,7 +30,7 @@ use transcript::{Presenter, Screen, notice_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
-use crate::run::Told;
+use crate::run::{Command, Done, Sent, SessionView, Told};
 use crate::run::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
@@ -705,8 +706,8 @@ impl Turn for ReplTurn<'_> {
         self.control.lock().info.context = Some(context);
     }
 
-    fn stored(&mut self, session: &Session) {
-        self.control.set_media_counts(session);
+    fn stored(&mut self, media: [u32; 3]) {
+        self.control.lock().media_counts = media;
     }
 
     fn over(&mut self) {
@@ -744,12 +745,42 @@ pub enum End {
 
 /// A slash command goes to the session (AGL-047, D5). A session that cannot
 /// be written to says so at the next event of the turn.
-fn record(session: &mut Session, line: String, failed: bool, output: Option<String>) {
-    let _ = session.append(Event::Command(CommandRun {
+/// The line of a command run at the prompt, for the session's record.
+fn command(line: String, failed: bool, output: Option<String>) -> Event {
+    Event::Command(CommandRun {
         line,
         failed,
         output,
-    }));
+    })
+}
+
+/// A command sent to the run and its end; `None` when the run's thread is
+/// gone.
+type Ask<'a> = dyn Fn(Command, &mut dyn FnMut(Sent)) -> Option<Done> + 'a;
+
+/// A command of the run that says what it did: shown, and its line
+/// recorded; false when the run's thread is gone.
+fn said(
+    ask: &Ask,
+    record: &dyn Fn(String, bool, Option<String>) -> bool,
+    presenter: &Presenter,
+    run: Command,
+    line: String,
+    lang: Lang,
+) -> bool {
+    match ask(run, &mut drop).and_then(|done| done.said) {
+        Some(Ok(said)) => {
+            let (failed, output) = (said.failed, said.content.clone());
+            show_said(presenter, &said, lang);
+            record(line, failed, output)
+        }
+        Some(Err(error)) => {
+            let text = error.message(lang);
+            presenter.show_notice(&text, Role::StatusFailure);
+            record(line, true, Some(text))
+        }
+        None => false,
+    }
 }
 
 /// What a command of the run said (AGL-067, F2): an answer and a notice
@@ -775,10 +806,11 @@ fn show_said(presenter: &Presenter, said: &crate::run::Said, lang: Lang) {
 
 /// The commands run at the prompt go to the session between turns, so that
 /// none stands between a call and its result (AGL-047, D5).
-fn record_commands(control: &Control, session: &mut Session) {
-    for run in std::mem::take(&mut control.lock().commands) {
-        let _ = session.append(Event::Command(run));
-    }
+fn take_commands(control: &Control) -> Vec<Event> {
+    std::mem::take(&mut control.lock().commands)
+        .into_iter()
+        .map(Event::Command)
+        .collect()
 }
 
 fn wait_for_next(control: &Control) -> Next {
@@ -864,7 +896,7 @@ fn answer(
 /// The interactive session in a terminal (D115-D138).
 pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
-        mut run,
+        run,
         resumed,
         server_url,
         theme,
@@ -1084,34 +1116,55 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         presenter.set_ready();
     }
 
+    // What the REPL keeps beside the run: its memory, for the question of
+    // a removal; and what its session is after each command.
+    let memory = Arc::clone(&run.memory);
+    let session = RefCell::new(SessionView::of(&run.session));
+    // The run takes the commands on a thread of its own (AGL-075, D7).
+    let handle = run.start();
+    // A command and its end; `None` when the run's thread is gone.
+    let ask = |command: Command, each: &mut dyn FnMut(Sent)| -> Option<Done> {
+        let done = handle.ask(command, each)?;
+        *session.borrow_mut() = done.session.clone();
+        Some(done)
+    };
+    let mut gone = false;
     let mut end = End::Exit(ExitCode::SUCCESS);
     loop {
         let next = wait_for_next(&control);
-        record_commands(&control, &mut run.session);
+        let commands = take_commands(&control);
+        if !commands.is_empty() && ask(Command::Append(commands), &mut drop).is_none() {
+            gone = true;
+            break;
+        }
         // The inspect mode re-reads the file, this is the fallback and
         // the new id of a `/new` (AGL-066).
         {
             let mut inner = inspect_data.lock().unwrap();
-            inner.id = run.session.id.clone();
-            inner.events = run.session.events.clone();
-            inner.outputs = run.session.outputs_dir();
+            inner.id = session.borrow().id.clone();
+            inner.events = session.borrow().events.clone();
+            inner.outputs = session.borrow().outputs.clone();
         }
-        match next {
+        // The command's line in the session's record (AGL-047, D5).
+        let record = |line: String, failed: bool, output: Option<String>| {
+            ask(Command::Append(vec![command(line, failed, output)]), &mut drop).is_some()
+        };
+        let kept = match next {
             Next::Quit => {
-                record(&mut run.session, "/quit".into(), false, None);
+                record("/quit".into(), false, None);
                 break;
             }
             Next::Functions => {
                 let list = catalog.lines(lang).join("\n");
                 presenter.show_notice(&list, Role::Muted);
-                record(&mut run.session, "/function".into(), false, Some(list));
+                record("/function".into(), false, Some(list))
             }
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
             Next::Switch(name) => match catalog.check(&name) {
                 Ok(()) => {
                     presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
-                    record(&mut run.session, format!("/function {name}"), false, None);
+                    record(format!("/function {name}"), false, None);
                     end = End::Function {
                         name,
                         reasoning: control.lock().reasoning,
@@ -1121,54 +1174,51 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 Err(error) => {
                     let text = error.message(lang);
                     presenter.show_notice(&text, Role::StatusFailure);
-                    record(&mut run.session, format!("/function {name}"), true, Some(text));
+                    record(format!("/function {name}"), true, Some(text))
                 }
             },
             Next::New => {
-                record(&mut run.session, "/new".into(), false, None);
-                match run.new_session() {
-                    Ok(said) => {
+                if !record("/new".into(), false, None) {
+                    gone = true;
+                    break;
+                }
+                match ask(Command::New, &mut drop).and_then(|done| done.said) {
+                    Some(Ok(said)) => {
                         show_said(&presenter, &said, lang);
                         let mut inner = control.lock();
                         inner.info = Info {
-                            session: run.session.id.clone(),
+                            session: session.borrow().id.clone(),
                             context: inner.info.context,
                             ..Info::default()
                         };
-                        drop(inner);
-                        control.set_media_counts(&run.session);
+                        inner.media_counts = session.borrow().media;
+                        true
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
                         let text = error.message(lang);
                         presenter.show_notice(&text, Role::StatusFailure);
+                        true
                     }
+                    None => false,
                 }
             }
             Next::Rename(name) => {
                 // `/rename <name>` (AGL-062, D7): the name is a line of the
                 // file. The model has the command from its record (AGL-047,
                 // D5), as with the others.
-                let line = format!("/rename {name}");
-                let said = run.rename(&name);
-                let (failed, output) = (said.failed, said.content.clone());
-                show_said(&presenter, &said, lang);
-                record(&mut run.session, line, failed, output);
+                said(&ask, &record, &presenter, Command::Rename(name.clone()), format!("/rename {name}"), lang)
             }
             Next::Remember(name, text) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
                 // writes the entry, no turn. The model has it from the
                 // record of the command (AGL-047, D5).
                 let line = format!("/remember {name} | {text}");
-                let said = run.remember(&name, &text);
-                let (failed, output) = (said.failed, said.content.clone());
-                show_said(&presenter, &said, lang);
-                record(&mut run.session, line, failed, output);
+                said(&ask, &record, &presenter, Command::Remember { name, text }, line, lang)
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
             Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
-                let found = run
-                    .memory
+                let found = memory
                     .look()
                     .and_then(|dir| crate::memory::entry_dir(dir.as_deref(), &name).map(drop));
                 match found {
@@ -1176,37 +1226,45 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         let question = tr!(lang, m::MEMORY_REMOVE_ASK, name = name);
                         control.lock().question = Some(Question { line, name });
                         presenter.show_notice(&question, Role::StatusPending);
+                        true
                     }
                     Err(error) => {
                         let text = error.message(lang);
                         presenter.show_notice(&text, Role::StatusFailure);
-                        record(&mut run.session, line, true, Some(text));
+                        record(line, true, Some(text))
                     }
                 }
             }
             // The model learns of it from the record, as of `/remember`
             // (AGL-060, D6).
             Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
-                let said = run.remove(&name);
-                let (failed, output) = (said.failed, said.content.clone());
-                show_said(&presenter, &said, lang);
-                record(&mut run.session, line, failed, output);
+                said(&ask, &record, &presenter, Command::Remove { name }, line, lang)
             }
             Next::Memory(line, action) => {
-                let said = run.looked_at(&action);
-                let (failed, output) = (said.failed, said.content.clone());
-                show_said(&presenter, &said, lang);
-                record(&mut run.session, line, failed, output);
+                said(&ask, &record, &presenter, Command::LookAt(action), line, lang)
             }
             Next::Compact => {
-                run.reasoning = control.lock().reasoning;
-                let said =
-                    run.compact(&mut |report: Report| show(&mut presenter, &control, report));
+                let reasoning = control.lock().reasoning;
+                let done = ask(Command::Compact { reasoning }, &mut |sent| {
+                    if let Sent::Report(report) = sent {
+                        show(&mut presenter, &control, report);
+                    }
+                });
                 control.lock().running = false;
-                let (failed, output) = (said.failed, said.content.clone());
-                show_said(&presenter, &said, lang);
-                record(&mut run.session, "/compact".into(), failed, output);
+                let kept = match done.and_then(|done| done.said) {
+                    Some(Ok(said)) => {
+                        let (failed, output) = (said.failed, said.content.clone());
+                        show_said(&presenter, &said, lang);
+                        record("/compact".into(), failed, output)
+                    }
+                    Some(Err(error)) => {
+                        presenter.show_notice(&error.message(lang), Role::StatusFailure);
+                        true
+                    }
+                    None => false,
+                };
                 presenter.set_ready();
+                kept
             }
             Next::Message(Queued {
                 text: message,
@@ -1216,32 +1274,40 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 presenter.begin_turn();
                 presenter.show_user(&message);
                 // The running turn keeps the level it started with (AGL-013).
-                run.reasoning = control.lock().reasoning;
-                let result = run.turn(
-                    &message,
-                    pending,
-                    &mut ReplTurn {
-                        presenter: &mut presenter,
-                        control: &control,
-                        dock: &dock,
+                let reasoning = control.lock().reasoning;
+                let done = ask(
+                    Command::Say {
+                        message,
+                        attached: pending,
+                        reasoning,
+                        observer: None,
+                    },
+                    &mut |sent| {
+                        sent.give(&mut ReplTurn {
+                            presenter: &mut presenter,
+                            control: &control,
+                            dock: &dock,
+                        })
                     },
                 );
+                let Some(done) = done else {
+                    gone = true;
+                    break;
+                };
                 let mut failed = None;
-                match result {
+                match done.turn.expect("a message's turn") {
                     Ok(TurnEnd::Answer(_)) => {}
                     Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
                         presenter
                             .show_notice(tr!(lang, m::INTERRUPTED_CLEARED), Role::StatusPending);
                     }
-                    Ok(TurnEnd::Stopped(reason)) => {
-                        failed = Some(texts::stopped(reason, &run.function, lang));
-                    }
+                    Ok(TurnEnd::Stopped(_)) => failed = done.why,
                     Err(error) => failed = Some(error.message(lang)),
                 }
                 let mut inner = control.lock();
                 inner.running = false;
                 inner.info.state = None;
-                inner.info.unfinished = run.session.unfinished().and_then(|turn| turn.state);
+                inner.info.unfinished = session.borrow().unfinished.clone();
                 // A turn that failed leaves no queue behind (D127).
                 let cleared = failed.is_some() && !inner.queue.is_empty();
                 if failed.is_some() {
@@ -1256,18 +1322,28 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     presenter.show_notice(tr!(lang, m::ERROR_CLEARED), Role::Muted);
                 }
                 presenter.set_ready();
+                true
             }
+        };
+        if !kept {
+            gone = true;
+            break;
         }
         // `hello` names the session as it is now; a `/new` moves the
         // socket to the new one.
         *identity.lock().unwrap_or_else(|e| e.into_inner()) =
-            (run.session.id.clone(), run.session.name.clone());
+            (session.borrow().id.clone(), session.borrow().name.clone());
         if let Ok(socket) = &socket {
-            let _ = socket.rename(&run.session.id);
+            let _ = socket.rename(&session.borrow().id);
         }
     }
 
-    record_commands(&control, &mut run.session);
+    let commands = take_commands(&control);
+    if !gone && !commands.is_empty() {
+        ask(Command::Append(commands), &mut drop);
+    }
+    // The run's thread ends with its last command.
+    drop(handle);
     drop(socket);
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
@@ -1275,6 +1351,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // A recording that goes keeps nothing, and ffmpeg is stopped (AGL-016).
     voice.cancel();
     dock.finish();
+    if gone {
+        return Err(Error::RunGone);
+    }
     Ok(end)
 }
 

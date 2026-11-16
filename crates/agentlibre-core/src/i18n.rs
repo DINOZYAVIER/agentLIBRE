@@ -931,6 +931,11 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// `agl notify` without `XDG_RUNTIME_DIR` (AGL-074, D3).
+    pub const RUN_GONE: Msg = Msg {
+        en: "the run of the session ended before it answered; the session's file keeps what it did",
+        uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
+    };
+
     pub const NOTIFY_NO_RUNTIME: Msg = Msg {
         en: "notify: XDG_RUNTIME_DIR is not set, so no session's socket can be found",
         uk: "notify: XDG_RUNTIME_DIR не задано, тож сокетів сесій не знайти",
@@ -2823,6 +2828,7 @@ impl Error {
             }
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
+            Error::RunGone => tr!(lang, m::RUN_GONE).to_string(),
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
@@ -3148,7 +3154,11 @@ pub fn stop_reason(reason: StopReason, function: &Function, lang: Lang) -> Strin
 
 /// Why a turn stopped, and how to go on (D113).
 pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) -> String {
-    let why = stop_reason(reason, function, lang);
+    stopped_why(&stop_reason(reason, function, lang), id, lang)
+}
+
+/// [`stopped`] from the reason's text a run told (AGL-075, D7).
+pub fn stopped_why(why: &str, id: &str, lang: Lang) -> String {
     format!("{why}\n{}", tr!(lang, m::STOPPED_RESUME, id = id))
 }
 

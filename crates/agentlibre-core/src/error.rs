@@ -182,6 +182,9 @@ pub enum Error {
     NotifyNoRuntime,
     /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
     Notify { detail: String },
+    /// The thread of a run ended before it answered: a fault of agl's
+    /// (AGL-075, D7).
+    RunGone,
     /// The server stopped before it was ready (D149; AGL-024, D2).
     ServerFailed { owner: ServerOwner },
     /// The server was not ready in time (D149; AGL-024, D2).

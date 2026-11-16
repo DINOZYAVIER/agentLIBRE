@@ -385,7 +385,6 @@ fn agent_session(
             cli::lines::run(setup).map(repl::End::Exit)
         };
     };
-    let mut run = run;
     eprintln!("{}", tr!(lang, m::SESSION, id = run.session.id));
     interrupt::install();
     let id = run.session.id.clone();
@@ -398,15 +397,30 @@ fn agent_session(
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
     observer.attach(&run.session);
-    let size = run.context.expect("`-p` read the context size");
+    let reasoning = run.reasoning;
+    // The turn runs on the run's thread (AGL-075, D7); what it tells is
+    // said here.
+    let handle = run.start();
     let mut report = StderrReport::new(lang);
-    match run.turn_on(size, &message, pending, &mut observer, &mut report)? {
+    let done = handle
+        .ask(
+            run::Command::Say {
+                message,
+                attached: pending,
+                reasoning,
+                observer: Some(observer),
+            },
+            &mut |sent| sent.give(&mut report),
+        )
+        .ok_or(Error::RunGone)?;
+    match done.turn.expect("a message's turn")? {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))
         }
         TurnEnd::Stopped(reason) => {
-            eprintln!("agl: {}", i18n::stopped(reason, &run.function, &id, lang));
+            let why = done.why.unwrap_or_default();
+            eprintln!("agl: {}", i18n::stopped_why(&why, &id, lang));
             Ok(repl::End::Exit(ExitCode::from(match reason {
                 StopReason::Interrupted => interrupt::EXIT_CODE,
                 _ => 1,
