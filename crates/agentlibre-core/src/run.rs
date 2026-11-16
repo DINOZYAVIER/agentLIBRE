@@ -5,24 +5,37 @@
 //! `-p`, the stdin session, the REPL — read their input and draw what comes
 //! out; the run takes a turn.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use crate::about;
 use crate::agent::{Agent, Sink, TurnEnd};
 use crate::attach::{self, Pending, Transcriber};
+use crate::backend::llama::Llama;
+use crate::backend::strata::Strata;
 use crate::backend::{Backend, ReasoningLevel};
-use crate::engine::{Autostart, ServerProgress};
+use crate::engine::{Autostart, Engine, Others, ServerProgress};
 use crate::error::Error;
+use crate::forge::Workspace;
 use crate::function::Function;
 use crate::i18n::{m, Lang};
+use crate::machine::Machine;
 use crate::memory::{self, Home, MemoryAction, Write};
+use crate::nix;
+use crate::paths::Paths;
 use crate::phase::{Observer, PhaseEvent};
-use crate::search::Searcher;
-use crate::session::{Event, Session};
+use crate::programs;
+use crate::search::{self, Searcher};
+use crate::session::{self, Event, Session};
+use crate::settings::{self, ServerFile, ServerKind, Settings, UserFile, function_name};
 use crate::status::compact_notice;
 use crate::stop::Stop;
 use crate::style::Role;
 use crate::tools::ForgeEnv;
 use crate::tr;
+use crate::weights;
+use crate::wsl;
 
 /// What a surface gives a turn of the run (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
@@ -113,58 +126,386 @@ fn written(write: &Write) -> Event {
     }
 }
 
-pub struct Run<'a> {
-    pub function: &'a Function,
-    pub function_name: &'a str,
-    pub backend: &'a dyn Backend,
+/// Who answers while a run is built and while its server starts (AGL-075,
+/// D8): the terminal asks the human; a caller with nobody to ask gives no
+/// `line` and refuses or agrees by `others`.
+#[derive(Clone)]
+pub struct Asker {
+    /// A line told: a notice of the building, a line of the server's start.
+    pub say: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A line asked for, the folder of a weights file (AGL-039, D24); none
+    /// when nobody answers, and a file found nowhere fails.
+    pub line: Option<AskLine>,
+    /// The consent to start or restart a server (AGL-033, D2).
+    pub others: Others,
+}
+
+/// Asks the human for a line; `None` when there is no answer.
+pub type AskLine = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// What a run is opened with (AGL-075): where, with what, and who answers.
+pub struct Opening<'a> {
+    /// The environment: `PATH`, and what `about` reads.
+    pub env: &'a dyn Fn(&str) -> Option<OsString>,
+    pub paths: &'a Paths,
+    pub user: &'a UserFile,
+    /// The directory of the run, the workspace of a new session.
+    pub cwd: &'a Path,
+    pub project: &'a Workspace,
+    /// `--resume`: `last`, a name, an id or the start of one.
+    pub resume: Option<&'a str>,
+    /// `--function`.
+    pub function: Option<&'a str>,
+    pub reasoning: Option<ReasoningLevel>,
+    /// One request (`-p`): the server is brought up before the session is
+    /// made, and its context size must be read (AGL-015, D10).
+    pub one_request: bool,
+    /// The engine agl launched, shared by the runs of the process (AGL-024).
+    pub engine: Arc<Mutex<Option<Engine>>>,
+    pub lang: Lang,
+    pub stop: Stop,
+    pub asker: Asker,
+}
+
+/// A run opened, and what its surface needs of the opening.
+pub struct Opened {
+    pub run: Run,
+    /// Whether the session existed before this run (D126).
+    pub resumed: bool,
+    /// The settings the run resolved: the surface's colors, its REPL.
+    pub settings: Settings,
+    /// The FSM of the first turn, which saw the server's start of a run of
+    /// one request (AGL-046, D10).
+    pub observer: Observer,
+}
+
+pub struct Run {
+    pub function: Function,
+    pub function_name: String,
+    pub backend: Arc<dyn Backend + Send + Sync>,
     pub session: Session,
     /// The directory of the sessions of the user, for a new one.
-    pub sessions_dir: &'a Path,
+    pub sessions_dir: PathBuf,
     /// The project of the session: a name is unique in it (AGL-062, D5).
-    pub project: &'a Path,
+    pub project: PathBuf,
     /// The workspace of the session.
     pub workspace: PathBuf,
     /// The context size of the server when it already answered at the
     /// start; read at the first request otherwise (AGL-015, D10).
     pub context: Option<usize>,
     /// Brings the server up when a request finds none (AGL-015).
-    pub autostart: &'a Autostart,
+    pub autostart: Autostart,
     pub lang: Lang,
-    /// What the agent's `forge` tool takes from the session (AGL-008).
-    pub forge: ForgeEnv<'a>,
+    /// What the agent's `forge` tool takes from the session (AGL-008): the
+    /// data directory and `[forge] auto_rehome`.
+    pub data: PathBuf,
+    pub auto_rehome: bool,
     /// The model's reasoning level (AGL-013); the REPL's `/think` changes it
     /// for the session.
     pub reasoning: Option<ReasoningLevel>,
     /// The most tokens one picture takes (AGL-014, D10).
     pub image_tokens: usize,
     /// Runs the `search` tool (AGL-019).
-    pub search: &'a dyn Searcher,
+    pub search: Box<dyn Searcher + Send>,
     /// Where the memory of the workspace is (AGL-006).
-    pub memory: &'a dyn Home,
+    pub memory: Box<dyn Home>,
     /// What the model is told of its environment and of this agl (AGL-048).
-    pub about: Option<&'a str>,
+    pub about: Option<String>,
     /// What stops a turn of this run (AGL-075): its turns run in its scope.
     pub stop: Stop,
 }
 
-impl Run<'_> {
+impl Run {
+    /// Opens a run (AGL-075): the session resumed or made, its Function, the
+    /// settings, the weights, the backend, the search, the memory and what
+    /// the model is told; a run of one request brings its server up first.
+    pub fn open(opening: Opening) -> Result<Opened, Error> {
+        let Opening {
+            env,
+            paths,
+            user,
+            cwd,
+            project,
+            resume,
+            function: cli_function,
+            reasoning,
+            one_request,
+            engine,
+            lang,
+            stop,
+            asker,
+        } = opening;
+        let say = |line: &str| (asker.say)(line);
+        let user_path = paths.settings_file();
+        let sessions_dir = paths.sessions();
+        // `last`: the last session of this project (AGL-058, D20).
+        let resume = match resume {
+            Some("last") => Some(
+                Session::latest(&sessions_dir, &project.project, 1)
+                    .into_iter()
+                    .next()
+                    .map(|session| session.id)
+                    .ok_or_else(|| Error::SessionNotFound {
+                        id: "last".into(),
+                        dir: sessions_dir.clone(),
+                    })?,
+            ),
+            // A name first, as it was typed, then an id or the start of one
+            // (AGL-062, D1).
+            Some(key) => Some(
+                Session::id_named(&sessions_dir, &project.project, key)
+                    .unwrap_or_else(|| key.to_owned()),
+            ),
+            None => None,
+        };
+        let session = resume
+            .as_deref()
+            .map(|id| Session::open(&sessions_dir, id))
+            .transpose()?;
+        // A resumed session keeps its Function (D106).
+        let resumed = session.as_ref().map(|s| s.function.as_str());
+        // The Function of a resumed session is the `run` snapshot of its
+        // header (AGL-063, D4): the session runs on the configuration it was
+        // made with, the Function file not needed. Without the snapshot (the
+        // v1 files), the name lookup of today; a Function that is not found
+        // continues loose.
+        let mut function = match session.as_ref().and_then(|s| s.run.clone()) {
+            Some(snapshot) => Function::from_snapshot(&snapshot)?,
+            None => {
+                // The Function's name (D58, D59, AGL-015); the Function loads
+                // before the settings, because its `[server]` table is the
+                // model side of the settings when the file declares it
+                // (AGL-033, D1, D3).
+                let name = function_name(
+                    resumed.or(cli_function),
+                    project.function.as_deref(),
+                    user.function.as_deref(),
+                );
+                // The Function's tiers (AGL-028, D3): the workspace store's
+                // `functions/` directory, then the user's, then the built-ins.
+                match Function::load(&paths.functions_dir(&project.key), &paths.functions(), &name) {
+                    Ok(function) => function,
+                    Err(Error::FunctionNotFound { .. }) if session.is_some() => {
+                        // The Function the session was made with is gone: it
+                        // continues loose (AGL-063, D4), with a notice.
+                        let session = session.as_ref().expect("a resumed session");
+                        say(&tr!(lang, m::LOOSE_CONTINUE, function = &session.function));
+                        Function::loose(&session.loose_tools(), session.last_budgets)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        // The model the session was made with (AGL-063, D5): the snapshot's,
+        // to compare with the model that runs; `None` without the snapshot.
+        let session_model = session
+            .as_ref()
+            .and_then(|s| s.run.as_ref())
+            .and_then(|_| model_name(&function.model));
+        let project_settings = settings::ProjectFile {
+            function: project.function.clone(),
+            server: project.server.clone(),
+            whisper: project.whisper.clone(),
+            search: project.search.clone(),
+        };
+        let mut settings = Settings::resolve(
+            user,
+            &user_path,
+            (&project.dir.join(settings::SETTINGS_FILE), &project_settings),
+            resumed.or(cli_function),
+            &function.model,
+        )?;
+        // The weights files become absolute paths before anything starts; a
+        // file found nowhere is asked for when somebody answers (AGL-039,
+        // D22-D24), and offered for download; a run of one request asks
+        // nobody (AGL-050, D10, D11).
+        let missing = match &asker.line {
+            Some(line) if !one_request => weights::Missing::Ask(&**line, &say),
+            _ => weights::Missing::Fail,
+        };
+        let models = wsl::own_models(paths.models())?;
+        weights::resolve(
+            &mut settings.server,
+            &mut settings.whisper,
+            &weights::Folders {
+                own: models.clone(),
+                listed: &user.models,
+                user_path: &user_path,
+            },
+            &function.sources,
+            &missing,
+            lang,
+        )?;
+        // The model of the session's snapshot against the model that runs
+        // (AGL-063, D5): a difference is told, never refused.
+        if let Some(recorded) = session_model
+            && let Some(running) = model_name(&settings.server)
+            && model_file(&recorded) != model_file(&running)
+        {
+            say(&tr!(lang, m::MODEL_DIFFERS, recorded = recorded, running = running));
+        }
+        // The tool `search` is there only where `[search]` is complete: no
+        // tool, no grammar for it and no word of it in the prompt otherwise
+        // (AGL-019, D5). An expired client certificate leaves the tool out
+        // too, with a notice (AGL-043 F20).
+        let expired = settings.search.as_ref().is_some_and(|config| {
+            programs::program("step")
+                .is_ok_and(|step| search::certificate_expired(&step, &config.client_certificate))
+        });
+        let search: Box<dyn Searcher + Send> = match &settings.search {
+            Some(config) if !expired => Box::new(search::Curl::new(config.clone())?),
+            Some(config) => {
+                say(&tr!(
+                    lang,
+                    m::SEARCH_CERT_EXPIRED,
+                    cert = config.client_certificate.display()
+                ));
+                function.without_tool("search");
+                Box::new(search::NoSearch)
+            }
+            None => {
+                function.without_tool("search");
+                Box::new(search::NoSearch)
+            }
+        };
+        // A turn to continue needs its state in the Function (D105).
+        if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
+            Machine::resume(&function, &settings.function, &turn)?;
+        }
+
+        let workspace = session
+            .as_ref()
+            .map_or_else(|| cwd.to_path_buf(), |s| s.workspace.clone());
+        let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
+        let image_tokens = settings
+            .server
+            .image_max_tokens
+            .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
+        let memory = memory::StoreHome {
+            workspace: workspace.clone(),
+            auto_rehome,
+            lang,
+        };
+        // The settings' `server` is the effective one (the function's
+        // `[server]` table when the file declares it, AGL-033, D1, D3), and
+        // the backend and the url run on it. The backend is the Llama or the
+        // Strata backend, by the effective settings' `[server] kind`
+        // (AGL-030, D1); the stirred mode runs on Strata.
+        let backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
+            Arc::new(Strata::new(&settings.server_url))
+        } else {
+            Arc::new(Llama::with_ca(
+                &settings.server_url,
+                settings.server.llama_private_ca.as_deref(),
+            )?)
+        };
+        let autostart = Autostart {
+            llama: Arc::clone(&backend),
+            project: project.clone(),
+            effective: settings.server.clone(),
+            whisper: settings.whisper.clone(),
+            user_path: user_path.clone(),
+            models,
+            path_var: env("PATH"),
+            runtime: paths.runtime.clone(),
+            lang,
+            // The consent of D2 (AGL-033): the restart asks, as the server
+            // commands do.
+            others: asker.others.clone(),
+            engine,
+        };
+        // A run of one request brings the server up now; the others do it
+        // at their first request (AGL-015, D10), or as the REPL starts
+        // (AGL-046), and take the context size if the server answers. The
+        // FSM of the turn sees the start too; its lines wait for the session
+        // (AGL-046, D10).
+        let mut observer = Observer::new();
+        let context = if one_request {
+            autostart.ensure(&mut |progress| match progress {
+                ServerProgress::Starting => {
+                    observer.on(PhaseEvent::ServerStart);
+                }
+                ServerProgress::Line(line) => say(line),
+            })?;
+            Some(backend.context_size()?)
+        } else {
+            backend.context_size().ok()
+        };
+        let resumed = session.is_some();
+        let session = match session {
+            Some(session) => session,
+            // A new session records the `run` snapshot of its Function
+            // (AGL-063, D4).
+            None => Session::create_run(
+                &sessions_dir,
+                &settings.function,
+                &workspace,
+                Some(&function.snapshot()),
+            )?,
+        };
+        let about = settings
+            .about
+            .enabled
+            .unwrap_or(true)
+            .then(|| about_of(env, paths, project, &settings, &workspace, &user_path));
+        let run = Run {
+            function,
+            function_name: settings.function.clone(),
+            backend,
+            session,
+            sessions_dir,
+            project: project.project.clone(),
+            workspace,
+            context,
+            autostart,
+            lang,
+            data: paths.data.clone(),
+            auto_rehome,
+            reasoning,
+            image_tokens,
+            search,
+            memory: Box::new(memory),
+            about,
+            stop,
+        };
+        Ok(Opened {
+            run,
+            resumed,
+            settings,
+            observer,
+        })
+    }
+
+    /// What the agent's `forge` tool takes from the session (AGL-008).
+    pub fn forge(&self) -> ForgeEnv<'_> {
+        ForgeEnv {
+            lang: self.lang,
+            auto_rehome: self.auto_rehome,
+            data: &self.data,
+        }
+    }
+
     /// The agent of a turn of this run, for a server with a context of
     /// `context` tokens: the one place an [`Agent`] is built.
     pub fn agent(&mut self, context: usize) -> Agent<'_> {
         Agent {
-            function: self.function,
-            function_name: self.function_name,
-            backend: self.backend,
+            function: &self.function,
+            function_name: &self.function_name,
+            backend: &*self.backend,
             session: &mut self.session,
             workspace: &self.workspace,
             context,
-            forge: self.forge,
+            forge: ForgeEnv {
+                lang: self.lang,
+                auto_rehome: self.auto_rehome,
+                data: &self.data,
+            },
             reasoning: self.reasoning,
             image_tokens: self.image_tokens,
-            whisper: self.autostart as &dyn Transcriber,
-            search: self.search,
-            memory: self.memory,
-            about: self.about,
+            whisper: &self.autostart as &dyn Transcriber,
+            search: &*self.search,
+            memory: &*self.memory,
+            about: self.about.as_deref(),
         }
     }
 
@@ -237,8 +578,8 @@ impl Run<'_> {
             &mut self.session,
             attached,
             message,
-            self.backend,
-            self.autostart,
+            &*self.backend,
+            &self.autostart,
             // A notice of the store is the whisper server's start or the
             // transcription (AGL-043 F2).
             &mut |line| {
@@ -322,7 +663,7 @@ impl Run<'_> {
 
     /// `/memory list`, `/memory show` (AGL-060, D5).
     pub fn looked_at(&mut self, action: &MemoryAction) -> Said {
-        match memory::looked_at(self.memory, action, self.lang) {
+        match memory::looked_at(&*self.memory, action, self.lang) {
             Ok(text) => {
                 let text = text.trim_end().to_owned();
                 Said {
@@ -337,7 +678,7 @@ impl Run<'_> {
 
     /// `/rename <name>` (AGL-062, D7): the name is a line of the session's file.
     pub fn rename(&mut self, name: &str) -> Said {
-        match self.session.rename(self.project, name) {
+        match self.session.rename(&self.project, name) {
             Ok(()) => {
                 let named = self.session.name.clone().unwrap_or_default();
                 Said::told(Told::Notice(
@@ -353,8 +694,8 @@ impl Run<'_> {
     /// A session that cannot be made ends the run of agl: nothing else works.
     pub fn new_session(&mut self) -> Result<Said, Error> {
         let new = Session::create_run(
-            self.sessions_dir,
-            self.function_name,
+            &self.sessions_dir,
+            &self.function_name,
             &self.workspace,
             Some(&self.function.snapshot()),
         )?;
@@ -378,7 +719,7 @@ impl Run<'_> {
             interrupted,
             ..Said::default()
         };
-        if let Some((text, role)) = compact_notice(result, self.function, self.lang) {
+        if let Some((text, role)) = compact_notice(result, &self.function, self.lang) {
             said.failed = role != Role::Muted;
             // The interrupted one is pending, the rest of them a refusal:
             // a stdin session says none of these with `agl: ` before it.
@@ -399,5 +740,132 @@ impl Run<'_> {
         if let Err(error) = self.session.append(event) {
             said.record_error = Some(error);
         }
+    }
+}
+
+/// What the model is told of its environment and of this agl (AGL-048).
+fn about_of(
+    env: &dyn Fn(&str) -> Option<OsString>,
+    paths: &Paths,
+    project: &Workspace,
+    settings: &Settings,
+    workspace: &Path,
+    user_path: &Path,
+) -> String {
+    let nix_dir = env(nix::NIX_VAR).map(PathBuf::from);
+    let functions_dir = env(nix::FUNCTIONS_VAR).map(PathBuf::from);
+    let name = format!("{}.nix", settings.function);
+    let function_file = [
+        paths.functions_dir(&project.key).join(&name),
+        paths.functions().join(&name),
+    ]
+    .into_iter()
+    .find(|file| file.is_file())
+    .or_else(|| {
+        functions_dir
+            .as_ref()
+            .map(|dir| dir.join("functions").join(&name))
+            .filter(|file| file.is_file())
+    });
+    let session_format = nix_dir
+        .as_ref()
+        .map(|dir| dir.join("docs/session-file.md"))
+        .filter(|file| file.is_file());
+    let git_root = about::git_root(workspace);
+    let in_wsl = std::fs::read_to_string("/proc/version")
+        .is_ok_and(|version| version.to_ascii_lowercase().contains("microsoft"));
+    let system = about::system(
+        std::env::consts::OS,
+        std::fs::read_to_string("/etc/os-release").ok().as_deref(),
+        in_wsl,
+        wsl::engine_is_windows(),
+    );
+    let now = session::utc_now();
+    let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
+    let (server_kind, model) = match settings.server.kind() {
+        ServerKind::Strata => ("strata", settings.server.strata_config.as_deref()),
+        ServerKind::Llama => ("llama", settings.server.model.as_deref()),
+    };
+    let sessions = paths.sessions();
+    about::About {
+        workspace,
+        git_root: git_root.as_deref(),
+        system: &system,
+        date: &now[..10.min(now.len())],
+        version: &version,
+        function: &settings.function,
+        function_file: function_file.as_deref(),
+        server_kind,
+        server_url: &settings.server_url,
+        model,
+        sessions: &sessions,
+        session_format: session_format.as_deref(),
+        user_settings: user_path,
+        project_store: &project.dir,
+        source: settings.about.source.as_deref(),
+    }
+    .render()
+}
+
+/// The model a server runs (AGL-063, D5): the weights of the llama kind,
+/// the config of the strata kind; `None` when the kind sets no model.
+fn model_name(server: &ServerFile) -> Option<String> {
+    match server.kind() {
+        ServerKind::Strata => server.strata_config.clone(),
+        ServerKind::Llama => server.model.clone(),
+    }
+}
+
+/// The name of a model file or config, for the comparison of D5: an
+/// absolute path is compared by its file name, so the recorded name and the
+/// resolved path of the same file agree.
+fn model_file(model: &str) -> &str {
+    Path::new(model)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(model)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_model_of_the_server_is_the_weights_or_the_config() {
+        // The model that runs (AGL-063, D5): the weights of the llama kind,
+        // the config of the strata kind.
+        let llama = ServerFile {
+            kind: Some("llama".into()),
+            model: Some("m.gguf".into()),
+            ..ServerFile::default()
+        };
+        assert_eq!(model_name(&llama), Some("m.gguf".into()));
+        let strata = ServerFile {
+            kind: Some("strata".into()),
+            strata_config: Some("strata.nix".into()),
+            ..ServerFile::default()
+        };
+        assert_eq!(model_name(&strata), Some("strata.nix".into()));
+        assert_eq!(model_name(&ServerFile::default()), None);
+    }
+
+    #[test]
+    fn the_model_is_compared_by_its_file_name() {
+        // The resolved absolute path and the recorded file name of the same
+        // model agree (AGL-063, D5).
+        assert_eq!(
+            model_file("/home/u/models/ThinkingCap-Qwen3.8-27B-IQ4_XS.gguf"),
+            "ThinkingCap-Qwen3.8-27B-IQ4_XS.gguf"
+        );
+        assert_eq!(model_file("strata.nix"), "strata.nix");
+    }
+
+    #[test]
+    fn the_model_that_differs_is_told_not_refused() {
+        // The difference is told, the resume goes on (AGL-063, D5).
+        assert_eq!(
+            tr!(Lang::En, m::MODEL_DIFFERS, recorded = "a.gguf", running = "b.gguf"),
+            "this session was made with the model `a.gguf`, the model that runs is `b.gguf`"
+        );
     }
 }

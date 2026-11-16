@@ -873,18 +873,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         catalog,
         runtime,
     } = setup;
-    let function = run.function;
-    let function_name = run.function_name;
-    let backend = run.backend;
+    let backend = Arc::clone(&run.backend);
     let lang = run.lang;
-    let autostart = run.autostart;
-    let memory = run.memory;
-    let sessions_dir = run.sessions_dir;
+    let sessions_dir = run.sessions_dir.clone();
     let context = run.context;
     let reasoning = run.reasoning;
     let workspace = run.workspace.clone();
     let facts = Facts {
-        function: function_name.into(),
+        function: run.function_name.clone(),
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
@@ -920,7 +916,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.set_media_counts(&run.session);
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
-        Arc::new(crate::whisper::Voice::of(autostart)),
+        Arc::new(crate::whisper::Voice::of(&run.autostart)),
         Box::new(crate::record::start),
         repl.max_record_seconds,
         lang,
@@ -937,7 +933,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // What the inspect mode re-reads on its open (AGL-066, D4).
     let inspect_data = Arc::new(Mutex::new(InspectData {
         id: run.session.id.clone(),
-        sessions_dir: sessions_dir.to_owned(),
+        sessions_dir: sessions_dir.clone(),
         events: run.session.events.clone(),
         transitions: Vec::new(),
         outputs: run.session.outputs_dir(),
@@ -1064,7 +1060,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         interrupt::reset();
         let mut observer = Observer::new();
         observer.attach_between_turns(&run.session);
-        let ready = autostart
+        let ready = run
+            .autostart
             .ensure(&mut |progress| match progress {
                 ServerProgress::Starting => {
                     observer.enter(PhaseEvent::ServerStart, &mut presenter);
@@ -1170,7 +1167,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
             Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
-                let found = memory
+                let found = run
+                    .memory
                     .look()
                     .and_then(|dir| crate::memory::entry_dir(dir.as_deref(), &name).map(drop));
                 match found {
@@ -1236,7 +1234,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                             .show_notice(tr!(lang, m::INTERRUPTED_CLEARED), Role::StatusPending);
                     }
                     Ok(TurnEnd::Stopped(reason)) => {
-                        failed = Some(texts::stopped(reason, function, lang));
+                        failed = Some(texts::stopped(reason, &run.function, lang));
                     }
                     Err(error) => failed = Some(error.message(lang)),
                 }

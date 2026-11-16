@@ -226,27 +226,11 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Whether the certificate at `certificate` has expired, as `step
-/// certificate needs-renewal --expires-in 0s` tells it: exit 0 is expired,
-/// 1 valid, 2 a missing file, 255 another error. Only an expired one is
-/// `true`: the search reports its own errors (AGL-043 F20).
-pub fn certificate_expired(step: &Path, certificate: &Path) -> bool {
-    let mut command = Command::new(step);
-    command
-        .args(["certificate", "needs-renewal"])
-        .arg(certificate)
-        .args(["--expires-in", "0s"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    crate::programs::clean_env(&mut command);
-    command.status().is_ok_and(|status| status.code() == Some(0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::forge::testutil::TempDir;
+    use agentlibre_core::search::certificate_expired;
     use std::os::unix::fs::PermissionsExt;
 
     /// A `step` that writes what the real one would: a certificate and a

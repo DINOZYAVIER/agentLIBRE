@@ -28,12 +28,10 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         server_url,
         ..
     } = setup;
-    let function = run.function;
-    let function_name = run.function_name;
     let lang = run.lang;
     let workspace = run.workspace.clone();
     let facts = Facts {
-        function: function_name.into(),
+        function: run.function_name.clone(),
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
@@ -167,12 +165,12 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
                 eprintln!(
                     "{}",
-                    texts::stopped(StopReason::Interrupted, function, lang)
+                    texts::stopped(StopReason::Interrupted, &run.function, lang)
                 );
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
             Ok(TurnEnd::Stopped(reason)) => {
-                eprintln!("agl: {}", texts::stopped(reason, function, lang));
+                eprintln!("agl: {}", texts::stopped(reason, &run.function, lang));
             }
             Err(error) => eprintln!("agl: {}", error.message(lang)),
         }
