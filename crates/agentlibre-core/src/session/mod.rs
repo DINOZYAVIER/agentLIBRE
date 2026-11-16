@@ -1208,7 +1208,7 @@ fn args_in_order(tool: &str, mut args: Vec<(String, Value)>) -> Vec<(String, Val
 }
 
 /// A new UUIDv7: milliseconds since the epoch, then random bits (D49).
-fn uuid_v7() -> io::Result<String> {
+pub(crate) fn uuid_v7() -> io::Result<String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let millis = SystemTime::now()

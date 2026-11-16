@@ -182,6 +182,16 @@ pub enum Error {
     NotifyNoRuntime,
     /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
     Notify { detail: String },
+    /// A plane's name that cannot be its store's directory (AGL-077, D5).
+    PlaneName { name: String },
+    /// A plane of that name exists (AGL-077, D5).
+    PlaneExists { name: String },
+    /// No plane has that name (AGL-077).
+    PlaneNotFound { name: String },
+    /// A plane's `plane.nix` is not what agl writes (AGL-077, D16).
+    PlaneFile { path: PathBuf, detail: String },
+    /// `agl plane remove` of a directory the plane does not have.
+    PlaneDirectoryNotIn { name: String, directory: PathBuf },
     /// The thread of a run ended before it answered: a fault of agl's
     /// (AGL-075, D7).
     PlaneGone,

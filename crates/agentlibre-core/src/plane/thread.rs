@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_is_answered_on_the_runs_thread() {
+    fn a_message_is_answered_on_the_planes_thread() {
         let dir = TempDir::new();
         let handle = plane(&dir, Arc::default()).start();
         let mut reports = 0;
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn each_run_is_stopped_by_its_own_stop() {
+    fn each_plane_is_stopped_by_its_own_stop() {
         let dir = TempDir::new();
         let (held, free) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
         held.hold.store(true, Ordering::SeqCst);

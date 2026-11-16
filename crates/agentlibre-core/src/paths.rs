@@ -69,6 +69,16 @@ impl Paths {
         self.data.join("models")
     }
 
+    /// The stores of the planes, `planes/<name>/` (AGL-077, D4).
+    pub fn planes(&self) -> PathBuf {
+        self.data.join("planes")
+    }
+
+    /// The store of the plane `name` (AGL-077, D4, D5).
+    pub fn plane_dir(&self, name: &str) -> PathBuf {
+        self.planes().join(name)
+    }
+
     /// The workspace directory `name` under the data directory (AGL-007);
     /// the engine picks the name and checks its marker.
     pub fn workspace_dir(&self, name: &str) -> PathBuf {

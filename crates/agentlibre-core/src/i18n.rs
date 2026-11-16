@@ -931,6 +931,31 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// `agl notify` without `XDG_RUNTIME_DIR` (AGL-074, D3).
+    pub const PLANE_NAME: Msg = Msg {
+        en: "`{name}` cannot name a plane: a name is not empty, has no `/` and does not start with `.`",
+        uk: "`{name}` не може бути назвою plane: назва не порожня, без `/` і не починається з `.`",
+    };
+
+    pub const PLANE_EXISTS: Msg = Msg {
+        en: "a plane named `{name}` exists",
+        uk: "plane з назвою `{name}` уже є",
+    };
+
+    pub const PLANE_NOT_FOUND: Msg = Msg {
+        en: "no plane is named `{name}`; `agl plane list` lists them",
+        uk: "немає plane з назвою `{name}`; `agl plane list` покаже всі",
+    };
+
+    pub const PLANE_FILE: Msg = Msg {
+        en: "{path}: {detail}",
+        uk: "{path}: {detail}",
+    };
+
+    pub const PLANE_DIRECTORY_NOT_IN: Msg = Msg {
+        en: "the plane `{name}` does not have {directory}",
+        uk: "у plane `{name}` немає {directory}",
+    };
+
     pub const PLANE_GONE: Msg = Msg {
         en: "the run of the session ended before it answered; the session's file keeps what it did",
         uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
@@ -2829,6 +2854,18 @@ impl Error {
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
+            Error::PlaneName { name } => tr!(lang, m::PLANE_NAME, name = name),
+            Error::PlaneExists { name } => tr!(lang, m::PLANE_EXISTS, name = name),
+            Error::PlaneNotFound { name } => tr!(lang, m::PLANE_NOT_FOUND, name = name),
+            Error::PlaneFile { path, detail } => {
+                tr!(lang, m::PLANE_FILE, path = path.display(), detail = detail)
+            }
+            Error::PlaneDirectoryNotIn { name, directory } => tr!(
+                lang,
+                m::PLANE_DIRECTORY_NOT_IN,
+                name = name,
+                directory = directory.display()
+            ),
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),

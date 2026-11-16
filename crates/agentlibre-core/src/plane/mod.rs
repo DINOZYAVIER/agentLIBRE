@@ -37,7 +37,10 @@ use crate::tr;
 use crate::weights;
 use crate::wsl;
 
+mod store;
 mod thread;
+
+pub use store::{PLANE_FILE, PlaneFile};
 
 pub use thread::{Command, Done, Handle, Sent, SessionView};
 
