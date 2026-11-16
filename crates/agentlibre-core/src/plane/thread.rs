@@ -45,6 +45,10 @@ pub enum Command {
     /// Lines of the session's record a surface writes: its commands
     /// (AGL-047, D5).
     Append(Vec<Event>),
+    /// The server comes up as the session starts (AGL-046), as a turn: its
+    /// lines and its phases are sent, then the context as `Context`; a
+    /// server that fails ends the command with its error in `said`.
+    Start,
 }
 
 /// What a plane sends while it takes a command, and at its end.
@@ -121,9 +125,19 @@ impl SessionView {
 /// once its command is done.
 pub struct Handle {
     commands: Option<Sender<Command>>,
-    sent: Receiver<Sent>,
+    sent: Option<Receiver<Sent>>,
     stop: Stop,
     thread: Option<JoinHandle<()>>,
+}
+
+/// A plane's handle taken apart (AGL-076): its commands, what it sends and
+/// its thread, for a daemon that sends from one thread and listens on
+/// another. Dropping the commands ends the thread once its command is done.
+pub struct Parts {
+    pub commands: Sender<Command>,
+    pub sent: Receiver<Sent>,
+    pub stop: Stop,
+    pub thread: JoinHandle<()>,
 }
 
 impl Handle {
@@ -141,7 +155,17 @@ impl Handle {
 
     /// What the plane sent next; `None` when its thread is gone.
     pub fn recv(&self) -> Option<Sent> {
-        self.sent.recv().ok()
+        self.sent.as_ref()?.recv().ok()
+    }
+
+    /// The handle taken apart.
+    pub fn into_parts(mut self) -> Parts {
+        Parts {
+            commands: self.commands.take().expect("a handle's commands"),
+            sent: self.sent.take().expect("a handle's receiver"),
+            stop: self.stop.clone(),
+            thread: self.thread.take().expect("a handle's thread"),
+        }
     }
 
     /// Sends `command` and waits for its end; what the plane sends before it
@@ -169,6 +193,34 @@ impl Drop for Handle {
 }
 
 impl Plane {
+    /// The server's start of a session (AGL-046): what the REPL did as it
+    /// started, on the plane's thread.
+    fn start_server(&mut self, forward: &mut Forward) -> Result<(), Error> {
+        use crate::engine::ServerProgress;
+        use crate::phase::{Observer, PhaseEvent};
+        let mut observer = Observer::new();
+        observer.attach_between_turns(&self.session);
+        let ready = self
+            .autostart
+            .ensure(&mut |progress| match progress {
+                ServerProgress::Starting => observer.enter(PhaseEvent::ServerStart, &mut *forward),
+                ServerProgress::Line(line) => forward.line(line),
+            })
+            .and_then(|()| self.backend.context_size());
+        match ready {
+            Ok(size) => {
+                observer.end(PhaseEvent::Idle, &mut *forward);
+                self.context = Some(size);
+                forward.context(size);
+                Ok(())
+            }
+            Err(error) => {
+                observer.end(PhaseEvent::Failed, &mut *forward);
+                Err(error)
+            }
+        }
+    }
+
     /// Moves the plane to a thread of its own (D7).
     pub fn start(self) -> Handle {
         let (commands, inbox) = mpsc::channel();
@@ -180,7 +232,7 @@ impl Plane {
             .expect("a thread for the run");
         Handle {
             commands: Some(commands),
-            sent,
+            sent: Some(sent),
             stop,
             thread: Some(thread),
         }
@@ -232,6 +284,7 @@ impl Plane {
                 }
                 (None, None)
             }
+            Command::Start => (None, self.start_server(&mut forward).err().map(Err)),
         };
         let why = match &turn {
             Some(Ok(TurnEnd::Stopped(reason))) => {

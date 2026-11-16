@@ -41,11 +41,17 @@ pub fn sent_of(sent: wire::Sent) -> Sent {
 }
 
 /// A command's end; its errors in `lang`.
-pub fn done(done: Done, plane: Option<&str>, lang: Lang) -> wire::Done {
+pub fn done(done: &Done, plane: Option<&str>, lang: Lang) -> wire::Done {
     wire::Done {
-        turn: done.turn.map(|turn| turn.map(turn_end).map_err(|error| error.message(lang))),
-        why: done.why,
-        said: done.said.map(|said| said.map(|said| self::said(said, lang)).map_err(|error| error.message(lang))),
+        turn: done.turn.as_ref().map(|turn| match turn {
+            Ok(end) => Ok(turn_end(end.clone())),
+            Err(error) => Err(error.message(lang)),
+        }),
+        why: done.why.clone(),
+        said: done.said.as_ref().map(|said| match said {
+            Ok(said) => Ok(self::said(said, lang)),
+            Err(error) => Err(error.message(lang)),
+        }),
         session: view(&done.session, plane),
     }
 }
@@ -86,12 +92,12 @@ pub fn turn_end_of(end: wire::TurnEnd) -> TurnEnd {
     }
 }
 
-pub fn said(said: Said, lang: Lang) -> wire::Said {
+pub fn said(said: &Said, lang: Lang) -> wire::Said {
     wire::Said {
         lines: said
             .lines
-            .into_iter()
-            .map(|told| match told {
+            .iter()
+            .map(|told| match told.clone() {
                 Told::Output(text) => wire::Told::Output(text),
                 Told::Notice(text) => wire::Told::Notice(text),
                 Told::Refusal(text) => wire::Told::Refusal(text),
@@ -99,15 +105,15 @@ pub fn said(said: Said, lang: Lang) -> wire::Said {
                 Told::Pending(text) => wire::Told::Pending(text),
             })
             .collect(),
-        memory: said.memory.map(|write| wire::MemoryWrite {
-            name: write.name,
+        memory: said.memory.as_ref().map(|write| wire::MemoryWrite {
+            name: write.name.clone(),
             kind: memory_kind(write.kind),
-            text: write.text,
+            text: write.text.clone(),
         }),
-        content: said.content,
+        content: said.content.clone(),
         failed: said.failed,
         interrupted: said.interrupted,
-        record_error: said.record_error.map(|error| error.message(lang)),
+        record_error: said.record_error.as_ref().map(|error| error.message(lang)),
     }
 }
 

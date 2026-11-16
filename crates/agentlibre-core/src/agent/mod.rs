@@ -79,7 +79,7 @@ impl<F: FnMut(Report)> Sink for F {
 }
 
 /// How a turn ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnEnd {
     Answer(String),
     Stopped(StopReason),

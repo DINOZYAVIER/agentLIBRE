@@ -429,6 +429,26 @@ Memory (the entries of the project, `memory/` of its store):
     };
 
     /// The usage of `agl session`.
+    /// The usage of `agl daemon` (AGL-076, D6).
+    pub const HELP_DAEMON_USAGE: Msg = Msg {
+        en: "agl daemon",
+        uk: "agl daemon",
+    };
+
+    /// The section of `agl daemon` in the help (AGL-076, D6).
+    pub const HELP_DAEMON: Msg = Msg {
+        en: "\
+The daemon (the planes of the sessions, served on one socket):
+  daemon   holds the planes its clients open and serves them on
+           $XDG_RUNTIME_DIR/agentLIBRE/agl.sock; agl starts it when none
+           runs. It runs until stopped, as a user unit does.",
+        uk: "\
+Демон (plane сесій, на одному сокеті):
+  daemon   тримає plane, які відкривають його клієнти, і обслуговує їх на
+           $XDG_RUNTIME_DIR/agentLIBRE/agl.sock; agl запускає його, коли
+           жодного немає. Працює, доки його не зупинять, як юніт.",
+    };
+
     pub const HELP_NOTIFY_USAGE: Msg = Msg {
         en: "agl notify",
         uk: "agl notify",
@@ -1072,6 +1092,41 @@ Forge (сховище артефактів робочої області, agentL
     pub const PLANE_DIRECTORY_NOT_IN: Msg = Msg {
         en: "the plane `{name}` does not have {directory}",
         uk: "у plane `{name}` немає {directory}",
+    };
+
+    pub const DAEMON_NO_RUNTIME: Msg = Msg {
+        en: "agl daemon: XDG_RUNTIME_DIR is not set, so it has no place for its socket",
+        uk: "agl daemon: XDG_RUNTIME_DIR не задано, тож сокету ніде бути",
+    };
+
+    pub const DAEMON_RUNNING: Msg = Msg {
+        en: "another agl daemon answers on {path}",
+        uk: "на {path} уже відповідає інший agl daemon",
+    };
+
+    pub const DAEMON_FAILED: Msg = Msg {
+        en: "the daemon: {detail}",
+        uk: "демон: {detail}",
+    };
+
+    pub const DAEMON_NO_SESSION: Msg = Msg {
+        en: "no session {id} is open in the daemon",
+        uk: "сесія {id} не відкрита в демоні",
+    };
+
+    pub const DAEMON_NO_TRANSCRIBER: Msg = Msg {
+        en: "no session is open in the daemon for {dir}, to transcribe with its settings",
+        uk: "у демоні не відкрито жодної сесії для {dir}, щоб розпізнати з її налаштуваннями",
+    };
+
+    pub const DAEMON_BAD_AUDIO: Msg = Msg {
+        en: "the audio is not base64",
+        uk: "аудіо не в base64",
+    };
+
+    pub const DAEMON_VERSION: Msg = Msg {
+        en: "this client speaks the protocol {theirs}, the daemon {ours}: run the same agl",
+        uk: "цей клієнт говорить протоколом {theirs}, демон — {ours}: запусти той самий agl",
     };
 
     pub const PLANE_GONE: Msg = Msg {
@@ -2995,6 +3050,14 @@ impl Error {
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
+            Error::DaemonNoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
+            Error::DaemonRunning { path } => tr!(lang, m::DAEMON_RUNNING, path = path.display()),
+            Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),
+            Error::DaemonNoSession { id } => tr!(lang, m::DAEMON_NO_SESSION, id = id),
+            Error::DaemonNoTranscriber { dir } => {
+                tr!(lang, m::DAEMON_NO_TRANSCRIBER, dir = dir.display())
+            }
+            Error::DaemonBadAudio => tr!(lang, m::DAEMON_BAD_AUDIO).to_string(),
             Error::PlaneName { name } => tr!(lang, m::PLANE_NAME, name = name),
             Error::PlaneDeleteNeedsYes { name } => tr!(lang, m::PLANE_DELETE_NEEDS_YES, name = name),
             Error::PlaneExists { name } => tr!(lang, m::PLANE_EXISTS, name = name),

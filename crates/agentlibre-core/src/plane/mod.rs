@@ -43,7 +43,7 @@ mod thread;
 
 pub use store::{PLANE_FILE, PlaneFile};
 
-pub use thread::{Command, Done, Handle, Sent, SessionView};
+pub use thread::{Command, Done, Handle, Parts, Sent, SessionView};
 
 /// What a surface gives a turn on the plane (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
@@ -64,7 +64,7 @@ pub trait Turn: Sink {
 /// needs: the stdin session writes `Output` to stdout, says `Fault` on
 /// stderr with `agl: ` before it, and puts both in the session's record;
 /// the REPL paints each in its role.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Told {
     /// The command's answer: `/memory list`, `/memory show`.
     Output(String),

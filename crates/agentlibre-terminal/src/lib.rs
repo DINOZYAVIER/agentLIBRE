@@ -258,6 +258,11 @@ fn run(
             let (paths, _) = loaded?;
             return cli::notify::run(&paths, *lang);
         }
+        Command::Daemon => {
+            let (paths, _) = loaded?;
+            agentlibre_core::daemon::serve(paths)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::InPlane { .. } => unreachable!("taken apart above"),
     };
     let (paths, user) = loaded?;

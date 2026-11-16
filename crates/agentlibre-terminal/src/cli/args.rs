@@ -39,6 +39,8 @@ pub enum Command {
     /// `agl forge|memory|function|session … --plane <name>`: the command on
     /// the plane's store (AGL-077, D9, D11).
     InPlane { plane: String, command: Box<Command> },
+    /// `agl daemon`: the planes served on the socket (AGL-076, D6).
+    Daemon,
     /// `agl notify`: the running sessions told on the desktop (AGL-074,
     /// D2).
     Notify,
@@ -56,6 +58,7 @@ pub enum HelpTopic {
     Memory,
     Plane,
     Session,
+    Daemon,
     Notify,
     Forge,
 }
@@ -255,6 +258,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("memory") => HelpTopic::Memory,
         Some("plane") => HelpTopic::Plane,
         Some("session") => HelpTopic::Session,
+        Some("daemon") => HelpTopic::Daemon,
         Some("notify") => HelpTopic::Notify,
         Some("forge") => HelpTopic::Forge,
         // Only the first word is a command; a message may say "forge".
@@ -281,6 +285,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         }
         HelpTopic::Plane => plane_args(args),
         HelpTopic::Session => session_args(args),
+        HelpTopic::Daemon => daemon_args(args),
         HelpTopic::Notify => notify_args(args),
         // The forge surface parses its own arguments (AGL-007), here, so
         // that its help needs no settings (AGL-061, D1).
@@ -321,6 +326,14 @@ fn take_plane(args: &mut Vec<OsString>) -> Result<Option<String>, Error> {
         return Err(Error::RepeatedOption("--plane".into()));
     }
     Ok(Some(name))
+}
+
+/// `agl daemon`: no arguments (AGL-076, D6).
+fn daemon_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    match args.next() {
+        None => Ok(Command::Daemon),
+        Some(other) => Err(Error::UnknownOption(text(other)?)),
+    }
 }
 
 /// `agl notify`: no arguments (AGL-074, D2).
