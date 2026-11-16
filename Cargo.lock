@@ -18,6 +18,7 @@ dependencies = [
 name = "agentlibre-core"
 version = "0.0.2"
 dependencies = [
+ "agentlibre-proto",
  "libc",
  "serde_json",
  "ureq",

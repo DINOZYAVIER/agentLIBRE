@@ -38,6 +38,7 @@ use crate::weights;
 use crate::wsl;
 
 mod store;
+pub mod wire;
 mod thread;
 
 pub use store::{PLANE_FILE, PlaneFile};
