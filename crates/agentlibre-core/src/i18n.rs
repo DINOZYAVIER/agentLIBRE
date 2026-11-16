@@ -340,14 +340,16 @@ Notifications (the desktop's, for every running session):
   notify   tells what each interactive session does, a card a session:
            thinking, a tool, writing the answer, with Stop; at a turn's end
            the answer's beginning, a field to answer in, Terminal and
-           Session; a stop, a failed tool and a cut-off as critical cards.
+           Session; a stop as a critical card answered from it (the field,
+           Continue, Terminal, Session), a cut-off as a critical card.
            It runs until stopped, as a user unit does.",
         uk: "\
 Сповіщення (стільниці, для кожної запущеної сесії):
   notify   каже, що робить кожна інтерактивна сесія, картка на сесію:
            думає, інструмент, пише відповідь, з кнопкою Зупинити; в кінці
            ходу початок відповіді, поле для відповіді, Термінал і Сесія;
-           зупинка, помилка інструмента й обрізання як критичні картки.
+           зупинка як критична картка з полем, Продовжити, Терміналом і
+           Сесією, обрізання як критична картка.
            Працює, доки його не зупинять, як user unit.",
     };
 
@@ -981,13 +983,14 @@ Forge (сховище артефактів робочої області, agentL
         en: "stopped: {reason}",
         uk: "зупинено: {reason}",
     };
-    pub const NOTIFY_TOOL_FAILED: Msg = Msg {
-        en: "{tool} failed",
-        uk: "{tool}: помилка",
+    /// The stop card's button, and the message it sends (AGL-074, D10).
+    pub const NOTIFY_CONTINUE: Msg = Msg {
+        en: "Continue",
+        uk: "Продовжити",
     };
-    pub const NOTIFY_TOOL_TIMEOUT: Msg = Msg {
-        en: "{tool} timed out",
-        uk: "{tool}: час вийшов",
+    pub const NOTIFY_CONTINUE_TEXT: Msg = Msg {
+        en: "Continue.",
+        uk: "Продовжуй.",
     };
     pub const NOTIFY_CUT_OFF: Msg = Msg {
         en: "a generation was cut off at its token budget",

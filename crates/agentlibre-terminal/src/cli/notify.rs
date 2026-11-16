@@ -9,8 +9,8 @@
 //!
 //! The session file is the bridges' interface (D7). The records read here:
 //! `user` (a turn starts), `transition` (its phase: `to` and, for
-//! `Running`, `tool`), `call` (`id`, `tool`, `args`), `result` (`id`,
-//! `outcome`), `answer` (`text`), `stop` (`reason`) and `cut_off`. A
+//! `Running`, `tool`), `call` (`tool`, `args`), `answer` (`text`), `stop`
+//! (`reason`) and `cut_off`. A
 //! change of their form is named in the spec of the change.
 //!
 //! The cards (D5, D8), over `org.freedesktop.Notifications`, the app name
@@ -22,8 +22,10 @@
 //!   field to answer in (KS-034's protocol) and the buttons Terminal (the
 //!   window that runs that agl, focused through Hyprland) and Session (its
 //!   file, by `xdg-open`);
-//! - a stop other than the human's, a tool that failed or timed out and a
-//!   cut-off, each a critical card of its own.
+//! - a stop other than the human's, a critical card of its own with the
+//!   field, Continue (a message to go on), Terminal and Session (D10); a
+//!   cut-off, a critical card with no buttons. A tool that failed or timed
+//!   out makes no card: the turn goes on and the agent sees it (D11).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -59,6 +61,7 @@ const INERT: &str = "x-katarsa-inert";
 const STOP: &str = "stop";
 const TERMINAL: &str = "terminal";
 const SESSION: &str = "session";
+const CONTINUE: &str = "continue";
 /// How often the sockets and the files are looked at.
 const TICK: Duration = Duration::from_millis(250);
 /// The most of an answer an end card shows.
@@ -209,7 +212,10 @@ enum Act {
     Live(String),
     /// The turn answered: the end card.
     End(String),
-    /// A critical card of its own.
+    /// The turn stopped without the human: a critical card of its own,
+    /// answered from it (D10).
+    Stopped(String),
+    /// A critical card of its own, without buttons.
     Critical(String),
     /// The turn ended without an answer: the live card goes.
     Close,
@@ -218,8 +224,6 @@ enum Act {
 /// What the bridge keeps of a session file's records between them.
 #[derive(Default)]
 struct Records {
-    /// The tools of the calls, by id.
-    calls: HashMap<String, String>,
     /// The last call's tool and its argument in short.
     last_call: Option<(String, String)>,
 }
@@ -250,31 +254,15 @@ impl Records {
                 _ => vec![Act::Live(tr!(lang, m::NOTIFY_THINKING).to_string())],
             },
             "call" => {
-                let tool = text("tool").to_owned();
-                self.calls.insert(text("id").to_owned(), tool.clone());
-                self.last_call = Some((tool, argument(&json["args"])));
+                self.last_call = Some((text("tool").to_owned(), argument(&json["args"])));
                 Vec::new()
-            }
-            "result" => {
-                let tool = self.calls.get(text("id")).cloned().unwrap_or_default();
-                match text("outcome") {
-                    "fail" => vec![Act::Critical(tr!(lang, m::NOTIFY_TOOL_FAILED, tool = tool))],
-                    "timeout" => {
-                        vec![Act::Critical(tr!(
-                            lang,
-                            m::NOTIFY_TOOL_TIMEOUT,
-                            tool = tool
-                        ))]
-                    }
-                    _ => Vec::new(),
-                }
             }
             "answer" => vec![Act::End(text("text").to_owned())],
             "stop" => match text("reason") {
                 "interrupted" => vec![Act::Close],
                 reason => vec![
                     Act::Close,
-                    Act::Critical(tr!(lang, m::NOTIFY_STOPPED, reason = reason)),
+                    Act::Stopped(tr!(lang, m::NOTIFY_STOPPED, reason = reason)),
                 ],
             },
             "cut_off" => vec![Act::Critical(tr!(lang, m::NOTIFY_CUT_OFF).to_string())],
@@ -341,6 +329,8 @@ struct Followed {
     shown: Option<Card>,
     /// The end card's answer, kept to show a queued message under it.
     answer: Option<String>,
+    /// The id of its last stop's card (D10); 0 before one shows.
+    stopped: u32,
 }
 
 impl Followed {
@@ -421,6 +411,7 @@ impl Bridge {
                     card: 0,
                     shown: None,
                     answer: None,
+                    stopped: 0,
                 },
             );
         }
@@ -471,6 +462,24 @@ impl Bridge {
                 followed.answer = Some(answer);
                 card
             }
+            Act::Stopped(text) => {
+                let mut actions = vec![
+                    (REPLY.to_owned(), tr!(lang, m::NOTIFY_ANSWER).to_string()),
+                    (CONTINUE.into(), tr!(lang, m::NOTIFY_CONTINUE).into()),
+                ];
+                if hyprland {
+                    actions.push((TERMINAL.into(), tr!(lang, m::NOTIFY_TERMINAL).into()));
+                }
+                actions.push((SESSION.into(), tr!(lang, m::NOTIFY_SESSION).into()));
+                followed.stopped = desk.notify(&Card {
+                    replaces: 0,
+                    summary: title,
+                    body: text,
+                    actions,
+                    critical: true,
+                });
+                return;
+            }
             Act::Critical(text) => {
                 desk.notify(&Card {
                     replaces: 0,
@@ -509,7 +518,7 @@ impl Bridge {
         let Some(socket) = self
             .followed
             .iter()
-            .find(|(_, followed)| followed.card == id && id != 0)
+            .find(|(_, followed)| id != 0 && (followed.card == id || followed.stopped == id))
             .map(|(socket, _)| socket.clone())
         else {
             return;
@@ -517,6 +526,7 @@ impl Bridge {
         let lang = self.lang;
         let hyprland = self.hyprland.clone();
         let followed = self.followed.get_mut(&socket).expect("found above");
+        let on_stop = followed.stopped == id && followed.card != id;
         match signal {
             Signal::Action(_, key) if key == STOP => {
                 let _ = control::ask(&followed.socket, &Request::Stop);
@@ -527,12 +537,18 @@ impl Bridge {
                 }
             }
             Signal::Action(_, key) if key == SESSION => open(&followed.file),
+            Signal::Action(_, key) if key == CONTINUE => {
+                let text = tr!(lang, m::NOTIFY_CONTINUE_TEXT).to_string();
+                let _ = control::ask(&followed.socket, &Request::Say(text));
+            }
             Signal::Action(..) => {}
             Signal::Replied(_, text) => {
                 let said = control::ask(&followed.socket, &Request::Say(text.clone()));
                 // While a turn runs it waits, and its card says so (D4); an
                 // idle session starts the turn, whose live card follows.
-                if let Ok(Reply::Said { queued: true }) = said {
+                if let Ok(Reply::Said { queued: true }) = said
+                    && !on_stop
+                {
                     let answer = followed.answer.clone().unwrap_or_default();
                     let body = format!(
                         "{}\n{}",
@@ -720,20 +736,11 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(
-            acts(
-                &mut records,
-                json!({"type": "result", "id": "c1", "outcome": "fail"})
-            ),
-            [Act::Critical("bash failed".into())]
-        );
-        assert_eq!(
-            acts(
-                &mut records,
-                json!({"type": "result", "id": "c1", "outcome": "timeout"})
-            ),
-            [Act::Critical("bash timed out".into())]
-        );
+        // A failed tool makes no card: the turn goes on (D11).
+        for outcome in ["fail", "timeout"] {
+            let result = json!({"type": "result", "id": "c1", "outcome": outcome});
+            assert!(acts(&mut records, result).is_empty(), "{outcome}");
+        }
         assert_eq!(
             acts(&mut records, json!({"type": "answer", "text": "done"})),
             [Act::End("done".into())]
@@ -764,7 +771,7 @@ mod tests {
                 &mut records,
                 json!({"type": "stop", "reason": "step_limit"})
             ),
-            [Act::Close, Act::Critical("stopped: step_limit".into())]
+            [Act::Close, Act::Stopped("stopped: step_limit".into())]
         );
         assert_eq!(
             acts(&mut records, json!({"type": "cut_off", "call": false})),
@@ -990,6 +997,29 @@ mod tests {
         let critical = desk.shown.last().unwrap();
         assert!(critical.critical && critical.replaces == 0);
         assert_eq!(critical.body, "stopped: server_error");
+        // Answered from it (D10): the field, Continue, Session.
+        let keys: Vec<&str> = critical
+            .actions
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        assert_eq!(keys, [REPLY, CONTINUE, SESSION]);
+        let stop_card = bridge.followed.values().next().unwrap().stopped;
+        assert_eq!(stop_card, 2);
+        let shown = desk.shown.len();
+        bridge.signal(Signal::Action(stop_card, CONTINUE.into()), &mut desk);
+        bridge.signal(
+            Signal::Replied(stop_card, "try another way".into()),
+            &mut desk,
+        );
+        let asked = session.asked.lock().unwrap().clone();
+        assert!(asked.contains(&Request::Say("Continue.".into())));
+        assert!(asked.contains(&Request::Say("try another way".into())));
+        assert_eq!(
+            desk.shown.len(),
+            shown,
+            "a queued answer on it changes no card"
+        );
 
         // The socket goes: the session is let go of, its card closed.
         std::fs::remove_file(session.dir.join("sockets/s1.sock")).unwrap();
