@@ -386,6 +386,27 @@ impl Session {
             .collect()
     }
 
+    /// The latest sessions in `dir` of the plane whose id is `plane`, the
+    /// newest first, at most `limit` (AGL-077, D13).
+    pub fn latest_of_plane(dir: &Path, plane: &str, limit: usize) -> Vec<SessionInfo> {
+        session_files(dir)
+            .iter()
+            .rev()
+            .filter_map(|path| session_info_if(path, |header| header["plane"]["id"] == plane))
+            .take(limit)
+            .collect()
+    }
+
+    /// [`Session::id_named`] among the sessions of the plane `plane`.
+    pub fn id_named_of_plane(dir: &Path, plane: &str, name: &str) -> Option<String> {
+        session_files(dir)
+            .iter()
+            .rev()
+            .filter_map(|path| session_info_if(path, |header| header["plane"]["id"] == plane))
+            .find(|info| info.name.as_deref() == Some(name))
+            .map(|info| info.id)
+    }
+
     /// How many sessions in `dir` are of the plane whose id is `plane`
     /// (AGL-077, D13, D18): their header names it.
     pub fn count_of_plane(dir: &Path, plane: &str) -> usize {
@@ -925,9 +946,18 @@ fn session_files(dir: &Path) -> Vec<PathBuf> {
 /// whole file for the last name, parsing only the lines that can be the first
 /// message or a name (AGL-062, D8).
 fn session_info(path: &Path, project: &Path) -> Option<SessionInfo> {
+    session_info_if(path, |header| {
+        header["workspace"]
+            .as_str()
+            .is_some_and(|workspace| Path::new(workspace).starts_with(project))
+    })
+}
+
+/// The session at `path`, when its header is `of` (AGL-077: a plane's).
+fn session_info_if(path: &Path, of: impl Fn(&Json) -> bool) -> Option<SessionInfo> {
     let mut lines = std::io::BufReader::new(File::open(path).ok()?).lines();
     let header: Json = serde_json::from_str(&lines.next()?.ok()?).ok()?;
-    if header["type"] != "session" || !Path::new(header["workspace"].as_str()?).starts_with(project) {
+    if header["type"] != "session" || !of(&header) {
         return None;
     }
     let mut first: Option<String> = None;

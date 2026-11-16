@@ -20,6 +20,7 @@ use crate::function::catalog::Catalog;
 /// Runs `agl function list|use` in the workspace of `cwd`.
 pub fn run(
     action: FunctionAction,
+    plane: Option<&str>,
     user: &UserFile,
     paths: &Paths,
     cwd: &Path,
@@ -27,16 +28,26 @@ pub fn run(
 ) -> Result<ExitCode, Error> {
     let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
     let project = super::forge::project_of(paths, cwd, auto_rehome, lang)?;
+    // `--plane`: the plane's Functions and settings win (AGL-077, D7, D11).
+    let plane = plane
+        .map(|name| crate::plane::PlaneFile::open(paths, name))
+        .transpose()?;
+    let catalog = match &plane {
+        Some(plane) => Catalog::in_plane(paths, &project, user, plane, &plane.settings()?),
+        None => Catalog::of(paths, &project, user),
+    };
     match action {
         FunctionAction::List => {
-            for line in Catalog::of(paths, &project, user).lines(lang) {
+            for line in catalog.lines(lang) {
                 outln!("{line}");
             }
         }
         FunctionAction::Use { name, user: to_user } => {
-            Catalog::of(paths, &project, user).check(&name)?;
+            catalog.check(&name)?;
             let path = if to_user {
                 paths.settings_file()
+            } else if let Some(plane) = &plane {
+                plane.settings_file()
             } else {
                 // D8: the workspace is registered first, as a first write.
                 for line in forge::materialize(&project, lang)? {
@@ -44,6 +55,12 @@ pub fn run(
                 }
                 project.dir.join(settings::SETTINGS_FILE)
             };
+            // The Functions' directories, the plane's first (AGL-077, D7).
+            let dirs: Vec<std::path::PathBuf> = plane
+                .iter()
+                .map(crate::plane::PlaneFile::functions_dir)
+                .chain([paths.functions_dir(&project.key), paths.functions()])
+                .collect();
             // The file is written anew from its value (AGL-039, D11, D12).
             settings::set_top(&path, "function", serde_json::Value::String(name.clone()))?;
             outln!("{}", tr!(lang, m::FUNCTION_SET, name = name, path = path.display()));
@@ -51,8 +68,10 @@ pub fn run(
             // a no is answered again at the first run (AGL-050, D10).
             if crate::tty::is_interactive()
                 && project.server.over(&user.server).llama_external != Some(true)
-                && let Ok(function) =
-                    Function::load(&[&paths.functions_dir(&project.key), &paths.functions()], &name)
+                && let Ok(function) = Function::load(
+                    &dirs.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>(),
+                    &name,
+                )
             {
                 crate::weights::offer(
                     &function.model,

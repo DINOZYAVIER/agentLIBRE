@@ -84,13 +84,21 @@ pub fn parse(args: &[OsString]) -> Result<ForgeAction, Error> {
 /// Runs a `forge` command in the workspace of `cwd`.
 pub fn run(
     action: ForgeAction,
+    plane: Option<&str>,
     user: &UserFile,
     paths: &Paths,
     cwd: &Path,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
     let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
-    let workspace = || resolve_workspace(paths, cwd, auto_rehome, lang);
+    // `--plane`: the plane's forge (AGL-077, D9).
+    let workspace = || match plane {
+        Some(name) => Ok(crate::plane::PlaneFile::open(paths, name)?.forge_store()),
+        None => resolve_workspace(paths, cwd, auto_rehome, lang),
+    };
+    if plane.is_some() && matches!(action, ForgeAction::Rehome { .. }) {
+        return Err(Error::UnknownOption("--plane".into()));
+    }
     match action {
         ForgeAction::List => list(&workspace()?),
         ForgeAction::Show { name } => {
@@ -768,7 +776,7 @@ mod tests {
             runtime: None,
         };
         let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
-        run(action, &UserFile::default(), &paths, cwd, Lang::En)
+        run(action, None, &UserFile::default(), &paths, cwd, Lang::En)
     }
 
     /// A git repository at `dir/proj` with one commit.
@@ -1201,7 +1209,7 @@ mod tests {
         user.forge.auto_rehome = Some(false);
         let run_with = |args: &[&str]| {
             let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
-            run(action, &user, &paths, &to, Lang::En)
+            run(action, None, &user, &paths, &to, Lang::En)
         };
         assert!(matches!(run_with(&["list"]), Err(Error::RehomeNoStore { .. })));
         let name = old_store.to_string_lossy().into_owned();

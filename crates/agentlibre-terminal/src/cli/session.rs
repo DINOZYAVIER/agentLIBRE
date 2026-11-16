@@ -36,6 +36,22 @@ pub fn id_of(dir: &Path, project: &Path, key: &str) -> Result<String, Error> {
 /// The transcript of the session (AGL-063, D3): the header's words, then
 /// the events in the order of the file; `verbose` appends the raw lines,
 /// so the observer's and the non-events are there too.
+/// [`id_of`] among the sessions of the plane whose id is `plane`.
+pub fn id_of_plane(dir: &Path, plane: &str, key: &str) -> Result<String, Error> {
+    if key == "last" {
+        Session::latest_of_plane(dir, plane, 1)
+            .into_iter()
+            .next()
+            .map(|info| info.id)
+            .ok_or_else(|| Error::SessionNotFound {
+                id: "last".into(),
+                dir: dir.to_path_buf(),
+            })
+    } else {
+        Ok(Session::id_named_of_plane(dir, plane, key).unwrap_or_else(|| key.to_owned()))
+    }
+}
+
 pub fn transcript(session: &Session, path: &Path, verbose: bool) -> Result<String, Error> {
     let mut out = String::new();
     out.push_str(&format!("session {}\n", session.id));
@@ -44,6 +60,10 @@ pub fn transcript(session: &Session, path: &Path, verbose: bool) -> Result<Strin
     }
     out.push_str(&format!("function {}\n", session.function));
     out.push_str(&format!("workspace {}\n", session.workspace.display()));
+    // The plane of the session (AGL-077, D10).
+    if let Some(plane) = &session.plane {
+        out.push_str(&format!("plane {} {}\n", plane.name, plane.id));
+    }
     out.push('\n');
     for event in &session.events {
         event_text(event, &mut out);
@@ -154,15 +174,26 @@ fn labeled(out: &mut String, label: &str, text: &str) {
 
 pub fn run(
     show: SessionShow,
+    plane: Option<&str>,
     user: &UserFile,
     paths: &Paths,
     cwd: &Path,
     lang: Lang,
 ) -> Result<ExitCode, Error> {
-    let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
-    let ws = crate::cli::forge::project_of(paths, cwd, auto_rehome, lang)?;
     let dir = paths.sessions();
-    let id = id_of(&dir, &ws.project, &show.key)?;
+    // `--plane`: `last` and a name among the plane's sessions (AGL-077,
+    // D13).
+    let id = match plane {
+        Some(name) => {
+            let plane = crate::plane::PlaneFile::open(paths, name)?;
+            id_of_plane(&dir, &plane.id, &show.key)?
+        }
+        None => {
+            let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
+            let ws = crate::cli::forge::project_of(paths, cwd, auto_rehome, lang)?;
+            id_of(&dir, &ws.project, &show.key)?
+        }
+    };
     let session = Session::open(&dir, &id)?;
     let path = dir.join(format!("{}.jsonl", session.id));
     // A closed pipe, as in `agl session show last | head`, is not an error.

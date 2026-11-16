@@ -36,6 +36,9 @@ pub enum Command {
     Plane(PlaneAction),
     /// `agl session show <id|name|last>` (AGL-063, D3).
     Session(SessionShow),
+    /// `agl forge|memory|function|session … --plane <name>`: the command on
+    /// the plane's store (AGL-077, D9, D11).
+    InPlane { plane: String, command: Box<Command> },
     /// `agl notify`: the running sessions told on the desktop (AGL-074,
     /// D2).
     Notify,
@@ -258,6 +261,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         _ => return run_args(args),
     };
     let word = args.next().map(text).transpose()?.unwrap_or_default();
+    // `--plane <name>` of the commands that act on a store (AGL-077, D11).
+    let mut rest: Vec<OsString> = args.collect();
+    let plane = match topic {
+        HelpTopic::Forge | HelpTopic::Memory | HelpTopic::Function | HelpTopic::Session => {
+            take_plane(&mut rest)?
+        }
+        _ => None,
+    };
+    let args = rest.into_iter();
     let parsed = match topic {
         HelpTopic::Init => init_args(args),
         HelpTopic::Server => server_args(args),
@@ -283,8 +295,32 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Err(Error::UnknownOption(option)) if option == "-h" || option == "--help" => {
             Ok(Command::Help(topic))
         }
+        Ok(Command::Help(topic)) => Ok(Command::Help(topic)),
+        Ok(command) => Ok(match plane {
+            Some(plane) => Command::InPlane {
+                plane,
+                command: Box::new(command),
+            },
+            None => command,
+        }),
         parsed => parsed,
     }
+}
+
+/// Takes `--plane <name>` out of `args`, wherever it stands.
+fn take_plane(args: &mut Vec<OsString>) -> Result<Option<String>, Error> {
+    let Some(at) = args.iter().position(|arg| arg == "--plane") else {
+        return Ok(None);
+    };
+    if at + 1 >= args.len() {
+        return Err(Error::MissingValue("--plane".into()));
+    }
+    let name = text(args.remove(at + 1))?;
+    args.remove(at);
+    if args.iter().any(|arg| arg == "--plane") {
+        return Err(Error::RepeatedOption("--plane".into()));
+    }
+    Ok(Some(name))
 }
 
 /// `agl notify`: no arguments (AGL-074, D2).
@@ -467,6 +503,35 @@ mod tests {
     #[test]
     fn no_arguments_start_the_repl() {
         assert_eq!(parse_strs(&[]).unwrap(), Command::Run(Args::default()));
+    }
+
+    #[test]
+    fn the_commands_on_a_store_take_a_plane() {
+        // AGL-077, D11: `--plane <name>` wherever it stands.
+        assert_eq!(
+            parse_strs(&["forge", "list", "--plane", "work"]).unwrap(),
+            Command::InPlane {
+                plane: "work".into(),
+                command: Box::new(Command::Forge(ForgeAction::List)),
+            }
+        );
+        assert_eq!(
+            parse_strs(&["memory", "--plane", "work", "show", "tea"]).unwrap(),
+            Command::InPlane {
+                plane: "work".into(),
+                command: Box::new(Command::Memory(MemoryAction::Show { name: "tea".into() })),
+            }
+        );
+        assert!(matches!(
+            parse_strs(&["session", "show", "last", "--plane"]),
+            Err(Error::MissingValue(_))
+        ));
+        assert!(matches!(
+            parse_strs(&["function", "list", "--plane", "a", "--plane", "b"]),
+            Err(Error::RepeatedOption(_))
+        ));
+        // Not a command on a store: an ordinary run's option.
+        assert!(matches!(parse_strs(&["--plane", "work"]), Ok(Command::Run(_))));
     }
 
     #[test]

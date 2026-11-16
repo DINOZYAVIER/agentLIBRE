@@ -148,7 +148,13 @@ fn run(
     {
         *lang = language;
     }
-    let args = match cli::args::parse(args)? {
+    // A command on a plane's store (AGL-077, D11).
+    let (command, plane) = match cli::args::parse(args)? {
+        Command::InPlane { plane, command } => (*command, Some(plane)),
+        command => (command, None),
+    };
+    let plane = plane.as_deref();
+    let args = match command {
         Command::Version => {
             let rev = env(about::REV_VAR).and_then(|rev| rev.into_string().ok());
             let _ = writeln!(io::stdout(), "{}", about::version(rev.as_deref()));
@@ -220,12 +226,12 @@ fn run(
         Command::Forge(action) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-            return cli::forge::run(action, &user, &paths, &cwd, *lang);
+            return cli::forge::run(action, plane, &user, &paths, &cwd, *lang);
         }
         Command::Function(action) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-            return cli::function::run(action, &user, &paths, &cwd, *lang);
+            return cli::function::run(action, plane, &user, &paths, &cwd, *lang);
         }
         Command::Search(action) => {
             let (paths, user) = loaded?;
@@ -234,7 +240,7 @@ fn run(
         Command::Memory(action) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-            return cli::memory::run(action, &user, &paths, &cwd, *lang);
+            return cli::memory::run(action, plane, &user, &paths, &cwd, *lang);
         }
         Command::Plane(action) => {
             let (paths, _) = loaded?;
@@ -244,12 +250,13 @@ fn run(
         Command::Session(show) => {
             let (paths, user) = loaded?;
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
-            return cli::session::run(show, &user, &paths, &cwd, *lang);
+            return cli::session::run(show, plane, &user, &paths, &cwd, *lang);
         }
         Command::Notify => {
             let (paths, _) = loaded?;
             return cli::notify::run(&paths, *lang);
         }
+        Command::InPlane { .. } => unreachable!("taken apart above"),
     };
     let (paths, user) = loaded?;
     let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;

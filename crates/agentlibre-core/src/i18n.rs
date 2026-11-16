@@ -262,8 +262,8 @@ the user's):
 
     /// The usage of `agl function`.
     pub const HELP_FUNCTION_USAGE: Msg = Msg {
-        en: "agl function list|use <name> [--user]",
-        uk: "agl function list|use <назва> [--user]",
+        en: "agl function list|use <name> [--user] [--plane <name>]",
+        uk: "agl function list|use <назва> [--user] [--plane <назва>]",
     };
 
     /// The section of `agl function` in the help (AGL-061, D3).
@@ -306,8 +306,8 @@ Search (`search` of the user's settings.nix):
 
     /// The usage of `agl memory`.
     pub const HELP_MEMORY_USAGE: Msg = Msg {
-        en: "agl memory list|show <name>|remove <name> [--yes]",
-        uk: "agl memory list|show <назва>|remove <назва> [--yes]",
+        en: "agl memory list|show <name>|remove <name> [--yes] [--plane <name>]",
+        uk: "agl memory list|show <назва>|remove <назва> [--yes] [--plane <назва>]",
     };
 
     /// The usage of `agl plane` (AGL-077, D11).
@@ -455,8 +455,8 @@ Notifications (the desktop's, for every running session):
     };
 
     pub const HELP_SESSION_USAGE: Msg = Msg {
-        en: "agl session show <id|name|last> [--verbose]",
-        uk: "agl session show <id|назва|last> [--verbose]",
+        en: "agl session show <id|name|last> [--verbose] [--plane <name>]",
+        uk: "agl session show <id|назва|last> [--verbose] [--plane <назва>]",
     };
 
     /// The section of `agl session` in the help (AGL-063, D3).
@@ -482,8 +482,8 @@ Sessions (the files of `sessions/`, per project):
 
     /// The usage of `agl forge`.
     pub const HELP_FORGE_USAGE: Msg = Msg {
-        en: "agl forge list|show|new|status|range|check|log|diff|rehome",
-        uk: "agl forge list|show|new|status|range|check|log|diff|rehome",
+        en: "agl forge list|show|new|status|range|check|log|diff|rehome [--plane <name>]",
+        uk: "agl forge list|show|new|status|range|check|log|diff|rehome [--plane <назва>]",
     };
 
     /// The section of `agl forge` in the help (AGL-061, D3).
