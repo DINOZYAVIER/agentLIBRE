@@ -118,6 +118,8 @@ pub struct Setup<'a> {
     /// agentLIBRE's runtime directory, where the REPL's control socket is
     /// made (AGL-074, D3).
     pub runtime: Option<PathBuf>,
+    /// agentLIBRE's directories, for the planes of `/plane` (AGL-077, D12).
+    pub paths: Paths,
 }
 
 pub fn cli() -> ExitCode {
@@ -300,6 +302,16 @@ fn run(
             repl::End::Exit(code) => return Ok(code),
             // `/function <name>` (AGL-036, D4): a new session with that
             // Function, the reasoning level kept.
+            // `/plane <name>` (AGL-077, D12): a new session in that plane,
+            // the reasoning level kept.
+            repl::End::Plane { name, reasoning } => {
+                args = cli::args::Args {
+                    plane: Some(name),
+                    reasoning,
+                    yes: args.yes,
+                    ..cli::args::Args::default()
+                };
+            }
             repl::End::Function {
                 name,
                 reasoning,
@@ -396,6 +408,7 @@ fn agent_session(
             history_file: paths.history_file(),
             catalog: &catalog,
             runtime: paths.runtime.clone(),
+            paths: paths.clone(),
         };
         return if interactive {
             repl::run(setup)

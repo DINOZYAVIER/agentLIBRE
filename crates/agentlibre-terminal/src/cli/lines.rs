@@ -34,6 +34,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let facts = Facts {
         function: plane.function_name.clone(),
         workspace: display_path(&workspace),
+        plane: plane.file.as_ref().map(|file| file.name.clone()),
         server: server_url.into(),
     };
     let reasoning = plane.reasoning;

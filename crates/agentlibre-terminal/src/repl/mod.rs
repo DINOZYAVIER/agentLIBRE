@@ -169,6 +169,10 @@ enum Request {
     /// `/function <name>`: the switch, for the main thread to check
     /// (AGL-036, D4).
     Switch(String),
+    /// `/plane`: the plane and the planes of the directory (AGL-077, D12).
+    Planes,
+    /// `/plane <name>`: a new session in that plane (AGL-077, D12).
+    PlaneSwitch(String),
     /// `/remember name | text`, for the main thread to write (AGL-006).
     Remember(String, String, bool),
     /// `/rename <name>`, for the main thread to write (AGL-062, D7).
@@ -190,10 +194,12 @@ impl Request {
             Request::New => 1,
             Request::Functions => 2,
             Request::Switch(_) => 3,
-            Request::Remember(..) => 4,
-            Request::Rename(_) => 5,
-            Request::Memory(..) => 6,
-            Request::Compact => 7,
+            Request::Planes => 4,
+            Request::PlaneSwitch(_) => 5,
+            Request::Remember(..) => 6,
+            Request::Rename(_) => 7,
+            Request::Memory(..) => 8,
+            Request::Compact => 9,
         }
     }
 }
@@ -486,6 +492,24 @@ impl Input {
                 drop(inner);
                 self.control.wake.notify_all();
             }
+            // `/plane [<name>]` (AGL-077, D12): the main thread says the
+            // planes, or checks the plane and leaves the session for a new
+            // one in it — not while a turn runs (as `/function`).
+            "/plane" => {
+                let plane = trimmed.split_whitespace().nth(1).map(str::to_owned);
+                let mut inner = self.control.lock();
+                if inner.busy() {
+                    drop(inner);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    return;
+                }
+                match plane {
+                    Some(plane) => inner.requests.push(Request::PlaneSwitch(plane)),
+                    None => inner.requests.push(Request::Planes),
+                }
+                drop(inner);
+                self.control.wake.notify_all();
+            }
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
             // for a new one with it — not while a turn runs (as `/new`).
@@ -733,6 +757,10 @@ enum Next {
     Functions,
     /// `/function <name>` (AGL-036, D4).
     Switch(String),
+    /// `/plane` (AGL-077, D12).
+    Planes,
+    /// `/plane <name>` (AGL-077, D12).
+    PlaneSwitch(String),
     Quit,
 }
 
@@ -741,6 +769,11 @@ enum Next {
 /// reasoning level of this one.
 pub enum End {
     Exit(ExitCode),
+    /// `/plane <name>`: a new session in that plane (AGL-077, D12).
+    Plane {
+        name: String,
+        reasoning: Option<ReasoningLevel>,
+    },
     /// `/function <name>`: a new session with that Function, in the same
     /// plane (AGL-077, D6).
     Function {
@@ -836,6 +869,8 @@ fn wait_for_next(control: &Control) -> Next {
                 Request::New => Next::New,
                 Request::Functions => Next::Functions,
                 Request::Switch(name) => Next::Switch(name),
+                Request::Planes => Next::Planes,
+                Request::PlaneSwitch(name) => Next::PlaneSwitch(name),
                 Request::Remember(name, text, workspace) => Next::Remember(name, text, workspace),
                 Request::Rename(name) => Next::Rename(name),
                 Request::Memory(line, action) => Next::Memory(line, action),
@@ -911,6 +946,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         history_file,
         catalog,
         runtime,
+        paths,
     } = setup;
     let backend = Arc::clone(&plane.backend);
     let lang = plane.lang;
@@ -921,6 +957,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let facts = Facts {
         function: plane.function_name.clone(),
         workspace: display_path(&workspace),
+        plane: plane.file.as_ref().map(|file| file.name.clone()),
         server: server_url.into(),
     };
     let commands: Vec<MenuItem> = COMMANDS
@@ -1167,6 +1204,46 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 presenter.show_notice(&list, Role::Muted);
                 record("/function".into(), false, Some(list))
             }
+            Next::Planes => {
+                let here = crate::plane::PlaneFile::of_directory(&paths, &workspace)
+                    .map(|planes| planes.into_iter().map(|plane| plane.name).collect::<Vec<_>>());
+                match here {
+                    Ok(names) => {
+                        let none = "—".to_owned();
+                        let text = tr!(
+                            lang,
+                            m::PLANE_HERE,
+                            plane = plane_name.as_ref().unwrap_or(&none),
+                            planes = if names.is_empty() { none.clone() } else { names.join(", ") }
+                        );
+                        presenter.show_notice(&text, Role::Muted);
+                        record("/plane".into(), false, Some(text))
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        record("/plane".into(), true, Some(text))
+                    }
+                }
+            }
+            // The plane must be there before the session is left (AGL-077,
+            // D12): a refusal keeps this session as it is.
+            Next::PlaneSwitch(name) => match crate::plane::PlaneFile::open(&paths, &name) {
+                Ok(_) => {
+                    presenter.show_notice(&tr!(lang, m::PLANE_SWITCH, name = name), Role::Muted);
+                    record(format!("/plane {name}"), false, None);
+                    end = End::Plane {
+                        name,
+                        reasoning: control.lock().reasoning,
+                    };
+                    break;
+                }
+                Err(error) => {
+                    let text = error.message(lang);
+                    presenter.show_notice(&text, Role::StatusFailure);
+                    record(format!("/plane {name}"), true, Some(text))
+                }
+            },
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
             Next::Switch(name) => match catalog.check(&name) {
@@ -1523,6 +1600,7 @@ mod tests {
             facts: Facts {
                 function: "minimal".into(),
                 workspace: "~/project".into(),
+                plane: None,
                 server: "http://127.0.0.1:18080".into(),
             },
             theme: Theme::plain(),
@@ -2148,6 +2226,25 @@ mod tests {
         f.type_text("/function other");
         f.input.key(Key::Enter);
         assert!(f.inner().requests.contains(&Request::Switch("other".into())));
+    }
+
+    #[test]
+    fn plane_asks_the_main_thread_and_waits_for_the_turn() {
+        // AGL-077, D12: `/plane` says the planes, `/plane <name>` switches.
+        let f = fixture();
+        f.inner().running = true;
+        f.type_text("/plane work");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("/plane is not available during a turn"));
+        assert!(f.inner().requests.0.is_empty());
+        f.inner().running = false;
+        f.type_text("/plane");
+        f.input.key(Key::Enter);
+        assert!(f.inner().requests.contains(&Request::Planes));
+        f.inner().requests = Requests::default();
+        f.type_text("/plane work");
+        f.input.key(Key::Enter);
+        assert!(f.inner().requests.contains(&Request::PlaneSwitch("work".into())));
     }
 
     #[test]

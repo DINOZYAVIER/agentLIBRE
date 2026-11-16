@@ -11,7 +11,7 @@ use crate::settings::SETTINGS_FILE;
 const APP_DIR: &str = "agentLIBRE";
 
 /// The application directories.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Paths {
     /// `$XDG_CONFIG_HOME/agentLIBRE`.
     pub config: PathBuf,

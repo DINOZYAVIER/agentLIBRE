@@ -39,9 +39,9 @@ pub fn stir_line(attempt: u32, error: &str, lang: Lang) -> String {
 }
 
 /// The `/` commands (D118, D139, AGL-013).
-pub const COMMANDS: [&str; 12] = [
+pub const COMMANDS: [&str; 13] = [
     "/quit", "/exit", "/help", "/status", "/think", "/attach", "/remember", "/memory", "/rename",
-    "/new", "/compact", "/function",
+    "/new", "/compact", "/function", "/plane",
 ];
 
 /// What `/remember` asked for (AGL-006, M34, M37).
@@ -93,6 +93,8 @@ pub fn parse_remember(rest: &str) -> Remember {
 pub struct Facts {
     pub function: String,
     pub workspace: String,
+    /// The plane of the run, when it is in one (AGL-077, D6).
+    pub plane: Option<String>,
     pub server: String,
 }
 
@@ -113,7 +115,8 @@ pub struct Info {
 pub fn help_text(lang: Lang, with_keys: bool) -> String {
     let mut lines: Vec<String> = COMMANDS
         .iter()
-        .filter(|name| with_keys || **name != "/function")
+        // The stdin session has no `/function` and no `/plane`.
+        .filter(|name| with_keys || !matches!(**name, "/function" | "/plane"))
         .map(|name| format!("{name:<9} {}", texts::command(name, lang)))
         .collect();
     if with_keys {
@@ -138,6 +141,7 @@ pub fn status_text(
         texts::status_line("session", &info.session, lang),
         texts::status_line("function", &facts.function, lang),
         texts::status_line("workspace", &facts.workspace, lang),
+        texts::status_line("plane", facts.plane.as_deref().unwrap_or("—"), lang),
         texts::status_line("server", &facts.server, lang),
         texts::status_line(
             "context",
@@ -235,6 +239,7 @@ mod tests {
         Facts {
             function: "minimal".into(),
             workspace: "~/project".into(),
+            plane: None,
             server: "http://127.0.0.1:18080".into(),
         }
     }

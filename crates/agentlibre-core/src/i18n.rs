@@ -1724,6 +1724,23 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// `/function` (AGL-036, D3, D4, D9).
+    pub const CMD_PLANE: Msg = Msg {
+        en: "the plane and the planes of the directory; /plane <name> starts a new session in it",
+        uk: "plane і plane цієї теки; /plane <назва> починає в ньому нову сесію",
+    };
+
+    /// A switch to another plane (AGL-077, D12).
+    pub const PLANE_SWITCH: Msg = Msg {
+        en: "a new session in the plane {name}",
+        uk: "нова сесія в plane {name}",
+    };
+
+    /// `/plane` without a name (AGL-077, D12).
+    pub const PLANE_HERE: Msg = Msg {
+        en: "plane: {plane}\nthe planes of this directory: {planes}",
+        uk: "plane: {plane}\nplane цієї теки: {planes}",
+    };
+
     pub const CMD_FUNCTION: Msg = Msg {
         en: "the Functions; /function <name> starts a new session with it",
         uk: "Функції; /function <назва> починає з нею нову сесію",
@@ -1926,6 +1943,11 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// A label of one line of `/status`.
+    pub const LABEL_PLANE: Msg = Msg {
+        en: "plane",
+        uk: "plane",
+    };
+
     pub const LABEL_WORKSPACE: Msg = Msg {
         en: "workspace",
         uk: "робоча тека",
@@ -3689,6 +3711,7 @@ pub mod repl {
             "/new" => tr!(lang, m::CMD_NEW),
             "/compact" => tr!(lang, m::CMD_COMPACT),
             "/function" => tr!(lang, m::CMD_FUNCTION),
+            "/plane" => tr!(lang, m::CMD_PLANE),
             _ => "",
         }
     }
@@ -3699,6 +3722,7 @@ pub mod repl {
             "session" => tr!(lang, m::LABEL_SESSION),
             "function" => tr!(lang, m::LABEL_FUNCTION),
             "workspace" => tr!(lang, m::LABEL_WORKSPACE),
+            "plane" => tr!(lang, m::LABEL_PLANE),
             "server" => tr!(lang, m::LABEL_SERVER),
             "context" => tr!(lang, m::LABEL_CONTEXT),
             "reasoning" => tr!(lang, m::LABEL_REASONING),
