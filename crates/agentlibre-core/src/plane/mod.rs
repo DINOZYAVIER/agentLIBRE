@@ -1,9 +1,9 @@
-//! The run of a Function in a session (AGL-075, D5; the `Plane` of AGL-067,
-//! F1, D10): what a session holds beside its Function — the backend, the
+//! The plane a Function runs on (AGL-067, F1, D10; AGL-075): what a session
+//! holds beside its Function — the backend, the
 //! session, the memory, the searcher, the engine's start. It outlives a
 //! session: `/new` and `/function` start a new one on it. The surfaces —
 //! `-p`, the stdin session, the REPL — read their input and draw what comes
-//! out; the run takes a turn.
+//! out; the plane takes a turn.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ mod thread;
 
 pub use thread::{Command, Done, Handle, Sent, SessionView};
 
-/// What a surface gives a turn of the run (AGL-067): where the reports go,
+/// What a surface gives a turn on the plane (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
 pub trait Turn: Sink {
     /// A line the start of the server or the transcription says (AGL-015,
@@ -74,7 +74,7 @@ pub enum Told {
     Pending(String),
 }
 
-/// What a slash command did (AGL-067, F2): the run does the work once, and
+/// What a slash command did (AGL-067, F2): the plane does the work once, and
 /// each surface shows [`Told`] and writes the session's record its own way
 /// (D4). What the record holds is `content`, or, for the stdin session, the
 /// lines it was told.
@@ -131,7 +131,7 @@ fn written(write: &Write) -> Event {
     }
 }
 
-/// Who answers while a run is built and while its server starts (AGL-075,
+/// Who answers while a plane is built and while its server starts (AGL-075,
 /// D8): the terminal asks the human; a caller with nobody to ask gives no
 /// `line` and refuses or agrees by `others`.
 #[derive(Clone)]
@@ -148,13 +148,13 @@ pub struct Asker {
 /// Asks the human for a line; `None` when there is no answer.
 pub type AskLine = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// What a run is opened with (AGL-075): where, with what, and who answers.
+/// What a plane is opened with (AGL-075): where, with what, and who answers.
 pub struct Opening<'a> {
     /// The environment: `PATH`, and what `about` reads.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
     pub paths: &'a Paths,
     pub user: &'a UserFile,
-    /// The directory of the run, the workspace of a new session.
+    /// The directory of the run of agl, the workspace of a new session.
     pub cwd: &'a Path,
     pub project: &'a Workspace,
     /// `--resume`: `last`, a name, an id or the start of one.
@@ -165,26 +165,26 @@ pub struct Opening<'a> {
     /// One request (`-p`): the server is brought up before the session is
     /// made, and its context size must be read (AGL-015, D10).
     pub one_request: bool,
-    /// The engine agl launched, shared by the runs of the process (AGL-024).
+    /// The engine agl launched, shared by the planes of the process (AGL-024).
     pub engine: Arc<Mutex<Option<Engine>>>,
     pub lang: Lang,
     pub stop: Stop,
     pub asker: Asker,
 }
 
-/// A run opened, and what its surface needs of the opening.
+/// A plane opened, and what its surface needs of the opening.
 pub struct Opened {
-    pub run: Run,
-    /// Whether the session existed before this run (D126).
+    pub plane: Plane,
+    /// Whether the session existed before this plane (D126).
     pub resumed: bool,
-    /// The settings the run resolved: the surface's colors, its REPL.
+    /// The settings the plane resolved: the surface's colors, its REPL.
     pub settings: Settings,
     /// The FSM of the first turn, which saw the server's start of a run of
     /// one request (AGL-046, D10).
     pub observer: Observer,
 }
 
-pub struct Run {
+pub struct Plane {
     pub function: Function,
     pub function_name: String,
     pub backend: Arc<dyn Backend + Send + Sync>,
@@ -216,12 +216,12 @@ pub struct Run {
     pub memory: Arc<dyn Home>,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<String>,
-    /// What stops a turn of this run (AGL-075): its turns run in its scope.
+    /// What stops a turn on this plane (AGL-075): its turns run in its scope.
     pub stop: Stop,
 }
 
-impl Run {
-    /// Opens a run (AGL-075): the session resumed or made, its Function, the
+impl Plane {
+    /// Opens a plane (AGL-075): the session resumed or made, its Function, the
     /// settings, the weights, the backend, the search, the memory and what
     /// the model is told; a run of one request brings its server up first.
     pub fn open(opening: Opening) -> Result<Opened, Error> {
@@ -453,7 +453,7 @@ impl Run {
             .enabled
             .unwrap_or(true)
             .then(|| about_of(env, paths, project, &settings, &workspace, &user_path));
-        let run = Run {
+        let plane = Plane {
             function,
             function_name: settings.function.clone(),
             backend,
@@ -474,7 +474,7 @@ impl Run {
             stop,
         };
         Ok(Opened {
-            run,
+            plane,
             resumed,
             settings,
             observer,
@@ -490,7 +490,7 @@ impl Run {
         }
     }
 
-    /// The agent of a turn of this run, for a server with a context of
+    /// The agent of a turn on this plane, for a server with a context of
     /// `context` tokens: the one place an [`Agent`] is built.
     pub fn agent(&mut self, context: usize) -> Agent<'_> {
         Agent {
@@ -516,7 +516,7 @@ impl Run {
 
     /// A turn for the message `message` and its `attached` media: the server
     /// is brought up when it does not answer, at the first request (AGL-015,
-    /// D10, AGL-024), and its context size read; then [`Run::turn_on`].
+    /// D10, AGL-024), and its context size read; then [`Plane::turn_on`].
     pub fn turn(
         &mut self,
         message: &str,
@@ -694,9 +694,9 @@ impl Run {
         }
     }
 
-    /// `/new`: a new session of the run with the `run` snapshot of its
+    /// `/new`: a new session on the plane with the `run` snapshot of its
     /// Function (AGL-063, D4). A surface clears what the old session held.
-    /// A session that cannot be made ends the run of agl: nothing else works.
+    /// A session that cannot be made ends the run: nothing else works.
     pub fn new_session(&mut self) -> Result<Said, Error> {
         let new = Session::create_run(
             &self.sessions_dir,

@@ -23,10 +23,10 @@ pub(crate) use agentlibre_core::{
     nix,
     paths,
     phase,
+    plane,
     programs,
     record,
     records,
-    run,
     session,
     settings,
     status,
@@ -53,7 +53,7 @@ use error::Error;
 use function::Function;
 use i18n::{Lang, m};
 use paths::Paths;
-use run::Run;
+use plane::Plane;
 use session::{Session, StopReason};
 use settings::{function_name, ReplSettings, UserFile};
 use theme::Theme;
@@ -103,10 +103,10 @@ fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
 /// How many sessions `agl --resume` lists (AGL-058, D20).
 const SESSIONS_LISTED: usize = 20;
 
-/// Everything a session needs: its run, and what the terminal
+/// Everything a session needs: the plane it runs on, and what the terminal
 /// draws with.
 pub struct Setup<'a> {
-    pub run: Run,
+    pub plane: Plane,
     /// Whether the session existed before this run (D126).
     pub resumed: bool,
     pub server_url: &'a str,
@@ -321,7 +321,7 @@ fn agent_session(
         .map(|path| media::Source::from_file(Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
     let interactive = tty::is_interactive();
-    let opened = Run::open(run::Opening {
+    let opened = Plane::open(plane::Opening {
         env,
         paths,
         user,
@@ -338,9 +338,9 @@ fn agent_session(
         // in a terminal (AGL-039, D22-D24), and the restart's consent as
         // the server commands do (AGL-033, D2) — `--yes` skips, the
         // terminal asks, a non-interactive terminal refuses.
-        asker: run::Asker {
+        asker: plane::Asker {
             say: Arc::new(|line| eprintln!("{line}")),
-            line: interactive.then(|| Arc::new(engine::ask_line) as run::AskLine),
+            line: interactive.then(|| Arc::new(engine::ask_line) as plane::AskLine),
             others: if args.yes {
                 engine::Others::Yes
             } else if interactive {
@@ -350,8 +350,8 @@ fn agent_session(
             },
         },
     })?;
-    let run::Opened {
-        run,
+    let plane::Opened {
+        plane,
         resumed,
         settings,
         mut observer,
@@ -367,10 +367,10 @@ fn agent_session(
         // The switch of D10 (AGL-036) before the terminal is taken: its
         // question needs the plain terminal.
         if interactive {
-            run.autostart.switch(&mut |line| eprintln!("{line}"))?;
+            plane.autostart.switch(&mut |line| eprintln!("{line}"))?;
         }
         let setup = Setup {
-            run,
+            plane,
             resumed,
             server_url: &settings.server_url,
             theme: Theme::new(interactive && theme::colors_enabled(env), &settings.colors),
@@ -385,26 +385,26 @@ fn agent_session(
             cli::lines::run(setup).map(repl::End::Exit)
         };
     };
-    eprintln!("{}", tr!(lang, m::SESSION, id = run.session.id));
+    eprintln!("{}", tr!(lang, m::SESSION, id = plane.session.id));
     interrupt::install();
-    let id = run.session.id.clone();
+    let id = plane.session.id.clone();
     // The attached files get their placeholders before the message and are
     // stored with the session; an audio is transcribed here (AGL-014).
     let mut pending = Vec::new();
     let placeholders: Vec<String> = sources
         .into_iter()
-        .map(|source| attach::add(&run.session, &mut pending, source))
+        .map(|source| attach::add(&plane.session, &mut pending, source))
         .collect();
     let message = attach::with_placeholders(&placeholders, &message);
-    observer.attach(&run.session);
-    let reasoning = run.reasoning;
-    // The turn runs on the run's thread (AGL-075, D7); what it tells is
+    observer.attach(&plane.session);
+    let reasoning = plane.reasoning;
+    // The turn runs on the plane's thread (AGL-075, D7); what it tells is
     // said here.
-    let handle = run.start();
+    let handle = plane.start();
     let mut report = StderrReport::new(lang);
     let done = handle
         .ask(
-            run::Command::Say {
+            plane::Command::Say {
                 message,
                 attached: pending,
                 reasoning,
@@ -412,7 +412,7 @@ fn agent_session(
             },
             &mut |sent| sent.give(&mut report),
         )
-        .ok_or(Error::RunGone)?;
+        .ok_or(Error::PlaneGone)?;
     match done.turn.expect("a message's turn")? {
         TurnEnd::Answer(text) => {
             outln!("{text}");

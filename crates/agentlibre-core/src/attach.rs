@@ -44,7 +44,7 @@ pub fn media_counts(session: &Session) -> [u32; 3] {
 }
 
 /// [`add`] after `counts` media of each kind the session holds, in the
-/// order of [`Kind::ALL`]: for a surface that holds what its run told it.
+/// order of [`Kind::ALL`]: for a surface that holds what its plane told it.
 pub fn add_counted(counts: &[u32; 3], pending: &mut Vec<Pending>, source: Source) -> String {
     let index = Kind::ALL.iter().position(|kind| *kind == source.kind).unwrap_or(0);
     let number = counts[index]

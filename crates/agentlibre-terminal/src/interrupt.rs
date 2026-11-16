@@ -1,7 +1,7 @@
 //! Ctrl-C: the first one asks the running step to stop, a second one exits
 //! at once (D111, D113). In the REPL the terminal is raw, Ctrl-C arrives as
 //! a key and the REPL decides about the second one itself (D120, D131).
-//! What stops is the stop of the terminal's runs (AGL-075): one for the
+//! What stops is the stop of the terminal's planes (AGL-075): one for the
 //! process, as a terminal runs one turn at a time.
 
 use std::sync::OnceLock;
@@ -11,7 +11,7 @@ use crate::stop::Stop;
 
 static STOP: OnceLock<Stop> = OnceLock::new();
 
-/// The stop of the terminal's runs.
+/// The stop of the terminal's planes.
 pub fn stop() -> &'static Stop {
     STOP.get_or_init(Stop::new)
 }

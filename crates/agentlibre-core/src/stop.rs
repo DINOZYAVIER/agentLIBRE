@@ -1,4 +1,4 @@
-//! The stop of a turn (AGL-075): each run has its own, so that a turn of
+//! The stop of a turn (AGL-075): each plane has its own, so that a turn of
 //! one session is stopped while a turn of another goes on. A turn runs in
 //! [`Stop::scope`] on its thread; the agent, the backends, the tools and the
 //! search ask [`requested`], which reads the stop of the turn on the thread
@@ -26,7 +26,7 @@ struct Inner {
     thread: AtomicU64,
 }
 
-/// The stop of a run's turns; its clones are the same stop.
+/// The stop of a plane's turns; its clones are the same stop.
 #[derive(Clone, Default)]
 pub struct Stop(Arc<Inner>);
 

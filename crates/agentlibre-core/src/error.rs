@@ -184,7 +184,7 @@ pub enum Error {
     Notify { detail: String },
     /// The thread of a run ended before it answered: a fault of agl's
     /// (AGL-075, D7).
-    RunGone,
+    PlaneGone,
     /// The server stopped before it was ready (D149; AGL-024, D2).
     ServerFailed { owner: ServerOwner },
     /// The server was not ready in time (D149; AGL-024, D2).

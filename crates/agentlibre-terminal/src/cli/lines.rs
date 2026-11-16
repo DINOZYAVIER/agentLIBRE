@@ -15,7 +15,7 @@ use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::interrupt;
 use crate::media::Source;
-use crate::run::{Command, Done, Said, Sent, SessionView, Told};
+use crate::plane::{Command, Done, Said, Sent, SessionView, Told};
 use crate::session::{CommandRun, Event, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
@@ -25,25 +25,25 @@ use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {
-        run,
+        plane,
         server_url,
         ..
     } = setup;
-    let lang = run.lang;
-    let workspace = run.workspace.clone();
+    let lang = plane.lang;
+    let workspace = plane.workspace.clone();
     let facts = Facts {
-        function: run.function_name.clone(),
+        function: plane.function_name.clone(),
         workspace: display_path(&workspace),
         server: server_url.into(),
     };
-    let reasoning = run.reasoning;
-    let context = Cell::new(run.context);
-    // What this session holds of the run's session, after each command.
-    let mut session = SessionView::of(&run.session);
+    let reasoning = plane.reasoning;
+    let context = Cell::new(plane.context);
+    // What this session holds of the plane's session, after each command.
+    let mut session = SessionView::of(&plane.session);
     interrupt::install();
     eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
-    // The run takes the commands on a thread of its own (AGL-075, D7).
-    let handle = run.start();
+    // The plane takes the commands on a thread of its own (AGL-075, D7).
+    let handle = plane.start();
     let mut ask = |command: Command, session: &mut SessionView| -> Result<Done, Error> {
         let mut report = StderrReport::new(lang);
         let done = handle
@@ -53,7 +53,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 sent.give(&mut report);
             })
-            .ok_or(Error::RunGone)?;
+            .ok_or(Error::PlaneGone)?;
         *session = done.session.clone();
         Ok(done)
     };
@@ -284,7 +284,7 @@ impl Record {
     }
 
     /// A session that cannot be written to says so at the next turn.
-    /// The command's line goes to the session's record, by its run.
+    /// The command's line goes to the session's record, by its plane.
     fn record(
         &self,
         ask: &mut impl FnMut(Command, &mut SessionView) -> Result<Done, Error>,

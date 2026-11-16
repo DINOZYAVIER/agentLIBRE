@@ -20,7 +20,7 @@ pub struct StderrReport {
     call: Option<ToolCall>,
 }
 
-impl crate::run::Turn for StderrReport {
+impl crate::plane::Turn for StderrReport {
     fn line(&mut self, line: &str) {
         eprintln!("{line}");
     }

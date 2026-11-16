@@ -931,7 +931,7 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     /// `agl notify` without `XDG_RUNTIME_DIR` (AGL-074, D3).
-    pub const RUN_GONE: Msg = Msg {
+    pub const PLANE_GONE: Msg = Msg {
         en: "the run of the session ended before it answered; the session's file keeps what it did",
         uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
     };
@@ -2828,7 +2828,7 @@ impl Error {
             }
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
-            Error::RunGone => tr!(lang, m::RUN_GONE).to_string(),
+            Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),

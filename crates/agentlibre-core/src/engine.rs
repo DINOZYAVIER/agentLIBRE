@@ -379,7 +379,7 @@ pub enum ServerProgress<'a> {
 /// consent of the restart.
 pub struct Autostart {
     /// The backend the turn runs on: the `Llama` or the `Strata` backend,
-    /// by the settings' `[server] kind` (AGL-030, D1); the run's own.
+    /// by the settings' `[server] kind` (AGL-030, D1); the plane's own.
     pub llama: Arc<dyn Backend + Send + Sync>,
     pub project: Workspace,
     /// The settings that actually run (AGL-033, D1): the function's
