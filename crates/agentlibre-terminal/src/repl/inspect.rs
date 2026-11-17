@@ -761,12 +761,12 @@ mod tests {
         let all = screen(&inspect, 10).join("\n");
         // The first record (the user's "First") is the focus; the rest
         // is not marked.
-        assert!(all.contains("▸ › First"), "{all}");
+        assert!(all.contains("▸ ›  First"), "{all}");
         assert!(!all.contains("▸ Ok."), "{all}");
         assert!(inspect.key(Key::Down));
         let all = screen(&inspect, 10).join("\n");
         assert!(all.contains("▸ THINKING"), "{all}");
-        assert!(!all.contains("▸ › First"), "{all}");
+        assert!(!all.contains("▸ ›  First"), "{all}");
     }
 
     #[test]
