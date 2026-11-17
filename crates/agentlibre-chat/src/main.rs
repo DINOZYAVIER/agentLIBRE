@@ -316,6 +316,8 @@ fn build(
             busy.set(true);
         }
     };
+    // What the copy buttons copy through (KS-041 D3).
+    let copier = ui.clone();
     ui.mount(move |cx| {
         let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
         // A message is its speaker's name and its text; the rest a row each.
@@ -356,9 +358,21 @@ fn build(
                             .unwrap_or_default()
                     })
                 });
-                // The agent's text is Markdown (katarsa-shell's KS-040).
+                // The agent's text is Markdown (katarsa-shell's KS-040), with a
+                // button that copies its source (KS-041 D3).
                 if who == Some(Who::Agent) {
                     cx.markdown(Sty::column().gap(6.0), text);
+                    let ui = copier.clone();
+                    cx.group(Sty::row(), move |cx| {
+                        cx.button("copy", "copy", move || {
+                            let source = conversation.with(|conversation| {
+                                conversation.rows.get(at).map(|row| row.text.clone())
+                            });
+                            if let Some(source) = source {
+                                ui.copy(source);
+                            }
+                        });
+                    });
                 } else {
                     cx.paragraph(text, tone);
                 }
