@@ -474,6 +474,142 @@ Notifications (the desktop's, for every running session):
            Працює, доки його не зупинять, як user unit.",
     };
 
+    /// The usage of `agl bridge` (AGL-083, D19).
+    pub const HELP_BRIDGE_USAGE: Msg = Msg {
+        en: "\
+agl bridge start|stop|status
+agl bridge pair <name>|revoke <name>|list",
+        uk: "\
+agl bridge start|stop|status
+agl bridge pair <назва>|revoke <назва>|list",
+    };
+
+    /// The section of `agl bridge` in the help (AGL-083, D10, D18 to D21).
+    pub const HELP_BRIDGE: Msg = Msg {
+        en: "\
+The bridge (the daemon for the iPhone and the watch; systemd user unit
+agentLIBRE-bridge; `bridge.address` and `bridge.port` of the user's
+settings.nix, reached through WireGuard; TLS with its own certificate, a token
+a device):
+  bridge start          start the daemon if none runs, then the bridge
+  bridge stop           stop the bridge
+  bridge status         show whether it runs, and how many devices are paired
+  bridge pair <name>    pair a device: a QR code to scan with the app, which
+                        holds the address, the device's token and the
+                        certificate's sha256; the token is shown this once
+  bridge revoke <name>  unpair a device: its token opens nothing any more
+  bridge list           the paired devices",
+        uk: "\
+Міст (демон для iPhone і годинника; user-unit systemd agentLIBRE-bridge;
+`bridge.address` і `bridge.port` у settings.nix користувача, доступ через
+WireGuard; TLS з власним сертифікатом, токен на пристрій):
+  bridge start          запустити демон, якщо жоден не працює, потім міст
+  bridge stop           зупинити міст
+  bridge status         показати, чи він працює і скільки пристроїв спарено
+  bridge pair <назва>   спарити пристрій: QR-код для застосунку з адресою,
+                        токеном пристрою і sha256 сертифіката; токен
+                        показано лише цей раз
+  bridge revoke <назва> розірвати пару: токен пристрою більше нічого не
+                        відкриває
+  bridge list           спарені пристрої",
+    };
+
+    /// `agl bridge start`, the bridge started (AGL-083, D18).
+    pub const BRIDGE_STARTED: Msg = Msg {
+        en: "the bridge listens at {url}",
+        uk: "міст слухає за {url}",
+    };
+
+    /// `agl bridge start` of a bridge that runs.
+    pub const BRIDGE_ALREADY_RUNNING: Msg = Msg {
+        en: "the bridge already runs ({url})",
+        uk: "міст уже працює ({url})",
+    };
+
+    /// `agl bridge stop`.
+    pub const BRIDGE_STOPPED: Msg = Msg {
+        en: "the bridge is stopped",
+        uk: "міст зупинено",
+    };
+
+    /// `agl bridge stop` of a bridge that does not run.
+    pub const BRIDGE_NOT_RUNNING: Msg = Msg {
+        en: "the bridge does not run",
+        uk: "міст не працює",
+    };
+
+    /// `agl bridge status` of a bridge that runs.
+    pub const BRIDGE_STATUS_RUNNING: Msg = Msg {
+        en: "the bridge runs at {url}; paired devices: {devices}",
+        uk: "міст працює за {url}; спарених пристроїв: {devices}",
+    };
+
+    /// `agl bridge status` of a bridge that does not run.
+    pub const BRIDGE_STATUS_STOPPED: Msg = Msg {
+        en: "the bridge does not run; paired devices: {devices}",
+        uk: "міст не працює; спарених пристроїв: {devices}",
+    };
+
+    /// `agl bridge pair <name>`, under the QR code (AGL-083, D10, D21).
+    pub const BRIDGE_PAIRED: Msg = Msg {
+        en: "{name} is paired: scan the code with the app on the iPhone. It holds the device's token, shown this once; the bridge at {url} keeps only its sha256.",
+        uk: "{name} спарено: відскануй код застосунком на iPhone. У ньому токен пристрою, показаний лише цей раз; міст за {url} зберігає тільки його sha256.",
+    };
+
+    /// `agl bridge revoke <name>`.
+    pub const BRIDGE_REVOKED: Msg = Msg {
+        en: "{name} is unpaired: its token opens nothing any more",
+        uk: "пару з {name} розірвано: його токен більше нічого не відкриває",
+    };
+
+    /// `agl bridge list` with no device.
+    pub const BRIDGE_NO_DEVICES: Msg = Msg {
+        en: "no device is paired (agl bridge pair <name>)",
+        uk: "жодного пристрою не спарено (agl bridge pair <назва>)",
+    };
+
+    /// `Error::BridgeNotSet` (AGL-083, D20).
+    pub const BRIDGE_NOT_SET: Msg = Msg {
+        en: "the bridge needs `bridge.address` and `bridge.port`; add to {path}, with the address of this computer that WireGuard reaches:\n\nbridge = {{ address = \"10.0.0.5\"; port = 18443; }};",
+        uk: "мостові потрібні `bridge.address` і `bridge.port`; додай у {path}, з адресою цього комп'ютера, до якої доходить WireGuard:\n\nbridge = {{ address = \"10.0.0.5\"; port = 18443; }};",
+    };
+
+    /// `Error::BridgeProgramMissing` (AGL-083, D18).
+    pub const BRIDGE_PROGRAM_MISSING: Msg = Msg {
+        en: "no agl-bridge beside agl: {path}",
+        uk: "поруч з agl немає agl-bridge: {path}",
+    };
+
+    /// `Error::BridgeNotListening`.
+    pub const BRIDGE_NOT_LISTENING: Msg = Msg {
+        en: "the bridge did not start listening; see journalctl --user -u {unit}",
+        uk: "міст не почав слухати; дивись journalctl --user -u {unit}",
+    };
+
+    /// `Error::BridgeDeviceName` (AGL-083, D10).
+    pub const BRIDGE_DEVICE_NAME: Msg = Msg {
+        en: "{name:?} is no device name: 1 to 64 letters, digits, `.`, `_` or `-`",
+        uk: "{name:?} не назва пристрою: від 1 до 64 латинських літер, цифр, `.`, `_` або `-`",
+    };
+
+    /// `Error::BridgeDeviceExists`.
+    pub const BRIDGE_DEVICE_EXISTS: Msg = Msg {
+        en: "the device {name} is paired already; to pair it anew, agl bridge revoke {name} first",
+        uk: "пристрій {name} уже спарено; щоб спарити заново, спершу agl bridge revoke {name}",
+    };
+
+    /// `Error::BridgeDeviceUnknown`.
+    pub const BRIDGE_DEVICE_UNKNOWN: Msg = Msg {
+        en: "no device {name} is paired (agl bridge list)",
+        uk: "пристрою {name} не спарено (agl bridge list)",
+    };
+
+    /// `Error::Bridge`.
+    pub const BRIDGE_FAILED: Msg = Msg {
+        en: "the bridge: {detail}",
+        uk: "міст: {detail}",
+    };
+
     pub const HELP_SESSION_USAGE: Msg = Msg {
         en: "agl session show <id|name|last> [--verbose] [--plane <name>]",
         uk: "agl session show <id|назва|last> [--verbose] [--plane <назва>]",
@@ -748,6 +884,12 @@ Forge (сховище артефактів робочої області, agentL
     pub const NOT_POSITIVE: Msg = Msg {
         en: "`{key}` in {path} must be at least 1",
         uk: "`{key}` у {path} має бути не менше 1",
+    };
+
+    /// `Error::NotAPort` (AGL-083, D20).
+    pub const NOT_A_PORT: Msg = Msg {
+        en: "`{key}` in {path} must be a port, 1 to 65535, not {value}",
+        uk: "`{key}` у {path} має бути портом від 1 до 65535, а не {value}",
     };
 
     /// `Error::UnsupportedLanguage`.
@@ -2912,6 +3054,9 @@ impl Error {
             Error::NotPositive { path, key } => {
                 tr!(lang, m::NOT_POSITIVE, path = path.display(), key = key)
             }
+            Error::NotAPort { path, key, value } => {
+                tr!(lang, m::NOT_A_PORT, path = path.display(), key = key, value = value)
+            }
             Error::UnsupportedLanguage { path, value } => {
                 tr!(
                     lang,
@@ -3081,6 +3226,15 @@ impl Error {
             Error::Transcribe { url, detail } => {
                 tr!(lang, m::TRANSCRIBE, url = url, detail = detail)
             }
+            Error::BridgeNotSet { path } => tr!(lang, m::BRIDGE_NOT_SET, path = path.display()),
+            Error::BridgeProgramMissing { path } => {
+                tr!(lang, m::BRIDGE_PROGRAM_MISSING, path = path.display())
+            }
+            Error::BridgeNotListening { unit } => tr!(lang, m::BRIDGE_NOT_LISTENING, unit = unit),
+            Error::BridgeDeviceName { name } => tr!(lang, m::BRIDGE_DEVICE_NAME, name = name),
+            Error::BridgeDeviceExists { name } => tr!(lang, m::BRIDGE_DEVICE_EXISTS, name = name),
+            Error::BridgeDeviceUnknown { name } => tr!(lang, m::BRIDGE_DEVICE_UNKNOWN, name = name),
+            Error::Bridge { detail } => tr!(lang, m::BRIDGE_FAILED, detail = detail),
             Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
             Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
             Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),

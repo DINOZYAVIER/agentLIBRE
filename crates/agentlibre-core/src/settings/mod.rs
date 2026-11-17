@@ -94,6 +94,9 @@ pub struct UserFile {
     /// `models`: the weights folders after agl's own (AGL-039, D24b),
     /// absolute paths, looked in in order.
     pub models: Vec<PathBuf>,
+    /// `bridge`: where the bridge of the iPhone and the watch listens
+    /// (AGL-083, D20).
+    pub bridge: BridgeFile,
 }
 
 /// The project's settings, `settings.nix` of its store (AGL-039, D11):
@@ -200,7 +203,7 @@ impl UserFile {
         };
         file.check_keys(&[
             "function", "language", "server", "whisper", "search", "colors", "repl", "forge",
-            "models", "about",
+            "models", "about", "bridge",
         ])?;
         let function = file.string("function")?;
         let language = file
@@ -237,6 +240,7 @@ impl UserFile {
         };
         let repl = ReplFile::parse(file.section("repl")?, path)?;
         let about = AboutFile::parse(file.section("about")?, path)?;
+        let bridge = BridgeFile::parse(file.section("bridge")?, path)?;
         let forge = match file.section("forge")? {
             None => ForgeFile::default(),
             Some(mut forge) => {
@@ -270,6 +274,7 @@ impl UserFile {
             forge,
             about,
             models,
+            bridge,
         })
     }
 }
@@ -303,6 +308,41 @@ impl AboutFile {
         Ok(AboutFile {
             enabled: about.bool("enabled")?,
             source,
+        })
+    }
+}
+
+/// `bridge` of the user's settings (AGL-083, D20): the address of this
+/// computer that WireGuard reaches, and the port. `agl bridge` needs both;
+/// neither has a default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BridgeFile {
+    pub address: Option<String>,
+    pub port: Option<u16>,
+}
+
+impl BridgeFile {
+    fn parse(section: Option<Section>, path: &Path) -> Result<BridgeFile, Error> {
+        let Some(mut bridge) = section else {
+            return Ok(BridgeFile::default());
+        };
+        bridge.check_keys(&["address", "port"])?;
+        let port = bridge
+            .integer("port")?
+            .map(|port| {
+                u16::try_from(port)
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| Error::NotAPort {
+                        path: path.into(),
+                        key: bridge.key("port"),
+                        value: port,
+                    })
+            })
+            .transpose()?;
+        Ok(BridgeFile {
+            address: bridge.string("address")?,
+            port,
         })
     }
 }

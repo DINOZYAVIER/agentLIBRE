@@ -53,6 +53,8 @@ pub enum Error {
     },
     /// A limit of `repl` below 1 (D130).
     NotPositive { path: PathBuf, key: String },
+    /// `bridge.port` is not 1 to 65535 (AGL-083, D20).
+    NotAPort { path: PathBuf, key: String, value: i64 },
     /// `language` names a language without translations.
     UnsupportedLanguage { path: PathBuf, value: String },
     /// `server.llama.url` or `server.strata.url` is not an `http://` or
@@ -243,6 +245,20 @@ pub enum Error {
     /// The `serve/server.py` in the `cwd` of the Strata config is missing
     /// (AGL-033, D2; AGL-038, D3).
     StrataServerPy { path: PathBuf },
+    /// `agl bridge` and `bridge` lacks `address` or `port` (AGL-083, D20).
+    BridgeNotSet { path: PathBuf },
+    /// No `agl-bridge` beside `agl` (AGL-083, D18).
+    BridgeProgramMissing { path: PathBuf },
+    /// The bridge's unit did not come to listen.
+    BridgeNotListening { unit: String },
+    /// A device's name the bridge does not take (AGL-083, D10).
+    BridgeDeviceName { name: String },
+    /// `agl bridge pair` of a device paired already.
+    BridgeDeviceExists { name: String },
+    /// `agl bridge revoke` of a device not paired.
+    BridgeDeviceUnknown { name: String },
+    /// The bridge's directory could not be read or written.
+    Bridge { detail: String },
     /// An audio needs whisper and `whisper` lacks `url` or `model`
     /// (AGL-014, D22).
     WhisperNotSet {

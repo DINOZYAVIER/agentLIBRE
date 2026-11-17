@@ -486,6 +486,28 @@ fn the_repl_shows_the_splash_unless_told_not_to() {
 }
 
 #[test]
+fn the_bridge_is_read_and_its_port_must_be_one() {
+    // AGL-083, D20.
+    let bridge = user_of(r#"bridge = { address = "10.0.0.5"; port = 18443; };"#)
+        .unwrap()
+        .bridge;
+    assert_eq!(bridge.address.as_deref(), Some("10.0.0.5"));
+    assert_eq!(bridge.port, Some(18443));
+    assert_eq!(user_of("").unwrap().bridge, BridgeFile::default());
+    for port in ["0", "-1", "65536"] {
+        assert!(
+            matches!(
+                user_of(&format!("bridge.port = {port};")),
+                Err(Error::NotAPort { key, .. }) if key == "bridge.port"
+            ),
+            "{port}"
+        );
+    }
+    assert!(user_of(r#"bridge.port = "18443";"#).is_err());
+    assert!(user_of("bridge.nope = true;").is_err());
+}
+
+#[test]
 fn about_is_read_and_its_source_must_be_absolute() {
     // AGL-048.
     let about = user_of(r#"about = { enabled = false; source = "/r/agentLIBRE"; };"#)
