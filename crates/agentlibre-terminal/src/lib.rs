@@ -13,7 +13,6 @@ pub(crate) use agentlibre_core::{
     agent,
     attach,
     backend,
-    control,
     engine,
     error,
     forge,

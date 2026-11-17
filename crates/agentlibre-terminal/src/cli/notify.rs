@@ -1,17 +1,11 @@
 //! `agl notify` (AGL-074, D1, D2, D5, D6, D8): the running sessions told on
 //! the desktop, and answered from it.
 //!
-//! The bridge finds the sessions by their control sockets
-//! (`$XDG_RUNTIME_DIR/agentLIBRE/sessions/<id>.sock`, [`crate::control`]):
-//! for each, `hello`, then its session file followed from its end. What
-//! goes in comes back through the socket: an answer typed in a card is
-//! `say`, its Stop is `stop`.
-//!
-//! The session file is the bridges' interface (D7). The records read here:
-//! `user` (a turn starts), `transition` (its phase: `to` and, for
-//! `Running`, `tool`), `call` (`tool`, `args`), `answer` (`text`), `stop`
-//! (`reason`) and `cut_off`. A
-//! change of their form is named in the spec of the change.
+//! The bridge is a client of the daemon (AGL-076, D3): it subscribes to
+//! every session and draws what each does from the protocol, not from the
+//! session files; what goes in goes back through the daemon: an answer typed
+//! in a card is `say`, its Stop is `stop`. With no daemon running it waits
+//! for one, and its cards close when the daemon goes.
 //!
 //! The cards (D5, D8), over `org.freedesktop.Notifications`, the app name
 //! `agentLIBRE`, the body inert (KS-034's hint), the title the session's
@@ -20,29 +14,32 @@
 //!   (thinking, a tool and its argument, writing the answer, compacting),
 //!   with Stop, no expiry; at the turn's end the answer's beginning, the
 //!   field to answer in (KS-034's protocol) and the buttons Terminal (the
-//!   window that runs that agl, focused through Hyprland) and Session (its
-//!   file, by `xdg-open`);
+//!   window of the client that holds the session, focused through Hyprland)
+//!   and Session (its file, by `xdg-open`);
 //! - a stop other than the human's, a critical card of its own with the
 //!   field, Continue (a message to go on), Terminal and Session (D10); a
 //!   cut-off, a critical card with no buttons. A tool that failed or timed
 //!   out makes no card: the turn goes on and the agent sees it (D11).
 
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use agentlibre_core::client::Client;
+use agentlibre_proto::{
+    Event, Phase, PhaseEvent, Reply, Report, Request, Sent, SessionInfo, StopReason,
+};
 use serde_json::Value as Json;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type as MessageType;
 use zbus::zvariant::Value;
 
-use crate::control::{self, Hello, Reply, Request};
 use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::paths::Paths;
@@ -62,42 +59,92 @@ const STOP: &str = "stop";
 const TERMINAL: &str = "terminal";
 const SESSION: &str = "session";
 const CONTINUE: &str = "continue";
-/// How often the sockets and the files are looked at.
+/// How often the bridge wakes with nothing received.
 const TICK: Duration = Duration::from_millis(250);
+/// How often the daemon is asked for its sessions (the closed ones' cards
+/// go), and how often a daemon that does not answer is tried again.
+const LOOK: Duration = Duration::from_secs(1);
+const RETRY: Duration = Duration::from_secs(2);
 /// The most of an answer an end card shows.
 const ANSWER_LINES: usize = 4;
 const ANSWER_CHARS: usize = 300;
 /// The most of a tool's argument the live card shows.
 const ARGUMENT_CHARS: usize = 60;
 
+/// What the bridge waits on: the notification server and the daemon.
+enum Input {
+    Signal(Signal),
+    Reply(Box<Reply>),
+    /// The daemon's connection ended.
+    Gone,
+}
+
 /// Runs the bridge until the session bus goes.
 pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
-    let runtime = paths.runtime.clone().ok_or(Error::NotifyNoRuntime)?;
+    if paths.runtime.is_none() {
+        return Err(Error::DaemonNoRuntime);
+    }
     let failed = |error: zbus::Error| Error::Notify {
         detail: error.to_string(),
     };
     let bus = Connection::session().map_err(failed)?;
-    let (signals, received) = mpsc::channel();
-    listen(&bus, NAME, "ActionInvoked", signals.clone(), Signal::Action).map_err(failed)?;
-    listen(&bus, KATARSA, "Replied", signals, Signal::Replied).map_err(failed)?;
+    let (inputs, received) = mpsc::channel();
+    listen(&bus, NAME, "ActionInvoked", inputs.clone(), Signal::Action).map_err(failed)?;
+    listen(&bus, KATARSA, "Replied", inputs.clone(), Signal::Replied).map_err(failed)?;
     let mut desk = Bus { bus };
-    let mut bridge = Bridge::new(
-        paths.sessions(),
-        control::sockets_dir(&runtime),
-        lang,
-        hyprland(),
-    );
+    let mut bridge = Bridge::new(paths.sessions(), lang, hyprland());
+    let mut client: Option<Arc<Client>> = None;
+    let mut tried = None::<Instant>;
+    let mut looked = Instant::now();
     loop {
-        bridge.scan(&mut desk);
-        bridge.follow(&mut desk);
+        if client.is_none() && tried.is_none_or(|at| at.elapsed() >= RETRY) {
+            tried = Some(Instant::now());
+            // The daemon is not started from here: no session, nothing to tell.
+            if let Ok(connected) = Client::connect(paths, false, lang, false) {
+                let connected = Arc::new(connected);
+                let reader = Arc::clone(&connected);
+                let to = inputs.clone();
+                thread::spawn(move || {
+                    while let Ok(reply) = reader.next() {
+                        if to.send(Input::Reply(Box::new(reply))).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = to.send(Input::Gone);
+                });
+                let _ = connected.send(&Request::Subscribe { session: None });
+                let _ = connected.send(&Request::Sessions);
+                client = Some(connected);
+            }
+        }
         match received.recv_timeout(TICK) {
-            Ok(signal) => bridge.signal(signal, &mut desk),
+            Ok(Input::Signal(signal)) => {
+                if let Some(client) = &client {
+                    bridge.signal(signal, &mut desk, &mut Daemon(client));
+                }
+            }
+            Ok(Input::Reply(reply)) => {
+                if let Some(client) = &client {
+                    bridge.reply(*reply, &mut desk, &mut Daemon(client));
+                }
+            }
+            Ok(Input::Gone) => {
+                bridge.lost(&mut desk);
+                client = None;
+                tried = Some(Instant::now());
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(Error::Notify {
                     detail: "the bus went".into(),
                 });
             }
+        }
+        if let Some(client) = &client
+            && looked.elapsed() >= LOOK
+        {
+            looked = Instant::now();
+            let _ = client.send(&Request::Sessions);
         }
     }
 }
@@ -112,12 +159,12 @@ enum Signal {
 }
 
 /// Sends `interface`'s signal `member`, made into a [`Signal`] by `make`,
-/// to `signals`, from a thread of its own.
+/// to `inputs`, from a thread of its own.
 fn listen(
     bus: &Connection,
     interface: &'static str,
     member: &'static str,
-    signals: Sender<Signal>,
+    inputs: Sender<Input>,
     make: fn(u32, String) -> Signal,
 ) -> zbus::Result<()> {
     let rule = zbus::MatchRule::builder()
@@ -129,13 +176,29 @@ fn listen(
     thread::spawn(move || {
         for message in messages.flatten() {
             if let Ok((id, text)) = message.body().deserialize::<(u32, String)>()
-                && signals.send(make(id, text)).is_err()
+                && inputs.send(Input::Signal(make(id, text))).is_err()
             {
                 return;
             }
         }
     });
     Ok(())
+}
+
+/// The daemon, as the bridge asks it.
+trait Agl {
+    fn send(&mut self, request: Request);
+}
+
+/// The daemon's connection.
+struct Daemon<'a>(&'a Client);
+
+impl Agl for Daemon<'_> {
+    fn send(&mut self, request: Request) {
+        if let Err(error) = self.0.send(&request) {
+            eprintln!("agl notify: {error:?}");
+        }
+    }
 }
 
 /// A card to show.
@@ -205,7 +268,7 @@ impl Desk for Bus {
     }
 }
 
-/// What a record of a session file does to its cards.
+/// What a session's report does to its cards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Act {
     /// The live card shows what the turn does now.
@@ -219,9 +282,11 @@ enum Act {
     Critical(String),
     /// The turn ended without an answer: the live card goes.
     Close,
+    /// The plane is idle again: a live card left goes, an end card stays.
+    Idle,
 }
 
-/// What the bridge keeps of a session file's records between them.
+/// What the bridge keeps of a session's reports between them.
 #[derive(Default)]
 struct Records {
     /// The last call's tool and its argument in short.
@@ -229,58 +294,89 @@ struct Records {
 }
 
 impl Records {
-    /// What the record `json` does (D5).
-    fn read(&mut self, json: &Json, lang: Lang) -> Vec<Act> {
-        let text = |key: &str| json[key].as_str().unwrap_or_default();
-        match text("type") {
-            "user" => vec![Act::Live(tr!(lang, m::NOTIFY_THINKING).to_string())],
-            "transition" => match text("to") {
-                "Writing" => vec![Act::Live(tr!(lang, m::NOTIFY_WRITING).to_string())],
-                "Compacting" => vec![Act::Live(tr!(lang, m::NOTIFY_COMPACTING).to_string())],
-                "Running" => {
-                    let tool = text("tool");
-                    let shown = match &self.last_call {
-                        Some((called, argument)) if called == tool && !argument.is_empty() => {
-                            format!("{tool} {argument}")
-                        }
-                        _ => tool.to_owned(),
-                    };
-                    vec![Act::Live(shown)]
-                }
-                "Ready" if text("event") == "failed" => vec![Act::Close],
-                // The answer, the stop and the cut-off have records of their
-                // own; idle is no turn.
-                "Ready" => Vec::new(),
-                _ => vec![Act::Live(tr!(lang, m::NOTIFY_THINKING).to_string())],
-            },
-            "call" => {
-                self.last_call = Some((text("tool").to_owned(), argument(&json["args"])));
+    /// What `sent` does (D5).
+    fn read(&mut self, sent: &Sent, lang: Lang) -> Vec<Act> {
+        let thinking = || Act::Live(tr!(lang, m::NOTIFY_THINKING).to_string());
+        match sent {
+            Sent::Report(Report::Event(Event::Call { call, .. })) => {
+                self.last_call = Some((call.name.clone(), argument(&call.args)));
                 Vec::new()
             }
-            "answer" => vec![Act::End(text("text").to_owned())],
-            "stop" => match text("reason") {
-                "interrupted" => vec![Act::Close],
-                reason => vec![
-                    Act::Close,
-                    Act::Stopped(tr!(lang, m::NOTIFY_STOPPED, reason = reason)),
-                ],
-            },
-            "cut_off" => vec![Act::Critical(tr!(lang, m::NOTIFY_CUT_OFF).to_string())],
+            Sent::Report(Report::Event(Event::Answer(text))) => vec![Act::End(text.clone())],
+            Sent::Report(Report::Event(Event::CutOff(_))) => {
+                vec![Act::Critical(tr!(lang, m::NOTIFY_CUT_OFF).to_string())]
+            }
+            Sent::Report(Report::Transition(transition)) => {
+                match (&transition.to, &transition.event) {
+                    (
+                        Phase::Ready,
+                        PhaseEvent::Failed | PhaseEvent::Stop(StopReason::Interrupted),
+                    ) => {
+                        vec![Act::Close]
+                    }
+                    (Phase::Ready, PhaseEvent::Stop(reason)) => vec![
+                        Act::Close,
+                        Act::Stopped(tr!(lang, m::NOTIFY_STOPPED, reason = reason_name(*reason))),
+                    ],
+                    (Phase::Ready, _) => vec![Act::Idle],
+                    // The server's start before a session's first turn is no turn.
+                    (Phase::StartingServer, _) => Vec::new(),
+                    (Phase::Writing, _) => {
+                        vec![Act::Live(tr!(lang, m::NOTIFY_WRITING).to_string())]
+                    }
+                    (Phase::Compacting, _) => {
+                        vec![Act::Live(tr!(lang, m::NOTIFY_COMPACTING).to_string())]
+                    }
+                    (Phase::Running(tool), _) => {
+                        let shown = match &self.last_call {
+                            Some((called, argument)) if called == tool && !argument.is_empty() => {
+                                format!("{tool} {argument}")
+                            }
+                            _ => tool.clone(),
+                        };
+                        vec![Act::Live(shown)]
+                    }
+                    _ => vec![thinking()],
+                }
+            }
             _ => Vec::new(),
         }
     }
 }
 
-/// A call's argument in short: its first string value's first line, or the
+/// A stop's reason as the session's file names it (`step_limit`…).
+fn reason_name(reason: StopReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|json| json.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// A call's argument in short: its first text value's first line, or the
 /// arguments as JSON, at most [`ARGUMENT_CHARS`].
-fn argument(args: &Json) -> String {
+fn argument(args: &[(String, agentlibre_proto::Value)]) -> String {
+    use agentlibre_proto::Value as Arg;
     let first = args
-        .as_object()
-        .and_then(|object| object.values().find_map(Json::as_str))
-        .map(|text| text.lines().next().unwrap_or_default().trim().to_owned())
-        .unwrap_or_else(|| match args {
-            Json::Null => String::new(),
-            other => other.to_string(),
+        .iter()
+        .find_map(|(_, value)| match value {
+            Arg::Text(text) => Some(text.lines().next().unwrap_or_default().trim().to_owned()),
+            Arg::Int(_) => None,
+        })
+        .unwrap_or_else(|| {
+            if args.is_empty() {
+                return String::new();
+            }
+            let object: serde_json::Map<String, Json> = args
+                .iter()
+                .map(|(name, value)| {
+                    let value = match value {
+                        Arg::Text(text) => Json::from(text.as_str()),
+                        Arg::Int(number) => Json::from(*number),
+                    };
+                    (name.clone(), value)
+                })
+                .collect();
+            Json::Object(object).to_string()
         });
     cut(&first, ARGUMENT_CHARS)
 }
@@ -315,13 +411,13 @@ fn beginning(answer: &str) -> String {
 }
 
 /// A session followed.
+#[derive(Default)]
 struct Followed {
-    socket: PathBuf,
-    file: PathBuf,
-    hello: Hello,
-    /// How far the file is read, and what of a line is read so far.
-    offset: u64,
-    partial: Vec<u8>,
+    name: Option<String>,
+    /// The process of a client that holds it: its window is the Terminal.
+    pid: Option<u32>,
+    /// Whether a turn runs: an answer typed now waits for its end (D4).
+    busy: bool,
     records: Records,
     /// The id of its card; 0 before one shows.
     card: u32,
@@ -333,121 +429,102 @@ struct Followed {
     stopped: u32,
 }
 
-impl Followed {
-    fn title(&self) -> String {
-        self.hello
-            .name
-            .clone()
-            .unwrap_or_else(|| self.hello.session.clone())
-    }
-}
-
 /// The bridge: the sessions it follows and what it tells of them.
 struct Bridge {
     sessions: PathBuf,
-    sockets: PathBuf,
     lang: Lang,
     /// Hyprland's socket, when it runs: the Terminal button needs it.
     hyprland: Option<PathBuf>,
-    followed: HashMap<PathBuf, Followed>,
+    /// By the session's id.
+    followed: HashMap<String, Followed>,
 }
 
 impl Bridge {
-    fn new(sessions: PathBuf, sockets: PathBuf, lang: Lang, hyprland: Option<PathBuf>) -> Bridge {
+    fn new(sessions: PathBuf, lang: Lang, hyprland: Option<PathBuf>) -> Bridge {
         Bridge {
             sessions,
-            sockets,
             lang,
             hyprland,
             followed: HashMap::new(),
         }
     }
 
-    /// Follows the sessions whose sockets came and lets go of those whose
-    /// sockets went, their cards closed.
-    fn scan(&mut self, desk: &mut dyn Desk) {
-        let found: HashSet<PathBuf> = std::fs::read_dir(&self.sockets)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| control::session_of(path).is_some())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let gone: Vec<PathBuf> = self
+    /// What the daemon sent.
+    fn reply(&mut self, reply: Reply, desk: &mut dyn Desk, agl: &mut dyn Agl) {
+        match reply {
+            Reply::Sessions { sessions } => self.sessions(&sessions, desk),
+            // A line before a session is made has no session.
+            Reply::Sent { session, .. } if session.is_empty() => {}
+            Reply::Sent { session, sent } => {
+                if !self.followed.contains_key(&session) {
+                    self.followed.insert(session.clone(), Followed::default());
+                    // Its name and its client's process.
+                    agl.send(Request::Sessions);
+                }
+                let followed = self.followed.get_mut(&session).expect("inserted above");
+                let acts = followed.records.read(&sent, self.lang);
+                for act in acts {
+                    self.act(&session, act, desk);
+                }
+            }
+            Reply::Done { session, done, .. } => {
+                let Some(mut followed) = self.followed.remove(&session) else {
+                    return;
+                };
+                followed.busy = false;
+                followed.name = done.session.name.clone();
+                // `/new`: the cards follow the new session.
+                self.followed.insert(done.session.id, followed);
+            }
+            Reply::Refused { error } => eprintln!("agl notify: {error}"),
+            _ => {}
+        }
+    }
+
+    /// The daemon's sessions: the names and processes learnt, the cards of
+    /// those it no longer holds closed.
+    fn sessions(&mut self, sessions: &[SessionInfo], desk: &mut dyn Desk) {
+        let gone: Vec<String> = self
             .followed
             .keys()
-            .filter(|path| !found.contains(*path))
+            .filter(|id| !sessions.iter().any(|session| &session.id == *id))
             .cloned()
             .collect();
-        for path in gone {
-            if let Some(followed) = self.followed.remove(&path)
+        for id in gone {
+            if let Some(followed) = self.followed.remove(&id)
                 && followed.card != 0
             {
                 desk.close(followed.card);
             }
         }
-        for socket in found {
-            if self.followed.contains_key(&socket) {
-                continue;
-            }
-            // One that does not answer is an agl that ended; it is tried
-            // again at the next scan.
-            let Ok(Reply::Hello(hello)) = control::ask(&socket, &Request::Hello) else {
-                continue;
-            };
-            let file = self.sessions.join(format!("{}.jsonl", hello.session));
-            let offset = std::fs::metadata(&file).map_or(0, |meta| meta.len());
-            self.followed.insert(
-                socket.clone(),
-                Followed {
-                    socket,
-                    file,
-                    hello,
-                    offset,
-                    partial: Vec::new(),
-                    records: Records::default(),
-                    card: 0,
-                    shown: None,
-                    answer: None,
-                    stopped: 0,
-                },
-            );
+        for session in sessions {
+            let followed = self.followed.entry(session.id.clone()).or_default();
+            followed.name = session.name.clone();
+            followed.pid = session.pids.first().copied();
+            followed.busy = session.busy;
         }
     }
 
-    /// Reads what each followed file got since, and tells it.
-    fn follow(&mut self, desk: &mut dyn Desk) {
-        let sockets: Vec<PathBuf> = self.followed.keys().cloned().collect();
-        for socket in sockets {
-            let lines = {
-                let followed = self.followed.get_mut(&socket).expect("listed above");
-                read_lines(followed)
-            };
-            for line in lines {
-                let Ok(json) = serde_json::from_str::<Json>(&line) else {
-                    continue;
-                };
-                let followed = self.followed.get_mut(&socket).expect("listed above");
-                let acts = followed.records.read(&json, self.lang);
-                for act in acts {
-                    self.act(&socket, act, desk);
-                }
+    /// The daemon went: every card closed.
+    fn lost(&mut self, desk: &mut dyn Desk) {
+        for (_, followed) in self.followed.drain() {
+            if followed.card != 0 {
+                desk.close(followed.card);
             }
         }
     }
 
-    /// Does `act` for the session of `socket`.
-    fn act(&mut self, socket: &Path, act: Act, desk: &mut dyn Desk) {
+    /// Does `act` for the session `id`.
+    fn act(&mut self, id: &str, act: Act, desk: &mut dyn Desk) {
         let lang = self.lang;
         let hyprland = self.hyprland.is_some();
-        let Some(followed) = self.followed.get_mut(socket) else {
+        let Some(followed) = self.followed.get_mut(id) else {
             return;
         };
-        let title = followed.title();
+        let title = followed.name.clone().unwrap_or_else(|| id.to_owned());
         let card = match act {
             Act::Live(doing) => {
+                followed.busy = true;
                 followed.answer = None;
                 Card {
                     replaces: followed.card,
@@ -490,8 +567,12 @@ impl Bridge {
                 });
                 return;
             }
-            Act::Close => {
-                if followed.card != 0 {
+            Act::Close | Act::Idle => {
+                followed.busy = false;
+                if act == Act::Idle && followed.answer.is_some() {
+                    return;
+                }
+                if followed.card != 0 && followed.shown.is_some() {
                     desk.close(followed.card);
                 }
                 followed.shown = None;
@@ -511,44 +592,48 @@ impl Bridge {
     }
 
     /// What a card's button or field asks.
-    fn signal(&mut self, signal: Signal, desk: &mut dyn Desk) {
+    fn signal(&mut self, signal: Signal, desk: &mut dyn Desk, agl: &mut dyn Agl) {
         let id = match &signal {
             Signal::Action(id, _) | Signal::Replied(id, _) => *id,
         };
-        let Some(socket) = self
+        let Some(session) = self
             .followed
             .iter()
             .find(|(_, followed)| id != 0 && (followed.card == id || followed.stopped == id))
-            .map(|(socket, _)| socket.clone())
+            .map(|(session, _)| session.clone())
         else {
             return;
         };
         let lang = self.lang;
+        let file = self.sessions.join(format!("{session}.jsonl"));
         let hyprland = self.hyprland.clone();
-        let followed = self.followed.get_mut(&socket).expect("found above");
+        let followed = self.followed.get_mut(&session).expect("found above");
         let on_stop = followed.stopped == id && followed.card != id;
+        let say = |message: String| Request::Say {
+            session: session.clone(),
+            message,
+            attached: Vec::new(),
+            reasoning: None,
+        };
         match signal {
-            Signal::Action(_, key) if key == STOP => {
-                let _ = control::ask(&followed.socket, &Request::Stop);
-            }
+            Signal::Action(_, key) if key == STOP => agl.send(Request::Stop {
+                session: session.clone(),
+            }),
             Signal::Action(_, key) if key == TERMINAL => {
-                if let Some(hyprland) = &hyprland {
-                    focus_terminal(hyprland, followed.hello.pid);
+                if let (Some(hyprland), Some(pid)) = (&hyprland, followed.pid) {
+                    focus_terminal(hyprland, pid);
                 }
             }
-            Signal::Action(_, key) if key == SESSION => open(&followed.file),
+            Signal::Action(_, key) if key == SESSION => open(&file),
             Signal::Action(_, key) if key == CONTINUE => {
-                let text = tr!(lang, m::NOTIFY_CONTINUE_TEXT).to_string();
-                let _ = control::ask(&followed.socket, &Request::Say(text));
+                agl.send(say(tr!(lang, m::NOTIFY_CONTINUE_TEXT).to_string()));
             }
             Signal::Action(..) => {}
             Signal::Replied(_, text) => {
-                let said = control::ask(&followed.socket, &Request::Say(text.clone()));
+                agl.send(say(text.clone()));
                 // While a turn runs it waits, and its card says so (D4); an
                 // idle session starts the turn, whose live card follows.
-                if let Ok(Reply::Said { queued: true }) = said
-                    && !on_stop
-                {
+                if followed.busy && !on_stop {
                     let answer = followed.answer.clone().unwrap_or_default();
                     let body = format!(
                         "{}\n{}",
@@ -557,7 +642,7 @@ impl Bridge {
                     );
                     let card = Card {
                         replaces: followed.card,
-                        summary: followed.title(),
+                        summary: followed.name.clone().unwrap_or_else(|| session.clone()),
                         body: body.trim_start().to_owned(),
                         actions: Vec::new(),
                         critical: false,
@@ -585,35 +670,6 @@ fn end_card(replaces: u32, summary: String, body: &str, lang: Lang, hyprland: bo
         actions,
         critical: false,
     }
-}
-
-/// The complete lines appended to `followed`'s file since it was last read.
-fn read_lines(followed: &mut Followed) -> Vec<String> {
-    let Ok(mut file) = File::open(&followed.file) else {
-        return Vec::new();
-    };
-    let length = file.metadata().map_or(0, |meta| meta.len());
-    if length < followed.offset {
-        // Not appended to: read again from its start.
-        followed.offset = 0;
-        followed.partial.clear();
-    }
-    let mut bytes = Vec::new();
-    if file.seek(SeekFrom::Start(followed.offset)).is_err() || file.read_to_end(&mut bytes).is_err()
-    {
-        return Vec::new();
-    }
-    followed.offset += bytes.len() as u64;
-    followed.partial.extend_from_slice(&bytes);
-    let Some(last) = followed.partial.iter().rposition(|byte| *byte == b'\n') else {
-        return Vec::new();
-    };
-    let complete: Vec<u8> = followed.partial.drain(..=last).collect();
-    String::from_utf8_lossy(&complete)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 /// Hyprland's command socket, when it runs.
@@ -697,98 +753,113 @@ fn open(file: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixListener;
-
-    use serde_json::json;
+    use agentlibre_proto::{Done, SessionView, ToolCall, Transition, Value as Arg};
 
     use super::*;
 
     const LANG: Lang = Lang::En;
 
-    fn acts(records: &mut Records, json: Json) -> Vec<Act> {
-        records.read(&json, LANG)
+    fn to(to: Phase, event: PhaseEvent) -> Sent {
+        Sent::Report(Report::Transition(Transition {
+            from: Phase::Ready,
+            to,
+            event,
+            micros: 0,
+            violation: false,
+        }))
+    }
+
+    fn event(event: Event) -> Sent {
+        Sent::Report(Report::Event(event))
+    }
+
+    fn call(tool: &str, command: &str) -> Sent {
+        event(Event::Call {
+            text: None,
+            call: ToolCall {
+                id: "c1".into(),
+                name: tool.into(),
+                args: vec![("command".into(), Arg::Text(command.into()))],
+            },
+        })
     }
 
     #[test]
-    fn records_tell_what_the_turn_does() {
+    fn reports_tell_what_the_turn_does() {
         let mut records = Records::default();
+        let mut acts = |sent: Sent| records.read(&sent, LANG);
         let live = |text: &str| vec![Act::Live(text.into())];
         assert_eq!(
-            acts(&mut records, json!({"type": "user", "text": "hi"})),
+            acts(to(Phase::Prefill, PhaseEvent::StepStart)),
             live("thinking")
         );
-        let to = |to: &str| json!({"type": "transition", "to": to, "event": "x"});
-        assert_eq!(acts(&mut records, to("Prefill")), live("thinking"));
         assert_eq!(
-            acts(&mut records, to("Writing")),
+            acts(to(Phase::Writing, PhaseEvent::FirstText)),
             live("writing the answer")
         );
-        assert_eq!(acts(&mut records, to("Compacting")), live("compacting"));
-        let call = json!({"type": "call", "id": "c1", "tool": "bash",
-                          "args": {"command": "cargo test\n--quiet"}});
-        assert!(acts(&mut records, call).is_empty());
-        let running = json!({"type": "transition", "to": "Running", "tool": "bash"});
-        assert_eq!(acts(&mut records, running), live("bash cargo test"));
+        assert_eq!(
+            acts(to(Phase::Compacting, PhaseEvent::CompactStart)),
+            live("compacting")
+        );
+        assert!(acts(to(Phase::StartingServer, PhaseEvent::ServerStart)).is_empty());
+        assert!(acts(call("bash", "cargo test\n--quiet")).is_empty());
+        let running = to(
+            Phase::Running("bash".into()),
+            PhaseEvent::ToolStart {
+                tool: "bash".into(),
+            },
+        );
+        assert_eq!(acts(running), live("bash cargo test"));
+        // A failed tool makes no card: the turn goes on (D11).
         assert!(
-            acts(
-                &mut records,
-                json!({"type": "result", "id": "c1", "outcome": "ok"})
-            )
+            acts(event(Event::Result {
+                id: "c1".into(),
+                outcome: agentlibre_proto::Outcome::Fail,
+                content: String::new(),
+            }))
             .is_empty()
         );
-        // A failed tool makes no card: the turn goes on (D11).
-        for outcome in ["fail", "timeout"] {
-            let result = json!({"type": "result", "id": "c1", "outcome": outcome});
-            assert!(acts(&mut records, result).is_empty(), "{outcome}");
-        }
         assert_eq!(
-            acts(&mut records, json!({"type": "answer", "text": "done"})),
+            acts(event(Event::Answer("done".into()))),
             [Act::End("done".into())]
         );
-        assert!(
-            acts(
-                &mut records,
-                json!({"type": "transition", "to": "Ready", "event": "answer"})
-            )
-            .is_empty()
-        );
+        assert_eq!(acts(to(Phase::Ready, PhaseEvent::Answer)), [Act::Idle]);
+        assert_eq!(acts(to(Phase::Ready, PhaseEvent::Idle)), [Act::Idle]);
+        assert_eq!(acts(to(Phase::Ready, PhaseEvent::Failed)), [Act::Close]);
         assert_eq!(
-            acts(
-                &mut records,
-                json!({"type": "transition", "to": "Ready", "event": "failed"})
-            ),
+            acts(to(Phase::Ready, PhaseEvent::Stop(StopReason::Interrupted))),
             [Act::Close]
         );
         assert_eq!(
-            acts(
-                &mut records,
-                json!({"type": "stop", "reason": "interrupted"})
-            ),
-            [Act::Close]
-        );
-        assert_eq!(
-            acts(
-                &mut records,
-                json!({"type": "stop", "reason": "step_limit"})
-            ),
+            acts(to(Phase::Ready, PhaseEvent::Stop(StopReason::StepLimit))),
             [Act::Close, Act::Stopped("stopped: step_limit".into())]
         );
         assert_eq!(
-            acts(&mut records, json!({"type": "cut_off", "call": false})),
+            acts(event(Event::CutOff(agentlibre_proto::CutOff {
+                limit: 1,
+                thinking: None,
+                discarded: 0,
+                call: false,
+            }))),
             [Act::Critical(
                 "a generation was cut off at its token budget".into()
             )]
         );
-        assert!(acts(&mut records, json!({"type": "prefill"})).is_empty());
+        assert!(acts(Sent::Over).is_empty());
     }
 
     #[test]
     fn arguments_and_answers_are_cut_short() {
-        assert_eq!(argument(&json!({"path": "/a/b"})), "/a/b");
-        assert_eq!(argument(&json!({"n": 3})), r#"{"n":3}"#);
-        assert_eq!(argument(&Json::Null), "");
         assert_eq!(
-            argument(&json!({"q": "x".repeat(100)})).chars().count(),
+            argument(&[("path".into(), Arg::Text("/a/b".into()))]),
+            "/a/b"
+        );
+        assert_eq!(argument(&[("n".into(), Arg::Int(3))]), r#"{"n":3}"#);
+        assert_eq!(argument(&[]), "");
+        assert_eq!(
+            argument(&[("q".into(), Arg::Text("x".repeat(100)))])
+                .chars()
+                .count(),
             ARGUMENT_CHARS
         );
         assert_eq!(beginning("one\n\ntwo"), "one\ntwo");
@@ -837,97 +908,66 @@ mod tests {
         }
     }
 
-    /// A fake session: its socket answering `hello` and recording the rest,
-    /// its file.
-    struct Session {
-        dir: PathBuf,
-        file: PathBuf,
-        asked: std::sync::Arc<std::sync::Mutex<Vec<Request>>>,
-        busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The requests the bridge sent.
+    #[derive(Default)]
+    struct Asked(Vec<Request>);
+
+    impl Agl for Asked {
+        fn send(&mut self, request: Request) {
+            self.0.push(request);
+        }
     }
 
-    impl Session {
-        fn new(name: &str) -> Session {
-            let dir =
-                std::env::temp_dir().join(format!("agl-notify-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(dir.join("sockets")).unwrap();
-            std::fs::create_dir_all(dir.join("sessions")).unwrap();
-            let file = dir.join("sessions/s1.jsonl");
-            std::fs::write(
-                &file,
-                "{\"type\":\"session\"}\n{\"type\":\"user\",\"text\":\"old\"}\n",
-            )
-            .unwrap();
-            let listener = UnixListener::bind(dir.join("sockets/s1.sock")).unwrap();
-            let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-            {
-                let asked = asked.clone();
-                let busy = busy.clone();
-                thread::spawn(move || {
-                    for stream in listener.incoming().flatten() {
-                        let _ = control::serve(stream, &mut |request| {
-                            asked.lock().unwrap().push(request.clone());
-                            match request {
-                                Request::Hello => Reply::Hello(Hello {
-                                    pid: 300,
-                                    session: "s1".into(),
-                                    name: Some("tea".into()),
-                                    busy: false,
-                                }),
-                                Request::Say(_) => Reply::Said {
-                                    queued: busy.load(std::sync::atomic::Ordering::SeqCst),
-                                },
-                                Request::Stop => Reply::Stopped,
-                            }
-                        });
-                    }
-                });
-            }
-            Session {
-                dir,
-                file,
-                asked,
+    fn sent(sent: Sent) -> Reply {
+        Reply::Sent {
+            session: "s1".into(),
+            sent,
+        }
+    }
+
+    fn said(text: &str) -> Request {
+        Request::Say {
+            session: "s1".into(),
+            message: text.into(),
+            attached: Vec::new(),
+            reasoning: None,
+        }
+    }
+
+    fn info(busy: bool) -> Reply {
+        Reply::Sessions {
+            sessions: vec![SessionInfo {
+                id: "s1".into(),
+                name: Some("tea".into()),
+                pids: vec![300],
                 busy,
-            }
-        }
-
-        fn append(&self, line: Json) {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&self.file)
-                .unwrap();
-            writeln!(file, "{line}").unwrap();
-        }
-
-        fn bridge(&self) -> Bridge {
-            Bridge::new(
-                self.dir.join("sessions"),
-                self.dir.join("sockets"),
-                LANG,
-                None,
-            )
+                ..Default::default()
+            }],
         }
     }
 
     #[test]
     fn a_session_has_one_card_replaced_in_place_and_is_answered_from_it() {
-        let session = Session::new("cards");
         let mut desk = Fake::default();
-        let mut bridge = session.bridge();
-        bridge.scan(&mut desk);
-        bridge.follow(&mut desk);
+        let mut agl = Asked::default();
+        let mut bridge = Bridge::new(PathBuf::from("/sessions"), LANG, None);
+        bridge.reply(info(false), &mut desk, &mut agl);
         assert!(
             desk.shown.is_empty(),
-            "followed from its end: the old turn is not told"
+            "a session that does nothing has no card"
         );
 
-        session.append(json!({"type": "user", "text": "go"}));
-        session.append(json!({"type": "transition", "to": "Prefill", "event": "step_start"}));
-        session.append(json!({"type": "transition", "to": "Thinking", "event": "first_thinking"}));
-        bridge.follow(&mut desk);
-        assert_eq!(desk.shown.len(), 1, "thinking once, not thrice");
+        bridge.reply(
+            sent(to(Phase::Prefill, PhaseEvent::StepStart)),
+            &mut desk,
+            &mut agl,
+        );
+        bridge.reply(
+            sent(to(Phase::Thinking, PhaseEvent::FirstThinking)),
+            &mut desk,
+            &mut agl,
+        );
+        assert_eq!(desk.shown.len(), 1, "thinking once, not twice");
         let live = &desk.shown[0];
         assert_eq!(
             (live.replaces, live.summary.as_str(), live.body.as_str()),
@@ -935,64 +975,59 @@ mod tests {
         );
         assert_eq!(live.actions, [("stop".to_owned(), "Stop".to_owned())]);
 
-        // A line written in two parts is read once whole.
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&session.file)
-            .unwrap();
-        write!(file, "{{\"type\":\"transition\",").unwrap();
-        bridge.follow(&mut desk);
-        writeln!(file, "\"to\":\"Writing\"}}").unwrap();
-        bridge.follow(&mut desk);
-        assert_eq!(desk.shown.len(), 2);
-        assert_eq!(
-            (desk.shown[1].replaces, desk.shown[1].body.as_str()),
-            (1, "writing the answer")
-        );
+        // An answer while a turn runs waits, and the card says so.
+        bridge.signal(Signal::Replied(1, "and then?".into()), &mut desk, &mut agl);
+        assert!(agl.0.contains(&said("and then?")));
+        assert_eq!(desk.shown.last().unwrap().body, "queued: and then?");
 
-        session.append(json!({"type": "answer", "text": "It is done."}));
-        bridge.follow(&mut desk);
+        bridge.reply(
+            sent(event(Event::Answer("It is done.".into()))),
+            &mut desk,
+            &mut agl,
+        );
+        bridge.reply(
+            sent(to(Phase::Ready, PhaseEvent::Answer)),
+            &mut desk,
+            &mut agl,
+        );
         let end = desk.shown.last().unwrap();
         assert_eq!((end.replaces, end.body.as_str()), (1, "It is done."));
         let keys: Vec<&str> = end.actions.iter().map(|(key, _)| key.as_str()).collect();
         assert_eq!(keys, [REPLY, SESSION], "no Terminal without Hyprland");
 
-        // An answer while a turn runs waits, and the card says so.
-        bridge.signal(Signal::Replied(1, "and then?".into()), &mut desk);
-        assert!(
-            session
-                .asked
-                .lock()
-                .unwrap()
-                .contains(&Request::Say("and then?".into()))
+        // The plane's idle report after the turn keeps the end card.
+        bridge.reply(
+            sent(to(Phase::Ready, PhaseEvent::Idle)),
+            &mut desk,
+            &mut agl,
         );
-        let queued = desk.shown.last().unwrap();
-        assert_eq!(queued.body, "It is done.\nqueued: and then?");
-        assert!(queued.actions.is_empty());
-        session
-            .busy
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        let shown = desk.shown.len();
-        bridge.signal(Signal::Replied(1, "go on".into()), &mut desk);
-        assert_eq!(
-            desk.shown.len(),
-            shown,
-            "an idle session's turn tells itself"
-        );
+        assert!(desk.closed.is_empty());
 
-        bridge.signal(Signal::Action(1, STOP.into()), &mut desk);
-        bridge.signal(Signal::Action(99, STOP.into()), &mut desk);
-        let stops = session
-            .asked
-            .lock()
-            .unwrap()
+        // An idle session's turn tells itself.
+        let shown = desk.shown.len();
+        bridge.signal(Signal::Replied(1, "go on".into()), &mut desk, &mut agl);
+        assert!(agl.0.contains(&said("go on")));
+        assert_eq!(desk.shown.len(), shown);
+
+        bridge.signal(Signal::Action(1, STOP.into()), &mut desk, &mut agl);
+        bridge.signal(Signal::Action(99, STOP.into()), &mut desk, &mut agl);
+        let stops = agl
+            .0
             .iter()
-            .filter(|r| **r == Request::Stop)
+            .filter(|r| matches!(r, Request::Stop { .. }))
             .count();
         assert_eq!(stops, 1, "a card of another program is not ours");
 
-        session.append(json!({"type": "stop", "reason": "server_error"}));
-        bridge.follow(&mut desk);
+        bridge.reply(
+            sent(to(Phase::Prefill, PhaseEvent::StepStart)),
+            &mut desk,
+            &mut agl,
+        );
+        bridge.reply(
+            sent(to(Phase::Ready, PhaseEvent::Stop(StopReason::ServerError))),
+            &mut desk,
+            &mut agl,
+        );
         assert_eq!(desk.closed, [1]);
         let critical = desk.shown.last().unwrap();
         assert!(critical.critical && critical.replaces == 0);
@@ -1004,28 +1039,79 @@ mod tests {
             .map(|(key, _)| key.as_str())
             .collect();
         assert_eq!(keys, [REPLY, CONTINUE, SESSION]);
-        let stop_card = bridge.followed.values().next().unwrap().stopped;
+        let stop_card = bridge.followed["s1"].stopped;
         assert_eq!(stop_card, 2);
         let shown = desk.shown.len();
-        bridge.signal(Signal::Action(stop_card, CONTINUE.into()), &mut desk);
+        bridge.signal(
+            Signal::Action(stop_card, CONTINUE.into()),
+            &mut desk,
+            &mut agl,
+        );
         bridge.signal(
             Signal::Replied(stop_card, "try another way".into()),
             &mut desk,
+            &mut agl,
         );
-        let asked = session.asked.lock().unwrap().clone();
-        assert!(asked.contains(&Request::Say("Continue.".into())));
-        assert!(asked.contains(&Request::Say("try another way".into())));
-        assert_eq!(
-            desk.shown.len(),
-            shown,
-            "a queued answer on it changes no card"
-        );
+        assert!(agl.0.contains(&said("Continue.")));
+        assert!(agl.0.contains(&said("try another way")));
+        assert_eq!(desk.shown.len(), shown, "an answer on it changes no card");
 
-        // The socket goes: the session is let go of, its card closed.
-        std::fs::remove_file(session.dir.join("sockets/s1.sock")).unwrap();
-        bridge.scan(&mut desk);
+        // `/new`: the cards follow the session's new id.
+        bridge.reply(
+            sent(to(Phase::Prefill, PhaseEvent::StepStart)),
+            &mut desk,
+            &mut agl,
+        );
+        bridge.reply(
+            Reply::Done {
+                session: "s1".into(),
+                done: Done {
+                    turn: None,
+                    why: None,
+                    said: None,
+                    session: SessionView {
+                        id: "s2".into(),
+                        ..Default::default()
+                    },
+                },
+                yours: false,
+            },
+            &mut desk,
+            &mut agl,
+        );
+        assert!(bridge.followed.contains_key("s2") && !bridge.followed.contains_key("s1"));
+
+        // The daemon no longer holds it: its card closed.
+        bridge.reply(
+            Reply::Sessions {
+                sessions: Vec::new(),
+            },
+            &mut desk,
+            &mut agl,
+        );
         assert!(bridge.followed.is_empty());
         assert_eq!(desk.closed, [1, 1]);
-        let _ = std::fs::remove_dir_all(&session.dir);
+    }
+
+    #[test]
+    fn a_session_first_seen_by_its_reports_is_asked_for_and_the_daemon_gone_closes_its_cards() {
+        let mut desk = Fake::default();
+        let mut agl = Asked::default();
+        let mut bridge = Bridge::new(PathBuf::from("/sessions"), LANG, None);
+        bridge.reply(
+            sent(to(Phase::Prefill, PhaseEvent::StepStart)),
+            &mut desk,
+            &mut agl,
+        );
+        assert_eq!(agl.0, [Request::Sessions]);
+        assert_eq!(
+            desk.shown[0].summary, "s1",
+            "its id until its name is known"
+        );
+        bridge.reply(info(true), &mut desk, &mut agl);
+        assert_eq!(bridge.followed["s1"].pid, Some(300));
+        bridge.lost(&mut desk);
+        assert!(bridge.followed.is_empty());
+        assert_eq!(desk.closed, [1]);
     }
 }

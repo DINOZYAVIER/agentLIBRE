@@ -458,7 +458,7 @@ The daemon (the planes of the sessions, served on one socket):
     pub const HELP_NOTIFY: Msg = Msg {
         en: "\
 Notifications (the desktop's, for every running session):
-  notify   tells what each interactive session does, a card a session:
+  notify   tells what each session of the daemon does, a card a session:
            thinking, a tool, writing the answer, with Stop; at a turn's end
            the answer's beginning, a field to answer in, Terminal and
            Session; a stop as a critical card answered from it (the field,
@@ -466,7 +466,7 @@ Notifications (the desktop's, for every running session):
            It runs until stopped, as a user unit does.",
         uk: "\
 Сповіщення (стільниці, для кожної запущеної сесії):
-  notify   каже, що робить кожна інтерактивна сесія, картка на сесію:
+  notify   каже, що робить кожна сесія демона, картка на сесію:
            думає, інструмент, пише відповідь, з кнопкою Зупинити; в кінці
            ходу початок відповіді, поле для відповіді, Термінал і Сесія;
            зупинка як критична картка з полем, Продовжити, Терміналом і
@@ -1132,11 +1132,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const PLANE_GONE: Msg = Msg {
         en: "the run of the session ended before it answered; the session's file keeps what it did",
         uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
-    };
-
-    pub const NOTIFY_NO_RUNTIME: Msg = Msg {
-        en: "notify: XDG_RUNTIME_DIR is not set, so no session's socket can be found",
-        uk: "notify: XDG_RUNTIME_DIR не задано, тож сокетів сесій не знайти",
     };
 
     /// `agl notify` and the session bus (AGL-074, D2).
@@ -3048,7 +3043,6 @@ impl Error {
                 tr!(lang, m::ENGINE_SPAWN, engine = engine, source = source).to_string()
             }
             Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
-            Error::NotifyNoRuntime => tr!(lang, m::NOTIFY_NO_RUNTIME).to_string(),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
             Error::Said { text } => text.clone(),
             Error::DaemonNoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),

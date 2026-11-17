@@ -7,7 +7,6 @@ pub mod about;
 pub mod action;
 pub mod agent;
 pub mod attach;
-pub mod control;
 pub mod daemon;
 pub mod backend;
 pub mod client;
