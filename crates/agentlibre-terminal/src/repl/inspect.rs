@@ -286,9 +286,9 @@ impl Inspect {
                         })
                         .collect();
                     if !items.is_empty() {
-                        // AGL-080, D2: the answer's times are the
-                        // activity's color, as `Ready` in the dock.
-                        lines.push(summary(theme, None, &items, Role::InputActivity));
+                        // AGL-080 D2, AGL-087 D1: the answer's times are the
+                        // tool's color, as `THINKING` and `TOOL bash` are.
+                        lines.push(summary(theme, None, &items, Role::Tool));
                     }
                 }
                 lines
@@ -414,12 +414,12 @@ fn card_lines(
             lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &row)));
         }
     }
-    // D27, AGL-080: the phases in the activity's color, with no rule.
+    // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
     lines.push(summary(
         theme,
         Some((status_text.as_str(), status_role)),
         items,
-        Role::InputActivity,
+        Role::Tool,
     ));
     lines
 }

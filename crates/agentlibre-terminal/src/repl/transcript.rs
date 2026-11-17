@@ -263,10 +263,10 @@ impl Presenter {
     /// The answer's block, with the row of its time when that is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
-        // AGL-080, D2: the times of the answer are the activity's color,
-        // as `Ready` in the dock's separator; no time, no row.
+        // AGL-080, D2 and AGL-087 D1: the times of the answer are the tool's
+        // color, as `THINKING` and `TOOL bash` are; no time, no row.
         let time = (!items.is_empty())
-            .then(|| self.summary(None, &items, Role::InputActivity));
+            .then(|| self.summary(None, &items, Role::Tool));
         self.screen.print(&self.answer_lines(text, time));
     }
 
@@ -414,13 +414,13 @@ impl Presenter {
                 lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
             }
         }
-        // D27, AGL-080: the phases in the activity's color, with no rule;
-        // with no phase to name the row says nothing, and there is none.
+        // D27, AGL-080 and AGL-087 D1: the phases in the tool's color, with
+        // no rule; with no phase to name the row says nothing, and none.
         if !items.is_empty() {
             lines.push(self.summary(
                 Some((status_text.as_str(), status_role)),
                 items,
-                Role::InputActivity,
+                Role::Tool,
             ));
         }
         // AGL-085, D1: the card ends its block, and a blank row divides one
@@ -600,8 +600,8 @@ impl Presenter {
             items.push(texts::speed(speed, self.lang));
         }
         let status = Some(("OK", Role::StatusSuccess));
-        // D27: the items in the rule's color, dark gray, as the body.
-        let time = Some(self.summary(status, &items, Role::InputActivity));
+        // D27, AGL-087 D1: the items are the tool's color, as the labels.
+        let time = Some(self.summary(status, &items, Role::Tool));
         let block = self.answer_lines(text, time);
         self.replace_streamed(block);
         self.prefill = None;
@@ -655,7 +655,7 @@ impl Presenter {
         self.screen.print(&[self.summary(
             Some(("OK", Role::StatusSuccess)),
             &items,
-            Role::InputActivity,
+            Role::Tool,
         )]);
     }
 
@@ -1422,12 +1422,12 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_time_is_the_activity_color() {
-        // AGL-066, D27; AGL-080, D2: the answer's row of times — the
-        // phases, the time, the speed — is in the activity's color, as
-        // `Ready` in the dock's separator.
+    fn the_answer_time_is_the_tool_color() {
+        // AGL-066, D27; AGL-080 D2 and AGL-087 D1: the answer's row of
+        // times — the phases, the time, the speed — is in the tool's color,
+        // as `THINKING` and `TOOL bash` are.
         let red = crate::style::Style::parse("#FF0000", false).expect("a color");
-        let theme = Theme::new(true, &[(Role::InputActivity, red)]);
+        let theme = Theme::new(true, &[(Role::Tool, red)]);
         let (presenter, mock) = presenter();
         let presenter = Presenter {
             theme: theme.clone(),
