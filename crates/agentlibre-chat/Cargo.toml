@@ -1,0 +1,23 @@
+[package]
+name = "agentlibre-chat"
+version = "0.0.2"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+description = "agl-chat: agentLIBRE's chat, drawn by katarsa, a client of agl daemon (AGL-073)"
+
+[[bin]]
+name = "agl-chat"
+path = "src/main.rs"
+
+# A workspace of its own, out of the repository's (AGL-073 D6): katarsa-shell
+# is taken from the checkout beside this one (D8), and it is built inside
+# katarsa-shell's nix-shell.
+[workspace]
+
+[dependencies]
+agentlibre-proto = { path = "../agentlibre-proto" }
+katarsa-app = { path = "../../../katarsa-shell/crates/katarsa-app" }
+katarsa-reactive = { path = "../../../katarsa-shell/crates/katarsa-reactive" }
+katarsa-ui = { path = "../../../katarsa-shell/crates/katarsa-ui" }
+katarsa-wayland = { path = "../../../katarsa-shell/crates/katarsa-wayland" }
