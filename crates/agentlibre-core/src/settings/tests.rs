@@ -309,7 +309,7 @@ fn the_effective_server_is_the_model_with_the_url_of_its_kind() {
 fn colors_repl_and_forge_tables() {
     let loaded = user_of(
         r##"colors = { muted = "italic #010203"; input_background = "#000000"; };
-            repl = { tool_lines = 3; frame = false; max_record_seconds = 15; };
+            repl = { max_record_seconds = 15; };
             forge.auto_rehome = false;"##,
     )
     .unwrap();
@@ -319,9 +319,6 @@ fn colors_repl_and_forge_tables() {
     assert_eq!(
         loaded.repl,
         ReplFile {
-            tool_lines: Some(3),
-            tool_chars: None,
-            frame: Some(false),
             max_record_seconds: Some(15),
             start_server: None,
             splash: None,
@@ -329,7 +326,7 @@ fn colors_repl_and_forge_tables() {
     );
     assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
     let settings = resolve_with(
-        &UserFile { server: with_url().server, ..user_of(r#"repl = { tool_lines = 3; frame = false; max_record_seconds = 15; };"#).unwrap() },
+        &UserFile { server: with_url().server, ..user_of(r#"repl = { max_record_seconds = 15; };"#).unwrap() },
         &ProjectFile::default(),
         None,
         &llama_model(),
@@ -338,9 +335,6 @@ fn colors_repl_and_forge_tables() {
     assert_eq!(
         settings.repl,
         ReplSettings {
-            tool_lines: 3,
-            tool_chars: 500,
-            frame: false,
             max_record_seconds: 15,
             start_server: true,
             splash: true,
@@ -363,8 +357,6 @@ fn invalid_values_are_errors() {
         Err(Error::UnknownKey { key, .. }) if key == "colors.mutd"
     ));
     for (body, key) in [
-        ("repl.tool_lines = 0;", "repl.tool_lines"),
-        ("repl.tool_chars = -5;", "repl.tool_chars"),
         ("repl.max_record_seconds = 0;", "repl.max_record_seconds"),
     ] {
         assert!(

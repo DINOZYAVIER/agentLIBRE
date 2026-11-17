@@ -175,7 +175,6 @@ roles! {
     InputSelected "input_selected" "bold oklch(0.518 0.253 323.949)",
     FocusBackground "focus_background" "oklch(0.33 0 0)",
     Muted "muted" "dim",
-    Rule "rule" "dim",
     Tool "tool" "bold #00FFFF",
     StatusSuccess "status_success" "bold #7BD88F",
     StatusFailure "status_failure" "bold #FF0000",

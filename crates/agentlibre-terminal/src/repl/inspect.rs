@@ -11,7 +11,7 @@ use super::markdown;
 use crate::records::{self, Record};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{edge, notice_lines, thinking_lines, user_lines};
+use super::transcript::{notice_lines, summary, thinking_lines, user_lines};
 use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
@@ -243,7 +243,7 @@ impl Inspect {
                         texts::duration(elapsed.as_secs())
                     ));
                 }
-                lines.extend(tool_lines(theme, lang, columns, call, result.as_ref(), hint, &items));
+                lines.extend(card_lines(theme, lang, columns, call, result.as_ref(), hint, &items));
                 if expanded {
                     // The input, in full, when the hint is not the whole (D4).
                     let input = call_input(call);
@@ -283,16 +283,9 @@ impl Inspect {
                         })
                         .collect();
                     if !items.is_empty() {
-                        // D27: the answer's phases in the rule's color,
-                        // dark gray, as the body.
-                        lines.push(edge(
-                            theme,
-                            columns,
-                            None,
-                            &items,
-                            Role::InputRule,
-                            Role::Rule,
-                        ));
+                        // AGL-080, D2: the answer's times are the
+                        // activity's color, as `Ready` in the dock.
+                        lines.push(summary(theme, None, &items, Role::InputActivity));
                     }
                 }
                 lines
@@ -334,8 +327,6 @@ fn is_user(record: &Record) -> bool {
     matches!(record, Record::User(_))
 }
 
-/// The compact frame of a call, as the inspect mode draws it (D6): the
-/// tool's line with its status, the lines of the input, the phases' row.
 /// The thinking and the text of a step's record, before its line (D19):
 /// the thinking's line in the tool's style when the record is compact,
 /// the full data when it is expanded.
@@ -379,9 +370,10 @@ fn step_lines(
     lines
 }
 
-/// The compact frame of a call, as the inspect mode draws it (D6): the
-/// tool's line with its status, the lines of the input, the phases' row.
-fn tool_lines(
+/// The compact card of a call, as the inspect mode draws it (D6; AGL-080,
+/// D1): the tool's line with its status, the lines of the input, the row of
+/// its phases.
+fn card_lines(
     theme: &Theme,
     lang: Lang,
     columns: usize,
@@ -408,14 +400,11 @@ fn tool_lines(
             lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &row)));
         }
     }
-    // D27: as the answer's rule — the phases in the activity's color, the
-    // dashes in the input's rule color.
-    lines.push(edge(
+    // D27, AGL-080: the phases in the activity's color, with no rule.
+    lines.push(summary(
         theme,
-        columns,
         Some((status_text.as_str(), status_role)),
         items,
-        Role::InputRule,
         Role::InputActivity,
     ));
     lines

@@ -28,21 +28,21 @@ const MAX_MENU_ROWS: usize = 6;
 const REMEMBERED_LINES: usize = 400;
 
 /// The context usage for the status row and its role (D152): `41 213 /
-/// 131 072 (32%)`, with `—` before the first step; yellow from 70%, red
-/// from 90%.
+/// 131 072 (32%)`, with `—` before the first step; yellow from 70%, orange
+/// from 90% (AGL-080, D3).
 fn context_usage(used: Option<usize>, size: usize) -> (String, Role) {
     // The server has not answered yet (AGL-015).
     if size == 0 {
-        return ("—".into(), Role::Muted);
+        return ("—".into(), Role::InputActivity);
     }
     let Some(used) = used else {
-        return (format!("— / {}", grouped(size)), Role::Muted);
+        return (format!("— / {}", grouped(size)), Role::InputActivity);
     };
     let percent = used.saturating_mul(100) / size.max(1);
     let role = match percent {
-        90.. => Role::StatusFailure,
+        90.. => Role::StatusWarn,
         70.. => Role::StatusPending,
-        _ => Role::Muted,
+        _ => Role::InputActivity,
     };
     (
         format!("{} / {} ({percent}%)", grouped(used), grouped(size)),
@@ -502,12 +502,14 @@ impl State {
         let usage = usage
             .map(|(text, role)| format!("{}{}", self.theme.paint(role, &text), "  "))
             .unwrap_or_default();
+        // AGL-080, D1: the row is the activity's color, as the separator's
+        // `Ready`, `Thinking` or `Running bash` above it.
         format!(
             "{}{}{}{}",
-            self.theme.paint(Role::Muted, &left),
+            self.theme.paint(Role::InputActivity, &left),
             " ".repeat(gap),
             usage,
-            self.theme.paint(Role::Muted, &right)
+            self.theme.paint(Role::InputActivity, &right)
         )
     }
 
@@ -775,15 +777,16 @@ mod tests {
     fn context_usage_is_grouped_and_colored_by_fill() {
         assert_eq!(
             context_usage(None, 131_072),
-            ("— / 131\u{a0}072".into(), Role::Muted)
+            ("— / 131\u{a0}072".into(), Role::InputActivity)
         );
         assert_eq!(
             context_usage(Some(41_213), 131_072),
-            ("41\u{a0}213 / 131\u{a0}072 (31%)".into(), Role::Muted)
+            ("41\u{a0}213 / 131\u{a0}072 (31%)".into(), Role::InputActivity)
         );
-        assert_eq!(context_usage(Some(999), 1000).1, Role::StatusFailure);
+        // AGL-080, D3: orange from 90%, yellow from 70%, else the row's own.
+        assert_eq!(context_usage(Some(999), 1000).1, Role::StatusWarn);
         assert_eq!(context_usage(Some(899), 1000).1, Role::StatusPending);
-        assert_eq!(context_usage(Some(699), 1000).1, Role::Muted);
+        assert_eq!(context_usage(Some(699), 1000).1, Role::InputActivity);
         assert_eq!(grouped(7), "7");
         assert_eq!(grouped(1000), "1\u{a0}000");
     }
@@ -812,8 +815,8 @@ mod tests {
 
     #[test]
     fn the_context_is_a_dash_until_the_server_has_answered() {
-        assert_eq!(context_usage(None, 0), ("—".into(), Role::Muted));
-        assert_eq!(context_usage(Some(5), 0), ("—".into(), Role::Muted));
+        assert_eq!(context_usage(None, 0), ("—".into(), Role::InputActivity));
+        assert_eq!(context_usage(Some(5), 0), ("—".into(), Role::InputActivity));
         let (dock, _) = dock(80, 20);
         dock.set_context_size(0);
         assert!(dock.lock().layout().rows.last().unwrap().contains('—'));
@@ -841,6 +844,34 @@ mod tests {
                 .contains("41\u{a0}213 / 131\u{a0}072 (31%)")
         );
         assert_eq!(width(layout.rows.last().unwrap()), 80);
+    }
+
+    #[test]
+    fn the_status_row_is_the_activity_color() {
+        // AGL-080, D1, D3: the Function, the usage and the workspace are the
+        // activity's color, as the separator's label above them; over 90% of
+        // the context the usage is the warn's orange.
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let blue = crate::style::Style::parse("#0000FF", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::InputActivity, red), (Role::StatusWarn, blue)]);
+        let dock = Dock::new(
+            Box::new(Sink::default()),
+            theme,
+            Lang::En,
+            "minimal".into(),
+            "/home/u/project".into(),
+            Editor::new(Vec::new(), Vec::new()),
+            (80, 20),
+        )
+        .with_context(1000);
+        let start = |role: Role| dock.lock().theme.start(role);
+        let status = || dock.lock().layout().rows.last().unwrap().clone();
+        dock.context(500);
+        let row = status();
+        assert!(row.contains(&start(Role::InputActivity)), "{row}");
+        dock.context(950);
+        let row = status();
+        assert!(row.contains(&start(Role::StatusWarn)), "{row}");
     }
 
     #[test]

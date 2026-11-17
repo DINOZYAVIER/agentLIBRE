@@ -10,13 +10,12 @@ use super::dock::grouped;
 use super::markdown;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use crate::records::{self, Record};
-use super::text::{StreamWrap, clean, hard_wrap, truncate, width, wrap_line};
+use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
 use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
-use crate::settings::ReplSettings;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
@@ -79,7 +78,6 @@ struct Generation {
 pub struct Presenter {
     screen: Arc<dyn Screen>,
     theme: Theme,
-    settings: ReplSettings,
     lang: Lang,
     turn_started: Instant,
     /// The finished phases of the step, with their times, from the FSM of
@@ -109,9 +107,6 @@ pub struct Presenter {
     /// The thinking being decoded, as its pieces arrive (D3, D19): the
     /// transcript shows its line with the record of its step.
     thinking: Option<String>,
-    /// Whether the step's block has begun: the separator is printed once
-    /// per step (D19).
-    step_open: bool,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -122,16 +117,10 @@ pub struct Presenter {
 }
 
 impl Presenter {
-    pub fn new(
-        screen: Arc<dyn Screen>,
-        theme: Theme,
-        settings: ReplSettings,
-        lang: Lang,
-    ) -> Presenter {
+    pub fn new(screen: Arc<dyn Screen>, theme: Theme, lang: Lang) -> Presenter {
         Presenter {
             screen,
             theme,
-            settings,
             lang,
             turn_started: Instant::now(),
             phases: Vec::new(),
@@ -147,7 +136,6 @@ impl Presenter {
             state_entered: false,
             pending_call: None,
             thinking: None,
-            step_open: false,
             action: None,
             generation: None,
             turn_tokens: 0,
@@ -167,7 +155,6 @@ impl Presenter {
         self.prefill = None;
         self.state_entered = false;
         self.generation = None;
-        self.step_open = false;
         self.turn_tokens = 0;
         self.turn_decoding = Duration::ZERO;
         self.screen.speed(None);
@@ -270,16 +257,14 @@ impl Presenter {
         lines
     }
 
-    /// The answer between rules, with the time when it is known.
+    /// The answer's block, with the row of its time when that is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
-        self.screen.print(&self.answer_lines(
-            text,
-            // D27: the items in the rule's color, dark gray, as the body
-            // and the prompt's block — what stays above the dock's
-            // activity line is all in the dark.
-            self.edge(None, &items, Role::InputRule, Role::Rule),
-        ));
+        // AGL-080, D2: the times of the answer are the activity's color,
+        // as `Ready` in the dock's separator; no time, no row.
+        let time = (!items.is_empty())
+            .then(|| self.summary(None, &items, Role::InputActivity));
+        self.screen.print(&self.answer_lines(text, time));
     }
 
     /// A line of the session itself: help, a stop, an error.
@@ -309,7 +294,6 @@ impl Presenter {
                     thinking,
                     text,
                 } => {
-                    self.screen.print(&self.step_separator());
                     if let Some(thinking) = thinking {
                         self.show_thinking(thinking);
                     }
@@ -332,7 +316,6 @@ impl Presenter {
                     time,
                     thinking,
                 } => {
-                    self.screen.print(&self.step_separator());
                     if let Some(thinking) = thinking {
                         self.show_thinking(thinking);
                     }
@@ -345,11 +328,11 @@ impl Presenter {
 
     // Lines.
 
-    fn answer_lines(&self, text: &str, edge: String) -> Vec<String> {
+    fn answer_lines(&self, text: &str, time: Option<String>) -> Vec<String> {
         let columns = self.screen.columns();
         let mut lines = Vec::new();
         lines.extend(markdown::render(text.trim(), columns, &self.theme));
-        lines.push(edge);
+        lines.extend(time);
         lines.push(String::new());
         lines
     }
@@ -386,32 +369,18 @@ impl Presenter {
             .collect()
     }
 
-    /// A rule that carries a status and the items of the row (AGL-045).
-    fn edge(
+    /// A step's row: its status and items (AGL-045, AGL-080).
+    fn summary(
         &self,
         status: Option<(&str, Role)>,
         items: &[String],
-        role: Role,
         item_role: Role,
     ) -> String {
-        edge(&self.theme, self.screen.columns(), status, items, role, item_role)
+        summary(&self.theme, status, items, item_role)
     }
 
-    /// The rule that begins a step's block, when the frame is on (D19).
-    /// The block is the thinking's line, the text, and the tool's card;
-    /// the rule goes before all of it, so the step reads as one unit.
-    fn step_separator(&self) -> Vec<String> {
-        if !self.settings.frame {
-            return Vec::new();
-        }
-        vec![
-            String::new(),
-            self.theme
-                .paint(Role::Rule, &"─".repeat(self.screen.columns())),
-        ]
-    }
-
-    /// The compact frame of a finished step (AGL-066, D1, D2, D6): the
+    /// The compact card of a finished step (AGL-066, D1, D2, D6; AGL-080,
+    /// D1): the
     /// tool's name and status, one line of the input, the phases' times.
     /// No output: the full data is in the inspect mode.
     fn card(
@@ -442,13 +411,12 @@ impl Presenter {
                 lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
             }
         }
-        if self.settings.frame {
-            // D27: as the answer's rule — the phases in the activity's
-            // color, the dashes in the input's rule color.
-            lines.push(self.edge(
+        // D27, AGL-080: the phases in the activity's color, with no rule;
+        // with no phase to name the row says nothing, and there is none.
+        if !items.is_empty() {
+            lines.push(self.summary(
                 Some((status_text.as_str(), status_role)),
                 items,
-                Role::InputRule,
                 Role::InputActivity,
             ));
         }
@@ -487,19 +455,9 @@ impl Presenter {
 
     fn close_thinking(&mut self) {
         if let Some(thinking) = self.thinking.take() {
-            self.step_block();
             self.show_thinking(&thinking);
             self.screen.live(&[]);
         }
-    }
-
-    /// The block of a step begins (D19): the separator, once per step.
-    fn step_block(&mut self) {
-        if self.step_open {
-            return;
-        }
-        self.step_open = true;
-        self.screen.print(&self.step_separator());
     }
 
     /// Replaces the streamed lines with the rendered block when they are
@@ -605,7 +563,6 @@ impl Presenter {
 
     fn action_text(&mut self, piece: &str) {
         self.close_thinking();
-        self.step_block();
         let columns = self.screen.columns();
         let streamed = self.action.get_or_insert_with(|| Streamed {
             wrap: StreamWrap::new(columns),
@@ -637,11 +594,9 @@ impl Presenter {
         }
         let status = Some(("ok", Role::StatusSuccess));
         // D27: the items in the rule's color, dark gray, as the body.
-        let edge = self.edge(status, &items, Role::InputRule, Role::Rule);
-        self.step_block();
-        let block = self.answer_lines(text, edge);
+        let time = Some(self.summary(status, &items, Role::InputActivity));
+        let block = self.answer_lines(text, time);
         self.replace_streamed(block);
-        self.step_open = false;
         self.prefill = None;
     }
 
@@ -658,10 +613,8 @@ impl Presenter {
             texts::duration(self.tool_time.as_secs())
         ));
         let hint = records::call_hint(call);
-        self.step_block();
         self.screen
             .print(&self.card(call, Some(result), &hint, &items));
-        self.step_open = false;
         self.prefill = None;
     }
 
@@ -692,26 +645,21 @@ impl Presenter {
                 None => tr!(self.lang, m::COMPACTED_AFTER, after = after),
             });
         }
-        self.screen.print(&[self.edge(
+        self.screen.print(&[self.summary(
             Some(("ok", Role::StatusSuccess)),
             &items,
-            Role::Rule,
-            Role::Rule,
+            Role::InputActivity,
         )]);
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
         self.close();
         self.show_cut_off(cut);
-        // The step goes on as a new block (D19).
-        self.step_open = false;
     }
 
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
         self.close();
         self.show_stir(attempt, error);
-        // The retry is a new block of the step (D19).
-        self.step_open = false;
     }
 
     fn prompt_progress(&mut self, progress: PromptProgress) {
@@ -807,33 +755,25 @@ pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Ve
         .collect()
 }
 
-/// A rule that carries a status and the items of the row: the dashes in
-/// `role`, the items in `item_role` (AGL-066, D26). A row too long for the
-/// width is left to wrap (AGL-045).
-pub fn edge(
+/// A step's row: its status and its items over ` · `, with no rule around
+/// them (AGL-066, D26; AGL-080, D1). A row longer than the width wraps as
+/// the terminal lets it (AGL-045).
+pub fn summary(
     theme: &Theme,
-    columns: usize,
     status: Option<(&str, Role)>,
     items: &[String],
-    role: Role,
     item_role: Role,
 ) -> String {
-    let mut parts: Vec<(String, Role)> = vec![("─".into(), role)];
-    if status.is_some() || !items.is_empty() {
-        parts.push((" ".into(), role));
-        if let Some((text, status_role)) = status {
-            parts.push((text.into(), status_role));
-            if !items.is_empty() {
-                parts.push((" · ".into(), role));
-            }
-        }
+    let mut parts: Vec<(String, Role)> = Vec::new();
+    if let Some((text, status_role)) = status {
+        parts.push((text.into(), status_role));
         if !items.is_empty() {
-            parts.push((items.join(" · "), item_role));
+            parts.push((" · ".into(), item_role));
         }
-        parts.push((" ".into(), role));
     }
-    let used: usize = parts.iter().map(|(text, _)| width(text)).sum();
-    parts.push(("─".repeat(columns.saturating_sub(used)), role));
+    if !items.is_empty() {
+        parts.push((items.join(" · "), item_role));
+    }
     parts
         .iter()
         .map(|(text, role)| theme.paint(*role, text))
@@ -884,16 +824,15 @@ pub fn thinking_lines(
     // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
     let mut lines = vec![theme.paint(role, label)];
+    // AGL-080, D2: five lines of the thinking's text, each wrapped to the
+    // terminal's width instead of being cut off at its edge.
     for line in thinking
         .lines()
         .filter(|line| !line.trim().is_empty())
         .take(THINKING_LINES)
+        .flat_map(|line| hard_wrap(&clean(line), inner))
     {
-        lines.push(format!(
-            "{}{}",
-            gutter,
-            theme.paint(Role::Muted, &truncate(line, inner))
-        ));
+        lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &line)));
     }
     lines
 }
@@ -1031,17 +970,9 @@ mod tests {
         }
     }
 
-    fn presenter(frame: bool) -> (Presenter, Arc<Mock>) {
+    fn presenter() -> (Presenter, Arc<Mock>) {
         let mock = Arc::new(Mock::default());
-        let settings = ReplSettings {
-            tool_lines: 2,
-            tool_chars: 20,
-            frame,
-            max_record_seconds: 60,
-            start_server: true,
-            splash: true,
-        };
-        let presenter = Presenter::new(mock.clone(), Theme::plain(), settings, Lang::En);
+        let presenter = Presenter::new(mock.clone(), Theme::plain(), Lang::En);
         (presenter, mock)
     }
 
@@ -1053,7 +984,7 @@ mod tests {
         }
     }
 
-    /// The compact frame of `call` with its `items` (D1, D2, D6).
+    /// The compact card of `call` with its `items` (D1, D2, D6).
     fn show_card(presenter: &Presenter, call: &ToolCall, result: &ToolResult, items: &[String]) {
         presenter
             .screen
@@ -1061,34 +992,28 @@ mod tests {
     }
 
     #[test]
-    fn framed_card() {
-        // AGL-066, D1, D6: the frame is the tool's line, one line of the
-        // input and the phases' row; no output.
-        let (presenter, mock) = presenter(true);
+    fn a_card_is_its_tool_its_input_and_its_times() {
+        // AGL-066, D1, D6; AGL-080, D1: the tool's line, one line of the
+        // input and the row of times, with no rule around them; no output.
+        let (presenter, mock) = presenter();
         let result = ToolResult {
             outcome: Outcome::Fail,
             content: "one\ntwo\nthree\nexit code: 1".into(),
         };
         show_card(&presenter, &bash("cargo test"), &result, &["bash 1m 15s".to_owned()]);
         let printed = mock.printed.lock().unwrap().clone();
-        // AGL-066, D19: the card is the tool's line, one line of the
-        // input and the phases' row; the step's separator goes before the
-        // block, not in the card.
         assert_eq!(
             printed,
-            [
-                "TOOL bash  fail",
-                "  │ cargo test",
-                &format!("─ fail · bash 1m 15s {}", "─".repeat(19)),
-            ]
+            ["TOOL bash  fail", "  │ cargo test", "fail · bash 1m 15s"]
         );
         assert!(!printed.iter().any(|line| line.contains("one")), "{printed:?}");
     }
 
     #[test]
-    fn unframed_card_and_edit_input() {
-        // AGL-066, D6: one line of the input — the file of an edit.
-        let (presenter, mock) = presenter(false);
+    fn a_card_shows_one_line_of_its_input() {
+        // AGL-066, D6: one line of the input — the file of an edit; with no
+        // phase to name there is no row of times (AGL-080, D1).
+        let (presenter, mock) = presenter();
         let call = ToolCall {
             id: "c2".into(),
             name: "edit".into(),
@@ -1108,29 +1033,25 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_keeps_its_rule_with_the_time() {
-        // AGL-066, D19: the step's separator goes before the block; the
-        // answer's own rule carries the time of the turn.
-        let (presenter, mock) = presenter(true);
+    fn the_answer_carries_its_time() {
+        // AGL-066, D19; AGL-080, D1: the answer is its text and the row of
+        // its time, with no rule; no time, no row.
+        let (presenter, mock) = presenter();
         presenter.show_answer("**Done**", Some(Duration::from_secs(5)));
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
-            [
-                "Done".into(),
-                format!("─ Worked for 5s {}", "─".repeat(24)),
-                "".into(),
-            ]
+            ["Done".to_owned(), "Worked for 5s".to_owned(), String::new()]
         );
         mock.printed.lock().unwrap().clear();
         presenter.show_answer("old", None);
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, ["old".to_owned(), "─".repeat(40), "".to_owned()]);
+        assert_eq!(printed, ["old".to_owned(), "".to_owned()]);
     }
 
     #[test]
     fn streamed_text_is_replaced_by_the_rendered_answer() {
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         presenter.thinking("hmm ");
         presenter.thinking("ok\n");
@@ -1142,13 +1063,11 @@ mod tests {
         // The two streamed lines are erased, then the block is printed.
         assert!(ops.contains(&"erase 2".to_owned()), "{ops:?}");
         let printed = mock.printed.lock().unwrap().clone();
-        // AGL-066, D19, D24: the step's block — the separator's rule, then
-        // the thinking like the tool's card (the label, the line under the
+        // AGL-066, D19, D24; AGL-080, D1: the step's block begins with the
+        // thinking like the tool's card (the label, the line under the
         // gutter); the answer follows in the same block.
-        assert_eq!(printed[0], "");
-        assert_eq!(printed[1], "─".repeat(40));
-        assert_eq!(printed[2], "THINKING");
-        assert_eq!(printed[3], "  │ hmm ok");
+        assert_eq!(printed[0], "THINKING");
+        assert_eq!(printed[1], "  │ hmm ok");
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
     }
@@ -1159,14 +1078,14 @@ mod tests {
         // lines under the gutter — up to THINKING_LINES of them, the empty
         // ones skipped — as the tool's card; no rule of its own, the time
         // of its phase is in the step's rule.
-        let (first, mock) = presenter(true);
+        let (first, mock) = presenter();
         first.show_thinking("hm\nmore\n\nthird");
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
             vec!["THINKING", "  │ hm", "  │ more", "  │ third"]
         );
-        let (second, mock) = presenter(true);
+        let (second, mock) = presenter();
         second.show_thinking("a\nb\nc\nd\ne\nf");
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
@@ -1187,25 +1106,25 @@ mod tests {
         // AGL-066, D29: while the thinking streams, the live's lines are
         // the card's lines — the label, its rows under the gutter — as
         // they are printed when the thinking ends; each fits the screen.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.thinking(&"a".repeat(80));
         let lines = mock.live.lock().unwrap().clone();
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        // AGL-080, D2: the line wraps to the terminal's width, so the
+        // thinking's one line is three of the screen's, each of them short.
+        assert_eq!(lines.len(), 4, "{lines:?}");
         assert_eq!(lines[0], "THINKING", "{lines:?}");
-        assert!(lines[1].starts_with("  │ "), "{lines:?}");
-        for line in &lines {
+        for line in &lines[1..] {
+            assert!(line.starts_with("  │ "), "{lines:?}");
             assert!(width(line) <= 40, "{line:?}");
         }
     }
 
-    /// The row of `printed` that starts with `start`, without its fill.
+    /// The row of `printed` that starts with `start`.
     fn row(printed: &[String], start: &str) -> String {
         printed
             .iter()
             .find(|line| line.starts_with(start))
             .expect("the row")
-            .trim_end_matches('─')
-            .trim_end()
             .to_owned()
     }
 
@@ -1213,7 +1132,7 @@ mod tests {
     fn the_rule_of_a_step_names_its_phases() {
         // AGL-045: the phases in order, each with its time; then the tool
         // on a card, the turn's time on the answer.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
         observer.enter(PhaseEvent::ServerStart, &mut presenter);
@@ -1233,8 +1152,8 @@ mod tests {
         };
         report.result(&bash("ls"), &ok);
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Starting the server <1s · Reading the prompt <1s · Thinking <1s · \
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Starting the server <1s · Reading the prompt <1s · Thinking <1s · \
              Writing <1s · bash <1s"
         );
         // The next step begins with no phase of the last one; a retry
@@ -1245,8 +1164,8 @@ mod tests {
         report.action_text("Done");
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Reading the prompt <1s · Writing <1s · Retry 1/2 <1s · Writing <1s · \
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Reading the prompt <1s · Writing <1s · Retry 1/2 <1s · Writing <1s · \
              Worked for <1s"
         );
     }
@@ -1254,7 +1173,7 @@ mod tests {
     #[test]
     fn a_new_turn_forgets_the_phases_of_the_last() {
         // AGL-045: an interrupted turn leaves its phases behind.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut first = Observer::new();
         let mut report = Reports {
@@ -1274,8 +1193,8 @@ mod tests {
         report.prefill();
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Reading the prompt <1s · Worked for <1s"
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Reading the prompt <1s · Worked for <1s"
         );
     }
 
@@ -1283,7 +1202,7 @@ mod tests {
     fn a_compaction_has_its_own_row_and_leaves_the_steps_row() {
         // AGL-046, D13: its time and the tokens before and after; the next
         // step's row does not repeat it.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
         let mut report = Reports {
@@ -1296,13 +1215,13 @@ mod tests {
         report.context_used(3_100);
         report.compacted();
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Compacting <1s · 52\u{a0}400 → 3\u{a0}100 tokens"
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Compacting <1s · 52\u{a0}400 → 3\u{a0}100 tokens"
         );
         mock.printed.lock().unwrap().clear();
         report.action_text("Done");
         report.answer("Done");
-        let answer = row(&mock.printed.lock().unwrap(), "─ ok");
+        let answer = row(&mock.printed.lock().unwrap(), "ok");
         assert!(!answer.contains("Compacting"), "{answer}");
         // A count that failed leaves the tokens out (the live row above);
         // the replayed compaction is its one line (AGL-066, D1).
@@ -1313,7 +1232,7 @@ mod tests {
         {
             let printed = mock.printed.lock().unwrap();
             assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
-            assert_eq!(row(&printed, "─ ok"), "─ ok · Compacting <1s");
+            assert_eq!(row(&printed, "ok"), "ok · Compacting <1s");
         }
         mock.printed.lock().unwrap().clear();
         presenter.replay(
@@ -1330,7 +1249,7 @@ mod tests {
     fn the_reading_of_the_prompt_shows_its_speed() {
         // AGL-046: the server's figure for the step's first generation; a
         // step that read a few tokens shows none.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
         let mut report = Reports {
@@ -1353,8 +1272,8 @@ mod tests {
         };
         report.result(&bash("ls"), &ok);
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Reading the prompt <1s (1125.0 tok/s) · bash <1s"
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Reading the prompt <1s (1125.0 tok/s) · bash <1s"
         );
         mock.printed.lock().unwrap().clear();
         report.prefill();
@@ -1364,15 +1283,15 @@ mod tests {
         });
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "─ ok"),
-            "─ ok · Reading the prompt <1s · Worked for <1s"
+            row(&mock.printed.lock().unwrap(), "ok"),
+            "ok · Reading the prompt <1s · Worked for <1s"
         );
     }
 
     #[test]
     fn the_reading_is_on_the_dock_only_while_the_prompt_is_read() {
         // AGL-046, D19.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
         let mut report = Reports {
@@ -1404,7 +1323,7 @@ mod tests {
     #[test]
     fn only_a_change_of_state_is_shown() {
         // AGL-046, D13.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         presenter.state("inference");
         assert!(mock.printed.lock().unwrap().is_empty());
@@ -1420,7 +1339,7 @@ mod tests {
     #[test]
     fn a_transition_that_must_not_happen_is_marked_and_the_turn_goes_on() {
         // AGL-046, D11.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.transition(&Transition {
             from: Phase::Writing,
             to: Phase::Thinking,
@@ -1437,7 +1356,7 @@ mod tests {
     fn the_status_on_a_rule_is_painted_in_its_role() {
         // AGL-045: `ok` keeps the color of `status_success`.
         let theme = Theme::new(true, &[]);
-        let (presenter, mock) = presenter(true);
+        let (presenter, mock) = presenter();
         let presenter = Presenter {
             theme: theme.clone(),
             ..presenter
@@ -1453,9 +1372,9 @@ mod tests {
         );
         let green = theme.paint(Role::StatusSuccess, "ok");
         let printed = mock.printed.lock().unwrap();
-        let rule = printed.last().expect("the rule");
-        assert!(rule.contains(&green), "{rule:?}");
-        assert!(rule.contains("bash 1s"), "{rule:?}");
+        let row = printed.last().expect("the row");
+        assert!(row.contains(&green), "{row:?}");
+        assert!(row.contains("bash 1s"), "{row:?}");
     }
 
     #[test]
@@ -1465,7 +1384,7 @@ mod tests {
         // keeps the tool's and the status's colors.
         let red = crate::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Muted, red)]);
-        let (presenter, mock) = presenter(true);
+        let (presenter, mock) = presenter();
         let presenter = Presenter {
             theme: theme.clone(),
             ..presenter
@@ -1488,32 +1407,31 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_rule_is_dark_like_the_body() {
-        // AGL-066, D27: the items of the answer's rule — the phases, the
-        // time, the speed — are in the rule's color, dark gray, as the
-        // body and the prompt's block; the dashes in the input's rule
-        // color.
+    fn the_answer_time_is_the_activity_color() {
+        // AGL-066, D27; AGL-080, D2: the answer's row of times — the
+        // phases, the time, the speed — is in the activity's color, as
+        // `Ready` in the dock's separator.
         let red = crate::style::Style::parse("#FF0000", false).expect("a color");
-        let theme = Theme::new(true, &[(Role::Rule, red)]);
-        let (presenter, mock) = presenter(true);
+        let theme = Theme::new(true, &[(Role::InputActivity, red)]);
+        let (presenter, mock) = presenter();
         let presenter = Presenter {
             theme: theme.clone(),
             ..presenter
         };
         presenter.show_answer("done", Some(Duration::from_secs(2)));
         let printed = mock.printed.lock().unwrap().clone();
-        let rule = printed
+        let row = printed
             .iter()
             .find(|line| line.contains("Worked for"))
-            .expect("the rule");
-        assert!(rule.contains("\x1b[38;2;255;0;0m"), "{rule:?}");
+            .expect("the row");
+        assert!(row.contains("\x1b[38;2;255;0;0m"), "{row:?}");
     }
 
     #[test]
     fn the_dock_follows_the_phases_of_a_turn() {
         // AGL-043 F2: the start, the prefill, the thinking, the writing,
         // the call, the next prefill, a stir and the answer.
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
         observer.enter(PhaseEvent::ServerStart, &mut presenter);
@@ -1569,7 +1487,7 @@ mod tests {
 
     #[test]
     fn text_before_a_call_stays_as_an_explanation() {
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.action_text("Looking at it.\n");
         presenter.text("Looking at it.");
         presenter.call(&bash("ls"));
@@ -1581,13 +1499,11 @@ mod tests {
             },
         );
         let printed = mock.printed.lock().unwrap().clone();
-        // AGL-066, D19: the step's block — the separator, the text before
-        // the call (the streamed line is replaced, not repeated), and the
-        // tool's card, one unit.
-        assert_eq!(printed[0], "");
-        assert_eq!(printed[1], "─".repeat(40));
-        assert_eq!(printed[2], "Looking at it.");
-        assert_eq!(printed[3], "");
+        // AGL-066, D19, AGL-080, D1: the text before the call (the streamed
+        // line is replaced, not repeated) and the tool's card, with no rule
+        // between them.
+        assert_eq!(printed[0], "Looking at it.");
+        assert_eq!(printed[1], "");
         assert!(printed.contains(&"TOOL bash  ok".to_owned()));
     }
 
@@ -1624,7 +1540,7 @@ mod tests {
 
     #[test]
     fn the_live_speed_shows_from_the_second_piece_and_clears() {
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         presenter.thinking("a");
         assert_eq!(mock.ops.lock().unwrap().last().unwrap(), "speed None");
@@ -1640,7 +1556,7 @@ mod tests {
 
     #[test]
     fn the_answer_rule_carries_the_turns_decoding_speed() {
-        let (mut presenter, mock) = presenter(true);
+        let (mut presenter, mock) = presenter();
         let t0 = Instant::now();
         presenter.begin_turn();
         presenter.thinking("hmm");
@@ -1651,13 +1567,13 @@ mod tests {
         presenter.answer("Done.");
         let measured = t0.elapsed().as_secs_f64();
         let printed = mock.printed.lock().unwrap().clone();
-        let rule = printed
+        let row = printed
             .iter()
             .find(|line| line.contains("Worked for"))
-            .expect("the answer rule")
+            .expect("the answer's row")
             .clone();
-        assert!(rule.contains("tok/s"), "{rule:?}");
-        let figure: f64 = rule
+        assert!(row.contains("tok/s"), "{row:?}");
+        let figure: f64 = row
             .rsplit('·')
             .next()
             .expect("the speed part")
@@ -1674,15 +1590,15 @@ mod tests {
         // What is replayed carries no speed.
         mock.printed.lock().unwrap().clear();
         presenter.show_answer("old", Some(Duration::from_secs(5)));
-        let rule = mock
+        let row = mock
             .printed
             .lock()
             .unwrap()
             .iter()
             .find(|line| line.contains("Worked for"))
-            .expect("the replay rule")
+            .expect("the replayed row")
             .clone();
-        assert!(!rule.contains("tok/s"), "{rule:?}");
+        assert!(!row.contains("tok/s"), "{row:?}");
     }
 
     #[test]
@@ -1697,7 +1613,7 @@ mod tests {
 
     #[test]
     fn a_resumed_session_is_replayed() {
-        let (presenter, mock) = presenter(false);
+        let (presenter, mock) = presenter();
         let events = [
             Event::User("go".into()),
             Event::State("work".into()),
@@ -1771,7 +1687,7 @@ mod tests {
             .expect("the thinking's label");
         assert_eq!(printed[thinking + 1], "  │ hm");
         assert!(printed.contains(&"Running.".to_owned()));
-        // The tool's frame: its name, its status, one line of the input; no
+        // The tool's card: its name, its status, one line of the input; no
         // output (D1, D6).
         let tool = printed
             .iter()

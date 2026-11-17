@@ -1,5 +1,5 @@
-//! `repl` of the user's settings: the tool cards and the voice recording
-//! (D130; AGL-016; AGL-039, D20).
+//! `repl` of the user's settings: the voice recording, the server's start
+//! and the splash (AGL-016; AGL-039, D20; AGL-046; AGL-065, D5; AGL-080).
 
 use std::path::Path;
 
@@ -11,12 +11,9 @@ use crate::nix::Section;
 /// AGL-039, D20; AGL-043 F18).
 const DEFAULT_MAX_RECORD_SECONDS: u32 = 300;
 
-/// `[repl]`: the limits of tool cards and their frame (D130).
+/// `[repl]`: the voice recording, the server's start and the splash.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ReplFile {
-    pub tool_lines: Option<usize>,
-    pub tool_chars: Option<usize>,
-    pub frame: Option<bool>,
     /// The longest voice recording, in seconds (AGL-039, D20).
     pub max_record_seconds: Option<u32>,
     /// Whether the session starts the server as it starts (AGL-046).
@@ -28,9 +25,6 @@ pub struct ReplFile {
 /// `[repl]` with the defaults of the old agl (D130).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplSettings {
-    pub tool_lines: usize,
-    pub tool_chars: usize,
-    pub frame: bool,
     /// The longest voice recording of Ctrl-R, in seconds (AGL-016;
     /// AGL-039, D20).
     pub max_record_seconds: u32,
@@ -47,9 +41,6 @@ impl ReplSettings {
     pub fn of(user: &super::UserFile) -> ReplSettings {
         let defaults = ReplSettings::default();
         ReplSettings {
-            tool_lines: user.repl.tool_lines.unwrap_or(defaults.tool_lines),
-            tool_chars: user.repl.tool_chars.unwrap_or(defaults.tool_chars),
-            frame: user.repl.frame.unwrap_or(defaults.frame),
             max_record_seconds: user.repl.max_record_seconds.unwrap_or(defaults.max_record_seconds),
             start_server: user.repl.start_server.unwrap_or(defaults.start_server),
             splash: user.repl.splash.unwrap_or(defaults.splash),
@@ -60,9 +51,6 @@ impl ReplSettings {
 impl Default for ReplSettings {
     fn default() -> ReplSettings {
         ReplSettings {
-            tool_lines: 10,
-            tool_chars: 500,
-            frame: true,
             max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
             start_server: true,
             splash: true,
@@ -76,7 +64,7 @@ impl ReplFile {
         Ok(match section {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["tool_lines", "tool_chars", "frame", "max_record_seconds", "start_server", "splash"])?;
+                repl.check_keys(&["max_record_seconds", "start_server", "splash"])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -89,14 +77,9 @@ impl ReplFile {
                         })
                         .transpose()
                 };
-                let tool_lines = count("tool_lines")?;
-                let tool_chars = count("tool_chars")?;
                 let max_record_seconds = count("max_record_seconds")?
                     .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
                 ReplFile {
-                    tool_lines,
-                    tool_chars,
-                    frame: repl.bool("frame")?,
                     max_record_seconds,
                     start_server: repl.bool("start_server")?,
                     splash: repl.bool("splash")?,

@@ -952,7 +952,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         theme.clone(),
     ));
     let screen: Arc<dyn Screen> = dock.clone();
-    let mut presenter = Presenter::new(screen, theme.clone(), repl, lang);
+    let mut presenter = Presenter::new(screen, theme.clone(), lang);
 
     interrupt::install_request_only();
     // Ctrl-C, its flag set, is sent to the daemon as `stop` (AGL-076, D5).
@@ -1372,7 +1372,6 @@ mod tests {
     use crate::agent::Compaction;
     use crate::status::compact_notice;
     use crate::function::Function;
-    use crate::settings::ReplSettings;
 
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -2300,15 +2299,7 @@ mod tests {
     fn the_reporter_forwards_the_decoded_tokens() {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let screen: Arc<dyn Screen> = Arc::new(Lines(lines.clone()));
-        let settings = ReplSettings {
-            tool_lines: 2,
-            tool_chars: 20,
-            frame: true,
-            max_record_seconds: 60,
-            start_server: true,
-            splash: true,
-        };
-        let mut presenter = Presenter::new(screen, Theme::plain(), settings, Lang::En);
+        let mut presenter = Presenter::new(screen, Theme::plain(), Lang::En);
         presenter.begin_turn();
         let control = Control::new(Info::default(), None);
         show(&mut presenter, &control, Report::Decoded(30));
