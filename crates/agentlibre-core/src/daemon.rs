@@ -822,10 +822,16 @@ mod tests {
             }
         };
         assert!(events.contains(&proto::Event::Command(line)), "{events:?}");
-        assert!(matches!(
-            client.ask(&Request::History { session: "none".into() }),
-            Reply::Refused { .. }
-        ));
+        // The `Done` of the recorded command can arrive while this answer is
+        // on its way, so the read skips what no request asked for.
+        proto::send(&mut client.out, &Request::History { session: "none".into() }).unwrap();
+        let refused = loop {
+            match client.next() {
+                Reply::Done { .. } | Reply::Ok => {}
+                reply => break reply,
+            }
+        };
+        assert!(matches!(refused, Reply::Refused { .. }), "{refused:?}");
     }
 
     #[test]
