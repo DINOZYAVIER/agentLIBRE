@@ -512,15 +512,18 @@ impl State {
     }
 
     /// The visible input rows, each with its marker, and the row and
-    /// column of the cursor among them.
+    /// column of the cursor among them. The marker is three columns and the
+    /// text begins at the fourth: with the caret at the start the cursor
+    /// rests on the marker's last column, so the block never covers the
+    /// first letter of what is typed, or of the hint (AGL-088, D1).
     fn input_rows(&self, avail: usize) -> (Vec<(&'static str, String)>, usize, usize) {
         let buffer = self.editor.buffer();
         if buffer.is_empty() {
-            return (vec![("›  ", truncate(tr!(self.lang, m::HINT), avail))], 0, 3);
+            return (vec![("›  ", truncate(tr!(self.lang, m::HINT), avail))], 0, 2);
         }
         let cursor = self.editor.cursor();
         let mut rows: Vec<String> = Vec::new();
-        let (mut cursor_row, mut cursor_column) = (0, 3);
+        let (mut cursor_row, mut cursor_column) = (0, 2);
         let mut line_start = 0;
         for line in buffer.split('\n') {
             let line_end = line_start + line.len();
@@ -535,7 +538,11 @@ impl State {
                 let last = index + 1 == chunks.len();
                 if cursor >= chunk_start && (cursor < chunk_end || (last && cursor <= chunk_end)) {
                     cursor_row = rows.len();
-                    cursor_column = 3 + width(&buffer[chunk_start..cursor]);
+                    cursor_column = if cursor == 0 {
+                        2
+                    } else {
+                        3 + width(&buffer[chunk_start..cursor])
+                    };
                 }
                 rows.push(chunk.clone());
                 chunk_start = chunk_end;
@@ -644,7 +651,7 @@ mod tests {
                 "  minimal    — / 131\u{a0}072  …e/u/project  ".to_string(),
             ]
         );
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 3));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
     }
 
     fn pad(text: &str, columns: usize) -> String {
@@ -705,7 +712,24 @@ mod tests {
         assert_eq!((layout.cursor_row, layout.cursor_column), (3, 3));
         dock.key(Key::Home);
         let layout = dock.lock().layout();
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 3));
+        // AGL-088, D1: at the start the cursor rests on the marker's last
+        // column, left of the first letter.
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
+    }
+
+    #[test]
+    fn the_cursor_at_the_start_rests_left_of_the_text() {
+        // AGL-088, D1: the hint's first letter is never under the block:
+        // empty, at the start of a typed line and at the end of it.
+        let (dock, _) = dock(40, 20);
+        let layout = dock.lock().layout();
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
+        drop(layout);
+        type_text(&dock, "hi");
+        let layout = dock.lock().layout();
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 5));
+        dock.key(Key::Home);
+        assert_eq!(dock.lock().layout().cursor_column, 2);
     }
 
     #[test]
