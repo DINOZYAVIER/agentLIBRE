@@ -67,16 +67,17 @@ pub enum Record {
 }
 
 /// A call's outcome as the transcript and the inspect mode print it;
-/// `None` is a call whose result is not known.
+/// `None` is a call whose result is not known. Capsof, so the word stands
+/// out of the row it ends (AGL-085, D2).
 pub fn status(outcome: Option<Outcome>) -> (String, Role) {
     match outcome {
-        Some(Outcome::Ok) => ("ok".into(), Role::StatusSuccess),
+        Some(Outcome::Ok) => ("OK".into(), Role::StatusSuccess),
         // A failed call is not a fatal error: the agent sees it and calls
         // again (AGL-066, D28), so the warn's orange, not the failure's
         // red.
-        Some(Outcome::Fail) => ("fail".into(), Role::StatusWarn),
-        Some(Outcome::Timeout) => ("timeout".into(), Role::StatusPending),
-        Some(Outcome::Interrupted) => ("interrupted".into(), Role::Muted),
+        Some(Outcome::Fail) => ("FAIL".into(), Role::StatusWarn),
+        Some(Outcome::Timeout) => ("TIMEOUT".into(), Role::StatusPending),
+        Some(Outcome::Interrupted) => ("INTERRUPTED".into(), Role::Muted),
         None => ("…".into(), Role::StatusPending),
     }
 }
@@ -731,8 +732,9 @@ mod tests {
 
     #[test]
     fn the_status_of_an_outcome() {
-        assert_eq!(status(Some(Outcome::Ok)), ("ok".into(), Role::StatusSuccess));
-        assert_eq!(status(Some(Outcome::Fail)), ("fail".into(), Role::StatusWarn));
+        // AGL-085, D2: capsof, so the word stands out of the row it ends.
+        assert_eq!(status(Some(Outcome::Ok)), ("OK".into(), Role::StatusSuccess));
+        assert_eq!(status(Some(Outcome::Fail)), ("FAIL".into(), Role::StatusWarn));
         assert_eq!(status(None), ("…".into(), Role::StatusPending));
     }
 }

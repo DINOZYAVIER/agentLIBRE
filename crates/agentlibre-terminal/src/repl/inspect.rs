@@ -215,6 +215,7 @@ impl Inspect {
         outputs: &Path,
     ) -> Vec<String> {
         let expanded = self.expanded.contains(&index);
+        let focused = index == self.selection;
         match record {
             Record::User(message) => user_lines(theme, message, columns),
             Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
@@ -232,6 +233,7 @@ impl Inspect {
                     lang,
                     columns,
                     expanded,
+                    focused,
                     thinking.as_deref(),
                     text.as_deref(),
                 );
@@ -267,6 +269,7 @@ impl Inspect {
                     lang,
                     columns,
                     expanded,
+                    focused,
                     thinking.as_deref(),
                     None,
                 );
@@ -335,14 +338,18 @@ fn step_lines(
     lang: Lang,
     columns: usize,
     expanded: bool,
+    focused: bool,
     thinking: Option<&str>,
     text: Option<&str>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(thinking) = thinking {
-        if expanded {
+        // D23, AGL-085 D3: the thinking's rows are muted, but on the record
+        // the navigation points at they take the color of a message's text.
+        let role = if focused { Role::InputText } else { Role::Muted };
+        if expanded || focused {
             // D24: like the tool's card — the label, and every line of the
-            // thinking under the gutter, muted (D23).
+            // thinking under the gutter.
             let gutter = theme.paint(Role::InputRule, "  │ ");
             let inner = columns.saturating_sub(4).max(1);
             lines.push(theme.paint(Role::Tool, tr!(lang, m::THINKING)));
@@ -350,10 +357,17 @@ fn step_lines(
                 .lines()
                 .flat_map(|line| hard_wrap(&clean(line), inner))
             {
-                lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &line)));
+                lines.push(format!("{gutter}{}", theme.paint(role, &line)));
             }
         } else {
-            lines.extend(thinking_lines(theme, lang, columns, thinking, Role::Tool));
+            lines.extend(thinking_lines(
+                theme,
+                lang,
+                columns,
+                thinking,
+                Role::Tool,
+                role,
+            ));
         }
     }
     if let Some(text) = text {
@@ -647,7 +661,7 @@ mod tests {
         assert!(inspect.key(Key::Up));
         assert!(inspect.key(Key::Enter));
         let all = screen(&inspect, 24).join("\n");
-        assert!(all.contains("TOOL bash  ok"), "{all}");
+        assert!(all.contains("TOOL bash  OK"), "{all}");
         assert!(all.contains("a\nb\nc\nd\ne"), "{all}");
     }
 
@@ -691,6 +705,42 @@ mod tests {
         assert!(all.contains("THINKING"), "{all}");
         assert!(all.contains("  │ let me look"), "{all}");
         assert!(all.contains("  │ and more"), "{all}");
+    }
+
+    #[test]
+    fn the_focused_thinking_shows_it_all_in_the_texts_color() {
+        // AGL-085, D3: the record the navigation points at shows its
+        // thinking whole, and its rows are the color of a message's text.
+        let events = vec![
+            Event::User("Go".into()),
+            Event::Thinking(
+                (1..=8)
+                    .map(|n| format!("line {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Event::Call {
+                text: None,
+                call: call("c1", "ls"),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+        ];
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::InputText, red)]);
+        let inspect = Inspect::new(&events, &[], Lang::En);
+        // The tail is the step's record, so its thinking is what shows.
+        let all = inspect
+            .render(&theme, Lang::En, 40, 24, std::path::Path::new("/tmp"), &[])
+            .join("\n");
+        let row = all
+            .lines()
+            .find(|line| line.contains("line 8"))
+            .unwrap_or_else(|| panic!("the sixth line is cut: {all}"));
+        assert!(row.contains(&theme.start(Role::InputText)), "{row}");
     }
 
     #[test]

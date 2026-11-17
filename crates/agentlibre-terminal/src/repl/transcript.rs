@@ -174,11 +174,13 @@ impl Presenter {
 
     // Whole blocks, also used to show a resumed session (D126).
 
-    /// The user's message on the input background.
+    /// The user's message on the input background, with the blank row that
+    /// ends its block (AGL-085, D1) — the row a card and an answer end with
+    /// too, so one blank divides one block from the next and never two.
     pub fn show_user(&self, message: &str) {
         let columns = self.screen.columns();
-        let mut lines = vec![String::new()];
-        lines.extend(user_lines(&self.theme, message, columns));
+        let mut lines = user_lines(&self.theme, message, columns);
+        lines.push(String::new());
         self.screen.print(&lines);
     }
 
@@ -233,6 +235,7 @@ impl Presenter {
             self.screen.columns(),
             thinking,
             Role::Tool,
+            Role::Muted,
         ));
     }
 
@@ -243,7 +246,8 @@ impl Presenter {
     }
 
     /// The block of the text before a call (D9): its first three lines,
-    /// as Markdown, with `…` when more.
+    /// as Markdown, with `…` when more. It stands inside its block, above
+    /// the card, so it ends with no blank row (AGL-085, D1).
     fn text_block(&self, text: &str) -> Vec<String> {
         let mut lines = markdown::render(text.trim(), self.screen.columns(), &self.theme);
         if lines.len() > 3 {
@@ -253,7 +257,6 @@ impl Presenter {
                 .expect("three lines")
                 .push_str(&self.theme.paint(Role::Muted, "…"));
         }
-        lines.push(String::new());
         lines
     }
 
@@ -420,6 +423,9 @@ impl Presenter {
                 Role::InputActivity,
             ));
         }
+        // AGL-085, D1: the card ends its block, and a blank row divides one
+        // block from the next.
+        lines.push(String::new());
         lines
     }
 
@@ -552,6 +558,7 @@ impl Presenter {
             self.screen.columns(),
             thinking,
             Role::Tool,
+            Role::Muted,
         ));
         self.piece();
     }
@@ -592,7 +599,7 @@ impl Presenter {
         if let Some(speed) = self.turn_speed() {
             items.push(texts::speed(speed, self.lang));
         }
-        let status = Some(("ok", Role::StatusSuccess));
+        let status = Some(("OK", Role::StatusSuccess));
         // D27: the items in the rule's color, dark gray, as the body.
         let time = Some(self.summary(status, &items, Role::InputActivity));
         let block = self.answer_lines(text, time);
@@ -646,7 +653,7 @@ impl Presenter {
             });
         }
         self.screen.print(&[self.summary(
-            Some(("ok", Role::StatusSuccess)),
+            Some(("OK", Role::StatusSuccess)),
             &items,
             Role::InputActivity,
         )]);
@@ -811,13 +818,14 @@ pub const THINKING_LINES: usize = 5;
 
 /// The lines of the thinking, like the tool's card (D24): the label,
 /// painted for `role`, and up to `THINKING_LINES` lines of the thinking
-/// under the gutter, in the muted color (D23).
+/// under the gutter, painted for `text_role` (D23).
 pub fn thinking_lines(
     theme: &Theme,
     lang: Lang,
     columns: usize,
     thinking: &str,
     role: Role,
+    text_role: Role,
 ) -> Vec<String> {
     let label = tr!(lang, m::THINKING);
     let gutter = theme.paint(Role::InputRule, "  │ ");
@@ -834,7 +842,7 @@ pub fn thinking_lines(
         .take(THINKING_LINES)
         .flat_map(|line| hard_wrap(&clean(line), inner))
     {
-        lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &line)));
+        lines.push(format!("{gutter}{}", theme.paint(text_role, &line)));
     }
     lines
 }
@@ -1006,7 +1014,7 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
-            ["TOOL bash  fail", "  │ cargo test", "fail · bash 1m 15s"]
+            ["TOOL bash  FAIL", "  │ cargo test", "FAIL · bash 1m 15s", ""]
         );
         assert!(!printed.iter().any(|line| line.contains("one")), "{printed:?}");
     }
@@ -1031,7 +1039,7 @@ mod tests {
         };
         show_card(&presenter, &call, &result, &[]);
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, ["TOOL edit  ok", "  │ a.rs"]);
+        assert_eq!(printed, ["TOOL edit  OK", "  │ a.rs", ""]);
     }
 
     #[test]
@@ -1154,8 +1162,8 @@ mod tests {
         };
         report.result(&bash("ls"), &ok);
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Starting the server <1s · Reading the prompt <1s · Thinking <1s · \
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Starting the server <1s · Reading the prompt <1s · Thinking <1s · \
              Writing <1s · bash <1s"
         );
         // The next step begins with no phase of the last one; a retry
@@ -1166,8 +1174,8 @@ mod tests {
         report.action_text("Done");
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Reading the prompt <1s · Writing <1s · Retry 1/2 <1s · Writing <1s · \
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Reading the prompt <1s · Writing <1s · Retry 1/2 <1s · Writing <1s · \
              Worked for <1s"
         );
     }
@@ -1195,8 +1203,8 @@ mod tests {
         report.prefill();
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Reading the prompt <1s · Worked for <1s"
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Reading the prompt <1s · Worked for <1s"
         );
     }
 
@@ -1217,13 +1225,13 @@ mod tests {
         report.context_used(3_100);
         report.compacted();
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Compacting <1s · 52\u{a0}400 → 3\u{a0}100 tokens"
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Compacting <1s · 52\u{a0}400 → 3\u{a0}100 tokens"
         );
         mock.printed.lock().unwrap().clear();
         report.action_text("Done");
         report.answer("Done");
-        let answer = row(&mock.printed.lock().unwrap(), "ok");
+        let answer = row(&mock.printed.lock().unwrap(), "OK");
         assert!(!answer.contains("Compacting"), "{answer}");
         // A count that failed leaves the tokens out (the live row above);
         // the replayed compaction is its one line (AGL-066, D1).
@@ -1234,7 +1242,7 @@ mod tests {
         {
             let printed = mock.printed.lock().unwrap();
             assert!(!printed[0].contains("tokens"), "{:?}", printed[0]);
-            assert_eq!(row(&printed, "ok"), "ok · Compacting <1s");
+            assert_eq!(row(&printed, "OK"), "OK · Compacting <1s");
         }
         mock.printed.lock().unwrap().clear();
         presenter.replay(
@@ -1274,8 +1282,8 @@ mod tests {
         };
         report.result(&bash("ls"), &ok);
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Reading the prompt <1s (1125.0 tok/s) · bash <1s"
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Reading the prompt <1s (1125.0 tok/s) · bash <1s"
         );
         mock.printed.lock().unwrap().clear();
         report.prefill();
@@ -1285,8 +1293,8 @@ mod tests {
         });
         report.answer("Done");
         assert_eq!(
-            row(&mock.printed.lock().unwrap(), "ok"),
-            "ok · Reading the prompt <1s · Worked for <1s"
+            row(&mock.printed.lock().unwrap(), "OK"),
+            "OK · Reading the prompt <1s · Worked for <1s"
         );
     }
 
@@ -1372,9 +1380,14 @@ mod tests {
             },
             &["bash 1s".to_owned()],
         );
-        let green = theme.paint(Role::StatusSuccess, "ok");
+        let green = theme.paint(Role::StatusSuccess, "OK");
         let printed = mock.printed.lock().unwrap();
-        let row = printed.last().expect("the row");
+        // AGL-085, D1: a card ends its block, so the last row is blank.
+        let row = printed
+            .iter()
+            .rev()
+            .find(|line| !line.is_empty())
+            .expect("the row");
         assert!(row.contains(&green), "{row:?}");
         assert!(row.contains("bash 1s"), "{row:?}");
     }
@@ -1503,10 +1516,10 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         // AGL-066, D19, AGL-080, D1: the text before the call (the streamed
         // line is replaced, not repeated) and the tool's card, with no rule
-        // between them.
+        // between them; AGL-085, D1: no blank row inside a block either.
         assert_eq!(printed[0], "Looking at it.");
-        assert_eq!(printed[1], "");
-        assert!(printed.contains(&"TOOL bash  ok".to_owned()));
+        assert!(printed[1].starts_with("TOOL bash"), "{printed:?}");
+        assert!(printed.contains(&"TOOL bash  OK".to_owned()));
     }
 
     #[test]
@@ -1693,7 +1706,7 @@ mod tests {
         // output (D1, D6).
         let tool = printed
             .iter()
-            .position(|line| line == "TOOL bash  ok")
+            .position(|line| line == "TOOL bash  OK")
             .expect("the tool's line");
         assert_eq!(printed[tool + 1], "  │ ls");
         assert!(!printed.contains(&"a".to_owned()));
