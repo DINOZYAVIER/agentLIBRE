@@ -356,7 +356,12 @@ fn build(
                             .unwrap_or_default()
                     })
                 });
-                cx.paragraph(text, tone);
+                // The agent's text is Markdown (katarsa-shell's KS-040).
+                if who == Some(Who::Agent) {
+                    cx.markdown(Sty::column().gap(6.0), text);
+                } else {
+                    cx.paragraph(text, tone);
+                }
             },
         );
         let answer_yes = answer.clone();
