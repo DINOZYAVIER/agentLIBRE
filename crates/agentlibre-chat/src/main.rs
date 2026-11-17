@@ -345,8 +345,13 @@ fn build(
                 }
                 let who =
                     conversation.with(|conversation| conversation.rows.get(at).map(|row| row.who));
+                // The calls between two texts, folded (KS-042 D1, D3).
+                if who == Some(Who::Steps) {
+                    steps(cx, conversation, at);
+                    return;
+                }
                 let tone = match who {
-                    Some(Who::Tool | Who::Note) => Tone::Dim,
+                    Some(Who::Note) => Tone::Dim,
                     _ => Tone::Normal,
                 };
                 let text = prop(move || {
@@ -364,7 +369,7 @@ fn build(
                     cx.markdown(Sty::column().gap(6.0), text);
                     let ui = copier.clone();
                     cx.group(Sty::row(), move |cx| {
-                        cx.button("copy", "copy", move || {
+                        let button = cx.button("copy", "copy", move || {
                             let source = conversation.with(|conversation| {
                                 conversation.rows.get(at).map(|row| row.text.clone())
                             });
@@ -372,6 +377,8 @@ fn build(
                                 ui.copy(source);
                             }
                         });
+                        // A quiet button, as a fold's header.
+                        cx.class(button, "fold");
                     });
                 } else {
                     cx.paragraph(text, tone);
@@ -418,6 +425,67 @@ fn build(
         );
     });
     ui
+}
+
+/// A row of steps as a fold: its header the number of calls and the last
+/// one's line, its body each call's line and its output (KS-042).
+fn steps(
+    cx: &mut katarsa_ui::reactive::Cx,
+    conversation: katarsa_reactive::Signal<Conversation>,
+    at: usize,
+) {
+    let header = prop(move || {
+        conversation.with(|conversation| {
+            conversation
+                .rows
+                .get(at)
+                .map(model::Row::header)
+                .unwrap_or_default()
+        })
+    });
+    cx.fold("steps", header, move |cx| {
+        let calls = move || {
+            conversation.with(|conversation| {
+                (0..conversation.rows.get(at).map_or(0, |row| row.steps.len())).collect::<Vec<_>>()
+            })
+        };
+        cx.keyed(
+            Sty::column().gap(4.0),
+            calls,
+            |call| *call,
+            move |cx, &call| {
+                let step = move |read: fn(&model::Step) -> String| {
+                    conversation.with(|conversation| {
+                        conversation
+                            .rows
+                            .get(at)
+                            .and_then(|row| row.steps.get(call))
+                            .map(read)
+                            .unwrap_or_default()
+                    })
+                };
+                let line = prop(move || {
+                    step(|step| {
+                        let mark = if step.failed { "\u{2717} " } else { "" };
+                        format!("{mark}{}", step.line)
+                    })
+                });
+                cx.paragraph(line, Tone::Dim);
+                cx.show(
+                    Sty::column(),
+                    move || !step(|step| step.output.clone().unwrap_or_default()).is_empty(),
+                    move |cx| {
+                        let node = cx.group(Sty::column(), move |cx| {
+                            let output =
+                                prop(move || step(|step| step.output.clone().unwrap_or_default()));
+                            cx.paragraph(output, Tone::Normal);
+                        });
+                        cx.class(node, "markdown.code");
+                    },
+                );
+            },
+        );
+    });
 }
 
 #[cfg(test)]

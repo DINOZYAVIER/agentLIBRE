@@ -2,7 +2,7 @@
 //! reports, ends and past make. Plain data: the window draws it.
 
 use agentlibre_proto::{
-    Done, Event, PhaseEvent, Report, Sent, StopReason, ToolCall, TurnEnd, Value,
+    Done, Event, Outcome, PhaseEvent, Report, Sent, StopReason, ToolCall, TurnEnd, Value,
 };
 
 /// The most of a tool's argument its line shows.
@@ -15,8 +15,8 @@ pub enum Who {
     You,
     /// The agent's text: its answer, or what it wrote before a call.
     Agent,
-    /// A tool call, a dim line.
-    Tool,
+    /// The calls between two of the agent's texts, folded (KS-042 D1).
+    Steps,
     /// A stop, a cut-off, an error: a dim line.
     Note,
 }
@@ -26,6 +26,44 @@ pub enum Who {
 pub struct Row {
     pub who: Who,
     pub text: String,
+    /// A row of steps' calls.
+    pub steps: Vec<Step>,
+}
+
+/// A call of the agent's: its line, and its output once it came.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    id: String,
+    pub line: String,
+    /// The output's first lines (KS-042 D2), and whether the call failed.
+    pub output: Option<String>,
+    pub failed: bool,
+}
+
+/// The most lines of an output a step shows (KS-042 D2).
+const OUTPUT_LINES: usize = 20;
+
+/// An output's first [`OUTPUT_LINES`], then how many more there are.
+fn output(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= OUTPUT_LINES {
+        return content.trim_end().to_owned();
+    }
+    format!(
+        "{}\n… {} more lines",
+        lines[..OUTPUT_LINES].join("\n"),
+        lines.len() - OUTPUT_LINES
+    )
+}
+
+impl Row {
+    /// A fold's header: the number of calls and the last one's line.
+    pub fn header(&self) -> String {
+        let count = self.steps.len();
+        let last = self.steps.last().map_or("", |step| step.line.as_str());
+        let calls = if count == 1 { "call" } else { "calls" };
+        format!("{count} {calls} · {last}")
+    }
 }
 
 /// The rows, and the agent's text that is arriving.
@@ -48,12 +86,17 @@ impl Conversation {
                     if let Some(text) = text.as_ref().filter(|text| !text.trim().is_empty()) {
                         conversation.push(Who::Agent, text.clone());
                     }
-                    conversation.push(Who::Tool, call_line(call));
+                    conversation.call(call);
                 }
                 Event::Stop(reason) if *reason != StopReason::Interrupted => {
                     conversation.push(Who::Note, format!("stopped: {}", reason_name(*reason)));
                 }
                 Event::CutOff(_) => conversation.push(Who::Note, CUT_OFF.into()),
+                Event::Result {
+                    id,
+                    outcome,
+                    content,
+                } => conversation.result(id, *outcome, content),
                 _ => {}
             }
         }
@@ -61,7 +104,41 @@ impl Conversation {
     }
 
     fn push(&mut self, who: Who, text: String) {
-        self.rows.push(Row { who, text });
+        self.rows.push(Row {
+            who,
+            text,
+            steps: Vec::new(),
+        });
+    }
+
+    /// A call: a step of the last row of steps, or of a new one after the
+    /// agent's text (D1).
+    fn call(&mut self, call: &ToolCall) {
+        if self.rows.last().is_none_or(|row| row.who != Who::Steps) {
+            self.push(Who::Steps, String::new());
+        }
+        let row = self.rows.last_mut().expect("a row of steps");
+        row.steps.push(Step {
+            id: call.id.clone(),
+            line: call_line(call),
+            output: None,
+            failed: false,
+        });
+    }
+
+    /// A call's output, on its step.
+    fn result(&mut self, id: &str, outcome: Outcome, content: &str) {
+        let step = self
+            .rows
+            .iter_mut()
+            .rev()
+            .filter(|row| row.who == Who::Steps)
+            .flat_map(|row| row.steps.iter_mut())
+            .find(|step| step.id == id);
+        if let Some(step) = step {
+            step.output = Some(output(content));
+            step.failed = outcome != Outcome::Ok;
+        }
     }
 
     /// The human's message, shown as it is sent.
@@ -106,13 +183,20 @@ impl Conversation {
                     }
                     _ => {}
                 }
-                self.push(Who::Tool, call_line(call));
+                self.call(call);
             }
             Report::Event(Event::Answer(text)) => match self.streaming.take() {
                 Some(at) => self.rows[at].text = text.clone(),
                 None => self.push(Who::Agent, text.clone()),
             },
             Report::Event(Event::CutOff(_)) => self.note(CUT_OFF),
+            Report::Event(Event::Result {
+                id,
+                outcome,
+                content,
+            }) => {
+                self.result(id, *outcome, content);
+            }
             // A new step's text is a row of its own.
             Report::Transition(transition) if matches!(transition.event, PhaseEvent::StepStart) => {
                 self.streaming = None;
@@ -203,12 +287,56 @@ mod tests {
         Sent::Report(Report::ActionText(piece.into()))
     }
 
-    fn rows(conversation: &Conversation) -> Vec<(Who, &str)> {
+    fn rows(conversation: &Conversation) -> Vec<(Who, String)> {
         conversation
             .rows
             .iter()
-            .map(|row| (row.who, row.text.as_str()))
+            .map(|row| match row.who {
+                Who::Steps => (row.who, row.header()),
+                _ => (row.who, row.text.clone()),
+            })
             .collect()
+    }
+
+    fn check(conversation: &Conversation, expected: &[(Who, &str)]) {
+        let rows = rows(conversation);
+        let rows: Vec<(Who, &str)> = rows
+            .iter()
+            .map(|(who, text)| (*who, text.as_str()))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn a_calls_output_is_on_its_step_cut_to_twenty_lines() {
+        let mut conversation = Conversation::default();
+        conversation.sent(&Sent::Report(Report::Event(Event::Call {
+            text: None,
+            call: call("read", "big"),
+        })));
+        let long: Vec<String> = (1..=25).map(|line| line.to_string()).collect();
+        conversation.sent(&Sent::Report(Report::Event(Event::Result {
+            id: "c1".into(),
+            outcome: Outcome::Ok,
+            content: long.join("\n"),
+        })));
+        let step = &conversation.rows[0].steps[0];
+        let output = step.output.as_deref().unwrap();
+        assert!(
+            output.starts_with("1\n2\n") && output.ends_with("20\n… 5 more lines"),
+            "{output}"
+        );
+        assert!(!step.failed);
+        conversation.sent(&Sent::Report(Report::Event(Event::Result {
+            id: "c1".into(),
+            outcome: Outcome::Fail,
+            content: "no such file".into(),
+        })));
+        let step = &conversation.rows[0].steps[0];
+        assert_eq!(
+            (step.output.as_deref(), step.failed),
+            (Some("no such file"), true)
+        );
     }
 
     #[test]
@@ -218,7 +346,10 @@ mod tests {
         conversation.sent(&step());
         conversation.sent(&text("Let me "));
         conversation.sent(&text("look."));
-        assert_eq!(rows(&conversation)[1], (Who::Agent, "Let me look."));
+        assert_eq!(
+            rows(&conversation)[1],
+            (Who::Agent, "Let me look.".to_owned())
+        );
         conversation.sent(&Sent::Report(Report::Event(Event::Call {
             text: Some("Let me look.".into()),
             call: call("read", "src/main.rs\nmore"),
@@ -234,15 +365,14 @@ mod tests {
         conversation.sent(&Sent::Report(Report::Event(Event::Answer(
             "It is done.".into(),
         ))));
-        assert_eq!(
-            rows(&conversation),
-            [
+        check(
+            &conversation,
+            &[
                 (Who::You, "read it"),
                 (Who::Agent, "Let me look."),
-                (Who::Tool, "→ read src/main.rs"),
-                (Who::Tool, "→ bash ls"),
+                (Who::Steps, "2 calls · → bash ls"),
                 (Who::Agent, "It is done."),
-            ]
+            ],
         );
     }
 
@@ -259,13 +389,13 @@ mod tests {
         conversation.done(&done(Ok(TurnEnd::Stopped(StopReason::StepLimit))));
         conversation.done(&done(Err("no server".into())));
         conversation.done(&done(Ok(TurnEnd::Answer("x".into()))));
-        assert_eq!(
-            rows(&conversation),
-            [
+        check(
+            &conversation,
+            &[
                 (Who::Note, "stopped"),
                 (Who::Note, "stopped: step_limit"),
                 (Who::Note, "no server"),
-            ]
+            ],
         );
     }
 
@@ -283,16 +413,16 @@ mod tests {
             Event::User("again".into()),
             Event::Stop(StopReason::ContextFull),
         ]);
-        assert_eq!(
-            rows(&conversation),
-            [
+        check(
+            &conversation,
+            &[
                 (Who::You, "hi"),
                 (Who::Agent, "Looking."),
-                (Who::Tool, "→ read a"),
+                (Who::Steps, "1 call · → read a"),
                 (Who::Agent, "hello"),
                 (Who::You, "again"),
                 (Who::Note, "stopped: context_full"),
-            ]
+            ],
         );
     }
 }
