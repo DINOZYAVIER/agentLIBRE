@@ -89,6 +89,8 @@ pub enum Request {
     Answer { question: u64, answer: Option<String> },
     /// The client no longer holds the session (D12).
     Close { session: String },
+    /// A session's past: its events (AGL-073, D10).
+    History { session: String },
 }
 
 /// What `open` names (D10): as on the command line.
@@ -130,6 +132,8 @@ pub enum Reply {
     Opened(Opened),
     Sessions { sessions: Vec<SessionInfo> },
     Transcribed { text: String },
+    /// A session's events, its past (AGL-073, D10).
+    History { session: String, events: Vec<Event> },
     /// What a subscribed session does (D3).
     Sent { session: String, sent: Sent },
     /// The end of a command of a subscribed session; `yours` when this

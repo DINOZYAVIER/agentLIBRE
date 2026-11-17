@@ -308,6 +308,25 @@ impl Daemon {
                 self.release(client, Some(&session));
                 Some(Reply::Ok)
             }
+            // The plane's thread answers when its command comes, after the
+            // one it runs (AGL-073, D10).
+            Request::History { session } => {
+                let (to, from) = mpsc::channel();
+                if let Err(error) = self.command(client, &session, |_| Command::History(to), false) {
+                    return refused(error);
+                }
+                thread::spawn(move || {
+                    let events = from.recv().unwrap_or_default();
+                    self.send_to(
+                        client,
+                        &Reply::History {
+                            session,
+                            events: events.into_iter().map(wire::event).collect(),
+                        },
+                    );
+                });
+                None
+            }
         }
     }
 
@@ -757,6 +776,54 @@ mod tests {
         assert_eq!(client.ask(&Request::Sessions), Reply::Sessions { sessions: Vec::new() });
         assert!(matches!(
             client.ask(&Request::Subscribe { session: Some("none".into()) }),
+            Reply::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn history_gives_a_sessions_past() {
+        // AGL-073, D10.
+        let dir = TempDir::new();
+        let (paths, socket) = daemon(&dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            r#"{ agl, ... }: { function = "fixture-minimal"; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
+        )
+        .unwrap();
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(opened) = client.ask(&open(&project, None)) else {
+            panic!("not opened")
+        };
+        let id = opened.session.id.clone();
+        let line = proto::CommandLine {
+            line: "/help".into(),
+            failed: false,
+            output: None,
+        };
+        assert_eq!(
+            client.ask(&Request::Record {
+                session: id.clone(),
+                lines: vec![line.clone()],
+            }),
+            Reply::Ok
+        );
+        proto::send(&mut client.out, &Request::History { session: id.clone() }).unwrap();
+        let events = loop {
+            match client.next() {
+                Reply::History { session, events } => {
+                    assert_eq!(session, id);
+                    break events;
+                }
+                // The ends of the commands, told to none here.
+                Reply::Done { .. } | Reply::Ok => {}
+                other => panic!("not the history: {other:?}"),
+            }
+        };
+        assert!(events.contains(&proto::Event::Command(line)), "{events:?}");
+        assert!(matches!(
+            client.ask(&Request::History { session: "none".into() }),
             Reply::Refused { .. }
         ));
     }

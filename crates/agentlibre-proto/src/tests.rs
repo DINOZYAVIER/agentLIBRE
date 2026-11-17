@@ -87,6 +87,7 @@ fn every_request_round_trips_as_one_line() {
             answer: Some("y".into()),
         },
         Request::Close { session: "s".into() },
+        Request::History { session: "s".into() },
     ];
     for request in requests {
         let (line, back) = round(&request);
@@ -111,6 +112,10 @@ fn what_a_plane_sends_round_trips() {
         Reply::Refused { error: "no".into() },
         Reply::Ok,
         Reply::Opened(Opened::default()),
+        Reply::History {
+            session: "s".into(),
+            events: vec![Event::User("hi".into()), Event::Answer("hello".into())],
+        },
         Reply::Sent {
             session: "s".into(),
             sent: Sent::Report(Report::Event(call)),

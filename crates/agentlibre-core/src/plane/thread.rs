@@ -45,6 +45,8 @@ pub enum Command {
     /// Lines of the session's record a surface writes: its commands
     /// (AGL-047, D5).
     Append(Vec<Event>),
+    /// The session's events, its past (AGL-073, D10), sent to the channel.
+    History(std::sync::mpsc::Sender<Vec<Event>>),
     /// The server comes up as the session starts (AGL-046), as a turn: its
     /// lines and its phases are sent, then the context as `Context`; a
     /// server that fails ends the command with its error in `said`.
@@ -282,6 +284,10 @@ impl Plane {
                 for event in events {
                     let _ = self.session.append(event);
                 }
+                (None, None)
+            }
+            Command::History(to) => {
+                let _ = to.send(self.session.events.clone());
                 (None, None)
             }
             Command::Start => (None, self.start_server(&mut forward).err().map(Err)),

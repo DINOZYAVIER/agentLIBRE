@@ -265,7 +265,7 @@ impl Remote {
                     })
                     .collect(),
             },
-            Command::Start => return None,
+            Command::Start | Command::History(_) => return None,
         };
         let failed = |error: Error| {
             let (turn, said) = if turn { (Some(Err(error)), None) } else { (None, Some(Err(error))) };
