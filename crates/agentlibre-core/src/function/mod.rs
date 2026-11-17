@@ -107,6 +107,9 @@ pub struct Function {
     /// The file the Function came from; a built-in says so
     /// (`<built-in>/functions/<name>.nix`).
     pub path: PathBuf,
+    /// What it is made for, as a human reads it (AGL-089, D12): "for a GPU
+    /// with 10 GB of VRAM and more"; every built-in has one (D14).
+    pub description: Option<String>,
     /// The evaluated Nix value the Function was read from (AGL-063, D4):
     /// the system, the policy figures, the sampling, the format, the server
     /// profile and the states with their transitions, as Nix wrote them.
@@ -295,13 +298,15 @@ impl Function {
     }
 
     /// Reads the evaluated Function `value` of the file `path` (AGL-039,
-    /// D17): exactly `policy` and `model`, both required (D21).
+    /// D17): `policy` and `model`, both required (D21), and the optional
+    /// `description` (AGL-089, D12).
     pub fn from_value(path: &Path, value: serde_json::Value) -> Result<Function, Error> {
         // Kept for the `run` snapshot (AGL-063, D4); `Section::top` takes
         // the value by value.
         let snapshot = value.clone();
         let mut file = Section::top(path, value)?;
-        file.check_keys(&["policy", "model"])?;
+        file.check_keys(&["policy", "model", "description"])?;
+        let description = file.string("description")?;
         let mut model = file.required_section("model")?;
         let mut policy = file.required_section("policy")?;
 
@@ -367,6 +372,7 @@ impl Function {
         check_graph(path, &states, initial)?;
         Ok(Function {
             path: path.to_path_buf(),
+            description,
             value: snapshot,
             sources,
             format,
@@ -450,6 +456,7 @@ impl Function {
         };
         Function {
             path: PathBuf::from("<loose-continue>"),
+            description: None,
             value: json!({}),
             sources: Vec::new(),
             format: Format::qwen(),

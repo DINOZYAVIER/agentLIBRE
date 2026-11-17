@@ -46,6 +46,8 @@ pub struct Entry {
     /// Function's).
     pub kind: ServerKind,
     pub model: Option<String>,
+    /// What it is made for (AGL-089, D12).
+    pub description: Option<String>,
     /// Why it does not load, instead of the kind and the model.
     pub error: Option<String>,
     /// The Function a run here loads (`--function` aside).
@@ -140,9 +142,9 @@ impl Catalog {
                 if builtins.contains(&name) {
                     sources.push(Source::BuiltIn);
                 }
-                let (kind, model, error) = match self.server_of(&name) {
-                    Ok((kind, model)) => (kind, model, None),
-                    Err(error) => (ServerKind::default(), None, Some(error.message(lang))),
+                let (kind, model, description, error) = match self.server_of(&name) {
+                    Ok((kind, model, description)) => (kind, model, description, None),
+                    Err(error) => (ServerKind::default(), None, None, Some(error.message(lang))),
                 };
                 Entry {
                     current: name == self.current,
@@ -151,6 +153,7 @@ impl Catalog {
                     shadows: sources[1..].to_vec(),
                     kind,
                     model,
+                    description,
                     error,
                 }
             })
@@ -167,6 +170,13 @@ impl Catalog {
             .map(|e| e.source.label(lang).chars().count())
             .max()
             .unwrap_or(0);
+        let no_model = tr!(lang, m::FUNCTION_NO_MODEL);
+        let model_width = entries
+            .iter()
+            .filter(|e| e.error.is_none())
+            .map(|e| e.model.as_deref().unwrap_or(no_model).chars().count())
+            .max()
+            .unwrap_or(0);
         entries
             .iter()
             .map(|entry| {
@@ -180,12 +190,15 @@ impl Catalog {
                     Some(error) => line.push_str(error),
                     None => {
                         line.push_str(&format!("{:6}  ", entry.kind.name()));
-                        line.push_str(
-                            entry
-                                .model
-                                .as_deref()
-                                .unwrap_or(tr!(lang, m::FUNCTION_NO_MODEL)),
-                        );
+                        let model = entry.model.as_deref().unwrap_or(no_model);
+                        // What it is made for (AGL-089, D12, D14), in a
+                        // column after the models.
+                        match &entry.description {
+                            Some(description) => {
+                                line.push_str(&format!("{model:model_width$}  {description}"));
+                            }
+                            None => line.push_str(model),
+                        }
                     }
                 }
                 if !entry.shadows.is_empty() {
@@ -205,11 +218,12 @@ impl Catalog {
         self.server_of(name).map(|_| ())
     }
 
-    /// The kind and the model of the Function `name` (AGL-039, D21).
-    fn server_of(&self, name: &str) -> Result<(ServerKind, Option<String>), Error> {
+    /// The kind, the model and the description of the Function `name`
+    /// (AGL-039, D21; AGL-089, D12).
+    fn server_of(&self, name: &str) -> Result<(ServerKind, Option<String>, Option<String>), Error> {
         let function = Function::load(&self.dirs(), name)?;
         let server = self.settings.effective(&function.model);
-        Ok((server.kind(), crate::engine::model_of(&server)?))
+        Ok((server.kind(), crate::engine::model_of(&server)?, function.description))
     }
 }
 
@@ -300,6 +314,28 @@ mod tests {
         let lines = catalog.lines(Lang::En);
         let current = lines.iter().find(|line| line.starts_with("* ")).unwrap();
         assert_eq!(current, "* mine             workspace  llama   p.gguf over user");
+    }
+
+    #[test]
+    fn a_description_is_a_column_after_the_models() {
+        // AGL-089, D12, D14.
+        let dir = TempDir::new();
+        let catalog = catalog(&dir.0);
+        let described = |text: &str| file(LLAMA).replacen("policy =", &format!("description = \"{text}\"; policy ="), 1);
+        write(&catalog.user_dir, "mine", &described("for a GPU with 10 GB of VRAM and more"));
+        write(&catalog.user_dir, "other", &file(LLAMA));
+        let entries = catalog.entries(Lang::En);
+        let by = |name: &str| entries.iter().find(|e| e.name == name).unwrap();
+        assert_eq!(by("mine").description.as_deref(), Some("for a GPU with 10 GB of VRAM and more"));
+        assert_eq!(by("other").description, None);
+        let lines = catalog.lines(Lang::En);
+        let line = |name: &str| lines.iter().find(|l| l[2..].starts_with(name)).unwrap().clone();
+        let mine = line("mine");
+        let column = mine.find("for a GPU").unwrap();
+        // The column starts after the longest model of the list.
+        assert_eq!(&mine[column - 2..column], "  ");
+        assert!(mine[..column].contains("p.gguf "), "{mine}");
+        assert!(line("other").ends_with("llama   p.gguf"), "{}", line("other"));
     }
 
     #[test]
