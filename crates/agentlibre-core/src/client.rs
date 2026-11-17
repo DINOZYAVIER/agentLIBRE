@@ -106,6 +106,12 @@ impl Client {
         })
     }
 
+    /// What the daemon sent that waits, if anything.
+    pub fn try_next(&self) -> Option<Reply> {
+        let from = self.from.lock().unwrap_or_else(|e| e.into_inner());
+        from.try_recv().ok()
+    }
+
     /// What the daemon sends next.
     pub fn next(&self) -> Result<Reply, Error> {
         let from = self.from.lock().unwrap_or_else(|e| e.into_inner());
@@ -273,6 +279,13 @@ impl Remote {
                 },
             }
         };
+        // What a turn another client started sent while this one waited is
+        // not drawn now as this command's: only a question is answered.
+        while let Some(reply) = self.client.try_next() {
+            if let Reply::Question { .. } = reply {
+                self.unasked(&session, reply, each);
+            }
+        }
         // The command's own reply first; what the plane sends follows.
         let mut each_unasked = |reply: Reply| self.unasked(&session, reply, each);
         if let Err(error) = self.client.ask(&request, &mut each_unasked) {
