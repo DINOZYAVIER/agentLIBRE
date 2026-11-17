@@ -10,12 +10,36 @@
     flake = false;
   };
 
+  # Strata, upstream and the RDNA3 fork, and the llama.cpp both pin
+  # (`LLAMA_CPP_COMMIT` of their setup.py): packages of agl's own (AGL-089, D7).
+  inputs.strata = {
+    url = "github:Niko1221/Strata/c77572806996349b49995e4f98d41b5294d36a21";
+    flake = false;
+  };
+  inputs.strata-rdna3 = {
+    url = "github:nicejunjie/Strata-rdna3/8b01b0c8512d388552e8601b3aff6753d05286e0";
+    flake = false;
+  };
+  inputs.strata-llama-cpp = {
+    url = "github:ggml-org/llama.cpp/3cf03257f219afbe7334045ff7c6a06ac68c627d";
+    flake = false;
+  };
+
   # NixOS on Windows, for the system of `nixosConfigurations.wsl` (AGL-056): the
   # release, on the nixpkgs of its own, as it does not follow nixos-unstable.
   inputs.nixos-wsl.url = "github:nix-community/NixOS-WSL/2605.7.2";
 
   outputs =
-    { self, nixpkgs, llama-cpp, functions, nixos-wsl }:
+    {
+      self,
+      nixpkgs,
+      llama-cpp,
+      functions,
+      nixos-wsl,
+      strata,
+      strata-rdna3,
+      strata-llama-cpp,
+    }:
     let
       # Linux on x86-64, also in WSL (AGL-057, D6).
       system = "x86_64-linux";
@@ -40,6 +64,16 @@
         ln -s ${pkgs.wl-clipboard}/bin/wl-paste $out/bin/wl-paste
         ln -s ${pkgs.step-cli}/bin/step $out/bin/step
       '';
+
+      # Strata for the RDNA3 card (AGL-089, D7, D8): upstream and the fork.
+      strataPackage =
+        pname: input: rdna3:
+        pkgs.callPackage ./pkgs/strata.nix {
+          inherit pname rdna3;
+          version = input.shortRev or "unknown";
+          src = input;
+          llamaCpp = strata-llama-cpp;
+        };
 
       # Only what the build reads: a change of the docs does not rebuild.
       src = lib.fileset.toSource {
@@ -155,6 +189,8 @@
         # A machine whose server is outside it (AGL-052, D4).
         outside = agl;
         inherit tools;
+        strata = strataPackage "strata" strata false;
+        strata-rdna3 = strataPackage "strata-rdna3" strata-rdna3 true;
       };
 
       # agl on a NixOS of one's own (AGL-056, D2).
@@ -216,6 +252,8 @@
             grep -q '^\* .* llama ' list
             touch $out
           '';
+        # The Strata packages build (AGL-089, D7).
+        inherit (self.packages.${system}) strata strata-rdna3;
         # The module on a plain NixOS and on NixOS-WSL: the right package, and
         # `wslinfo` only where there is a WSL (AGL-056).
         module =
