@@ -27,28 +27,21 @@ const MAX_MENU_ROWS: usize = 6;
 /// How many printed lines are remembered for erasing.
 const REMEMBERED_LINES: usize = 400;
 
-/// The context usage for the status row and its role (D152): `41 213 /
-/// 131 072 (32%)`, with `—` before the first step. Its base is the text's
-/// own color, and it warms on its own: yellow from 70%, orange from 90%
-/// (AGL-080, D3; AGL-082, D2).
-fn context_usage(used: Option<usize>, size: usize) -> (String, Role) {
+/// The context usage for the status row (D152): `41 213 / 131 072 (32%)`,
+/// with `—` before the first step. The text's own color at every share of
+/// the context: the number says how much is used, the color says nothing
+/// else (AGL-080, D3, yellow from 70% and orange from 90%, undone by
+/// AGL-084, D1).
+fn context_usage(used: Option<usize>, size: usize) -> String {
     // The server has not answered yet (AGL-015).
     if size == 0 {
-        return ("—".into(), Role::InputText);
+        return "—".into();
     }
     let Some(used) = used else {
-        return (format!("— / {}", grouped(size)), Role::InputText);
+        return format!("— / {}", grouped(size));
     };
     let percent = used.saturating_mul(100) / size.max(1);
-    let role = match percent {
-        90.. => Role::StatusWarn,
-        70.. => Role::StatusPending,
-        _ => Role::InputText,
-    };
-    (
-        format!("{} / {} ({percent}%)", grouped(used), grouped(size)),
-        role,
-    )
+    format!("{} / {} ({percent}%)", grouped(used), grouped(size))
 }
 
 /// `n` with a no-break space between groups of three digits.
@@ -494,8 +487,8 @@ impl State {
         let columns = self.columns;
         let usage = context_usage(self.context_used, self.context);
         // The usage is dropped when the row is too narrow for it.
-        let usage = Some(usage).filter(|(text, _)| columns >= 3 * width(text));
-        let usage_width = usage.as_ref().map_or(0, |(text, _)| width(text) + 2);
+        let usage = Some(usage).filter(|text| columns >= 3 * width(text));
+        let usage_width = usage.as_ref().map_or(0, |text| width(text) + 2);
         let room = columns.saturating_sub(4 + usage_width);
         let workspace = truncate_start(&self.workspace, room / 2 + room % 2);
         let function = truncate(&self.function, room.saturating_sub(width(&workspace)));
@@ -503,12 +496,12 @@ impl State {
         let right = format!("{workspace}  ");
         let gap = columns.saturating_sub(width(&left) + usage_width + width(&right));
         let usage = usage
-            .map(|(text, role)| format!("{}{}", self.theme.paint(role, &text), "  "))
+            .map(|text| format!("{}{}", self.theme.paint(Role::InputText, &text), "  "))
             .unwrap_or_default();
-        // AGL-082, D2: three roles for three kinds of the row — the
-        // Function in the tool's, as `THINKING` and `Tool bash`; the
-        // workspace in the activity's, as the separator above; the usage in
-        // the text's, since it changes its own color as it fills.
+        // AGL-082, D2 and AGL-084, D1: three roles for three kinds of the
+        // row — the Function in the tool's, as `THINKING` and `Tool bash`;
+        // the workspace in the activity's, as the separator above; the
+        // usage in the text's, whatever share of the context it names.
         format!(
             "{}{}{}{}",
             self.theme.paint(Role::Tool, &left),
@@ -820,19 +813,15 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_is_grouped_and_colored_by_fill() {
-        assert_eq!(
-            context_usage(None, 131_072),
-            ("— / 131\u{a0}072".into(), Role::InputText)
-        );
+    fn context_usage_is_grouped_and_stays_the_texts_color() {
+        assert_eq!(context_usage(None, 131_072), "— / 131\u{a0}072");
         assert_eq!(
             context_usage(Some(41_213), 131_072),
-            ("41\u{a0}213 / 131\u{a0}072 (31%)".into(), Role::InputText)
+            "41\u{a0}213 / 131\u{a0}072 (31%)"
         );
-        // AGL-080, D3: orange from 90%, yellow from 70%, else the row's own.
-        assert_eq!(context_usage(Some(999), 1000).1, Role::StatusWarn);
-        assert_eq!(context_usage(Some(899), 1000).1, Role::StatusPending);
-        assert_eq!(context_usage(Some(699), 1000).1, Role::InputText);
+        // AGL-084, D1: the number alone says how full the context is, so
+        // 99% is no louder than 31%.
+        assert_eq!(context_usage(Some(999), 1000), "999 / 1\u{a0}000 (99%)");
         assert_eq!(grouped(7), "7");
         assert_eq!(grouped(1000), "1\u{a0}000");
     }
@@ -861,8 +850,8 @@ mod tests {
 
     #[test]
     fn the_context_is_a_dash_until_the_server_has_answered() {
-        assert_eq!(context_usage(None, 0), ("—".into(), Role::InputText));
-        assert_eq!(context_usage(Some(5), 0), ("—".into(), Role::InputText));
+        assert_eq!(context_usage(None, 0), "—");
+        assert_eq!(context_usage(Some(5), 0), "—");
         let (dock, _) = dock(80, 20);
         dock.set_context_size(0);
         assert!(dock.lock().layout().rows.last().unwrap().contains('—'));
@@ -894,18 +883,17 @@ mod tests {
 
     #[test]
     fn the_status_row_divides_its_three_colors() {
-        // AGL-082, D2: the Function in the tool's color, the workspace
-        // in the activity's, the usage in the text's — and over 90% of the
-        // context the usage takes the warn's orange.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
-        let blue = crate::style::Style::parse("#0000FF", false).expect("a color");
+        // AGL-082, D2 and AGL-084, D1: the Function in the tool's color,
+        // the workspace in the activity's, the usage in the text's at every
+        // share of the context — the warn's orange and yellow are no more.
+        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
-                (Role::Tool, red),
-                (Role::InputActivity, blue),
-                (Role::InputText, crate::style::Style::parse("#00FF00", false).expect("a color")),
-                (Role::StatusWarn, crate::style::Style::parse("#0000FF", false).expect("a color")),
+                (Role::Tool, color("#FF0000")),
+                (Role::InputActivity, color("#0000FF")),
+                (Role::InputText, color("#00FF00")),
+                (Role::StatusWarn, color("#FFA500")),
             ],
         );
         let dock = Dock::new(
@@ -927,7 +915,8 @@ mod tests {
         assert!(row.contains(&start(Role::InputText)), "{row}");
         dock.context(950);
         let row = status();
-        assert!(row.contains(&start(Role::StatusWarn)), "{row}");
+        assert!(!row.contains(&start(Role::StatusWarn)), "{row}");
+        assert!(row.contains(&start(Role::InputText)), "{row}");
     }
 
     #[test]
