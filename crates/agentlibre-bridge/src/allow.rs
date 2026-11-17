@@ -1,0 +1,126 @@
+//! The requests a device may send (D9): what the first version of the apps
+//! needs, and `open` only to resume a session — no new session in a
+//! directory the phone names.
+
+use agentlibre_proto::Request;
+
+/// Whether `request` goes on to the daemon. Every request is named, so that
+/// a new one is refused until it is decided here.
+pub fn allowed(request: &Request) -> bool {
+    match request {
+        Request::Hello { .. }
+        | Request::Sessions
+        | Request::Subscribe { .. }
+        | Request::History { .. }
+        | Request::Say { .. }
+        | Request::Stop { .. }
+        | Request::Answer { .. }
+        | Request::Transcribe { .. }
+        | Request::Close { .. } => true,
+        Request::Open(open) => open.resume.is_some(),
+        Request::Remember { .. }
+        | Request::Remove { .. }
+        | Request::Look { .. }
+        | Request::Rename { .. }
+        | Request::New { .. }
+        | Request::Compact { .. }
+        | Request::Record { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentlibre_proto::{Attached, Look, MediaKind, Open, VERSION};
+
+    fn audio() -> Attached {
+        Attached {
+            number: 1,
+            kind: MediaKind::Audio,
+            name: "voice.m4a".into(),
+            ext: "m4a".into(),
+            base64: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_first_versions_requests_go_on() {
+        let s = || "s".to_owned();
+        for request in [
+            Request::Hello {
+                version: VERSION,
+                human: true,
+                lang: "en".into(),
+                pid: 0,
+            },
+            Request::Sessions,
+            Request::Subscribe { session: None },
+            Request::Subscribe { session: Some(s()) },
+            Request::History { session: s() },
+            Request::Say {
+                session: s(),
+                message: "hi".into(),
+                attached: vec![audio()],
+                reasoning: None,
+            },
+            Request::Stop { session: s() },
+            Request::Answer {
+                question: 1,
+                answer: Some("y".into()),
+            },
+            Request::Transcribe {
+                dir: "/w".into(),
+                plane: None,
+                audio: audio(),
+            },
+            Request::Close { session: s() },
+            Request::Open(Open {
+                dir: "/w".into(),
+                resume: Some("last".into()),
+                ..Open::default()
+            }),
+        ] {
+            assert!(allowed(&request), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_session_and_the_memory_are_refused() {
+        let s = || "s".to_owned();
+        for request in [
+            Request::Open(Open {
+                dir: "/etc".into(),
+                ..Open::default()
+            }),
+            Request::Remember {
+                session: s(),
+                name: "n".into(),
+                text: "t".into(),
+                workspace: false,
+            },
+            Request::Remove {
+                session: s(),
+                name: "n".into(),
+            },
+            Request::Look {
+                session: s(),
+                look: Look::List,
+            },
+            Request::Rename {
+                session: s(),
+                name: "n".into(),
+            },
+            Request::New { session: s() },
+            Request::Compact {
+                session: s(),
+                reasoning: None,
+            },
+            Request::Record {
+                session: s(),
+                lines: Vec::new(),
+            },
+        ] {
+            assert!(!allowed(&request), "{request:?}");
+        }
+    }
+}

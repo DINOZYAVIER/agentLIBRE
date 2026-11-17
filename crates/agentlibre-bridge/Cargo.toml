@@ -1,0 +1,20 @@
+[package]
+name = "agentlibre-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "agentLIBRE's bridge: the daemon's protocol over a WebSocket with TLS and a token per device, for the iPhone and the watch (AGL-083)"
+
+# The bridge runs as a binary of its own, with no core and no nix (D18).
+[[bin]]
+name = "agl-bridge"
+path = "src/bin/agl-bridge.rs"
+
+[dependencies]
+agentlibre-proto = { path = "../agentlibre-proto" }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+serde_json = "1"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
