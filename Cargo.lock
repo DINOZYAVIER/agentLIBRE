@@ -6,10 +6,12 @@ version = 4
 name = "agentLIBRE"
 version = "0.0.2"
 dependencies = [
+ "agentlibre-bridge",
  "agentlibre-core",
  "agentlibre-proto",
  "libc",
  "pulldown-cmark",
+ "qrcode",
  "serde_json",
  "unicode-width",
  "zbus",
@@ -798,6 +800,12 @@ dependencies = [
  "memchr",
  "unicase",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quote"

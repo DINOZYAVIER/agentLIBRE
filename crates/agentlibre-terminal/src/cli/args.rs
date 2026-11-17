@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 
 use crate::backend::ReasoningLevel;
+use crate::cli::bridge::BridgeAction;
 use crate::cli::forge::ForgeAction;
 use crate::error::Error;
 
@@ -44,6 +45,8 @@ pub enum Command {
     /// `agl notify`: the running sessions told on the desktop (AGL-074,
     /// D2).
     Notify,
+    /// `agl bridge start|stop|status|pair|revoke|list` (AGL-083, D19).
+    Bridge(BridgeAction),
 }
 
 /// What `--help` shows (AGL-061, D3): the help of the program, or of one
@@ -60,6 +63,7 @@ pub enum HelpTopic {
     Session,
     Daemon,
     Notify,
+    Bridge,
     Forge,
 }
 
@@ -260,6 +264,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("session") => HelpTopic::Session,
         Some("daemon") => HelpTopic::Daemon,
         Some("notify") => HelpTopic::Notify,
+        Some("bridge") => HelpTopic::Bridge,
         Some("forge") => HelpTopic::Forge,
         // Only the first word is a command; a message may say "forge".
         _ => return run_args(args),
@@ -287,6 +292,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         HelpTopic::Session => session_args(args),
         HelpTopic::Daemon => daemon_args(args),
         HelpTopic::Notify => notify_args(args),
+        HelpTopic::Bridge => bridge_args(args),
         // The forge surface parses its own arguments (AGL-007), here, so
         // that its help needs no settings (AGL-061, D1).
         HelpTopic::Forge => crate::cli::forge::parse(&args.collect::<Vec<_>>()).map(Command::Forge),
@@ -341,6 +347,34 @@ fn notify_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Erro
     match args.next() {
         None => Ok(Command::Notify),
         Some(other) => Err(Error::UnknownOption(text(other)?)),
+    }
+}
+
+/// `agl bridge start|stop|status|list`, `pair <name>`, `revoke <name>`
+/// (AGL-083, D19).
+fn bridge_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let word = args
+        .next()
+        .map(text)
+        .transpose()?
+        .ok_or_else(|| Error::MissingValue("bridge".into()))?;
+    let mut name = || {
+        args.next()
+            .ok_or_else(|| Error::MissingValue(word.clone()))
+            .and_then(text)
+    };
+    let action = match word.as_str() {
+        "start" => BridgeAction::Start,
+        "stop" => BridgeAction::Stop,
+        "status" => BridgeAction::Status,
+        "list" => BridgeAction::List,
+        "pair" => BridgeAction::Pair { name: name()? },
+        "revoke" => BridgeAction::Revoke { name: name()? },
+        _ => return Err(Error::UnknownOption(word)),
+    };
+    match args.next() {
+        Some(extra) => Err(Error::UnknownOption(text(extra)?)),
+        None => Ok(Command::Bridge(action)),
     }
 }
 
@@ -990,6 +1024,42 @@ mod tests {
                 ..Args::default()
             })
         );
+    }
+
+    #[test]
+    fn bridge_commands() {
+        // AGL-083, D19.
+        for (word, action) in [
+            ("start", BridgeAction::Start),
+            ("stop", BridgeAction::Stop),
+            ("status", BridgeAction::Status),
+            ("list", BridgeAction::List),
+        ] {
+            assert_eq!(parse_strs(&["bridge", word]).unwrap(), Command::Bridge(action));
+        }
+        assert_eq!(
+            parse_strs(&["bridge", "pair", "iphone"]).unwrap(),
+            Command::Bridge(BridgeAction::Pair { name: "iphone".into() })
+        );
+        assert_eq!(
+            parse_strs(&["bridge", "revoke", "iphone"]).unwrap(),
+            Command::Bridge(BridgeAction::Revoke { name: "iphone".into() })
+        );
+        assert!(matches!(
+            parse_strs(&["bridge", "pair"]),
+            Err(Error::MissingValue(word)) if word == "pair"
+        ));
+        assert!(matches!(
+            parse_strs(&["bridge", "start", "now"]),
+            Err(Error::UnknownOption(word)) if word == "now"
+        ));
+        assert!(matches!(
+            parse_strs(&["bridge", "open"]),
+            Err(Error::UnknownOption(word)) if word == "open"
+        ));
+        for words in [&["bridge"][..], &["bridge", "-h"], &["bridge", "start", "--help"]] {
+            assert_eq!(parse_strs(words).unwrap(), Command::Help(HelpTopic::Bridge), "{words:?}");
+        }
     }
 
     #[test]

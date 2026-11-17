@@ -235,6 +235,10 @@ fn run(
             let (paths, _) = loaded?;
             return cli::notify::run(&paths, *lang);
         }
+        Command::Bridge(action) => {
+            let (paths, user) = loaded?;
+            return cli::bridge::run(action, &user, &paths, *lang);
+        }
         Command::Daemon => {
             let (paths, _) = loaded?;
             agentlibre_core::daemon::serve(paths)?;

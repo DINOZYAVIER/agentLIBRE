@@ -3,9 +3,10 @@
 //! `init` (AGL-010), the Functions (AGL-036), the lines on stdout
 //! (AGL-038), the search's login (AGL-043 F20), the memory (AGL-060),
 //! the help (AGL-061), the desktop's notifications (AGL-074), the planes
-//! (AGL-077).
+//! (AGL-077), the bridge of the iPhone and the watch (AGL-083).
 
 pub mod args;
+pub mod bridge;
 pub mod forge;
 pub mod function;
 pub mod help;
