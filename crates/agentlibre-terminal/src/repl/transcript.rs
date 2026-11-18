@@ -16,6 +16,7 @@ use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
+use crate::settings::ThinkingDetail;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
@@ -41,6 +42,8 @@ pub fn label(phase: &Phase, lang: Lang) -> String {
 /// Where the transcript is drawn: above the dock.
 pub trait Screen: Send + Sync {
     fn columns(&self) -> usize;
+    /// The rows above the dock that the live block may take (AGL-092, D3).
+    fn room(&self) -> usize;
     /// The reading of the prompt going on (AGL-046, D19).
     fn reading(&self, _reading: Option<Reading>) {}
     /// Appends finished lines.
@@ -107,6 +110,8 @@ pub struct Presenter {
     /// The thinking being decoded, as its pieces arrive (D3, D19): the
     /// transcript shows its line with the record of its step.
     thinking: Option<String>,
+    /// How much of the thinking the transcript shows (AGL-092, D2).
+    detail: ThinkingDetail,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -117,7 +122,12 @@ pub struct Presenter {
 }
 
 impl Presenter {
-    pub fn new(screen: Arc<dyn Screen>, theme: Theme, lang: Lang) -> Presenter {
+    pub fn new(
+        screen: Arc<dyn Screen>,
+        theme: Theme,
+        lang: Lang,
+        detail: ThinkingDetail,
+    ) -> Presenter {
         Presenter {
             screen,
             theme,
@@ -136,6 +146,7 @@ impl Presenter {
             state_entered: false,
             pending_call: None,
             thinking: None,
+            detail,
             action: None,
             generation: None,
             turn_tokens: 0,
@@ -225,10 +236,17 @@ impl Presenter {
     }
 
     /// The step's thinking's lines (D3, D19, D24): like the tool's card —
-    /// the label in the tool's color, and the first line of the thinking
-    /// under the gutter, muted. The time is in the step's rule, the full
-    /// text in the inspect mode.
+    /// the label in the tool's color, and the thinking's rows under the
+    /// gutter, muted: all of them, or its head and its tail (AGL-092, D2).
+    /// The time is in the step's rule, the full text in the inspect mode.
     pub fn show_thinking(&self, thinking: &str) {
+        if self.detail == ThinkingDetail::Off {
+            return;
+        }
+        let fold = match self.detail {
+            ThinkingDetail::Full => Fold::Whole,
+            _ => Fold::Folded,
+        };
         self.screen.print(&thinking_lines(
             &self.theme,
             self.lang,
@@ -236,6 +254,7 @@ impl Presenter {
             thinking,
             Role::Tool,
             Role::Muted,
+            fold,
         ));
     }
 
@@ -549,17 +568,25 @@ impl Presenter {
         }
         let thinking = self.thinking.as_mut().expect("just set");
         thinking.push_str(piece);
-        // D29: the live's lines are the card's own lines — the label in
-        // the tool's color, the thinking's rows under the gutter — so the
-        // thinking is formatted as it ends, from the first piece.
-        self.screen.live(&thinking_lines(
-            &self.theme,
-            self.lang,
-            self.screen.columns(),
-            thinking,
-            Role::Tool,
-            Role::Muted,
-        ));
+        // D29, AGL-092, D3: while the thinking is decoded the live's rows
+        // are all of its rows — the label in the tool's color, the rows
+        // under the gutter — clipped to what fits above the dock, which
+        // keeps the newest of them: what the model thinks now.
+        if self.detail == ThinkingDetail::Off {
+            self.screen.live(&[]);
+        } else {
+            let room = self.screen.room();
+            let lines = thinking_lines(
+                &self.theme,
+                self.lang,
+                self.screen.columns(),
+                thinking,
+                Role::Tool,
+                Role::Muted,
+                Fold::Whole,
+            );
+            self.screen.live(&clip_live(&lines, room));
+        }
         self.piece();
     }
 
@@ -814,11 +841,87 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
 
 /// The lines of the thinking the transcript shows by default (AGL-068);
 /// the full text is in the inspect mode.
-pub const THINKING_LINES: usize = 5;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fold {
+    /// Every row of it.
+    Whole,
+    /// Its head and its tail, with `⋯` between them (AGL-092, D4).
+    Folded,
+}
+
+/// The rows of the thinking's head: as many of its first paragraph as these
+/// allow (AGL-092, D4).
+const THINKING_HEAD: usize = 3;
+/// The rows of the thinking's tail: as many of its last rows as these
+/// allow, two more when that is where a paragraph begins.
+const THINKING_TAIL: usize = 5;
+/// A fold that would hide fewer rows than these is not worth a row of `⋯`.
+const THINKING_FOLD_MIN: usize = 3;
+
+/// A row of a folded block: the thinking's own, or the count of the rows
+/// that are hidden.
+enum Shown {
+    Row(String),
+    Hidden(usize),
+}
+
+/// The thinking's rows, each wrapped to `inner`, with the row where every
+/// paragraph of it begins: a run of the non-empty lines, as the model wrote
+/// them (AGL-092, D4).
+fn thinking_rows(thinking: &str, inner: usize) -> (Vec<String>, Vec<usize>) {
+    let mut rows: Vec<String> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut blank = true;
+    for line in thinking.lines() {
+        if line.trim().is_empty() {
+            blank = true;
+            continue;
+        }
+        if blank {
+            starts.push(rows.len());
+        }
+        blank = false;
+        rows.extend(hard_wrap(&clean(line), inner));
+    }
+    (rows, starts)
+}
+
+/// The rows a folded thinking keeps (AGL-092, D4): the first paragraph's
+/// first rows, `⋯ n` for what lies between, and its last rows — the tail
+/// reaching back to the start of its paragraph when two rows buy that, so
+/// it never opens in the middle of a paragraph and always shows how the
+/// thinking ended. A thinking with no room for `⋯` shows all of it.
+fn fold_rows(rows: &[String], starts: &[usize]) -> Vec<Shown> {
+    let total = rows.len();
+    let all = || rows.iter().map(|row| Shown::Row(row.clone())).collect();
+    // The rows of the first paragraph: what ends it is where the second
+    // one begins.
+    let paragraph = *starts.get(1).unwrap_or(&total);
+    let head = paragraph.min(THINKING_HEAD);
+    if total < head + THINKING_TAIL + THINKING_FOLD_MIN {
+        return all();
+    }
+    let mut tail = total - THINKING_TAIL;
+    if let Some(start) = starts.iter().rev().find(|start| **start < tail)
+        && tail - start <= 2
+    {
+        tail = *start;
+    }
+    let Some(hidden) = tail.checked_sub(head) else {
+        return all();
+    };
+    let mut kept: Vec<Shown> = rows[..head]
+        .iter()
+        .map(|row| Shown::Row(row.clone()))
+        .collect();
+    kept.push(Shown::Hidden(hidden));
+    kept.extend(rows[tail..].iter().map(|row| Shown::Row(row.clone())));
+    kept
+}
 
 /// The lines of the thinking, like the tool's card (D24): the label,
-/// painted for `role`, and up to `THINKING_LINES` lines of the thinking
-/// under the gutter, painted for `text_role` (D23).
+/// painted for `role`, and its rows under the gutter, painted for
+/// `text_role` (D23) — all of them, or the head and the tail of them.
 pub fn thinking_lines(
     theme: &Theme,
     lang: Lang,
@@ -826,6 +929,7 @@ pub fn thinking_lines(
     thinking: &str,
     role: Role,
     text_role: Role,
+    fold: Fold,
 ) -> Vec<String> {
     let label = tr!(lang, m::THINKING);
     let gutter = theme.paint(Role::InputRule, "  │ ");
@@ -833,18 +937,36 @@ pub fn thinking_lines(
     // live's lines (the card from the first piece, D29) and the printed
     // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
+    let (rows, starts) = thinking_rows(thinking, inner);
+    let kept = match fold {
+        Fold::Whole => rows.iter().map(|row| Shown::Row(row.clone())).collect(),
+        Fold::Folded => fold_rows(&rows, &starts),
+    };
     let mut lines = vec![theme.paint(role, label)];
-    // AGL-080, D2: five lines of the thinking's text, each wrapped to the
-    // terminal's width instead of being cut off at its edge.
-    for line in thinking
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(THINKING_LINES)
-        .flat_map(|line| hard_wrap(&clean(line), inner))
-    {
-        lines.push(format!("{gutter}{}", theme.paint(text_role, &line)));
+    for row in kept {
+        let text = match row {
+            Shown::Row(row) => theme.paint(text_role, &row),
+            Shown::Hidden(n) => theme.paint(Role::Muted, &tr!(lang, m::THINKING_FOLDED, n = n)),
+        };
+        lines.push(format!("{gutter}{text}"));
     }
     lines
+}
+
+/// The live block of a thinking longer than the room above the dock
+/// (AGL-092, D3): its last rows, with the label's row kept on top — what
+/// the model thinks now is worth more than what it thought first.
+pub fn clip_live(lines: &[String], room: usize) -> Vec<String> {
+    if lines.len() <= room {
+        return lines.to_vec();
+    }
+    if room == 0 {
+        return Vec::new();
+    }
+    let mut kept = vec![lines[0].clone()];
+    let keep = (room - 1).min(lines.len() - 1);
+    kept.extend_from_slice(&lines[lines.len() - keep..]);
+    kept
 }
 
 #[cfg(test)]
@@ -940,11 +1062,15 @@ mod tests {
         ops: Mutex<Vec<String>>,
         printed: Mutex<Vec<String>>,
         live: Mutex<Vec<String>>,
+        room: Mutex<usize>,
     }
 
     impl Screen for Mock {
         fn columns(&self) -> usize {
             40
+        }
+        fn room(&self) -> usize {
+            *self.room.lock().unwrap()
         }
         fn print(&self, lines: &[String]) {
             self.printed.lock().unwrap().extend_from_slice(lines);
@@ -981,8 +1107,15 @@ mod tests {
     }
 
     fn presenter() -> (Presenter, Arc<Mock>) {
+        presenter_at(ThinkingDetail::Flexible)
+    }
+
+    /// A presenter of the thinking's detail `detail`, on a screen 24 rows
+    /// above the dock.
+    fn presenter_at(detail: ThinkingDetail) -> (Presenter, Arc<Mock>) {
         let mock = Arc::new(Mock::default());
-        let presenter = Presenter::new(mock.clone(), Theme::plain(), Lang::En);
+        *mock.room.lock().unwrap() = 24;
+        let presenter = Presenter::new(mock.clone(), Theme::plain(), Lang::En, detail);
         (presenter, mock)
     }
 
@@ -1097,18 +1230,76 @@ mod tests {
         );
         let (second, mock) = presenter();
         second.show_thinking("a\nb\nc\nd\ne\nf");
-        let printed = mock.printed.lock().unwrap().clone();
+        // AGL-092, D4: six rows are fewer than a fold costs, so all of them
+        // stay — the fold begins where it pays.
         assert_eq!(
-            printed,
+            mock.printed.lock().unwrap().clone(),
             vec![
                 "THINKING",
                 "  │ a",
                 "  │ b",
                 "  │ c",
                 "  │ d",
-                "  │ e"
+                "  │ e",
+                "  │ f"
             ]
         );
+    }
+
+    #[test]
+    fn a_long_thinking_shows_its_head_and_its_tail() {
+        // AGL-092, D4: the first paragraph's rows, `⋯ n` for what lies
+        // between, and the last rows, which reach back to the start of
+        // their paragraph because one row buys that.
+        let (first, mock) = presenter();
+        first.show_thinking("one\ntwo\n\np3\n\np4\n\np5\n\np6\n\np7\n\np8\n\np9\n\nlast\ntail");
+        assert_eq!(
+            mock.printed.lock().unwrap().clone(),
+            vec![
+                "THINKING",
+                "  │ one",
+                "  │ two",
+                "  │ ⋯ 3 hidden",
+                "  │ p6",
+                "  │ p7",
+                "  │ p8",
+                "  │ p9",
+                "  │ last",
+                "  │ tail"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_levels_of_the_thinking() {
+        // AGL-092, D2: `off` shows nothing of it, `full` shows all of it
+        // and keeps it — no `⋯` row anywhere.
+        let (mut off, mock) = presenter_at(ThinkingDetail::Off);
+        off.thinking("hm\n");
+        off.thinking_done();
+        assert!(mock.live.lock().unwrap().is_empty());
+        assert!(mock.printed.lock().unwrap().is_empty());
+        let (mut full, mock) = presenter_at(ThinkingDetail::Full);
+        full.thinking(&"a\n".repeat(20));
+        full.thinking_done();
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed.len(), 21, "{printed:?}");
+        assert!(!printed.iter().any(|line| line.contains('⋯')), "{printed:?}");
+    }
+
+    #[test]
+    fn the_live_thinking_shows_all_of_it_and_then_its_newest_rows() {
+        // AGL-092, D3: while the thinking is decoded the live block takes
+        // all of it; past the room above the dock its newest rows stay,
+        // with the label's row on top.
+        let (mut presenter, mock) = presenter();
+        for n in 0..30 {
+            presenter.thinking(&format!("line {n}\n"));
+        }
+        let lines = mock.live.lock().unwrap().clone();
+        assert_eq!(lines.len(), 24, "{lines:?}");
+        assert_eq!(lines[0], "THINKING");
+        assert_eq!(lines[23], "  │ line 29");
     }
 
     #[test]

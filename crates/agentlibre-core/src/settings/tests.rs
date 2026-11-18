@@ -324,6 +324,7 @@ fn colors_repl_and_forge_tables() {
             max_record_seconds: Some(15),
             start_server: None,
             splash: None,
+            thinking: None,
         }
     );
     assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
@@ -340,12 +341,37 @@ fn colors_repl_and_forge_tables() {
             max_record_seconds: 15,
             start_server: true,
             splash: true,
+            thinking: ThinkingDetail::Flexible,
         }
     );
     // The voice limit is 300 s unless set (AGL-016, D5; AGL-039, D20;
     // AGL-043 F18).
     let plain = resolve_with(&with_url(), &ProjectFile::default(), None, &llama_model()).unwrap();
     assert_eq!(plain.repl.max_record_seconds, 300);
+}
+
+#[test]
+fn the_thinking_detail_level() {
+    // AGL-092, D2: three levels, `flexible` by default, and no other word.
+    let of = |text: &str| {
+        user_of(text)
+            .map(|file| file.repl.thinking)
+            .unwrap_or_else(|error| panic!("{error:?}"))
+    };
+    assert_eq!(of(r#"repl = { thinking = "off"; };"#), Some(ThinkingDetail::Off));
+    assert_eq!(
+        of(r#"repl = { thinking = "full"; };"#),
+        Some(ThinkingDetail::Full)
+    );
+    assert_eq!(
+        of(r#"repl = { thinking = "flexible"; };"#),
+        Some(ThinkingDetail::Flexible)
+    );
+    assert_eq!(of("repl = { start_server = true; };"), None);
+    assert!(matches!(
+        user_of(r#"repl = { thinking = "brief"; };"#),
+        Err(Error::UnknownThinkingLevel { .. })
+    ));
 }
 
 #[test]

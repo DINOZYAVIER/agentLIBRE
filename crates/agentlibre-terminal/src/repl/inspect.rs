@@ -11,7 +11,7 @@ use super::markdown;
 use crate::records::{self, Record};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{notice_lines, summary, thinking_lines, user_lines};
+use super::transcript::{Fold, notice_lines, summary, thinking_lines, user_lines};
 use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
@@ -367,6 +367,7 @@ fn step_lines(
                 thinking,
                 Role::Tool,
                 role,
+                Fold::Folded,
             ));
         }
     }

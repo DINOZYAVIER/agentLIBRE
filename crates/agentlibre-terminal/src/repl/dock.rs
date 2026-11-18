@@ -265,6 +265,13 @@ impl Screen for Dock {
         self.lock().columns
     }
 
+    fn room(&self) -> usize {
+        let state = self.lock();
+        // The dock's own rows are the layout's less the live block, which
+        // the room is meant for (AGL-092, D3).
+        state.rows.saturating_sub(state.layout().rows.len() - state.live.len())
+    }
+
     fn print(&self, lines: &[String]) {
         let mut state = self.lock();
         let mut text = String::new();
@@ -798,6 +805,17 @@ mod tests {
         assert!(picked.contains(&start(Role::InputSelected)), "{picked}");
         assert!(!picked.contains(&start(Role::InputText)), "{picked}");
         assert!(rows[4].contains(&start(Role::Tool)), "{}", rows[4]);
+    }
+
+    #[test]
+    fn the_room_above_the_dock() {
+        // AGL-092, D3: the dock's own rows — the separator, a blank, the
+        // input, a blank and the status — are what the terminal has less
+        // those; the live block's own rows are not taken from the room.
+        let (dock, _) = dock(40, 20);
+        assert_eq!(dock.room(), 15);
+        dock.live(&["one".into(), "two".into()]);
+        assert_eq!(dock.room(), 15);
     }
 
     #[test]

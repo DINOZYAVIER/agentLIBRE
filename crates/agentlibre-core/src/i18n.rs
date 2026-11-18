@@ -916,6 +916,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
     };
 
+    /// `Error::UnknownThinkingLevel` (AGL-092, D2).
+    pub const UNKNOWN_THINKING_LEVEL: Msg = Msg {
+        en: "`repl.thinking` in {path} is not `off`, `flexible` or `full`: `{value}`",
+        uk: "`repl.thinking` у {path} не `off`, не `flexible` і не `full`: `{value}`",
+    };
+
     /// `Error::UnsupportedSearchUrl`.
     pub const UNSUPPORTED_SEARCH_URL: Msg = Msg {
         en: "unsupported search address `{url}` in {path}; only https:// is supported",
@@ -1727,6 +1733,13 @@ Forge (сховище артефактів робочої області, agentL
     pub const THINKING: Msg = Msg {
         en: "THINKING",
         uk: "МІРКУВАННЯ",
+    };
+
+    /// The row between the head and the tail of a folded thinking: how many
+    /// of its rows are hidden (AGL-092, D4).
+    pub const THINKING_FOLDED: Msg = Msg {
+        en: "⋯ {n} hidden",
+        uk: "⋯ {n} приховано",
     };
 
     /// One line of output (`lines`).
@@ -3085,6 +3098,9 @@ impl Error {
             }
             Error::UnknownServerKind { path, value } => {
                 tr!(lang, m::UNKNOWN_SERVER_KIND, path = path.display(), value = value)
+            }
+            Error::UnknownThinkingLevel { path, value } => {
+                tr!(lang, m::UNKNOWN_THINKING_LEVEL, path = path.display(), value = value)
             }
             Error::UnsupportedSearchUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)

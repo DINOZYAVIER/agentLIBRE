@@ -952,7 +952,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         theme.clone(),
     ));
     let screen: Arc<dyn Screen> = dock.clone();
-    let mut presenter = Presenter::new(screen, theme.clone(), lang);
+    let mut presenter = Presenter::new(screen, theme.clone(), lang, repl.thinking);
 
     interrupt::install_request_only();
     // Ctrl-C, its flag set, is sent to the daemon as `stop` (AGL-076, D5).
@@ -2285,6 +2285,9 @@ mod tests {
         fn columns(&self) -> usize {
             40
         }
+        fn room(&self) -> usize {
+            16
+        }
         fn print(&self, lines: &[String]) {
             self.0.lock().unwrap().extend_from_slice(lines);
         }
@@ -2299,7 +2302,12 @@ mod tests {
     fn the_reporter_forwards_the_decoded_tokens() {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let screen: Arc<dyn Screen> = Arc::new(Lines(lines.clone()));
-        let mut presenter = Presenter::new(screen, Theme::plain(), Lang::En);
+        let mut presenter = Presenter::new(
+            screen,
+            Theme::plain(),
+            Lang::En,
+            crate::settings::ThinkingDetail::Flexible,
+        );
         presenter.begin_turn();
         let control = Control::new(Info::default(), None);
         show(&mut presenter, &control, Report::Decoded(30));

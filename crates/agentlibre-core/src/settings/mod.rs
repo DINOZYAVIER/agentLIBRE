@@ -12,7 +12,7 @@ mod server;
 pub use server::DEFAULT_LLAMA_URL;
 mod whisper;
 
-pub use repl::{ReplFile, ReplSettings};
+pub use repl::{ReplFile, ReplSettings, ThinkingDetail};
 pub use search::{Search, SearchCa, SearchFile};
 pub use server::{DEFAULT_IMAGE_TOKENS, ServerFile};
 pub use whisper::WhisperFile;

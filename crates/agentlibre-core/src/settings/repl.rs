@@ -11,6 +11,31 @@ use crate::nix::Section;
 /// AGL-039, D20; AGL-043 F18).
 const DEFAULT_MAX_RECORD_SECONDS: u32 = 300;
 
+/// How much of the thinking the REPL shows (AGL-092, D2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThinkingDetail {
+    /// No thinking at all: the row of the phase says that it was.
+    Off,
+    /// All of it while it is decoded, the first paragraph and the last rows
+    /// after it ends.
+    #[default]
+    Flexible,
+    /// All of it, and it stays.
+    Full,
+}
+
+impl ThinkingDetail {
+    /// The level named `name`; none when there is no such level.
+    pub fn parse(name: &str) -> Option<ThinkingDetail> {
+        match name {
+            "off" => Some(ThinkingDetail::Off),
+            "flexible" => Some(ThinkingDetail::Flexible),
+            "full" => Some(ThinkingDetail::Full),
+            _ => None,
+        }
+    }
+}
+
 /// `[repl]`: the voice recording, the server's start and the splash.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ReplFile {
@@ -20,6 +45,8 @@ pub struct ReplFile {
     pub start_server: Option<bool>,
     /// Whether the REPL shows the splash at its start (AGL-065, D5).
     pub splash: Option<bool>,
+    /// How much of the thinking the transcript shows (AGL-092, D2).
+    pub thinking: Option<ThinkingDetail>,
 }
 
 /// `[repl]` with the defaults of the old agl (D130).
@@ -33,6 +60,8 @@ pub struct ReplSettings {
     pub start_server: bool,
     /// Whether the REPL shows the splash at its start (AGL-065, D5).
     pub splash: bool,
+    /// How much of the thinking the transcript shows (AGL-092, D2).
+    pub thinking: ThinkingDetail,
 }
 
 impl ReplSettings {
@@ -44,6 +73,7 @@ impl ReplSettings {
             max_record_seconds: user.repl.max_record_seconds.unwrap_or(defaults.max_record_seconds),
             start_server: user.repl.start_server.unwrap_or(defaults.start_server),
             splash: user.repl.splash.unwrap_or(defaults.splash),
+            thinking: user.repl.thinking.unwrap_or(defaults.thinking),
         }
     }
 }
@@ -54,6 +84,7 @@ impl Default for ReplSettings {
             max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
             start_server: true,
             splash: true,
+            thinking: ThinkingDetail::default(),
         }
     }
 }
@@ -64,7 +95,7 @@ impl ReplFile {
         Ok(match section {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["max_record_seconds", "start_server", "splash"])?;
+                repl.check_keys(&["max_record_seconds", "start_server", "splash", "thinking"])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -83,6 +114,12 @@ impl ReplFile {
                     max_record_seconds,
                     start_server: repl.bool("start_server")?,
                     splash: repl.bool("splash")?,
+                    thinking: repl.string("thinking")?.map(|name| {
+                        ThinkingDetail::parse(&name).ok_or_else(|| Error::UnknownThinkingLevel {
+                            path: path.into(),
+                            value: name,
+                        })
+                    }).transpose()?,
                 }
             }
         })

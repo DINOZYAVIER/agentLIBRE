@@ -63,6 +63,8 @@ pub enum Error {
     /// The kind of a Function's model is not `llama` or `strata` (AGL-030, D1;
     /// AGL-036, D1).
     UnknownServerKind { path: PathBuf, value: String },
+    /// `repl.thinking` is not `off`, `flexible` or `full` (AGL-092, D2).
+    UnknownThinkingLevel { path: PathBuf, value: String },
     /// `search.url` is not an `https://` URL (AGL-019, D3).
     UnsupportedSearchUrl { path: PathBuf, url: String },
     /// `agl search login` without a complete `search.ca` in the user file
