@@ -247,7 +247,8 @@
             cat list
             want=$(ls ${functions}/functions | wc -l)
             test "$want" -gt 0
-            test "$(grep -c ' llama ' list)" = "$want"
+            # A strata Function loads with no Strata installed (AGL-089, D20).
+            test "$(grep -cE ' (llama|strata) ' list)" = "$want"
             test "$(wc -l < list)" = "$want"
             grep -q '^\* .* llama ' list
             touch $out

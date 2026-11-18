@@ -23,12 +23,21 @@ let
       gpu = [ "-ngl" "999" "-ngld" "999" "-fa" "on" "-ctk" "q8_0" "-ctv" "q8_0" "-np" "2" "-kvu" ];
       cpu = [ "--device" "none" "-ngl" "0" "--device-draft" "none" "-ngld" "0" "-fa" "on" "-ctk" "q8_0" "-ctv" "q8_0" "-np" "2" "-kvu" ];
     };
+    # The engine's variant, arguments and environment of the Strata Functions
+    # (AGL-089, D10): `model = agl.models.<model> // agl.strata.<variant>`.
+    strata = {
+      rdna3 = import ./strata/rdna3.nix;
+      upstream = import ./strata/upstream.nix;
+    };
     models = {
       "qwen3.8-27b-iq4_xs" = import ./models/qwen3.8-27b-iq4_xs.nix { inherit agl; };
       "qwen3.8-27b-thinkingcap-iq4_xs" = import ./models/qwen3.8-27b-thinkingcap-iq4_xs.nix { inherit agl; };
       "gemma-4-e2b-qat" = import ./models/gemma-4-e2b-qat.nix { inherit agl; };
       "gemma-4-e4b-qat" = import ./models/gemma-4-e4b-qat.nix { inherit agl; };
       "gemma-4-12b-qat" = import ./models/gemma-4-12b-qat.nix { inherit agl; };
+      "qwen3.8-flash-next-thinkingcap-iq4_xs" =
+        import ./models/qwen3.8-flash-next-thinkingcap-iq4_xs.nix { inherit agl; };
+      "qwen3.8-flash-next-ud-iq4_xs" = import ./models/qwen3.8-flash-next-ud-iq4_xs.nix { inherit agl; };
     };
     functions = import functions { inherit agl; };
   };
