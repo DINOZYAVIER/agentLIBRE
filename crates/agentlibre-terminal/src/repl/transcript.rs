@@ -867,10 +867,10 @@ fn window_speed(window: &VecDeque<Instant>) -> Option<f64> {
 }
 
 /// An event's notice as a block (AGL-099, D1): the label in the tool's
-/// color, the rest under the gutter — the look of the THINKING and RESULT
+/// color, the rest under the elbow — the look of the THINKING and RESULT
 /// blocks; a label with no body prints alone, with no placeholder. What
-/// the session did not write — a command's answer, an error — prints
-/// plain, as before.
+/// carries no label of its own — the server's line, a command's answer,
+/// an error — hangs under the elbow too (AGL-106, D2), in its own role.
 pub fn notice_block_lines(
     theme: &Theme,
     lang: Lang,
@@ -879,7 +879,13 @@ pub fn notice_block_lines(
     role: Role,
 ) -> Vec<String> {
     let Some((label, body)) = crate::status::notice_parts(text, lang) else {
-        return notice_lines(theme, text, columns, role);
+        let inner = columns.saturating_sub(BODY_PREFIX).max(1);
+        let rows = text
+            .lines()
+            .flat_map(|line| hard_wrap(&clean(line), inner))
+            .map(|row| theme.paint(role, &row))
+            .collect();
+        return elbow_rows(theme, rows);
     };
     let mut lines = vec![theme.paint(Role::Tool, &label)];
     if body.trim().is_empty() {
@@ -1107,11 +1113,11 @@ pub fn block_lines(
 /// first row, two spaces before the rows that follow.
 pub const BODY_PREFIX: usize = 2;
 
-/// The body's rows with their prefix (AGL-104, D1): the elbow in the
-/// label's color before the first, and two spaces before the rest, so they
-/// all stand under it.
+/// The body's rows with their prefix (AGL-104, D1; AGL-106, D1): the elbow
+/// in the muted color — dark, whatever block it begins — before the first
+/// row, and two spaces before the rest, so they all stand under it.
 pub fn elbow_rows(theme: &Theme, rows: Vec<String>) -> Vec<String> {
-    let elbow = theme.paint(Role::Tool, "⎿ ");
+    let elbow = theme.paint(Role::Muted, "⎿ ");
     rows.into_iter()
         .enumerate()
         .map(|(n, row)| {
@@ -1619,6 +1625,38 @@ mod tests {
             "{printed:?}"
         );
         assert!(printed.contains(&theme.start(Role::Muted)), "{printed:?}");
+    }
+
+    #[test]
+    fn the_elbow_is_dark_and_an_unlabelled_notice_hangs_under_it() {
+        // AGL-106, D1, D2: the elbow is muted on every block, the label
+        // keeps its own color; a notice with no label of its own — the
+        // server's line — is a block too.
+        let theme = Theme::new(true, &[]);
+        let (presenter, mock) = presenter();
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        presenter.show_notice("the server is ready at http://x", Role::Muted);
+        show_card(
+            &presenter,
+            &bash("ls"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+            &[],
+        );
+        let printed = mock.printed.lock().unwrap().clone();
+        let elbow = format!("{}⎿ {}", theme.start(Role::Muted), theme.reset());
+        assert!(printed[0].starts_with(&elbow), "{printed:?}");
+        assert!(printed[2].starts_with(&elbow), "{printed:?}");
+        assert!(printed[4].starts_with(&elbow), "{printed:?}");
+        // The labels above them keep the tool's color.
+        for label in [&printed[1], &printed[3]] {
+            assert!(label.starts_with(&theme.start(Role::Tool)), "{label:?}");
+        }
     }
 
     #[test]
@@ -2283,8 +2321,16 @@ mod tests {
         assert_eq!(printed[tool + 1], "⎿ ls");
         assert!(!printed.contains(&"a".to_owned()));
         // A line per medium (AGL-043 F17).
-        assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
-        assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
+        // AGL-106, D2: a notice with no label of its own hangs under the
+        // elbow too; the line that does not fit wraps under it.
+        assert!(
+            printed
+                .windows(2)
+                .any(|rows| rows[0] == "⎿ [Audio#1] voice.wav — “Check the logs."
+                    && rows[1] == "  ”"),
+            "{printed:?}"
+        );
+        assert!(printed.contains(&"⎿ [Video#1] clip.mp4 — frames: 2".to_owned()));
         // The stir and the cut-off as blocks (AGL-043 F8; AGL-099, D1):
         // the label, and the body under the gutter, wrapped at the 36
         // columns inside the 40 columns of the test screen.
