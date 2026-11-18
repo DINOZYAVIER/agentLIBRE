@@ -131,26 +131,6 @@ pub fn truncate(text: &str, limit: usize) -> String {
     out
 }
 
-/// Cuts `text` to its last `limit` columns, starting with `…` when it was
-/// longer.
-pub fn truncate_start(text: &str, limit: usize) -> String {
-    if width(text) <= limit {
-        return text.into();
-    }
-    let mut kept: Vec<char> = Vec::new();
-    let mut used = 1;
-    for ch in text.chars().rev() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > limit {
-            break;
-        }
-        kept.push(ch);
-        used += w;
-    }
-    kept.push('…');
-    kept.into_iter().rev().collect()
-}
-
 /// Wraps streamed text into lines of at most `width` columns as it
 /// arrives. Finished lines are final; the unfinished one is shown live.
 pub struct StreamWrap {
@@ -239,8 +219,6 @@ mod tests {
     fn truncating() {
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("hello world", 6), "hello…");
-        assert_eq!(truncate_start("hello world", 6), "…world");
-        assert_eq!(truncate_start("hi", 6), "hi");
         assert_eq!(hard_wrap("abcdefg", 3), ["abc", "def", "g"]);
         assert_eq!(hard_wrap("日本語", 4), ["日本", "語"]);
     }

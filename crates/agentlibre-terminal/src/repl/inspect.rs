@@ -13,7 +13,10 @@ use super::dock::{Dock, Layout};
 use super::markdown;
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{Fold, Render, Screen, block_lines, notice_lines, summary, user_lines};
+use super::transcript::{
+    BODY_PREFIX, Fold, Render, Screen, block_lines, elbow_rows, notice_lines, summary,
+    user_lines,
+};
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::records::{self, BlockKind, Record};
@@ -574,9 +577,10 @@ fn result_block(
     )
 }
 
-/// The answer's block (AGL-098, D2; AGL-100): a head for the focus to
-/// stand on, as the other blocks have, and its text, in full (D1), under
-/// the gutter; on the focus the time the turn took joins it (AGL-080, D2).
+/// The answer's block (AGL-098, D2; AGL-100; AGL-104, D1): a head for the
+/// focus to stand on, as the other blocks have, and its text, in full (D1),
+/// plain below the elbow; on the focus the time the turn took joins it
+/// (AGL-080, D2).
 fn answer_block(
     theme: &Theme,
     lang: Lang,
@@ -585,12 +589,14 @@ fn answer_block(
     time: Option<std::time::Duration>,
     focused: bool,
 ) -> Vec<String> {
+    // AGL-104, D1: the label's row, and the text under the elbow.
     let mut lines = vec![theme.paint(Role::Tool, tr!(lang, m::ANSWER_LABEL))];
-    let gutter = theme.paint(Role::InputRule, "  │ ");
-    let inner = columns.saturating_sub(4).max(1);
-    for row in markdown::render(text.trim(), inner, theme) {
-        lines.push(format!("{gutter}{row}"));
-    }
+    let body = markdown::render(
+        text.trim(),
+        columns.saturating_sub(BODY_PREFIX).max(1),
+        theme,
+    );
+    lines.extend(elbow_rows(theme, body));
     if focused {
         let items: Vec<String> = time
             .iter()
@@ -623,8 +629,6 @@ fn card_lines(
     items: &[String],
     focused: bool,
 ) -> Vec<String> {
-    let gutter = theme.paint(Role::InputRule, "  │ ");
-    let inner = columns.saturating_sub(4).max(1);
     let (status_text, status_role) = records::status(result.map(|result| result.outcome));
     // AGL-068: the action of a forge or a memory call is in the hint row.
     let mut lines = vec![format!(
@@ -642,11 +646,15 @@ fn card_lines(
     } else {
         Role::Muted
     };
+    // AGL-104, D1: the input's rows hang under the elbow.
+    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
+    let mut rows = Vec::new();
     for line in clean(input).lines() {
         for row in hard_wrap(line, inner) {
-            lines.push(format!("{gutter}{}", theme.paint(input_role, &row)));
+            rows.push(theme.paint(input_role, &row));
         }
     }
+    lines.extend(elbow_rows(theme, rows));
     // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
     lines.push(summary(
         theme,
@@ -1018,7 +1026,8 @@ mod tests {
         // marker stands on `ANSWER`, not on the answer's first line.
         let all = screen(&mut inspect(), 10).join("\n");
         assert!(all.contains("▸ ANSWER"), "{all}");
-        assert!(all.contains("  │ Ok."), "{all}");
+        // AGL-104, D1: the answer's text begins under the elbow.
+        assert!(all.contains("⎿ Ok."), "{all}");
     }
 
     #[test]
@@ -1321,7 +1330,7 @@ mod tests {
             10,
             &std::env::temp_dir(),
             &Layout {
-                rows: vec!["› ask".into(), "─ Ready".into(), "ctx".into()],
+                rows: vec!["› ask".into(), "Ready".into(), "ctx".into()],
                 cursor_row: 1,
                 cursor_column: 5,
             },

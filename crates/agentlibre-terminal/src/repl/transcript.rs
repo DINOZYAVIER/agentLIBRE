@@ -55,8 +55,6 @@ pub trait Screen: Send + Sync {
     /// the screen; false when they are not.
     fn erase(&self, count: usize) -> bool;
     fn activity(&self, phase: Phase);
-    /// The tokens of the last prompt (D152).
-    fn context(&self, _used: usize) {}
     /// The decoding speed of the current generation, in tokens per
     /// second (AGL-012); none when there is no figure to show.
     fn speed(&self, _speed: Option<f64>) {}
@@ -465,8 +463,6 @@ impl Presenter {
         items: &[String],
     ) -> Vec<String> {
         let columns = self.screen.columns();
-        let gutter = self.theme.paint(Role::InputRule, "  │ ");
-        let inner = columns.saturating_sub(4).max(1);
         let (status_text, status_role) = records::status(result.map(|result| result.outcome));
         let mut lines = Vec::new();
         lines.push(format!(
@@ -487,11 +483,14 @@ impl Presenter {
             Detail::Flexible => hint.to_owned(),
             Detail::Full => records::call_input(call),
         };
+        let inner = columns.saturating_sub(BODY_PREFIX).max(1);
+        let mut rows = Vec::new();
         for line in clean(&input).lines() {
             for row in hard_wrap(line, inner) {
-                lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
+                rows.push(self.theme.paint(Role::Muted, &row));
             }
         }
+        lines.extend(elbow_rows(&self.theme, rows));
         // AGL-095, D2: the tool's answer, at the tool's own level, folded by
         // the thinking's rule; `off` keeps it out of the transcript.
         if self.result_detail != Detail::Off {
@@ -803,7 +802,6 @@ impl Presenter {
     fn context_used(&mut self, tokens: usize) {
         self.context = Some(tokens);
         self.context_fresh = true;
-        self.screen.context(tokens);
     }
 
     /// The dock and the rows follow the FSM of the turn (AGL-046). A tool and
@@ -885,13 +883,14 @@ pub fn notice_block_lines(
     if body.trim().is_empty() {
         return lines;
     }
-    let gutter = theme.paint(Role::InputRule, "  │ ");
-    let inner = columns.saturating_sub(4).max(1);
+    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
+    let mut rows = Vec::new();
     for line in clean(&body).lines() {
         for row in hard_wrap(line, inner) {
-            lines.push(format!("{gutter}{}", theme.paint(role, &row)));
+            rows.push(theme.paint(role, &row));
         }
     }
+    lines.extend(elbow_rows(theme, rows));
     lines
 }
 
@@ -1063,10 +1062,11 @@ fn fold_rows(rows: &[String], starts: &[usize]) -> Vec<Shown> {
     kept
 }
 
-/// The lines of one block: the label in the tool's color, and its rows under
-/// the gutter, painted for `text_role` (D23, D24; AGL-095, D2) — all of them,
-/// or the head and the tail of them, or, when the block has no text of its
-/// own, the placeholder that keeps its place (AGL-095, D4).
+/// The lines of one block (AGL-104, D1): the label in the tool's color,
+/// and its rows below, painted for `text_role` (D23, D24; AGL-095, D2) —
+/// all of them, or the head and the tail of them, or, when the block has no
+/// text of its own, the placeholder that keeps its place (AGL-095, D4).
+/// The body hangs under `⎿ `, the rows that follow stand under it.
 #[allow(clippy::too_many_arguments)]
 pub fn block_lines(
     theme: &Theme,
@@ -1078,11 +1078,7 @@ pub fn block_lines(
     fold: Fold,
     render: Render,
 ) -> Vec<String> {
-    let gutter = theme.paint(Role::InputRule, "  │ ");
-    // The label's width is reserved on the snippet's rows too, so the
-    // live's lines (the card from the first piece, D29) and the printed
-    // card's fit the screen alike.
-    let inner = columns.saturating_sub(width(label) + 4).max(1);
+    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
     let (rows, starts) = block_rows(text, inner, theme, text_role, render);
     let kept = match fold {
         Fold::Whole => rows.iter().map(|row| Shown::Row(row.clone())).collect(),
@@ -1090,20 +1086,43 @@ pub fn block_lines(
     };
     let mut lines = vec![theme.paint(Role::Tool, label)];
     if rows.is_empty() {
-        lines.push(format!(
-            "{gutter}{}",
-            theme.paint(Role::Muted, tr!(lang, m::EMPTY))
-        ));
+        let placeholder = theme.paint(Role::Muted, tr!(lang, m::EMPTY));
+        lines.extend(elbow_rows(theme, vec![placeholder]));
         return lines;
     }
-    for row in kept {
-        let text = match row {
+    let kept = kept
+        .into_iter()
+        .map(|row| match row {
             Shown::Row(row) => row,
             Shown::Hidden(n) => theme.paint(Role::Muted, &tr!(lang, m::THINKING_FOLDED, n = n)),
-        };
-        lines.push(format!("{gutter}{text}"));
-    }
+        })
+        .collect();
+    lines.extend(elbow_rows(theme, kept));
     lines
+}
+
+/// The width of the body's prefix (AGL-104, D1): `⎿ ` before a block's
+/// first row, two spaces before the rows that follow.
+pub const BODY_PREFIX: usize = 2;
+
+/// The body's rows with their prefix (AGL-104, D1): the elbow in the
+/// label's color before the first, and two spaces before the rest, so they
+/// all stand under it.
+pub fn elbow_rows(theme: &Theme, rows: Vec<String>) -> Vec<String> {
+    let elbow = theme.paint(Role::Tool, "⎿ ");
+    rows.into_iter()
+        .enumerate()
+        .map(|(n, row)| {
+            format!(
+                "{}{row}",
+                if n == 0 {
+                    elbow.as_str()
+                } else {
+                    "  "
+                }
+            )
+        })
+        .collect()
 }
 
 /// The live block of a thinking longer than the room above the dock
@@ -1312,12 +1331,12 @@ mod tests {
             printed,
             [
                 "TOOL bash  FAIL",
-                "  │ cargo test",
+                "⎿ cargo test",
                 "RESULT",
-                "  │ one",
-                "  │ two",
-                "  │ three",
-                "  │ exit code: 1",
+                "⎿ one",
+                "  two",
+                "  three",
+                "  exit code: 1",
                 "FAIL · bash 1m 15s",
                 "",
             ]
@@ -1348,9 +1367,9 @@ mod tests {
             printed,
             [
                 "TOOL edit  OK",
-                "  │ a.rs",
+                "⎿ a.rs",
                 "RESULT",
-                "  │ Replaced 1 occurrence in a.rs.",
+                "⎿ Replaced 1 occurrence in a.rs.",
                 "",
             ]
         );
@@ -1372,9 +1391,9 @@ mod tests {
         );
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(printed[2], "RESULT");
-        assert_eq!(printed[3], "  │ 1");
+        assert_eq!(printed[3], "⎿ 1");
         assert!(printed[6].contains("hidden"), "{printed:?}");
-        assert_eq!(printed[printed.len() - 2], "  │ 20");
+        assert_eq!(printed[printed.len() - 2], "  20");
     }
 
     #[test]
@@ -1393,7 +1412,7 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
-            ["TOOL bash  OK", "  │ true", "RESULT", "  │ (empty)", ""]
+            ["TOOL bash  OK", "⎿ true", "RESULT", "⎿ (empty)", ""]
         );
     }
 
@@ -1416,10 +1435,10 @@ mod tests {
         };
         for (level, rows) in [
             (Detail::Off, &["TOOL bash  OK", ""][..]),
-            (Detail::Flexible, &["TOOL bash  OK", "  │ ls", ""][..]),
+            (Detail::Flexible, &["TOOL bash  OK", "⎿ ls", ""][..]),
             (
                 Detail::Full,
-                &["TOOL bash  OK", "  │ ls", "  │ cat a", ""][..],
+                &["TOOL bash  OK", "⎿ ls", "  cat a", ""][..],
             ),
         ] {
             let (presenter, mock) = presenter_with(ReplSettings {
@@ -1439,7 +1458,7 @@ mod tests {
         show_card(&presenter, &call, &result, &[]);
         assert_eq!(
             mock.printed.lock().unwrap().clone(),
-            ["TOOL bash  OK", "  │ ls", ""]
+            ["TOOL bash  OK", "⎿ ls", ""]
         );
     }
 
@@ -1483,7 +1502,7 @@ mod tests {
         // thinking like the tool's card (the label, the line under the
         // gutter); the answer follows in the same block.
         assert_eq!(printed[0], "THINKING");
-        assert_eq!(printed[1], "  │ hmm ok");
+        assert_eq!(printed[1], "⎿ hmm ok");
         assert!(printed.contains(&"Hi there more".to_owned()));
         assert!(!printed.contains(&"**Hi** there".to_owned()));
     }
@@ -1498,7 +1517,7 @@ mod tests {
         // AGL-093, D1: the two lines of one paragraph flow into one row.
         assert_eq!(
             mock.printed.lock().unwrap().clone(),
-            vec!["THINKING", "  │ hm more", "  │ third"]
+            vec!["THINKING", "⎿ hm more", "  third"]
         );
         let (second, mock) = presenter();
         second.show_thinking("a\n\nb\n\nc\n\nd\n\ne\n\nf");
@@ -1508,12 +1527,12 @@ mod tests {
             mock.printed.lock().unwrap().clone(),
             vec![
                 "THINKING",
-                "  │ a",
-                "  │ b",
-                "  │ c",
-                "  │ d",
-                "  │ e",
-                "  │ f"
+                "⎿ a",
+                "  b",
+                "  c",
+                "  d",
+                "  e",
+                "  f"
             ]
         );
     }
@@ -1524,9 +1543,9 @@ mod tests {
         // the live block, redrawn with every piece, shows it as it came.
         let (mut presenter, mock) = presenter();
         presenter.thinking("use **bash** here");
-        assert_eq!(mock.live.lock().unwrap()[1], "  │ use **bash** here");
+        assert_eq!(mock.live.lock().unwrap()[1], "⎿ use **bash** here");
         presenter.thinking_done();
-        assert_eq!(mock.printed.lock().unwrap()[1], "  │ use bash here");
+        assert_eq!(mock.printed.lock().unwrap()[1], "⎿ use bash here");
     }
 
     #[test]
@@ -1542,14 +1561,14 @@ mod tests {
             mock.printed.lock().unwrap().clone(),
             vec![
                 "THINKING",
-                "  │ one",
-                "  │ ⋯ 3 hidden",
-                "  │ p5",
-                "  │ p6",
-                "  │ p7",
-                "  │ p8",
-                "  │ p9",
-                "  │ last tail"
+                "⎿ one",
+                "  ⋯ 3 hidden",
+                "  p5",
+                "  p6",
+                "  p7",
+                "  p8",
+                "  p9",
+                "  last tail"
             ]
         );
     }
@@ -1572,6 +1591,22 @@ mod tests {
     }
 
     #[test]
+    fn the_body_of_a_block_hangs_under_the_elbow() {
+        // AGL-104, D1: the label stands alone, `⎿ ` begins the body and
+        // the rows that follow stand under it; nothing passes the screen.
+        let (mut presenter, mock) = presenter();
+        presenter.thinking(&"a".repeat(120));
+        presenter.thinking_done();
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed[0], "THINKING", "{printed:?}");
+        assert!(printed[1].starts_with("⎿ "), "{printed:?}");
+        assert!(printed[2].starts_with("  "), "{printed:?}");
+        for line in &printed[1..] {
+            assert!(width(line) <= 40, "{line}");
+        }
+    }
+
+    #[test]
     fn the_live_thinking_shows_all_of_it_and_then_its_newest_rows() {
         // AGL-092, D3: while the thinking is decoded the live block takes
         // all of it; past the room above the dock its newest rows stay,
@@ -1583,14 +1618,15 @@ mod tests {
         let lines = mock.live.lock().unwrap().clone();
         assert_eq!(lines.len(), 24, "{lines:?}");
         assert_eq!(lines[0], "THINKING");
-        assert_eq!(lines[23], "  │ line 29");
+        assert_eq!(lines[23], "  line 29");
     }
 
     #[test]
     fn the_live_thinking_is_the_card_from_the_first_piece() {
         // AGL-066, D29: while the thinking streams, the live's lines are
-        // the card's lines — the label, its rows under the gutter — as
-        // they are printed when the thinking ends; each fits the screen.
+        // the card's lines — the label and its rows under the elbow (
+        // AGL-104, D1) — as they are printed when the thinking ends; each
+        // fits the screen.
         let (mut presenter, mock) = presenter();
         presenter.thinking(&"a".repeat(80));
         let lines = mock.live.lock().unwrap().clone();
@@ -1599,7 +1635,7 @@ mod tests {
         assert_eq!(lines.len(), 4, "{lines:?}");
         assert_eq!(lines[0], "THINKING", "{lines:?}");
         for line in &lines[1..] {
-            assert!(line.starts_with("  │ "), "{lines:?}");
+            assert!(line.starts_with("⎿ ") || line.starts_with("  "), "{lines:?}");
             assert!(width(line) <= 40, "{line:?}");
         }
     }
@@ -1832,9 +1868,21 @@ mod tests {
             time: Duration::ZERO,
             violation: true,
         });
-        let printed = mock.printed.lock().unwrap().join("\n");
-        assert!(printed.contains("first_thinking"), "{printed}");
-        assert!(printed.contains("Writing"), "{printed}");
+        // AGL-104, D1: the body hangs under the elbow, and the rows that
+        // follow it stand under that.
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed[0], "fsm", "{printed:?}");
+        assert!(
+            printed[1].starts_with("⎿ `first_thinking` must not happen in"),
+            "{printed:?}"
+        );
+        assert!(printed[2].starts_with("  "), "{printed:?}");
+        // The word the wrap cut in two comes back when the prefixes go.
+        let body: String = printed[1..]
+            .iter()
+            .map(|row| row.chars().skip(2).collect::<String>())
+            .collect();
+        assert!(body.contains("Writing"), "{printed:?}");
     }
 
     #[test]
@@ -2193,7 +2241,7 @@ mod tests {
             .iter()
             .position(|line| line == "THINKING")
             .expect("the thinking's label");
-        assert_eq!(printed[thinking + 1], "  │ hm");
+        assert_eq!(printed[thinking + 1], "⎿ hm");
         assert!(printed.contains(&"Running.".to_owned()));
         // The tool's card: its name, its status, one line of the input; no
         // output (D1, D6).
@@ -2201,7 +2249,7 @@ mod tests {
             .iter()
             .position(|line| line == "TOOL bash  OK")
             .expect("the tool's line");
-        assert_eq!(printed[tool + 1], "  │ ls");
+        assert_eq!(printed[tool + 1], "⎿ ls");
         assert!(!printed.contains(&"a".to_owned()));
         // A line per medium (AGL-043 F17).
         assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
@@ -2215,12 +2263,12 @@ mod tests {
             .expect("the stir's label");
         assert_eq!(
             printed[stir + 1],
-            "  │ `nope` is not a tool of this state"
+            "⎿ `nope` is not a tool of this state"
         );
         assert!(printed.contains(&"cut off".to_owned()));
         assert!(printed
             .iter()
-            .any(|line| line.starts_with("  │ 4000 tokens of thinking")));
+            .any(|line| line.starts_with("⎿ 4000 tokens of thinking")));
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));

@@ -1,8 +1,9 @@
 //! The dock at the bottom of the terminal and the transcript above it
-//! (D119, D135, D138): a status line, the input rows on their background,
-//! the command menu and a row with the Function and the workspace. The
-//! transcript is printed above the dock, which is drawn again after every
-//! change.
+//! (D119, D135, D138): the activity's row, the input rows on their
+//! background, and the command menu. The transcript is printed above the
+//! dock, which is drawn again after every change. AGL-104, D3: the dock
+//! no longer carries a status row with the Function, the workspace and the
+//! context's usage — `/status` says all of that when it is asked.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -13,7 +14,7 @@ use super::editor::{Editor, Outcome};
 use super::term::Key;
 use super::transcript::{Screen, label};
 use super::reading::Reading;
-use super::text::{hard_wrap, truncate, truncate_start, width};
+use super::text::{hard_wrap, truncate, width};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::Phase;
 use crate::style::Role;
@@ -26,23 +27,6 @@ const MAX_INPUT_ROWS: usize = 6;
 const MAX_MENU_ROWS: usize = 6;
 /// How many printed lines are remembered for erasing.
 const REMEMBERED_LINES: usize = 400;
-
-/// The context usage for the status row (D152): `41 213 / 131 072 (32%)`,
-/// with `—` before the first step. The text's own color at every share of
-/// the context: the number says how much is used, the color says nothing
-/// else (AGL-080, D3, yellow from 70% and orange from 90%, undone by
-/// AGL-084, D1).
-fn context_usage(used: Option<usize>, size: usize) -> String {
-    // The server has not answered yet (AGL-015).
-    if size == 0 {
-        return "—".into();
-    }
-    let Some(used) = used else {
-        return format!("— / {}", grouped(size));
-    };
-    let percent = used.saturating_mul(100) / size.max(1);
-    format!("{} / {} ({percent}%)", grouped(used), grouped(size))
-}
 
 /// `n` with a no-break space between groups of three digits.
 pub(super) fn grouped(n: usize) -> String {
@@ -77,11 +61,6 @@ struct State {
     out: Box<dyn Write + Send>,
     theme: Theme,
     lang: Lang,
-    function: String,
-    workspace: String,
-    /// The context size and the tokens of the last prompt (D152).
-    context: usize,
-    context_used: Option<usize>,
     /// The voice input, in the separator row (AGL-016).
     voice: Option<VoiceLabel>,
     /// The decoding speed of the current generation (AGL-012).
@@ -112,8 +91,6 @@ impl Dock {
         out: Box<dyn Write + Send>,
         theme: Theme,
         lang: Lang,
-        function: String,
-        workspace: String,
         editor: Editor,
         size: (usize, usize),
     ) -> Dock {
@@ -122,10 +99,6 @@ impl Dock {
                 out,
                 theme,
                 lang,
-                function,
-                workspace,
-                context: 0,
-                context_used: None,
                 voice: None,
                 speed: None,
                 reading: None,
@@ -142,16 +115,6 @@ impl Dock {
         }
     }
 
-    /// The size of the context the status row measures the prompt by
-    /// (D152).
-    pub fn with_context(mut self, size: usize) -> Dock {
-        self.state
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .context = size;
-        self
-    }
-
     /// The line being written.
     #[cfg(test)]
     pub fn input_text(&self) -> String {
@@ -164,15 +127,6 @@ impl Dock {
         let mut state = self.lock();
         let _ = state.out.write_all(text.as_bytes());
         let _ = state.out.flush();
-    }
-
-    /// The context size, once the server has answered (AGL-015).
-    pub fn set_context_size(&self, size: usize) {
-        let mut state = self.lock();
-        if state.context != size {
-            state.context = size;
-            state.redraw("");
-        }
     }
 
     /// Shows the state of the voice input in the separator row, or
@@ -295,12 +249,6 @@ impl Screen for Dock {
             state.printed.pop_front();
         }
         state.redraw(&text);
-    }
-
-    fn context(&self, used: usize) {
-        let mut state = self.lock();
-        state.context_used = Some(used);
-        state.redraw("");
     }
 
     fn reading(&self, reading: Option<Reading>) {
@@ -458,8 +406,8 @@ impl State {
                 columns,
             ));
         }
-        rows.push(background_row(theme, &[], columns));
-        rows.push(self.status_row());
+        // AGL-104, D3: the dock ends with its last row — the status row,
+        // and the blank above it, are gone; `/status` keeps that information.
         Layout {
             rows,
             cursor_row,
@@ -467,7 +415,9 @@ impl State {
         }
     }
 
-    /// `─ Ready ────` with the number of waiting messages.
+    /// The activity's row (AGL-104, D2): the words alone — `Ready · queued
+    /// 2` — with the number of waiting messages, the reading, the speed and
+    /// the voice; no rule around them.
     fn separator(&self) -> String {
         let lang = self.lang;
         let mut label = label(&self.activity, lang);
@@ -490,42 +440,8 @@ impl State {
             }
             None => {}
         }
-        let label = truncate(&format!(" {label} "), self.columns.saturating_sub(1));
-        let fill = self.columns.saturating_sub(1 + width(&label));
-        format!(
-            "{}{}{}",
-            self.theme.paint(Role::InputRule, "─"),
-            self.theme.paint(Role::Tool, &label),
-            self.theme.paint(Role::InputRule, &"─".repeat(fill))
-        )
-    }
-
-    fn status_row(&self) -> String {
-        let columns = self.columns;
-        let usage = context_usage(self.context_used, self.context);
-        // The usage is dropped when the row is too narrow for it.
-        let usage = Some(usage).filter(|text| columns >= 3 * width(text));
-        let usage_width = usage.as_ref().map_or(0, |text| width(text) + 2);
-        let room = columns.saturating_sub(4 + usage_width);
-        let workspace = truncate_start(&self.workspace, room / 2 + room % 2);
-        let function = truncate(&self.function, room.saturating_sub(width(&workspace)));
-        let left = format!("  {function}");
-        let right = format!("{workspace}  ");
-        let gap = columns.saturating_sub(width(&left) + usage_width + width(&right));
-        let usage = usage
-            .map(|text| format!("{}{}", self.theme.paint(Role::InputText, &text), "  "))
-            .unwrap_or_default();
-        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function, the workspace
-        // and the separator above them are all the tool's color, as
-        // `THINKING` and `Tool bash` are; the usage is the text's color,
-        // whatever share of the context it names.
-        format!(
-            "{}{}{}{}",
-            self.theme.paint(Role::Tool, &left),
-            " ".repeat(gap),
-            usage,
-            self.theme.paint(Role::Tool, &right)
-        )
+        self.theme
+            .paint(Role::Tool, &truncate(&label, self.columns))
     }
 
     /// The visible input rows, each with its marker, and the row and
@@ -641,12 +557,9 @@ mod tests {
             Box::new(sink.clone()),
             Theme::plain(),
             Lang::En,
-            "minimal".into(),
-            "/home/u/project".into(),
             Editor::new(Vec::new(), commands),
             (columns, rows),
-        )
-        .with_context(131_072);
+        );
         (dock, sink)
     }
 
@@ -663,11 +576,9 @@ mod tests {
         assert_eq!(
             layout.rows,
             [
-                format!("─ Ready {}", "─".repeat(32)),
+                "Ready".to_string(),
                 " ".repeat(40),
                 format!("› {}", pad(" Type a message or / for commands", 38)),
-                " ".repeat(40),
-                "  minimal    — / 131\u{a0}072  …e/u/project  ".to_string(),
             ]
         );
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
@@ -688,7 +599,7 @@ mod tests {
         let layout = dock.lock().layout();
         assert_eq!(
             layout.rows[0],
-            format!("─ Running bash · queued 2 {}", "─".repeat(4))
+            "Running bash · queued 2" 
         );
         assert_eq!(layout.rows[2], pad("› hello", 30));
         assert_eq!(layout.rows[3], pad("  ab", 30));
@@ -700,18 +611,15 @@ mod tests {
         let (dock, _) = dock(40, 20);
         dock.activity(Phase::Writing);
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[0], format!("─ Writing {}", "─".repeat(30)));
+        assert_eq!(layout.rows[0], "Writing");
         drop(layout);
         dock.speed(Some(46.3));
         let layout = dock.lock().layout();
-        assert_eq!(
-            layout.rows[0],
-            format!("─ Writing · 46.3 tok/s {}", "─".repeat(17))
-        );
+        assert_eq!(layout.rows[0], "Writing · 46.3 tok/s");
         drop(layout);
         dock.speed(None);
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[0], format!("─ Writing {}", "─".repeat(30)));
+        assert_eq!(layout.rows[0], "Writing");
     }
 
     #[test]
@@ -773,7 +681,7 @@ mod tests {
         let layout = dock.lock().layout();
         assert_eq!(layout.rows[3], pad("  /quit     does it", 30));
         assert_eq!(layout.rows[4], pad("  /help     does it", 30));
-        assert_eq!(layout.rows.len(), 7);
+        assert_eq!(layout.rows.len(), 5);
         // The cursor stays in the input.
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 3));
     }
@@ -799,8 +707,6 @@ mod tests {
             Box::new(Sink::default()),
             theme,
             Lang::En,
-            "minimal".into(),
-            "/home/u/project".into(),
             Editor::new(Vec::new(), commands),
             (30, 20),
         );
@@ -821,13 +727,13 @@ mod tests {
 
     #[test]
     fn the_room_above_the_dock() {
-        // AGL-092, D3: the dock's own rows — the separator, a blank, the
-        // input, a blank and the status — are what the terminal has less
-        // those; the live block's own rows are not taken from the room.
+        // AGL-092, D3, AGL-104, D3: the dock's own rows — the separator,
+        // a blank and the input — are what the terminal has less those;
+        // the live block's own rows are not taken from the room.
         let (dock, _) = dock(40, 20);
-        assert_eq!(dock.room(), 15);
+        assert_eq!(dock.room(), 17);
         dock.live(&["one".into(), "two".into()]);
-        assert_eq!(dock.room(), 15);
+        assert_eq!(dock.room(), 17);
     }
 
     #[test]
@@ -835,14 +741,16 @@ mod tests {
         let (dock, sink) = dock(20, 20);
         dock.start();
         let first = sink.take();
-        // First draw: no moving up; the cursor ends on the input row.
-        assert!(first.contains("─ Ready"));
-        assert!(first.contains("\x1b[2A"));
+        // First draw: no moving up; the cursor ends on the input row, the
+        // last one of the dock (AGL-104, D3).
+        assert!(first.contains("Ready"));
+        assert!(!first.contains("\x1b[2A"));
+        assert!(first.contains("›"));
         dock.print(&["one".into(), "two".into()]);
         let out = sink.take();
         // Back to the top of the dock, clear, lines, the dock again.
         assert!(out.starts_with("\x1b[?2026h\r\x1b[2A\x1b[J"));
-        assert!(out.contains("one\r\ntwo\r\n\x1b[?25l─ Ready"));
+        assert!(out.contains("one\r\ntwo\r\n\x1b[?25lReady"));
         assert!(out.ends_with("\x1b[?25h\x1b[?2026l"));
     }
 
@@ -869,7 +777,7 @@ mod tests {
         dock.print(&["a".into(), "b".into(), "c".into()]);
         sink.take();
         assert!(dock.erase(2));
-        // The dock is 5 rows; the cursor is 2 rows below its top: up 2 + 2.
+        // The dock is 3 rows; the cursor is on its last one: up 2 + 2.
         assert!(sink.take().contains("\r\x1b[4A\x1b[J"));
         assert!(!dock.erase(5));
         // Lines wider than the window take more rows.
@@ -883,15 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_is_grouped_and_stays_the_texts_color() {
-        assert_eq!(context_usage(None, 131_072), "— / 131\u{a0}072");
-        assert_eq!(
-            context_usage(Some(41_213), 131_072),
-            "41\u{a0}213 / 131\u{a0}072 (31%)"
-        );
-        // AGL-084, D1: the number alone says how full the context is, so
-        // 99% is no louder than 31%.
-        assert_eq!(context_usage(Some(999), 1000), "999 / 1\u{a0}000 (99%)");
+    fn grouped_numbers_use_a_no_break_space() {
         assert_eq!(grouped(7), "7");
         assert_eq!(grouped(1000), "1\u{a0}000");
     }
@@ -919,80 +819,10 @@ mod tests {
     }
 
     #[test]
-    fn the_context_is_a_dash_until_the_server_has_answered() {
-        assert_eq!(context_usage(None, 0), "—");
-        assert_eq!(context_usage(Some(5), 0), "—");
-        let (dock, _) = dock(80, 20);
-        dock.set_context_size(0);
-        assert!(dock.lock().layout().rows.last().unwrap().contains('—'));
-        dock.set_context_size(65_536);
-        assert!(
-            dock.lock()
-                .layout()
-                .rows
-                .last()
-                .unwrap()
-                .contains("— / 65\u{a0}536")
-        );
-    }
-
-    #[test]
-    fn the_status_row_follows_the_last_prompt() {
-        let (dock, _) = dock(80, 20);
-        dock.context(41_213);
-        let layout = dock.lock().layout();
-        assert!(
-            layout
-                .rows
-                .last()
-                .unwrap()
-                .contains("41\u{a0}213 / 131\u{a0}072 (31%)")
-        );
-        assert_eq!(width(layout.rows.last().unwrap()), 80);
-    }
-
-    #[test]
-    fn the_status_row_divides_its_two_colors() {
-        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function and the
-        // workspace are both the tool's color, as the separator above them
-        // and `THINKING` are; the usage is the text's at every share of the
-        // context — the warn's orange and yellow are no more.
-        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
-        let theme = Theme::new(
-            true,
-            &[
-                (Role::Tool, color("#FF0000")),
-                (Role::InputText, color("#00FF00")),
-                (Role::StatusWarn, color("#FFA500")),
-            ],
-        );
-        let dock = Dock::new(
-            Box::new(Sink::default()),
-            theme,
-            Lang::En,
-            "minimal".into(),
-            "/home/u/project".into(),
-            Editor::new(Vec::new(), Vec::new()),
-            (80, 20),
-        )
-        .with_context(1000);
-        let start = |role: Role| dock.lock().theme.start(role);
-        let status = || dock.lock().layout().rows.last().unwrap().clone();
-        dock.context(500);
-        let row = status();
-        let tool = row.matches(&start(Role::Tool)).count();
-        assert_eq!(tool, 2, "{row}");
-        assert!(row.contains(&start(Role::InputText)), "{row}");
-        dock.context(950);
-        let row = status();
-        assert!(!row.contains(&start(Role::StatusWarn)), "{row}");
-        assert!(row.contains(&start(Role::InputText)), "{row}");
-    }
-
-    #[test]
     fn the_separators_activity_takes_the_tools_color() {
-        // AGL-091: `Ready`, `Starting server` and the rest of the
-        // separator's label are the tool's color, not a color of their own.
+        // AGL-091, AGL-104, D2: `Ready`, `Starting server` and the rest of
+        // the separator's words are the tool's color alone — there is no
+        // rule left to color.
         let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
@@ -1005,33 +835,40 @@ mod tests {
             Box::new(Sink::default()),
             theme,
             Lang::En,
-            "minimal".into(),
-            "/home/u/project".into(),
             Editor::new(Vec::new(), Vec::new()),
             (80, 20),
         );
         let start = |role: Role| dock.lock().theme.start(role);
         dock.activity(Phase::StartingServer);
         let row = dock.lock().separator();
-        assert!(row.contains(&start(Role::Tool)), "{row}");
-        let rule = row.find(&start(Role::InputRule)).expect("the rule's color");
-        let tool = row.find(&start(Role::Tool)).expect("the tool's color");
-        assert!(rule < tool, "{row}");
+        assert!(row.starts_with(&start(Role::Tool)), "{row}");
+        assert!(row.contains("Starting the server"), "{row}");
+        assert!(!row.contains('─'), "{row}");
+        assert!(!row.contains(&start(Role::InputRule)), "{row}");
     }
 
     #[test]
-    fn long_texts_are_cut_to_fit() {
+    fn the_separator_is_cut_to_the_screen() {
+        // AGL-104, D2: the words alone, and never more of them than the
+        // screen has columns.
         let (dock, _) = dock(16, 20);
-        {
-            let mut state = dock.lock();
-            state.function = "a-very-long-function-name".into();
-            state.workspace = "/a/very/long/workspace/path".into();
-        }
-        let layout = dock.lock().layout();
-        let status = layout.rows.last().unwrap();
-        assert_eq!(width(status), 16);
-        assert!(status.contains('…'));
+        dock.activity(Phase::Running("a-very-long-tool-name".into()));
+        let row = dock.lock().separator();
+        assert_eq!(width(&row), 16);
+        assert!(row.contains('…'), "{row}");
         dock.live(&["partial".into()]);
         assert_eq!(dock.lock().layout().rows[0], "partial");
+    }
+
+    #[test]
+    fn the_dock_has_no_status_row() {
+        // AGL-104, D3: the dock ends with its input and its menu; the
+        // Function, the workspace and the context's usage live in `/status`.
+        let (dock, _) = dock(60, 20);
+        let layout = dock.lock().layout();
+        assert_eq!(layout.rows.len(), 3);
+        assert_eq!(&layout.rows[2], layout.rows.last().unwrap());
+        assert!(!layout.rows.join("\n").contains("131\u{a0}072"));
+        assert!(!layout.rows.join("\n").contains("minimal"));
     }
 }
