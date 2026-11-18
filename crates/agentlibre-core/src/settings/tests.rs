@@ -388,14 +388,10 @@ fn invalid_values_are_errors() {
         user_of(r#"colors.mutd = "dim";"#),
         Err(Error::UnknownKey { key, .. }) if key == "colors.mutd"
     ));
-    for (body, key) in [
-        ("repl.max_record_seconds = 0;", "repl.max_record_seconds"),
-    ] {
-        assert!(
-            matches!(user_of(body), Err(Error::NotPositive { key: k, .. }) if k == key),
-            "{body}"
-        );
-    }
+    assert!(matches!(
+        user_of("repl.max_record_seconds = 0;"),
+        Err(Error::NotPositive { key, .. }) if key == "repl.max_record_seconds"
+    ));
     assert!(matches!(
         user_of("forge.auto_rehome = \"on\";"),
         Err(Error::WrongType { key, .. }) if key == "forge.auto_rehome"
