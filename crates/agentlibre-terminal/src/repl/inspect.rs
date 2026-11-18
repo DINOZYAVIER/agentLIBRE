@@ -363,10 +363,16 @@ impl Inspect {
         outputs: &Path,
     ) -> Vec<String> {
         match record {
-            Record::User(message) => user_lines(theme, message, columns),
+            Record::User(message) => user_lines(theme, message, columns, Role::InputText),
             Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
             Record::Notice { line, role, detail } => {
-                let mut lines = notice_lines(theme, line, columns, *role);
+                // A command keeps the message's look in the mode too,
+                // as in the transcript (AGL-101).
+                let mut lines = if line.starts_with('/') {
+                    user_lines(theme, line, columns, Role::Tool)
+                } else {
+                    notice_lines(theme, line, columns, *role)
+                };
                 if focused
                     && let Some(detail) = detail
                     && !detail.is_empty()

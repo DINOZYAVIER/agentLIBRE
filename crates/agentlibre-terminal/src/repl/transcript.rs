@@ -195,7 +195,17 @@ impl Presenter {
     /// too, so one blank divides one block from the next and never two.
     pub fn show_user(&self, message: &str) {
         let columns = self.screen.columns();
-        let mut lines = user_lines(&self.theme, message, columns);
+        let mut lines = user_lines(&self.theme, message, columns, Role::InputText);
+        lines.push(String::new());
+        self.screen.print(&lines);
+    }
+
+    /// A command of the human on the input background, in the tool's
+    /// color as the menu paints it (AGL-101): a slash says that the
+    /// model never saw the line.
+    pub fn show_command(&self, line: &str) {
+        let columns = self.screen.columns();
+        let mut lines = user_lines(&self.theme, line, columns, Role::Tool);
         lines.push(String::new());
         self.screen.print(&lines);
     }
@@ -367,7 +377,16 @@ impl Presenter {
                     }
                     self.show_answer(text, *time);
                 }
-                Record::Notice { line, role, .. } => self.show_notice(line, *role),
+                Record::Notice { line, role, .. } => {
+                    // A command of the human takes the message's look;
+                    // of the session's lines only a command's starts at
+                    // the slash (AGL-101).
+                    if line.starts_with('/') {
+                        self.show_command(line);
+                    } else {
+                        self.show_notice(line, *role);
+                    }
+                }
             }
         }
     }
@@ -905,8 +924,9 @@ pub fn summary(
 
 /// The user's message as rows on the input background (D138). Its marker is
 /// the input's own, two columns wide (AGL-094, D1), so a message of the
-/// human and what he types begin at the same column.
-pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
+/// human and what he types begin at the same column. The text takes `role`:
+/// a message the color of the input, a command the tool's (AGL-101).
+pub fn user_lines(theme: &Theme, message: &str, columns: usize, role: Role) -> Vec<String> {
     let columns = columns.max(4);
     let background = theme.start(Role::InputBackground);
     let reset = theme.reset();
@@ -922,7 +942,7 @@ pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
             format!(
                 "{background}{}{background}{}{background}{pad}{reset}",
                 theme.paint(Role::InputPrompt, marker),
-                theme.paint(Role::InputText, row)
+                theme.paint(role, row)
             )
         })
         .collect()
@@ -2068,12 +2088,30 @@ mod tests {
 
     #[test]
     fn user_messages_fill_the_row() {
-        let rows = user_lines(&Theme::plain(), "hi\nthere", 10);
+        let rows = user_lines(&Theme::plain(), "hi\nthere", 10, Role::InputText);
         assert_eq!(rows, ["› hi      ", "  there   "]);
-        let rows = user_lines(&Theme::plain(), "abcdefghijkl", 10);
+        let rows = user_lines(&Theme::plain(), "abcdefghijkl", 10, Role::InputText);
         assert_eq!(rows, ["› abcdefgh", "  ijkl    "]);
-        let rows = user_lines(&Theme::plain(), "one two three", 10);
+        let rows = user_lines(&Theme::plain(), "one two three", 10, Role::InputText);
         assert_eq!(rows, ["› one two ", "  three   "]);
+    }
+
+    #[test]
+    fn a_command_takes_the_message_look() {
+        // AGL-101: a run command echoes like a sent message, in the tool's
+        // color as the menu paints it.
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Tool, red)]);
+        let (presenter, mock) = presenter();
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        presenter.show_command("/quit");
+        let printed = mock.printed.lock().unwrap().clone();
+        let row = printed.first().expect("a row");
+        assert!(row.contains('›'), "{row:?}");
+        assert!(row.contains("\x1b[38;2;255;0;0m/quit"), "{row:?}");
     }
 
     #[test]

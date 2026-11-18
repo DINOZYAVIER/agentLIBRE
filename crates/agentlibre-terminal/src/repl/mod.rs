@@ -25,7 +25,7 @@ use dock::Dock;
 use editor::{Editor, MenuItem, Outcome, save_history};
 use voice::VoiceInput;
 use term::{Key, Parser, RawGuard};
-use transcript::{Presenter, Screen, notice_lines};
+use transcript::{Presenter, Screen, notice_lines, user_lines};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};
@@ -347,6 +347,11 @@ impl Input {
             return;
         }
         *self.said.lock().unwrap() = Some(Said::default());
+        // AGL-101: Enter echoes the command like a message, in the tool's
+        // color as the menu paints it; the model never sees the line.
+        let mut echo = user_lines(&self.theme, trimmed, self.dock.columns(), Role::Tool);
+        echo.push(String::new());
+        self.dock.print(&echo);
         self.command(trimmed);
         let said = self.said.lock().unwrap().take().unwrap_or_default();
         let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
