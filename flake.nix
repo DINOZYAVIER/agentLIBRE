@@ -286,13 +286,19 @@
             };
             names = configuration: map lib.getName configuration.config.environment.systemPackages;
             wsl = self.nixosConfigurations.wsl.config;
+            # With Strata asked for (AGL-089, D20): agl wrapped once more, the
+            # plain package not installed beside it.
+            withStrata = plain.extendModules { modules = [ { programs.agl.strata = [ "rdna3" ]; } ]; };
             ok =
               plain.config.programs.agl.package == self.packages.${system}.default
               && plain.config.hardware.graphics.enable
               && !(builtins.elem "wslinfo" (names plain))
               && wsl.programs.agl.package == self.packages.${system}.wsl
               && builtins.elem "wslinfo" (names self.nixosConfigurations.wsl)
-              && builtins.elem "wslpath" (names self.nixosConfigurations.wsl);
+              && builtins.elem "wslpath" (names self.nixosConfigurations.wsl)
+              && builtins.elem "agentLIBRE-strata" (names withStrata)
+              && !(builtins.elem "agentLIBRE" (names withStrata))
+              && builtins.elem "agentLIBRE" (names plain);
           in
           assert ok;
           pkgs.runCommand "${cargo.package.name}-module" { } "touch $out";

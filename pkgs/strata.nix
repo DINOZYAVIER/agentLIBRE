@@ -38,6 +38,12 @@ in
 stdenv.mkDerivation {
   inherit pname version src;
 
+  # ThinkingCap's GGUF carries the MTP (nextn) block: the pack holds the base
+  # layers only, the engine takes the MTP layer from --mtp (AGL-089, D9;
+  # AGL-070's patch of today's Strata). Upstream and the fork have no such
+  # skip.
+  patches = [ ./strata/iq-pack-skip-mtp.patch ];
+
   nativeBuildInputs = [
     cmake
     ninja
@@ -99,6 +105,20 @@ stdenv.mkDerivation {
     makeWrapper ${python}/bin/python $out/bin/strata-iq-pack \
       --add-flags $out/share/strata/tools/iq_pack.py \
       --set STRATA_GGUF_PY ${llamaCpp}/gguf-py
+    # The Python of the tools agl runs to prepare a model: mtp_fetch.py,
+    # mtp_pack.py, mtp_rt.py (AGL-089, D13).
+    makeWrapper ${python}/bin/python $out/bin/strata-python \
+      --set STRATA_GGUF_PY ${llamaCpp}/gguf-py
+    # The hipBLASLt tuning table of this hipBLASLt (AGL-089): the engine
+    # refuses a table of another version and its prompt reads slow down.
+    h=${rocmPackages.hipblaslt}/include/hipblaslt/hipblaslt-version.h
+    # major * 100000 + minor * 100 + patch: 1.2.2 is 100202.
+    v=$(awk '/define HIPBLASLT_VERSION_MAJOR/ { a = $3 } /define HIPBLASLT_VERSION_MINOR/ { b = $3 }
+      /define HIPBLASLT_VERSION_PATCH/ { c = $3 } END { print a * 100000 + b * 100 + c }' $h)
+    table=$out/share/strata/tools/hip/gfx1100-hipblaslt-$v.txt
+    if [ -e $table ]; then
+      ln -s $table $out/share/strata/hipblaslt-tuning.txt
+    fi
     runHook postInstall
   '';
 
