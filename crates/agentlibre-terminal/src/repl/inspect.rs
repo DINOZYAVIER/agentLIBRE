@@ -11,7 +11,7 @@ use super::markdown;
 use crate::records::{self, Record};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{Fold, notice_lines, summary, thinking_lines, user_lines};
+use super::transcript::{Fold, Render, notice_lines, summary, thinking_lines, user_lines};
 use crate::action::Value;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
@@ -196,7 +196,7 @@ impl Inspect {
                 };
                 let marked = format!("{head}{row}");
                 let pad = " ".repeat(columns.saturating_sub(super::text::width(&marked)));
-                *first = theme.on_background(Role::FocusBackground, &format!("{marked}{pad}"));
+                *first = theme.on_style(Role::FocusBackground, &format!("{marked}{pad}"));
             }
             lines.extend(block);
         }
@@ -344,32 +344,22 @@ fn step_lines(
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(thinking) = thinking {
-        // D23, AGL-085 D3: the thinking's rows are muted, but on the record
-        // the navigation points at they take the color of a message's text.
-        let role = if focused { Role::InputText } else { Role::Muted };
-        if expanded || focused {
-            // D24: like the tool's card — the label, and every line of the
-            // thinking under the gutter.
-            let gutter = theme.paint(Role::InputRule, "  │ ");
-            let inner = columns.saturating_sub(4).max(1);
-            lines.push(theme.paint(Role::Tool, tr!(lang, m::THINKING)));
-            for line in thinking
-                .lines()
-                .flat_map(|line| hard_wrap(&clean(line), inner))
-            {
-                lines.push(format!("{gutter}{}", theme.paint(role, &line)));
-            }
-        } else {
-            lines.extend(thinking_lines(
-                theme,
-                lang,
-                columns,
-                thinking,
-                Role::Tool,
-                role,
-                Fold::Folded,
-            ));
-        }
+        // D23, AGL-085 D3, AGL-093 D2: the thinking's rows carry its own
+        // style, but on the record the navigation points at they take the
+        // color of a message's text.
+        let role = if focused { Role::InputText } else { Role::Thinking };
+        lines.extend(thinking_lines(
+            theme,
+            lang,
+            columns,
+            thinking,
+            role,
+            // D24: like the tool's card — the label, and every row of the
+            // thinking under the gutter when the record is expanded or the
+            // one the navigation points at.
+            if expanded || focused { Fold::Whole } else { Fold::Folded },
+            Render::Markdown,
+        ));
     }
     if let Some(text) = text {
         let mut block = markdown::render(text.trim(), columns, theme);
@@ -701,11 +691,11 @@ mod tests {
         assert!(inspect.key(Key::Char('g')));
         assert!(inspect.key(Key::Down));
         assert!(inspect.key(Key::Enter));
-        // D24: the label's line and the thinking under the gutter.
+        // D24, AGL-093 D1: the label's line and the thinking under the
+        // gutter, as Markdown — one paragraph is one flowing row.
         let all = screen(&inspect, 10).join("\n");
         assert!(all.contains("THINKING"), "{all}");
-        assert!(all.contains("  │ let me look"), "{all}");
-        assert!(all.contains("  │ and more"), "{all}");
+        assert!(all.contains("  │ let me look and more"), "{all}");
     }
 
     #[test]
@@ -715,10 +705,8 @@ mod tests {
         let events = vec![
             Event::User("Go".into()),
             Event::Thinking(
-                (1..=8)
-                    .map(|n| format!("line {n}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                ["one", "two", "three", "four", "five", "six", "seven", "eight"]
+                    .join("\n\n"),
             ),
             Event::Call {
                 text: None,
@@ -739,8 +727,8 @@ mod tests {
             .join("\n");
         let row = all
             .lines()
-            .find(|line| line.contains("line 8"))
-            .unwrap_or_else(|| panic!("the sixth line is cut: {all}"));
+            .find(|line| line.contains("eight"))
+            .unwrap_or_else(|| panic!("the last row is cut: {all}"));
         assert!(row.contains(&theme.start(Role::InputText)), "{row}");
     }
 

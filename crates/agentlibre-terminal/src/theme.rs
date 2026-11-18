@@ -70,10 +70,12 @@ impl Theme {
         format!("{start}{text}{}", self.reset())
     }
 
-    /// The already-painted `row` on the background of `role` (AGL-066,
-    /// D16): the background starts the row and is re-asserted after every
-    /// reset the row carries, so the row's own styles stay on it.
-    pub fn on_background(&self, role: Role, row: &str) -> String {
+    /// The already-styled `row` under the style of `role` (AGL-066, D16;
+    /// AGL-093, D2): the style starts the row and is re-asserted after every
+    /// reset the row carries, so what the row paints for itself wins and
+    /// what it leaves alone keeps `role` — the thinking's own style under
+    /// the styles of its Markdown.
+    pub fn on_style(&self, role: Role, row: &str) -> String {
         let start = self.start(role);
         if start.is_empty() {
             return row.to_owned();
@@ -115,6 +117,23 @@ mod tests {
             "\x1b[1;38;2;123;216;143mok\x1b[0m"
         );
         assert!(theme.start(Role::InputBackground).contains("48;2"));
+        // AGL-093, D2: the thinking is a register of its own, italic and
+        // dim, not the muted color of a notice.
+        assert_eq!(theme.start(Role::Thinking), "\x1b[3;2m");
+    }
+
+    #[test]
+    fn the_thinkings_style_stays_under_its_markdown() {
+        // AGL-093, D1, D2: what the thinking paints for itself wins, what
+        // it leaves alone keeps the thinking's style.
+        let theme = Theme::new(true, &[]);
+        let row = format!("{}{}", theme.paint(Role::MarkdownStrong, "x"), " y");
+        let under = theme.on_style(Role::Thinking, &row);
+        assert!(under.starts_with("\x1b[3;2m"), "{under}");
+        // The reset the Markdown row carries puts the thinking's style back.
+        assert!(under.contains("\x1b[0m\x1b[3;2m"), "{under}");
+        assert_eq!(under.matches("\x1b[0m").count(), 2);
+        assert_eq!(Theme::plain().on_style(Role::Thinking, "x"), "x");
     }
 
     #[test]
@@ -149,7 +168,7 @@ mod tests {
             theme.paint(Role::Tool, "TOOL"),
             theme.paint(Role::StatusSuccess, "ok")
         );
-        let on = theme.on_background(Role::FocusBackground, &row);
+        let on = theme.on_style(Role::FocusBackground, &row);
         // The background starts the row, is re-asserted after each reset,
         // and one final reset ends it.
         assert_eq!(on.matches("\x1b[0m").count(), 3);
@@ -157,7 +176,7 @@ mod tests {
         assert!(on.ends_with("\x1b[0m"));
         assert!(on.contains("48;2"));
         let plain = Theme::plain();
-        assert_eq!(plain.on_background(Role::FocusBackground, "x"), "x");
+        assert_eq!(plain.on_style(Role::FocusBackground, "x"), "x");
     }
 
     #[test]

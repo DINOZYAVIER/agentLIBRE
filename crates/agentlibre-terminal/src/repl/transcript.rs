@@ -252,9 +252,9 @@ impl Presenter {
             self.lang,
             self.screen.columns(),
             thinking,
-            Role::Tool,
-            Role::Muted,
+            Role::Thinking,
             fold,
+            Render::Markdown,
         ));
     }
 
@@ -581,9 +581,9 @@ impl Presenter {
                 self.lang,
                 self.screen.columns(),
                 thinking,
-                Role::Tool,
-                Role::Muted,
+                Role::Thinking,
                 Fold::Whole,
+                Render::Plain,
             );
             self.screen.live(&clip_live(&lines, room));
         }
@@ -865,24 +865,53 @@ enum Shown {
     Hidden(usize),
 }
 
-/// The thinking's rows, each wrapped to `inner`, with the row where every
-/// paragraph of it begins: a run of the non-empty lines, as the model wrote
-/// them (AGL-092, D4).
-fn thinking_rows(thinking: &str, inner: usize) -> (Vec<String>, Vec<usize>) {
+/// Whether a block renders the thinking's Markdown (AGL-093, D1): the
+/// printed card does, the live block does not — that is redrawn with every
+/// piece, and the whole of the text with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Render {
+    Plain,
+    Markdown,
+}
+
+/// The thinking's rows, each wrapped to `inner` and painted for `text_role`,
+/// with the row where every paragraph of it begins: a run of its non-empty
+/// lines, as the model wrote them (AGL-092, D4; AGL-093, D1).
+fn thinking_rows(
+    thinking: &str,
+    inner: usize,
+    theme: &Theme,
+    text_role: Role,
+    render: Render,
+) -> (Vec<String>, Vec<usize>) {
     let mut rows: Vec<String> = Vec::new();
     let mut starts: Vec<usize> = Vec::new();
-    let mut blank = true;
+    let mut paragraph: Vec<String> = Vec::new();
+    let mut flush = |paragraph: &mut Vec<String>, rows: &mut Vec<String>| {
+        if paragraph.is_empty() {
+            return;
+        }
+        starts.push(rows.len());
+        match render {
+            Render::Plain => rows.extend(paragraph.iter().flat_map(|line| {
+                hard_wrap(line, inner).into_iter().map(|row| theme.paint(text_role, &row))
+            })),
+            Render::Markdown => rows.extend(
+                markdown::render(&paragraph.join("\n"), inner, theme)
+                    .into_iter()
+                    .map(|row| theme.on_style(text_role, &row)),
+            ),
+        }
+        paragraph.clear();
+    };
     for line in thinking.lines() {
         if line.trim().is_empty() {
-            blank = true;
+            flush(&mut paragraph, &mut rows);
             continue;
         }
-        if blank {
-            starts.push(rows.len());
-        }
-        blank = false;
-        rows.extend(hard_wrap(&clean(line), inner));
+        paragraph.push(clean(line));
     }
+    flush(&mut paragraph, &mut rows);
     (rows, starts)
 }
 
@@ -919,17 +948,17 @@ fn fold_rows(rows: &[String], starts: &[usize]) -> Vec<Shown> {
     kept
 }
 
-/// The lines of the thinking, like the tool's card (D24): the label,
-/// painted for `role`, and its rows under the gutter, painted for
-/// `text_role` (D23) — all of them, or the head and the tail of them.
+/// The lines of the thinking, like the tool's card (D24): the label in the
+/// tool's color, and its rows under the gutter, painted for `text_role`
+/// (D23) — all of them, or the head and the tail of them.
 pub fn thinking_lines(
     theme: &Theme,
     lang: Lang,
     columns: usize,
     thinking: &str,
-    role: Role,
     text_role: Role,
     fold: Fold,
+    render: Render,
 ) -> Vec<String> {
     let label = tr!(lang, m::THINKING);
     let gutter = theme.paint(Role::InputRule, "  │ ");
@@ -937,15 +966,15 @@ pub fn thinking_lines(
     // live's lines (the card from the first piece, D29) and the printed
     // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
-    let (rows, starts) = thinking_rows(thinking, inner);
+    let (rows, starts) = thinking_rows(thinking, inner, theme, text_role, render);
     let kept = match fold {
         Fold::Whole => rows.iter().map(|row| Shown::Row(row.clone())).collect(),
         Fold::Folded => fold_rows(&rows, &starts),
     };
-    let mut lines = vec![theme.paint(role, label)];
+    let mut lines = vec![theme.paint(Role::Tool, label)];
     for row in kept {
         let text = match row {
-            Shown::Row(row) => theme.paint(text_role, &row),
+            Shown::Row(row) => row,
             Shown::Hidden(n) => theme.paint(Role::Muted, &tr!(lang, m::THINKING_FOLDED, n = n)),
         };
         lines.push(format!("{gutter}{text}"));
@@ -1218,18 +1247,17 @@ mod tests {
     #[test]
     fn the_thinking_is_like_the_tools_card() {
         // AGL-066, D24, AGL-068: the thinking is the label's line and its
-        // lines under the gutter — up to THINKING_LINES of them, the empty
-        // ones skipped — as the tool's card; no rule of its own, the time
-        // of its phase is in the step's rule.
+        // rows under the gutter, as the tool's card; no rule of its own, the
+        // time of its phase is in the step's rule.
         let (first, mock) = presenter();
         first.show_thinking("hm\nmore\n\nthird");
-        let printed = mock.printed.lock().unwrap().clone();
+        // AGL-093, D1: the two lines of one paragraph flow into one row.
         assert_eq!(
-            printed,
-            vec!["THINKING", "  │ hm", "  │ more", "  │ third"]
+            mock.printed.lock().unwrap().clone(),
+            vec!["THINKING", "  │ hm more", "  │ third"]
         );
         let (second, mock) = presenter();
-        second.show_thinking("a\nb\nc\nd\ne\nf");
+        second.show_thinking("a\n\nb\n\nc\n\nd\n\ne\n\nf");
         // AGL-092, D4: six rows are fewer than a fold costs, so all of them
         // stay — the fold begins where it pays.
         assert_eq!(
@@ -1247,25 +1275,37 @@ mod tests {
     }
 
     #[test]
+    fn the_cards_thinking_is_markdown_and_the_lives_is_not() {
+        // AGL-093, D1: the printed card renders the thinking's Markdown;
+        // the live block, redrawn with every piece, shows it as it came.
+        let (mut presenter, mock) = presenter();
+        presenter.thinking("use **bash** here");
+        assert_eq!(mock.live.lock().unwrap()[1], "  │ use **bash** here");
+        presenter.thinking_done();
+        assert_eq!(mock.printed.lock().unwrap()[1], "  │ use bash here");
+    }
+
+    #[test]
     fn a_long_thinking_shows_its_head_and_its_tail() {
         // AGL-092, D4: the first paragraph's rows, `⋯ n` for what lies
         // between, and the last rows, which reach back to the start of
         // their paragraph because one row buys that.
         let (first, mock) = presenter();
-        first.show_thinking("one\ntwo\n\np3\n\np4\n\np5\n\np6\n\np7\n\np8\n\np9\n\nlast\ntail");
+        first.show_thinking(
+            "one\n\ntwo\n\np3\n\np4\n\np5\n\np6\n\np7\n\np8\n\np9\n\nlast\ntail",
+        );
         assert_eq!(
             mock.printed.lock().unwrap().clone(),
             vec![
                 "THINKING",
                 "  │ one",
-                "  │ two",
                 "  │ ⋯ 3 hidden",
+                "  │ p5",
                 "  │ p6",
                 "  │ p7",
                 "  │ p8",
                 "  │ p9",
-                "  │ last",
-                "  │ tail"
+                "  │ last tail"
             ]
         );
     }
@@ -1280,7 +1320,7 @@ mod tests {
         assert!(mock.live.lock().unwrap().is_empty());
         assert!(mock.printed.lock().unwrap().is_empty());
         let (mut full, mock) = presenter_at(ThinkingDetail::Full);
-        full.thinking(&"a\n".repeat(20));
+        full.thinking(&"a\n\n".repeat(20));
         full.thinking_done();
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(printed.len(), 21, "{printed:?}");
