@@ -82,7 +82,7 @@ const SESSIONS_LISTED: usize = 20;
 
 /// Everything a session needs: its plane in the daemon (AGL-076, D5), and
 /// what the terminal draws with.
-pub struct Setup<'a> {
+pub struct Setup {
     pub remote: Arc<Remote>,
     pub opened: proto::Opened,
     /// The session's file as it is, for the replay and the inspect mode.
@@ -91,8 +91,9 @@ pub struct Setup<'a> {
     pub theme: Theme,
     pub repl: ReplSettings,
     pub history_file: PathBuf,
-    /// The Functions of the REPL's `/function` (AGL-036, D3).
-    pub catalog: &'a function::catalog::Catalog,
+    /// The Functions of the REPL's `/function` (AGL-036, D3); the input
+    /// thread reads it too (AGL-102, D2).
+    pub catalog: Arc<function::catalog::Catalog>,
     /// agentLIBRE's directories, for the planes of `/plane` (AGL-077, D12).
     pub paths: Paths,
     /// The REPL's voice, by the daemon (AGL-076, D15).
@@ -372,7 +373,7 @@ fn agent_session(
             theme: Theme::new(interactive && theme::colors_enabled(env), &user.colors),
             repl: repl_settings,
             history_file: paths.history_file(),
-            catalog: &catalog,
+            catalog: Arc::new(catalog),
             paths: paths.clone(),
             voice,
         };

@@ -3,7 +3,8 @@
 use std::ffi::OsString;
 
 use crate::error::{
-    CredentialProblem, Error, Expected, FunctionProblem, NameProblem, ServerOwner, TemplateProblem,
+    CredentialProblem, EditProblem, Error, Expected, FunctionProblem, NameProblem, ServerOwner,
+    TemplateProblem,
 };
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
@@ -262,8 +263,8 @@ the user's):
 
     /// The usage of `agl function`.
     pub const HELP_FUNCTION_USAGE: Msg = Msg {
-        en: "agl function list|use <name> [--user] [--plane <name>]",
-        uk: "agl function list|use <назва> [--user] [--plane <назва>]",
+        en: "agl function list|use <name> [--user]|show <name>|new <name> [from] [--plane <name>]",
+        uk: "agl function list|use <назва> [--user]|show <назва>|new <назва> [зразок] [--plane <назва>]",
     };
 
     /// The section of `agl function` in the help (AGL-061, D3).
@@ -274,14 +275,20 @@ built-ins; a Function's model names its server kind and weights):
   function list               the Functions, each with its kind and model;
                               * marks the one the runs here load
   function use <name>         the runs here load <name>: `function` in the
-                              project's settings.nix (--user: the user's)",
+                              project's settings.nix (--user: the user's)
+  function show <name>        the source of <name> and the file it loads from
+  function new <name> [from]  a copy of <name> — of `from` when given —
+                              into the workspace's functions/",
         uk: "\
 Функції (functions/*.nix робочої області, потім користувача, потім
 вбудовані; модель Функції називає вид її сервера і ваги):
   function list               Функції, кожна з видом і моделлю; * позначає
                               ту, яку тут завантажують запуски
   function use <назва>        запуски тут завантажують <назва>: `function` у
-                              settings.nix проєкту (--user: користувача)",
+                              settings.nix проєкту (--user: користувача)
+  function show <назва>       код <назва> і файл, з якого її завантажують
+  function new <назва> [зраз] копію <назва> — або <зраз>, якщо вказано — у
+                              functions/ робочої області",
     };
 
     /// The usage of `agl search`.
@@ -1015,6 +1022,42 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNCTION_NOT_FOUND: Msg = Msg {
         en: "Function `{name}` not found: no {paths} and no built-in Function of that name",
         uk: "Function `{name}` не знайдено: немає {paths} і вбудованої Function з такою назвою",
+    };
+
+    /// `Error::FunctionBuiltIn`.
+    pub const FUNCTION_BUILTIN: Msg = Msg {
+        en: "Function `{name}` is built-in: its file belongs to the repository; make your own with `/function new <name> {name}`",
+        uk: "Function `{name}` вбудована: її файл належить репозиторію; зробіть власну через `/function new <назва> {name}`",
+    };
+
+    /// `Error::FunctionExists`.
+    pub const FUNCTION_EXISTS: Msg = Msg {
+        en: "Function `{name}` already exists: nothing was written",
+        uk: "Function `{name}` уже є: нічого не записано",
+    };
+
+    /// `agl function new` copied a Function (AGL-102, D3).
+    pub const FUNCTION_NEW: Msg = Msg {
+        en: "Function {name}: a copy of {source} in {path}",
+        uk: "Function {name}: копія {source} у {path}",
+    };
+
+    /// `/function show` without a name (AGL-102, D2).
+    pub const FUNCTION_SHOW_USAGE: Msg = Msg {
+        en: "usage: /function show <name>",
+        uk: "використання: /function show <назва>",
+    };
+
+    /// `Error::FunctionEdit` with `EditProblem::BadNumber`.
+    pub const EDIT_BAD_NUMBER: Msg = Msg {
+        en: "a line number: a positive integer",
+        uk: "номер рядка: додатне ціле",
+    };
+
+    /// `Error::FunctionEdit` with `EditProblem::NoLine`.
+    pub const EDIT_NO_LINE: Msg = Msg {
+        en: "there is no line {n}: the buffer has {lines}",
+        uk: "рядка {n} немає: у буфері {lines}",
     };
 
     /// `Error::RunSchema`.
@@ -3189,6 +3232,14 @@ impl Error {
                     paths = &paths
                 )
             }
+            Error::FunctionBuiltIn { name } => tr!(lang, m::FUNCTION_BUILTIN, name = name),
+            Error::FunctionExists { name } => tr!(lang, m::FUNCTION_EXISTS, name = name),
+            Error::FunctionEdit { problem } => match problem {
+                EditProblem::BadNumber => tr!(lang, m::EDIT_BAD_NUMBER).to_string(),
+                EditProblem::NoLine { n, lines } => {
+                    tr!(lang, m::EDIT_NO_LINE, n = n, lines = lines)
+                }
+            },
             Error::Function { path, key, problem } => {
                 tr!(
                     lang,

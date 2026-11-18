@@ -228,7 +228,7 @@ pub fn builtin_names() -> Result<Vec<String>, Error> {
 }
 
 /// Rejects a Function name that cannot name a file in its directory.
-fn check_name(name: &str) -> Result<(), Error> {
+pub fn check_name(name: &str) -> Result<(), Error> {
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
         return Err(Error::InvalidName(name.into()));
     }

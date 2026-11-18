@@ -33,6 +33,7 @@ use crate::plane::{Command, Done, Sent, Told};
 use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
+use crate::function::catalog::Catalog;
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::tty::is_yes;
 use crate::error::Error;
@@ -282,6 +283,8 @@ struct Input {
     dock: Arc<Dock>,
     control: Arc<Control>,
     facts: Facts,
+    /// The Functions of `/function show|new|edit` (AGL-102, D2).
+    catalog: Arc<Catalog>,
     theme: Theme,
     lang: Lang,
     history_file: PathBuf,
@@ -533,8 +536,18 @@ impl Input {
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
             // for a new one with it — not while a turn runs (as `/new`).
+            // AGL-102, D2: `show`, `new` and `edit` are this thread's own,
+            // and a name that exists stays the main thread's switch.
             "/function" => {
-                let function = trimmed.split_whitespace().nth(1).map(str::to_owned);
+                let rest = trimmed["/function".len()..].trim();
+                let word = rest.split_whitespace().next().unwrap_or("");
+                if word == "show"
+                    && !self.catalog.entries(self.lang).iter().any(|e| e.name == word)
+                {
+                    self.function_show(rest["show".len()..].trim());
+                    return false;
+                }
+                let function = rest.split_whitespace().next().map(str::to_owned);
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
@@ -575,6 +588,26 @@ impl Input {
                 );
                 false
             }
+        }
+    }
+
+    /// `/function show <name>` (AGL-102, D2): the source of the Function
+    /// whose name is given, and the file a run loads it from.
+    fn function_show(&self, name: &str) {
+        if name.is_empty() {
+            self.notice(tr!(self.lang, m::FUNCTION_SHOW_USAGE), Role::StatusPending);
+            return;
+        }
+        let shown = self
+            .catalog
+            .text(name)
+            .and_then(|text| Ok((text, self.catalog.file(name)?.path)));
+        match shown {
+            Ok((text, path)) => {
+                self.notice(&text, Role::Muted);
+                self.notice(&path.display().to_string(), Role::Muted);
+            }
+            Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
         }
     }
 
@@ -1045,6 +1078,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         dock: dock.clone(),
         control: control.clone(),
         facts: facts.clone(),
+        catalog: Arc::clone(&catalog),
         theme: theme.clone(),
         lang,
         history_file,
@@ -1431,6 +1465,8 @@ mod tests {
         inspects: Arc<AtomicUsize>,
         clip: Arc<Mutex<Clip>>,
         fake: Arc<Fake>,
+        /// The fixture's temporary directory, the catalog's own (AGL-102).
+        dir: std::path::PathBuf,
     }
 
     /// The recorder and whisper of the tests (AGL-016).
@@ -1542,6 +1578,10 @@ mod tests {
             Lang::En,
             Theme::plain(),
         ));
+        let dir = std::env::temp_dir().join(format!(
+            "agentLIBRE-repl-{}-{n}",
+            std::process::id()
+        ));
         let input = Input {
             dock,
             control: Arc::new(Control::new(
@@ -1558,12 +1598,16 @@ mod tests {
                 plane: None,
                 server: "http://127.0.0.1:18080".into(),
             },
+            catalog: Arc::new(Catalog {
+                plane_dir: None,
+                workspace_dir: dir.join("functions"),
+                user_dir: dir.join("user"),
+                settings: crate::settings::ServerFile::default(),
+                current: "minimal".into(),
+            }),
             theme: Theme::plain(),
             lang: Lang::En,
-            history_file: std::env::temp_dir().join(format!(
-                "agentLIBRE-repl-{}-{n}/history.jsonl",
-                std::process::id()
-            )),
+            history_file: dir.join("history.jsonl"),
             request_stop: {
                 let stops = stops.clone();
                 Box::new(move || stops.fetch_add(1, Ordering::SeqCst) > 0)
@@ -1599,6 +1643,7 @@ mod tests {
             inspects,
             clip,
             fake,
+            dir,
         }
     }
 
@@ -2379,5 +2424,31 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("tok/s"))
         );
+    }
+
+    /// AGL-102, D2: `/function show` prints the source and the file a run
+    /// loads it from; without a name it is the usage.
+    #[test]
+    fn function_show_prints_the_source_and_its_file() {
+        let f = fixture();
+        let dir = f.dir.join("functions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mine.nix"), "{ agl, ... }: { }\n").unwrap();
+        f.type_text("/function show mine");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("{ agl, ... }: { }"));
+        f.type_text("/function show");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("usage: /function show <name>"));
+        // The command and what it said stand in the session (AGL-101):
+        // the path, unwrapped, and the usage's failure.
+        let inner = f.inner();
+        assert_eq!(inner.commands.len(), 2);
+        assert!(!inner.commands[0].failed);
+        assert!(inner.commands[0]
+            .output
+            .as_deref()
+            .is_some_and(|o| o.contains(&dir.join("mine.nix").display().to_string())));
+        assert!(inner.commands[1].failed);
     }
 }

@@ -42,6 +42,32 @@ pub fn run(
                 outln!("{line}");
             }
         }
+        // AGL-102, D2: the source and the file it loads from.
+        FunctionAction::Show { name } => {
+            let text = catalog.text(&name)?;
+            let file = catalog.file(&name)?;
+            outln!("{text}\n{}", file.path.display());
+        }
+        // AGL-102, D3: a copy to the workspace's functions/, the workspace
+        // registered first, as `use` does.
+        FunctionAction::New { name, from } => {
+            for line in forge::materialize(&project, lang)? {
+                eprintln!("{line}");
+            }
+            let source = from.as_deref().unwrap_or(&catalog.current);
+            let text = catalog.text(source)?;
+            let path = catalog.create(&name, &text)?;
+            outln!(
+                "{}",
+                tr!(
+                    lang,
+                    m::FUNCTION_NEW,
+                    name = name,
+                    source = source,
+                    path = path.display()
+                )
+            );
+        }
         FunctionAction::Use { name, user: to_user } => {
             catalog.check(&name)?;
             let path = if to_user {

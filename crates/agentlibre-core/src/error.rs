@@ -100,6 +100,15 @@ pub enum Error {
     /// Neither the looked-in `paths` nor a built-in Function is called
     /// `name`.
     FunctionNotFound { name: String, paths: Vec<PathBuf> },
+    /// `/function edit` was asked of a built-in (AGL-102, D3): its file
+    /// belongs to the Functions' repository.
+    FunctionBuiltIn { name: String },
+    /// `/function new` took a name one of the sources already has
+    /// (AGL-102, D3); nothing was written.
+    FunctionExists { name: String },
+    /// A line edit of `/function edit` asks for what the file does not
+    /// have (AGL-102, D4).
+    FunctionEdit { problem: EditProblem },
     /// A Function is unusable; `key` locates the problem (D21, D42, D72,
     /// D78, D82-D93).
     Function {
@@ -451,6 +460,15 @@ pub enum NameProblem {
     TooLong,
     /// It is `last`, which `--resume` reads as the newest session.
     Reserved,
+}
+
+/// What is wrong with a line edit of `/function edit` (AGL-102, D4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditProblem {
+    /// The line number is not a positive integer.
+    BadNumber,
+    /// There is no line `n`: the buffer has `lines`.
+    NoLine { n: usize, lines: usize },
 }
 
 /// What is wrong with a Function.

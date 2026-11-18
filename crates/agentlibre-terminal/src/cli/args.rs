@@ -211,6 +211,10 @@ pub enum SearchAction {
 pub enum FunctionAction {
     List,
     Use { name: String, user: bool },
+    /// `agl function show <name>` (AGL-102, D2).
+    Show { name: String },
+    /// `agl function new <name> [from]` (AGL-102, D3).
+    New { name: String, from: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -386,10 +390,25 @@ fn init_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error>
     }
 }
 
-/// `agl function list` or `agl function use <name> [--user]`.
+/// `agl function list` or `agl function use <name> [--user]`,
+/// `agl function show <name>`, `agl function new <name> [from]` (AGL-102).
 fn function_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
     let mut action = match args.next().map(text).transpose()?.as_deref() {
         Some("list") => FunctionAction::List,
+        Some("show") => FunctionAction::Show {
+            name: args
+                .next()
+                .ok_or_else(|| Error::MissingValue("show".into()))
+                .and_then(text)?,
+        },
+        Some("new") => {
+            let name = args
+                .next()
+                .ok_or_else(|| Error::MissingValue("new".into()))
+                .and_then(text)?;
+            let from = args.next().map(text).transpose()?;
+            FunctionAction::New { name, from }
+        }
         Some("use") => {
             let name = args
                 .next()
@@ -969,10 +988,22 @@ mod tests {
             parse_strs(&["function", "list", "--user"]),
             Err(Error::UnknownOption(o)) if o == "--user"
         ));
+        assert_eq!(
+            parse_strs(&["function", "show", "p"]).unwrap(),
+            Command::Function(FunctionAction::Show { name: "p".into() })
+        );
         assert!(matches!(
             parse_strs(&["function", "show"]),
-            Err(Error::UnknownOption(o)) if o == "show"
+            Err(Error::MissingValue(o)) if o == "show"
         ));
+        assert_eq!(
+            parse_strs(&["function", "new", "p"]).unwrap(),
+            Command::Function(FunctionAction::New { name: "p".into(), from: None })
+        );
+        assert_eq!(
+            parse_strs(&["function", "new", "p", "q"]).unwrap(),
+            Command::Function(FunctionAction::New { name: "p".into(), from: Some("q".into()) })
+        );
         assert_eq!(parse_strs(&["function", "--help"]).unwrap(), Command::Help(HelpTopic::Function));
         // Only the first word is a command; a message may say "function".
         assert_eq!(

@@ -5,10 +5,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::Function;
+use super::{check_name, Function};
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m};
+use crate::nix;
 use crate::paths::Paths;
 use crate::settings::{ServerFile, ServerKind, UserFile, function_name};
 use crate::tr;
@@ -52,6 +53,21 @@ pub struct Entry {
     pub error: Option<String>,
     /// The Function a run here loads (`--function` aside).
     pub current: bool,
+}
+
+/// The source file of a Function (AGL-102, D2): where it is, and which
+/// source wins with it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FunctionFile {
+    pub path: PathBuf,
+    pub source: Source,
+}
+
+impl FunctionFile {
+    /// The Function's name: the stem of its file.
+    pub fn stem(&self) -> String {
+        self.path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+    }
 }
 
 /// The Functions of a workspace (AGL-036, D3): the workspace's, the
@@ -218,12 +234,117 @@ impl Catalog {
         self.server_of(name).map(|_| ())
     }
 
+    /// The file of `name` whose source a run loads (AGL-102, D2): the
+    /// winning one, as `load` resolves it; a built-in answers with its
+    /// file in the Functions' repository.
+    pub fn file(&self, name: &str) -> Result<FunctionFile, Error> {
+        check_name(name)?;
+        for dir in self.dirs() {
+            let path = dir.join(format!("{name}.nix"));
+            if path.is_file() {
+                let source = self.source_at(&path);
+                return Ok(FunctionFile { path, source });
+            }
+        }
+        // The repository's `functions/` (AGL-053): `agl.functions` is
+        // built from it by its default.nix; no file of that name means
+        // no Function at all.
+        let path = nix::functions_dir()?.join("functions").join(format!("{name}.nix"));
+        if !path.is_file() {
+            return Err(Error::FunctionNotFound {
+                name: name.into(),
+                paths: self.dirs().iter().map(|dir| dir.to_path_buf()).collect(),
+            });
+        }
+        Ok(FunctionFile { path, source: Source::BuiltIn })
+    }
+
+    /// The source text of `name`: the bytes of the file `file` names
+    /// (AGL-102, D2).
+    pub fn text(&self, name: &str) -> Result<String, Error> {
+        let file = self.file(name)?;
+        fs::read_to_string(&file.path).map_err(|source| Error::Read { path: file.path, source })
+    }
+
+    /// The Function `name` of the workspace's `functions/`, whatever
+    /// wins over it (AGL-102, D3).
+    pub fn workspace_file(&self, name: &str) -> PathBuf {
+        self.workspace_dir.join(format!("{name}.nix"))
+    }
+
+    /// True when `name` has a file in any source or is a built-in
+    /// (AGL-102, D3: `new` refuses it).
+    pub fn exists(&self, name: &str) -> bool {
+        self.dirs()
+            .iter()
+            .any(|dir| dir.join(format!("{name}.nix")).is_file())
+            || super::builtin_names()
+                .map(|names| names.iter().any(|b| b == name))
+                .unwrap_or(false)
+    }
+
+    /// The source of the file `path` of this catalog (AGL-102, D2).
+    fn source_at(&self, path: &Path) -> Source {
+        if path.parent() == Some(self.workspace_dir.as_path()) {
+            Source::Workspace
+        } else if self.plane_dir.as_deref().is_some_and(|dir| path.parent() == Some(dir)) {
+            Source::Plane
+        } else {
+            Source::User
+        }
+    }
+
+    /// Writes `text` to the workspace's `<name>.nix` as a first write,
+    /// validated through the same load as `check` before the rename
+    /// (AGL-102, D3, D4): on a failure the directory keeps what it had.
+    /// A built-in of that name is never written.
+    pub fn create(&self, name: &str, text: &str) -> Result<PathBuf, Error> {
+        check_name(name)?;
+        if self.exists(name) {
+            return Err(Error::FunctionExists { name: name.into() });
+        }
+        write_validated(&self.workspace_file(name), &self.workspace_dir, name, text)
+    }
+
+    /// Saves the edited `text` over `file` (AGL-102, D4): atomic,
+    /// validated through the same load as `check` before the rename; on
+    /// a failure the file keeps its previous text.
+    pub fn save(&self, file: &FunctionFile, text: &str) -> Result<(), Error> {
+        if file.source == Source::BuiltIn {
+            return Err(Error::FunctionBuiltIn { name: file.stem() });
+        }
+        write_validated(&file.path, file.path.parent().unwrap_or(Path::new(".")), &file.stem(), text)
+            .map(|_| ())
+    }
+
     /// The kind, the model and the description of the Function `name`
     /// (AGL-039, D21; AGL-089, D12).
     fn server_of(&self, name: &str) -> Result<(ServerKind, Option<String>, Option<String>), Error> {
         let function = Function::load(&self.dirs(), name)?;
         let server = self.settings.effective(&function.model);
         Ok((server.kind(), crate::engine::model_of(&server)?, function.description))
+    }
+}
+
+/// Writes `text` to `target` as a temp file next to it, validates the
+/// file alone through the same load as `Catalog::check`, and only then
+/// renames it over `target` (AGL-102, D3, D4): a text that does not load
+/// never reaches the name.
+fn write_validated(target: &Path, dir: &Path, name: &str, text: &str) -> Result<PathBuf, Error> {
+    fs::create_dir_all(dir).map_err(|source| Error::Write {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let temp = dir.join(format!("{name}.nix.tmp"));
+    fs::write(&temp, text).map_err(|source| Error::Write { path: temp.clone(), source })?;
+    match Function::load(&[dir], name) {
+        Ok(_) => fs::rename(&temp, target)
+            .map(|()| target.to_path_buf())
+            .map_err(|source| Error::Write { path: target.to_path_buf(), source }),
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(error)
+        }
     }
 }
 
@@ -346,5 +467,24 @@ mod tests {
         assert!(catalog.check("fixture-high").is_ok());
         assert!(matches!(catalog.check("nope"), Err(Error::FunctionNotFound { .. })));
         assert!(matches!(catalog.check("broken"), Err(Error::Function { .. })));
+    }
+
+    /// AGL-102, D2: the file of a Function is the one that wins; a name
+    /// with no file answers with the built-in's file of the repository.
+    #[test]
+    fn the_winning_file_and_its_source() {
+        let dir = TempDir::new();
+        let catalog = catalog(&dir.0);
+        write(&catalog.user_dir, "mine", &file(LLAMA));
+        let f = catalog.file("mine").unwrap();
+        assert_eq!(f.source, Source::User);
+        assert_eq!(f.path, catalog.user_dir.join("mine.nix"));
+        assert_eq!(catalog.text("mine").unwrap(), file(LLAMA));
+        write(&catalog.workspace_dir, "mine", &file(LLAMA));
+        assert_eq!(catalog.file("mine").unwrap().source, Source::Workspace);
+        // A name with no file is the built-in's.
+        let f = catalog.file("fixture-minimal").unwrap();
+        assert_eq!(f.source, Source::BuiltIn);
+        assert!(catalog.text("fixture-minimal").unwrap().contains("policy"));
     }
 }
