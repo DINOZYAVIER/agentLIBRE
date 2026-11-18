@@ -478,7 +478,7 @@ impl State {
         format!(
             "{}{}{}",
             self.theme.paint(Role::InputRule, "─"),
-            self.theme.paint(Role::InputActivity, &label),
+            self.theme.paint(Role::Tool, &label),
             self.theme.paint(Role::InputRule, &"─".repeat(fill))
         )
     }
@@ -498,16 +498,16 @@ impl State {
         let usage = usage
             .map(|text| format!("{}{}", self.theme.paint(Role::InputText, &text), "  "))
             .unwrap_or_default();
-        // AGL-082, D2 and AGL-084, D1: three roles for three kinds of the
-        // row — the Function in the tool's, as `THINKING` and `Tool bash`;
-        // the workspace in the activity's, as the separator above; the
-        // usage in the text's, whatever share of the context it names.
+        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function, the workspace
+        // and the separator above them are all the tool's color, as
+        // `THINKING` and `Tool bash` are; the usage is the text's color,
+        // whatever share of the context it names.
         format!(
             "{}{}{}{}",
             self.theme.paint(Role::Tool, &left),
             " ".repeat(gap),
             usage,
-            self.theme.paint(Role::InputActivity, &right)
+            self.theme.paint(Role::Tool, &right)
         )
     }
 
@@ -906,16 +906,16 @@ mod tests {
     }
 
     #[test]
-    fn the_status_row_divides_its_three_colors() {
-        // AGL-082, D2 and AGL-084, D1: the Function in the tool's color,
-        // the workspace in the activity's, the usage in the text's at every
-        // share of the context — the warn's orange and yellow are no more.
+    fn the_status_row_divides_its_two_colors() {
+        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function and the
+        // workspace are both the tool's color, as the separator above them
+        // and `THINKING` are; the usage is the text's at every share of the
+        // context — the warn's orange and yellow are no more.
         let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
                 (Role::Tool, color("#FF0000")),
-                (Role::InputActivity, color("#0000FF")),
                 (Role::InputText, color("#00FF00")),
                 (Role::StatusWarn, color("#FFA500")),
             ],
@@ -934,13 +934,43 @@ mod tests {
         let status = || dock.lock().layout().rows.last().unwrap().clone();
         dock.context(500);
         let row = status();
-        assert!(row.contains(&start(Role::Tool)), "{row}");
-        assert!(row.contains(&start(Role::InputActivity)), "{row}");
+        let tool = row.matches(&start(Role::Tool)).count();
+        assert_eq!(tool, 2, "{row}");
         assert!(row.contains(&start(Role::InputText)), "{row}");
         dock.context(950);
         let row = status();
         assert!(!row.contains(&start(Role::StatusWarn)), "{row}");
         assert!(row.contains(&start(Role::InputText)), "{row}");
+    }
+
+    #[test]
+    fn the_separators_activity_takes_the_tools_color() {
+        // AGL-091: `Ready`, `Starting server` and the rest of the
+        // separator's label are the tool's color, not a color of their own.
+        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
+        let theme = Theme::new(
+            true,
+            &[
+                (Role::Tool, color("#FF0000")),
+                (Role::InputRule, color("#00FF00")),
+            ],
+        );
+        let dock = Dock::new(
+            Box::new(Sink::default()),
+            theme,
+            Lang::En,
+            "minimal".into(),
+            "/home/u/project".into(),
+            Editor::new(Vec::new(), Vec::new()),
+            (80, 20),
+        );
+        let start = |role: Role| dock.lock().theme.start(role);
+        dock.activity(Phase::StartingServer);
+        let row = dock.lock().separator();
+        assert!(row.contains(&start(Role::Tool)), "{row}");
+        let rule = row.find(&start(Role::InputRule)).expect("the rule's color");
+        let tool = row.find(&start(Role::Tool)).expect("the tool's color");
+        assert!(rule < tool, "{row}");
     }
 
     #[test]

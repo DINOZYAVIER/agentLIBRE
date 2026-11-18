@@ -171,7 +171,6 @@ roles! {
     InputPrompt "input_prompt" "bold oklch(0.718 0.202 349.761)",
     InputHint "input_hint" "dim oklch(0.823 0.12 346.018)",
     InputText "input_text" "oklch(0.936 0.032 17.717)",
-    InputActivity "input_activity" "oklch(0.823 0.12 346.018)",
     InputSelected "input_selected" "bold oklch(0.518 0.253 323.949)",
     FocusBackground "focus_background" "oklch(0.33 0 0)",
     Muted "muted" "dim",
