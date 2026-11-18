@@ -952,7 +952,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         theme.clone(),
     ));
     let screen: Arc<dyn Screen> = dock.clone();
-    let mut presenter = Presenter::new(screen, theme.clone(), lang, repl.thinking);
+    let mut presenter = Presenter::new(screen, theme.clone(), lang, repl);
 
     interrupt::install_request_only();
     // Ctrl-C, its flag set, is sent to the daemon as `stop` (AGL-076, D5).
@@ -2306,7 +2306,7 @@ mod tests {
             screen,
             Theme::plain(),
             Lang::En,
-            crate::settings::ThinkingDetail::Flexible,
+            crate::settings::ReplSettings::default(),
         );
         presenter.begin_turn();
         let control = Control::new(Info::default(), None);

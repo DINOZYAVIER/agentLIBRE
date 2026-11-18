@@ -325,6 +325,8 @@ fn colors_repl_and_forge_tables() {
             start_server: None,
             splash: None,
             thinking: None,
+            tool: None,
+            result: None,
         }
     );
     assert_eq!(loaded.forge, ForgeFile { auto_rehome: Some(false) });
@@ -341,7 +343,9 @@ fn colors_repl_and_forge_tables() {
             max_record_seconds: 15,
             start_server: true,
             splash: true,
-            thinking: ThinkingDetail::Flexible,
+            thinking: Detail::Flexible,
+            tool: Detail::Flexible,
+            result: Detail::Flexible,
         }
     );
     // The voice limit is 300 s unless set (AGL-016, D5; AGL-039, D20;
@@ -351,26 +355,26 @@ fn colors_repl_and_forge_tables() {
 }
 
 #[test]
-fn the_thinking_detail_level() {
-    // AGL-092, D2: three levels, `flexible` by default, and no other word.
+fn the_detail_levels() {
+    // AGL-092, D2; AGL-095, D1: three levels of each block, `flexible` by
+    // default, and no other word.
     let of = |text: &str| {
         user_of(text)
-            .map(|file| file.repl.thinking)
+            .map(|file| (file.repl.thinking, file.repl.tool, file.repl.result))
             .unwrap_or_else(|error| panic!("{error:?}"))
     };
-    assert_eq!(of(r#"repl = { thinking = "off"; };"#), Some(ThinkingDetail::Off));
     assert_eq!(
-        of(r#"repl = { thinking = "full"; };"#),
-        Some(ThinkingDetail::Full)
+        of(r#"repl = { thinking = "off"; tool = "full"; result = "flexible"; };"#),
+        (Some(Detail::Off), Some(Detail::Full), Some(Detail::Flexible))
     );
-    assert_eq!(
-        of(r#"repl = { thinking = "flexible"; };"#),
-        Some(ThinkingDetail::Flexible)
-    );
-    assert_eq!(of("repl = { start_server = true; };"), None);
+    assert_eq!(of("repl = { start_server = true; };"), (None, None, None));
     assert!(matches!(
         user_of(r#"repl = { thinking = "brief"; };"#),
-        Err(Error::UnknownThinkingLevel { .. })
+        Err(Error::UnknownDetailLevel { .. })
+    ));
+    assert!(matches!(
+        user_of(r#"repl = { result = "brief"; };"#),
+        Err(Error::UnknownDetailLevel { .. })
     ));
 }
 

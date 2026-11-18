@@ -11,26 +11,27 @@ use crate::nix::Section;
 /// AGL-039, D20; AGL-043 F18).
 const DEFAULT_MAX_RECORD_SECONDS: u32 = 300;
 
-/// How much of the thinking the REPL shows (AGL-092, D2).
+/// How much of one block — the thinking, a call, a result — the REPL shows
+/// (AGL-092, D2; AGL-095, D1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ThinkingDetail {
-    /// No thinking at all: the row of the phase says that it was.
+pub enum Detail {
+    /// Nothing of the block; what has a row of the phases says that it was.
     Off,
-    /// All of it while it is decoded, the first paragraph and the last rows
-    /// after it ends.
+    /// All of it while it is decoded, the head and the last rows after it
+    /// ends.
     #[default]
     Flexible,
     /// All of it, and it stays.
     Full,
 }
 
-impl ThinkingDetail {
+impl Detail {
     /// The level named `name`; none when there is no such level.
-    pub fn parse(name: &str) -> Option<ThinkingDetail> {
+    pub fn parse(name: &str) -> Option<Detail> {
         match name {
-            "off" => Some(ThinkingDetail::Off),
-            "flexible" => Some(ThinkingDetail::Flexible),
-            "full" => Some(ThinkingDetail::Full),
+            "off" => Some(Detail::Off),
+            "flexible" => Some(Detail::Flexible),
+            "full" => Some(Detail::Full),
             _ => None,
         }
     }
@@ -46,7 +47,11 @@ pub struct ReplFile {
     /// Whether the REPL shows the splash at its start (AGL-065, D5).
     pub splash: Option<bool>,
     /// How much of the thinking the transcript shows (AGL-092, D2).
-    pub thinking: Option<ThinkingDetail>,
+    pub thinking: Option<Detail>,
+    /// How much of a call the transcript shows (AGL-095, D1).
+    pub tool: Option<Detail>,
+    /// How much of a result the transcript shows (AGL-095, D1).
+    pub result: Option<Detail>,
 }
 
 /// `[repl]` with the defaults of the old agl (D130).
@@ -61,7 +66,11 @@ pub struct ReplSettings {
     /// Whether the REPL shows the splash at its start (AGL-065, D5).
     pub splash: bool,
     /// How much of the thinking the transcript shows (AGL-092, D2).
-    pub thinking: ThinkingDetail,
+    pub thinking: Detail,
+    /// How much of a call the transcript shows (AGL-095, D1).
+    pub tool: Detail,
+    /// How much of a result the transcript shows (AGL-095, D1).
+    pub result: Detail,
 }
 
 impl ReplSettings {
@@ -74,6 +83,8 @@ impl ReplSettings {
             start_server: user.repl.start_server.unwrap_or(defaults.start_server),
             splash: user.repl.splash.unwrap_or(defaults.splash),
             thinking: user.repl.thinking.unwrap_or(defaults.thinking),
+            tool: user.repl.tool.unwrap_or(defaults.tool),
+            result: user.repl.result.unwrap_or(defaults.result),
         }
     }
 }
@@ -84,7 +95,9 @@ impl Default for ReplSettings {
             max_record_seconds: DEFAULT_MAX_RECORD_SECONDS,
             start_server: true,
             splash: true,
-            thinking: ThinkingDetail::default(),
+            thinking: Detail::default(),
+            tool: Detail::default(),
+            result: Detail::default(),
         }
     }
 }
@@ -95,7 +108,14 @@ impl ReplFile {
         Ok(match section {
             None => ReplFile::default(),
             Some(mut repl) => {
-                repl.check_keys(&["max_record_seconds", "start_server", "splash", "thinking"])?;
+                repl.check_keys(&[
+                    "max_record_seconds",
+                    "start_server",
+                    "splash",
+                    "thinking",
+                    "tool",
+                    "result",
+                ])?;
                 let mut count = |key: &str| -> Result<Option<usize>, Error> {
                     repl.integer(key)?
                         .map(|n| {
@@ -110,16 +130,26 @@ impl ReplFile {
                 };
                 let max_record_seconds = count("max_record_seconds")?
                     .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+                // One level for each of the three blocks (AGL-095, D1).
+                let level = |key: &str, name: Option<String>| -> Result<Option<Detail>, Error> {
+                    match name {
+                        None => Ok(None),
+                        Some(name) => Detail::parse(&name)
+                            .map(Some)
+                            .ok_or_else(|| Error::UnknownDetailLevel {
+                                path: path.into(),
+                                key: key.into(),
+                                value: name,
+                            }),
+                    }
+                };
                 ReplFile {
                     max_record_seconds,
                     start_server: repl.bool("start_server")?,
                     splash: repl.bool("splash")?,
-                    thinking: repl.string("thinking")?.map(|name| {
-                        ThinkingDetail::parse(&name).ok_or_else(|| Error::UnknownThinkingLevel {
-                            path: path.into(),
-                            value: name,
-                        })
-                    }).transpose()?,
+                    thinking: level("thinking", repl.string("thinking")?)?,
+                    tool: level("tool", repl.string("tool")?)?,
+                    result: level("result", repl.string("result")?)?,
                 }
             }
         })

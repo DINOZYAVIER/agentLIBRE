@@ -16,7 +16,7 @@ use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
-use crate::settings::ThinkingDetail;
+use crate::settings::{Detail, ReplSettings};
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
@@ -110,8 +110,11 @@ pub struct Presenter {
     /// The thinking being decoded, as its pieces arrive (D3, D19): the
     /// transcript shows its line with the record of its step.
     thinking: Option<String>,
-    /// How much of the thinking the transcript shows (AGL-092, D2).
-    detail: ThinkingDetail,
+    /// How much of the thinking, of a call and of a result the transcript
+    /// shows (AGL-092, D2; AGL-095, D1).
+    thinking_detail: Detail,
+    tool_detail: Detail,
+    result_detail: Detail,
     action: Option<Streamed>,
     /// The generation being decoded, if any (AGL-012).
     generation: Option<Generation>,
@@ -126,7 +129,7 @@ impl Presenter {
         screen: Arc<dyn Screen>,
         theme: Theme,
         lang: Lang,
-        detail: ThinkingDetail,
+        settings: ReplSettings,
     ) -> Presenter {
         Presenter {
             screen,
@@ -146,7 +149,9 @@ impl Presenter {
             state_entered: false,
             pending_call: None,
             thinking: None,
-            detail,
+            thinking_detail: settings.thinking,
+            tool_detail: settings.tool,
+            result_detail: settings.result,
             action: None,
             generation: None,
             turn_tokens: 0,
@@ -240,22 +245,33 @@ impl Presenter {
     /// gutter, muted: all of them, or its head and its tail (AGL-092, D2).
     /// The time is in the step's rule, the full text in the inspect mode.
     pub fn show_thinking(&self, thinking: &str) {
-        if self.detail == ThinkingDetail::Off {
-            return;
+        let lines = self.thinking_block(thinking);
+        if !lines.is_empty() {
+            self.screen.print(&lines);
         }
-        let fold = match self.detail {
-            ThinkingDetail::Full => Fold::Whole,
-            _ => Fold::Folded,
-        };
-        self.screen.print(&thinking_lines(
+    }
+
+    /// The thinking's block at the transcript's level (AGL-092, D2): all of
+    /// it, or its head and its tail, and the placeholder of a thinking there
+    /// was none (AGL-095, D4); nothing at all when the level is `off`.
+    fn thinking_block(&self, thinking: &str) -> Vec<String> {
+        if self.thinking_detail == Detail::Off {
+            return Vec::new();
+        }
+        block_lines(
             &self.theme,
             self.lang,
             self.screen.columns(),
+            tr!(self.lang, m::THINKING),
             thinking,
             Role::Thinking,
-            fold,
+            if self.thinking_detail == Detail::Full {
+                Fold::Whole
+            } else {
+                Fold::Folded
+            },
             Render::Markdown,
-        ));
+        )
     }
 
     /// The text before a call (D9): its first three lines; the rest is in
@@ -406,9 +422,9 @@ impl Presenter {
     }
 
     /// The compact card of a finished step (AGL-066, D1, D2, D6; AGL-080,
-    /// D1): the
-    /// tool's name and status, one line of the input, the phases' times.
-    /// No output: the full data is in the inspect mode.
+    /// D1; AGL-095, D2, D5): the tool's name and status, its input at the
+    /// level of `repl.tool`, the result's block at the tool's own level, and
+    /// the phases' times.
     fn card(
         &self,
         call: &ToolCall,
@@ -432,10 +448,38 @@ impl Presenter {
         // AGL-068: the row under the gutter says what the call did — the
         // command, the file, the query, or the action of a forge or a
         // memory call — in the muted color, as the thinking's (D26).
-        if !hint.is_empty() {
-            for row in hard_wrap(&clean(hint), inner) {
+        // AGL-095, D5: `off` says nothing of it, `flexible` its one line,
+        // `full` the whole of what was sent.
+        let input = match self.tool_detail {
+            Detail::Off => String::new(),
+            Detail::Flexible => hint.to_owned(),
+            Detail::Full => records::call_input(call),
+        };
+        for line in clean(&input).lines() {
+            for row in hard_wrap(line, inner) {
                 lines.push(format!("{gutter}{}", self.theme.paint(Role::Muted, &row)));
             }
+        }
+        // AGL-095, D2: the tool's answer, at the tool's own level, folded by
+        // the thinking's rule; `off` keeps it out of the transcript.
+        if self.result_detail != Detail::Off {
+            let content = result
+                .map(|result| result.content.as_str())
+                .unwrap_or_default();
+            lines.extend(block_lines(
+                &self.theme,
+                self.lang,
+                columns,
+                tr!(self.lang, m::RESULT_LABEL),
+                &clean(content),
+                Role::Muted,
+                if self.result_detail == Detail::Full {
+                    Fold::Whole
+                } else {
+                    Fold::Folded
+                },
+                Render::Plain,
+            ));
         }
         // D27, AGL-080 and AGL-087 D1: the phases in the tool's color, with
         // no rule; with no phase to name the row says nothing, and none.
@@ -521,10 +565,11 @@ impl Presenter {
             Report::ThinkingDone => self.thinking_done(),
             Report::ActionText(piece) => self.action_text(&piece),
             Report::Event(Event::Call { text, call }) => {
+                let had_text = text.is_some();
                 if let Some(text) = text {
                     self.text(&text);
                 }
-                self.call(&call);
+                self.call(&call, had_text);
                 self.pending_call = Some(call);
             }
             Report::Event(Event::Result {
@@ -576,14 +621,15 @@ impl Presenter {
         // are all of its rows — the label in the tool's color, the rows
         // under the gutter — clipped to what fits above the dock, which
         // keeps the newest of them: what the model thinks now.
-        if self.detail == ThinkingDetail::Off {
+        if self.thinking_detail == Detail::Off {
             self.screen.live(&[]);
         } else {
             let room = self.screen.room();
-            let lines = thinking_lines(
+            let lines = block_lines(
                 &self.theme,
                 self.lang,
                 self.screen.columns(),
+                tr!(self.lang, m::THINKING),
                 thinking,
                 Role::Thinking,
                 Fold::Whole,
@@ -638,8 +684,18 @@ impl Presenter {
         self.prefill = None;
     }
 
-    fn call(&mut self, _call: &ToolCall) {
+    fn call(&mut self, _call: &ToolCall, had_text: bool) {
+        // AGL-095, D4: a step is a thinking, a call and a result; when the
+        // model neither thought nor wrote before the call, the thinking's
+        // block shows its placeholder rather than dropping out.
+        let bare = self.thinking.is_none() && self.action.is_none() && !had_text;
         self.close();
+        if bare {
+            let lines = self.thinking_block("");
+            if !lines.is_empty() {
+                self.screen.print(&lines);
+            }
+        }
     }
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
@@ -878,11 +934,12 @@ pub enum Render {
     Markdown,
 }
 
-/// The thinking's rows, each wrapped to `inner` and painted for `text_role`,
+/// The rows of a block, each wrapped to `inner` and painted for `text_role`,
 /// with the row where every paragraph of it begins: a run of its non-empty
-/// lines, as the model wrote them (AGL-092, D4; AGL-093, D1).
-fn thinking_rows(
-    thinking: &str,
+/// lines, as the model or the tool wrote them (AGL-092, D4; AGL-093, D1;
+/// AGL-095, D2).
+fn block_rows(
+    text: &str,
     inner: usize,
     theme: &Theme,
     text_role: Role,
@@ -908,7 +965,7 @@ fn thinking_rows(
         }
         paragraph.clear();
     };
-    for line in thinking.lines() {
+    for line in text.lines() {
         if line.trim().is_empty() {
             flush(&mut paragraph, &mut rows);
             continue;
@@ -952,30 +1009,39 @@ fn fold_rows(rows: &[String], starts: &[usize]) -> Vec<Shown> {
     kept
 }
 
-/// The lines of the thinking, like the tool's card (D24): the label in the
-/// tool's color, and its rows under the gutter, painted for `text_role`
-/// (D23) — all of them, or the head and the tail of them.
-pub fn thinking_lines(
+/// The lines of one block: the label in the tool's color, and its rows under
+/// the gutter, painted for `text_role` (D23, D24; AGL-095, D2) — all of them,
+/// or the head and the tail of them, or, when the block has no text of its
+/// own, the placeholder that keeps its place (AGL-095, D4).
+#[allow(clippy::too_many_arguments)]
+pub fn block_lines(
     theme: &Theme,
     lang: Lang,
     columns: usize,
-    thinking: &str,
+    label: &str,
+    text: &str,
     text_role: Role,
     fold: Fold,
     render: Render,
 ) -> Vec<String> {
-    let label = tr!(lang, m::THINKING);
     let gutter = theme.paint(Role::InputRule, "  │ ");
     // The label's width is reserved on the snippet's rows too, so the
     // live's lines (the card from the first piece, D29) and the printed
     // card's fit the screen alike.
     let inner = columns.saturating_sub(width(label) + 4).max(1);
-    let (rows, starts) = thinking_rows(thinking, inner, theme, text_role, render);
+    let (rows, starts) = block_rows(text, inner, theme, text_role, render);
     let kept = match fold {
         Fold::Whole => rows.iter().map(|row| Shown::Row(row.clone())).collect(),
         Fold::Folded => fold_rows(&rows, &starts),
     };
     let mut lines = vec![theme.paint(Role::Tool, label)];
+    if rows.is_empty() {
+        lines.push(format!(
+            "{gutter}{}",
+            theme.paint(Role::Muted, tr!(lang, m::EMPTY))
+        ));
+        return lines;
+    }
     for row in kept {
         let text = match row {
             Shown::Row(row) => row,
@@ -1140,15 +1206,24 @@ mod tests {
     }
 
     fn presenter() -> (Presenter, Arc<Mock>) {
-        presenter_at(ThinkingDetail::Flexible)
+        presenter_at(Detail::Flexible)
     }
 
     /// A presenter of the thinking's detail `detail`, on a screen 24 rows
     /// above the dock.
-    fn presenter_at(detail: ThinkingDetail) -> (Presenter, Arc<Mock>) {
+    fn presenter_at(detail: Detail) -> (Presenter, Arc<Mock>) {
+        presenter_with(ReplSettings {
+            thinking: detail,
+            ..Default::default()
+        })
+    }
+
+    /// A presenter of the settings `settings`, on a screen 24 rows above
+    /// the dock.
+    fn presenter_with(settings: ReplSettings) -> (Presenter, Arc<Mock>) {
         let mock = Arc::new(Mock::default());
         *mock.room.lock().unwrap() = 24;
-        let presenter = Presenter::new(mock.clone(), Theme::plain(), Lang::En, detail);
+        let presenter = Presenter::new(mock.clone(), Theme::plain(), Lang::En, settings);
         (presenter, mock)
     }
 
@@ -1169,8 +1244,9 @@ mod tests {
 
     #[test]
     fn a_card_is_its_tool_its_input_and_its_times() {
-        // AGL-066, D1, D6; AGL-080, D1: the tool's line, one line of the
-        // input and the row of times, with no rule around them; no output.
+        // AGL-066, D1, D6; AGL-080, D1; AGL-095, D2: the tool's line, one
+        // line of the input, the result's block at the tool's own level and
+        // the row of times, with no rule around them.
         let (presenter, mock) = presenter();
         let result = ToolResult {
             outcome: Outcome::Fail,
@@ -1180,9 +1256,18 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
-            ["TOOL bash  FAIL", "  │ cargo test", "FAIL · bash 1m 15s", ""]
+            [
+                "TOOL bash  FAIL",
+                "  │ cargo test",
+                "RESULT",
+                "  │ one",
+                "  │ two",
+                "  │ three",
+                "  │ exit code: 1",
+                "FAIL · bash 1m 15s",
+                "",
+            ]
         );
-        assert!(!printed.iter().any(|line| line.contains("one")), "{printed:?}");
     }
 
     #[test]
@@ -1205,7 +1290,103 @@ mod tests {
         };
         show_card(&presenter, &call, &result, &[]);
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, ["TOOL edit  OK", "  │ a.rs", ""]);
+        assert_eq!(
+            printed,
+            [
+                "TOOL edit  OK",
+                "  │ a.rs",
+                "RESULT",
+                "  │ Replaced 1 occurrence in a.rs.",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_folds_like_the_thinking() {
+        // AGL-095, D2: the same head, the same `⋯ n hidden`, the same tail.
+        let (presenter, mock) = presenter();
+        let content = (1..=20).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        show_card(
+            &presenter,
+            &bash("seq"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content,
+            },
+            &[],
+        );
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(printed[2], "RESULT");
+        assert_eq!(printed[3], "  │ 1");
+        assert!(printed[6].contains("hidden"), "{printed:?}");
+        assert_eq!(printed[printed.len() - 2], "  │ 20");
+    }
+
+    #[test]
+    fn an_empty_result_keeps_its_place() {
+        // AGL-095, D4: a tool that answered nothing still has a result block.
+        let (presenter, mock) = presenter();
+        show_card(
+            &presenter,
+            &bash("true"),
+            &ToolResult {
+                outcome: Outcome::Ok,
+                content: String::new(),
+            },
+            &[],
+        );
+        let printed = mock.printed.lock().unwrap().clone();
+        assert_eq!(
+            printed,
+            ["TOOL bash  OK", "  │ true", "RESULT", "  │ (empty)", ""]
+        );
+    }
+
+    #[test]
+    fn the_levels_of_the_tool_and_the_result() {
+        // AGL-095, D1 and D5: `off` shows neither the input nor the answer,
+        // `flexible` the one line of it, `full` the whole of what was sent.
+        let args = vec![
+            ("command".into(), Value::Text("ls\ncat a".into())),
+            ("path".into(), Value::Text("a.rs".into())),
+        ];
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args,
+        };
+        let result = ToolResult {
+            outcome: Outcome::Ok,
+            content: "out".into(),
+        };
+        for (level, rows) in [
+            (Detail::Off, &["TOOL bash  OK", ""][..]),
+            (Detail::Flexible, &["TOOL bash  OK", "  │ ls", ""][..]),
+            (
+                Detail::Full,
+                &["TOOL bash  OK", "  │ ls", "  │ cat a", ""][..],
+            ),
+        ] {
+            let (presenter, mock) = presenter_with(ReplSettings {
+                tool: level,
+                result: Detail::Off,
+                ..Default::default()
+            });
+            show_card(&presenter, &call, &result, &[]);
+            let printed = mock.printed.lock().unwrap().clone();
+            assert_eq!(printed, rows, "{level:?}");
+        }
+        // `repl.result = off` keeps the tool's answer out of the card.
+        let (presenter, mock) = presenter_with(ReplSettings {
+            result: Detail::Off,
+            ..Default::default()
+        });
+        show_card(&presenter, &call, &result, &[]);
+        assert_eq!(
+            mock.printed.lock().unwrap().clone(),
+            ["TOOL bash  OK", "  │ ls", ""]
+        );
     }
 
     #[test]
@@ -1323,12 +1504,12 @@ mod tests {
     fn the_levels_of_the_thinking() {
         // AGL-092, D2: `off` shows nothing of it, `full` shows all of it
         // and keeps it — no `⋯` row anywhere.
-        let (mut off, mock) = presenter_at(ThinkingDetail::Off);
+        let (mut off, mock) = presenter_at(Detail::Off);
         off.thinking("hm\n");
         off.thinking_done();
         assert!(mock.live.lock().unwrap().is_empty());
         assert!(mock.printed.lock().unwrap().is_empty());
-        let (mut full, mock) = presenter_at(ThinkingDetail::Full);
+        let (mut full, mock) = presenter_at(Detail::Full);
         full.thinking(&"a\n\n".repeat(20));
         full.thinking_done();
         let printed = mock.printed.lock().unwrap().clone();
@@ -1745,7 +1926,7 @@ mod tests {
         let (mut presenter, mock) = presenter();
         presenter.action_text("Looking at it.\n");
         presenter.text("Looking at it.");
-        presenter.call(&bash("ls"));
+        presenter.call(&bash("ls"), true);
         presenter.result(
             &bash("ls"),
             &ToolResult {

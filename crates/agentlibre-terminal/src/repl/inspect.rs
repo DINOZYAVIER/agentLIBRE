@@ -11,8 +11,7 @@ use super::markdown;
 use crate::records::{self, Record};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{Fold, Render, notice_lines, summary, thinking_lines, user_lines};
-use crate::action::Value;
+use super::transcript::{Fold, Render, block_lines, notice_lines, summary, user_lines};
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::session::{Event, TransitionLine};
@@ -248,10 +247,12 @@ impl Inspect {
                 lines.extend(card_lines(theme, lang, columns, call, result.as_ref(), hint, &items));
                 if expanded {
                     // The input, in full, when the hint is not the whole (D4).
-                    let input = call_input(call);
+                    let input = records::call_input(call);
                     if input != *hint {
-                        for row in hard_wrap(&clean(&input), columns) {
-                            lines.push(theme.paint(Role::Muted, &row));
+                        for line in clean(&input).lines() {
+                            for row in hard_wrap(line, columns) {
+                                lines.push(theme.paint(Role::Muted, &row));
+                            }
                         }
                     }
                     lines.push(String::new());
@@ -348,10 +349,11 @@ fn step_lines(
         // style, but on the record the navigation points at they take the
         // color of a message's text.
         let role = if focused { Role::InputText } else { Role::Thinking };
-        lines.extend(thinking_lines(
+        lines.extend(block_lines(
             theme,
             lang,
             columns,
+            tr!(lang, m::THINKING),
             thinking,
             role,
             // D24: like the tool's card — the label, and every row of the
@@ -441,44 +443,6 @@ fn tool_output(
         .collect()
 }
 
-/// What a call sent: the command, the edit with its lines, the search's
-/// query, the summary of a write to the forge or the memory.
-fn call_input(call: &ToolCall) -> String {
-    let text = |name: &str| call.text(name).unwrap_or_default();
-    if call.name == "edit" {
-        let mut out = text("path").to_owned();
-        for (sign, name) in [('-', "old"), ('+', "new")] {
-            for line in text(name).split('\n') {
-                out.push_str(&format!("\n{sign} {line}"));
-            }
-        }
-        return out;
-    }
-    if call.name == "search" {
-        return format!(
-            "{}: {}",
-            text("source"),
-            text("query")
-        );
-    }
-    if call.name == "memory" || call.name == "forge" {
-        // The whole input, argument by argument (D11); the summary
-        // stays the compact form.
-        let mut out = String::new();
-        for (key, value) in &call.args {
-            let Value::Text(value) = value else {
-                continue;
-            };
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&format!("{key}: {value}"));
-        }
-        return out;
-    }
-    text("command").to_owned()
-}
-
 /// The inspect mode on the terminal (D4, D8): the alternate screen, the
 /// full redraws, the keys until the escape. `write` is what the mode
 /// draws with; `dock` is the dock's rows, drawn at the bottom so the
@@ -560,7 +524,7 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::Outcome;
+    use crate::action::{Outcome, Value};
 
     fn call(id: &str, command: &str) -> ToolCall {
         ToolCall {

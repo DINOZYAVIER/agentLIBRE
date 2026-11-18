@@ -192,6 +192,45 @@ pub fn call_hint(call: &ToolCall) -> String {
         .unwrap_or_default()
 }
 
+/// What a call sent, in full (AGL-095, D5): the command, the edit with its
+/// lines, the search's query, every argument of a forge or a memory call.
+/// The compact form of it is `call_hint`.
+pub fn call_input(call: &ToolCall) -> String {
+    let text = |name: &str| call.text(name).unwrap_or_default();
+    if call.name == "edit" {
+        let mut out = text("path").to_owned();
+        for (sign, name) in [('-', "old"), ('+', "new")] {
+            for line in text(name).split('\n') {
+                out.push_str(&format!("\n{sign} {line}"));
+            }
+        }
+        return out;
+    }
+    if call.name == "search" {
+        return format!(
+            "{}: {}",
+            text("source"),
+            text("query")
+        );
+    }
+    if call.name == "memory" || call.name == "forge" {
+        // The whole input, argument by argument (D11); the summary
+        // stays the compact form.
+        let mut out = String::new();
+        for (key, value) in &call.args {
+            let Value::Text(value) = value else {
+                continue;
+            };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("{key}: {value}"));
+        }
+        return out;
+    }
+    text("command").to_owned()
+}
+
 /// The action of a forge or a memory call, on the tool's line (D28).
 pub fn call_action(call: &ToolCall) -> Option<String> {
     call.text("action")

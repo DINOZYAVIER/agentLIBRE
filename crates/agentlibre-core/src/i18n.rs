@@ -916,10 +916,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
     };
 
-    /// `Error::UnknownThinkingLevel` (AGL-092, D2).
-    pub const UNKNOWN_THINKING_LEVEL: Msg = Msg {
-        en: "`repl.thinking` in {path} is not `off`, `flexible` or `full`: `{value}`",
-        uk: "`repl.thinking` у {path} не `off`, не `flexible` і не `full`: `{value}`",
+    /// `Error::UnknownDetailLevel` (AGL-092, D2; AGL-095, D1).
+    pub const UNKNOWN_DETAIL_LEVEL: Msg = Msg {
+        en: "`repl.{key}` in {path} is not `off`, `flexible` or `full`: `{value}`",
+        uk: "`repl.{key}` у {path} не `off`, не `flexible` і не `full`: `{value}`",
     };
 
     /// `Error::UnsupportedSearchUrl`.
@@ -1740,6 +1740,19 @@ Forge (сховище артефактів робочої області, agentL
     pub const THINKING_FOLDED: Msg = Msg {
         en: "⋯ {n} hidden",
         uk: "⋯ {n} приховано",
+    };
+
+    /// The label of a tool's answer, as `TOOL` and `THINKING` are
+    /// (AGL-095, D2).
+    pub const RESULT_LABEL: Msg = Msg {
+        en: "RESULT",
+        uk: "РЕЗУЛЬТАТ",
+    };
+
+    /// The row a block shows when it has no text of its own (AGL-095, D4).
+    pub const EMPTY: Msg = Msg {
+        en: "(empty)",
+        uk: "(порожньо)",
     };
 
     /// One line of output (`lines`).
@@ -3099,9 +3112,13 @@ impl Error {
             Error::UnknownServerKind { path, value } => {
                 tr!(lang, m::UNKNOWN_SERVER_KIND, path = path.display(), value = value)
             }
-            Error::UnknownThinkingLevel { path, value } => {
-                tr!(lang, m::UNKNOWN_THINKING_LEVEL, path = path.display(), value = value)
-            }
+            Error::UnknownDetailLevel { path, key, value } => tr!(
+                lang,
+                m::UNKNOWN_DETAIL_LEVEL,
+                path = path.display(),
+                key = key,
+                value = value
+            ),
             Error::UnsupportedSearchUrl { path, url } => {
                 tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)
             }
