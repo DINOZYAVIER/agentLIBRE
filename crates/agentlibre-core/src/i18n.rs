@@ -1749,6 +1749,13 @@ Forge (сховище артефактів робочої області, agentL
         uk: "РЕЗУЛЬТАТ",
     };
 
+    /// The label of the answer's block in the inspect mode, where every
+    /// block starts with a head for the focus to stand on (AGL-100).
+    pub const ANSWER_LABEL: Msg = Msg {
+        en: "ANSWER",
+        uk: "ВІДПОВІДЬ",
+    };
+
     /// The row a block shows when it has no text of its own (AGL-095, D4).
     pub const EMPTY: Msg = Msg {
         en: "(empty)",

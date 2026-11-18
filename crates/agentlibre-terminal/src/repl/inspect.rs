@@ -568,8 +568,9 @@ fn result_block(
     )
 }
 
-/// The answer's block (AGL-098, D2): its text, in full (D1) under no
-/// label; on the focus the time the turn took joins it (AGL-080, D2).
+/// The answer's block (AGL-098, D2; AGL-100): a head for the focus to
+/// stand on, as the other blocks have, and its text, in full (D1), under
+/// the gutter; on the focus the time the turn took joins it (AGL-080, D2).
 fn answer_block(
     theme: &Theme,
     lang: Lang,
@@ -578,7 +579,12 @@ fn answer_block(
     time: Option<std::time::Duration>,
     focused: bool,
 ) -> Vec<String> {
-    let mut lines = markdown::render(text.trim(), columns, theme);
+    let mut lines = vec![theme.paint(Role::Tool, tr!(lang, m::ANSWER_LABEL))];
+    let gutter = theme.paint(Role::InputRule, "  │ ");
+    let inner = columns.saturating_sub(4).max(1);
+    for row in markdown::render(text.trim(), inner, theme) {
+        lines.push(format!("{gutter}{row}"));
+    }
     if focused {
         let items: Vec<String> = time
             .iter()
@@ -998,6 +1004,15 @@ mod tests {
         assert!(all.contains("cut"), "{all}");
         assert!(all.contains("tail"), "{all}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_answers_head_takes_the_focus_marker() {
+        // AGL-100: the answer's block has its own head, so the focus's
+        // marker stands on `ANSWER`, not on the answer's first line.
+        let all = screen(&mut inspect(), 10).join("\n");
+        assert!(all.contains("▸ ANSWER"), "{all}");
+        assert!(all.contains("  │ Ok."), "{all}");
     }
 
     #[test]
