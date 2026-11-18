@@ -41,8 +41,13 @@ stdenv.mkDerivation {
   # ThinkingCap's GGUF carries the MTP (nextn) block: the pack holds the base
   # layers only, the engine takes the MTP layer from --mtp (AGL-089, D9;
   # AGL-070's patch of today's Strata). Upstream and the fork have no such
-  # skip.
-  patches = [ ./strata/iq-pack-skip-mtp.patch ];
+  # skip. The engine reads the trunk only, `block_count -
+  # nextn_predict_layers`, and leaves the block's tensors (D23); its code
+  # differs between the two checkouts, a patch each.
+  patches = [
+    ./strata/iq-pack-skip-mtp.patch
+    (if rdna3 then ./strata/engine-skip-mtp-rdna3.patch else ./strata/engine-skip-mtp-upstream.patch)
+  ];
 
   nativeBuildInputs = [
     cmake

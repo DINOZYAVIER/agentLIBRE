@@ -1,0 +1,134 @@
+diff --git a/include/strata/artifact/gguf_reader.hpp b/include/strata/artifact/gguf_reader.hpp
+index 5b67f54..54534c9 100644
+--- a/include/strata/artifact/gguf_reader.hpp
++++ b/include/strata/artifact/gguf_reader.hpp
+@@ -709,6 +709,17 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
+     };
+     for (const Key& k : keys)
+         if (!read_int(k.key, g.*k.field, k.required)) return err;
++    // An MTP (nextn) block after the trunk (ThinkingCap's blk.48): the engine takes the MTP layer from --mtp and
++    // reads the trunk only, as iq_pack.py packs it.
++    const int64_t n_blocks = g.n_layers;
++    if (const MetaValue* v = f.get(p + "nextn_predict_layers")) {
++        if (!v->is_num() || v->type == MetaType::F32 || v->type == MetaType::F64 || v->type == MetaType::BOOL)
++            return p + "nextn_predict_layers is not an integer";
++        if ((int64_t) v->u >= n_blocks)
++            return p + "nextn_predict_layers = " + std::to_string((int64_t) v->u) + " is not smaller than " + p +
++                   "block_count = " + std::to_string(n_blocks);
++        g.n_layers = n_blocks - (int64_t) v->u;
++    }
+ 
+     int64_t value_length = g.head_dim, ff_shexp = g.n_ff;
+     if (!read_int("attention.value_length", value_length, false) ||
+@@ -747,9 +758,9 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
+     // The layer split, twice over: the interval, and a ratio per layer that is non-zero (the indexer's pooling
+     // block) exactly on the full-attention layers.
+     if (const MetaValue* v = f.get(p + "attention.compress_ratios")) {
+-        if (v->type != MetaType::ARRAY || v->count != (uint64_t) g.n_layers || v->items.size() != v->count)
+-            return p + "attention.compress_ratios must list one entry for each of the " + std::to_string(g.n_layers) +
+-                   " layers";
++        if (v->type != MetaType::ARRAY || v->count != (uint64_t) n_blocks || v->items.size() != v->count)
++            return p + "attention.compress_ratios must list one entry for each of the " + std::to_string(n_blocks) +
++                   " blocks";
+         // A list of zeros only is a converter's placeholder, not a layer split (#2396: orcarouter's
+         // Qwen3.8-Flash-Next-Uncensored GGUFs carry 48 zeros; 0.1.43 never read the key): it is treated as absent
+         // and the compiled pooling block is used.  A list with any non-zero entry is checked in full below.
+diff --git a/include/strata/core/family_layout.hpp b/include/strata/core/family_layout.hpp
+index 554350d..2f304f2 100644
+--- a/include/strata/core/family_layout.hpp
++++ b/include/strata/core/family_layout.hpp
+@@ -40,7 +40,7 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
+         if (const strata::MetaValue* v = meta.get(p + key))
+             if (v->is_num()) dst = (int64_t) v->u;
+     };
+-    int64_t block_count = g.n_layers, key_length = g.head_dim, value_length = -1;
++    int64_t block_count = g.n_layers, key_length = g.head_dim, value_length = -1, skipped_mtp = 0;
+     num("block_count", block_count);
+     num("embedding_length", g.n_embd);
+     num("attention.head_count", g.n_head);
+@@ -69,8 +69,9 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
+         num("hyper_connection.low_rank", g.hc_lr);
+         num("attention.indexer.head_count", g.idx_q_heads);
+         num("attention.indexer.key_length", g.idx_key_dim);
++        num("nextn_predict_layers", skipped_mtp);   // read from --mtp, not the GGUF
+     }
+-    g.n_layers = block_count - g.n_mtp_layers;
++    g.n_layers = block_count - g.n_mtp_layers - skipped_mtp;
+     g.ssm_conv_channels = 2 * g.ssm_state_size * g.ssm_k_heads + g.ssm_value_dim;
+     if (const strata::MetaValue* v = meta.get("tokenizer.ggml.tokens"))
+         if (v->type == strata::MetaType::ARRAY && v->count > 0) g.n_vocab = (int64_t) v->count;
+diff --git a/src/core/native_dense.cpp b/src/core/native_dense.cpp
+index dd41201..7b5eecd 100644
+--- a/src/core/native_dense.cpp
++++ b/src/core/native_dense.cpp
+@@ -39,6 +39,24 @@ uint64_t alloc_bytes(uint64_t bytes) {
+     return bytes < kSmallAlloc ? bytes : (bytes + kAllocGranule - 1) / kAllocGranule * kAllocGranule;
+ }
+ int g_layer_lb = -1, g_layer_le = -1;   // set_layer_range; -1: every layer
++// The trunk of a qwen4exp GGUF that carries its MTP (nextn) block after it, from the shard with the metadata;
++// -1 when it carries none.  The engine takes the MTP layer from --mtp: the block's tensors are not read.
++int64_t mtp_trunk(const std::vector<std::string>& shards) {
++    for (const auto& path : shards) {
++        strata::GgufFile gguf(path);
++        const auto* arch = gguf.get("general.architecture");
++        if (!arch) continue;
++        if (arch->s != "qwen4exp") return -1;
++        const auto* blocks = gguf.get("qwen4exp.block_count");
++        const auto* nextn = gguf.get("qwen4exp.nextn_predict_layers");
++        if (!blocks || !nextn || !nextn->is_num() || nextn->u == 0 || nextn->u >= blocks->u) return -1;
++        return (int64_t) (blocks->u - nextn->u);
++    }
++    return -1;
++}
++bool past_trunk(const std::string& name, int64_t trunk) {
++    return trunk >= 0 && name.rfind("blk.", 0) == 0 && std::strtol(name.c_str() + 4, nullptr, 10) >= trunk;
++}
+ bool in_range(const std::string& name) {
+     if (g_layer_lb < 0 || name.rfind("blk.", 0) != 0) return true;
+     const int l = std::atoi(name.c_str() + 4);
+@@ -190,11 +208,12 @@ struct Pending {
+ bool NativeDense::served_names(const std::vector<std::string>& shards, bool include_ple_key,
+                                std::set<std::string>& out, std::string& err) {
+     try {
++        const int64_t trunk = mtp_trunk(shards);
+         for (const auto& path : shards) {
+             strata::GgufFile gguf(path);
+             for (const auto& tensor : gguf.tensors())
+-                if (eligible(tensor, include_ple_key) && strata::kernels::native_mmvq_supported(tensor.type) &&
+-                    tensor.shape.size() == 2)
++                if (eligible(tensor, include_ple_key) && !past_trunk(tensor.name, trunk) &&
++                    strata::kernels::native_mmvq_supported(tensor.type) && tensor.shape.size() == 2)
+                     out.insert(tensor.name);
+         }
+         return true;
+@@ -215,9 +234,11 @@ bool NativeDense::weight_bytes_for(const std::vector<std::string>& shards, Weigh
+     try {
+         std::set<std::string> seen;
+         uint64_t total = 0;
++        const int64_t trunk = mtp_trunk(shards);
+         for (const auto& path : shards) {
+             strata::GgufFile gguf(path);
+             for (const auto& tensor : gguf.tensors()) {
++                if (past_trunk(tensor.name, trunk)) continue;
+                 if (!eligible(tensor, include_ple_key)) continue;
+                 if (tensor.name.rfind("blk.", 0) == 0) {
+                     const long l = std::strtol(tensor.name.c_str() + 4, nullptr, 10);
+@@ -276,7 +297,9 @@ NativeDense::~NativeDense() {
+ 
+ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err,
+                        bool include_ple_key, int64_t layer_lo, int64_t layer_hi) {
+-    auto outside = [&](const std::string& name) {   // a blk.<l>. tensor of another stage's layers
++    int64_t trunk = -1;   // set below, once the shards are opened
++    auto outside = [&](const std::string& name) {   // a blk.<l>. tensor of another stage's layers, or of the MTP block
++        if (past_trunk(name, trunk)) return true;
+         if (layer_hi < 0 || name.rfind("blk.", 0) != 0) return false;
+         const long l = std::strtol(name.c_str() + 4, nullptr, 10);
+         return l < layer_lo || l >= layer_hi;
+@@ -291,6 +314,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
+         uint64_t split_count = 0, split_tensors = 0;
+         std::set<uint64_t> split_numbers;
+         bool have_architecture = false;
++        trunk = mtp_trunk(shards);
+         for (const auto& path : shards) {
+             strata::GgufFile gguf(path);
+             const auto* count = gguf.get("split.count");
