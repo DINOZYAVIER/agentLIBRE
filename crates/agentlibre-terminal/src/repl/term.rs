@@ -26,6 +26,9 @@ pub enum Key {
     /// Alt with an arrow: the blocks of one kind (AGL-098, D2).
     AltUp,
     AltDown,
+    /// Ctrl with an arrow: the inspect mode pages with these (AGL-098, D1).
+    CtrlUp,
+    CtrlDown,
     /// Ctrl-Left or Alt-Left.
     WordLeft,
     /// Ctrl-Right or Alt-Right.
@@ -247,10 +250,14 @@ fn csi_key(params: &str, final_byte: u8) -> Option<Key> {
     }
     let word = mask & (ALT | CTRL) != 0;
     match final_byte {
+        // AGL-098, D1: the mode tells the arrows apart by their modifier;
+        // a plain one — and so the wheel — says nothing there.
         b'A' => Some(if mask & SHIFT != 0 {
             Key::ShiftUp
         } else if mask & ALT != 0 {
             Key::AltUp
+        } else if mask & CTRL != 0 {
+            Key::CtrlUp
         } else {
             Key::Up
         }),
@@ -258,6 +265,8 @@ fn csi_key(params: &str, final_byte: u8) -> Option<Key> {
             Key::ShiftDown
         } else if mask & ALT != 0 {
             Key::AltDown
+        } else if mask & CTRL != 0 {
+            Key::CtrlDown
         } else {
             Key::Down
         }),
@@ -521,9 +530,8 @@ mod tests {
         assert_eq!(keys(b"\x1bOA\x1bOH"), [Key::Up, Key::Home]);
         assert_eq!(keys(b"\x1b[1;5D\x1b[1;3C"), [Key::WordLeft, Key::WordRight]);
         assert_eq!(keys(b"\x1b[Z"), [Key::BackTab]);
-        // AGL-098, D1: the inspect mode's arrows. The wheel in
-        // Alacritty arrives as a plain arrow; Shift and Alt tell
-        // apart; Ctrl falls to the plain key.
+        // AGL-098, D1: the inspect mode's arrows, each modifier its
+        // own key; the wheel in Alacritty arrives as a plain arrow.
         assert_eq!(
             keys(b"\x1b[1;2A\x1b[1;2B\x1b[1;3A\x1b[1;3B\x1b[1;5A\x1b[1;5B"),
             [
@@ -531,8 +539,8 @@ mod tests {
                 Key::ShiftDown,
                 Key::AltUp,
                 Key::AltDown,
-                Key::Up,
-                Key::Down
+                Key::CtrlUp,
+                Key::CtrlDown
             ]
         );
     }

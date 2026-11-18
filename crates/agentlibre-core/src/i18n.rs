@@ -2321,8 +2321,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// The keys of the inspect mode (AGL-066, D8; AGL-098, D1, D5).
     pub const INSPECT_HINT: Msg = Msg {
-        en: "↑↓ page · ⇧↑↓ block · ⌥↑↓ neighbour · ⌥u/U user · ⌥g top · ⌥G end · esc exit",
-        uk: "↑↓ сторінка · ⇧↑↓ блок · ⌥↑↓ сусід · ⌥u/U повідомлення · ⌥g згори · ⌥G знизу · esc вихід",
+        en: "⇧↑↓ block · ⌃↑↓ page · ⌥↑↓ neighbour · ⌥u/U user · ⌥g top · ⌥G end · esc exit",
+        uk: "⇧↑↓ блок · ⌃↑↓ сторінка · ⌥↑↓ сусід · ⌥u/U повідомлення · ⌥g згори · ⌥G знизу · esc вихід",
     };
 
     /// The inspect mode keeps the tail of the session on screen (AGL-066,

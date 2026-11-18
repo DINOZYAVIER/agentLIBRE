@@ -84,14 +84,15 @@ impl Inspect {
     pub fn key(&mut self, key: Key) -> Mode {
         match key {
             Key::Escape => Mode::Exit,
-            // The arrows turn the screen by a page; the wheel arrives as
-            // them (D1).
-            Key::Up => {
+            // D1, the human's word of the 18th: the plain arrows — and so
+            // the wheel — say nothing; `Ctrl`+arrows turn the page.
+            Key::Up | Key::Down => Mode::Stay,
+            Key::CtrlUp => {
                 self.follow = false;
                 self.top = self.top.saturating_sub(self.body);
                 Mode::Stay
             }
-            Key::Down => {
+            Key::CtrlDown => {
                 self.follow = false;
                 self.top += self.body;
                 Mode::Stay
@@ -789,13 +790,17 @@ mod tests {
     }
 
     #[test]
-    fn the_plain_arrow_pages_the_screen() {
-        // AGL-098, D1: `↑`/`↓` — and so the wheel — turn the screen; they
-        // do not move the focus.
+    fn the_plain_arrow_says_nothing_and_ctrl_pages() {
+        // AGL-098, D1: the plain arrows — and so the wheel — are silent;
+        // `Ctrl`+arrows turn the screen, and neither moves the focus.
         let mut inspect = inspect();
         // A redraw first: it is what gives the mode its page size.
-        screen(&mut inspect, 10);
+        let before = screen(&mut inspect, 10);
         press(&mut inspect, Key::Up);
+        assert_eq!(screen(&mut inspect, 10), before);
+        press(&mut inspect, Key::Down);
+        assert_eq!(screen(&mut inspect, 10), before);
+        press(&mut inspect, Key::CtrlUp);
         let all = screen(&mut inspect, 10).join("\n");
         assert!(!all.contains("Ok."), "{all}");
         assert!(all.contains("Done."), "{all}");
@@ -803,7 +808,7 @@ mod tests {
         let hint = screen(&mut inspect, 10).pop().unwrap();
         assert!(hint.contains("10/10"), "{hint}");
         assert!(!hint.contains("follow"), "{hint}");
-        press(&mut inspect, Key::Down);
+        press(&mut inspect, Key::CtrlDown);
         let all = screen(&mut inspect, 10).join("\n");
         assert!(all.contains("Ok."), "{all}");
     }
