@@ -878,18 +878,18 @@ pub fn summary(
 /// the input's own, two columns wide (AGL-094, D1), so a message of the
 /// human and what he types begin at the same column.
 pub fn user_lines(theme: &Theme, message: &str, columns: usize) -> Vec<String> {
-    let columns = columns.max(4);
+    let columns = columns.max(5);
     let background = theme.start(Role::InputBackground);
     let reset = theme.reset();
     let mut rows = Vec::new();
     for line in clean(message).trim_end().split('\n') {
-        rows.extend(wrap_line(line, columns - 2));
+        rows.extend(wrap_line(line, columns - 3));
     }
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            let marker = if index == 0 { "› " } else { "  " };
-            let pad = " ".repeat(columns - 2 - width(row));
+            let marker = if index == 0 { "›  " } else { "   " };
+            let pad = " ".repeat(columns - 3 - width(row));
             format!(
                 "{background}{}{background}{}{background}{pad}{reset}",
                 theme.paint(Role::InputPrompt, marker),
@@ -2040,11 +2040,11 @@ mod tests {
     #[test]
     fn user_messages_fill_the_row() {
         let rows = user_lines(&Theme::plain(), "hi\nthere", 10);
-        assert_eq!(rows, ["› hi      ", "  there   "]);
+        assert_eq!(rows, ["›  hi     ", "   there  "]);
         let rows = user_lines(&Theme::plain(), "abcdefghijkl", 10);
-        assert_eq!(rows, ["› abcdefgh", "  ijkl    "]);
+        assert_eq!(rows, ["›  abcdefg", "   hijkl  "]);
         let rows = user_lines(&Theme::plain(), "one two three", 10);
-        assert_eq!(rows, ["› one two ", "  three   "]);
+        assert_eq!(rows, ["›  one two", "   three  "]);
     }
 
     #[test]
