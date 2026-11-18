@@ -258,6 +258,9 @@ impl Plane {
                 reasoning,
                 observer,
             } => {
+                // A stop asked before this turn is forgotten: it stopped
+                // the turn it was for (AGL-096, D1).
+                self.stop.reset();
                 self.reasoning = reasoning;
                 let end = match (observer, self.context) {
                     (Some(mut observer), Some(context)) => {
@@ -277,6 +280,7 @@ impl Plane {
             Command::Rename(name) => (None, Some(Ok(self.rename(&name)))),
             Command::New => (None, Some(self.new_session())),
             Command::Compact { reasoning } => {
+                self.stop.reset();
                 self.reasoning = reasoning;
                 (None, Some(Ok(self.compact(&mut forward))))
             }
@@ -371,9 +375,13 @@ mod tests {
             _on_thinking: &mut dyn FnMut(&str),
             _on_text: &mut dyn FnMut(&str),
         ) -> Result<Generated, Error> {
-            while self.hold.load(Ordering::SeqCst) {
+            // As the servers' streams do: the stop is asked before every read.
+            loop {
                 if crate::stop::requested() {
                     return Err(Error::Interrupted);
+                }
+                if !self.hold.load(Ordering::SeqCst) {
+                    break;
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -515,6 +523,29 @@ mod tests {
             }
         };
         assert!(matches!(second_end.turn, Some(Ok(TurnEnd::Answer(_)))));
+    }
+
+    #[test]
+    fn a_stop_ends_its_turn_and_not_the_next() {
+        let dir = TempDir::new();
+        let fake = Arc::new(Fake::default());
+        fake.hold.store(true, Ordering::SeqCst);
+        let handle = plane(&dir, fake.clone()).start();
+        assert!(handle.send(say("one")));
+        thread::sleep(Duration::from_millis(50));
+        handle.stop().request();
+        let first = loop {
+            if let Sent::Done(done) = handle.recv().unwrap() {
+                break done;
+            }
+        };
+        assert!(matches!(
+            first.turn,
+            Some(Ok(TurnEnd::Stopped(StopReason::Interrupted)))
+        ));
+        fake.hold.store(false, Ordering::SeqCst);
+        let second = handle.ask(say("two"), &mut |_| {}).unwrap();
+        assert!(matches!(second.turn, Some(Ok(TurnEnd::Answer(_)))));
     }
 
     #[test]
