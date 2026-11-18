@@ -863,7 +863,7 @@ fn about_of(
     let now = session::utc_now();
     let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
     let (server_kind, model) = match settings.server.kind() {
-        ServerKind::Strata => ("strata", settings.server.strata_config.as_deref()),
+        ServerKind::Strata => ("strata", settings.server.strata_name.as_deref()),
         ServerKind::Llama => ("llama", settings.server.model.as_deref()),
     };
     let sessions = paths.sessions();
@@ -889,10 +889,11 @@ fn about_of(
 }
 
 /// The model a server runs (AGL-063, D5): the weights of the llama kind,
-/// the config of the strata kind; `None` when the kind sets no model.
+/// the model's name of the strata kind (AGL-089, D5); `None` when the kind
+/// sets no model.
 fn model_name(server: &ServerFile) -> Option<String> {
     match server.kind() {
-        ServerKind::Strata => server.strata_config.clone(),
+        ServerKind::Strata => server.strata_name.clone(),
         ServerKind::Llama => server.model.clone(),
     }
 }
@@ -914,7 +915,7 @@ mod tests {
     #[test]
     fn the_model_of_the_server_is_the_weights_or_the_config() {
         // The model that runs (AGL-063, D5): the weights of the llama kind,
-        // the config of the strata kind.
+        // the model's name of the strata kind (AGL-089, D5).
         let llama = ServerFile {
             kind: Some("llama".into()),
             model: Some("m.gguf".into()),
@@ -923,10 +924,10 @@ mod tests {
         assert_eq!(model_name(&llama), Some("m.gguf".into()));
         let strata = ServerFile {
             kind: Some("strata".into()),
-            strata_config: Some("strata.nix".into()),
+            strata_name: Some("tc".into()),
             ..ServerFile::default()
         };
-        assert_eq!(model_name(&strata), Some("strata.nix".into()));
+        assert_eq!(model_name(&strata), Some("tc".into()));
         assert_eq!(model_name(&ServerFile::default()), None);
     }
 

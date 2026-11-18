@@ -183,6 +183,28 @@ impl Section {
         self.section(key)?.ok_or_else(|| self.missing(key))
     }
 
+    /// Takes the list of sets `key`, if present: each a section at
+    /// `key.<index>` (AGL-089: the sources of a model's shards).
+    pub fn tables(&mut self, key: &str) -> Result<Option<Vec<Section>>, Error> {
+        match self.map.remove(key) {
+            None => Ok(None),
+            Some(Value::Array(items)) => items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| match item {
+                    Value::Object(map) => Ok(Section {
+                        path: self.path.clone(),
+                        prefix: format!("{}{key}.{index}.", self.prefix),
+                        map,
+                    }),
+                    _ => Err(self.wrong_type(key, Expected::Tables)),
+                })
+                .collect::<Result<_, _>>()
+                .map(Some),
+            Some(_) => Err(self.wrong_type(key, Expected::Tables)),
+        }
+    }
+
     /// Takes every remaining key as a set, in key order.
     pub fn sections(&mut self) -> Result<Vec<(String, Section)>, Error> {
         self.keys()

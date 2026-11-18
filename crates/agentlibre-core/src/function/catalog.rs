@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(high.source, Source::BuiltIn);
         assert_eq!(high.model.as_deref(), Some("Qwen3.8-27B-UD-IQ4_XS.gguf"));
         // A Function that does not load is listed with its error.
-        assert!(by("broken").error.as_deref().is_some_and(|e| e.contains("strata_config")));
+        assert!(by("broken").error.as_deref().is_some_and(|e| e.contains("needs `strata`")));
         let lines = catalog.lines(Lang::En);
         let current = lines.iter().find(|line| line.starts_with("* ")).unwrap();
         assert_eq!(current, "* mine             workspace  llama   p.gguf over user");

@@ -2,6 +2,7 @@
 //! the model side an effective server carries (AGL-015; AGL-036; AGL-039,
 //! D21).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -60,9 +61,18 @@ pub struct ServerFile {
     /// The most tokens one image takes: passed to llama-server and the
     /// bound of the context check (D10, D23).
     pub image_max_tokens: Option<u32>,
-    /// The path of the Strata config JSON, for the `strata` kind
-    /// (AGL-033, D2): it describes the launch fully.
-    pub strata_config: Option<String>,
+    /// The Strata engine of the `strata` kind, a variant of
+    /// `programs.agl.strata`: `upstream`, `rdna3` (AGL-089, D5, D20).
+    pub strata: Option<String>,
+    /// The model's name of the `strata` kind: the server's `model_name` and
+    /// the folder of its pack (AGL-089, D5).
+    pub strata_name: Option<String>,
+    /// The GGUF shards of the `strata` kind, the first one first: file names
+    /// found as weights are (D24); after `weights::resolve`, absolute paths
+    /// (AGL-089, D4).
+    pub gguf: Option<Vec<String>>,
+    /// The engine's environment of the `strata` kind (AGL-089, D5).
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 /// `image_max_tokens` when the model does not set it (AGL-014, D23).
@@ -206,7 +216,10 @@ impl ServerFile {
             || self.mmproj != other.mmproj
             || self.mmproj_offload != other.mmproj_offload
             || self.image_max_tokens != other.image_max_tokens
-            || self.strata_config != other.strata_config
+            || self.strata != other.strata
+            || self.strata_name != other.strata_name
+            || self.gguf != other.gguf
+            || self.env != other.env
     }
 
     /// The keys set here, the others from `defaults`; `args` is replaced
@@ -233,10 +246,10 @@ impl ServerFile {
             mmproj: self.mmproj.clone().or_else(|| defaults.mmproj.clone()),
             mmproj_offload: self.mmproj_offload.or(defaults.mmproj_offload),
             image_max_tokens: self.image_max_tokens.or(defaults.image_max_tokens),
-            strata_config: self
-                .strata_config
-                .clone()
-                .or_else(|| defaults.strata_config.clone()),
+            strata: self.strata.clone().or_else(|| defaults.strata.clone()),
+            strata_name: self.strata_name.clone().or_else(|| defaults.strata_name.clone()),
+            gguf: self.gguf.clone().or_else(|| defaults.gguf.clone()),
+            env: self.env.clone().or_else(|| defaults.env.clone()),
         }
     }
 
@@ -258,7 +271,10 @@ impl ServerFile {
             "mmproj": self.mmproj,
             "mmproj_offload": self.mmproj_offload,
             "image_max_tokens": self.image_max_tokens,
-            "strata_config": self.strata_config,
+            "strata": self.strata,
+            "strata_name": self.strata_name,
+            "gguf": self.gguf,
+            "env": self.env,
         })
     }
 
@@ -274,13 +290,23 @@ impl ServerFile {
             Value::Null => Some(None),
             value => value.as_u64().and_then(|n| u32::try_from(n).ok()).map(Some),
         };
-        let args = match value.get("args")? {
+        let list = |key: &str| match value.get(key)? {
+            Value::Null => Some(None),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .map(Some),
+            _ => None,
+        };
+        let args = list("args")?;
+        let gguf = list("gguf")?;
+        let env = match value.get("env")? {
             Value::Null => None,
-            Value::Array(items) => Some(
-                items
-                    .iter()
-                    .map(|item| item.as_str().map(str::to_owned))
-                    .collect::<Option<Vec<_>>>()?,
+            Value::Object(map) => Some(
+                map.iter()
+                    .map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+                    .collect::<Option<BTreeMap<_, _>>>()?,
             ),
             _ => return None,
         };
@@ -304,7 +330,10 @@ impl ServerFile {
             mmproj: text("mmproj")?,
             mmproj_offload: offload,
             image_max_tokens: number("image_max_tokens")?,
-            strata_config: text("strata_config")?,
+            strata: text("strata")?,
+            strata_name: text("strata_name")?,
+            gguf,
+            env,
         })
     }
 }

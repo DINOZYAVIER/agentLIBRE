@@ -856,6 +856,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "масивом рядків",
     };
 
+    /// `Expected::Tables` (AGL-089).
+    pub const EXPECTED_TABLES: Msg = Msg {
+        en: "an array of attribute sets",
+        uk: "масивом наборів атрибутів",
+    };
+
     /// `Error::InvalidStyle`.
     pub const INVALID_STYLE: Msg = Msg {
         en: "invalid style `{value}` for `{key}` in {path}: {problem}",
@@ -1385,28 +1391,37 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер іншого виду не зупинено, тож новий не запущено",
     };
 
-    /// `Error::StrataConfig` (AGL-033, D2).
-    pub const STRATA_CONFIG: Msg = Msg {
-        en: "the Strata config {path} cannot be read or parsed: {detail}",
-        uk: "JSON-конфіг Strata {path} не можна прочитати або розібрати: {detail}",
+    /// `Error::StrataNotInstalled` (AGL-089, D20).
+    pub const STRATA_NOT_INSTALLED: Msg = Msg {
+        en: "the Strata engine `{variant}` is not installed: on NixOS, add it to `programs.agl.strata` (e.g. programs.agl.strata = [ \"{variant}\" ];) and rebuild",
+        uk: "рушій Strata `{variant}` не встановлено: на NixOS додай його в `programs.agl.strata` (наприклад, programs.agl.strata = [ \"{variant}\" ];) і перебудуй систему",
     };
 
-    /// `Error::StrataNoCwd` (AGL-038, D3, D7).
-    pub const STRATA_NO_CWD: Msg = Msg {
-        en: "the Strata config {path} names no cwd (the directory of the Strata checkout, where .venv and serve/server.py are)",
-        uk: "конфіг Strata {path} не називає cwd (каталог checkout Strata, де лежать .venv і serve/server.py)",
+    /// `Error::StrataPrepare` (AGL-089, D9, D13).
+    pub const STRATA_PREPARE: Msg = Msg {
+        en: "the preparation of the Strata model failed at {step}; its output is in {log}",
+        uk: "підготовка моделі Strata не вдалася на кроці «{step}»; її вивід у {log}",
     };
 
-    /// `Error::StrataPython` (AGL-033, D2; AGL-038, D3).
-    pub const STRATA_PYTHON: Msg = Msg {
-        en: "no venv python at {path} (the .venv in the cwd of the Strata config)",
-        uk: "немає venv python за {path} (.venv у cwd конфігу Strata)",
+    /// The first preparation of a Strata model, said before each step
+    /// (AGL-089, D9, D13).
+    pub const STRATA_PREPARING: Msg = Msg {
+        en: "preparing the Strata model, once: {step} ...",
+        uk: "готую модель Strata, один раз: {step} ...",
     };
 
-    /// `Error::StrataServerPy` (AGL-033, D2; AGL-038, D3).
-    pub const STRATA_SERVER_PY: Msg = Msg {
-        en: "no serve/server.py at {path} (in the cwd of the Strata config)",
-        uk: "немає serve/server.py за {path} (у cwd конфігу Strata)",
+    /// The steps of the preparation.
+    pub const STRATA_STEP_PACK: Msg = Msg {
+        en: "its pack (a few minutes)",
+        uk: "її pack (кілька хвилин)",
+    };
+    pub const STRATA_STEP_MTP_FETCH: Msg = Msg {
+        en: "the MTP head's tensors from Hugging Face (about 5 GB)",
+        uk: "тензори MTP-голови з Hugging Face (близько 5 ГБ)",
+    };
+    pub const STRATA_STEP_MTP_BUILD: Msg = Msg {
+        en: "the MTP head",
+        uk: "MTP-голову",
     };
 
     /// The question of D9: another server runs, start one more?
@@ -1624,17 +1639,16 @@ Forge (сховище артефактів робочої області, agentL
         en: "the model of the llama kind needs `weights`",
         uk: "модель llama-виду потребує `weights`",
     };
-    /// The `model` of a Function of the strata kind has no
-    /// `strata_config` (AGL-033, D1).
-    pub const FUNC_SERVER_STRATA_CONFIG_MISSING: Msg = Msg {
-        en: "the model of the strata kind needs `strata_config`",
-        uk: "модель strata-виду потребує `strata_config`",
+    /// The `model` of a Function of the strata kind lacks a key
+    /// (AGL-089, D5).
+    pub const FUNC_SERVER_STRATA_KEY_MISSING: Msg = Msg {
+        en: "the model of the strata kind needs `{key}`",
+        uk: "модель strata-виду потребує `{key}`",
     };
-    /// A path of the Function's `model` that must be absolute
-    /// (`strata_config`).
-    pub const FUNC_NOT_ABSOLUTE: Msg = Msg {
-        en: "the path must be absolute",
-        uk: "шлях має бути абсолютним",
+    /// `source.gguf` against `gguf` (AGL-089, D4).
+    pub const FUNC_SOURCE_SHARDS_MISMATCH: Msg = Msg {
+        en: "`source.gguf` needs one source for each file of `gguf`, in their order",
+        uk: "`source.gguf` потребує по одному джерелу на кожен файл `gguf`, у тому ж порядку",
     };
 
     pub const FUNC_BAD_WEIGHTS_NAME: Msg = Msg {
@@ -3029,6 +3043,7 @@ impl Error {
                         Expected::Integer => tr!(lang, m::EXPECTED_INTEGER),
                         Expected::Number => tr!(lang, m::EXPECTED_NUMBER),
                         Expected::Strings => tr!(lang, m::EXPECTED_STRINGS),
+                        Expected::Tables => tr!(lang, m::EXPECTED_TABLES),
                     }
                 )
             }
@@ -3266,17 +3281,11 @@ impl Error {
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
             Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
             Error::SwitchDeclined => tr!(lang, m::SWITCH_DECLINED).to_string(),
-            Error::StrataConfig { path, detail } => {
-                tr!(lang, m::STRATA_CONFIG, path = path.display(), detail = detail)
+            Error::StrataNotInstalled { variant } => {
+                tr!(lang, m::STRATA_NOT_INSTALLED, variant = variant)
             }
-            Error::StrataNoCwd { path } => {
-                tr!(lang, m::STRATA_NO_CWD, path = path.display()).to_string()
-            }
-            Error::StrataPython { path } => {
-                tr!(lang, m::STRATA_PYTHON, path = path.display()).to_string()
-            }
-            Error::StrataServerPy { path } => {
-                tr!(lang, m::STRATA_SERVER_PY, path = path.display()).to_string()
+            Error::StrataPrepare { step, log } => {
+                tr!(lang, m::STRATA_PREPARE, step = step, log = log.display())
             }
             Error::ServerStatus {
                 kind,
@@ -3595,16 +3604,18 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::ConstraintKeys => tr!(lang, m::FUNC_CONSTRAINT_KEYS).to_string(),
         P::NotPositive => tr!(lang, m::FUNC_NOT_POSITIVE).to_string(),
         P::ServerModelMissing => tr!(lang, m::FUNC_SERVER_MODEL_MISSING).to_string(),
-        P::ServerStrataConfigMissing => {
-            tr!(lang, m::FUNC_SERVER_STRATA_CONFIG_MISSING).to_string()
-        }
+        P::ServerStrataKeyMissing(key) => tr!(lang, m::FUNC_SERVER_STRATA_KEY_MISSING, key = key),
         P::ServerKeyOfOtherKind(key) => {
-            let kind = if key == "strata_config" { "strata" } else { "llama" };
+            let kind = if crate::function::STRATA_MODEL_KEYS.contains(&key.as_str()) {
+                "strata"
+            } else {
+                "llama"
+            };
             tr!(lang, m::FUNC_SERVER_KEY_OF_OTHER_KIND, key = key, kind = kind)
         }
-        P::NotAbsolute => tr!(lang, m::FUNC_NOT_ABSOLUTE).to_string(),
         P::BadWeightsName => tr!(lang, m::FUNC_BAD_WEIGHTS_NAME).to_string(),
         P::SourceWithoutFile => tr!(lang, m::FUNC_SOURCE_WITHOUT_FILE).to_string(),
+        P::SourceShardsMismatch => tr!(lang, m::FUNC_SOURCE_SHARDS_MISMATCH).to_string(),
         P::BadSourceUrl => tr!(lang, m::FUNC_BAD_SOURCE_URL).to_string(),
         P::BadSourceSha256 => tr!(lang, m::FUNC_BAD_SOURCE_SHA256).to_string(),
         P::BadSourceSize => tr!(lang, m::FUNC_BAD_SOURCE_SIZE).to_string(),

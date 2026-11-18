@@ -154,10 +154,11 @@ pub enum Others {
 
 /// Starts the unit of the project and waits until the server is ready
 /// (D146, D149); the same code as the autostart (AGL-015, D10). The
-/// server of the strata kind is the Strata python server of the
-/// `strata_config` (AGL-033, D2). When a server already answers at the
-/// url, the check of D2 decides (AGL-033): it serves the effective
-/// settings, or a mismatch restarts it with the consent as today.
+/// server of the strata kind is the server of the Function's Strata
+/// package, its model prepared and its config written first (AGL-089, D5).
+/// When a server already answers at the url, the check of D2 decides
+/// (AGL-033): it serves the effective settings, or a mismatch restarts it
+/// with the consent as today.
 pub fn start(
     server: &Server,
     models: &Path,
@@ -257,7 +258,7 @@ fn launch_unit(
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
     let args = match effective.kind() {
         ServerKind::Strata => {
-            let launch = strata_launch(effective, url)?;
+            let launch = strata_launch(effective, url, models, say, lang)?;
             strata_systemd_run_args(&server.unit, &launch)
         }
         ServerKind::Llama => {
@@ -564,15 +565,10 @@ impl Autostart {
     fn launch(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         let (engine, log) = match self.effective.kind() {
             ServerKind::Strata => {
-                let launch = strata_launch(&self.effective, self.llama.url())?;
-                // The log beside the config when it names one, else beside
-                // the project.
-                let log = launch
-                    .config
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|dir| dir.join("strata.log"))
-                    .unwrap_or_else(|| self.project.dir.join("server.log"));
+                let launch =
+                    strata_launch(&self.effective, self.llama.url(), &self.models, say, self.lang)?;
+                // The server's log beside the model's data (AGL-089).
+                let log = launch.cwd.join("server.log");
                 (Engine::launch_strata(&launch, &log)?, log)
             }
             ServerKind::Llama => {
@@ -779,64 +775,31 @@ pub fn what_of(effective: &ServerFile) -> Result<String, Error> {
 /// kind; `None` when the settings name none.
 pub fn model_of(settings: &ServerFile) -> Result<Option<String>, Error> {
     match settings.kind() {
-        ServerKind::Strata => Ok(settings
-            .strata_config
-            .as_deref()
-            .map(|path| strata_config(Path::new(path)))
-            .transpose()?
-            .and_then(|cfg| cfg.model_name)),
+        ServerKind::Strata => Ok(settings.strata_name.clone()),
         ServerKind::Llama => Ok(settings.model.clone()),
     }
 }
 
-/// The Strata config JSON the `strata_config` names (AGL-033, D2): the
-/// parts of the launch agl needs; the engine's binary, its arguments,
-/// the HIP libraries and the environment are applied by the server
-/// itself.
-struct StrataConfig {
-    /// The `model_name` the server reports at `/v1/models`.
-    model_name: Option<String>,
-    /// The Strata checkout (`cwd`): the working directory of the launch
-    /// and where its python and server are (AGL-038, D3).
-    cwd: Option<PathBuf>,
-}
-
-/// Reads the Strata config JSON at `path` (AGL-033, D2).
-fn strata_config(path: &Path) -> Result<StrataConfig, Error> {
-    let text = fs::read_to_string(path).map_err(|source| Error::StrataConfig {
-        path: path.into(),
-        detail: source.to_string(),
-    })?;
-    let cfg: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|source| Error::StrataConfig {
-            path: path.into(),
-            detail: source.to_string(),
-        })?;
-    Ok(StrataConfig {
-        model_name: cfg["model_name"].as_str().map(str::to_owned),
-        cwd: cfg["cwd"].as_str().map(PathBuf::from),
-    })
-}
-
-/// The launch of the Strata server (AGL-033, D2; AGL-038, D3): the venv
-/// python and the `serve/server.py` of the Strata checkout, the config's
-/// `cwd`, which is also the working directory; the port of the url.
+/// The launch of the Strata server (AGL-033, D2; AGL-089, D5): the server of
+/// the Function's package, the config agl wrote, the port of the url, the
+/// model's data folder as the working directory.
 pub struct StrataLaunch {
-    python: PathBuf,
-    server_py: PathBuf,
+    server: PathBuf,
     config: PathBuf,
     port: u16,
     cwd: PathBuf,
 }
 
 /// Resolves the launch of the Strata server of `settings` at `url`
-/// (AGL-033, D2; AGL-038, D3, D7): the `strata_config` names the config
-/// JSON, whose `cwd` is the Strata checkout — the python is its `.venv`,
-/// the server its `serve/server.py` —, and the port is the url's. A
-/// foreign process on the port is an error, not a target.
+/// (AGL-089, D5, D9, D13, D20): the package of its variant, the first
+/// preparation of its model under `models`, the config written from the
+/// Function. A foreign process on the port is an error, not a target.
 fn strata_launch(
     settings: &ServerFile,
     url: &str,
+    models: &Path,
+    say: &mut dyn FnMut(&str),
+    lang: Lang,
 ) -> Result<StrataLaunch, Error> {
     let (host, port) =
         local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
@@ -846,58 +809,32 @@ fn strata_launch(
             units: Vec::new(),
         });
     }
-    // The Function loader requires `strata_config` of the strata kind
-    // (AGL-039, D21; AGL-043 F5).
-    let config = PathBuf::from(
-        settings
-            .strata_config
-            .as_deref()
-            .expect("a strata Function has a strata_config"),
-    );
-    let cfg = strata_config(&config)?;
-    // The Strata checkout is the config's `cwd` (AGL-038, D3, D7): the
-    // config itself may live anywhere.
-    let Some(cwd) = cfg.cwd else {
-        return Err(Error::StrataNoCwd { path: config });
-    };
-    let python = cwd.join(".venv/bin/python");
-    if !python.is_file() {
-        return Err(Error::StrataPython { path: python });
-    }
-    let server_py = cwd.join("serve/server.py");
-    if !server_py.is_file() {
-        return Err(Error::StrataServerPy { path: server_py });
-    }
+    // The Function loader requires `strata` of the strata kind (AGL-089, D5).
+    let variant = settings.strata.as_deref().expect("a strata Function has its variant");
+    let package = crate::strata::package(variant)?;
+    let data = crate::strata::prepare(settings, models, &package, say, lang)?;
+    let config = crate::strata::write_config(settings, &data, &package)?;
     Ok(StrataLaunch {
-        python,
-        server_py,
+        server: package.join("bin/strata-server"),
         config,
         port,
-        cwd,
+        cwd: data.dir,
     })
 }
 
-/// The arguments of the Strata server, the program first (AGL-033, D2):
-/// the venv python, the `serve/server.py`, `--engine strata`, the config
-/// and the port.
+/// The arguments of the Strata server, the program first (AGL-033, D2;
+/// AGL-089): the package's server, `--engine strata`, the config and the
+/// port.
 fn strata_args(launch: &StrataLaunch) -> Vec<OsString> {
-    let mut args = vec![
-        launch.python.clone().into_os_string(),
-        launch.server_py.clone().into_os_string(),
-    ];
-    args.extend(
-        [
-            "--engine",
-            "strata",
-            "--config",
-            launch.config.to_str().unwrap_or_default(),
-            "--port",
-            &launch.port.to_string(),
-        ]
-        .iter()
-        .map(OsString::from),
-    );
-    args
+    vec![
+        launch.server.clone().into_os_string(),
+        "--engine".into(),
+        "strata".into(),
+        "--config".into(),
+        launch.config.clone().into_os_string(),
+        "--port".into(),
+        launch.port.to_string().into(),
+    ]
 }
 
 /// The arguments of `systemd-run` for the Strata server (AGL-033, D2):
@@ -923,10 +860,10 @@ fn strata_systemd_run_args(unit: &str, launch: &StrataLaunch) -> Vec<OsString> {
 
 impl Engine {
     /// Launches the Strata server of the launch as a background child
-    /// (AGL-033, D2): the venv python running `serve/server.py` with
-    /// `--engine strata --config` the config and `--port` the port, from
-    /// the config's cwd; the child's output to the log file `log`,
-    /// appended on each launch.
+    /// (AGL-033, D2; AGL-089): the package's server with `--engine strata
+    /// --config` the config and `--port` the port, from the model's data
+    /// folder; the child's output to the log file `log`, appended on each
+    /// launch.
     pub fn launch_strata(launch: &StrataLaunch, log: &Path) -> Result<Engine, Error> {
         let log_out = OpenOptions::new()
             .create(true)
@@ -982,12 +919,7 @@ pub fn expected_model(settings: &ServerFile, models: &Path) -> Result<Option<Str
             .model
             .as_deref()
             .map(|name| models.join(name).to_string_lossy().into_owned())),
-        ServerKind::Strata => Ok(settings
-            .strata_config
-            .as_deref()
-            .map(|path| strata_config(Path::new(path)))
-            .transpose()?
-            .and_then(|cfg| cfg.model_name)),
+        ServerKind::Strata => Ok(settings.strata_name.clone()),
     }
 }
 
@@ -2534,13 +2466,11 @@ mod tests {
             .collect();
         assert_eq!(names, [std::ffi::OsString::from(format!("{pid}.json"))]);
         // The kind and the url of the Strata server; the model is the
-        // config's `model_name`.
-        let config = runtime.join("strata.json");
-        fs::write(&config, r#"{"model_name": "qwen"}"#).unwrap();
+        // Function's `name` (AGL-089, D5).
         let strata = ServerFile {
             kind: Some("strata".into()),
             strata_url: Some("http://127.0.0.1:18090".into()),
-            strata_config: Some(config.to_str().unwrap().into()),
+            strata_name: Some("qwen".into()),
             ..ServerFile::default()
         };
         write_runtime_file(Some(&runtime), pid, &strata).unwrap();
@@ -2749,32 +2679,31 @@ mod tests {
         assert!(said.is_empty());
     }
 
-    #[test]
-    fn the_strata_arguments_name_the_python_the_script_the_config_and_the_port() {
-        // The launch of the Strata server (AGL-033, D2): the venv python
-        // runs `serve/server.py` with the config and the port; the
-        // libraries and the environment the config names are applied by
-        // the server itself.
-        let launch = StrataLaunch {
-            python: PathBuf::from("/r/.venv/bin/python"),
-            server_py: PathBuf::from("/r/serve/server.py"),
-            config: PathBuf::from("/r/strata.json"),
+    fn launch() -> StrataLaunch {
+        StrataLaunch {
+            server: PathBuf::from("/p/bin/strata-server"),
+            config: PathBuf::from("/m/strata/tc/config-rdna3.json"),
             port: 18088,
-            cwd: PathBuf::from("/w"),
-        };
-        let args: Vec<String> = strata_args(&launch)
+            cwd: PathBuf::from("/m/strata/tc"),
+        }
+    }
+
+    #[test]
+    fn the_strata_arguments_name_the_packages_server_the_config_and_the_port() {
+        // AGL-033, D2; AGL-089, D5: the package's server with the config agl
+        // wrote; the engine, its libraries and environment are the config's.
+        let args: Vec<String> = strata_args(&launch())
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             args,
             [
-                "/r/.venv/bin/python",
-                "/r/serve/server.py",
+                "/p/bin/strata-server",
                 "--engine",
                 "strata",
                 "--config",
-                "/r/strata.json",
+                "/m/strata/tc/config-rdna3.json",
                 "--port",
                 "18088",
             ]
@@ -2783,20 +2712,10 @@ mod tests {
 
     #[test]
     fn the_systemd_run_arguments_carry_the_unit_the_cwd_and_the_server() {
-        let launch = StrataLaunch {
-            python: PathBuf::from("/r/.venv/bin/python"),
-            server_py: PathBuf::from("/r/serve/server.py"),
-            config: PathBuf::from("/r/strata.json"),
-            port: 18088,
-            cwd: PathBuf::from("/w"),
-        };
-        let args: Vec<String> = strata_systemd_run_args(
-            "agentLIBRE-server-60af300abea6",
-            &launch,
-        )
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
+        let args: Vec<String> = strata_systemd_run_args("agentLIBRE-server-60af300abea6", &launch())
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
             args,
             [
@@ -2804,14 +2723,13 @@ mod tests {
                 "--unit=agentLIBRE-server-60af300abea6",
                 "--collect",
                 "--quiet",
-                "--property=WorkingDirectory=/w",
+                "--property=WorkingDirectory=/m/strata/tc",
                 "--",
-                "/r/.venv/bin/python",
-                "/r/serve/server.py",
+                "/p/bin/strata-server",
                 "--engine",
                 "strata",
                 "--config",
-                "/r/strata.json",
+                "/m/strata/tc/config-rdna3.json",
                 "--port",
                 "18088",
             ]
@@ -2819,35 +2737,20 @@ mod tests {
     }
 
     #[test]
-    fn the_strata_server_comes_from_the_cwd_of_its_config() {
-        // AGL-038, D3, D7: the python and the server are of the config's
-        // `cwd`, the config itself lives anywhere; without `cwd` the error
-        // names the config.
-        let dir = std::env::temp_dir().join(format!("agentLIBRE-strata-cwd-{}", std::process::id()));
-        let checkout = dir.join("Strata");
-        fs::create_dir_all(checkout.join(".venv/bin")).unwrap();
-        fs::create_dir_all(checkout.join("serve")).unwrap();
-        fs::write(checkout.join(".venv/bin/python"), "").unwrap();
-        fs::write(checkout.join("serve/server.py"), "").unwrap();
-        let config = dir.join("elsewhere/strata.json");
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config, format!("{{\"cwd\": {:?}}}", checkout.display().to_string())).unwrap();
+    fn a_strata_variant_not_installed_is_named() {
+        // AGL-089, D20: no package of the variant in AGENTLIBRE_STRATA (the
+        // tests run with none); nothing is prepared.
         let settings = ServerFile {
             kind: Some("strata".into()),
-            strata_config: Some(config.display().to_string()),
+            strata: Some("rdna3".into()),
+            strata_name: Some("tc".into()),
+            gguf: Some(vec!["/m/tc.gguf".into()]),
             ..ServerFile::default()
         };
-        let url = free_url(3);
-        let launch = strata_launch(&settings, &url).unwrap();
-        assert_eq!(launch.python, checkout.join(".venv/bin/python"));
-        assert_eq!(launch.server_py, checkout.join("serve/server.py"));
-        assert_eq!(launch.cwd, checkout);
-        fs::write(&config, "{}").unwrap();
-        assert!(matches!(
-            strata_launch(&settings, &url),
-            Err(Error::StrataNoCwd { path }) if path == config
-        ));
-        fs::remove_dir_all(&dir).unwrap();
+        let models = std::env::temp_dir().join(format!("agentLIBRE-strata-none-{}", std::process::id()));
+        let result = strata_launch(&settings, &free_url(3), &models, &mut |_| {}, Lang::En);
+        assert!(matches!(result, Err(Error::StrataNotInstalled { variant }) if variant == "rdna3"));
+        assert!(!models.exists());
     }
 
     #[test]

@@ -69,10 +69,16 @@ pub fn offer(
     lang: Lang,
 ) -> Result<(), Error> {
     let looked_in = folders.all();
-    let names = [&model.model, &model.draft, &model.mmproj];
+    // The shards of a Strata model too (AGL-089, D4).
+    let names: Vec<&str> = [&model.model, &model.draft, &model.mmproj]
+        .into_iter()
+        .flatten()
+        .chain(model.gguf.iter().flatten())
+        .map(String::as_str)
+        .collect();
     let of_model = sources
         .iter()
-        .filter(|source| names.iter().any(|name| name.as_deref() == Some(&source.name)));
+        .filter(|source| names.contains(&source.name.as_str()));
     let (here, absent): (Vec<_>, Vec<_>) =
         of_model.partition(|source| find(&source.name, &looked_in).is_some());
     let yes = |question: &str| ask(question).is_some_and(|answer| crate::tty::is_yes(&answer));
@@ -146,39 +152,70 @@ pub fn resolve(
         let Some(name) = file.clone() else {
             continue;
         };
-        if let Some(path) = find(&name, &found) {
-            *file = Some(path.to_string_lossy().into_owned());
-            continue;
+        if let Some(path) = place(&name, &mut found, &mut listed, folders, sources, missing, lang)? {
+            *file = Some(path);
         }
-        match missing {
-            Missing::Keep => {}
-            Missing::Fail => {
-                return Err(match sources.iter().find(|source| source.name == name) {
-                    Some(source) => Error::WeightsNotDownloaded { name, size: source.size },
-                    None => Error::WeightsNotFound { name, folders: found },
-                });
-            }
-            Missing::Ask(ask, _) => {
-                let question = tr!(lang, m::WEIGHTS_ASK, name = name.as_str());
-                let folder = ask(&question)
-                    .map(|answer| PathBuf::from(answer.trim()))
-                    .filter(|folder| folder.is_absolute() && folder.join(&name).is_file());
-                let Some(folder) = folder else {
-                    return Err(Error::WeightsNotFound { name, folders: found });
-                };
-                // The folder is kept for the next runs (D24c, D12).
-                listed.push(folder.clone());
-                let list = listed
-                    .iter()
-                    .map(|folder| Value::String(folder.to_string_lossy().into_owned()))
-                    .collect();
-                settings::set_top(folders.user_path, "models", Value::Array(list))?;
-                *file = Some(folder.join(&name).to_string_lossy().into_owned());
-                found.push(folder);
-            }
+    }
+    // The shards of a Strata model (AGL-089, D4).
+    for shard in server.gguf.iter_mut().flatten() {
+        let name = shard.clone();
+        if let Some(path) = place(&name, &mut found, &mut listed, folders, sources, missing, lang)? {
+            *shard = path;
         }
     }
     Ok(())
+}
+
+/// Where the file `name` is: its absolute path, found in the folders or in
+/// a folder the human names (kept in the settings, D24c, D12); `None` when it
+/// is not looked for (`Missing::Keep`).
+fn place(
+    name: &str,
+    found: &mut Vec<PathBuf>,
+    listed: &mut Vec<PathBuf>,
+    folders: &Folders,
+    sources: &[FileSource],
+    missing: &Missing,
+    lang: Lang,
+) -> Result<Option<String>, Error> {
+    if let Some(path) = find(name, found) {
+        return Ok(Some(path.to_string_lossy().into_owned()));
+    }
+    match missing {
+        Missing::Keep => Ok(None),
+        Missing::Fail => Err(match sources.iter().find(|source| source.name == name) {
+            Some(source) => Error::WeightsNotDownloaded {
+                name: name.to_owned(),
+                size: source.size,
+            },
+            None => Error::WeightsNotFound {
+                name: name.to_owned(),
+                folders: found.clone(),
+            },
+        }),
+        Missing::Ask(ask, _) => {
+            let question = tr!(lang, m::WEIGHTS_ASK, name = name);
+            let folder = ask(&question)
+                .map(|answer| PathBuf::from(answer.trim()))
+                .filter(|folder| folder.is_absolute() && folder.join(name).is_file());
+            let Some(folder) = folder else {
+                return Err(Error::WeightsNotFound {
+                    name: name.to_owned(),
+                    folders: found.clone(),
+                });
+            };
+            // The folder is kept for the next runs (D24c, D12).
+            listed.push(folder.clone());
+            let list = listed
+                .iter()
+                .map(|folder| Value::String(folder.to_string_lossy().into_owned()))
+                .collect();
+            settings::set_top(folders.user_path, "models", Value::Array(list))?;
+            let path = folder.join(name).to_string_lossy().into_owned();
+            found.push(folder);
+            Ok(Some(path))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -233,18 +233,12 @@ pub enum Error {
     /// The human answered no to the stop of the server of the other kind
     /// (AGL-036, D10).
     SwitchDeclined,
-    /// The Strata config JSON the `strata_config` names cannot be read or
-    /// parsed (AGL-033, D2).
-    StrataConfig { path: PathBuf, detail: String },
-    /// The Strata config names no `cwd`, the Strata checkout (AGL-038, D3,
-    /// D7).
-    StrataNoCwd { path: PathBuf },
-    /// The `.venv/bin/python` in the `cwd` of the Strata config is missing
-    /// (AGL-033, D2; AGL-038, D3).
-    StrataPython { path: PathBuf },
-    /// The `serve/server.py` in the `cwd` of the Strata config is missing
-    /// (AGL-033, D2; AGL-038, D3).
-    StrataServerPy { path: PathBuf },
+    /// The Strata package of the Function's variant is not installed: no
+    /// `<AGENTLIBRE_STRATA>/<variant>` (AGL-089, D20).
+    StrataNotInstalled { variant: String },
+    /// A step of the first preparation of a Strata model failed: the pack,
+    /// the MTP head (AGL-089, D9, D13); its output is in `log`.
+    StrataPrepare { step: String, log: PathBuf },
     /// `agl bridge` and `bridge` lacks `address` or `port` (AGL-083, D20).
     BridgeNotSet { path: PathBuf },
     /// No `agl-bridge` beside `agl` (AGL-083, D18).
@@ -415,6 +409,8 @@ pub enum Expected {
     Integer,
     Number,
     Strings,
+    /// A list of sets (AGL-089).
+    Tables,
 }
 
 /// What is wrong with a format template (D81).
@@ -487,19 +483,20 @@ pub enum FunctionProblem {
     /// The `model` of a Function of the llama kind has no `weights`
     /// (AGL-033, D1; AGL-039, D19).
     ServerModelMissing,
-    /// The `model` of a Function of the strata kind has no
-    /// `strata_config` (AGL-033, D1).
-    ServerStrataConfigMissing,
+    /// The `model` of a Function of the strata kind lacks one of
+    /// `strata`, `name`, `gguf` (AGL-089, D5).
+    ServerStrataKeyMissing(String),
     /// A key of the Function's `model` that does not apply to its kind
     /// (AGL-033, D1; AGL-034, D4).
     ServerKeyOfOtherKind(String),
-    /// A path that must be absolute is not (AGL-039, D24e).
-    NotAbsolute,
     /// A weights file is neither a file name nor an absolute path
     /// (AGL-039, D24a).
     BadWeightsName,
     /// A `source` names a file the model does not set (AGL-039, D5).
     SourceWithoutFile,
+    /// `source.gguf` does not have one source for each of `gguf`
+    /// (AGL-089, D4).
+    SourceShardsMismatch,
     /// A `source` url is not https (AGL-050, D8).
     BadSourceUrl,
     /// A `source` sha256 is not 64 lowercase hex digits (AGL-050, D8).

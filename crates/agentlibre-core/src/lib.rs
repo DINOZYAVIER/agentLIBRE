@@ -33,6 +33,7 @@ pub mod session;
 pub mod settings;
 pub mod status;
 pub mod stop;
+pub mod strata;
 pub mod style;
 #[cfg(test)]
 mod test_server;

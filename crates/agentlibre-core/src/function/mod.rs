@@ -78,7 +78,10 @@ const MODEL_KEYS: &[&str] = &[
     "mmproj",
     "mmproj_offload",
     "image_max_tokens",
-    "strata_config",
+    "strata",
+    "name",
+    "gguf",
+    "env",
     "sampling",
     "compact_early",
     "max_stirs",
@@ -86,20 +89,25 @@ const MODEL_KEYS: &[&str] = &[
     "source",
 ];
 
-/// The keys of the `llama` kind's server in `model` (AGL-033, D1).
+/// The keys of the `llama` kind's server in `model` (AGL-033, D1);
+/// `context` and `args` are both kinds'.
 const LLAMA_MODEL_KEYS: &[&str] = &[
     "weights",
-    "context",
     "spec_type",
     "draft",
-    "args",
     "mmproj",
     "mmproj_offload",
     "image_max_tokens",
 ];
 
-/// The files a `source` may name (AGL-039, D4, D5, D19).
-const SOURCE_KEYS: &[&str] = &["weights", "mmproj", "draft", "strata_config"];
+/// The keys of the `strata` kind's server in `model` (AGL-089, D5): the
+/// engine's variant, the model's name, its GGUF shards, the engine's
+/// environment.
+pub const STRATA_MODEL_KEYS: &[&str] = &["strata", "name", "gguf", "env"];
+
+/// The files a `source` may name (AGL-039, D4, D5, D19); `gguf` is a list,
+/// one source a shard (AGL-089, D4).
+const SOURCE_KEYS: &[&str] = &["weights", "mmproj", "draft", "gguf"];
 
 /// A loaded Function.
 #[derive(Debug)]
@@ -496,7 +504,8 @@ impl Function {
 /// Reads the server side of `model` (AGL-033, D1; AGL-036, D1, D5;
 /// AGL-039, D19, D21, D24): `kind` (`llama` when absent), the weights and
 /// the keys of the kind; a key of the other kind is an error, the llama
-/// kind needs `weights`, the strata kind `strata_config`, an absolute path.
+/// kind needs `weights`, the strata kind `strata`, `name` and `gguf`
+/// (AGL-089, D5).
 fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
     let kind = match model.string("kind")? {
         None => ServerKind::Llama,
@@ -508,8 +517,8 @@ fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
     let other_kind = |key: &str| problem(model, key, FunctionProblem::ServerKeyOfOtherKind(key.into()));
     match kind {
         ServerKind::Llama => {
-            if model.has("strata_config") {
-                return Err(other_kind("strata_config"));
+            if let Some(key) = STRATA_MODEL_KEYS.iter().find(|key| model.has(key)) {
+                return Err(other_kind(key));
             }
         }
         ServerKind::Strata => {
@@ -521,18 +530,42 @@ fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
     let weights = weights_name(model, "weights")?;
     let draft = weights_name(model, "draft")?;
     let mmproj = weights_name(model, "mmproj")?;
-    let strata_config = model.string("strata_config")?;
-    if let Some(config) = &strata_config
-        && !Path::new(config).is_absolute()
+    let strata = model.string("strata")?;
+    let strata_name = model.string("name")?;
+    if let Some(name) = &strata_name
+        && !is_file_name(name)
     {
-        return Err(problem(model, "strata_config", FunctionProblem::NotAbsolute));
+        return Err(problem(model, "name", FunctionProblem::BadWeightsName));
     }
+    let gguf = model.strings("gguf")?;
+    if gguf
+        .iter()
+        .flatten()
+        .any(|name| !Path::new(name).is_absolute() && !is_file_name(name))
+    {
+        return Err(problem(model, "gguf", FunctionProblem::BadWeightsName));
+    }
+    let env = model
+        .section("env")?
+        .map(|mut env| env.string_entries().map(|entries| entries.into_iter().collect()))
+        .transpose()?;
     match kind {
         ServerKind::Llama if weights.is_none() => {
             return Err(problem(model, "weights", FunctionProblem::ServerModelMissing));
         }
-        ServerKind::Strata if strata_config.is_none() => {
-            return Err(problem(model, "strata_config", FunctionProblem::ServerStrataConfigMissing));
+        ServerKind::Strata => {
+            let missing = [
+                ("strata", strata.is_none()),
+                ("name", strata_name.is_none()),
+                ("gguf", gguf.as_ref().is_none_or(Vec::is_empty)),
+            ];
+            if let Some((key, _)) = missing.iter().find(|(_, missing)| *missing) {
+                return Err(problem(
+                    model,
+                    key,
+                    FunctionProblem::ServerStrataKeyMissing((*key).to_owned()),
+                ));
+            }
         }
         _ => {}
     }
@@ -546,9 +579,17 @@ fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
         mmproj,
         mmproj_offload: model.bool("mmproj_offload")?,
         image_max_tokens: positive(model, "image_max_tokens")?,
-        strata_config,
+        strata,
+        strata_name,
+        gguf,
+        env,
         ..ServerFile::default()
     })
+}
+
+/// Whether `name` is a file name: not empty, no folder, not hidden.
+fn is_file_name(name: &str) -> bool {
+    !(name.is_empty() || name.contains('/') || name.starts_with('.'))
 }
 
 /// A weights file of `model` (AGL-039, D24a): a file name, found in the
@@ -557,7 +598,7 @@ fn weights_name(model: &mut Section, key: &str) -> Result<Option<String>, Error>
     let name = model.string(key)?;
     if let Some(name) = &name
         && !Path::new(name).is_absolute()
-        && (name.is_empty() || name.contains('/') || name.starts_with('.'))
+        && !is_file_name(name)
     {
         return Err(problem(model, key, FunctionProblem::BadWeightsName));
     }
@@ -566,47 +607,58 @@ fn weights_name(model: &mut Section, key: &str) -> Result<Option<String>, Error>
 
 /// Reads `source` (AGL-039, D4, D5; AGL-050, D8): keyed by a file of the
 /// model that the model sets, each a url at a fixed version, its sha256 and
-/// its size. The files agl can fetch come back under their local names; a
-/// `strata_config` is a path of the machine (AGL-039, D24e).
+/// its size; `gguf`, one such source for each shard, in their order
+/// (AGL-089, D4). The files come back under their local names.
 fn read_sources(mut source: Section, server: &ServerFile) -> Result<Vec<FileSource>, Error> {
     source.check_keys(SOURCE_KEYS)?;
     let mut sources = Vec::new();
-    for (key, mut file) in source.sections()? {
+    if let Some(shards) = source.tables("gguf")? {
+        let names = server.gguf.clone().unwrap_or_default();
+        if shards.len() != names.len() {
+            return Err(problem(&source, "gguf", FunctionProblem::SourceShardsMismatch));
+        }
+        for (name, file) in names.into_iter().zip(shards) {
+            sources.push(read_source(file, name)?);
+        }
+    }
+    for (key, file) in source.sections()? {
         let name = match key.as_str() {
             "weights" => server.model.clone(),
             "mmproj" => server.mmproj.clone(),
-            "draft" => server.draft.clone(),
-            _ => server.strata_config.clone(),
+            _ => server.draft.clone(),
         };
         let Some(name) = name else {
             return Err(problem(&source, &key, FunctionProblem::SourceWithoutFile));
         };
-        file.check_keys(&["url", "sha256", "size"])?;
-        let url = file.required_string("url")?;
-        if !url.starts_with("https://") {
-            return Err(problem(&file, "url", FunctionProblem::BadSourceUrl));
-        }
-        let sha256 = file.required_string("sha256")?;
-        if sha256.len() != 64 || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
-            return Err(problem(&file, "sha256", FunctionProblem::BadSourceSha256));
-        }
-        let size = file
-            .integer("size")?
-            .ok_or_else(|| Error::MissingKey {
-                path: file.path().into(),
-                key: file.key("size"),
-            })
-            .and_then(|size| {
-                u64::try_from(size)
-                    .ok()
-                    .filter(|size| *size > 0)
-                    .ok_or_else(|| problem(&file, "size", FunctionProblem::BadSourceSize))
-            })?;
-        if key != "strata_config" {
-            sources.push(FileSource { name, url, sha256, size });
-        }
+        sources.push(read_source(file, name)?);
     }
     Ok(sources)
+}
+
+/// One source: its url, sha256 and size, for the file `name`.
+fn read_source(mut file: Section, name: String) -> Result<FileSource, Error> {
+    file.check_keys(&["url", "sha256", "size"])?;
+    let url = file.required_string("url")?;
+    if !url.starts_with("https://") {
+        return Err(problem(&file, "url", FunctionProblem::BadSourceUrl));
+    }
+    let sha256 = file.required_string("sha256")?;
+    if sha256.len() != 64 || !sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        return Err(problem(&file, "sha256", FunctionProblem::BadSourceSha256));
+    }
+    let size = file
+        .integer("size")?
+        .ok_or_else(|| Error::MissingKey {
+            path: file.path().into(),
+            key: file.key("size"),
+        })
+        .and_then(|size| {
+            u64::try_from(size)
+                .ok()
+                .filter(|size| *size > 0)
+                .ok_or_else(|| problem(&file, "size", FunctionProblem::BadSourceSize))
+        })?;
+    Ok(FileSource { name, url, sha256, size })
 }
 
 /// What reading a state needs from the rest of the Function.

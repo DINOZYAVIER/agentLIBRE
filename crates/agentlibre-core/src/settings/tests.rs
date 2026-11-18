@@ -286,7 +286,9 @@ fn the_effective_server_is_the_model_with_the_url_of_its_kind() {
     );
     let strata_model = ServerFile {
         kind: Some("strata".into()),
-        strata_config: Some("/s.json".into()),
+        strata: Some("rdna3".into()),
+        strata_name: Some("m".into()),
+        gguf: Some(vec!["m-00001-of-00002.gguf".into(), "m-00002-of-00002.gguf".into()]),
         ..ServerFile::default()
     };
     let strata = resolve_with(&user, &ProjectFile::default(), None, &strata_model).unwrap();

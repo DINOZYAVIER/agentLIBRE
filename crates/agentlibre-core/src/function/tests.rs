@@ -451,27 +451,45 @@ fn the_model_is_checked_against_its_kind() {
         ("model.weights".into(), FunctionProblem::ServerModelMissing)
     );
     assert_eq!(
-        problem_of(model(r#"weights = "m.gguf"; strata_config = "/s.json";"#)),
-        (
-            "model.strata_config".into(),
-            FunctionProblem::ServerKeyOfOtherKind("strata_config".into())
-        )
+        problem_of(model(r#"weights = "m.gguf"; strata = "rdna3";"#)),
+        ("model.strata".into(), FunctionProblem::ServerKeyOfOtherKind("strata".into()))
     );
-    let strata = model(r#"kind = "strata"; strata_config = "/s.json"; compact_early = true;"#).unwrap();
+    // The strata kind (AGL-089, D5): its variant, its name, its shards, its
+    // engine's environment; `context` and `args` are both kinds'.
+    const STRATA: &str = r#"kind = "strata"; strata = "rdna3"; name = "tc"; gguf = [ "tc-1.gguf" "/g/tc-2.gguf" ];"#;
+    let strata = model(&format!(
+        r#"{STRATA} context = 262144; args = [ "--spec" "4" ]; env = {{ STRATA_GR_RDNA = "1"; }}; compact_early = true;"#
+    ))
+    .unwrap();
     assert_eq!(strata.model.kind(), ServerKind::Strata);
-    assert_eq!(strata.model.strata_config.as_deref(), Some("/s.json"));
+    assert_eq!(strata.model.strata.as_deref(), Some("rdna3"));
+    assert_eq!(strata.model.strata_name.as_deref(), Some("tc"));
+    assert_eq!(strata.model.gguf, Some(vec!["tc-1.gguf".to_owned(), "/g/tc-2.gguf".to_owned()]));
+    assert_eq!(strata.model.context, Some(262144));
+    assert_eq!(strata.model.args, Some(vec!["--spec".to_owned(), "4".to_owned()]));
+    assert_eq!(strata.model.env, Some([("STRATA_GR_RDNA".to_owned(), "1".to_owned())].into()));
     assert_eq!(
-        problem_of(model(r#"kind = "strata"; strata_config = "/s.json"; weights = "m.gguf";"#)),
+        problem_of(model(&format!(r#"{STRATA} weights = "m.gguf";"#))),
         ("model.weights".into(), FunctionProblem::ServerKeyOfOtherKind("weights".into()))
     );
-    assert_eq!(
-        problem_of(model(r#"kind = "strata";"#)),
-        ("model.strata_config".into(), FunctionProblem::ServerStrataConfigMissing)
-    );
-    assert_eq!(
-        problem_of(model(r#"kind = "strata"; strata_config = "s.json";"#)),
-        ("model.strata_config".into(), FunctionProblem::NotAbsolute)
-    );
+    for (body, key) in [
+        (r#"kind = "strata"; name = "tc"; gguf = [ "a.gguf" ];"#, "strata"),
+        (r#"kind = "strata"; strata = "rdna3"; gguf = [ "a.gguf" ];"#, "name"),
+        (r#"kind = "strata"; strata = "rdna3"; name = "tc";"#, "gguf"),
+        (r#"kind = "strata"; strata = "rdna3"; name = "tc"; gguf = [ ];"#, "gguf"),
+    ] {
+        assert_eq!(
+            problem_of(model(body)),
+            (format!("model.{key}"), FunctionProblem::ServerStrataKeyMissing(key.into())),
+            "{body}"
+        );
+    }
+    for body in [
+        r#"kind = "strata"; strata = "rdna3"; name = "a/b"; gguf = [ "a.gguf" ];"#,
+        r#"kind = "strata"; strata = "rdna3"; name = "tc"; gguf = [ "d/a.gguf" ];"#,
+    ] {
+        assert_eq!(problem_of(model(body)).1, FunctionProblem::BadWeightsName, "{body}");
+    }
     assert!(matches!(model(r#"kind = "gemma"; weights = "m.gguf";"#), Err(Error::UnknownServerKind { .. })));
     // A weights file is a file name or an absolute path (D24a).
     assert!(model(r#"weights = "/w/m.gguf";"#).is_ok());
@@ -1012,3 +1030,30 @@ fn the_loose_function_keeps_the_tools_and_the_budgets() {
     assert_eq!(tools, ["bash", "edit"]);
 }
 
+
+#[test]
+fn a_strata_model_has_a_source_for_each_shard() {
+    // AGL-089, D4: `source.gguf`, one source a shard, in their order.
+    let model = |body: &str| function_on(&plain(""), &format!(r#"{{ format = agl.formats."qwen3.8"; {body} }}"#));
+    let sha = "b".repeat(64);
+    let file = |n: u32| format!(r#"{{ url = "https://x/{n}"; sha256 = "{sha}"; size = {n}; }}"#);
+    const STRATA: &str = r#"kind = "strata"; strata = "rdna3"; name = "tc"; gguf = [ "tc-1.gguf" "tc-2.gguf" ];"#;
+    let function = model(&format!("{STRATA} source.gguf = [ {} {} ];", file(1), file(2))).unwrap();
+    let sources: Vec<(&str, &str, u64)> = function
+        .sources
+        .iter()
+        .map(|source| (source.name.as_str(), source.url.as_str(), source.size))
+        .collect();
+    assert_eq!(sources, [("tc-1.gguf", "https://x/1", 1), ("tc-2.gguf", "https://x/2", 2)]);
+    assert_eq!(
+        problem_of(model(&format!("{STRATA} source.gguf = [ {} ];", file(1)))),
+        ("model.source.gguf".into(), FunctionProblem::SourceShardsMismatch)
+    );
+    assert_eq!(
+        problem_of(model(&format!(
+            r#"{STRATA} source.gguf = [ {} {{ url = "http://x/2"; sha256 = "{sha}"; size = 2; }} ];"#,
+            file(1)
+        ))),
+        ("model.source.gguf.1.url".into(), FunctionProblem::BadSourceUrl)
+    );
+}
