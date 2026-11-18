@@ -838,7 +838,7 @@ mod tests {
         assert!(matches!(inspect.key(Key::Up), Mode::Dock));
         assert!(matches!(inspect.key(Key::Down), Mode::Dock));
         // A redraw first: it is what gives the mode its page size.
-        let before = screen(&mut inspect, 10);
+        screen(&mut inspect, 10);
         press(&mut inspect, Key::CtrlUp);
         let all = screen(&mut inspect, 10).join("\n");
         assert!(!all.contains("Ok."), "{all}");
