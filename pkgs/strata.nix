@@ -73,6 +73,12 @@ stdenv.mkDerivation {
 
   ninjaFlags = [ "strata" ];
 
+  # The CPU kernels (the experts held in RAM, computed during decode) for
+  # this machine's CPU, as Strata's own setup.py builds them (AGL-089, D19):
+  # nixpkgs' cc-wrapper drops -march=native otherwise, and decode is 18 %
+  # slower. The result does not move to another CPU.
+  NIX_ENFORCE_NO_NATIVE = "0";
+
   # The engine, then the checkout's server, tools and data beside it: the
   # server finds the engine through the config agl writes (D5).
   installPhase = ''
