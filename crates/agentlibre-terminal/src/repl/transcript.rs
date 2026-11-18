@@ -1600,16 +1600,16 @@ mod tests {
 
     #[test]
     fn a_thinking_block_has_no_accent_of_its_own() {
-        // AGL-105, D1: in the transcript the thinking is gray — neither the
-        // label's, the elbow's nor the Markdown's color shows in it, while
-        // the card beside it keeps the tool's.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        // AGL-105, D1; AGL-107, D1: in the transcript only the thinking's
+        // head keeps a color — the elbow and the Markdown of its body are
+        // gray.
+        let style = |hex| crate::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
-                (Role::Tool, red.clone()),
-                (Role::MarkdownHeading, red.clone()),
-                (Role::MarkdownInlineCode, red),
+                (Role::Tool, style("#FF0000")),
+                (Role::MarkdownHeading, style("#0000FF")),
+                (Role::MarkdownInlineCode, style("#00FF00")),
             ],
         );
         let (presenter, mock) = presenter();
@@ -1619,7 +1619,7 @@ mod tests {
         };
         presenter.show_thinking("# Heading\n\nwith `code` in it\n");
         let printed = mock.printed.lock().unwrap().join("\n");
-        assert!(!printed.contains(&theme.start(Role::Tool)), "{printed:?}");
+        assert!(printed.starts_with(&theme.start(Role::Tool)), "{printed:?}");
         assert!(
             !printed.contains(&theme.start(Role::MarkdownHeading)),
             "{printed:?}"

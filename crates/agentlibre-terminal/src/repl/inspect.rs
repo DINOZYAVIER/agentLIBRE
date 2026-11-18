@@ -1258,27 +1258,32 @@ mod tests {
 
     #[test]
     fn the_focus_brings_the_thinkings_colors_back() {
-        // AGL-105, D1: a thinking off the focus is gray, its own label
-        // included; the focus's block paints again with its accents.
+        // AGL-105, D1; AGL-107, D1: off the focus a thinking keeps its
+        // head's color alone and its body gray; the focus's block paints
+        // again with its accents.
         let red = crate::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Tool, red)]);
         let start = |role: Role| theme.start(role);
         let mut inspect = inspect();
-        let lines = inspect.render(&theme, Lang::En, 40, 24, &std::env::temp_dir(), &[]);
-        let head = lines
-            .iter()
-            .find(|line| line.contains("THINKING"))
-            .expect("the thinking's head");
-        assert!(!head.contains(&start(Role::Tool)), "{head:?}");
-        assert!(head.contains(&start(Role::Muted)), "{head:?}");
-        press(&mut inspect, Key::ShiftDown);
-        press(&mut inspect, Key::ShiftDown);
+        press(&mut inspect, Key::Alt('g'));
         let lines = inspect.render(&theme, Lang::En, 40, 24, &std::env::temp_dir(), &[]);
         let head = lines
             .iter()
             .find(|line| line.contains("THINKING"))
             .expect("the thinking's head");
         assert!(head.contains(&start(Role::Tool)), "{head:?}");
+        let body = lines
+            .iter()
+            .find(|line| line.contains("look"))
+            .expect("the thinking's body");
+        assert!(!body.contains(&start(Role::InputText)), "{body:?}");
+        press(&mut inspect, Key::ShiftDown);
+        let lines = inspect.render(&theme, Lang::En, 40, 24, &std::env::temp_dir(), &[]);
+        let body = lines
+            .iter()
+            .find(|line| line.contains("look"))
+            .expect("the thinking's body");
+        assert!(body.contains(&start(Role::InputText)), "{body:?}");
     }
 
     #[test]

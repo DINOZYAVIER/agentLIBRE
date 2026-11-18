@@ -54,10 +54,11 @@ impl Theme {
         }
     }
 
-    /// The theme with every accent off (AGL-105, D1): each role but a
-    /// background's wears the muted style. A thinking block paints with it
-    /// while it has no focus, so nothing of it stands out; the accents come
-    /// back where the focus stands on it.
+    /// The theme with every accent off but the labels' (AGL-105, D1;
+    /// AGL-107, D1): each role but a background's and the tool's wears the
+    /// muted style. A thinking block paints with it while it has no focus,
+    /// so only its head stands out; the rest of the accents come back where
+    /// the focus stands on it.
     pub fn gray(&self) -> Theme {
         let muted = self.styles[Role::Muted as usize].clone();
         Theme {
@@ -65,7 +66,7 @@ impl Theme {
             styles: Role::ALL
                 .iter()
                 .map(|role| {
-                    if role.is_background() {
+                    if role.is_background() || *role == Role::Tool {
                         self.styles[*role as usize].clone()
                     } else {
                         muted.clone()
@@ -127,14 +128,15 @@ mod tests {
     }
 
     #[test]
-    fn the_gray_theme_keeps_only_the_backgrounds() {
-        // AGL-105, D1: every accent of the gray theme is the muted style,
-        // while a background keeps its own — the focus's background still
-        // stands under the gray rows.
+    fn the_gray_theme_keeps_the_labels_and_the_backgrounds() {
+        // AGL-105, D1; AGL-107, D1: every accent of the gray theme is the
+        // muted style but the block's label and the backgrounds — the tool's
+        // head still stands out, and the focus's background still stands
+        // under the gray rows.
         let red = Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Tool, red)]);
         let gray = theme.gray();
-        assert_eq!(gray.start(Role::Tool), theme.start(Role::Muted));
+        assert_eq!(gray.start(Role::Tool), theme.start(Role::Tool));
         assert_eq!(gray.start(Role::MarkdownCode), theme.start(Role::Muted));
         assert_eq!(gray.start(Role::FocusBackground), theme.start(Role::FocusBackground));
         assert!(!gray.start(Role::FocusBackground).is_empty());

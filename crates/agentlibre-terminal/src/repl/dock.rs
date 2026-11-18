@@ -406,8 +406,11 @@ impl State {
                 columns,
             ));
         }
-        // AGL-104, D3: the dock ends with its last row — the status row,
-        // and the blank above it, are gone; `/status` keeps that information.
+        // AGL-104, D3: the status row and the blank above it are gone;
+        // `/status` keeps that information. AGL-107, D2: one free row stays
+        // under the input, so the terminal never clips the row the cursor
+        // stands on.
+        rows.push(background_row(theme, &[], columns));
         Layout {
             rows,
             cursor_row,
@@ -579,6 +582,7 @@ mod tests {
                 "Ready".to_string(),
                 " ".repeat(40),
                 format!("› {}", pad(" Type a message or / for commands", 38)),
+                " ".repeat(40),
             ]
         );
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
@@ -681,7 +685,7 @@ mod tests {
         let layout = dock.lock().layout();
         assert_eq!(layout.rows[3], pad("  /quit     does it", 30));
         assert_eq!(layout.rows[4], pad("  /help     does it", 30));
-        assert_eq!(layout.rows.len(), 5);
+        assert_eq!(layout.rows.len(), 6);
         // The cursor stays in the input.
         assert_eq!((layout.cursor_row, layout.cursor_column), (2, 3));
     }
@@ -727,13 +731,13 @@ mod tests {
 
     #[test]
     fn the_room_above_the_dock() {
-        // AGL-092, D3, AGL-104, D3: the dock's own rows — the separator,
-        // a blank and the input — are what the terminal has less those;
-        // the live block's own rows are not taken from the room.
+        // AGL-092, D3, AGL-104, D3, AGL-107, D2: the dock's own rows — the
+        // separator, a blank, the input and the free row under it — are what
+        // the terminal has less those; the live block's rows are not.
         let (dock, _) = dock(40, 20);
-        assert_eq!(dock.room(), 17);
+        assert_eq!(dock.room(), 16);
         dock.live(&["one".into(), "two".into()]);
-        assert_eq!(dock.room(), 17);
+        assert_eq!(dock.room(), 16);
     }
 
     #[test]
@@ -741,8 +745,8 @@ mod tests {
         let (dock, sink) = dock(20, 20);
         dock.start();
         let first = sink.take();
-        // First draw: no moving up; the cursor ends on the input row, the
-        // last one of the dock (AGL-104, D3).
+        // First draw: no moving up; the cursor ends on the input row, with
+        // the dock's free row below it (AGL-107, D2).
         assert!(first.contains("Ready"));
         assert!(!first.contains("\x1b[2A"));
         assert!(first.contains("›"));
@@ -777,7 +781,8 @@ mod tests {
         dock.print(&["a".into(), "b".into(), "c".into()]);
         sink.take();
         assert!(dock.erase(2));
-        // The dock is 3 rows; the cursor is on its last one: up 2 + 2.
+        // The dock is 4 rows, the cursor on its third: up 2 for the cursor
+        // and 2 for the printed rows: up 4.
         assert!(sink.take().contains("\r\x1b[4A\x1b[J"));
         assert!(!dock.erase(5));
         // Lines wider than the window take more rows.
@@ -862,12 +867,13 @@ mod tests {
 
     #[test]
     fn the_dock_has_no_status_row() {
-        // AGL-104, D3: the dock ends with its input and its menu; the
-        // Function, the workspace and the context's usage live in `/status`.
+        // AGL-104, D3: the dock ends with its input and its menu over a
+        // free row; the Function, the workspace and the context's usage
+        // live in `/status`.
         let (dock, _) = dock(60, 20);
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows.len(), 3);
-        assert_eq!(&layout.rows[2], layout.rows.last().unwrap());
+        assert_eq!(layout.rows.len(), 4);
+        assert_eq!(layout.rows[3], " ".repeat(60));
         assert!(!layout.rows.join("\n").contains("131\u{a0}072"));
         assert!(!layout.rows.join("\n").contains("minimal"));
     }
