@@ -145,6 +145,9 @@ fn event_text(event: &Event, out: &mut String) {
                 labeled(out, "output", output);
             }
         }
+        Event::System { text, failed } => {
+            out.push_str(&format!("system{} {text}\n", if *failed { " failed" } else { "" }));
+        }
     }
 }
 

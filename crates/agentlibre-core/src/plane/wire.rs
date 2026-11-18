@@ -281,6 +281,7 @@ pub fn event(event: Event) -> wire::Event {
         }),
         Event::Compact { summary, question } => wire::Event::Compact { summary, question },
         Event::Command(run) => wire::Event::Command(command(run)),
+        Event::System { text, failed } => wire::Event::System { text, failed },
     }
 }
 
@@ -339,6 +340,7 @@ pub fn event_of(event: wire::Event) -> Event {
         }),
         wire::Event::Compact { summary, question } => Event::Compact { summary, question },
         wire::Event::Command(line) => Event::Command(command_of(line)),
+        wire::Event::System { text, failed } => Event::System { text, failed },
     }
 }
 

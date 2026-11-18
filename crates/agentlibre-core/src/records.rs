@@ -419,6 +419,15 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 },
                 run.output.clone(),
             )),
+            Event::System { text, failed } => records.push(notice(
+                text.clone(),
+                if *failed {
+                    Role::StatusFailure
+                } else {
+                    Role::Muted
+                },
+                None,
+            )),
         }
     }
     records
@@ -811,5 +820,25 @@ mod tests {
         assert_eq!(status(Some(Outcome::Ok)), ("OK".into(), Role::StatusSuccess));
         assert_eq!(status(Some(Outcome::Fail)), ("FAIL".into(), Role::StatusWarn));
         assert_eq!(status(None), ("…".into(), Role::StatusPending));
+    }
+
+    #[test]
+    fn a_system_line_is_a_notice_red_when_failed() {
+        // AGL-103, D5.
+        let records = group(
+            &[
+                Event::System { text: "the server is ready at http://x".into(), failed: false },
+                Event::System { text: "the server refused to start".into(), failed: true },
+            ],
+            &[],
+            Lang::En,
+        );
+        assert_eq!(
+            records,
+            vec![
+                notice("the server is ready at http://x".into(), Role::Muted, None),
+                notice("the server refused to start".into(), Role::StatusFailure, None),
+            ]
+        );
     }
 }

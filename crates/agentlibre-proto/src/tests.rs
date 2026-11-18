@@ -114,7 +114,11 @@ fn what_a_plane_sends_round_trips() {
         Reply::Opened(Opened::default()),
         Reply::History {
             session: "s".into(),
-            events: vec![Event::User("hi".into()), Event::Answer("hello".into())],
+            events: vec![
+                Event::User("hi".into()),
+                Event::Answer("hello".into()),
+                Event::System { text: "the server is ready".into(), failed: true },
+            ],
         },
         Reply::Sent {
             session: "s".into(),

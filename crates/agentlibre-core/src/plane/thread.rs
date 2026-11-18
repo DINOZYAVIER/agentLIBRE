@@ -206,7 +206,13 @@ impl Plane {
             .autostart
             .ensure(&mut |progress| match progress {
                 ServerProgress::Starting => observer.enter(PhaseEvent::ServerStart, &mut *forward),
-                ServerProgress::Line(line) => forward.line(line),
+                ServerProgress::Line(line) => {
+                    // AGL-103, D2: the server's own line stands in the record.
+                    let _ = self
+                        .session
+                        .append(Event::System { text: line.to_owned(), failed: false });
+                    forward.line(line);
+                }
             })
             .and_then(|()| self.backend.context_size());
         match ready {
@@ -294,7 +300,17 @@ impl Plane {
                 let _ = to.send(self.session.events.clone());
                 (None, None)
             }
-            Command::Start => (None, self.start_server(&mut forward).err().map(Err)),
+            Command::Start => {
+                let said = self.start_server(&mut forward).err().map(|error| {
+                    // AGL-103, D2: a start that failed stands in the record, red.
+                    let _ = self.session.append(Event::System {
+                        text: error.message(self.lang),
+                        failed: true,
+                    });
+                    Err(error)
+                });
+                (None, said)
+            }
         };
         let why = match &turn {
             Some(Ok(TurnEnd::Stopped(reason))) => {

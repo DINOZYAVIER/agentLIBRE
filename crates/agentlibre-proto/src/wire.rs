@@ -153,6 +153,10 @@ pub enum Event {
         question: Option<String>,
     },
     Command(CommandLine),
+    System {
+        text: String,
+        failed: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

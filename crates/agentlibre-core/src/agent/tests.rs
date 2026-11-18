@@ -595,6 +595,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::Memory { .. } => "memory",
             Event::Stir { .. } => "stir",
             Event::Command(_) => "command",
+            Event::System { .. } => "system",
         })
         .collect()
 }

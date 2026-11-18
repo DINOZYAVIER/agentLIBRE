@@ -254,6 +254,9 @@ impl Plane {
             asker,
         } = opening;
         let say = |line: &str| (asker.say)(line);
+        // AGL-103, D2-D3: what the opening says of this session stands in
+        // its record; the lines wait here until the session stands.
+        let mut opened_lines: Vec<String> = Vec::new();
         let user_path = paths.settings_file();
         let sessions_dir = paths.sessions();
         // `last`: the last session of this project (AGL-058, D20).
@@ -290,7 +293,9 @@ impl Plane {
             (Some(recorded), _) => {
                 let found = PlaneFile::with_id(paths, &recorded.id)?;
                 if found.is_none() {
-                    say(&tr!(lang, m::PLANE_GONE_LOOSE, name = &recorded.name));
+                    let line = tr!(lang, m::PLANE_GONE_LOOSE, name = &recorded.name);
+                    say(&line);
+                    opened_lines.push(line);
                 }
                 found
             }
@@ -346,7 +351,9 @@ impl Plane {
                         // The Function the session was made with is gone: it
                         // continues loose (AGL-063, D4), with a notice.
                         let session = session.as_ref().expect("a resumed session");
-                        say(&tr!(lang, m::LOOSE_CONTINUE, function = &session.function));
+                        let line = tr!(lang, m::LOOSE_CONTINUE, function = &session.function);
+                        say(&line);
+                        opened_lines.push(line);
                         Function::loose(&session.loose_tools(), session.last_budgets)
                     }
                     Err(error) => return Err(error),
@@ -399,7 +406,9 @@ impl Plane {
             && let Some(running) = model_name(&settings.server)
             && model_file(&recorded) != model_file(&running)
         {
-            say(&tr!(lang, m::MODEL_DIFFERS, recorded = recorded, running = running));
+            let line = tr!(lang, m::MODEL_DIFFERS, recorded = recorded, running = running);
+            say(&line);
+            opened_lines.push(line);
         }
         // The tool `search` is there only where `[search]` is complete: no
         // tool, no grammar for it and no word of it in the prompt otherwise
@@ -412,11 +421,13 @@ impl Plane {
         let search: Box<dyn Searcher + Send> = match &settings.search {
             Some(config) if !expired => Box::new(search::Curl::new(config.clone())?),
             Some(config) => {
-                say(&tr!(
+                let line = tr!(
                     lang,
                     m::SEARCH_CERT_EXPIRED,
                     cert = config.client_certificate.display()
-                ));
+                );
+                say(&line);
+                opened_lines.push(line);
                 function.without_tool("search");
                 Box::new(search::NoSearch)
             }
@@ -491,14 +502,17 @@ impl Plane {
                 ServerProgress::Starting => {
                     observer.on(PhaseEvent::ServerStart);
                 }
-                ServerProgress::Line(line) => say(line),
+                ServerProgress::Line(line) => {
+                    say(line);
+                    opened_lines.push(line.to_owned());
+                }
             })?;
             Some(backend.context_size()?)
         } else {
             backend.context_size().ok()
         };
         let resumed = session.is_some();
-        let session = match session {
+        let mut session = match session {
             Some(session) => session,
             // A new session records the `run` snapshot of its Function
             // (AGL-063, D4).
@@ -510,6 +524,11 @@ impl Plane {
                 plane_file.as_ref().map(PlaneFile::of_session).as_ref(),
             )?,
         };
+        // AGL-103, D2-D3: what the opening said of the session enters its
+        // record in the order it was said.
+        for line in opened_lines {
+            let _ = session.append(Event::System { text: line, failed: false });
+        }
         let about = settings
             .about
             .enabled
@@ -606,7 +625,13 @@ impl Plane {
             .autostart
             .ensure(&mut |progress| match progress {
                 ServerProgress::Starting => observer.enter(PhaseEvent::ServerStart, &mut *surface),
-                ServerProgress::Line(line) => surface.line(line),
+                ServerProgress::Line(line) => {
+                    // AGL-103, D2: the server's own line stands in the record.
+                    let _ = self
+                        .session
+                        .append(Event::System { text: line.to_owned(), failed: false });
+                    surface.line(line);
+                }
             })
             .and_then(|()| self.backend.context_size());
         match ready {

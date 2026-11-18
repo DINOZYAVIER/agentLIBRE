@@ -239,6 +239,13 @@ pub enum Event {
     },
     /// A slash command the human ran (AGL-047, D5).
     Command(CommandRun),
+    /// A line the program said about itself while the session ran
+    /// (AGL-103, D1): the server's lines, a failed start. `text` is as
+    /// rendered at emission; `failed` is what makes it red.
+    System {
+        text: String,
+        failed: bool,
+    },
 }
 
 /// Where an unfinished turn continues (D105).
@@ -757,7 +764,8 @@ impl Session {
                 | Event::Forge { .. }
                 | Event::Media(_)
                 | Event::Memory { .. }
-                | Event::Stir { .. } => {}
+                | Event::Stir { .. }
+                | Event::System { .. } => {}
             }
         }
         messages
@@ -1090,6 +1098,13 @@ fn event_json(event: &Event) -> Json {
             }
             json
         }
+        Event::System { text, failed } => {
+            let mut json = json!({"type": "system", "text": text});
+            if *failed {
+                json["failed"] = Json::from(true);
+            }
+            json
+        }
         Event::Stop(reason) => json!({"type": "stop", "reason": reason.name()}),
         Event::Compact { summary, question } => {
             let mut json = json!({"type": "compact", "summary": summary});
@@ -1193,6 +1208,10 @@ pub fn event_from_json(json: &Json) -> Option<Event> {
             failed: json["failed"].as_bool()?,
             output: text("output"),
         }),
+        "system" => Event::System {
+            text: text("text")?,
+            failed: json["failed"].as_bool().unwrap_or(false),
+        },
         "cut_off" => {
             let count = |key: &str| u32::try_from(json[key].as_u64()?).ok();
             Event::CutOff(CutOff {

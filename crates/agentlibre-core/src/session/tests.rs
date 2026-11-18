@@ -749,6 +749,31 @@ fn a_command_is_kept_whole_and_the_model_reads_what_helps() {
 }
 
 #[test]
+fn a_system_line_is_kept_and_never_reaches_the_model() {
+    // AGL-103, D1, D4: the program's own line round-trips, `failed`
+    // included, and the history stays blind to it.
+    let dir = std::env::temp_dir().join(format!("agentLIBRE-system-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let mut session = Session::create(&dir, "f", Path::new("/w")).unwrap();
+    let events = [
+        Event::System {
+            text: "the server is ready at http://127.0.0.1:18088: the Strata server (m)".into(),
+            failed: false,
+        },
+        Event::System { text: "the server refused to start".into(), failed: true },
+    ];
+    for event in events.clone() {
+        session.append(event).unwrap();
+    }
+    assert!(session.history().is_empty());
+    // The file holds all of it, the flag included.
+    let reopened = Session::open(&dir, &session.id).unwrap();
+    assert_eq!(reopened.events, events);
+    assert!(!session.compactable());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_session_is_the_users_alone_and_the_latest_are_listed() {
     // AGL-058, D19, D20.
     use std::os::unix::fs::PermissionsExt;
