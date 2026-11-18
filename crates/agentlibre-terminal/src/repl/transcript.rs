@@ -273,13 +273,15 @@ impl Presenter {
 
     /// The thinking's block at the transcript's level (AGL-092, D2): all of
     /// it, or its head and its tail; nothing at all when the level is `off`
-    /// or the thinking has no text (AGL-099, D2).
+    /// or the thinking has no text (AGL-099, D2). AGL-105, D1: the block is
+    /// gray, its own and the Markdown's accents alike; only the inspect
+    /// mode's focus gives them back.
     fn thinking_block(&self, thinking: &str) -> Vec<String> {
         if self.thinking_detail == Detail::Off {
             return Vec::new();
         }
         block_lines(
-            &self.theme,
+            &self.theme.gray(),
             self.lang,
             self.screen.columns(),
             tr!(self.lang, m::THINKING),
@@ -656,7 +658,7 @@ impl Presenter {
         } else {
             let room = self.screen.room();
             let lines = block_lines(
-                &self.theme,
+                &self.theme.gray(),
                 self.lang,
                 self.screen.columns(),
                 tr!(self.lang, m::THINKING),
@@ -1591,6 +1593,35 @@ mod tests {
     }
 
     #[test]
+    fn a_thinking_block_has_no_accent_of_its_own() {
+        // AGL-105, D1: in the transcript the thinking is gray — neither the
+        // label's, the elbow's nor the Markdown's color shows in it, while
+        // the card beside it keeps the tool's.
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(
+            true,
+            &[
+                (Role::Tool, red.clone()),
+                (Role::MarkdownHeading, red.clone()),
+                (Role::MarkdownInlineCode, red),
+            ],
+        );
+        let (presenter, mock) = presenter();
+        let presenter = Presenter {
+            theme: theme.clone(),
+            ..presenter
+        };
+        presenter.show_thinking("# Heading\n\nwith `code` in it\n");
+        let printed = mock.printed.lock().unwrap().join("\n");
+        assert!(!printed.contains(&theme.start(Role::Tool)), "{printed:?}");
+        assert!(
+            !printed.contains(&theme.start(Role::MarkdownHeading)),
+            "{printed:?}"
+        );
+        assert!(printed.contains(&theme.start(Role::Muted)), "{printed:?}");
+    }
+
+    #[test]
     fn the_body_of_a_block_hangs_under_the_elbow() {
         // AGL-104, D1: the label stands alone, `⎿ ` begins the body and
         // the rows that follow stand under it; nothing passes the screen.
@@ -2274,3 +2305,4 @@ mod tests {
         assert!(!printed.iter().any(|line| line.contains("Worked for")));
     }
 }
+

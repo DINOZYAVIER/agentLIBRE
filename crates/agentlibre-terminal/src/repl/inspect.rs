@@ -461,7 +461,9 @@ fn is_user(record: &Record) -> bool {
 /// The thinking's block (D19; AGL-098, D2): whole on the focus, folded off
 /// it; the placeholder when the step has no thinking (AGL-095, D4). D23,
 /// AGL-085 D3, AGL-093 D2: the rows carry their own style, and the block
-/// the focus stands on takes the color of a message's text.
+/// the focus stands on takes the color of a message's text. AGL-105, D1:
+/// off the focus the block is gray, and its accents — the label's, the
+/// Markdown's — come back only where the focus stands on it.
 fn thinking_block(
     theme: &Theme,
     lang: Lang,
@@ -469,8 +471,9 @@ fn thinking_block(
     thinking: Option<&str>,
     focused: bool,
 ) -> Vec<String> {
+    let gray = theme.gray();
     block_lines(
-        theme,
+        if focused { theme } else { &gray },
         lang,
         columns,
         tr!(lang, m::THINKING),
@@ -1251,6 +1254,31 @@ mod tests {
         let all = screen(&mut inspect, 10).join("\n");
         assert!(all.contains("▸ THINKING"), "{all}");
         assert!(!all.contains("▸ › First"), "{all}");
+    }
+
+    #[test]
+    fn the_focus_brings_the_thinkings_colors_back() {
+        // AGL-105, D1: a thinking off the focus is gray, its own label
+        // included; the focus's block paints again with its accents.
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Tool, red)]);
+        let start = |role: Role| theme.start(role);
+        let mut inspect = inspect();
+        let lines = inspect.render(&theme, Lang::En, 40, 24, &std::env::temp_dir(), &[]);
+        let head = lines
+            .iter()
+            .find(|line| line.contains("THINKING"))
+            .expect("the thinking's head");
+        assert!(!head.contains(&start(Role::Tool)), "{head:?}");
+        assert!(head.contains(&start(Role::Muted)), "{head:?}");
+        press(&mut inspect, Key::ShiftDown);
+        press(&mut inspect, Key::ShiftDown);
+        let lines = inspect.render(&theme, Lang::En, 40, 24, &std::env::temp_dir(), &[]);
+        let head = lines
+            .iter()
+            .find(|line| line.contains("THINKING"))
+            .expect("the thinking's head");
+        assert!(head.contains(&start(Role::Tool)), "{head:?}");
     }
 
     #[test]

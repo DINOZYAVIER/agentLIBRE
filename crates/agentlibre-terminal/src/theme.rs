@@ -54,6 +54,27 @@ impl Theme {
         }
     }
 
+    /// The theme with every accent off (AGL-105, D1): each role but a
+    /// background's wears the muted style. A thinking block paints with it
+    /// while it has no focus, so nothing of it stands out; the accents come
+    /// back where the focus stands on it.
+    pub fn gray(&self) -> Theme {
+        let muted = self.styles[Role::Muted as usize].clone();
+        Theme {
+            enabled: self.enabled,
+            styles: Role::ALL
+                .iter()
+                .map(|role| {
+                    if role.is_background() {
+                        self.styles[*role as usize].clone()
+                    } else {
+                        muted.clone()
+                    }
+                })
+                .collect(),
+        }
+    }
+
     /// `text` in the style of `role` over the base style of `base`
     /// (AGL-072, D2): the base starts, the role follows, so the role's color
     /// wins over the base's and its attributes add while a role without a
@@ -103,6 +124,21 @@ mod tests {
 
     fn style(spec: &str) -> Result<Style, StyleError> {
         Style::parse(spec, false)
+    }
+
+    #[test]
+    fn the_gray_theme_keeps_only_the_backgrounds() {
+        // AGL-105, D1: every accent of the gray theme is the muted style,
+        // while a background keeps its own — the focus's background still
+        // stands under the gray rows.
+        let red = Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Tool, red)]);
+        let gray = theme.gray();
+        assert_eq!(gray.start(Role::Tool), theme.start(Role::Muted));
+        assert_eq!(gray.start(Role::MarkdownCode), theme.start(Role::Muted));
+        assert_eq!(gray.start(Role::FocusBackground), theme.start(Role::FocusBackground));
+        assert!(!gray.start(Role::FocusBackground).is_empty());
+        assert!(Theme::plain().gray().start(Role::Tool).is_empty());
     }
 
     #[test]
