@@ -168,6 +168,20 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
+/// The block parts of an event's line (AGL-099, D1): the bracketed lines
+/// the session writes itself split at the first `: ` into a label and a
+/// body — `stir 2: parse error` into `stir 2` and `parse error` — and the
+/// compaction line is a label with no body. Any other line says nothing;
+/// it prints plain, as a command's answer does.
+pub fn notice_parts(line: &str, lang: Lang) -> Option<(String, String)> {
+    if line == tr!(lang, m::COMPACTING) {
+        return Some((line.to_owned(), String::new()));
+    }
+    let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+    let (label, body) = inner.split_once(": ")?;
+    Some((label.to_owned(), body.to_owned()))
+}
+
 /// What to tell after `/compact`; a summary shows itself (D140).
 pub fn compact_notice(
     result: Result<Compaction, Error>,
@@ -191,6 +205,31 @@ pub fn compact_notice(
     }
 }
 
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    #[test]
+    fn an_events_line_splits_to_label_and_body() {
+        assert_eq!(
+            notice_parts("[stir 2: parse error]", Lang::En),
+            Some(("stir 2".into(), "parse error".into()))
+        );
+        assert_eq!(
+            notice_parts("[memory: +name]", Lang::En),
+            Some(("memory".into(), "+name".into()))
+        );
+        // The compaction line is a label with no body.
+        assert_eq!(
+            notice_parts("Compacting", Lang::En),
+            Some(("Compacting".into(), String::new()))
+        );
+        // A plain line, and an unsplit bracketed one, say nothing.
+        assert_eq!(notice_parts("/help says things", Lang::En), None);
+        assert_eq!(notice_parts("[idle]", Lang::En), None);
+    }
+}
 
 #[cfg(test)]
 mod tests {

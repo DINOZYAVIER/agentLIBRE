@@ -209,16 +209,23 @@ impl Presenter {
     /// `[cut off]` where an action hit its token limit (D154).
     pub fn show_cut_off(&self, cut: &CutOff) {
         let line = crate::status::cut_off_line(cut, self.lang);
-        self.screen.print(&[self.theme.paint(Role::Muted, &line)]);
+        self.screen.print(&notice_block_lines(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            &line,
+            Role::Muted,
+        ));
     }
 
     /// A stir of the stirred mode: its number and the parse error
     /// (AGL-030, D4; AGL-043 F8).
     pub fn show_stir(&self, attempt: u32, error: &str) {
-        self.screen.print(&notice_lines(
+        self.screen.print(&notice_block_lines(
             &self.theme,
-            &crate::status::stir_line(attempt, error, self.lang),
+            self.lang,
             self.screen.columns(),
+            &crate::status::stir_line(attempt, error, self.lang),
             Role::Muted,
         ));
     }
@@ -252,8 +259,8 @@ impl Presenter {
     }
 
     /// The thinking's block at the transcript's level (AGL-092, D2): all of
-    /// it, or its head and its tail, and the placeholder of a thinking there
-    /// was none (AGL-095, D4); nothing at all when the level is `off`.
+    /// it, or its head and its tail; nothing at all when the level is `off`
+    /// or the thinking has no text (AGL-099, D2).
     fn thinking_block(&self, thinking: &str) -> Vec<String> {
         if self.thinking_detail == Detail::Off {
             return Vec::new();
@@ -307,10 +314,11 @@ impl Presenter {
 
     /// A line of the session itself: help, a stop, an error.
     pub fn show_notice(&self, text: &str, role: Role) {
-        self.screen.print(&notice_lines(
+        self.screen.print(&notice_block_lines(
             &self.theme,
-            text,
+            self.lang,
             self.screen.columns(),
+            text,
             role,
         ));
     }
@@ -565,11 +573,10 @@ impl Presenter {
             Report::ThinkingDone => self.thinking_done(),
             Report::ActionText(piece) => self.action_text(&piece),
             Report::Event(Event::Call { text, call }) => {
-                let had_text = text.is_some();
                 if let Some(text) = text {
                     self.text(&text);
                 }
-                self.call(&call, had_text);
+                self.call();
                 self.pending_call = Some(call);
             }
             Report::Event(Event::Result {
@@ -684,18 +691,12 @@ impl Presenter {
         self.prefill = None;
     }
 
-    fn call(&mut self, _call: &ToolCall, had_text: bool) {
-        // AGL-095, D4: a step is a thinking, a call and a result; when the
-        // model neither thought nor wrote before the call, the thinking's
-        // block shows its placeholder rather than dropping out.
-        let bare = self.thinking.is_none() && self.action.is_none() && !had_text;
+    fn call(&mut self) {
+        // AGL-099, D2: a bare step prints no thinking placeholder in the
+        // transcript — an empty THINKING under a filled one is noise. The
+        // triple lives on in the inspect mode, where the placeholder
+        // keeps its place.
         self.close();
-        if bare {
-            let lines = self.thinking_block("");
-            if !lines.is_empty() {
-                self.screen.print(&lines);
-            }
-        }
     }
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
@@ -841,7 +842,35 @@ fn window_speed(window: &VecDeque<Instant>) -> Option<f64> {
     (span > 0.0).then(|| window.len() as f64 / span)
 }
 
-/// `text` as wrapped lines painted with `role`.
+/// An event's notice as a block (AGL-099, D1): the label in the tool's
+/// color, the rest under the gutter — the look of the THINKING and RESULT
+/// blocks; a label with no body prints alone, with no placeholder. What
+/// the session did not write — a command's answer, an error — prints
+/// plain, as before.
+pub fn notice_block_lines(
+    theme: &Theme,
+    lang: Lang,
+    columns: usize,
+    text: &str,
+    role: Role,
+) -> Vec<String> {
+    let Some((label, body)) = crate::status::notice_parts(text, lang) else {
+        return notice_lines(theme, text, columns, role);
+    };
+    let mut lines = vec![theme.paint(Role::Tool, &label)];
+    if body.trim().is_empty() {
+        return lines;
+    }
+    let gutter = theme.paint(Role::InputRule, "  │ ");
+    let inner = columns.saturating_sub(4).max(1);
+    for line in clean(&body).lines() {
+        for row in hard_wrap(line, inner) {
+            lines.push(format!("{gutter}{}", theme.paint(role, &row)));
+        }
+    }
+    lines
+}
+
 pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Vec<String> {
     text.lines()
         .flat_map(|line| hard_wrap(&clean(line), columns))
@@ -1926,7 +1955,7 @@ mod tests {
         let (mut presenter, mock) = presenter();
         presenter.action_text("Looking at it.\n");
         presenter.text("Looking at it.");
-        presenter.call(&bash("ls"), true);
+        presenter.call();
         presenter.result(
             &bash("ls"),
             &ToolResult {
@@ -2134,17 +2163,21 @@ mod tests {
         // A line per medium (AGL-043 F17).
         assert!(printed.contains(&"[Audio#1] voice.wav — “Check the logs.”".to_owned()));
         assert!(printed.contains(&"[Video#1] clip.mp4 — frames: 2".to_owned()));
-        // The stir and the cut-off with what it discarded (AGL-043 F8).
-        // Both wrap at the 40 columns of the test screen.
-        let all = printed
-            .join("\n")
-            .replace('\n', " ")
-            .replace("  ", " ");
-        assert!(all.contains("[stir 1: `nope`"), "{all}");
-        assert!(
-            all.contains("[cut off: 4000 tokens of thinking, 8288 of a tool call]"),
-            "{all}"
+        // The stir and the cut-off as blocks (AGL-043 F8; AGL-099, D1):
+        // the label, and the body under the gutter, wrapped at the 36
+        // columns inside the 40 columns of the test screen.
+        let stir = printed
+            .iter()
+            .position(|line| line == "stir 1")
+            .expect("the stir's label");
+        assert_eq!(
+            printed[stir + 1],
+            "  │ `nope` is not a tool of this state"
         );
+        assert!(printed.contains(&"cut off".to_owned()));
+        assert!(printed
+            .iter()
+            .any(|line| line.starts_with("  │ 4000 tokens of thinking")));
         assert!(printed.contains(&"Done".to_owned()));
         // No time is shown for what is replayed.
         assert!(!printed.iter().any(|line| line.contains("Worked for")));
