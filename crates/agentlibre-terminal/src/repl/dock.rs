@@ -413,7 +413,7 @@ impl State {
         rows.push(self.separator());
         rows.push(background_row(theme, &[], columns));
 
-        let avail = columns.saturating_sub(3).max(1);
+        let avail = columns.saturating_sub(2).max(1);
         let (input, cursor_row, cursor_column) = self.input_rows(avail);
         let cursor_row = rows.len() + cursor_row;
         let empty = self.editor.is_empty();
@@ -519,18 +519,18 @@ impl State {
     }
 
     /// The visible input rows, each with its marker, and the row and
-    /// column of the cursor among them. The marker is three columns and the
-    /// text begins at the fourth: with the caret at the start the cursor
-    /// rests on the marker's last column, so the block never covers the
-    /// first letter of what is typed, or of the hint (AGL-088, D1).
+    /// column of the cursor among them. The marker is `› `, two columns, and
+    /// the text begins right after it (AGL-094, D1): with the caret at the
+    /// start the cursor rests on the marker's last column, so the block never
+    /// covers the first letter of what is typed, or of the hint (AGL-088, D1).
     fn input_rows(&self, avail: usize) -> (Vec<(&'static str, String)>, usize, usize) {
         let buffer = self.editor.buffer();
         if buffer.is_empty() {
-            return (vec![("›  ", truncate(tr!(self.lang, m::HINT), avail))], 0, 2);
+            return (vec![("› ", truncate(tr!(self.lang, m::HINT), avail))], 0, 1);
         }
         let cursor = self.editor.cursor();
         let mut rows: Vec<String> = Vec::new();
-        let (mut cursor_row, mut cursor_column) = (0, 2);
+        let (mut cursor_row, mut cursor_column) = (0, 1);
         let mut line_start = 0;
         for line in buffer.split('\n') {
             let line_end = line_start + line.len();
@@ -546,9 +546,9 @@ impl State {
                 if cursor >= chunk_start && (cursor < chunk_end || (last && cursor <= chunk_end)) {
                     cursor_row = rows.len();
                     cursor_column = if cursor == 0 {
-                        2
+                        1
                     } else {
-                        3 + width(&buffer[chunk_start..cursor])
+                        2 + width(&buffer[chunk_start..cursor])
                     };
                 }
                 rows.push(chunk.clone());
@@ -566,7 +566,7 @@ impl State {
             .enumerate()
             .skip(start)
             .take(MAX_INPUT_ROWS)
-            .map(|(index, row)| (if index == 0 { "›  " } else { "   " }, row))
+            .map(|(index, row)| (if index == 0 { "› " } else { "  " }, row))
             .collect();
         (visible, cursor_row - start, cursor_column)
     }
@@ -653,12 +653,12 @@ mod tests {
             [
                 format!("─ Ready {}", "─".repeat(32)),
                 " ".repeat(40),
-                format!("›  {}", pad("Type a message or / for commands", 37)),
+                format!("› {}", pad("Type a message or / for commands", 38)),
                 " ".repeat(40),
                 "  minimal    — / 131\u{a0}072  …e/u/project  ".to_string(),
             ]
         );
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 1));
     }
 
     fn pad(text: &str, columns: usize) -> String {
@@ -678,9 +678,9 @@ mod tests {
             layout.rows[0],
             format!("─ Running bash · queued 2 {}", "─".repeat(4))
         );
-        assert_eq!(layout.rows[2], pad("›  hello", 30));
-        assert_eq!(layout.rows[3], pad("   ab", 30));
-        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 5));
+        assert_eq!(layout.rows[2], pad("› hello", 30));
+        assert_eq!(layout.rows[3], pad("  ab", 30));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 4));
     }
 
     #[test]
@@ -705,23 +705,23 @@ mod tests {
     #[test]
     fn cursor_follows_wrapped_rows() {
         let (dock, _) = dock(12, 20);
-        // 9 columns of text per row: 12, less the marker's three.
+        // 10 columns of text per row: 12, less the marker's two.
         type_text(&dock, "0123456789ab");
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[2], pad("›  012345678", 12));
-        assert_eq!(layout.rows[3], pad("   9ab", 12));
-        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 6));
+        assert_eq!(layout.rows[2], pad("› 0123456789", 12));
+        assert_eq!(layout.rows[3], pad("  ab", 12));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 4));
         // At the end of a full row the cursor starts a row of its own.
         dock.clear_input();
-        type_text(&dock, "012345678");
+        type_text(&dock, "0123456789");
         let layout = dock.lock().layout();
-        assert_eq!(layout.rows[3], pad("   ", 12));
-        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 3));
+        assert_eq!(layout.rows[3], pad("  ", 12));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (3, 2));
         dock.key(Key::Home);
         let layout = dock.lock().layout();
         // AGL-088, D1: at the start the cursor rests on the marker's last
         // column, left of the first letter.
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 1));
     }
 
     #[test]
@@ -730,13 +730,13 @@ mod tests {
         // empty, at the start of a typed line and at the end of it.
         let (dock, _) = dock(40, 20);
         let layout = dock.lock().layout();
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 2));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 1));
         drop(layout);
         type_text(&dock, "hi");
         let layout = dock.lock().layout();
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 5));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 4));
         dock.key(Key::Home);
-        assert_eq!(dock.lock().layout().cursor_column, 2);
+        assert_eq!(dock.lock().layout().cursor_column, 1);
     }
 
     #[test]
@@ -749,8 +749,8 @@ mod tests {
         let layout = dock.lock().layout();
         // 10 logical lines, 6 shown: the cursor is on the last one.
         let input: Vec<&String> = layout.rows[2..8].iter().collect();
-        assert!(input[0].starts_with("   line4"));
-        assert!(input[5].starts_with("   "));
+        assert!(input[0].starts_with("  line4"));
+        assert!(input[5].starts_with("  "));
         assert_eq!(layout.cursor_row, 7);
     }
 
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(layout.rows[4], pad("  /help     does it", 30));
         assert_eq!(layout.rows.len(), 7);
         // The cursor stays in the input.
-        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 4));
+        assert_eq!((layout.cursor_row, layout.cursor_column), (2, 3));
     }
 
     #[test]

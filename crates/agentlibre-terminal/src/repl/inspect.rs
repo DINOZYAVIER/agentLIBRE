@@ -800,22 +800,22 @@ mod tests {
         let all = screen(&inspect, 10).join("\n");
         // The first record (the user's "First") is the focus; the rest
         // is not marked.
-        assert!(all.contains("▸ ›  First"), "{all}");
+        assert!(all.contains("▸ › First"), "{all}");
         assert!(!all.contains("▸ Ok."), "{all}");
         assert!(inspect.key(Key::Down));
         let all = screen(&inspect, 10).join("\n");
         assert!(all.contains("▸ THINKING"), "{all}");
-        assert!(!all.contains("▸ ›  First"), "{all}");
+        assert!(!all.contains("▸ › First"), "{all}");
     }
 
     #[test]
     fn the_dock_stays_at_the_bottom_of_the_screen() {
         let inspect = inspect();
-        let dock = vec!["›  ask".into(), "agentLIBRE · /home/dinozyavier/repos/agentLIBRE".into()];
+        let dock = vec!["› ask".into(), "agentLIBRE · /home/dinozyavier/repos/agentLIBRE".into()];
         let lines = screen_dock(&inspect, 10, &dock);
         assert_eq!(lines.len(), 10);
         // The dock's rows are the last rows of the screen, in order.
-        assert!(lines[lines.len() - 2].contains("›  ask"), "{lines:?}");
+        assert!(lines[lines.len() - 2].contains("› ask"), "{lines:?}");
         assert!(lines[lines.len() - 1].contains("agentLIBRE"), "{lines:?}");
     }
 
