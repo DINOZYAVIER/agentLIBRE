@@ -252,6 +252,17 @@
             grep -q '^\* .* llama ' list
             touch $out
           '';
+        # Every built-in Function says what it is made for (AGL-089, D12, D14).
+        functions-described =
+          let
+            undescribed = lib.filter (name: !(self.lib.functions.${name} ? description)) (
+              lib.attrNames self.lib.functions
+            );
+          in
+          if undescribed == [ ] then
+            pkgs.runCommand "${cargo.package.name}-functions-described" { } "touch $out"
+          else
+            throw "built-in Functions with no description: ${lib.concatStringsSep ", " undescribed}";
         # The Strata packages build (AGL-089, D7).
         inherit (self.packages.${system}) strata strata-rdna3;
         # The module on a plain NixOS and on NixOS-WSL: the right package, and
