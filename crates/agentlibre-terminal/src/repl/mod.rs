@@ -956,10 +956,11 @@ fn show(presenter: &mut Presenter, control: &Control, report: Report) {
 }
 
 /// A turn of the REPL: its reports are drawn, what the start says is shown
-/// as a notice, and `/status` follows the server and the media.
+/// as a notice, the dock and `/status` follow the server and the media.
 struct ReplTurn<'a> {
     presenter: &'a mut Presenter,
     control: &'a Control,
+    dock: &'a Dock,
 }
 
 impl Sink for ReplTurn<'_> {
@@ -974,6 +975,7 @@ impl Turn for ReplTurn<'_> {
     }
 
     fn context(&mut self, context: usize) {
+        self.dock.set_context_size(context);
         self.control.lock().info.context = Some(context);
     }
 
@@ -1174,9 +1176,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Box::new(io::stdout()),
             theme.clone(),
             lang,
+            facts.function.clone(),
+            facts.workspace.clone(),
             editor,
             term::size(),
-        ),
+        )
+        .with_context(context.unwrap_or(0)),
     );
     let control = Arc::new(Control::new(
         Info {
@@ -1314,7 +1319,10 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         interrupt::reset();
         let done = remote.wait(&mut |sent| match sent {
             Sent::Line(line) => presenter.show_notice(&line, Role::Muted),
-            Sent::Context(size) => control.lock().info.context = Some(size),
+            Sent::Context(size) => {
+                dock.set_context_size(size);
+                control.lock().info.context = Some(size);
+            }
             Sent::Report(report) => show(&mut presenter, &control, report),
             _ => {}
         });
@@ -1545,6 +1553,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         sent.give(&mut ReplTurn {
                             presenter: &mut presenter,
                             control: &control,
+                            dock: &dock,
                         })
                     },
                 );
@@ -1719,9 +1728,12 @@ mod tests {
                 Box::new(sink.clone()),
                 Theme::plain(),
                 Lang::En,
+                "minimal".into(),
+                "~/project".into(),
                 Editor::new(Vec::new(), commands),
                 (40, 20),
-            ),
+            )
+            .with_context(16384),
         );
         let stops = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(AtomicUsize::new(0));

@@ -55,6 +55,8 @@ pub trait Screen: Send + Sync {
     /// the screen; false when they are not.
     fn erase(&self, count: usize) -> bool;
     fn activity(&self, phase: Phase);
+    /// The tokens of the last prompt (D152).
+    fn context(&self, _used: usize) {}
     /// The decoding speed of the current generation, in tokens per
     /// second (AGL-012); none when there is no figure to show.
     fn speed(&self, _speed: Option<f64>) {}
@@ -804,6 +806,7 @@ impl Presenter {
     fn context_used(&mut self, tokens: usize) {
         self.context = Some(tokens);
         self.context_fresh = true;
+        self.screen.context(tokens);
     }
 
     /// The dock and the rows follow the FSM of the turn (AGL-046). A tool and
