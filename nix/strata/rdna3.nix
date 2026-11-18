@@ -2,12 +2,11 @@
 # settings of the UD-IQ4_XS (rdna3/configs/iq4-1gpu.json at 8b01b0c8) with what
 # AGL-086 measured on a 62 GB machine whose desktop is on the card: no draft
 # vocabulary subset of its own (D6), no conversation cache (D7), 2 GB of VRAM
-# kept (the desktop), 40 GiB of experts in RAM (the engine takes all the free
-# RAM else; AGL-089 D27: at 47 the kernel failed allocations in the engine's GPU
-# waits and the engine stopped) and the prompt read in chunks of 16384 tokens
-# (AGL-089 D26: with 47 and 32768 an 84K prompt read ~4 GB from the drive and
-# left 2 GiB of RAM; with 44 and 16384 ~0.4 GB and 6 GiB, the prompt 3-7 %
-# slower). agl fills the paths and the hipBLASLt tuning.
+# kept (the desktop), 44 GiB of experts in RAM (the engine takes all the free
+# RAM else) and the prompt read in chunks of 16384 tokens (AGL-089 D26: with 47
+# and 32768 an 84K prompt read ~4 GB from the drive and left 2 GiB of RAM; with
+# these ~0.4 GB and 6 GiB, the prompt 3-7 % slower). agl fills the paths and the
+# hipBLASLt tuning.
 {
   strata = "rdna3";
   args = [
@@ -47,7 +46,7 @@
     "--adapt-swaps"
     "32"
     "--resident-budget-gib"
-    "40"
+    "44"
   ];
   env = {
     STRATA_RDNA_MMVQ_WAVE = "3";
