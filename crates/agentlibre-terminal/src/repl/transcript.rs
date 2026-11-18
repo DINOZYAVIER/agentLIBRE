@@ -243,14 +243,19 @@ impl Presenter {
     /// `[memory: +name]` where the memory was written, then the text that
     /// was written, muted (AGL-006, M28).
     pub fn show_memory(&self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
-        let mut lines = vec![self
-            .theme
-            .paint(Role::Muted, &records::memory_line(name, kind, self.lang))];
+        let mut lines = notice_block_lines(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            &records::memory_line(name, kind, self.lang),
+            Role::Muted,
+        );
         if let Some(text) = text {
-            lines.extend(notice_lines(
+            lines.extend(notice_block_lines(
                 &self.theme,
-                text,
+                self.lang,
                 self.screen.columns(),
+                text,
                 Role::Muted,
             ));
         }
