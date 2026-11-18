@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use super::dock::Dock;
+use super::dock::{Dock, Layout};
 use super::markdown;
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
@@ -632,7 +632,7 @@ pub fn run(
         // The dock's rows of the moment (D14): the input prompt is live,
         // so its rows change with its keys (AGL-098, D7).
         let rows = dock.layout();
-        draw(write, &mut inspect, theme, lang, size.0, size.1, &outputs, &rows.rows);
+        draw(write, &mut inspect, theme, lang, size.0, size.1, &outputs, &rows);
         let keys = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
@@ -679,9 +679,11 @@ pub fn run(
     Exit { block, submit }
 }
 
-/// One redraw of the screen: the clear, the lines, the cursor at the
-/// bottom. The lines carry no trailing newline: a last one would scroll
-/// the screen up by a row and cut the window's first row (AGL-066, D15).
+/// One redraw of the screen: the clear, the lines, no trailing newline.
+/// A last newline would scroll the screen up by a row and cut the
+/// window's first row (AGL-066, D15). The cursor rests on the input's
+/// caret and shows: the mode leaves the input live, so the human reads
+/// with the prompt under his hands (AGL-098, D7).
 #[allow(clippy::too_many_arguments)]
 fn draw(
     write: &dyn Fn(&str),
@@ -691,9 +693,9 @@ fn draw(
     columns: usize,
     rows: usize,
     outputs: &Path,
-    dock: &[String],
+    dock: &Layout,
 ) {
-    let lines = inspect.render(theme, lang, columns, rows, outputs, dock);
+    let lines = inspect.render(theme, lang, columns, rows, outputs, &dock.rows);
     let mut text = String::from(term::CLEAR);
     text.push_str(term::HOME);
     for (index, line) in lines.iter().enumerate() {
@@ -702,7 +704,16 @@ fn draw(
         }
         text.push_str(line);
     }
-    text.push_str(&term::cursor_at(rows.max(1), 1));
+    // The dock's rows stand at the screen's bottom, as many as fit below
+    // the hint; the caret sits on its own row among them.
+    let placed = dock.rows.len().min(rows.saturating_sub(RESERVE));
+    let row = if dock.cursor_row < placed {
+        (rows + dock.cursor_row + 1).saturating_sub(placed).max(1)
+    } else {
+        rows.max(1)
+    };
+    text.push_str(&term::cursor_at(row, 1 + dock.cursor_column));
+    text.push_str("\x1b[?25h");
     write(&text);
 }
 
@@ -1146,13 +1157,19 @@ mod tests {
             40,
             10,
             &std::env::temp_dir(),
-            &[],
+            &Layout {
+                rows: Vec::new(),
+                cursor_row: 0,
+                cursor_column: 0,
+            },
         );
         let written = written.lock().unwrap();
         let lines =
             Inspect::new(&session(), &[], Lang::En).render(&Theme::plain(), Lang::En, 40, 10, &std::env::temp_dir(), &[]);
         let home = format!("{CLEAR}{HOME}", CLEAR = term::CLEAR, HOME = term::HOME);
-        let bottom = term::cursor_at(10, 1);
+        // The cursor at the bottom of an empty dock, and shown: the input
+        // stays live through the mode (AGL-098, D7).
+        let bottom = format!("{}\x1b[?25h", term::cursor_at(10, 1));
         assert!(written.starts_with(&home), "{written:?}");
         assert!(written.ends_with(&bottom), "{written:?}");
         let body = written[home.len()..written.len() - bottom.len()].to_owned();
@@ -1160,6 +1177,32 @@ mod tests {
         // added at the bottom.
         assert_eq!(body, lines.join("\n"), "{body:?}");
         assert!(!body.ends_with('\n'), "{body:?}");
+    }
+
+    #[test]
+    fn the_cursor_rests_on_the_inputs_caret() {
+        // AGL-098, D7: the input stays live — the cursor stands on its
+        // caret, among the dock's rows at the bottom, and shows.
+        let mut inspect = inspect();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = written.clone();
+        let write = |text: &str| sink.lock().unwrap().push_str(text);
+        draw(
+            &write,
+            &mut inspect,
+            &Theme::plain(),
+            Lang::En,
+            40,
+            10,
+            &std::env::temp_dir(),
+            &Layout {
+                rows: vec!["› ask".into(), "─ Ready".into(), "ctx".into()],
+                cursor_row: 1,
+                cursor_column: 5,
+            },
+        );
+        let written = written.lock().unwrap();
+        assert!(written.ends_with("\x1b[9;6H\x1b[?25h"), "{written:?}");
     }
 
     #[test]
