@@ -61,9 +61,45 @@ pub enum Record {
     Notice {
         line: String,
         role: Role,
-        /// What the inspect mode shows when the record is expanded.
+        /// What the inspect mode shows when the block is focused
+        /// (AGL-098, D2).
         detail: Option<String>,
     },
+}
+
+/// The kind of a record's block (AGL-098, D2): the block is the unit the
+/// inspect mode's focus moves between. A block with no text of its own
+/// keeps its place and shows the placeholder (AGL-095, D4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A message of the human: the record is one block.
+    Message,
+    /// A line of the session: the record is one block.
+    Line,
+    /// The thinking of a step or of an answer.
+    Thinking,
+    /// A tool call: the text written before it and its card.
+    Tool,
+    /// The tool's result.
+    Result,
+    /// The answer's text.
+    Answer,
+}
+
+impl Record {
+    /// The record's blocks in the order they stand (AGL-098, D2): a step
+    /// is the triple `thinking`, `tool`, `result` — a missing thinking or
+    /// result keeps its place as a placeholder; an answer is `thinking`
+    /// and `ANSWER`; the rest is one block.
+    pub fn blocks(&self) -> Vec<BlockKind> {
+        match self {
+            Record::User(_) => vec![BlockKind::Message],
+            Record::State(_) => vec![BlockKind::Line],
+            Record::Tool { .. } => vec![BlockKind::Thinking, BlockKind::Tool, BlockKind::Result],
+            Record::Answer { .. } => vec![BlockKind::Thinking, BlockKind::Answer],
+            Record::Notice { .. } => vec![BlockKind::Line],
+        }
+    }
 }
 
 /// A call's outcome as the transcript and the inspect mode print it;

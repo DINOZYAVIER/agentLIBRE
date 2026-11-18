@@ -290,8 +290,9 @@ struct Input {
     /// Leaves at once, after giving the terminal back (D120, D135).
     exit_now: Box<dyn Fn() + Send + Sync>,
     /// Opens the inspect mode on the alternate screen (AGL-066, D4); it
-    /// runs here, in the input thread.
-    open_inspect: Box<dyn Fn() + Send + Sync>,
+    /// runs here, in the input thread, and gives back what leaving means
+    /// (AGL-098, D6, D7): the block to redraw, and the text to send.
+    open_inspect: Box<dyn Fn() -> inspect::Exit + Send + Sync>,
     /// What Ctrl-V reads (AGL-014, D21).
     clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
     /// Ctrl-R records the voice (AGL-016).
@@ -647,8 +648,16 @@ impl Input {
         }
         if key == Key::Ctrl('o') {
             // The inspect mode takes the alternate screen and returns the
-            // terminal as it was (AGL-066, D4, D8).
-            (self.open_inspect)();
+            // terminal as it was (AGL-066, D4, D8). Leaving puts the block
+            // he was reading above the dock (AGL-098, D6); `Enter` inside
+            // the mode sends the input's text (D7).
+            let exit = (self.open_inspect)();
+            if !exit.block.is_empty() {
+                self.dock.print(&exit.block);
+            }
+            if let Some(message) = exit.submit {
+                self.submitted(message);
+            }
             return;
         }
         match self.dock.key(key) {
@@ -990,9 +999,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     ),
                 }
             };
-            // The dock's rows of its moment (D14): the input prompt
-            // stays on the alternate screen.
-            let dock_rows = dock.layout().rows;
+            // The dock's rows of the moment (D14): the input prompt
+            // stays on the alternate screen, and its rows come anew at
+            // each redraw (AGL-098, D7).
             inspect::run(
                 &|text| dock.write_raw(text),
                 &theme,
@@ -1000,8 +1009,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 events,
                 transitions,
                 outputs,
-                dock_rows,
-            );
+                &dock,
+            )
         }
     };
     let input = Input {
@@ -1541,6 +1550,10 @@ mod tests {
                 let inspects = inspects.clone();
                 Box::new(move || {
                     inspects.fetch_add(1, Ordering::SeqCst);
+                    inspect::Exit {
+                        block: Vec::new(),
+                        submit: None,
+                    }
                 })
             },
             clipboard: {

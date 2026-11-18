@@ -155,6 +155,8 @@ impl Editor {
             }
             Key::Ctrl('c') => return Outcome::Interrupt,
             Key::BackTab | Key::Ctrl(_) | Key::Alt(_) => {}
+            // The arrows of the inspect mode say nothing to the input.
+            Key::ShiftUp | Key::ShiftDown | Key::AltUp | Key::AltDown => {}
         }
         Outcome::Edited
     }
