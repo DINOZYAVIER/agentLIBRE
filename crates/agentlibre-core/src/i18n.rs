@@ -1066,6 +1066,48 @@ Forge (сховище артефактів робочої області, agentL
         uk: "рядка {n} немає: у буфері {lines}",
     };
 
+    /// `/function edit` without a name or an op (AGL-102, D4).
+    pub const EDIT_USAGE: Msg = Msg {
+        en: "usage: /function edit <name> opens; then show, ins <n> <text>, add <text>, chg <n> <text>, del <n>, save, close",
+        uk: "використання: /function edit <назва> відкриває; далі show, ins <n> <текст>, add <текст>, chg <n> <текст>, del <n>, save, close",
+    };
+
+    /// `/function edit <name>` opened the buffer (AGL-102, D4).
+    pub const EDIT_OPEN: Msg = Msg {
+        en: "editing {path}",
+        uk: "редагування {path}",
+    };
+
+    /// `/function edit save` wrote the file (AGL-102, D4).
+    pub const EDIT_SAVED: Msg = Msg {
+        en: "saved {path}",
+        uk: "збережено {path}",
+    };
+
+    /// `/function edit close` with changes the file never got (AGL-102, D4).
+    pub const EDIT_LOST: Msg = Msg {
+        en: "closed {name}: the changes were not saved",
+        uk: "закрито {name}: зміни не збережено",
+    };
+
+    /// `/function edit close` without changes.
+    pub const EDIT_CLOSED: Msg = Msg {
+        en: "closed {name}",
+        uk: "закрито {name}",
+    };
+
+    /// An `/function edit` op with no open buffer (AGL-102, D4).
+    pub const EDIT_NONE: Msg = Msg {
+        en: "no Function is open: /function edit <name> opens one",
+        uk: "Function не відкрито: /function edit <назва> відкриє",
+    };
+
+    /// `/function edit <name>` while another Function is open (AGL-102, D4).
+    pub const EDIT_BUSY: Msg = Msg {
+        en: "{name} is open: /function edit close first",
+        uk: "{name} відкрито: спершу /function edit close",
+    };
+
     /// `Error::RunSchema`.
     pub const RUN_SCHEMA: Msg = Msg {
         en: "the session's `run` snapshot is of the schema {found}, this build reads {expected}",
@@ -2030,8 +2072,8 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     pub const CMD_FUNCTION: Msg = Msg {
-        en: "the Functions; /function <name> starts a new session with it",
-        uk: "Функції; /function <назва> починає з нею нову сесію",
+        en: "the Functions; /function <name> switches; show, new and edit work here",
+        uk: "Функції; /function <назва> перемикає; show, new і edit працюють тут",
     };
 
     /// `/function <name>` leaves the session for a new one (AGL-036, D4).

@@ -57,7 +57,7 @@ pub struct Entry {
 
 /// The source file of a Function (AGL-102, D2): where it is, and which
 /// source wins with it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionFile {
     pub path: PathBuf,
     pub source: Source,
