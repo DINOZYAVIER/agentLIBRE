@@ -513,7 +513,18 @@ fn tool_block(
     } else {
         hint.to_owned()
     };
-    lines.extend(card_lines(theme, lang, columns, call, result, &input, &items));
+    // AGL-098: as the thinking's on the focus, the whole input on it
+    // stands in the color of a message's text.
+    lines.extend(card_lines(
+        theme,
+        lang,
+        columns,
+        call,
+        result,
+        &input,
+        &items,
+        focused,
+    ));
     lines
 }
 
@@ -545,7 +556,13 @@ fn result_block(
         columns,
         tr!(lang, m::RESULT_LABEL),
         &content,
-        Role::Muted,
+        // AGL-098: as the thinking's, the block under the focus stands in
+        // the color of a message's text.
+        if focused {
+            Role::InputText
+        } else {
+            Role::Muted
+        },
         if focused { Fold::Whole } else { Fold::Folded },
         Render::Plain,
     )
@@ -583,6 +600,7 @@ fn answer_block(
 /// The compact card of a call, as the inspect mode draws it (D6; AGL-080,
 /// D1): the tool's line with its status, the lines of the input, the row of
 /// its phases.
+#[allow(clippy::too_many_arguments)]
 fn card_lines(
     theme: &Theme,
     lang: Lang,
@@ -591,6 +609,7 @@ fn card_lines(
     result: Option<&ToolResult>,
     input: &str,
     items: &[String],
+    focused: bool,
 ) -> Vec<String> {
     let gutter = theme.paint(Role::InputRule, "  │ ");
     let inner = columns.saturating_sub(4).max(1);
@@ -604,10 +623,16 @@ fn card_lines(
         ),
         theme.paint(status_role, &status_text)
     )];
-    // D26: the tool's row, like the thinking's, in the muted color.
+    // D26: the tool's row, like the thinking's, in the muted color — on
+    // the focus, as the thinking's there, in the color of a message's text.
+    let input_role = if focused {
+        Role::InputText
+    } else {
+        Role::Muted
+    };
     for line in clean(input).lines() {
         for row in hard_wrap(line, inner) {
-            lines.push(format!("{gutter}{}", theme.paint(Role::Muted, &row)));
+            lines.push(format!("{gutter}{}", theme.paint(input_role, &row)));
         }
     }
     // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
@@ -1063,6 +1088,44 @@ mod tests {
             .lines()
             .find(|line| line.contains("eight"))
             .unwrap_or_else(|| panic!("the last row is cut: {all}"));
+        assert!(row.contains(&theme.start(Role::InputText)), "{row}");
+    }
+
+    #[test]
+    fn the_focused_tool_and_result_are_in_the_texts_color() {
+        // AGL-098: as the thinking's, the input of the focused tool block
+        // and the rows of the focused result take the color of a
+        // message's text; off the focus they stay muted.
+        let events = vec![
+            Event::User("Go".into()),
+            Event::Call {
+                text: None,
+                call: call("c1", "ls"),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "out".into(),
+            },
+        ];
+        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::InputText, red)]);
+        let mut inspect = Inspect::new(&events, &[], Lang::En);
+        // The focus is on the result.
+        let all = inspect
+            .render(&theme, Lang::En, 40, 24, std::path::Path::new("/tmp"), &[])
+            .join("\n");
+        let row = all.lines().find(|line| line.contains("out")).expect("out");
+        assert!(row.contains(&theme.start(Role::InputText)), "{row}");
+        // Up one: the tool's block, its whole input in the text's color.
+        press(&mut inspect, Key::ShiftUp);
+        let all = inspect
+            .render(&theme, Lang::En, 40, 24, std::path::Path::new("/tmp"), &[])
+            .join("\n");
+        let row = all
+            .lines()
+            .find(|line| line.contains("ls"))
+            .expect("the input row");
         assert!(row.contains(&theme.start(Role::InputText)), "{row}");
     }
 
