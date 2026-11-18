@@ -29,6 +29,11 @@ pub enum Key {
     /// Ctrl with an arrow: the inspect mode pages with these (AGL-098, D1).
     CtrlUp,
     CtrlDown,
+    /// A tick of the wheel, from the mouse reporting of the inspect mode
+    /// (AGL-098, D1): there the wheel scrolls and the arrows stay the
+    /// input's, as in the REPL itself.
+    WheelUp,
+    WheelDown,
     /// Ctrl-Left or Alt-Left.
     WordLeft,
     /// Ctrl-Right or Alt-Right.
@@ -239,6 +244,19 @@ const ALT: u32 = 2;
 const CTRL: u32 = 4;
 
 fn csi_key(params: &str, final_byte: u8) -> Option<Key> {
+    // The SGR mouse of the inspect mode (AGL-098, D1): with reporting on,
+    // Alacritty sends the wheel as buttons 64/65 instead of the arrows.
+    // A press only; the clicks say nothing.
+    if let Some(rest) = params.strip_prefix('<') {
+        if final_byte != b'M' {
+            return None;
+        }
+        return match rest.split(';').next()?.parse::<u32>().ok()? {
+            64 => Some(Key::WheelUp),
+            65 => Some(Key::WheelDown),
+            _ => None,
+        };
+    }
     let mut fields = params.split(';');
     let first = fields.next().unwrap_or_default();
     let second = fields.next().unwrap_or_default();
@@ -319,6 +337,11 @@ fn kitty_key(code: u32, mask: u32) -> Option<Key> {
 /// invisible cursor while it redraws (AGL-066, D4). Leaving it puts the
 /// transcript back as it was.
 pub const ALT_ON: &str = "\x1b[?1049h\x1b[?25l";
+/// The mouse reporting of the inspect mode (AGL-098, D1): buttons and
+/// wheel in the SGR encoding, so the wheel tells itself from the arrows.
+/// In Alacritty Shift keeps the terminal's own selection over them.
+pub const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
+pub const MOUSE_OFF: &str = "\x1b[?1000l\x1b[?1006l";
 pub const ALT_OFF: &str = "\x1b[?25h\x1b[?1049l";
 
 /// Erases the whole screen, for the inspect mode's full redraws.
@@ -530,6 +553,12 @@ mod tests {
         assert_eq!(keys(b"\x1bOA\x1bOH"), [Key::Up, Key::Home]);
         assert_eq!(keys(b"\x1b[1;5D\x1b[1;3C"), [Key::WordLeft, Key::WordRight]);
         assert_eq!(keys(b"\x1b[Z"), [Key::BackTab]);
+        // AGL-098, D1: the wheel of the mouse reporting, and the clicks
+        // that say nothing.
+        assert_eq!(
+            keys(b"\x1b[<64;5;3M\x1b[<64;5;3m\x1b[<65;5;3M\x1b[<0;1;1M\x1b[<0;1;1m"),
+            [Key::WheelUp, Key::WheelDown]
+        );
         // AGL-098, D1: the inspect mode's arrows, each modifier its
         // own key; the wheel in Alacritty arrives as a plain arrow.
         assert_eq!(

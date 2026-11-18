@@ -25,6 +25,8 @@ use crate::tr;
 
 /// The rows the screen keeps for the blank one and the hint (D8).
 const RESERVE: usize = 2;
+/// The rows one tick of the wheel turns (AGL-098, D1).
+const WHEEL_STEP: usize = 3;
 
 /// What leaving the mode gives back (AGL-098, D6, D7): the block he was
 /// reading, to redraw above the dock, and the input's text when `Enter`
@@ -84,9 +86,11 @@ impl Inspect {
     pub fn key(&mut self, key: Key) -> Mode {
         match key {
             Key::Escape => Mode::Exit,
-            // D1, the human's word of the 18th: the plain arrows — and so
-            // the wheel — say nothing; `Ctrl`+arrows turn the page.
-            Key::Up | Key::Down => Mode::Stay,
+            // D1, the human's word of the 18th: the mode answers to the
+            // arrows as the REPL does — the plain ones are the input's
+            // (its history), `Ctrl`+arrows turn the page, and the wheel,
+            // known apart from them by the mouse reporting, scrolls.
+            Key::Up | Key::Down => Mode::Dock,
             Key::CtrlUp => {
                 self.follow = false;
                 self.top = self.top.saturating_sub(self.body);
@@ -95,6 +99,16 @@ impl Inspect {
             Key::CtrlDown => {
                 self.follow = false;
                 self.top += self.body;
+                Mode::Stay
+            }
+            Key::WheelUp => {
+                self.follow = false;
+                self.top = self.top.saturating_sub(WHEEL_STEP);
+                Mode::Stay
+            }
+            Key::WheelDown => {
+                self.follow = false;
+                self.top += WHEEL_STEP;
                 Mode::Stay
             }
             Key::ShiftUp => {
@@ -625,6 +639,7 @@ pub fn run(
     let mut buffer = [0u8; 4096];
     let mut size = term::size();
     write(term::ALT_ON);
+    write(term::MOUSE_ON);
     let mut submit: Option<String> = None;
     loop {
         if term::take_resized() {
@@ -669,6 +684,7 @@ pub fn run(
             break;
         }
     }
+    write(term::MOUSE_OFF);
     write(term::ALT_OFF);
     // Leaving puts the block he was reading above the dock again (D6);
     // a send needs no redraw — its own line says it.
@@ -790,16 +806,14 @@ mod tests {
     }
 
     #[test]
-    fn the_plain_arrow_says_nothing_and_ctrl_pages() {
-        // AGL-098, D1: the plain arrows — and so the wheel — are silent;
-        // `Ctrl`+arrows turn the screen, and neither moves the focus.
+    fn the_plain_arrows_are_the_inputs_and_ctrl_pages() {
+        // AGL-098, D1: the mode answers to the arrows as the REPL does —
+        // the plain ones go to the input; `Ctrl`+arrows turn the screen.
         let mut inspect = inspect();
+        assert!(matches!(inspect.key(Key::Up), Mode::Dock));
+        assert!(matches!(inspect.key(Key::Down), Mode::Dock));
         // A redraw first: it is what gives the mode its page size.
         let before = screen(&mut inspect, 10);
-        press(&mut inspect, Key::Up);
-        assert_eq!(screen(&mut inspect, 10), before);
-        press(&mut inspect, Key::Down);
-        assert_eq!(screen(&mut inspect, 10), before);
         press(&mut inspect, Key::CtrlUp);
         let all = screen(&mut inspect, 10).join("\n");
         assert!(!all.contains("Ok."), "{all}");
@@ -811,6 +825,28 @@ mod tests {
         press(&mut inspect, Key::CtrlDown);
         let all = screen(&mut inspect, 10).join("\n");
         assert!(all.contains("Ok."), "{all}");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_by_rows() {
+        // AGL-098, D1: the wheel, known apart from the arrows by the
+        // mouse reporting, turns the screen by rows, not by a page.
+        let mut inspect = inspect();
+        let before = screen(&mut inspect, 10);
+        press(&mut inspect, Key::WheelUp);
+        let after = screen(&mut inspect, 10);
+        assert_ne!(after, before);
+        // The page shows three fewer rows than Ctrl+arrow cuts.
+        let mut by_page = Inspect::new(&session(), &[], Lang::En);
+        press(&mut by_page, Key::CtrlUp);
+        assert_ne!(screen(&mut by_page, 10), after);
+        // And back to the tail: the rows, and `G` brings the follow too.
+        press(&mut inspect, Key::WheelDown);
+        press(&mut inspect, Key::WheelDown);
+        press(&mut inspect, Key::WheelDown);
+        assert!(!screen(&mut inspect, 10).join("\n").contains("follow"));
+        press(&mut inspect, Key::Alt('G'));
+        assert_eq!(screen(&mut inspect, 10), before);
     }
 
     #[test]
@@ -1105,7 +1141,7 @@ mod tests {
     #[test]
     fn the_escape_leaves() {
         let mut inspect = inspect();
-        press(&mut inspect, Key::Down);
+        assert!(matches!(inspect.key(Key::Down), Mode::Dock));
         assert!(matches!(inspect.key(Key::Escape), Mode::Exit));
     }
 
