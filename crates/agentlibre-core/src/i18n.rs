@@ -1048,6 +1048,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "використання: /function show <назва>",
     };
 
+    /// `/function new` without a name (AGL-102, D3).
+    pub const FUNCTION_NEW_USAGE: Msg = Msg {
+        en: "usage: /function new <name> [from]",
+        uk: "використання: /function new <назва> [зразок]",
+    };
+
     /// `Error::FunctionEdit` with `EditProblem::BadNumber`.
     pub const EDIT_BAD_NUMBER: Msg = Msg {
         en: "a line number: a positive integer",

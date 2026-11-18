@@ -536,15 +536,19 @@ impl Input {
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
             // for a new one with it — not while a turn runs (as `/new`).
-            // AGL-102, D2: `show`, `new` and `edit` are this thread's own,
+            // AGL-102, D2, D3: `show` and `new` are this thread's own,
             // and a name that exists stays the main thread's switch.
             "/function" => {
                 let rest = trimmed["/function".len()..].trim();
                 let word = rest.split_whitespace().next().unwrap_or("");
-                if word == "show"
+                if matches!(word, "show" | "new")
                     && !self.catalog.entries(self.lang).iter().any(|e| e.name == word)
                 {
-                    self.function_show(rest["show".len()..].trim());
+                    let tail = rest[word.len()..].trim();
+                    match word {
+                        "show" => self.function_show(tail),
+                        _ => self.function_new(tail),
+                    }
                     return false;
                 }
                 let function = rest.split_whitespace().next().map(str::to_owned);
@@ -607,6 +611,35 @@ impl Input {
                 self.notice(&text, Role::Muted);
                 self.notice(&path.display().to_string(), Role::Muted);
             }
+            Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
+        }
+    }
+
+    /// `/function new <name> [from]` (AGL-102, D3): a copy of an existing
+    /// Function — the current one by default — to the workspace's
+    /// `functions/`; a name that exists is refused.
+    fn function_new(&self, rest: &str) {
+        let mut words = rest.split_whitespace();
+        let (Some(name), from) = (words.next(), words.next()) else {
+            self.notice(tr!(self.lang, m::FUNCTION_NEW_USAGE), Role::StatusPending);
+            return;
+        };
+        let source = from.unwrap_or(&self.catalog.current);
+        let made = self
+            .catalog
+            .text(source)
+            .and_then(|text| self.catalog.create(name, &text));
+        match made {
+            Ok(path) => self.notice(
+                &tr!(
+                    self.lang,
+                    m::FUNCTION_NEW,
+                    name = name,
+                    source = source,
+                    path = path.display()
+                ),
+                Role::Muted,
+            ),
             Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
         }
     }
@@ -2450,5 +2483,34 @@ mod tests {
             .as_deref()
             .is_some_and(|o| o.contains(&dir.join("mine.nix").display().to_string())));
         assert!(inner.commands[1].failed);
+    }
+
+    /// AGL-102, D3: `/function new` copies to the workspace's `functions/`,
+    /// refuses an existing name, and leaves nothing of a text that does
+    /// not load.
+    #[test]
+    fn function_new_copies_and_refuses() {
+        const GOOD: &str = r#"{ agl, ... }: { policy = { system = "s"; initial = "work"; state.work.answer = true; }; model = { format = agl.formats."qwen3.8"; weights = "p.gguf"; }; }"#;
+        let f = fixture();
+        let dir = f.dir.join("functions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mine.nix"), GOOD).unwrap();
+        f.type_text("/function new twin mine");
+        f.input.key(Key::Enter);
+        assert_eq!(std::fs::read_to_string(dir.join("twin.nix")).unwrap(), GOOD);
+        assert!(f.output().contains("a copy of mine"));
+        f.type_text("/function new twin mine");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("already exists"));
+        // A source that does not load leaves no half-written file.
+        std::fs::write(dir.join("broken.nix"), "{ agl, ... }: { nope").unwrap();
+        f.type_text("/function new copy broken");
+        f.input.key(Key::Enter);
+        assert!(!dir.join("copy.nix").exists());
+        // The source by default is the current Function — "minimal"
+        // here, and there is none of that name.
+        f.type_text("/function new solo");
+        f.input.key(Key::Enter);
+        assert!(f.output().contains("not found"));
     }
 }

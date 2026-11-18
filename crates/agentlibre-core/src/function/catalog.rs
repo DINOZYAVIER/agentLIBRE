@@ -326,10 +326,10 @@ impl Catalog {
     }
 }
 
-/// Writes `text` to `target` as a temp file next to it, validates the
-/// file alone through the same load as `Catalog::check`, and only then
-/// renames it over `target` (AGL-102, D3, D4): a text that does not load
-/// never reaches the name.
+/// Writes `text` to `target` as a temp file next to it, loads that file
+/// alone the way `Catalog::check` loads it, and only then renames it over
+/// `target` (AGL-102, D3, D4): a text that does not load never reaches
+/// the name.
 fn write_validated(target: &Path, dir: &Path, name: &str, text: &str) -> Result<PathBuf, Error> {
     fs::create_dir_all(dir).map_err(|source| Error::Write {
         path: dir.to_path_buf(),
@@ -337,7 +337,7 @@ fn write_validated(target: &Path, dir: &Path, name: &str, text: &str) -> Result<
     })?;
     let temp = dir.join(format!("{name}.nix.tmp"));
     fs::write(&temp, text).map_err(|source| Error::Write { path: temp.clone(), source })?;
-    match Function::load(&[dir], name) {
+    match nix::eval_file(&temp).and_then(|value| Function::from_value(&temp, value)) {
         Ok(_) => fs::rename(&temp, target)
             .map(|()| target.to_path_buf())
             .map_err(|source| Error::Write { path: target.to_path_buf(), source }),
@@ -486,5 +486,29 @@ mod tests {
         let f = catalog.file("fixture-minimal").unwrap();
         assert_eq!(f.source, Source::BuiltIn);
         assert!(catalog.text("fixture-minimal").unwrap().contains("policy"));
+    }
+
+    /// AGL-102, D3: `create` writes the workspace's `functions/`, refuses
+    /// a name that exists and a text that does not load.
+    #[test]
+    fn create_writes_the_workspace_and_refuses() {
+        let dir = TempDir::new();
+        let catalog = catalog(&dir.0);
+        write(&catalog.user_dir, "mine", &file(LLAMA));
+        assert!(catalog.exists("mine"));
+        assert!(catalog.exists("fixture-minimal"));
+        assert!(!catalog.exists("twin"));
+        let path = catalog.create("twin", &file(LLAMA)).unwrap();
+        assert_eq!(path, catalog.workspace_file("twin"));
+        assert!(catalog.check("twin").is_ok());
+        // A name of any source, a built-in included, is refused.
+        assert!(matches!(catalog.create("mine", &file(LLAMA)), Err(Error::FunctionExists { .. })));
+        assert!(matches!(
+            catalog.create("fixture-minimal", &file(LLAMA)),
+            Err(Error::FunctionExists { .. })
+        ));
+        // A text that does not load never reaches the name.
+        assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::NixEval { .. })));
+        assert!(!catalog.workspace_file("twin2").exists());
     }
 }
