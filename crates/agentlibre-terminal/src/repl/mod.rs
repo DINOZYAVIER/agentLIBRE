@@ -352,11 +352,12 @@ impl Input {
         let mut echo = user_lines(&self.theme, trimmed, self.dock.columns(), Role::Tool);
         echo.push(String::new());
         self.dock.print(&echo);
-        self.command(trimmed);
+        let handed = self.command(trimmed);
         let said = self.said.lock().unwrap().take().unwrap_or_default();
-        let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
-        // What went to the main thread is recorded there, with its result.
-        if !said.lines.is_empty() || matches!(name, "/help" | "/status") {
+        // AGL-102: a command of this thread is recorded whatever it said —
+        // silence is a result too. What went to the main thread is recorded
+        // there, with its result (AGL-047, D5).
+        if !handed {
             self.control.lock().commands.push(CommandRun {
                 line: trimmed.to_owned(),
                 failed: said.failed,
@@ -379,10 +380,15 @@ impl Input {
     }
 
     /// A slash command; what it says is what [`Input::notice`] gathers.
-    fn command(&self, trimmed: &str) {
+    /// True when the main thread took the command: it records there, with
+    /// its result (AGL-047, D5; AGL-102).
+    fn command(&self, trimmed: &str) -> bool {
         let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
         match name {
-            "/help" => self.notice(&help_text(self.lang, true), Role::Muted),
+            "/help" => {
+                self.notice(&help_text(self.lang, true), Role::Muted);
+                false
+            }
             "/status" => {
                 let (info, reasoning) = {
                     let inner = self.control.lock();
@@ -392,6 +398,7 @@ impl Input {
                     &status_text(&self.facts, &info, reasoning, self.lang),
                     Role::Muted,
                 );
+                false
             }
             "/think" => {
                 let value = trimmed.split_whitespace().nth(1);
@@ -416,6 +423,7 @@ impl Input {
                         ),
                     },
                 }
+                false
             }
             "/attach" => {
                 let path = trimmed["/attach".len()..].trim();
@@ -429,10 +437,12 @@ impl Input {
                 } else {
                     self.attach_files(&[std::path::PathBuf::from(path)]);
                 }
+                false
             }
             "/remember" => match parse_remember(trimmed["/remember".len()..].trim()) {
                 Remember::Usage => {
                     self.notice(tr!(self.lang, m::REMEMBER_USAGE), Role::StatusPending);
+                    false
                 }
                 // The entry is written by the main thread, which holds the
                 // session: not while a turn runs (as `/new`).
@@ -448,14 +458,19 @@ impl Input {
                             &tr!(self.lang, m::BUSY, name = "/remember"),
                             Role::StatusPending,
                         );
+                        false
                     } else {
                         inner.requests.push(Request::Remember(name, text, workspace));
                         drop(inner);
                         self.control.wake.notify_all();
+                        true
                     }
                 }
                 // An ordinary message: the model names the entry (M37).
-                Remember::Turn(message) => self.submitted(message),
+                Remember::Turn(message) => {
+                    self.submitted(message);
+                    false
+                }
             },
             // `/rename <name>` (AGL-062, D7): the main thread writes the name,
             // which it holds the session for; not while a turn runs (as `/new`).
@@ -463,17 +478,18 @@ impl Input {
                 let text = trimmed["/rename".len()..].trim();
                 if text.is_empty() {
                     self.notice(tr!(self.lang, m::RENAME_USAGE), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 inner.requests.push(Request::Rename(text.to_owned()));
                 drop(inner);
                 self.control.wake.notify_all();
+                true
             }
             // `/memory` (AGL-060, D5): the main thread finds the store, which
             // takes the evaluation of its marker, too long for the keyboard to
@@ -482,17 +498,18 @@ impl Input {
                 let words = trimmed.split_whitespace().skip(1).map(str::to_owned);
                 let Ok(action) = memory_action(words) else {
                     self.notice(tr!(self.lang, m::MEMORY_USAGE), Role::StatusPending);
-                    return;
+                    return false;
                 };
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 inner.requests.push(Request::Memory(trimmed.to_owned(), action));
                 drop(inner);
                 self.control.wake.notify_all();
+                true
             }
             // `/plane [<name>]` (AGL-077, D12): the main thread says the
             // planes, or checks the plane and leaves the session for a new
@@ -503,7 +520,7 @@ impl Input {
                 if inner.busy() {
                     drop(inner);
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 match plane {
                     Some(plane) => inner.requests.push(Request::PlaneSwitch(plane)),
@@ -511,6 +528,7 @@ impl Input {
                 }
                 drop(inner);
                 self.control.wake.notify_all();
+                true
             }
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
@@ -521,7 +539,7 @@ impl Input {
                 if inner.busy() {
                     drop(inner);
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 match function {
                     Some(function) => inner.requests.push(Request::Switch(function)),
@@ -529,13 +547,14 @@ impl Input {
                 }
                 drop(inner);
                 self.control.wake.notify_all();
+                true
             }
             "/quit" | "/exit" | "/new" | "/compact" => {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
                     self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
-                    return;
+                    return false;
                 }
                 if name == "/new" {
                     inner.requests.push(Request::New);
@@ -547,11 +566,15 @@ impl Input {
                 }
                 drop(inner);
                 self.control.wake.notify_all();
+                true
             }
-            _ => self.notice(
-                &tr!(self.lang, m::UNKNOWN_COMMAND, name = name),
-                Role::StatusPending,
-            ),
+            _ => {
+                self.notice(
+                    &tr!(self.lang, m::UNKNOWN_COMMAND, name = name),
+                    Role::StatusPending,
+                );
+                false
+            }
         }
     }
 
@@ -2092,6 +2115,24 @@ mod tests {
         f.type_text("/new");
         f.input.key(Key::Enter);
         assert!(f.inner().commands.is_empty());
+    }
+
+    #[test]
+    fn a_silent_command_is_recorded_too() {
+        // AGL-102: silence is a result too — a `/remember <text>` that
+        // turns into a message leaves its line in the session; what the
+        // main thread runs is recorded there, not twice.
+        let f = fixture();
+        f.type_text("/remember what he wants");
+        f.input.key(Key::Enter);
+        let commands = std::mem::take(&mut f.inner().commands);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].line, "/remember what he wants");
+        assert_eq!(commands[0].output, None);
+        std::mem::take(&mut f.inner().queue);
+        f.type_text("/rename gemma grammar");
+        f.input.key(Key::Enter);
+        assert!(f.inner().commands.is_empty(), "the main thread records it");
     }
 
     #[test]
