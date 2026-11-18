@@ -98,6 +98,9 @@ struct State {
     drawn: Option<(usize, usize)>,
     /// Terminal rows of each printed line, newest last.
     printed: VecDeque<usize>,
+    /// Whether the last printed line was blank: two blank rows never stand
+    /// one under the other (AGL-097).
+    last_blank: bool,
 }
 
 pub struct Dock {
@@ -134,6 +137,7 @@ impl Dock {
                 rows: size.1.max(4),
                 drawn: None,
                 printed: VecDeque::new(),
+                last_blank: false,
             }),
         }
     }
@@ -276,6 +280,12 @@ impl Screen for Dock {
         let mut state = self.lock();
         let mut text = String::new();
         for line in lines {
+            // A block begins with a blank row and another ends with one:
+            // two blank rows in a row say nothing (AGL-097).
+            if line.is_empty() && state.last_blank {
+                continue;
+            }
+            state.last_blank = line.is_empty();
             text.push_str(line);
             text.push_str("\r\n");
             let rows = width(line).div_ceil(state.columns).max(1);
@@ -832,6 +842,22 @@ mod tests {
         assert!(out.starts_with("\x1b[?2026h\r\x1b[2A\x1b[J"));
         assert!(out.contains("one\r\ntwo\r\n\x1b[?25l─ Ready"));
         assert!(out.ends_with("\x1b[?25h\x1b[?2026l"));
+    }
+
+    #[test]
+    fn two_blank_rows_never_stand_one_under_the_other() {
+        // AGL-097: a block that ends with a blank row and a block that
+        // begins with one give a single blank row between them.
+        let (dock, sink) = dock(20, 20);
+        dock.start();
+        sink.take();
+        dock.print(&["one".into(), String::new(), String::new(), "two".into()]);
+        assert!(sink.take().contains("one\r\n\r\ntwo\r\n"));
+        dock.print(&[String::new(), "x".into(), String::new()]);
+        assert!(sink.take().contains("x\r\n"));
+        // The blank row that would follow a blank row brings no rows at all.
+        dock.print(&[String::new()]);
+        assert!(sink.take().contains("\x1b[J\x1b[?25l"));
     }
 
     #[test]

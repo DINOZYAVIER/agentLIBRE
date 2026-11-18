@@ -353,6 +353,10 @@ impl Presenter {
     fn answer_lines(&self, text: &str, time: Option<String>) -> Vec<String> {
         let columns = self.screen.columns();
         let mut lines = Vec::new();
+        // AGL-097: the answer is set off by a blank row before it — it is
+        // the main thing, and it takes no gutter. The dock drops this row
+        // when the block before it already ended with one.
+        lines.push(String::new());
         lines.extend(markdown::render(text.trim(), columns, &self.theme));
         lines.extend(time);
         lines.push(String::new());
@@ -1213,12 +1217,17 @@ mod tests {
         let printed = mock.printed.lock().unwrap().clone();
         assert_eq!(
             printed,
-            ["Done".to_owned(), "Worked for 5s".to_owned(), String::new()]
+            [
+                String::new(),
+                "Done".to_owned(),
+                "Worked for 5s".to_owned(),
+                String::new()
+            ]
         );
         mock.printed.lock().unwrap().clear();
         presenter.show_answer("old", None);
         let printed = mock.printed.lock().unwrap().clone();
-        assert_eq!(printed, ["old".to_owned(), "".to_owned()]);
+        assert_eq!(printed, ["".to_owned(), "old".to_owned(), "".to_owned()]);
     }
 
     #[test]
