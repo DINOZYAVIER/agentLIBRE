@@ -1,11 +1,14 @@
 //! The inspect mode of the session (AGL-066, D4, D5, D8; AGL-098): the
 //! alternate screen on which the records of the session are drawn. The
 //! focus is a block — a thinking, a tool, a result — and the block it
-//! stands on prints whole. `↑`/`↓` turn the screen, and so does the wheel,
-//! since Alacritty sends it as those arrows (D1); `Shift`+arrows walk the
-//! blocks and `Alt`+arrows move to the neighbouring record (D2, D3); the
-//! dock below stays live, and leaving prints nothing — the terminal is
-//! back where it was (AGL-098, D7; AGL-111, D1).
+//! stands on prints whole. The plain `↑`/`↓` belong to the input, `Ctrl`
+//! arrows turn the page, and the wheel, told apart from them by the mouse
+//! reporting, scrolls (AGL-098, D1); `Shift`+arrows walk the blocks and
+//! `Alt`+arrows move to the neighbouring record (D2, D3); the dock below
+//! stays live, and leaving prints nothing — the terminal is back where it
+//! was (AGL-098, D7; AGL-111, D1). The mouse reporting is what buys the
+//! wheel, and it takes the terminal's selection with it: while the mode
+//! stands, selecting text needs `Shift` (AGL-115, D2).
 
 use std::path::Path;
 
