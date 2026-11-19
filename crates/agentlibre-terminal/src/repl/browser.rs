@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::dock::Dock;
+use super::dock::{Dock, Layout};
 use super::term::{self, Key};
 use super::text::{hard_wrap, truncate};
 use crate::function::Function;
@@ -570,6 +570,25 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
     }
 }
 
+/// One frame on the alternate screen: the cleared field, the browser's
+/// rows padded to `room`, the dock at the bottom, the caret on the dock's
+/// input cell. Clearing every frame is what keeps a shorter screen — a
+/// short list, a one-line message, a closed source view — from leaving the
+/// rows of a taller one behind, which the relative redraw smeared
+/// (AGL-109, D1). No trailing newline: it would scroll the field up a row.
+fn frame(body: &[String], room: usize, dock: &Layout) -> String {
+    let mut lines = body.to_vec();
+    lines.truncate(room.max(1));
+    lines.resize(room, String::new());
+    lines.extend(dock.rows.iter().cloned());
+    let mut text = String::from(term::CLEAR);
+    text.push_str(term::HOME);
+    text.push_str(&lines.join("\n"));
+    text.push_str(&term::cursor_at(room + dock.cursor_row + 1, 1 + dock.cursor_column));
+    text.push_str("\x1b[?25h");
+    text
+}
+
 /// The mode on the terminal, as `inspect::run`: the alternate screen,
 /// the full redraws, the dock's rows at the bottom, the input live
 /// (AGL-098, D7): its text goes to `submit`, as from the inspect mode.
@@ -597,17 +616,7 @@ pub fn run(
         }
         let rows = dock.layout();
         let room = size.1.saturating_sub(rows.rows.len());
-        let mut lines = browser.lines(theme, lang, size.0, room, settings);
-        lines.extend(rows.rows);
-        write(&lines.join("\r\n"));
-        let up = lines.len() - 1 - (room + rows.cursor_row);
-        if up > 0 {
-            write(&format!("\x1b[{up}A"));
-        }
-        write("\r");
-        if rows.cursor_column > 0 {
-            write(&format!("\x1b[{}C", rows.cursor_column));
-        }
+        write(&frame(&browser.lines(theme, lang, size.0, room, settings), room, &rows));
         let keys = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
@@ -670,6 +679,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::dock::Layout;
     use crate::forge::testutil::TempDir;
     use crate::settings::ServerFile;
 
@@ -730,6 +740,35 @@ mod tests {
 
     fn hint(browser: &Browser, settings: &[SettingsItem]) -> String {
         browser.lines(&Theme::plain(), Lang::En, 80, 10, settings).last().unwrap().clone()
+    }
+
+    fn dock_layout(rows: &[&str], cursor_row: usize) -> Layout {
+        Layout {
+            rows: rows.iter().map(|r| r.to_string()).collect(),
+            cursor_row,
+            cursor_column: 2,
+        }
+    }
+
+    #[test]
+    fn a_frame_clears_and_pads_to_the_dock_and_homes_the_caret() {
+        let dock = dock_layout(&["› hi", "  status"], 0);
+        let text = frame(&["one".to_string(), "two".to_string()], 4, &dock);
+        // Cleared, homed; no relative move that could smear (AGL-109, D1).
+        assert!(text.starts_with(&format!("{}{}", term::CLEAR, term::HOME)), "{text}");
+        assert!(!text.contains('A'), "no relative cursor-up: {text}");
+        // `room` rows (two body, two blank) then the dock; caret on it.
+        let body = text
+            .strip_prefix(term::CLEAR)
+            .and_then(|t| t.strip_prefix(term::HOME))
+            .and_then(|t| t.strip_suffix("\x1b[?25h"))
+            .expect("the frame own ends");
+        let rows: Vec<&str> = body.split('\n').collect();
+        assert_eq!(rows, ["one", "two", "", "", "› hi", "  status\x1b[5;3H"]);
+        // A shorter body than the last frame pads, it does not stack.
+        let short = frame(&["one".to_string()], 4, &dock);
+        assert!(short.contains("one\n\n\n\n› hi"), "{short}");
+        assert!(!short.contains("two"));
     }
 
     #[test]
