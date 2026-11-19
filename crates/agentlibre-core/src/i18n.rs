@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 
 use crate::error::{
-    CredentialProblem, EditProblem, Error, Expected, FunctionProblem, NameProblem, ServerOwner,
+    CredentialProblem, Error, Expected, FunctionProblem, NameProblem, ServerOwner,
     TemplateProblem,
 };
 use crate::function::Function;
@@ -1054,6 +1054,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name}: завантажується, {kind}, {model}, {context} контексту",
     };
 
+    /// `/function edit`, whose line editor is gone (AGL-109, D2).
+    pub const FUNCTION_EDIT_GONE: Msg = Msg {
+        en: "the line editor is gone: Ctrl-F picks a Function and opens it in $EDITOR",
+        uk: "построчний редактор пішов: Ctrl-F вибере Функцію і відкриє її в $EDITOR",
+    };
+
     /// `/function show` without a name (AGL-102, D2).
     pub const FUNCTION_SHOW_USAGE: Msg = Msg {
         en: "usage: /function show <name>",
@@ -1066,65 +1072,60 @@ Forge (сховище артефактів робочої області, agentL
         uk: "використання: /function new <назва> [зразок]",
     };
 
-    /// `Error::FunctionEdit` with `EditProblem::BadNumber`.
-    pub const EDIT_BAD_NUMBER: Msg = Msg {
-        en: "a line number: a positive integer",
-        uk: "номер рядка: додатне ціле",
-    };
-
-    /// `Error::FunctionEdit` with `EditProblem::NoLine`.
-    pub const EDIT_NO_LINE: Msg = Msg {
-        en: "there is no line {n}: the buffer has {lines}",
-        uk: "рядка {n} немає: у буфері {lines}",
-    };
-
-    /// `/function edit` without a name or an op (AGL-102, D4).
-    pub const EDIT_USAGE: Msg = Msg {
-        en: "usage: /function edit <name> opens; then show, ins <n> <text>, add <text>, chg <n> <text>, del <n>, save, close",
-        uk: "використання: /function edit <назва> відкриває; далі show, ins <n> <текст>, add <текст>, chg <n> <текст>, del <n>, save, close",
-    };
-
-    /// `/function edit <name>` opened the buffer (AGL-102, D4).
-    pub const EDIT_OPEN: Msg = Msg {
-        en: "editing {path}",
-        uk: "редагування {path}",
-    };
-
-    /// `/function edit save` wrote the file (AGL-102, D4).
-    pub const EDIT_SAVED: Msg = Msg {
-        en: "saved {path}",
-        uk: "збережено {path}",
-    };
-
-    /// `/function edit close` with changes the file never got (AGL-102, D4).
-    pub const EDIT_LOST: Msg = Msg {
-        en: "closed {name}: the changes were not saved",
-        uk: "закрито {name}: зміни не збережено",
-    };
-
-    /// `/function edit close` without changes.
-    pub const EDIT_CLOSED: Msg = Msg {
-        en: "closed {name}",
-        uk: "закрито {name}",
-    };
-
-    /// An `/function edit` op with no open buffer (AGL-102, D4).
-    pub const EDIT_NONE: Msg = Msg {
-        en: "no Function is open: /function edit <name> opens one",
-        uk: "Function не відкрито: /function edit <назва> відкриє",
-    };
-
-    /// `/function edit <name>` while another Function is open (AGL-102, D4).
-    pub const EDIT_BUSY: Msg = Msg {
-        en: "{name} is open: /function edit close first",
-        uk: "{name} відкрито: спершу /function edit close",
-    };
-
     /// The Function browser on Ctrl-F: the line of keys over the list
     /// (AGL-109, D1).
     pub const BROWSER_KEYS: Msg = Msg {
-        en: "↑↓ pick · Enter source · e edit · c clone · s switch · Esc leave",
-        uk: "↑↓ вибір · Enter код · e редагувати · c копія · s перемкнути · Esc вийти",
+        en: "↑↓ pick · Enter source · e edit · c clone · s switch · d delete · Tab settings · Esc leave",
+        uk: "↑↓ вибір · Enter код · e редагувати · c копія · s перемкнути · d видалити · Tab налаштування · Esc вийти",
+    };
+
+    /// The browser's `d`: the row asks the second press (AGL-109, D3).
+    pub const BROWSER_DELETE_ASK: Msg = Msg {
+        en: "delete {name}? d erases the file, any other key keeps it",
+        uk: "видалити {name}? d зітре файл, будь-яка інша клавіша лишить його",
+    };
+
+    /// The browser's `d` erased the file (AGL-109, D3).
+    pub const BROWSER_DELETED: Msg = Msg {
+        en: "deleted {name}",
+        uk: "видалено {name}",
+    };
+
+    /// The browser's `d` on a file it may not erase (AGL-109, D3).
+    pub const BROWSER_DELETE_BUILTIN: Msg = Msg {
+        en: "`{name}` belongs to the repository: nothing to delete here",
+        uk: "`{name}` належить репозиторію: тут нема чого видаляти",
+    };
+
+    /// The line of keys over the settings' list (AGL-109, D6).
+    pub const BROWSER_SETTINGS_KEYS: Msg = Msg {
+        en: "↑↓ pick · Enter source · e edit · Tab functions · Esc leave",
+        uk: "↑↓ вибір · Enter код · e редагувати · Tab функції · Esc вийти",
+    };
+
+    /// The note of the user's `settings.nix` (AGL-109, D6): its
+    /// `server.context` beats every Function's.
+    pub const BROWSER_SETTINGS_USER: Msg = Msg {
+        en: "the user's settings: `server.context` here beats every Function",
+        uk: "налаштування користувача: `server.context` тут перебиває будь-яку Функцію",
+    };
+
+    /// The note of the workspace's `settings.nix` (AGL-109, D6).
+    pub const BROWSER_SETTINGS_PROJECT: Msg = Msg {
+        en: "this workspace's settings: they beat the user's",
+        uk: "налаштування цієї робочої області: вони перебивають користувачеві",
+    };
+
+    /// The browser's `e` on a settings file that is not there (AGL-109, D6).
+    pub const BROWSER_SETTINGS_MISSING: Msg = Msg {
+        en: "{path} is not there: create it, and it joins the settings",
+        uk: "{path} немає: створи його, і воно станеться з налаштуваннями",
+    };
+
+    /// What the check of a settings file says after the editor (AGL-109, D6).
+    pub const BROWSER_SETTINGS_SAVED: Msg = Msg {
+        en: "saved {name}: it loads with these settings",
+        uk: "збережено {name}: завантажується з цими налаштуваннями",
     };
 
     /// The browser's `e` on a built-in Function (AGL-109, D3).
@@ -2129,8 +2130,8 @@ Forge (сховище артефактів робочої області, agentL
     };
 
     pub const CMD_FUNCTION: Msg = Msg {
-        en: "the Functions; /function <name> switches; show, new and edit work here",
-        uk: "Функції; /function <назва> перемикає; show, new і edit працюють тут",
+        en: "the Functions; /function <name> switches; show and new work here, Ctrl-F browses and edits",
+        uk: "Функції; /function <назва> перемикає; show і new працюють тут, Ctrl-F переглядає й редагує",
     };
 
     /// `/function <name>` leaves the session for a new one (AGL-036, D4).
@@ -3339,12 +3340,6 @@ impl Error {
             }
             Error::FunctionBuiltIn { name } => tr!(lang, m::FUNCTION_BUILTIN, name = name),
             Error::FunctionExists { name } => tr!(lang, m::FUNCTION_EXISTS, name = name),
-            Error::FunctionEdit { problem } => match problem {
-                EditProblem::BadNumber => tr!(lang, m::EDIT_BAD_NUMBER).to_string(),
-                EditProblem::NoLine { n, lines } => {
-                    tr!(lang, m::EDIT_NO_LINE, n = n, lines = lines)
-                }
-            },
             Error::Function { path, key, problem } => {
                 tr!(
                     lang,

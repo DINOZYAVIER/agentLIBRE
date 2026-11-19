@@ -34,10 +34,11 @@ use crate::plane::{Command, Done, Sent, Told};
 use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
-use crate::function::catalog::{self, Catalog, FunctionFile};
+use crate::function::catalog::Catalog;
+use crate::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::tty::is_yes;
-use crate::error::{EditProblem, Error};
+use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
@@ -157,8 +158,11 @@ impl Inner {
 
 /// The Function browser of Ctrl-F (AGL-109, D1): the mode itself, given
 /// the threads and the surfaces it draws on.
-type OpenBrowser =
-    Box<dyn Fn(&Control, &Dock, Lang, &Theme, &Catalog) -> browser::Exit + Send + Sync>;
+type OpenBrowser = Box<
+    dyn Fn(&Control, &Dock, Lang, &Theme, &Catalog, &[browser::SettingsItem]) -> browser::Exit
+        + Send
+        + Sync,
+>;
 
 /// What the input thread asks of the main thread (AGL-067, F10).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,12 +279,6 @@ struct Said {
 /// The open buffer of `/function edit` (AGL-102, D4): the file it edits,
 /// the lines as they are now, and the lines as saved — unequal says
 /// there are changes the file never got.
-struct EditSession {
-    file: FunctionFile,
-    lines: Vec<String>,
-    saved: Vec<String>,
-}
-
 /// What the inspect mode re-reads on its open (AGL-066, D4): the session's
 /// id and directory, to read the file fresh — its events and the
 /// transitions the observer wrote — and, when the read fails, the copy
@@ -298,8 +296,11 @@ struct Input {
     dock: Arc<Dock>,
     control: Arc<Control>,
     facts: Facts,
-    /// The Functions of `/function show|new|edit` (AGL-102, D2).
+    /// The Functions of `/function show|new` (AGL-102, D2, D3).
     catalog: Arc<Catalog>,
+    /// The settings' paths for the browser's tab (AGL-109, D6).
+    paths: Paths,
+    workspace: PathBuf,
     theme: Theme,
     lang: Lang,
     history_file: PathBuf,
@@ -320,8 +321,6 @@ struct Input {
     voice: Arc<VoiceInput>,
     /// What the running slash command says, while one runs (AGL-047, D5).
     said: Mutex<Option<Said>>,
-    /// The open buffer of `/function edit` (AGL-102, D4).
-    edit: Mutex<Option<EditSession>>,
 }
 
 impl Input {
@@ -556,21 +555,21 @@ impl Input {
             // `/function [<name>]` (AGL-036, D3, D4, D9): the main thread
             // shows the list, or checks the Function and leaves the session
             // for a new one with it — not while a turn runs (as `/new`).
-            // AGL-102, D2-D4: `show`, `new` and `edit` are this thread's own,
-            // and a name that exists stays the main thread's switch.
+            // AGL-102, D2-D3: `show` and `new` are this thread's own, and a
+            // name that exists stays the main thread's switch. AGL-109, D2:
+            // the line editor is gone; `edit` points at Ctrl-F and $EDITOR.
             "/function" => {
                 let rest = trimmed["/function".len()..].trim();
                 let word = rest.split_whitespace().next().unwrap_or("");
                 if matches!(word, "show" | "new" | "edit")
                     && !self.catalog.entries(self.lang).iter().any(|e| e.name == word)
                 {
-                    // The rest keeps its spaces: an edit's text may be
-                    // indented (AGL-102, D4).
+                    // The rest keeps its spaces: `/function new`'s words.
                     let tail = &rest[word.len()..];
                     match word {
                         "show" => self.function_show(tail.trim()),
                         "new" => self.function_new(tail),
-                        _ => self.function_edit(tail.trim_start()),
+                        _ => self.notice(tr!(self.lang, m::FUNCTION_EDIT_GONE), Role::StatusPending),
                     }
                     return false;
                 }
@@ -664,138 +663,6 @@ impl Input {
                 Role::Muted,
             ),
             Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-        }
-    }
-
-    /// `/function edit` (AGL-102, D4): `<name>` opens the buffer on the
-    /// file a run loads; the op words, reserved while a buffer is open,
-    /// change its lines on this thread. `save` writes through
-    /// `Catalog::save` — atomic, and loaded before the rename — so a bad
-    /// save cannot outlive itself; `close` leaves the file as it is.
-    fn function_edit(&self, rest: &str) {
-        const OPS: [&str; 7] = ["show", "ins", "add", "chg", "del", "save", "close"];
-        let (word, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        if word.is_empty() {
-            self.notice(tr!(self.lang, m::EDIT_USAGE), Role::StatusPending);
-            return;
-        }
-        let mut session = self.edit.lock().unwrap();
-        if OPS.contains(&word) {
-            // `close` belongs here: it takes the buffer itself.
-            let closed = match session.as_mut() {
-                Some(s) if word == "close" => Some((s.file.stem(), s.lines != s.saved)),
-                Some(s) => {
-                    self.edit_op(s, word, args);
-                    None
-                }
-                None => {
-                    self.notice(tr!(self.lang, m::EDIT_NONE), Role::StatusPending);
-                    None
-                }
-            };
-            if let Some((name, lost)) = closed {
-                *session = None;
-                self.notice(
-                    &tr!(
-                        self.lang,
-                        if lost { m::EDIT_LOST } else { m::EDIT_CLOSED },
-                        name = name
-                    ),
-                    Role::Muted,
-                );
-            }
-            return;
-        }
-        // A second Function while one is open asks to close it first.
-        if let Some(s) = session.as_ref() {
-            self.notice(&tr!(self.lang, m::EDIT_BUSY, name = s.file.stem()), Role::StatusPending);
-            return;
-        }
-        let opened = self
-            .catalog
-            .file(word)
-            .and_then(|file| Ok((self.catalog.text(word)?, file)));
-        match opened {
-            Ok((text, file)) if file.source != catalog::Source::BuiltIn => {
-                let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
-                *session = Some(EditSession {
-                    saved: lines.clone(),
-                    lines,
-                    file: file.clone(),
-                });
-                self.notice(&tr!(self.lang, m::EDIT_OPEN, path = file.path.display()), Role::Muted);
-            }
-            Ok((_, file)) => self.notice(
-                &tr!(self.lang, m::FUNCTION_BUILTIN, name = file.stem()),
-                Role::StatusFailure,
-            ),
-            Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-        }
-    }
-
-    /// One op of the open buffer (AGL-102, D4): silence is a result too,
-    /// only `show` and `save` answer. `args` keeps the text's spaces.
-    fn edit_op(&self, session: &mut EditSession, op: &str, args: &str) {
-        // The line's index from its number; `extra` lets `ins` stand
-        // after the last line.
-        let index = |n: &str, lines: &[String], extra: usize| -> Result<usize, Error> {
-            let n: usize = n
-                .parse()
-                .map_err(|_| Error::FunctionEdit { problem: EditProblem::BadNumber })?;
-            if n == 0 || n > lines.len() + extra {
-                return Err(Error::FunctionEdit {
-                    problem: EditProblem::NoLine { n, lines: lines.len() },
-                });
-            }
-            Ok(n - 1)
-        };
-        match op {
-            "show" => {
-                let text = session
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .map(|(i, line)| format!("{:>2} {line}", i + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.notice(&text, Role::Muted);
-            }
-            "ins" => {
-                let (n, text) = args.split_once(' ').unwrap_or((args, ""));
-                match index(n, &session.lines, 1) {
-                    Ok(at) => session.lines.insert(at, text.to_owned()),
-                    Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-                }
-            }
-            "add" => session.lines.push(args.to_owned()),
-            "chg" => {
-                let (n, text) = args.split_once(' ').unwrap_or((args, ""));
-                match index(n, &session.lines, 0) {
-                    Ok(at) => session.lines[at] = text.to_owned(),
-                    Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-                }
-            }
-            "del" => match index(args.trim_end(), &session.lines, 0) {
-                Ok(at) => {
-                    session.lines.remove(at);
-                }
-                Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-            },
-            "save" => {
-                let text = session.lines.join("\n");
-                match self.catalog.save(&session.file, &text) {
-                    Ok(()) => {
-                        session.saved = session.lines.clone();
-                        self.notice(
-                            &tr!(self.lang, m::EDIT_SAVED, path = session.file.path.display()),
-                            Role::Muted,
-                        );
-                    }
-                    Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
-                }
-            }
-            // `close` is the caller's: it takes the buffer itself.
-            _ => {}
         }
     }
 
@@ -912,9 +779,29 @@ impl Input {
         if key == Key::Ctrl('f') {
             // The Function browser (AGL-109, D1): `s` leaves the session
             // for a Function, as `/function <name>` does.
+            // The settings' tab: the user's file and this workspace's
+            // (AGL-109, D6).
+            let items = vec![
+                browser::SettingsItem {
+                    label: "settings.nix".into(),
+                    path: self.paths.settings_file(),
+                    note: tr!(self.lang, m::BROWSER_SETTINGS_USER).to_string(),
+                },
+                browser::SettingsItem {
+                    label: "settings.nix".into(),
+                    path: self.workspace.join(crate::settings::SETTINGS_FILE),
+                    note: tr!(self.lang, m::BROWSER_SETTINGS_PROJECT).to_string(),
+                },
+            ];
             if let Some(open) = &self.open_browser
-                && let browser::Exit::Switch(name) =
-                    open(&self.control, &self.dock, self.lang, &self.theme, &self.catalog)
+                && let browser::Exit::Switch(name) = open(
+                    &self.control,
+                    &self.dock,
+                    self.lang,
+                    &self.theme,
+                    &self.catalog,
+                    &items,
+                )
             {
                 let mut inner = self.control.lock();
                 inner.requests.push(Request::Switch(name));
@@ -1281,6 +1168,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         control: control.clone(),
         facts: facts.clone(),
         catalog: Arc::clone(&catalog),
+        paths: paths.clone(),
+        workspace: workspace.clone(),
         theme: theme.clone(),
         lang,
         history_file,
@@ -1292,19 +1181,19 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         clipboard: Box::new(media::clipboard),
         voice: voice.clone(),
         open_inspect: Box::new(open_inspect),
-        open_browser: Some(Box::new(|control, dock, lang, theme, catalog| {
+        open_browser: Some(Box::new(|control, dock, lang, theme, catalog, items| {
             browser::run(
                 &|text| dock.write_raw(text),
                 theme,
                 lang,
                 catalog,
+                items,
                 dock,
                 &|| control.lock().busy(),
                 &|message| dock.print(&[message.to_string()]),
             )
         })),
         said: Mutex::new(None),
-        edit: Mutex::new(None),
     };
     let reader = {
         let done = done.clone();
@@ -1843,14 +1732,18 @@ mod tests {
                 })
             },
             open_browser: None,
+            paths: Paths::from_env(|var| {
+                (var == "HOME").then(|| std::ffi::OsString::from(&dir))
+            })
+            .unwrap(),
+            workspace: dir.clone(),
             clipboard: {
                 let clip = clip.clone();
                 Box::new(move || clip.lock().unwrap().clone())
             },
             voice,
             said: Mutex::new(None),
-            edit: Mutex::new(None),
-        };
+            };
         Fixture {
             input,
             sink,
@@ -2697,45 +2590,4 @@ mod tests {
         assert!(f.output().contains("not found"));
     }
 
-    /// AGL-102, D4: `/function edit` opens the buffer, changes lines and
-    /// saves through the load's own check; a bad save leaves the file as
-    /// it was, and `close` tells of what it takes with it.
-    #[test]
-    fn function_edit_saves_only_what_loads() {
-        const GOOD: &str = r#"{ agl, ... }: { policy = { system = "s"; initial = "work"; state.work.answer = true; }; model = { format = agl.formats."qwen3.8"; weights = "p.gguf"; }; }"#;
-        const FIXED: &str = r#"{ agl, ... }: { policy = { system = "t"; initial = "work"; state.work.answer = true; }; model = { format = agl.formats."qwen3.8"; weights = "p.gguf"; }; }"#;
-        let f = fixture();
-        let dir = f.dir.join("functions");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("mine.nix"), GOOD).unwrap();
-        // An op with no open buffer is told.
-        f.type_text("/function edit save");
-        f.input.key(Key::Enter);
-        assert!(f.output().contains("no Function is open"));
-        f.type_text("/function edit mine");
-        f.input.key(Key::Enter);
-        assert!(f.output().contains("editing"));
-        // A second Function asks to close the first.
-        f.type_text("/function edit twin");
-        f.input.key(Key::Enter);
-        assert!(f.output().contains("is open"));
-        f.type_text(&format!("/function edit chg 1 {FIXED}"));
-        f.input.key(Key::Enter);
-        f.type_text("/function edit save");
-        f.input.key(Key::Enter);
-        assert_eq!(std::fs::read_to_string(dir.join("mine.nix")).unwrap(), FIXED);
-        // A line that is not there, and a text that does not load, are
-        // told; the file keeps what the last good save wrote.
-        f.type_text("/function edit del 9");
-        f.input.key(Key::Enter);
-        assert!(f.output().contains("no line 9"));
-        f.type_text("/function edit chg 1 { nope");
-        f.input.key(Key::Enter);
-        f.type_text("/function edit save");
-        f.input.key(Key::Enter);
-        assert_eq!(std::fs::read_to_string(dir.join("mine.nix")).unwrap(), FIXED);
-        f.type_text("/function edit close");
-        f.input.key(Key::Enter);
-        assert!(f.output().contains("the changes were not saved"));
-    }
 }

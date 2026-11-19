@@ -1,13 +1,13 @@
 //! The Function browser on Ctrl-F (AGL-109): the alternate screen with
-//! the list of the Functions, their sources and what each hides. agl
-//! never edits here: `e` hands the file to the external editor, and what
-//! the editor left is validated — the same words as `agl function check`,
-//! plus what the change means: the restart, the budgets.
+//! the list of the Functions, their sources and what each hides, and a
+//! second tab with the settings' files. agl never edits here: `e` hands
+//! the file to the external editor, and what the editor left is checked —
+//! the same words as `agl function check`, or the settings' own load.
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::fs;
 
 use super::dock::Dock;
 use super::term::{self, Key};
@@ -15,6 +15,7 @@ use super::text::{hard_wrap, truncate};
 use crate::function::Function;
 use crate::function::catalog::{Catalog, Entry, Source};
 use crate::i18n::{Lang, m};
+use crate::settings::UserFile;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tr;
@@ -38,12 +39,21 @@ pub enum Edited {
     Saved { check: String, error: bool },
 }
 
+/// One line of the settings' tab (AGL-109, D6).
+#[derive(Clone)]
+pub struct SettingsItem {
+    pub label: String,
+    pub path: PathBuf,
+    /// The plane's file, when the run is in a plane; its path only.
+    pub note: String,
+}
+
 /// What one key of the list asks of the caller.
 pub enum KeyOutcome {
     Stay,
     Leave,
     /// `e`: the file goes to the external editor (AGL-109, D4).
-    Edit(String, PathBuf),
+    Edit(PathBuf),
     /// `s`: the main thread leaves the session for that Function.
     Switch(String),
 }
@@ -52,10 +62,15 @@ pub enum KeyOutcome {
 pub struct Browser {
     entries: Vec<Entry>,
     at: usize,
+    /// The settings' tab and its cursor (AGL-109, D6).
+    settings: bool,
+    set_at: usize,
     /// The source of the entry being read, with the row it starts at.
     source: Option<(String, usize)>,
     /// The name typed for `c`; the row of keys becomes the question.
     clone: Option<String>,
+    /// `d` was pressed once; `d` again erases the file (AGL-109, D3).
+    delete: bool,
     /// The last thing the browser has to say; it lives until the next key.
     message: Option<String>,
     message_failed: bool,
@@ -67,8 +82,11 @@ impl Browser {
         Browser {
             entries,
             at,
+            settings: false,
+            set_at: 0,
             source: None,
             clone: None,
+            delete: false,
             message: None,
             message_failed: false,
         }
@@ -85,13 +103,31 @@ impl Browser {
             .map(|e| e.name.as_str())
     }
 
-    fn say(&mut self, text: String, failed: bool) {
+    fn note(&mut self, text: String, failed: bool) {
         self.message = Some(text);
         self.message_failed = failed;
     }
 
+    /// Whether the browser owns the key; the rest go to the input
+    /// (AGL-098, D7): the arrows and `jkqecsd\t` do, the typing does not.
+    pub fn takes(&self, key: &Key) -> bool {
+        match key {
+            Key::Ctrl('f') | Key::Escape | Key::Enter | Key::Up | Key::Down | Key::Tab => true,
+            Key::Char(c) if self.clone.is_some() || self.delete => !matches!(c, '\n' | '\r'),
+            Key::Char(c) => matches!(c, 'q' | 'j' | 'k' | 'e' | 'c' | 's' | 'd'),
+            _ => false,
+        }
+    }
+
     /// One key of the mode; what it asks of the caller, if anything.
-    pub fn key(&mut self, key: Key, catalog: &Catalog, lang: Lang, busy: bool) -> KeyOutcome {
+    pub fn key(
+        &mut self,
+        key: Key,
+        catalog: &Catalog,
+        settings: &[SettingsItem],
+        lang: Lang,
+        busy: bool,
+    ) -> KeyOutcome {
         self.message = None;
         self.message_failed = false;
         // `Ctrl-F` twice leaves, as Ctrl-O does with itself.
@@ -113,6 +149,17 @@ impl Browser {
             }
             return KeyOutcome::Stay;
         }
+        // `d` answers itself: the second press erases, any other keeps.
+        if self.delete {
+            self.delete = false;
+            if key == Key::Char('d') {
+                self.erase(catalog, lang);
+            }
+            return KeyOutcome::Stay;
+        }
+        if self.settings {
+            return self.key_settings(key, settings, lang);
+        }
         // The source being read takes the arrows and nothing else.
         if let Some((_, top)) = &mut self.source {
             match key {
@@ -124,6 +171,10 @@ impl Browser {
             return KeyOutcome::Stay;
         }
         match key {
+            Key::Tab => {
+                self.settings = true;
+                KeyOutcome::Stay
+            }
             Key::Escape | Key::Char('q') => KeyOutcome::Leave,
             Key::Down | Key::Char('j') => {
                 self.down();
@@ -137,7 +188,7 @@ impl Browser {
                 if let Some(name) = self.name() {
                     match catalog.text(name) {
                         Ok(text) => self.source = Some((text, 0)),
-                        Err(error) => self.say(error.message(lang), true),
+                        Err(error) => self.note(error.message(lang), true),
                     }
                 }
                 KeyOutcome::Stay
@@ -149,17 +200,17 @@ impl Browser {
                 let row = self.selected().map(|e| (e.name.clone(), e.source, e.error.clone()));
                 match row {
                     Some((_, _, Some(error))) => {
-                        self.say(error, true);
+                        self.note(error, true);
                         KeyOutcome::Stay
                     }
                     Some((name, Source::BuiltIn, None)) => {
-                        self.say(tr!(lang, m::BROWSER_BUILTIN, name = name), false);
+                        self.note(tr!(lang, m::BROWSER_BUILTIN, name = name), false);
                         KeyOutcome::Stay
                     }
-                    Some((name, _, None)) => match catalog.file(&name) {
-                        Ok(file) => KeyOutcome::Edit(name, file.path),
+                    Some((_, _, None)) => match self.selected_file(catalog) {
+                        Ok(path) => KeyOutcome::Edit(path),
                         Err(error) => {
-                            self.say(error.message(lang), true);
+                            self.note(error.message(lang), true);
                             KeyOutcome::Stay
                         }
                     },
@@ -170,11 +221,22 @@ impl Browser {
                 self.clone = Some(String::new());
                 KeyOutcome::Stay
             }
+            Key::Char('d') => {
+                match self.selected().map(|e| e.source) {
+                    Some(Source::BuiltIn) => {
+                        let name = self.entries[self.at].name.clone();
+                        self.note(tr!(lang, m::BROWSER_DELETE_BUILTIN, name = name), false);
+                    }
+                    Some(_) if self.name().is_some() => self.delete = true,
+                    _ => {}
+                }
+                KeyOutcome::Stay
+            }
             Key::Char('s') => {
                 if let Some(name) = self.name() {
                     if busy {
                         // The turn answers first, as `/function <name>` does.
-                        self.say(tr!(lang, m::BUSY, name = "Ctrl-F"), true);
+                        self.note(tr!(lang, m::BUSY, name = "Ctrl-F"), true);
                         KeyOutcome::Stay
                     } else {
                         KeyOutcome::Switch(name.to_owned())
@@ -187,14 +249,57 @@ impl Browser {
         }
     }
 
-    /// Whether the browser owns the key; the rest go to the input
-    /// (AGL-098, D7): the arrows and `jkqec s` do, the typing does not.
-    pub fn takes(&self, key: &Key) -> bool {
+    /// One key of the settings' tab (AGL-109, D6).
+    fn key_settings(&mut self, key: Key, settings: &[SettingsItem], lang: Lang) -> KeyOutcome {
+        if let Some((_, top)) = &mut self.source {
+            match key {
+                Key::Escape | Key::Enter => self.source = None,
+                Key::Down | Key::Char('j') => *top += 1,
+                Key::Up | Key::Char('k') => *top = top.saturating_sub(1),
+                _ => {}
+            }
+            return KeyOutcome::Stay;
+        }
         match key {
-            Key::Ctrl('f') | Key::Escape | Key::Enter | Key::Up | Key::Down => true,
-            Key::Char(c) if self.clone.is_some() => !matches!(c, '\n' | '\r'),
-            Key::Char(c) => matches!(c, 'q' | 'j' | 'k' | 'e' | 'c' | 's'),
-            _ => false,
+            Key::Tab => {
+                self.settings = false;
+                KeyOutcome::Stay
+            }
+            Key::Escape | Key::Char('q') => KeyOutcome::Leave,
+            Key::Down | Key::Char('j') => {
+                self.set_at = (self.set_at + 1).min(settings.len().saturating_sub(1));
+                KeyOutcome::Stay
+            }
+            Key::Up | Key::Char('k') => {
+                self.set_at = self.set_at.saturating_sub(1);
+                KeyOutcome::Stay
+            }
+            Key::Enter => {
+                if let Some(item) = settings.get(self.set_at) {
+                    match fs::read_to_string(&item.path) {
+                        Ok(text) => self.source = Some((text, 0)),
+                        Err(error) => self.note(format!("{}: {error}", item.path.display()), true),
+                    }
+                }
+                KeyOutcome::Stay
+            }
+            Key::Char('e') => {
+                let item = settings.get(self.set_at).cloned();
+                match item {
+                    Some(item) => {
+                        if !item.path.is_file() {
+                            self.note(
+                                tr!(lang, m::BROWSER_SETTINGS_MISSING, path = item.path.display()),
+                                false,
+                            );
+                            return KeyOutcome::Stay;
+                        }
+                        KeyOutcome::Edit(item.path)
+                    }
+                    None => KeyOutcome::Stay,
+                }
+            }
+            _ => KeyOutcome::Stay,
         }
     }
 
@@ -204,13 +309,46 @@ impl Browser {
         }
     }
 
+    /// The file the row stands on: the one a run would load (AGL-102, D2).
+    fn selected_file(&self, catalog: &Catalog) -> Result<PathBuf, crate::error::Error> {
+        catalog.file(&self.entries[self.at].name).map(|file| file.path)
+    }
+
+    /// `d` answered twice: the file goes, the list is read anew
+    /// (AGL-109, D3). The settings' files are not deletable here.
+    fn erase(&mut self, catalog: &Catalog, lang: Lang) {
+        let name = match self.name() {
+            Some(name) => name.to_owned(),
+            None => return,
+        };
+        let path = match catalog.file(&name) {
+            Ok(file) => file.path,
+            Err(error) => {
+                self.note(error.message(lang), true);
+                return;
+            }
+        };
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                self.note(tr!(lang, m::BROWSER_DELETED, name = name.clone()), false);
+                self.entries = catalog.entries(lang);
+                self.at = self
+                    .entries
+                    .iter()
+                    .position(|e| e.name == name)
+                    .unwrap_or_else(|| self.at.min(self.entries.len().saturating_sub(1)));
+            }
+            Err(error) => self.note(format!("{}: {error}", path.display()), true),
+        }
+    }
+
     /// `c` answered: the copy goes to the workspace's `functions/`, the
     /// same way `agl function new` puts it (AGL-102, D3).
     fn clone_as(&mut self, name: &str, catalog: &Catalog, lang: Lang) {
         let from = self.entries[self.at].name.clone();
         match catalog.text(&from).and_then(|text| catalog.create(name, &text)) {
             Ok(path) => {
-                self.say(
+                self.note(
                     tr!(lang, m::BROWSER_CLONED, name = name.to_owned(), path = path.display()),
                     false,
                 );
@@ -219,30 +357,57 @@ impl Browser {
                     self.at = at;
                 }
             }
-            Err(error) => self.say(error.message(lang), true),
+            Err(error) => self.note(error.message(lang), true),
         }
     }
 
-    /// What the editor left (AGL-109, D4).
+    /// What the editor left of a Function (AGL-109, D4).
     pub fn note_edited(&mut self, name: &str, edited: Edited, catalog: &Catalog, lang: Lang) {
         match edited {
             Edited::Failed(reason) => {
-                self.say(tr!(lang, m::BROWSER_EDITOR_FAILED, editor = editor_command().join(" "), reason = reason), true);
+                self.note(tr!(lang, m::BROWSER_EDITOR_FAILED, editor = editor_command().join(" "), reason = reason), true);
             }
             Edited::Unchanged => {
-                self.say(tr!(lang, m::BROWSER_UNCHANGED, name = name.to_owned()), false);
+                self.note(tr!(lang, m::BROWSER_UNCHANGED, name = name.to_owned()), false);
             }
             Edited::Saved { check, error } => {
-                self.say(check, error);
+                self.note(check, error);
                 self.entries = catalog.entries(lang);
             }
         }
     }
 
-    /// The rows of the screen above the dock: the list, or the source
-    /// being read, and below them the row of keys — or what the browser
-    /// has to say, until the next key.
-    pub fn lines(&self, theme: &Theme, lang: Lang, columns: usize, room: usize) -> Vec<String> {
+    /// What the editor left of a settings' file (AGL-109, D6): its own
+    /// load is the check, and a fresh file is the settings' default.
+    pub fn note_settings_edited(&mut self, path: &Path, edited: Edited, lang: Lang) {
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let edited = match edited {
+            Edited::Saved { check: _, error: false } => match UserFile::load(path) {
+                Ok(_) => Edited::Saved {
+                    check: tr!(lang, m::BROWSER_SETTINGS_SAVED, name = name).to_string(),
+                    error: false,
+                },
+                Err(error) => Edited::Saved { check: error.message(lang), error: true },
+            },
+            other => other,
+        };
+        match edited {
+            Edited::Failed(reason) => {
+                self.note(tr!(lang, m::BROWSER_EDITOR_FAILED, editor = editor_command().join(" "), reason = reason), true);
+            }
+            Edited::Unchanged => {
+                self.note(tr!(lang, m::BROWSER_UNCHANGED, name = name), false);
+            }
+            Edited::Saved { check, error } => self.note(check, error),
+        }
+    }
+
+    /// The rows of the screen above the dock: the list of the Functions
+    /// or of the settings, and below them the row of keys — or what the
+    /// browser has to say, until the next key.
+    pub fn lines(&self, theme: &Theme, lang: Lang, columns: usize, room: usize, settings: &[SettingsItem]) -> Vec<String> {
         let room = room.max(2);
         let shown = room - 1;
         let mut lines: Vec<String> = Vec::new();
@@ -253,24 +418,43 @@ impl Browser {
                 .collect();
             let top = (*top).min(all.len().saturating_sub(1));
             lines.extend(all.into_iter().skip(top).take(shown));
+        } else if self.settings {
+            let from = self.set_at.saturating_sub(shown.saturating_sub(1));
+            for (n, item) in settings.iter().skip(from).take(shown).enumerate() {
+                lines.push(self.settings_line(theme, columns, item, from + n == self.set_at));
+            }
         } else {
             let from = self.at.saturating_sub(shown.saturating_sub(1));
             for entry in self.entries.iter().skip(from).take(shown) {
                 lines.push(self.entry_line(theme, lang, columns, entry));
             }
         }
-        let hint = match (&self.clone, &self.message) {
-            (Some(typed), _) => tr!(
-                lang,
-                m::BROWSER_CLONE_ASK,
-                name = self.entries[self.at].name.clone(),
-                typed = typed.clone()
-            )
-            .to_string(),
-            (None, Some(message)) => message.clone(),
-            (None, None) => tr!(lang, m::BROWSER_KEYS).to_string(),
+        let (hint, failed) = match (&self.clone, &self.delete, &self.message) {
+            (Some(typed), _, _) => (
+                tr!(
+                    lang,
+                    m::BROWSER_CLONE_ASK,
+                    name = self.entries[self.at].name.clone(),
+                    typed = typed.clone()
+                )
+                .to_string(),
+                false,
+            ),
+            (None, true, _) => (
+                tr!(lang, m::BROWSER_DELETE_ASK, name = self.entries[self.at].name.clone()).to_string(),
+                false,
+            ),
+            (None, _, Some(message)) => (message.clone(), self.message_failed),
+            (None, _, None) => (
+                tr!(
+                    lang,
+                    if self.settings { m::BROWSER_SETTINGS_KEYS } else { m::BROWSER_KEYS }
+                )
+                .to_string(),
+                false,
+            ),
         };
-        let role = if self.message_failed { Role::StatusFailure } else { Role::Muted };
+        let role = if failed { Role::StatusFailure } else { Role::Muted };
         lines.push(theme.paint(role, &truncate(&hint, columns)));
         lines
     }
@@ -287,7 +471,10 @@ impl Browser {
                 format!("{}  {model}", entry.kind.name())
             }
         };
-        let line = truncate(&format!("{mark} {:<22} {:<9}{rest}", entry.name, entry.source.label(lang)), columns);
+        let line = truncate(
+            &format!("{mark} {:<22} {:<9}{rest}", entry.name, entry.source.label(lang)),
+            columns,
+        );
         let role = if entry.error.is_some() {
             Role::StatusFailure
         } else if entry.current {
@@ -296,6 +483,15 @@ impl Browser {
             Role::InputText
         };
         theme.paint(role, &line)
+    }
+
+    fn settings_line(&self, theme: &Theme, columns: usize, item: &SettingsItem, picked: bool) -> String {
+        let mark = if picked { '>' } else { ' ' };
+        let line = truncate(
+            &format!("{mark} {} — {} {}", item.label, item.note, item.path.display()),
+            columns,
+        );
+        theme.paint(Role::InputText, &line)
     }
 }
 
@@ -312,38 +508,37 @@ pub fn editor_command() -> Vec<String> {
 /// Hands the screen to the editor and checks what it left (AGL-109, D4,
 /// D5): the cooked terminal and the main screen go to the child, as to
 /// `git commit`, and the raw mode and the alternate screen return after.
-/// The second of the pair says that the screen is the browser's again.
-pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> (Edited, bool) {
+pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
     let before = fs::read_to_string(path).unwrap_or_default();
     let command = editor_command();
     let shown = command.join(" ");
     let (Some(program), args) = (command.first(), &command[1..]) else {
-        return (Edited::Failed(shown), false);
+        return Edited::Failed(shown);
     };
     write(term::MOUSE_OFF);
     write(term::ALT_OFF);
     term::suspend_raw();
-    match Command::new(program)
+    let status = Command::new(program)
         .args(args)
         .arg(path)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()
-    {
-        Err(error) => {
-            term::resume_raw();
-            write(term::ALT_ON);
-            write(term::MOUSE_ON);
-            (Edited::Failed(format!("{shown}: {error}")), true)
-        }
+        .status();
+    term::resume_raw();
+    write(term::ALT_ON);
+    write(term::MOUSE_ON);
+    match status {
+        Err(error) => Edited::Failed(format!("{shown}: {error}")),
         Ok(_) => {
-            term::resume_raw();
-            write(term::ALT_ON);
-            write(term::MOUSE_ON);
             let after = fs::read_to_string(path).unwrap_or_default();
             if after == before {
-                return (Edited::Unchanged, true);
+                return Edited::Unchanged;
+            }
+            // A `settings.nix` is the settings' own to answer; a Function
+            // is checked the way `agl function check` checks it (D5).
+            if path.file_name().is_some_and(|name| name == "settings.nix") {
+                return Edited::Saved { check: String::new(), error: false };
             }
             let checked = crate::nix::eval_file(path)
                 .and_then(|value| Function::from_value(path, value))
@@ -353,25 +548,23 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> (Edited, b
                     let name = path
                         .file_stem()
                         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-                    (
-                        Edited::Saved {
-                            check: tr!(
-                                lang,
-                                m::BROWSER_SAVED,
-                                name = name,
-                                kind = function.model.kind().name(),
-                                model = crate::engine::model_of(&function.model)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_default(),
-                                context = function.model.context.unwrap_or_default()
-                            ),
-                            error: false,
-                        },
-                        true,
-                    )
+                    Edited::Saved {
+                        check: tr!(
+                            lang,
+                            m::BROWSER_SAVED,
+                            name = name,
+                            kind = function.model.kind().name(),
+                            model = crate::engine::model_of(&function.model)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
+                            context = function.model.context.unwrap_or_default()
+                        )
+                        .to_string(),
+                        error: false,
+                    }
                 }
-                Err(problem) => (Edited::Saved { check: problem, error: true }, true),
+                Err(problem) => Edited::Saved { check: problem, error: true },
             }
         }
     }
@@ -380,11 +573,13 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> (Edited, b
 /// The mode on the terminal, as `inspect::run`: the alternate screen,
 /// the full redraws, the dock's rows at the bottom, the input live
 /// (AGL-098, D7): its text goes to `submit`, as from the inspect mode.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     write: &dyn Fn(&str),
     theme: &Theme,
     lang: Lang,
     catalog: &Catalog,
+    settings: &[SettingsItem],
     dock: &Dock,
     busy: &dyn Fn() -> bool,
     submit: &dyn Fn(&str),
@@ -402,7 +597,7 @@ pub fn run(
         }
         let rows = dock.layout();
         let room = size.1.saturating_sub(rows.rows.len());
-        let mut lines = browser.lines(theme, lang, size.0, room);
+        let mut lines = browser.lines(theme, lang, size.0, room, settings);
         lines.extend(rows.rows);
         write(&lines.join("\r\n"));
         let up = lines.len() - 1 - (room + rows.cursor_row);
@@ -437,7 +632,9 @@ pub fn run(
                 }
                 continue;
             }
-            match browser.key(key, catalog, lang, busy()) {
+            // On the settings' tab `e` answers through the settings' load.
+            let on_settings = browser.settings;
+            match browser.key(key, catalog, settings, lang, busy()) {
                 KeyOutcome::Stay => {}
                 KeyOutcome::Leave => {
                     open = false;
@@ -448,9 +645,16 @@ pub fn run(
                     open = false;
                     break;
                 }
-                KeyOutcome::Edit(name, path) => {
-                    let (edited, _) = spawn_editor(write, &path, lang);
-                    browser.note_edited(&name, edited, catalog, lang);
+                KeyOutcome::Edit(path) => {
+                    let edited = spawn_editor(write, &path, lang);
+                    if on_settings {
+                        browser.note_settings_edited(&path, edited, lang);
+                    } else {
+                        let name = path
+                            .file_stem()
+                            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                        browser.note_edited(&name, edited, catalog, lang);
+                    }
                 }
             }
         }
@@ -505,15 +709,27 @@ mod tests {
         }
     }
 
+    fn setting(path: &Path) -> SettingsItem {
+        SettingsItem {
+            label: "settings.nix".into(),
+            path: path.to_path_buf(),
+            note: "the user's".into(),
+        }
+    }
+
     fn press(browser: &mut Browser, catalog: &Catalog, keys: &[Key]) -> KeyOutcome {
         let mut last = KeyOutcome::Stay;
         for key in keys {
-            last = browser.key(key.clone(), catalog, Lang::En, false);
+            last = browser.key(key.clone(), catalog, &[], Lang::En, false);
             if !matches!(last, KeyOutcome::Stay) {
                 return last;
             }
         }
         last
+    }
+
+    fn hint(browser: &Browser, settings: &[SettingsItem]) -> String {
+        browser.lines(&Theme::plain(), Lang::En, 80, 10, settings).last().unwrap().clone()
     }
 
     #[test]
@@ -539,6 +755,7 @@ mod tests {
         assert!(!browser.takes(&Key::Char('x')));
         assert!(browser.takes(&Key::Char('j')));
         assert!(browser.takes(&Key::Up));
+        assert!(browser.takes(&Key::Tab));
     }
 
     #[test]
@@ -546,13 +763,12 @@ mod tests {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
         let mut browser = Browser::new(catalog.entries(Lang::En));
-        assert!(matches!(browser.key(Key::Char('s'), &catalog, Lang::En, false), KeyOutcome::Switch(name) if name == "mine"));
+        assert!(matches!(browser.key(Key::Char('s'), &catalog, &[], Lang::En, false), KeyOutcome::Switch(name) if name == "mine"));
         // The turn answers first, as `/function <name>` does.
         let mut browser = Browser::new(catalog.entries(Lang::En));
-        assert!(matches!(browser.key(Key::Char('s'), &catalog, Lang::En, true), KeyOutcome::Stay));
-        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10);
+        assert!(matches!(browser.key(Key::Char('s'), &catalog, &[], Lang::En, true), KeyOutcome::Stay));
         // The words of `/function` on a busy thread (AGL-036, D9).
-        assert!(lines.last().unwrap().contains("Ctrl-F"), "{}", lines.last().unwrap());
+        assert!(hint(&browser, &[]).contains("Ctrl-F"));
     }
 
     #[test]
@@ -560,10 +776,9 @@ mod tests {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
         let mut browser = Browser::new(vec![builtin("stock")]);
-        let outcome = browser.key(Key::Char('e'), &catalog, Lang::En, false);
+        let outcome = browser.key(Key::Char('e'), &catalog, &[], Lang::En, false);
         assert!(matches!(outcome, KeyOutcome::Stay));
-        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10);
-        assert!(lines.last().unwrap().contains("clones"), "{}", lines.last().unwrap());
+        assert!(hint(&browser, &[]).contains("clones"), "{}", hint(&browser, &[]));
     }
 
     #[test]
@@ -573,15 +788,13 @@ mod tests {
         let mut browser = Browser::new(catalog.entries(Lang::En));
         press(&mut browser, &catalog, &[Key::Char('c')]);
         // The row of keys became the question.
-        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10);
-        assert!(lines.last().unwrap().contains("clone `mine` as:"), "{}", lines.last().unwrap());
+        assert!(hint(&browser, &[]).contains("clone `mine` as:"), "{}", hint(&browser, &[]));
         press(&mut browser, &catalog, &[Key::Char('m'), Key::Char('y'), Key::Enter]);
         assert!(
             catalog.workspace_dir.join("my.nix").is_file(),
             "the copy went to the workspace's functions/"
         );
-        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10);
-        assert!(lines.last().unwrap().contains("cloned to my"), "{}", lines.last().unwrap());
+        assert!(hint(&browser, &[]).contains("cloned to my"), "{}", hint(&browser, &[]));
         assert_eq!(browser.name(), Some("my"));
     }
 
@@ -591,7 +804,32 @@ mod tests {
         let catalog = fixture(&dir.0);
         let mut browser = Browser::new(catalog.entries(Lang::En));
         press(&mut browser, &catalog, &[Key::Char('c'), Key::Enter]);
-        assert!(!browser.lines(&Theme::plain(), Lang::En, 80, 10).last().unwrap().contains("cloned"));
+        assert!(!hint(&browser, &[]).contains("cloned"));
+    }
+
+    #[test]
+    fn a_delete_asks_twice_and_erases_the_file() {
+        let dir = TempDir::new();
+        let catalog = fixture(&dir.0);
+        let mut browser = Browser::new(catalog.entries(Lang::En));
+        press(&mut browser, &catalog, &[Key::Char('d')]);
+        assert!(hint(&browser, &[]).contains("delete mine?"), "{}", hint(&browser, &[]));
+        // Any other key keeps the file, and its answer spends the question.
+        press(&mut browser, &catalog, &[Key::Char('x')]);
+        assert!(catalog.user_dir.join("mine.nix").is_file());
+        // A fresh question, and its second press erases and says so.
+        press(&mut browser, &catalog, &[Key::Char('d'), Key::Char('d')]);
+        assert!(!catalog.user_dir.join("mine.nix").is_file(), "the second `d` erased it");
+        assert!(hint(&browser, &[]).contains("deleted mine"), "{}", hint(&browser, &[]));
+    }
+
+    #[test]
+    fn a_builtin_has_nothing_to_delete() {
+        let dir = TempDir::new();
+        let catalog = fixture(&dir.0);
+        let mut browser = Browser::new(vec![builtin("stock")]);
+        press(&mut browser, &catalog, &[Key::Char('d')]);
+        assert!(hint(&browser, &[]).contains("repository"), "{}", hint(&browser, &[]));
     }
 
     #[test]
@@ -605,13 +843,43 @@ mod tests {
             &catalog,
             Lang::En,
         );
-        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10);
-        assert!(lines.last().unwrap().contains("loads"), "{}", lines.last().unwrap());
+        assert!(hint(&browser, &[]).contains("loads"), "{}", hint(&browser, &[]));
         // A broken save says so, and the list stands.
         browser.note_edited("mine", Edited::Saved { check: "no `model`".into(), error: true }, &catalog, Lang::En);
-        assert!(browser.lines(&Theme::plain(), Lang::En, 80, 10).last().unwrap().contains("no `model`"));
+        assert!(hint(&browser, &[]).contains("no `model`"));
         browser.note_edited("mine", Edited::Unchanged, &catalog, Lang::En);
-        assert!(browser.lines(&Theme::plain(), Lang::En, 80, 10).last().unwrap().contains("as it was"));
+        assert!(hint(&browser, &[]).contains("as it was"));
+    }
+
+    #[test]
+    fn the_tab_crosses_to_the_settings_and_back() {
+        let dir = TempDir::new();
+        let catalog = fixture(&dir.0);
+        let items = vec![setting(&dir.0.join("settings.nix"))];
+        let mut browser = Browser::new(catalog.entries(Lang::En));
+        browser.key(Key::Tab, &catalog, &items, Lang::En, false);
+        assert!(browser.settings);
+        let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10, &items);
+        assert!(lines.last().unwrap().contains("Tab functions"), "{}", lines.last().unwrap());
+        assert!(lines[0].contains("settings.nix"), "{}", lines[0]);
+        browser.key(Key::Tab, &catalog, &items, Lang::En, false);
+        assert!(!browser.settings);
+    }
+
+    #[test]
+    fn a_settings_file_answers_with_its_own_load() {
+        let dir = TempDir::new();
+        let catalog = fixture(&dir.0);
+        let path = dir.0.join("settings.nix");
+        fs::write(&path, r#"{ agl, ... }: { function = "mine"; language = "en"; }"#).unwrap();
+        let mut browser = Browser::new(catalog.entries(Lang::En));
+        browser.settings = true;
+        browser.note_settings_edited(&path, Edited::Saved { check: String::new(), error: false }, Lang::En);
+        assert!(hint(&browser, &[]).contains("it loads"), "{}", hint(&browser, &[]));
+        // A file that does not evaluate is the error's own.
+        fs::write(&path, "{ agl, ... }: { nope = ; }").unwrap();
+        browser.note_settings_edited(&path, Edited::Saved { check: String::new(), error: false }, Lang::En);
+        assert!(!hint(&browser, &[]).contains("it loads"), "{}", hint(&browser, &[]));
     }
 
     #[test]
@@ -619,11 +887,11 @@ mod tests {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
         let mut browser = Browser::new(catalog.entries(Lang::En));
-        assert!(matches!(browser.key(Key::Enter, &catalog, Lang::En, false), KeyOutcome::Stay));
-        let lines = browser.lines(&Theme::plain(), Lang::En, 40, 6);
+        assert!(matches!(browser.key(Key::Enter, &catalog, &[], Lang::En, false), KeyOutcome::Stay));
+        let lines = browser.lines(&Theme::plain(), Lang::En, 40, 6, &[]);
         assert!(lines.iter().any(|l| l.contains("policy")), "the source shows: {lines:?}");
         assert!(browser.source.is_some());
-        browser.key(Key::Escape, &catalog, Lang::En, false);
+        browser.key(Key::Escape, &catalog, &[], Lang::En, false);
         assert!(browser.source.is_none());
     }
 }
