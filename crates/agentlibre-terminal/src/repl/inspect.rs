@@ -4,8 +4,8 @@
 //! stands on prints whole. `↑`/`↓` turn the screen, and so does the wheel,
 //! since Alacritty sends it as those arrows (D1); `Shift`+arrows walk the
 //! blocks and `Alt`+arrows move to the neighbouring record (D2, D3); the
-//! dock below stays live, and leaving puts the block he was reading above
-//! it again (D6, D7).
+//! dock below stays live, and leaving prints nothing — the terminal is
+//! back where it was (AGL-098, D7; AGL-111, D1).
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use super::markdown;
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
 use super::transcript::{
-    BODY_PREFIX, Fold, Render, Screen, block_lines, elbow_rows, notice_lines, summary,
+    BODY_PREFIX, Fold, Render, block_lines, elbow_rows, notice_lines, summary,
     user_lines,
 };
 use crate::backend::ToolCall;
@@ -31,13 +31,10 @@ const RESERVE: usize = 2;
 /// The rows one tick of the wheel turns (AGL-098, D1).
 const WHEEL_STEP: usize = 3;
 
-/// What leaving the mode gives back (AGL-098, D6, D7): the block he was
-/// reading, to redraw above the dock, and the input's text when `Enter`
-/// sent it.
-pub struct Exit {
-    pub block: Vec<String>,
-    pub submit: Option<String>,
-}
+/// What leaving the mode gives back (AGL-098, D7; AGL-111, D1): the
+/// input's text when `Enter` sent it, else nothing — the alternate screen
+/// already puts the terminal back where it was, so nothing is redrawn.
+pub type Exit = Option<String>;
 
 /// The mode's answer to a key (AGL-098, D1).
 pub enum Mode {
@@ -430,16 +427,6 @@ impl Inspect {
         }
     }
 
-    /// The block the focus stands on, whole and without its marker
-    /// (AGL-098, D6): what the screen draws again above the dock when the
-    /// mode is over.
-    pub fn focused_block(&self, theme: &Theme, lang: Lang, columns: usize, outputs: &Path) -> Vec<String> {
-        let Some(record) = self.records.get(self.selection) else {
-            return Vec::new();
-        };
-        self.record_block(record, self.block, true, theme, lang, columns, outputs)
-    }
-
     /// The position, the follow and the keys' hint (D8); the position is
     /// first, so a narrow screen keeps it.
     fn hint(&self, theme: &Theme, lang: Lang, columns: usize) -> String {
@@ -734,14 +721,9 @@ pub fn run(
     }
     write(term::MOUSE_OFF);
     write(term::ALT_OFF);
-    // Leaving puts the block he was reading above the dock again (D6);
-    // a send needs no redraw — its own line says it.
-    let block = if submit.is_some() {
-        Vec::new()
-    } else {
-        inspect.focused_block(theme, lang, dock.columns(), &outputs)
-    };
-    Exit { block, submit }
+    // Leaving prints nothing (AGL-111, D1): the alternate screen puts the
+    // terminal back where it was. A send says itself, in the transcript.
+    submit
 }
 
 /// One redraw of the screen: the clear, the lines, no trailing newline.

@@ -310,7 +310,7 @@ struct Input {
     exit_now: Box<dyn Fn() + Send + Sync>,
     /// Opens the inspect mode on the alternate screen (AGL-066, D4); it
     /// runs here, in the input thread, and gives back what leaving means
-    /// (AGL-098, D6, D7): the block to redraw, and the text to send.
+    /// (AGL-098, D7; AGL-111, D1): the text to send, else nothing.
     open_inspect: Box<dyn Fn() -> inspect::Exit + Send + Sync>,
     /// Opens the Function browser on the alternate screen (AGL-109, D1);
     /// `Some` only with a terminal of its own, as `/function` itself.
@@ -764,14 +764,10 @@ impl Input {
         }
         if key == Key::Ctrl('o') {
             // The inspect mode takes the alternate screen and returns the
-            // terminal as it was (AGL-066, D4, D8). Leaving puts the block
-            // he was reading above the dock (AGL-098, D6); `Enter` inside
-            // the mode sends the input's text (D7).
-            let exit = (self.open_inspect)();
-            if !exit.block.is_empty() {
-                self.dock.print(&exit.block);
-            }
-            if let Some(message) = exit.submit {
+            // terminal as it was (AGL-066, D4, D8), printing nothing on its
+            // way out (AGL-111, D1); `Enter` inside the mode sends the
+            // input's text (AGL-098, D7).
+            if let Some(message) = (self.open_inspect)() {
                 self.submitted(message);
             }
             return;
@@ -1725,10 +1721,7 @@ mod tests {
                 let inspects = inspects.clone();
                 Box::new(move || {
                     inspects.fetch_add(1, Ordering::SeqCst);
-                    inspect::Exit {
-                        block: Vec::new(),
-                        submit: None,
-                    }
+                    None
                 })
             },
             open_browser: None,
