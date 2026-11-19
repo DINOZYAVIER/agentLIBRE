@@ -215,6 +215,10 @@ pub enum FunctionAction {
     Show { name: String },
     /// `agl function new <name> [from]` (AGL-102, D3).
     New { name: String, from: Option<String> },
+    /// `agl function check <name|file>` (AGL-109, D5): loads what the
+    /// name resolves to, or the given file alone, and says whether it
+    /// loads; nvim may ask it on every save.
+    Check(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,7 +395,8 @@ fn init_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error>
 }
 
 /// `agl function list` or `agl function use <name> [--user]`,
-/// `agl function show <name>`, `agl function new <name> [from]` (AGL-102).
+/// `agl function show <name>`, `agl function new <name> [from]`,
+/// `agl function check <name|file>` (AGL-102, AGL-109).
 fn function_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
     let mut action = match args.next().map(text).transpose()?.as_deref() {
         Some("list") => FunctionAction::List,
@@ -409,6 +414,11 @@ fn function_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Er
             let from = args.next().map(text).transpose()?;
             FunctionAction::New { name, from }
         }
+        Some("check") => FunctionAction::Check(
+            args.next()
+                .ok_or_else(|| Error::MissingValue("check".into()))
+                .and_then(text)?,
+        ),
         Some("use") => {
             let name = args
                 .next()
@@ -1004,6 +1014,14 @@ mod tests {
             parse_strs(&["function", "new", "p", "q"]).unwrap(),
             Command::Function(FunctionAction::New { name: "p".into(), from: Some("q".into()) })
         );
+        assert_eq!(
+            parse_strs(&["function", "check", "/tmp/p.nix"]).unwrap(),
+            Command::Function(FunctionAction::Check("/tmp/p.nix".into()))
+        );
+        assert!(matches!(
+            parse_strs(&["function", "check"]),
+            Err(Error::MissingValue(o)) if o == "check"
+        ));
         assert_eq!(parse_strs(&["function", "--help"]).unwrap(), Command::Help(HelpTopic::Function));
         // Only the first word is a command; a message may say "function".
         assert_eq!(

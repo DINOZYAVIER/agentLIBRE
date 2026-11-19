@@ -263,8 +263,8 @@ the user's):
 
     /// The usage of `agl function`.
     pub const HELP_FUNCTION_USAGE: Msg = Msg {
-        en: "agl function list|use <name> [--user]|show <name>|new <name> [from] [--plane <name>]",
-        uk: "agl function list|use <назва> [--user]|show <назва>|new <назва> [зразок] [--plane <назва>]",
+        en: "agl function list|use <name> [--user]|show <name>|new <name> [from]|check <name|file> [--plane <name>]",
+        uk: "agl function list|use <назва> [--user]|show <назва>|new <назва> [зразок]|check <назва|файл> [--plane <назва>]",
     };
 
     /// The section of `agl function` in the help (AGL-061, D3).
@@ -278,7 +278,10 @@ built-ins; a Function's model names its server kind and weights):
                               project's settings.nix (--user: the user's)
   function show <name>        the source of <name> and the file it loads from
   function new <name> [from]  a copy of <name> — of `from` when given —
-                              into the workspace's functions/",
+                              into the workspace's functions/
+  function check <name|file>  whether it loads, and what runs: the kind,
+                              the model, the context; for a file, the
+                              editor's own bytes, not the saved name",
         uk: "\
 Функції (functions/*.nix робочої області, потім користувача, потім
 вбудовані; модель Функції називає вид її сервера і ваги):
@@ -288,7 +291,10 @@ built-ins; a Function's model names its server kind and weights):
                               settings.nix проєкту (--user: користувача)
   function show <назва>       код <назва> і файл, з якого її завантажують
   function new <назва> [зраз] копію <назва> — або <зраз>, якщо вказано — у
-                              functions/ робочої області",
+                              functions/ робочої області
+  function check <назва|файл> чи завантажується і що запускається: вид,
+                              модель, контекст; для файла — його власні
+                              байти, не збережена назва",
     };
 
     /// The usage of `agl search`.
@@ -1040,6 +1046,12 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNCTION_NEW: Msg = Msg {
         en: "Function {name}: a copy of {source} in {path}",
         uk: "Function {name}: копія {source} у {path}",
+    };
+
+    /// `agl function check` loaded a Function (AGL-109, D5).
+    pub const FUNCTION_CHECK: Msg = Msg {
+        en: "{name}: loads, {kind}, {model}, {context} of context",
+        uk: "{name}: завантажується, {kind}, {model}, {context} контексту",
     };
 
     /// `/function show` without a name (AGL-102, D2).

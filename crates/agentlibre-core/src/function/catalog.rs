@@ -117,7 +117,7 @@ impl Catalog {
     }
 
     /// The directories a Function is looked for in, in their order.
-    fn dirs(&self) -> Vec<&Path> {
+    pub fn dirs(&self) -> Vec<&Path> {
         self.plane_dir
             .iter()
             .map(PathBuf::as_path)

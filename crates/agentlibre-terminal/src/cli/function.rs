@@ -68,6 +68,31 @@ pub fn run(
                 )
             );
         }
+        // AGL-109, D5: the load of a file the editor left, or of what the
+        // name resolves to; what does not load is the error itself.
+        FunctionAction::Check(target) => {
+            let path = Path::new(&target);
+            let (name, function) = if path.is_file() {
+                (
+                    path.file_stem()
+                        .map_or_else(|| target.clone(), |stem| stem.to_string_lossy().into_owned()),
+                    Function::from_value(path, crate::nix::eval_file(path)?)?,
+                )
+            } else {
+                (target.clone(), Function::load(&catalog.dirs(), &target)?)
+            };
+            outln!(
+                "{}",
+                tr!(
+                    lang,
+                    m::FUNCTION_CHECK,
+                    name = name,
+                    kind = function.model.kind().name(),
+                    model = crate::engine::model_of(&function.model)?.unwrap_or_default(),
+                    context = function.model.context.unwrap_or_default()
+                )
+            );
+        }
         FunctionAction::Use { name, user: to_user } => {
             catalog.check(&name)?;
             let path = if to_user {
