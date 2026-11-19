@@ -156,10 +156,56 @@ impl Inner {
     }
 }
 
+/// What an alternate-screen mode asks of the REPL's keys (AGL-112, D1;
+/// AGL-114, D1-D3). The mode owns its own loop, so the input thread
+/// lends it these at the call.
+pub struct ModeKeys<'a> {
+    /// Ctrl-C as in the input, but it neither quits agl nor leaves.
+    pub interrupt: &'a dyn Fn(),
+    /// Whether a dictation records now.
+    pub recording: &'a dyn Fn() -> bool,
+    /// Cancels the recording; the next Escape leaves (AGL-114, D1).
+    pub cancel: &'a dyn Fn(),
+    /// Ctrl-R: the dictation's own start or stop.
+    pub voice: &'a dyn Fn(),
+    /// Ctrl-V: the clipboard's own paste.
+    pub paste: &'a dyn Fn(),
+}
+
+impl ModeKeys<'_> {
+    pub fn interrupt(&self) {
+        (self.interrupt)();
+    }
+
+    pub fn recording(&self) -> bool {
+        (self.recording)()
+    }
+
+    pub fn cancel(&self) {
+        (self.cancel)();
+    }
+
+    pub fn voice(&self) {
+        (self.voice)();
+    }
+
+    pub fn paste(&self) {
+        (self.paste)();
+    }
+}
+
 /// The Function browser of Ctrl-F (AGL-109, D1): the mode itself, given
 /// the threads and the surfaces it draws on.
 type OpenBrowser = Box<
-    dyn Fn(&Control, &Dock, Lang, &Theme, &Catalog, &[browser::SettingsItem]) -> browser::Exit
+    dyn Fn(
+            &Control,
+            &Dock,
+            Lang,
+            &Theme,
+            &Catalog,
+            &[browser::SettingsItem],
+            &ModeKeys,
+        ) -> browser::Exit
         + Send
         + Sync,
 >;
@@ -311,7 +357,7 @@ struct Input {
     /// Opens the inspect mode on the alternate screen (AGL-066, D4); it
     /// runs here, in the input thread, and gives back what leaving means
     /// (AGL-098, D7; AGL-111, D1): the text to send, else nothing.
-    open_inspect: Box<dyn Fn() -> inspect::Exit + Send + Sync>,
+    open_inspect: Box<dyn Fn(&ModeKeys) -> inspect::Exit + Send + Sync>,
     /// Opens the Function browser on the alternate screen (AGL-109, D1);
     /// `Some` only with a terminal of its own, as `/function` itself.
     open_browser: Option<OpenBrowser>,
@@ -712,8 +758,10 @@ impl Input {
         }
     }
 
-    /// Ctrl-C (D120).
-    fn interrupt(&self) {
+    /// Ctrl-C (D120). `stay` is the mode's case (AGL-112, D1, D2): the same
+    /// key inside an alternate-screen mode stops the turn and clears the
+    /// line, but neither quits agl nor leaves the mode.
+    fn interrupt(&self, stay: bool) {
         // At a question it is the answer no (AGL-060, D7).
         let question = self.control.lock().question.take();
         if let Some(question) = question {
@@ -724,7 +772,7 @@ impl Input {
         let mut inner = self.control.lock();
         if inner.busy() {
             let already = (self.request_stop)();
-            if already {
+            if already && !stay {
                 drop(inner);
                 (self.exit_now)();
                 return;
@@ -733,9 +781,13 @@ impl Input {
             drop(inner);
             self.dock.set_queued(0);
         } else if self.dock.input_is_empty() {
-            inner.requests.push(Request::Quit);
-            drop(inner);
-            self.control.wake.notify_all();
+            if stay {
+                drop(inner);
+            } else {
+                inner.requests.push(Request::Quit);
+                drop(inner);
+                self.control.wake.notify_all();
+            }
         } else {
             drop(inner);
             self.dock.clear_input();
@@ -766,8 +818,16 @@ impl Input {
             // The inspect mode takes the alternate screen and returns the
             // terminal as it was (AGL-066, D4, D8), printing nothing on its
             // way out (AGL-111, D1); `Enter` inside the mode sends the
-            // input's text (AGL-098, D7).
-            if let Some(message) = (self.open_inspect)() {
+            // input's text (AGL-098, D7), and the mode borrows the keys of
+            // the input while it stands (AGL-112, AGL-114).
+            let keys = ModeKeys {
+                interrupt: &|| self.interrupt(true),
+                recording: &|| self.voice.recording(),
+                cancel: &|| self.voice.cancel(),
+                voice: &|| self.voice.toggle(),
+                paste: &|| self.paste(),
+            };
+            if let Some(message) = (self.open_inspect)(&keys) {
                 self.submitted(message);
             }
             return;
@@ -789,6 +849,13 @@ impl Input {
                     note: tr!(self.lang, m::BROWSER_SETTINGS_PROJECT).to_string(),
                 },
             ];
+            let keys = ModeKeys {
+                interrupt: &|| self.interrupt(true),
+                recording: &|| self.voice.recording(),
+                cancel: &|| self.voice.cancel(),
+                voice: &|| self.voice.toggle(),
+                paste: &|| self.paste(),
+            };
             if let Some(open) = &self.open_browser
                 && let browser::Exit::Switch(name) = open(
                     &self.control,
@@ -797,6 +864,7 @@ impl Input {
                     &self.theme,
                     &self.catalog,
                     &items,
+                    &keys,
                 )
             {
                 let mut inner = self.control.lock();
@@ -809,7 +877,7 @@ impl Input {
         match self.dock.key(key) {
             Outcome::Edited => {}
             Outcome::Submit(message) => self.submitted(message),
-            Outcome::Interrupt => self.interrupt(),
+            Outcome::Interrupt => self.interrupt(false),
             Outcome::Quit => {
                 if self.control.lock().busy() {
                     self.notice(
@@ -1128,7 +1196,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         let data = inspect_data.clone();
         let dock = dock.clone();
         let theme = theme.clone();
-        move || {
+        move |keys: &ModeKeys| {
             // The file holds what the observer wrote of the phases; the
             // in-memory copy is the fallback for when it cannot be read.
             let (events, transitions, outputs) = {
@@ -1156,6 +1224,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 transitions,
                 outputs,
                 &dock,
+                keys,
             )
         }
     };
@@ -1177,18 +1246,21 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         clipboard: Box::new(media::clipboard),
         voice: voice.clone(),
         open_inspect: Box::new(open_inspect),
-        open_browser: Some(Box::new(|control, dock, lang, theme, catalog, items| {
-            browser::run(
-                &|text| dock.write_raw(text),
-                theme,
-                lang,
-                catalog,
-                items,
-                dock,
-                &|| control.lock().busy(),
-                &|message| dock.print(&[message.to_string()]),
-            )
-        })),
+        open_browser: Some(Box::new(
+            |control, dock, lang, theme, catalog, items, keys| {
+                browser::run(
+                    &|text| dock.write_raw(text),
+                    theme,
+                    lang,
+                    catalog,
+                    items,
+                    dock,
+                    &|| control.lock().busy(),
+                    &|message| dock.print(&[message.to_string()]),
+                    keys,
+                )
+            },
+        )),
         said: Mutex::new(None),
     };
     let reader = {
@@ -1719,7 +1791,7 @@ mod tests {
             },
             open_inspect: {
                 let inspects = inspects.clone();
-                Box::new(move || {
+                Box::new(move |_keys| {
                     inspects.fetch_add(1, Ordering::SeqCst);
                     None
                 })

@@ -20,6 +20,7 @@ use super::transcript::{
     BODY_PREFIX, Fold, Render, block_lines, elbow_rows, notice_lines, summary,
     user_lines,
 };
+use super::ModeKeys;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::records::{self, BlockKind, Record};
@@ -671,6 +672,7 @@ pub fn run(
     transitions: Vec<TransitionLine>,
     outputs: std::path::PathBuf,
     dock: &Dock,
+    keys: &ModeKeys,
 ) -> Exit {
     let mut inspect = Inspect::new(&events, &transitions, lang);
     let mut parser = term::Parser::default();
@@ -687,7 +689,7 @@ pub fn run(
         // so its rows change with its keys (AGL-098, D7).
         let rows = dock.layout();
         draw(write, &mut inspect, theme, lang, size.0, size.1, &outputs, &rows);
-        let keys = loop {
+        let pressed = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
                     if parser.waiting() {
@@ -701,20 +703,45 @@ pub fn run(
             }
         };
         let mut open = true;
-        for key in keys {
+        for key in pressed {
+            // The input's own keys, lent to the mode: a dictation is
+            // cancelled by the first Escape and only the next one leaves
+            // (AGL-114, D1), `Ctrl-R` and `Ctrl-V` are its start and its
+            // paste (D2, D3).
+            if key == Key::Escape && keys.recording() {
+                keys.cancel();
+                continue;
+            }
+            if key == Key::Ctrl('r') {
+                keys.voice();
+                continue;
+            }
+            if key == Key::Ctrl('v') {
+                keys.paste();
+                continue;
+            }
             match inspect.key(key.clone()) {
                 Mode::Exit => {
                     open = false;
                     break;
                 }
-                Mode::Dock => {
-                    if let super::editor::Outcome::Submit(message) = dock.key(key) {
-                        // `Enter` in the input sends and leaves (D7).
+                Mode::Dock => match dock.key(key) {
+                    // `Enter` in the input sends and leaves (D7).
+                    super::editor::Outcome::Submit(message) => {
                         submit = Some(message);
                         open = false;
                         break;
                     }
-                }
+                    // `Ctrl-C` stops the turn or clears the line and the
+                    // human stays where he reads (AGL-112, D1); `Ctrl-D`
+                    // leaves the mode and nothing else (D2).
+                    super::editor::Outcome::Interrupt => keys.interrupt(),
+                    super::editor::Outcome::Quit => {
+                        open = false;
+                        break;
+                    }
+                    super::editor::Outcome::Edited => {}
+                },
                 Mode::Stay => {}
             }
         }

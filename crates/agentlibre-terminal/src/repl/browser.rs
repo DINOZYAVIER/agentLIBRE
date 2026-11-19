@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use super::dock::{Dock, Layout};
 use super::term::{self, Key};
 use super::text::{hard_wrap, truncate};
+use super::ModeKeys;
 use crate::function::Function;
 use crate::function::catalog::{Catalog, Entry, Source};
 use crate::i18n::{Lang, m};
@@ -602,6 +603,7 @@ pub fn run(
     dock: &Dock,
     busy: &dyn Fn() -> bool,
     submit: &dyn Fn(&str),
+    keys: &ModeKeys,
 ) -> Exit {
     let mut browser = Browser::new(catalog.entries(lang));
     let mut parser = term::Parser::default();
@@ -617,7 +619,7 @@ pub fn run(
         let rows = dock.layout();
         let room = size.1.saturating_sub(rows.rows.len());
         write(&frame(&browser.lines(theme, lang, size.0, room, settings), room, &rows));
-        let keys = loop {
+        let pressed = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
                     if parser.waiting() {
@@ -630,14 +632,24 @@ pub fn run(
             }
         };
         let mut open = true;
-        for key in keys {
+        for key in pressed {
             // A key the browser does not take belongs to the input, and
-            // its Enter sends and leaves (AGL-098, D7).
+            // its Enter sends and leaves (AGL-098, D7); its Ctrl-C stops
+            // the turn and keeps the browser (AGL-112, D1), its Ctrl-D
+            // leaves the browser and nothing else (D2).
             if !browser.takes(&key) {
-                if let super::editor::Outcome::Submit(message) = dock.key(key) {
-                    submit(&message);
-                    open = false;
-                    break;
+                match dock.key(key) {
+                    super::editor::Outcome::Submit(message) => {
+                        submit(&message);
+                        open = false;
+                        break;
+                    }
+                    super::editor::Outcome::Interrupt => keys.interrupt(),
+                    super::editor::Outcome::Quit => {
+                        open = false;
+                        break;
+                    }
+                    super::editor::Outcome::Edited => {}
                 }
                 continue;
             }
