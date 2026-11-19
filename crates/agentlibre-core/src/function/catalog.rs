@@ -25,7 +25,8 @@ pub enum Source {
 }
 
 impl Source {
-    fn label(self, lang: Lang) -> &'static str {
+    /// The source's word: `built-in`, `user`, the workspace's, the plane's.
+    pub fn label(self, lang: Lang) -> &'static str {
         match self {
             Source::Plane => tr!(lang, m::FUNCTION_SOURCE_PLANE),
             Source::Workspace => tr!(lang, m::FUNCTION_SOURCE_WORKSPACE),

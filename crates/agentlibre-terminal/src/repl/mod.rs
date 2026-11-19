@@ -1,6 +1,7 @@
 //! The interactive session (D34, D115-D140): a line editor and a dock in
 //! the terminal while the turn runs, or lines on stdin without a terminal.
 
+mod browser;
 mod dock;
 mod editor;
 mod inspect;
@@ -154,6 +155,11 @@ impl Inner {
     }
 }
 
+/// The Function browser of Ctrl-F (AGL-109, D1): the mode itself, given
+/// the threads and the surfaces it draws on.
+type OpenBrowser =
+    Box<dyn Fn(&Control, &Dock, Lang, &Theme, &Catalog) -> browser::Exit + Send + Sync>;
+
 /// What the input thread asks of the main thread (AGL-067, F10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Request {
@@ -305,6 +311,9 @@ struct Input {
     /// runs here, in the input thread, and gives back what leaving means
     /// (AGL-098, D6, D7): the block to redraw, and the text to send.
     open_inspect: Box<dyn Fn() -> inspect::Exit + Send + Sync>,
+    /// Opens the Function browser on the alternate screen (AGL-109, D1);
+    /// `Some` only with a terminal of its own, as `/function` itself.
+    open_browser: Option<OpenBrowser>,
     /// What Ctrl-V reads (AGL-014, D21).
     clipboard: Box<dyn Fn() -> Clip + Send + Sync>,
     /// Ctrl-R records the voice (AGL-016).
@@ -900,6 +909,20 @@ impl Input {
             }
             return;
         }
+        if key == Key::Ctrl('f') {
+            // The Function browser (AGL-109, D1): `s` leaves the session
+            // for a Function, as `/function <name>` does.
+            if let Some(open) = &self.open_browser
+                && let browser::Exit::Switch(name) =
+                    open(&self.control, &self.dock, self.lang, &self.theme, &self.catalog)
+            {
+                let mut inner = self.control.lock();
+                inner.requests.push(Request::Switch(name));
+                drop(inner);
+                self.control.wake.notify_all();
+            }
+            return;
+        }
         match self.dock.key(key) {
             Outcome::Edited => {}
             Outcome::Submit(message) => self.submitted(message),
@@ -1269,6 +1292,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         clipboard: Box::new(media::clipboard),
         voice: voice.clone(),
         open_inspect: Box::new(open_inspect),
+        open_browser: Some(Box::new(|control, dock, lang, theme, catalog| {
+            browser::run(
+                &|text| dock.write_raw(text),
+                theme,
+                lang,
+                catalog,
+                dock,
+                &|| control.lock().busy(),
+                &|message| dock.print(&[message.to_string()]),
+            )
+        })),
         said: Mutex::new(None),
         edit: Mutex::new(None),
     };
@@ -1808,6 +1842,7 @@ mod tests {
                     }
                 })
             },
+            open_browser: None,
             clipboard: {
                 let clip = clip.clone();
                 Box::new(move || clip.lock().unwrap().clone())

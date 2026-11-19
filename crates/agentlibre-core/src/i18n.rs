@@ -1120,6 +1120,51 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} відкрито: спершу /function edit close",
     };
 
+    /// The Function browser on Ctrl-F: the line of keys over the list
+    /// (AGL-109, D1).
+    pub const BROWSER_KEYS: Msg = Msg {
+        en: "↑↓ pick · Enter source · e edit · c clone · s switch · Esc leave",
+        uk: "↑↓ вибір · Enter код · e редагувати · c копія · s перемкнути · Esc вийти",
+    };
+
+    /// The browser's `e` on a built-in Function (AGL-109, D3).
+    pub const BROWSER_BUILTIN: Msg = Msg {
+        en: "`{name}` is built-in: c clones it, and the copy is editable",
+        uk: "`{name}` вбудована: c зробить її редаговану копію",
+    };
+
+    /// The browser's `c`: the name is asked on the keys' row (AGL-109, D3).
+    pub const BROWSER_CLONE_ASK: Msg = Msg {
+        en: "clone `{name}` as: {typed}▏ (Enter writes, Esc cancels)",
+        uk: "копія `{name}` як: {typed}▏ (Enter пише, Esc скасовує)",
+    };
+
+    /// The browser's `c` wrote the copy (AGL-109, D3).
+    pub const BROWSER_CLONED: Msg = Msg {
+        en: "cloned to {name}: {path}",
+        uk: "скопійовано до {name}: {path}",
+    };
+
+    /// The browser's `e`: the editor's command did not start (AGL-109, D4).
+    pub const BROWSER_EDITOR_FAILED: Msg = Msg {
+        en: "{editor} did not start: {reason}",
+        uk: "{editor} не запустився: {reason}",
+    };
+
+    /// The browser's `e`, after the editor left the file as it was
+    /// (AGL-109, D4).
+    pub const BROWSER_UNCHANGED: Msg = Msg {
+        en: "{name}: the file is as it was",
+        uk: "{name}: файл лишився як був",
+    };
+
+    /// What `agl function check` says of the saved file, which the
+    /// browser shows too (AGL-109, D4, D5).
+    pub const BROWSER_SAVED: Msg = Msg {
+        en: "saved {name}: loads, {kind}, {model}, {context} of context",
+        uk: "збережено {name}: завантажується, {kind}, {model}, {context} контексту",
+    };
+
     /// `Error::RunSchema`.
     pub const RUN_SCHEMA: Msg = Msg {
         en: "the session's `run` snapshot is of the schema {found}, this build reads {expected}",

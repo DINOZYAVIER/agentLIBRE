@@ -400,6 +400,25 @@ pub fn restore() {
     }
 }
 
+/// Hands the cooked terminal to a child process — the external editor of
+/// the Function browser (AGL-109, D4) — and keeps the saved mode: the
+/// same raw mode returns with [`resume_raw`], so no second copy of the
+/// original is lost.
+pub fn suspend_raw() {
+    let original = *ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(original) = original {
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+    }
+}
+
+/// Puts the raw mode back after [`suspend_raw`].
+pub fn resume_raw() {
+    let original = *ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(original) = original {
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &original) };
+    }
+}
+
 /// Restores the terminal when dropped, also on a panic.
 pub struct RawGuard;
 
