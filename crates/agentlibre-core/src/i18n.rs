@@ -176,7 +176,8 @@ agl [-p <повідомлення> [--attach <шлях>]...] [--resume [<id>|las
     /// The options of a run of `agl`, in the help of the program.
     pub const HELP_RUN: Msg = Msg {
         en: "\
-Without -p, agl starts an interactive session.
+Without -p, agl starts an interactive session; its `/help` lists the
+commands and the keys.
 
 Options:
   -p <message>        send one message, print the answer and exit
@@ -191,7 +192,8 @@ Options:
   --version           print the version and the commit of this agl
   -h, --help          print this help",
         uk: "\
-Без -p agl запускає інтерактивну сесію.
+Без -p agl запускає інтерактивну сесію; її `/help` показує команди та
+клавіші.
 
 Параметри:
   -p <повідомлення>   надіслати одне повідомлення, вивести відповідь і вийти
@@ -2280,12 +2282,14 @@ Forge (сховище артефактів робочої області, agentL
              Ctrl-V attaches the clipboard; Ctrl-R records the voice and writes what is said \
              (Ctrl-R again stops, Escape cancels); \
              Ctrl-C stops the turn (or clears the line, or quits when it is empty); \
-             Ctrl-D quits",
+             Ctrl-D quits; Ctrl-O reads the session, Ctrl-F browses the functions \
+             (while a mode stands, the mouse selects only with Shift)",
         uk: "Enter надсилає; Shift-Enter або Alt-Enter додає рядок; Вгору/Вниз — історія; \
              Ctrl-V прикріплює буфер обміну; Ctrl-R записує голос і вписує сказане \
              (ще раз Ctrl-R зупиняє, Escape скасовує); \
              Ctrl-C зупиняє хід (або очищає рядок, або виходить, якщо він порожній); \
-             Ctrl-D виходить",
+             Ctrl-D виходить; Ctrl-O читає сесію, Ctrl-F переглядає функції \
+             (доки режим стоїть, миша виділяє лише з Shift)",
     };
 
     /// The separator row while the voice is recorded (AGL-016, D9).
