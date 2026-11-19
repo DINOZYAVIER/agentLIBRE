@@ -325,16 +325,21 @@ struct Said {
 /// The open buffer of `/function edit` (AGL-102, D4): the file it edits,
 /// the lines as they are now, and the lines as saved — unequal says
 /// there are changes the file never got.
-/// What the inspect mode re-reads on its open (AGL-066, D4): the session's
-/// id and directory, to read the file fresh — its events and the
-/// transitions the observer wrote — and, when the read fails, the copy
-/// kept in memory.
+/// What the inspect mode re-reads on its open (AGL-066, D4) and while it
+/// stands (AGL-113, D1): the session's id and directory, to read the file
+/// fresh — its events and the transitions the observer wrote — and, when
+/// the read fails, the copy kept in memory. `path` and `size` are the last
+/// read: a poll that sees the same length reads nothing; an id that left its
+/// path behind (a `/new`) makes the mode find the file again.
 struct InspectData {
     id: String,
     sessions_dir: PathBuf,
     events: Vec<Event>,
     transitions: Vec<TransitionLine>,
     outputs: PathBuf,
+    path: Option<PathBuf>,
+    size: u64,
+    read_id: String,
 }
 
 /// Reacts to what the user does at the prompt (D118, D120).
@@ -1191,6 +1196,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         events: file.events.clone(),
         transitions: Vec::new(),
         outputs: file.outputs_dir(),
+        path: Some(file.file_path().to_path_buf()),
+        size: std::fs::metadata(file.file_path()).map_or(0, |meta| meta.len()),
+        read_id: file.id.clone(),
     }));
     let open_inspect = {
         let data = inspect_data.clone();
@@ -1200,10 +1208,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             // The file holds what the observer wrote of the phases; the
             // in-memory copy is the fallback for when it cannot be read.
             let (events, transitions, outputs) = {
-                let inner = data.lock().unwrap();
+                let mut inner = data.lock().unwrap();
                 match Session::open(&inner.sessions_dir, &inner.id) {
                     Ok(session) => {
                         let outputs = session.outputs_dir();
+                        inner.path = Some(session.file_path().to_path_buf());
+                        inner.size = std::fs::metadata(session.file_path())
+                            .map_or(0, |meta| meta.len());
+                        inner.read_id = inner.id.clone();
                         (session.events, session.transitions, outputs)
                     }
                     Err(_) => (
@@ -1211,6 +1223,35 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         inner.transitions.clone(),
                         inner.outputs.clone(),
                     ),
+                }
+            };
+            // The mode follows the session while the agent works (AGL-113,
+            // D1): an empty read asks the file's length, and only a
+            // different one reads it again; a failed read keeps what the
+            // screen already shows.
+            let poll = {
+                let data = data.clone();
+                move || {
+                    let mut inner = data.lock().unwrap();
+                    let path = match inner.path.as_ref() {
+                        Some(path) if inner.read_id == inner.id => path.clone(),
+                        // A `/new` left the path behind: find the file again.
+                        _ => Session::open(&inner.sessions_dir, &inner.id)
+                            .ok()?
+                            .file_path()
+                            .to_path_buf(),
+                    };
+                    let size = std::fs::metadata(&path).ok()?.len();
+                    if size == inner.size {
+                        return None;
+                    }
+                    let session = Session::open(&inner.sessions_dir, &inner.id).ok()?;
+                    inner.path = Some(path);
+                    inner.size = size;
+                    inner.read_id = inner.id.clone();
+                    inner.events = session.events.clone();
+                    inner.transitions = session.transitions.clone();
+                    Some((session.events, session.transitions))
                 }
             };
             // The dock's rows of the moment (D14): the input prompt
@@ -1225,6 +1266,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 outputs,
                 &dock,
                 keys,
+                &poll,
             )
         }
     };

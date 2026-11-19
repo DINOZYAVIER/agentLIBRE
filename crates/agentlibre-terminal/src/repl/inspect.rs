@@ -154,6 +154,24 @@ impl Inspect {
         }
     }
 
+    /// The file gained lines while the human reads (AGL-113, D1): the
+    /// records are built anew, and the standing focus keeps its record —
+    /// the session's file only appends — while the follow goes after the
+    /// new tail.
+    pub fn reload(&mut self, events: &[Event], transitions: &[TransitionLine], lang: Lang) {
+        self.records = records::group(events, transitions, lang);
+        if self.follow {
+            self.go_tail();
+            return;
+        }
+        self.selection = self.selection.min(self.records.len().saturating_sub(1));
+        let last = self
+            .records
+            .get(self.selection)
+            .map_or(0, |record| record.blocks().len() - 1);
+        self.block = self.block.min(last);
+    }
+
     /// The tail: the last record, its last block (D8).
     fn go_tail(&mut self) {
         self.selection = self.records.len().saturating_sub(1);
@@ -673,6 +691,7 @@ pub fn run(
     outputs: std::path::PathBuf,
     dock: &Dock,
     keys: &ModeKeys,
+    poll: &dyn Fn() -> Option<(Vec<Event>, Vec<TransitionLine>)>,
 ) -> Exit {
     let mut inspect = Inspect::new(&events, &transitions, lang);
     let mut parser = term::Parser::default();
@@ -692,6 +711,12 @@ pub fn run(
         let pressed = loop {
             match term::read_input(&mut buffer, 100) {
                 Ok(None) => {
+                    // The session grows while the human reads: an empty
+                    // read asks the file, and a grown one is taken in
+                    // (AGL-113, D1).
+                    if let Some((events, transitions)) = poll() {
+                        inspect.reload(&events, &transitions, lang);
+                    }
                     if parser.waiting() {
                         break parser.timeout();
                     }
@@ -863,6 +888,29 @@ mod tests {
         assert!(all.contains("Compacting"), "{all}");
         assert!(lines.last().unwrap().contains("10/10"));
         assert!(lines.last().unwrap().contains("follow"));
+    }
+
+    #[test]
+    fn a_grown_session_keeps_the_focus_and_follows_the_tail() {
+        // AGL-113, D1: what the file gains shows, the record the focus
+        // stands on stays, and the follow goes after the new tail.
+        let events = vec![Event::User("one".into()), Event::Answer("a".into())];
+        let mut inspect = Inspect::new(&events, &[], Lang::En);
+        press(&mut inspect, Key::ShiftUp);
+        let here = inspect.selection;
+        let grown = vec![
+            Event::User("one".into()),
+            Event::Answer("a".into()),
+            Event::User("two".into()),
+            Event::Answer("b".into()),
+        ];
+        inspect.reload(&grown, &[], Lang::En);
+        assert_eq!(inspect.selection, here);
+        assert!(!inspect.follow);
+        inspect.go_tail();
+        inspect.reload(&grown, &[], Lang::En);
+        assert_eq!(inspect.selection, grown.len() - 1);
+        assert!(inspect.follow);
     }
 
     #[test]
