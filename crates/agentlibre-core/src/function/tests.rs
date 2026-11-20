@@ -1,12 +1,21 @@
 use std::fs;
 
 use super::*;
+use crate::action::Outcome;
 use crate::forge::testutil::TempDir;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 
 /// The model of the test Functions: the built-in Qwen3.8 format on the
 /// llama kind (AGL-039, D17, D18).
 pub const MODEL: &str = r#"{ kind = "llama"; format = agl.formats."qwen3.8"; weights = "m.gguf"; }"#;
+
+/// The event of a call: `tool` ended with `outcome` (AGL-118, D4).
+fn call(tool: &str, outcome: Outcome) -> Event {
+    Event::Call {
+        tool: tool.into(),
+        outcome,
+    }
+}
 
 /// A multi-state policy used by the load and transition tests (AGL-039,
 /// D40: the nested transitions).
@@ -131,7 +140,7 @@ fn a_built_in_on_the_minimal_policy() {
     assert!(function.format.think.is_some());
     assert_eq!(inference.actions.tools, action::builtin_tools());
     assert!(inference.actions.answer && inference.think);
-    assert_eq!(inference.next("bash", Outcome::Timeout), function.initial);
+    assert_eq!(inference.next(&call("bash", Outcome::Timeout)), function.initial);
     // The model of D33 and D44 (AGL-039).
     assert_eq!(
         function.model,
@@ -168,16 +177,16 @@ fn spec_example() {
     assert!(!explore.actions.answer && answer.actions.answer);
     assert_eq!((explore.max_steps, explore.max_visits), (Some(15), Some(3)));
     assert_eq!(explore.on_limit, Some(index("answer")));
-    assert_eq!(explore.next("edit", Outcome::Fail), index("verify"));
-    assert_eq!(explore.next("bash", Outcome::Ok), index("explore"));
-    assert_eq!(verify.next("bash", Outcome::Ok), index("answer"));
-    assert_eq!(verify.next("bash", Outcome::Fail), index("explore"));
+    assert_eq!(explore.next(&call("edit", Outcome::Fail)), index("verify"));
+    assert_eq!(explore.next(&call("bash", Outcome::Ok)), index("explore"));
+    assert_eq!(verify.next(&call("bash", Outcome::Ok)), index("answer"));
+    assert_eq!(verify.next(&call("bash", Outcome::Fail)), index("explore"));
     // The implicit forge (AGL-011): a tool of the tool states, keeping
     // the state on any outcome.
     assert_eq!(verify.actions.tools.len(), 2);
     assert!(verify.actions.tools.iter().any(|t| t.name == "forge"));
-    assert_eq!(verify.next("forge", Outcome::Ok), index("verify"));
-    assert_eq!(verify.next("forge", Outcome::Fail), index("verify"));
+    assert_eq!(verify.next(&call("forge", Outcome::Ok)), index("verify"));
+    assert_eq!(verify.next(&call("forge", Outcome::Fail)), index("verify"));
     let bash = &verify.actions.tools[0];
     assert!(matches!(bash.params[0].constraint, Constraint::Pattern(_)));
     assert_eq!(
@@ -199,10 +208,10 @@ fn the_transitions_take_the_outcome_then_any_then_otherwise() {
     )
     .unwrap();
     let a = state(&function, "a");
-    assert_eq!(a.next("bash", Outcome::Ok), 1);
-    assert_eq!(a.next("bash", Outcome::Fail), 2);
-    assert_eq!(a.next("bash", Outcome::Timeout), 2);
-    assert_eq!(a.next("edit", Outcome::Ok), 0);
+    assert_eq!(a.next(&call("bash", Outcome::Ok)), 1);
+    assert_eq!(a.next(&call("bash", Outcome::Fail)), 2);
+    assert_eq!(a.next(&call("bash", Outcome::Timeout)), 2);
+    assert_eq!(a.next(&call("edit", Outcome::Ok)), 0);
 }
 
 #[test]
@@ -252,8 +261,8 @@ fn the_implicit_forge_keeps_the_state() {
     // by the loop, a step in the same visit (Q2).
     let one = one_state(r#"tools.bash = { }; next.bash.any = "a";"#).unwrap();
     let a = state(&one, "a");
-    assert_eq!(a.next("forge", Outcome::Ok), 0);
-    assert_eq!(a.next("forge", Outcome::Fail), 0);
+    assert_eq!(a.next(&call("forge", Outcome::Ok)), 0);
+    assert_eq!(a.next(&call("forge", Outcome::Fail)), 0);
     // A named forge outcome applies like any tool's; the unnamed outcomes
     // keep the state.
     let two = with_states(
@@ -261,8 +270,8 @@ fn the_implicit_forge_keeps_the_state() {
     )
     .unwrap();
     let a = state(&two, "a");
-    assert_eq!(a.next("forge", Outcome::Ok), 1);
-    assert_eq!(a.next("forge", Outcome::Fail), 0);
+    assert_eq!(a.next(&call("forge", Outcome::Ok)), 1);
+    assert_eq!(a.next(&call("forge", Outcome::Fail)), 0);
 }
 
 #[test]
@@ -273,7 +282,7 @@ fn the_explicit_forge_tool() {
     let a = state(&function, "a");
     assert_eq!(a.actions.tools.len(), 1);
     assert_eq!(a.actions.tools[0].name, "forge");
-    assert_eq!(a.next("forge", Outcome::Ok), 0);
+    assert_eq!(a.next(&call("forge", Outcome::Ok)), 0);
 }
 
 #[test]

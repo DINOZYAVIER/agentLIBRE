@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value as Json, json};
 
-use crate::action::{self, Actions, Constraint, Kind, Outcome, Tool};
+use crate::action::{self, Actions, Constraint, Kind, Tool};
 use crate::backend::RUNTIME_PREFIX;
 use crate::download::FileSource;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
+use crate::machine::Event;
 use crate::media::sha256_hex;
 use crate::nix::{self, Section};
 use crate::settings::{ServerFile, ServerKind};
@@ -181,25 +182,26 @@ pub struct State {
     pub max_steps: Option<u32>,
     pub max_visits: Option<u32>,
     pub on_limit: Option<usize>,
-    /// The transitions other than `otherwise`: tool, outcome (`None` for
-    /// `any`) and target state.
-    transitions: Vec<(String, Option<Outcome>, usize)>,
+    /// The transitions other than `otherwise`: an event's name, its detail
+    /// (`None` for `any`) and the target state (D43, D9).
+    transitions: Vec<(String, Option<String>, usize)>,
     /// `next.otherwise`.
     otherwise: Option<usize>,
 }
 
 impl State {
-    /// The state after `tool` ended with `outcome`; the most specific key
-    /// wins (D43): the outcome, then `any`, then `otherwise`. Loading
-    /// guarantees an answer (D21).
-    pub fn next(&self, tool: &str, outcome: Outcome) -> usize {
-        let find = |wanted: Option<Outcome>| {
+    /// The state `event` leads to; the most specific key wins (D43): the
+    /// detail, then `any`, then `otherwise`. Loading guarantees an answer
+    /// (D21).
+    pub fn next(&self, event: &Event) -> usize {
+        let (name, detail) = event.key();
+        let find = |wanted: Option<&str>| {
             self.transitions
                 .iter()
-                .find(|(t, o, _)| t == tool && *o == wanted)
+                .find(|(t, o, _)| t == name && o.as_deref() == wanted)
                 .map(|&(_, _, target)| target)
         };
-        find(Some(outcome))
+        find(detail)
             .or_else(|| find(None))
             .or(self.otherwise)
             .expect("complete transitions")
@@ -827,11 +829,14 @@ fn read_state(
                     transitions.push((key.clone(), None, target));
                     continue;
                 }
-                let outcome = crate::tools::outcomes(&key)
+                // The name must be one of the tool's outcomes (D43).
+                if !crate::tools::outcomes(&key)
                     .iter()
-                    .find(|o| o.name() == name)
-                    .ok_or_else(|| problem(&of_tool, &name, FunctionProblem::BadTransitionKey))?;
-                transitions.push((key.clone(), Some(*outcome), target));
+                    .any(|o| o.name() == name)
+                {
+                    return Err(problem(&of_tool, &name, FunctionProblem::BadTransitionKey));
+                }
+                transitions.push((key.clone(), Some(name), target));
             }
         }
     }
@@ -850,7 +855,9 @@ fn read_state(
             let covered = otherwise.is_some()
                 || transitions
                     .iter()
-                    .any(|(t, o, _)| *t == tool.name && o.is_none_or(|o| o == outcome));
+                    .any(|(t, o, _)| {
+                        *t == tool.name && o.as_deref().is_none_or(|o| o == outcome.name())
+                    });
             if !covered {
                 return Err(problem(
                     section,

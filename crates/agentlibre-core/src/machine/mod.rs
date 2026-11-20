@@ -17,6 +17,40 @@ pub struct Table<'a> {
     pub max_steps_total: Option<u32>,
 }
 
+/// What moves a state machine (AGL-118, D4): a call inside a turn, or an
+/// event from outside it. The names and their details are the keys of
+/// `next.*` (D43, D9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A tool's call ended with `outcome`: `bash.ok` (D43).
+    Call { tool: String, outcome: Outcome },
+    /// A command a flow ran ended: `exit.ok` (D9).
+    Exit(Outcome),
+    /// A turn of a session the flow started ended: `turn.end` (D9).
+    TurnEnd,
+    /// A flow's timer fired: `timer` (D9).
+    Timer,
+    /// A human's message: `message.<name>` (D9).
+    Message(String),
+    /// A check-turn's answer, one of its `events` (D5, D9): `<check>.<answer>`.
+    Answer { check: String, answer: String },
+}
+
+impl Event {
+    /// The name and the detail a transition key is matched against (D43):
+    /// the most specific key wins, and `None` is a key's `any`.
+    pub fn key(&self) -> (&str, Option<&str>) {
+        match self {
+            Event::Call { tool, outcome } => (tool, Some(outcome.name())),
+            Event::Exit(outcome) => ("exit", Some(outcome.name())),
+            Event::TurnEnd => ("turn", Some("end")),
+            Event::Timer => ("timer", None),
+            Event::Message(name) => ("message", Some(name)),
+            Event::Answer { check, answer } => (check, Some(answer)),
+        }
+    }
+}
+
 /// Whether the turn may go on after a step.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Progress {
@@ -102,7 +136,10 @@ impl<'f> Machine<'f> {
     /// Records a call of `tool` that ended with `outcome` and moves to the
     /// next state. An answer ends the turn instead (D44).
     pub fn after_call(&mut self, tool: &str, outcome: Outcome) -> Progress {
-        self.after(Some((tool, outcome)))
+        self.after(Some(Event::Call {
+            tool: tool.into(),
+            outcome,
+        }))
     }
 
     /// Records a discarded action: a step that keeps the state unless the
@@ -111,12 +148,12 @@ impl<'f> Machine<'f> {
         self.after(None)
     }
 
-    fn after(&mut self, call: Option<(&str, Outcome)>) -> Progress {
+    fn after(&mut self, event: Option<Event>) -> Progress {
         self.entered = false;
         self.steps_total += 1;
         self.steps_in_visit += 1;
         let state = self.state();
-        let target = call.map_or(self.state, |(tool, outcome)| state.next(tool, outcome));
+        let target = event.map_or(self.state, |event| state.next(&event));
         if target != self.state {
             self.enter(target);
         } else if state
