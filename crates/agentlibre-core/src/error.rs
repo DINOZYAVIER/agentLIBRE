@@ -468,7 +468,7 @@ pub enum FunctionProblem {
     /// outcome, nor `else`.
     BadTransitionKey,
     /// No transition for a tool and outcome of the state (D21).
-    MissingTransition { tool: String, outcome: &'static str },
+    MissingTransition { tool: String, outcome: String },
     /// The state has neither tools nor `answer` (D87).
     NoActions,
     /// The state has `next` but no tools.

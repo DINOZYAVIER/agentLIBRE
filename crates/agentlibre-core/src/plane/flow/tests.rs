@@ -1,0 +1,166 @@
+use super::*;
+use crate::forge::testutil::TempDir;
+use std::fs;
+
+/// A flow of the shape D9 gives, as a file: `nix::eval_file` reads a file as
+/// a function of `{ agl, ... }`, as it does a Function.
+const DEV: &str = r#"{ agl, ... }: {
+  flow.dev-loop = {
+    initial = "build";
+    max_steps_total = 40;
+    state.build = {
+      action.command = { cmd = "cargo build"; timeout = 900; };
+      next.exit.ok = "check";
+      next.exit.any = "rollback";
+    };
+    state.check = {
+      action.review = { function = "reviewer"; events = [ "ok" "flaky" "broken" ]; };
+      next.review.ok = "launch";
+      next.review.any = "rollback";
+    };
+    state.launch = { next.otherwise = "halted"; };
+    state.rollback = {
+      action.artifact = { dir = "result"; keep = 3; };
+      action.say = "agl:dev";
+      max_visits = 2;
+      on_limit = "halted";
+      next.otherwise = "halted";
+    };
+    state.halted = { };
+  };
+}
+"#;
+
+/// Writes `text` as the plane's `flow.nix` and reads it back; `dir` outlives
+/// the read, so a test that fails keeps its file for the message.
+fn read(dir: &TempDir, text: &str) -> Result<FlowFile, Error> {
+    fs::write(dir.0.join(FLOW_FILE), text).unwrap();
+    FlowFile::load(&dir.0)
+}
+
+fn problem_of(text: &str) -> (String, FunctionProblem) {
+    let dir = TempDir::new();
+    let error = read(&dir, text).expect_err("a flow that does not load");
+    match error {
+        Error::Function { key, problem, .. } => (key, problem),
+        other => panic!("not a load problem: {other:?}"),
+    }
+}
+
+#[test]
+fn no_file_is_no_flows() {
+    let dir = TempDir::new();
+    assert!(FlowFile::load(&dir.0).unwrap().flows.is_empty());
+}
+
+#[test]
+fn a_flow_loads_with_its_states_and_actions() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let flow = flows.find("dev-loop").expect("the declared flow");
+    assert_eq!(flow.initial(), "build");
+    assert_eq!(flow.states().len(), 5);
+    let at = |name: &str| flow.states().iter().position(|s| s.name == name).unwrap();
+    assert_eq!(
+        flow.actions(at("build")),
+        [Action::Command {
+            cmd: "cargo build".into(),
+            timeout: Duration::from_secs(900),
+        }]
+    );
+    assert_eq!(
+        flow.actions(at("rollback")),
+        [
+            Action::Artifact {
+                dir: PathBuf::from("result"),
+                keep: 3,
+            },
+            Action::Say {
+                session: "agl:dev".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn the_table_moves_on_the_flows_own_events() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let flow = flows.find("dev-loop").unwrap();
+    let states = flow.states();
+    let at = |name: &str| states.iter().position(|s| s.name == name).unwrap();
+    // `exit.any` covers the three outcomes the file does not name (D43).
+    assert_eq!(states[at("build")].next_named("exit", Some("ok")), at("check"));
+    assert_eq!(
+        states[at("build")].next_named("exit", Some("timeout")),
+        at("rollback")
+    );
+    assert_eq!(
+        states[at("check")].next_named("review", Some("flaky")),
+        at("rollback")
+    );
+    assert_eq!(flow.table().states.len(), 5);
+}
+
+#[test]
+fn a_command_without_its_exit_transition_is_named() {
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: { flow.one = { initial = "build"; state.build.action.command = { cmd = "true"; timeout = 1; }; }; }"#,
+    );
+    assert_eq!(key, "flow.one.state.build.next");
+    assert_eq!(
+        problem,
+        FunctionProblem::MissingTransition {
+            tool: "exit".into(),
+            outcome: "ok".into(),
+        }
+    );
+}
+
+#[test]
+fn a_review_needs_a_transition_for_each_of_its_events() {
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: { flow.one = { initial = "check"; state.check = { action.review = { function = "r"; events = [ "ok" "broken" ]; }; next.review.ok = "check"; }; }; }"#,
+    );
+    assert_eq!(key, "flow.one.state.check.next");
+    assert_eq!(
+        problem,
+        FunctionProblem::MissingTransition {
+            tool: "review".into(),
+            outcome: "broken".into(),
+        }
+    );
+}
+
+#[test]
+fn an_unknown_target_names_the_key_a_human_would_edit() {
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: { flow.one = { initial = "a"; state.a = { next.otherwise = "gone"; }; }; }"#,
+    );
+    assert_eq!(key, "flow.one.state.a.next.otherwise");
+    assert_eq!(problem, FunctionProblem::UnknownState("gone".into()));
+}
+
+#[test]
+fn on_limit_without_a_limit_is_refused() {
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: { flow.one = { initial = "a"; state.a = { on_limit = "a"; next.otherwise = "a"; }; }; }"#,
+    );
+    assert_eq!(key, "flow.one.state.a.on_limit");
+    assert_eq!(problem, FunctionProblem::OnLimitWithoutLimit);
+}
+
+#[test]
+fn a_key_a_flow_has_not_is_refused() {
+    // A flow's state has no tools: those belong to a turn (D4).
+    let dir = TempDir::new();
+    let error = read(
+        &dir,
+        r#"{ agl, ... }: { flow.one = { initial = "a"; state.a = { tools.bash = { }; next.otherwise = "a"; }; }; }"#,
+    )
+    .expect_err("a flow that does not load");
+    assert!(
+        matches!(&error, Error::UnknownKey { key, .. } if key == "flow.one.state.a.tools"),
+        "{error:?}"
+    );
+}

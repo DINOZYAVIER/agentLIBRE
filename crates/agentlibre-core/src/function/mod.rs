@@ -190,11 +190,44 @@ pub struct State {
 }
 
 impl State {
+    /// A state of a table that has no actions of the model: what a flow's
+    /// declaration builds (AGL-118, D4). Its limits and transitions are a
+    /// policy state's, and one machine runs on both.
+    pub(crate) fn of_table(
+        name: String,
+        max_steps: Option<u32>,
+        max_visits: Option<u32>,
+        on_limit: Option<usize>,
+        transitions: Vec<(String, Option<String>, usize)>,
+        otherwise: Option<usize>,
+    ) -> State {
+        State {
+            name,
+            instruction: None,
+            actions: Actions {
+                tools: Vec::new(),
+                answer: false,
+            },
+            think: false,
+            max_steps,
+            max_visits,
+            on_limit,
+            transitions,
+            otherwise,
+        }
+    }
+
     /// The state `event` leads to; the most specific key wins (D43): the
     /// detail, then `any`, then `otherwise`. Loading guarantees an answer
     /// (D21).
     pub fn next(&self, event: &Event) -> usize {
         let (name, detail) = event.key();
+        self.next_named(name, detail)
+    }
+
+    /// The state the event named `name` with `detail` leads to (D43): what
+    /// a journal replays without rebuilding the event itself (AGL-118, D3).
+    pub fn next_named(&self, name: &str, detail: Option<&str>) -> usize {
         let find = |wanted: Option<&str>| {
             self.transitions
                 .iter()
@@ -864,7 +897,7 @@ fn read_state(
                     "next",
                     FunctionProblem::MissingTransition {
                         tool: tool.name.clone(),
-                        outcome: outcome.name(),
+                        outcome: outcome.name().into(),
                     },
                 ));
             }

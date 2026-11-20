@@ -37,10 +37,12 @@ use crate::tr;
 use crate::weights;
 use crate::wsl;
 
+pub mod flow;
 mod store;
 pub mod wire;
 mod thread;
 
+pub use flow::{FLOW_FILE, FlowDecl, FlowFile};
 pub use store::{PLANE_FILE, PlaneFile};
 
 pub use thread::{Command, Done, Handle, Parts, Sent, SessionView};

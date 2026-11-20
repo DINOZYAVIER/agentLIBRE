@@ -58,6 +58,14 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// Every outcome, in the order a declaration has to cover them (D21).
+    pub const ALL: [Outcome; 4] = [
+        Outcome::Ok,
+        Outcome::Fail,
+        Outcome::Timeout,
+        Outcome::Interrupted,
+    ];
+
     /// The name in transition keys such as `bash.ok` (D43).
     pub fn name(self) -> &'static str {
         match self {

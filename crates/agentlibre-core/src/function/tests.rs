@@ -585,7 +585,7 @@ fn state_errors() {
             "policy.state.a.next",
             MissingTransition {
                 tool: "bash".into(),
-                outcome: "fail",
+                outcome: "fail".into()
             },
         ),
         (
@@ -593,7 +593,7 @@ fn state_errors() {
             "policy.state.a.next",
             MissingTransition {
                 tool: "bash".into(),
-                outcome: "ok",
+                outcome: "ok".into()
             },
         ),
         (
