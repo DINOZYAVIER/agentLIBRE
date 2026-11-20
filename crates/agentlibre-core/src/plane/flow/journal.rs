@@ -42,6 +42,9 @@ pub enum Entry {
     },
     /// A human stopped the flow; it stays where it stood (D7).
     Stopped { time: u64, state: String },
+    /// The wake of an `action.say` delivered to `session` (D14, D20): the
+    /// line went, the journal keeps which one. It moves nothing.
+    Said { time: u64, session: String, text: String },
 }
 
 impl Entry {
@@ -51,7 +54,8 @@ impl Entry {
         match self {
             Entry::Started { time, .. }
             | Entry::Event { time, .. }
-            | Entry::Stopped { time, .. } => *time,
+            | Entry::Stopped { time, .. }
+            | Entry::Said { time, .. } => *time,
         }
     }
 
@@ -76,6 +80,12 @@ impl Entry {
             Entry::Stopped { time, state } => {
                 json!({ "type": "stopped", "time": time, "state": state })
             }
+            Entry::Said { time, session, text } => json!({
+                "type": "said",
+                "time": time,
+                "session": session,
+                "text": text,
+            }),
         }
     }
 
@@ -96,6 +106,11 @@ impl Entry {
             "stopped" => Some(Entry::Stopped {
                 time,
                 state: value["state"].as_str()?.into(),
+            }),
+            "said" => Some(Entry::Said {
+                time,
+                session: value["session"].as_str()?.into(),
+                text: value["text"].as_str()?.into(),
             }),
             _ => None,
         }
@@ -133,7 +148,7 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
 }
 
 /// Appends `entry` as one line, making the directory when it is not there.
-fn append(path: &Path, entry: &Entry) -> Result<(), Error> {
+pub fn append(path: &Path, entry: &Entry) -> Result<(), Error> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|source| Error::Write {
             path: dir.into(),
@@ -209,8 +224,9 @@ pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinishe
                 steps_in_visit = 0;
             }
             // A `stopped` line names a state without moving it; a `started`
-            // after it belongs to the run this fold follows (D7).
-            Entry::Started { .. } | Entry::Stopped { .. } => {}
+            // after it belongs to the run this fold follows (D7). A `said`
+            // line records a delivery, not a step (D14).
+            Entry::Started { .. } | Entry::Stopped { .. } | Entry::Said { .. } => {}
         }
     }
     Ok(Unfinished {
@@ -298,9 +314,9 @@ impl<'d> FlowRun<'d> {
                         .map_or(at.clone(), |next| decl.state_name(next).into());
                     trail.push(at.clone());
                 }
-                // A stopped line marks where the human left it; it moves
-                // nothing (D7).
-                Entry::Stopped { .. } => {}
+                // A stopped line marks where the human left it, a `said`
+                // line a delivery; neither moves anything (D7, D14).
+                Entry::Stopped { .. } | Entry::Said { .. } => {}
             }
         }
         Ok(trail)

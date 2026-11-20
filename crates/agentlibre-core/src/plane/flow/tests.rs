@@ -79,7 +79,8 @@ fn a_flow_loads_with_its_states_and_actions() {
                 keep: 3,
             },
             Action::Say {
-                session: "agl:dev".into()
+                session: "agl:dev".into(),
+                text: None,
             },
         ]
     );
@@ -637,4 +638,120 @@ fn a_stopped_flow_waits_for_no_timer() {
     fs::write(&file, aged).unwrap();
     assert!(host::tick(&dir.0, &dir.0).is_empty());
     assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
+}
+
+/// A flow whose second state waits for a wake (D6, D20).
+const TALK: &str = r#"{ agl, ... }: {
+  flow.talk = {
+    initial = "ask";
+    state.ask = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.ok = "stood";
+      next.exit.any = "end";
+    };
+    state.stood = { action.say = "last"; next.message.done = "end"; };
+    state.end = { };
+  };
+}
+"#;
+
+#[test]
+fn a_say_waits_until_its_wake_is_delivered() {
+    use crate::i18n::Lang;
+    let dir = TempDir::new();
+    let flows = read(&dir, TALK).unwrap();
+    let decl = flows.find("talk").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    // The flow stands in `stood`, and its wake names the session and the
+    // line D14 gives it: itself and where it stands.
+    assert_eq!(
+        host::wakeups(&dir.0),
+        [host::Wake {
+            flow: "talk".into(),
+            session: "last".into(),
+            text: "flow `talk` stands in `stood`; read `flow status talk`".into(),
+        }]
+    );
+    // The delivery writes the journal's `said` line, and the wake is no
+    // longer pending (D14, D20).
+    let file = journal::path(&dir.0, "talk");
+    journal::append(
+        &file,
+        &journal::Entry::Said {
+            time: journal::now(),
+            session: "last".into(),
+            text: "woken".into(),
+        },
+    )
+    .unwrap();
+    assert!(host::wakeups(&dir.0).is_empty());
+    // A stopped flow holds its wake with it (D7).
+    host::stop(decl, &dir.0).unwrap();
+    assert!(host::wakeups(&dir.0).is_empty());
+    let _ = Lang::En;
+}
+
+#[test]
+fn a_say_table_overrides_the_wakes_line() {
+    let dir = TempDir::new();
+    fs::write(
+        dir.0.join(FLOW_FILE),
+        TALK.replace(
+            "action.say = \"last\"",
+            "action.say = { session = \"agl:dev\"; text = \"the build broke\"; }",
+        ),
+    )
+    .unwrap();
+    let flows = FlowFile::load(&dir.0).unwrap();
+    let decl = flows.find("talk").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    assert_eq!(
+        host::wakeups(&dir.0),
+        [host::Wake {
+            flow: "talk".into(),
+            session: "agl:dev".into(),
+            text: "the build broke".into(),
+        }]
+    );
+}
+
+#[test]
+fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
+    use super::holder::{self, Letter, Need};
+    use crate::i18n::Lang;
+    use std::time::Duration;
+
+    let dir = TempDir::new();
+    let (to, from) = std::sync::mpsc::channel();
+    let registry = holder::Registry::with_delivery(to);
+    let handle = registry.holder(&dir.0, &dir.0);
+    read(&dir, TALK).unwrap();
+    handle.ask(Verb::Start { name: "talk".into() }, Lang::En);
+    // The verb that left a flow standing in a `say` asked for its wake (D18).
+    let need = from.recv_timeout(Duration::from_secs(5)).expect("no need sent");
+    // `Need` has one kind today: a wake.
+    let Need::Wake { plane_dir, wake } = need;
+    assert_eq!(plane_dir, dir.0);
+    assert_eq!(wake.session, "last");
+    // A poke while the wake is in flight asks nothing twice (D20).
+    handle.post(Letter::Poke);
+    // A second ask would wait behind nothing; `wakeups` answers the double.
+    drop(from.recv_timeout(Duration::from_millis(300)));
+    assert!(host::wakeups(&dir.0).len() == 1, "asked twice");
+    // The delivery comes back, the `said` line goes to the journal, and no
+    // wake stands (D14, D20); a later ask waits behind it, so the journal
+    // is written by then.
+    handle.post(Letter::Delivered {
+        flow: wake.flow.clone(),
+        session: wake.session,
+        text: wake.text.clone(),
+    });
+    let status = handle.ask(Verb::Status { name: "talk".into() }, Lang::En);
+    assert!(status.content.as_deref().is_some_and(|t| t.contains("stood")), "no status");
+    assert!(host::wakeups(&dir.0).is_empty());
+    let entries = journal::read(&journal::path(&dir.0, "talk")).unwrap();
+    assert!(
+        matches!(entries.last(), Some(journal::Entry::Said { text, .. }) if text == &wake.text),
+        "{entries:?}"
+    );
 }

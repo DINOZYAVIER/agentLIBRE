@@ -34,8 +34,12 @@ const MAX_WALK: usize = 32;
 /// which is not this layer's to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Waiting {
-    /// `action.say = "<session>"`: a turn of that session (D6).
-    Say { session: String },
+    /// `action.say = "<session>"`: a wake delivered to that session (D6,
+    /// D14), with the flow's own line when the declaration gives one.
+    Say {
+        session: String,
+        text: Option<String>,
+    },
     /// `action.review = { function; events; }`: a turn whose answer is one of
     /// `events`, under another Function (D5).
     Review { function: String, events: Vec<String> },
@@ -169,7 +173,7 @@ pub fn said(lang: Lang, name: &str, place: &Place) -> String {
 /// A thing a state waits for, in one line (D6).
 fn text_of(wait: &Waiting) -> String {
     match wait {
-        Waiting::Say { session } => format!("say {session}"),
+        Waiting::Say { session, .. } => format!("say {session}"),
         Waiting::Review { function, events } => format!("review {function}: {}", events.join("|")),
     }
 }
@@ -191,6 +195,92 @@ pub fn place(decl: &FlowDecl, plane_dir: &Path) -> Result<Place, Error> {
         stopped: matches!(last, Entry::Stopped { .. }),
         state,
     })
+}
+
+/// A wake waiting for its session (D18, D20): the flow it wakes for, the
+/// session key as `Open.resume` names one (D9), and the line to send — the
+/// declaration's own `text`, or one naming the flow and its state (D14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wake {
+    pub flow: String,
+    pub session: String,
+    pub text: String,
+}
+
+/// What the flows of `plane_dir` stand waiting for a wake (D18, D20): a
+/// `say` whose current visit has no `said` line, since only a delivery
+/// writes one. A stopped flow stands where the human left it (D7), and a
+/// declaration that does not load wakes nothing.
+pub fn wakeups(plane_dir: &Path) -> Vec<Wake> {
+    let mut wakes = Vec::new();
+    let Ok(decls) = FlowFile::load(plane_dir) else {
+        return wakes;
+    };
+    for decl in decls.flows {
+        let file = journal::path(plane_dir, decl.name());
+        let Ok(entries) = journal::read(&file) else {
+            continue;
+        };
+        let Some((state, entered)) = resting(&entries) else {
+            continue;
+        };
+        let Some(at) = decl
+            .states()
+            .iter()
+            .position(|s| s.name == state)
+            .filter(|at| decl.state_name(*at) == state)
+        else {
+            continue;
+        };
+        for action in decl.actions(at) {
+            let Action::Say { session, text } = action else { continue };
+            // One `say` per state (D9): a `said` line after the arrival is
+            // this visit's delivery, and the wake is no longer pending.
+            if entries[entered + 1..]
+                .iter()
+                .any(|entry| matches!(entry, Entry::Said { .. }))
+            {
+                continue;
+            }
+            wakes.push(Wake {
+                flow: decl.name().to_owned(),
+                session: session.clone(),
+                text: text.clone().unwrap_or_else(|| {
+                    format!(
+                        "flow `{}` stands in `{state}`; read `flow status {}`",
+                        decl.name(),
+                        decl.name()
+                    )
+                }),
+            });
+        }
+    }
+    wakes
+}
+
+/// Where the journal leaves its flow at rest: the state it stands in and
+/// the index of the line that entered it — `None` for a flow that never
+/// started or that a human stopped (D3, D7). The `into` of a line is read
+/// for the guard only; the fold is the law (D11).
+fn resting(entries: &[Entry]) -> Option<(&str, usize)> {
+    let from = entries
+        .iter()
+        .rposition(|entry| matches!(entry, Entry::Started { .. }))?;
+    let Entry::Started { state, .. } = &entries[from] else {
+        return None;
+    };
+    let mut at = state.as_str();
+    let mut entered = from;
+    for (i, entry) in entries.iter().enumerate().skip(from + 1) {
+        if let Entry::Event { into, .. } = entry {
+            at = into;
+            entered = i;
+        }
+    }
+    if matches!(entries.last(), Some(Entry::Stopped { .. })) {
+        return None;
+    }
+    Some((at, entered))
 }
 
 /// Starts `decl` or goes on with it (D2, D3), running what its states do by
@@ -308,8 +398,9 @@ fn waiting_of(decl: &FlowDecl, name: &str) -> Vec<Waiting> {
     decl.actions(at)
         .iter()
         .filter_map(|action| match action {
-            Action::Say { session } => Some(Waiting::Say {
+            Action::Say { session, text } => Some(Waiting::Say {
                 session: session.clone(),
+                text: text.clone(),
             }),
             Action::Review { function, events } => Some(Waiting::Review {
                 function: function.clone(),
@@ -329,6 +420,7 @@ fn short(entry: &Entry) -> String {
             None => format!("{name} -> {into}"),
         },
         Entry::Stopped { state, .. } => format!("stopped {state}"),
+        Entry::Said { session, .. } => format!("said {session}"),
     }
 }
 

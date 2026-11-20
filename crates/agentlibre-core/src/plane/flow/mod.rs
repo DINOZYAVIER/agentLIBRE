@@ -32,9 +32,13 @@ pub enum Action {
     Review { function: String, events: Vec<String> },
     /// `action.artifact = { dir; keep; }`: what a rollback may reach (D6).
     Artifact { dir: PathBuf, keep: u32 },
-    /// `action.say = "<session>"`: a turn started in a session, named as
-    /// `Open.resume` names one (D6, D9).
-    Say { session: String },
+    /// `action.say = "<session>"`, or `{ session; text? }` (D14): a wake
+    /// delivered to a session named as `Open.resume` names one (D6, D9),
+    /// with the flow's own line when the declaration gives one.
+    Say {
+        session: String,
+        text: Option<String>,
+    },
     /// `action.launch = { cmd; timeout; }`: what a rollback runs to bring the
     /// artifact back; its event is `launch.ok`/`launch.fail` (D10).
     Launch { cmd: String, timeout: Duration },
@@ -245,8 +249,18 @@ fn read_actions(at: &mut Section) -> Result<Vec<Action>, Error> {
         };
         read.push(Action::Artifact { dir, keep });
     }
-    if let Some(session) = actions.string("say")? {
-        read.push(Action::Say { session });
+    // `action.say` is a bare session name or `{ session; text? }` (D14).
+    if actions.is_object("say") {
+        let mut one = actions.section("say")?.expect("just seen");
+        one.check_keys(&["session", "text"])?;
+        let session = one.required_string("session")?;
+        let text = one.string("text")?;
+        read.push(Action::Say { session, text });
+    } else if let Some(session) = actions.string("say")? {
+        read.push(Action::Say {
+            session,
+            text: None,
+        });
     }
     Ok(read)
 }

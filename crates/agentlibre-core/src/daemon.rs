@@ -40,10 +40,16 @@ pub fn socket_path(runtime: &Path) -> PathBuf {
 pub fn serve(paths: Paths) -> Result<(), Error> {
     let runtime = paths.runtime.clone().ok_or(Error::DaemonNoRuntime)?;
     let listener = bind(&runtime)?;
+    // The daemon's ear for the wakes its flows wait on (D18, D20).
+    let (needs, inbox) = mpsc::channel();
     let daemon = Arc::new(Daemon {
-        flows: Arc::new(plane::flow::holder::Registry::default()),
+        flows: Arc::new(plane::flow::holder::Registry::with_delivery(needs)),
         paths,
         state: Mutex::new(State::default()),
+    });
+    thread::spawn({
+        let daemon = Arc::clone(&daemon);
+        move || daemon.flow_turns(inbox)
     });
     // Every plane that declares a flow gets its driver now (D12, D17): the
     // timers of a flow run with no session open and no model. A plane made
@@ -374,6 +380,92 @@ impl Daemon {
         Ok(self.flows.holder(&file.dir, &workdir))
     }
 
+    /// The daemon's arm for the turns its flows wait on (D18): wakes go to
+    /// open sessions, and every ask gets its word back. Review turns (D19)
+    /// join here when the daemon runs one.
+    fn flow_turns(&self, inbox: mpsc::Receiver<plane::flow::holder::Need>) {
+        use plane::flow::holder::{Letter, Need};
+        for need in inbox {
+            match need {
+                Need::Wake { plane_dir, wake } => {
+                    let delivered = self.deliver_wake(&plane_dir, &wake);
+                    if let Some(handle) = self.flows.peek(&plane_dir) {
+                        handle.post(if delivered {
+                            Letter::Delivered {
+                                flow: wake.flow,
+                                session: wake.session,
+                                text: wake.text,
+                            }
+                        } else {
+                            Letter::Miss { flow: wake.flow }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// The wake of D18: of the plane's open sessions, the one its name names
+    /// (AGL-062: `last`, a name, a start of an id); that session's queue
+    /// takes the line as a human's `say` does. None answers — no delivery,
+    /// and the flow stands (D20).
+    fn deliver_wake(&self, plane_dir: &Path, wake: &plane::flow::host::Wake) -> bool {
+        let mut state = self.lock();
+        let mut dirs: HashMap<String, PathBuf> = HashMap::new();
+        let mut ids: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(_, entry)| {
+                let Some(name) = entry.plane.as_deref() else {
+                    return false;
+                };
+                let dir = dirs.entry(name.to_owned()).or_insert_with(|| {
+                    plane::PlaneFile::open(&self.paths, name)
+                        .map(|file| file.dir)
+                        .unwrap_or_default()
+                });
+                dir == plane_dir
+            })
+            .filter(|(id, entry)| match wake.session.as_str() {
+                "last" => true,
+                key => {
+                    entry.opened.session.name.as_deref() == Some(key) || id.starts_with(key)
+                }
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        // `last` of the open ones: session ids grow with time (AGL-062).
+        ids.sort();
+        let Some(id) = ids.pop() else { return false };
+        let Some(entry) = state.sessions.get_mut(&id) else {
+            return false;
+        };
+        let command = Command::Say {
+            message: wake.text.clone(),
+            attached: Vec::new(),
+            reasoning: None,
+            observer: entry.observer.take(),
+        };
+        if entry.commands.send(command).is_ok() {
+            entry.busy = true;
+            return true;
+        }
+        false
+    }
+
+    /// A word to the plane's flows that something of theirs may have moved
+    /// (D18): only a plane whose driver already runs is poked.
+    fn poke(&self, plane: Option<&str>) {
+        use plane::flow::holder::Letter;
+        let Some(name) = plane else { return };
+        let Ok(file) = plane::PlaneFile::open(&self.paths, name) else {
+            return;
+        };
+        if let Some(handle) = self.flows.peek(&file.dir) {
+            handle.post(Letter::Poke);
+        }
+    }
+
     /// A command that is not a turn.
     fn plain(&self, client: u64, session: &str, command: Command, lang: Lang) -> Option<Reply> {
         let mut command = Some(command);
@@ -492,6 +584,7 @@ impl Daemon {
             observer
         });
         let parts = plane.start().into_parts();
+        let opened_plane = plane_name.clone();
         let entry = Entry {
             commands: parts.commands,
             stop: parts.stop,
@@ -507,6 +600,8 @@ impl Daemon {
             project_dir: project.dir.clone(),
         };
         self.lock().sessions.insert(id.clone(), entry);
+        // A session of the plane opened: wakes that missed it may land now (D20).
+        self.poke(opened_plane.as_deref());
         let daemon = Arc::clone(self);
         let sent = parts.sent;
         thread::spawn(move || {
@@ -530,8 +625,10 @@ impl Daemon {
         let plane = entry.plane.clone();
         let mut next = id.to_owned();
         let mut origin = None;
+        let mut turn_ended = false;
         let message = match item {
             Sent::Done(done) => {
+                turn_ended = true;
                 origin = entry.origins.pop_front();
                 entry.busy = !entry.origins.is_empty();
                 let done = *done;
@@ -566,6 +663,11 @@ impl Daemon {
                 },
             };
             write(&to.out, &reply);
+        }
+        // A turn of the plane ended: its flows look again at what they wait
+        // for (D18) — a review's verdict asks through the next poke.
+        if turn_ended {
+            self.poke(plane.as_deref());
         }
         next
     }
@@ -944,6 +1046,67 @@ mod tests {
             client.ask(&Request::Flow { plane: "nowhere".into(), verb: proto::FlowVerb::List }),
             Reply::Refused { .. }
         ));
+    }
+
+    #[test]
+    fn a_flows_wake_reaches_an_open_session_of_its_plane() {
+        // AGL-118, D18, D20: a flow standing at a `say` asks the daemon,
+        // and the daemon carries its line to an open session of the plane;
+        // the journal keeps the `said` line the delivery wrote.
+        let dir = TempDir::new();
+        let (paths, socket) = daemon(&dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            r#"{ agl, ... }: { function = "fixture-minimal"; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
+        )
+        .unwrap();
+        let plane = plane::PlaneFile::create(&paths, "work", std::slice::from_ref(&project)).unwrap();
+        std::fs::write(
+            plane.dir.join("flow.nix"),
+            r#"{ agl, ... }: {
+  flow.talk = {
+    initial = "stood";
+    state.stood = { action.say = "last"; next.message.done = "stood"; };
+  };
+}
+"#,
+        )
+        .unwrap();
+        // A session of the plane opens, and the flow starts into its wake.
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(_) = client.ask(&Request::Open(proto::Open {
+            dir: project.display().to_string(),
+            plane: Some("work".into()),
+            ..Default::default()
+        })) else {
+            panic!("not opened");
+        };
+        let Reply::Said { said, .. } = client.ask(&Request::Flow {
+            plane: "work".into(),
+            verb: proto::FlowVerb::Start { name: "talk".into() },
+        }) else {
+            panic!("no flow answer");
+        };
+        assert!(
+            said.lines.iter().any(|line| matches!(
+                line,
+                proto::Told::Output(text) if text.contains("stood")
+            )),
+            "no place: {:?}",
+            said.lines
+        );
+        // The wake lands: the holder wrote the journal's `said` line.
+        let file = plane.dir.join("flow").join("talk.jsonl");
+        let since = std::time::Instant::now();
+        loop {
+            if std::fs::read_to_string(&file).is_ok_and(|text| text.contains("\"type\":\"said\"")) {
+                break;
+            }
+            assert!(since.elapsed() < std::time::Duration::from_secs(10), "the wake never landed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]
