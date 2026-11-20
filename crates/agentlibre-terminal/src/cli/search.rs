@@ -255,7 +255,9 @@ case "$1 $2" in
   "certificate inspect")
     echo '{{"validity": {{"end": "2026-11-10T21:00:00Z"}}}}' ;;
   "certificate needs-renewal")
-    grep -q EXPIRED "$3" && exit 0; exit 1 ;;
+    # The name alone, no program and no read: the check phase of nix has
+    # neither grep nor a shell that agrees on reading a file this way.
+    case "$3" in *old*) exit 0 ;; esac; exit 1 ;;
 esac
 "#,
                 args = dir.join("args").display()
