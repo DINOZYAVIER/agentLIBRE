@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
-use crate::plane::PlaneFile;
+use crate::plane::{self, PlaneFile, Told};
 use crate::session::Session;
 use crate::tr;
 
@@ -84,6 +84,7 @@ fn act(
             plane.remove(&dir)?;
             tr!(lang, m::PLANE_TAKEN_OUT, directory = shown.display(), name = name)
         }
+        PlaneAction::Flow(verb) => flows(paths, cwd, &verb, lang)?,
         PlaneAction::Delete { name, yes } => {
             let plane = PlaneFile::open(paths, &name)?;
             if !yes {
@@ -97,6 +98,50 @@ fn act(
             tr!(lang, m::PLANE_DELETED, name = name)
         }
     })
+}
+
+/// A verb of the flows of the planes of `cwd` (AGL-118, D2, D7). A flow's
+/// commands run in the plane's first directory, which is where its builds
+/// are; a plane with no directory has none to run in (D9).
+fn flows(
+    paths: &Paths,
+    cwd: &Path,
+    verb: &plane::flow::Verb,
+    lang: Lang,
+) -> Result<String, Error> {
+    let planes = PlaneFile::of_directory(paths, cwd)?;
+    if planes.is_empty() {
+        return Ok(tr!(lang, m::PLANE_NONE_HERE).to_string());
+    }
+    let many = planes.len() > 1;
+    planes
+        .iter()
+        .map(|plane| {
+            let workdir = plane
+                .directories
+                .first()
+                .cloned()
+                .unwrap_or_else(|| plane.dir.clone());
+            let said = plane::flow::host::run(&plane.dir, &workdir, verb, lang);
+            let text = said
+                .lines
+                .iter()
+                .map(|line| match line {
+                    Told::Output(text)
+                    | Told::Notice(text)
+                    | Told::Refusal(text)
+                    | Told::Fault(text)
+                    | Told::Pending(text) => text.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if said.failed {
+                return Err(Error::Said { text });
+            }
+            Ok(if many { format!("[{}] {text}", plane.name) } else { text })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| lines.join("\n"))
 }
 
 /// A plane as `agl plane show` gives it: its name, id, store, sessions and

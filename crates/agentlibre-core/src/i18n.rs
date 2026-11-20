@@ -328,9 +328,11 @@ Search (`search` of the user's settings.nix):
     /// The usage of `agl plane` (AGL-077, D11).
     pub const HELP_PLANE_USAGE: Msg = Msg {
         en: "agl plane new <name> [--empty]|list|show [<name>]|rename <old> <new>\n\
-             agl plane add|remove <name> [<dir>]|delete <name> [--yes]",
+             agl plane add|remove <name> [<dir>]|delete <name> [--yes]\n\
+             agl plane flow list|status|start|stop|reset [<flow>]",
         uk: "agl plane new <назва> [--empty]|list|show [<назва>]|rename <стара> <нова>\n\
-             agl plane add|remove <назва> [<тека>]|delete <назва> [--yes]",
+             agl plane add|remove <назва> [<тека>]|delete <назва> [--yes]\n\
+             agl plane flow list|status|start|stop|reset [<flow>]",
     };
 
     /// The section of `agl plane` in the help (AGL-077, D11).
@@ -347,6 +349,10 @@ settings and Functions, and any directories; `planes/<name>/` of the data):
   plane remove <name> [<dir>]   take a directory out; its files are not touched
   plane delete <name> [--yes]   remove the plane's store; it asks first; the
                                 sessions keep their files
+  plane flow list               the plane's flows and where each stands
+  plane flow start <flow>       go on with the flow; `stop` leaves it where it
+                                stood, `status` answers from its journal,
+                                `reset` begins again and keeps the old journal
   agl --plane <name>            a run in the plane",
         uk: "\
 Plane (де йде робота над проєктом: його сесії, forge, пам'ять, налаштування
@@ -360,6 +366,10 @@ Plane (де йде робота над проєктом: його сесії, fo
   plane remove <назва> [<тека>]  прибрати теку з plane; її файли не чіпає
   plane delete <назва> [--yes]   видалити сховище plane; спершу питає; файли
                                  сесій лишаються
+  plane flow list                flows plane та де кожен стоїть
+  plane flow start <flow>        рухатися flow; `stop` лишає його на місці,
+                                 `status` відповідає з журналу, `reset`
+                                 починає знову й ховає старий журнал
   agl --plane <назва>            запуск у plane",
     };
 

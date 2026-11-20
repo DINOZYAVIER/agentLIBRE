@@ -131,6 +131,29 @@ pub enum PlaneAction {
     Remove { name: String, dir: Option<String> },
     /// `delete <name> [--yes]` (D14).
     Delete { name: String, yes: bool },
+    /// `flow list|status|start|stop|reset [<flow>]` (AGL-118, D2, D7): the
+    /// plane of the current directory, the verb of the flow's own machine.
+    Flow(crate::plane::flow::Verb),
+}
+
+/// Reads the words after `plane flow` (AGL-118, D2, D7): the verb, and the
+/// flow's name where the verb needs one.
+fn flow_action(mut words: impl Iterator<Item = String>) -> Result<PlaneAction, Error> {
+    let verb = words.next().ok_or_else(|| Error::MissingValue("flow".into()))?;
+    let name = words.next();
+    if let Some(extra) = words.next() {
+        return Err(Error::UnknownOption(extra));
+    }
+    let need = || name.clone().ok_or_else(|| Error::MissingValue(verb.clone()));
+    use crate::plane::flow::Verb;
+    Ok(PlaneAction::Flow(match verb.as_str() {
+        "list" => Verb::List,
+        "start" => Verb::Start { name: need()? },
+        "stop" => Verb::Stop { name: need()? },
+        "status" => Verb::Status { name: need()? },
+        "reset" => Verb::Reset { name: need()? },
+        _ => return Err(Error::UnknownOption(verb)),
+    }))
 }
 
 /// Reads the words after `plane`.
@@ -140,6 +163,11 @@ fn plane_args(args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
     let action = words
         .next()
         .ok_or_else(|| Error::MissingValue("plane".into()))?;
+    // `agl plane flow <verb> [<flow>]` (AGL-118, D2, D7): the plane is the
+    // current directory's, and the verb is the flow's own.
+    if action == "flow" {
+        return flow_action(words).map(Command::Plane);
+    }
     // The one flag an action has, when it has one.
     let flag_name = match action.as_str() {
         "new" => Some("--empty"),
@@ -574,6 +602,29 @@ mod tests {
 
     fn parse_strs(args: &[&str]) -> Result<Command, Error> {
         parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn the_flow_verbs_of_a_plane() {
+        // AGL-118, D2, D7: `agl plane flow <verb> [<flow>]`, the plane of the
+        // current directory.
+        use crate::plane::flow::Verb;
+        assert_eq!(
+            parse_strs(&["plane", "flow", "status", "build"]).unwrap(),
+            Command::Plane(PlaneAction::Flow(Verb::Status { name: "build".into() }))
+        );
+        assert_eq!(
+            parse_strs(&["plane", "flow", "list"]).unwrap(),
+            Command::Plane(PlaneAction::Flow(Verb::List))
+        );
+        assert!(matches!(
+            parse_strs(&["plane", "flow", "start"]),
+            Err(Error::MissingValue(name)) if name == "start"
+        ));
+        assert!(matches!(
+            parse_strs(&["plane", "flow", "walk"]),
+            Err(Error::UnknownOption(word)) if word == "walk"
+        ));
     }
 
     #[test]

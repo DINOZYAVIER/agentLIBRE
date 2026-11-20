@@ -76,7 +76,13 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
         Ok(place) => Said::told(Told::Output(said(lang, name, &place))),
         Err(error) => Said::fault(&error, lang),
     };
-    let refused = |text: String| Said::told(Told::Refusal(text));
+    // A refused verb did not do what was asked: it is a failed one (D2).
+    let refused = |text: String| Said {
+        lines: vec![Told::Refusal(text.clone())],
+        content: Some(text),
+        failed: true,
+        ..Said::default()
+    };
     match verb {
         Verb::List => {
             if decls.flows.is_empty() {
