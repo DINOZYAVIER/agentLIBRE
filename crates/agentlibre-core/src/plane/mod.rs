@@ -15,7 +15,7 @@ use crate::attach::{self, Pending, Transcriber};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, ReasoningLevel};
-use crate::engine::{Autostart, Engine, Others, ServerProgress};
+use crate::engine::{Autostart, Engine, Others, ServerProgress, user_manager};
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::function::Function;
@@ -516,6 +516,7 @@ impl Plane {
             // commands do.
             others: asker.others.clone(),
             engine,
+            units: user_manager(),
         };
         // A run of one request brings the server up now; the others do it
         // at their first request (AGL-015, D10), or as the REPL starts

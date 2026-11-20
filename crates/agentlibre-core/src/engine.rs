@@ -401,6 +401,11 @@ pub struct Autostart {
     /// The engine child agl launched itself (AGL-024, D2, D3): `None`
     /// while agl uses a server it does not own.
     pub engine: Arc<Mutex<Option<Engine>>>,
+    /// Whether a user manager answers, so the server a turn needs starts
+    /// as its unit and outlives the process that asked for it (AGL-120, D1);
+    /// `false` keeps the background child of AGL-024, D2 — the road of a
+    /// machine with no user manager, where a unit cannot exist.
+    pub units: bool,
 }
 
 impl Autostart {
@@ -457,7 +462,15 @@ impl Autostart {
             // a foreign process on the port is an error, not a target.
             Health::Down => {
                 progress(ServerProgress::Starting);
-                self.launch(&what, &mut |line| progress(ServerProgress::Line(line)))
+                let mut say = |line: &str| progress(ServerProgress::Line(line));
+                // The unit of the user manager when there is one (AGL-120,
+                // D1): a restarted agl finds the model where it left it, and
+                // a server that agl outlives is no longer agl's child.
+                if self.units {
+                    self.launch_as_unit(&mut say)
+                } else {
+                    self.launch(&what, &mut say)
+                }
             }
         }
     }
@@ -490,7 +503,7 @@ impl Autostart {
     /// run's own child stays the child.
     fn restart(&self, what: &str, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
         restart_consent(what, &self.others, self.lang)?;
-        if self.stop_ours()? {
+        if self.stop_ours()? || self.units {
             self.launch_as_unit(say)
         } else {
             self.launch(what, say)
@@ -1348,6 +1361,31 @@ pub fn port_open(host: &str, port: u16) -> bool {
 }
 
 /// Whether the unit runs.
+/// The states `systemctl --user is-system-running` answers when a user
+/// manager is there (AGL-120, D1); `None` is the silence of no manager, no
+/// binary, no `XDG_RUNTIME_DIR`. `degraded` counts: the manager answers, and
+/// a failed unit of somebody else is no reason to fork a server into one's own
+/// process.
+fn manager_answers(state: Option<&str>) -> bool {
+    matches!(
+        state.unwrap_or("").trim(),
+        "running" | "degraded" | "starting" | "initializing"
+    )
+}
+
+/// Whether a user manager answers for this user (AGL-120, D1).
+pub fn user_manager() -> bool {
+    manager_answers(
+        Command::new("systemctl")
+            .args(["--user", "is-system-running"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(output.stdout.as_slice()).into_owned())
+            .as_deref(),
+    )
+}
+
 pub fn unit_active(unit: &str) -> Result<bool, Error> {
     let status = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", unit])
@@ -2233,6 +2271,19 @@ mod tests {
         url
     }
 
+    #[test]
+    fn only_an_answer_of_the_manager_is_a_manager() {
+        // AGL-120 D1: the unit road exists wherever the manager answers, in
+        // any of its states; silence — no binary, no runtime dir — is not.
+        for state in ["running", "degraded\n", "  starting ", "initializing"] {
+            assert!(manager_answers(Some(state)), "{state}");
+        }
+        for state in ["", "offline", "\n"] {
+            assert!(!manager_answers(Some(state)), "{state}");
+        }
+        assert!(!manager_answers(None));
+    }
+
     fn autostart(llama: Llama, project: &Workspace, effective: &ServerFile) -> Autostart {
         Autostart {
             llama: Arc::new(llama),
@@ -2246,6 +2297,7 @@ mod tests {
             lang: Lang::En,
             others: Others::Refuse,
             engine: Arc::new(Mutex::new(None)),
+            units: false,
         }
     }
 

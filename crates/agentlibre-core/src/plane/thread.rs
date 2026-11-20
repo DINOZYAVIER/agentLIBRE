@@ -469,6 +469,7 @@ mod tests {
                 lang: Lang::En,
                 others: Others::Refuse,
                 engine: Arc::new(Mutex::new(None)),
+                units: false,
             },
             lang: Lang::En,
             data: dir.0.join("data"),
