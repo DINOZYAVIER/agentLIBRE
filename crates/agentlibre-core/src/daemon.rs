@@ -113,6 +113,9 @@ struct State {
     sessions: HashMap<String, Entry>,
     /// The questions that wait for their answer, and their client.
     questions: HashMap<u64, (u64, Sender<Option<String>>)>,
+    /// The wake's pair (AGL-118, D22): (plane store, flow) to the session
+    /// its wake woke; the end of that turn carries `turn.end` back.
+    flow_wakes: HashMap<(PathBuf, String), String>,
     /// The engines of planes that ended, kept while a plane uses their
     /// server (D16): its url, the engine, the store of its record.
     engines: Vec<(String, Engine, PathBuf)>,
@@ -477,6 +480,11 @@ impl Daemon {
         };
         if entry.commands.send(command).is_ok() {
             entry.busy = true;
+            // The pair of D22: the end of this session's turn is the flow's
+            // `turn.end`, no other's.
+            state
+                .flow_wakes
+                .insert((plane_dir.to_path_buf(), wake.flow.clone()), id);
             return true;
         }
         false
@@ -753,8 +761,24 @@ impl Daemon {
             write(&to.out, &reply);
         }
         // A turn of the plane ended: its flows look again at what they wait
-        // for (D18) — a review's verdict asks through the next poke.
+        // for (D18) — a review's verdict asks through the next poke — and
+        // the flow whose woken session just turned gets its `turn.end`
+        // through the pair the wake left (D22).
         if turn_ended {
+            // `state` is held here already: collect the due pairs as owned
+            // values, and post to the holders without touching it twice.
+            let due: Vec<(PathBuf, String)> = state
+                .flow_wakes
+                .iter()
+                .filter(|(_, session)| *session == id || *session == &next)
+                .map(|((dir, flow), _)| (dir.clone(), flow.clone()))
+                .collect();
+            for (dir, flow) in due {
+                state.flow_wakes.remove(&(dir.clone(), flow.clone()));
+                if let Some(handle) = self.flows.peek(&dir) {
+                    handle.post(plane::flow::holder::Letter::TurnEnd { flow });
+                }
+            }
             self.poke(plane.as_deref());
         }
         next
@@ -1292,6 +1316,59 @@ mod tests {
                 break;
             }
             assert!(since.elapsed() < std::time::Duration::from_secs(10), "the wake never landed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_wakes_turn_pairs_its_end_to_the_flow() {
+        // AGL-118, D22: the daemon remembers the session a wake woke, and
+        // that turn's end — no other — carries `turn.end` to the flow.
+        let dir = TempDir::new();
+        let (paths, socket) = daemon(&dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            r#"{ agl, ... }: { function = "fixture-minimal"; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
+        )
+        .unwrap();
+        let plane = plane::PlaneFile::create(&paths, "work", std::slice::from_ref(&project)).unwrap();
+        std::fs::write(
+            plane.dir.join("flow.nix"),
+            r#"{ agl, ... }: {
+  flow.talk = {
+    initial = "stood";
+    state.stood = { action.say = "last"; next.turn.end = "gone"; };
+    state.gone = { };
+  };
+}
+"#,
+        )
+        .unwrap();
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(_) = client.ask(&Request::Open(proto::Open {
+            dir: project.display().to_string(),
+            plane: Some("work".into()),
+            ..Default::default()
+        })) else {
+            panic!("not opened");
+        };
+        let Reply::Said { .. } = client.ask(&Request::Flow {
+            plane: "work".into(),
+            verb: proto::FlowVerb::Start { name: "talk".into() },
+        }) else {
+            panic!("no flow answer");
+        };
+        // The session turns on the dead url, ends, and the pair fires:
+        // the journal keeps `turn.end -> gone`.
+        let file = plane.dir.join("flow").join("talk.jsonl");
+        let since = std::time::Instant::now();
+        loop {
+            if std::fs::read_to_string(&file).is_ok_and(|text| text.contains("\"name\":\"turn\"")) {
+                break;
+            }
+            assert!(since.elapsed() < std::time::Duration::from_secs(10), "the pair never fired");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }

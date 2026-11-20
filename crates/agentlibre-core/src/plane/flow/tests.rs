@@ -803,7 +803,7 @@ fn a_review_verdict_moves_the_flow_and_names_its_session() {
 const GATE: &str = r#"{ agl, ... }: {
   flow.gate = {
     initial = "stood";
-    state.stood = { nudges = [ "go" ]; next.message.go = "gone"; };
+    state.stood = { nudges = [ "go" ]; next.message.go = "gone"; next.turn.end = "gone"; };
     state.gone = { };
   };
 }
@@ -828,4 +828,16 @@ fn a_nudge_delivers_where_the_state_names_it() {
     // And the declared one moves the machine through the ordinary table.
     let out = told(run(Verb::Nudge { name: "gate".into(), event: "go".into() }));
     assert!(out.contains("gone"), "{out}");
+}
+
+#[test]
+fn a_woken_sessions_turn_end_moves_the_flow() {
+    // D22: the end of the woken session's turn arrives as `turn.end` and
+    // moves the flow through the ordinary table.
+    let dir = TempDir::new();
+    let flows = read(&dir, GATE).unwrap();
+    let decl = flows.find("gate").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    host::settle(&dir.0, &dir.0, "gate", Event::TurnEnd, None);
+    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("gone"));
 }

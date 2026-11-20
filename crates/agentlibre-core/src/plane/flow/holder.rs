@@ -66,6 +66,9 @@ pub enum Letter {
     /// D19): the flow stands, and a poke — an opening, a turn's end — asks
     /// again.
     Miss { flow: String, kind: Kind },
+    /// The turn of the session this flow's wake woke has ended: the
+    /// `turn.end` event, pair kept by the daemon (D22).
+    TurnEnd { flow: String },
     /// Look again (D18): a session of the plane opened, or one's turn ended.
     Poke,
 }
@@ -221,6 +224,10 @@ fn answer(
         }
         Letter::Miss { flow, kind } => {
             pending.remove(&(flow, kind));
+        }
+        Letter::TurnEnd { flow } => {
+            host::settle(plane_dir, workdir, &flow, Event::TurnEnd, None);
+            issue(plane_dir, needs, pending);
         }
         Letter::Poke => issue(plane_dir, needs, pending),
     }
