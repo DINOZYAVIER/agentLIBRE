@@ -178,6 +178,12 @@ impl Section {
         }
     }
 
+    /// Whether `key` holds a set, without taking it (AGL-118): a key that
+    /// may be a string or a set asks this before choosing which to take.
+    pub fn is_object(&self, key: &str) -> bool {
+        matches!(self.map.get(key), Some(Value::Object(_)))
+    }
+
     /// Takes the set `key`, which must be present.
     pub fn required_section(&mut self, key: &str) -> Result<Section, Error> {
         self.section(key)?.ok_or_else(|| self.missing(key))

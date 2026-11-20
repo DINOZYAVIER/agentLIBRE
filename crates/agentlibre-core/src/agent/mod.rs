@@ -124,9 +124,9 @@ pub struct Agent<'a> {
     pub memory: &'a dyn crate::memory::Home,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<&'a str>,
-    /// The plane whose flows the `flow` tool moves and reads; none outside
-    /// a plane (AGL-118, D2).
-    pub flows: Option<crate::plane::flow::host::Env<'a>>,
+    /// The daemon's holder of the plane's flows, which the `flow` tool asks;
+    /// none outside a plane (AGL-118, D2, D17).
+    pub flows: Option<crate::plane::flow::holder::Handle>,
 }
 
 impl Agent<'_> {
@@ -390,7 +390,7 @@ impl Agent<'_> {
                         whisper: self.whisper,
                         search: self.search,
                         memory: self.memory,
-                        flows: self.flows,
+                        flows: self.flows.clone(),
                     },
                 );
                 let result = ran.result;

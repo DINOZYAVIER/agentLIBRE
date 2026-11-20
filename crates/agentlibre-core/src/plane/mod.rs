@@ -195,6 +195,9 @@ pub struct Opening<'a> {
     pub lang: Lang,
     pub stop: Stop,
     pub asker: Asker,
+    /// The daemon's flow holders (AGL-118, D17): a plane of the run takes
+    /// its one driver from here, and its agent's `flow` tool asks it.
+    pub flows: crate::plane::flow::holder::Shared,
 }
 
 /// A plane opened, and what its surface needs of the opening.
@@ -248,6 +251,10 @@ pub struct Plane {
     pub about: Option<String>,
     /// What stops a turn on this plane (AGL-075): its turns run in its scope.
     pub stop: Stop,
+    /// The daemon's holder of this plane's flows (AGL-118, D17): the agent's
+    /// `flow` tool asks it — the one driver the CLI asks. None outside a
+    /// plane; the daemon sets it on the plane it opens.
+    pub flows: Option<flow::holder::Handle>,
 }
 
 impl Plane {
@@ -270,6 +277,7 @@ impl Plane {
             lang,
             stop,
             asker,
+            flows,
         } = opening;
         let say = |line: &str| (asker.say)(line);
         // AGL-103, D2-D3: what the opening says of this session stands in
@@ -552,6 +560,11 @@ impl Plane {
             .enabled
             .unwrap_or(true)
             .then(|| about_of(env, paths, project, plane_file.as_ref(), &settings, &workspace, &user_path));
+        // A plane of a store drives its flows on the daemon's one holder
+        // for it, the same thread the CLI asks (AGL-118, D17).
+        let flows = plane_file
+            .as_ref()
+            .map(|file| flows.holder(&file.dir, &workspace));
         let plane = Plane {
             plane_forge: plane_file.as_ref().map(PlaneFile::forge_store),
             file: plane_file,
@@ -573,6 +586,7 @@ impl Plane {
             memory,
             about,
             stop,
+            flows,
         };
         Ok(Opened {
             plane,
@@ -614,10 +628,7 @@ impl Plane {
             search: &*self.search,
             memory: &*self.memory,
             about: self.about.as_deref(),
-            flows: self
-                .file
-                .as_ref()
-                .map(|plane| flow::host::Env { plane_dir: &plane.dir, workdir: &self.workspace }),
+            flows: self.flows.clone(),
         }
     }
 
@@ -856,15 +867,6 @@ impl Plane {
             said.content = Some(text);
         }
         said
-    }
-
-    /// A flow of the plane (AGL-118, D2, D7): `agl plane flow` and the agent's
-    /// `flow` tool come here, the same verb of the same machine.
-    pub fn flow(&mut self, verb: flow::Verb) -> Said {
-        let Some(plane) = &self.file else {
-            return Said::told(Told::Refusal(tr!(self.lang, m::FLOW_NO_PLANE).to_string()));
-        };
-        flow::host::run(&plane.dir, &self.workspace, &verb, self.lang)
     }
 
     /// The line of a command for the session (AGL-047, D5); a session that

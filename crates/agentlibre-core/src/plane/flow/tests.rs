@@ -562,3 +562,79 @@ fn a_verb_answers_what_the_flow_does_and_where_it_stands() {
     assert!(told(run(Verb::Reset { name: "work".into() })).starts_with("work: reset to `build`"));
     assert_eq!(told(run(Verb::List)), "work: not started");
 }
+
+/// A flow that stands in `wait` while its `timer` runs (D9, D16).
+const CLOCK: &str = r#"{ agl, ... }: {
+  flow.clock = {
+    initial = "wait";
+    state.wait = { timer = 1; next.timer = "ring"; };
+    state.ring = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.any = "done";
+    };
+    state.done = { };
+  };
+}
+"#;
+
+#[test]
+fn a_states_timer_is_read_and_its_zero_is_named() {
+    let dir = TempDir::new();
+    let flows = read(&dir, CLOCK).unwrap();
+    let flow = flows.find("clock").expect("the declared flow");
+    let at = |name: &str| flow.states().iter().position(|s| s.name == name).unwrap();
+    assert_eq!(flow.timer(at("wait")), Some(Duration::from_secs(1)));
+    assert_eq!(flow.timer(at("ring")), None);
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: {
+  flow.clock = {
+    initial = "wait";
+    state.wait = { timer = 0; next.timer = "wait"; };
+  };
+}
+"#,
+    );
+    assert_eq!(
+        (key.as_str(), problem),
+        ("flow.clock.state.wait.timer", FunctionProblem::NotPositive)
+    );
+}
+
+#[test]
+fn a_due_timer_fires_and_moves_the_flow() {
+    let dir = TempDir::new();
+    let flows = read(&dir, CLOCK).unwrap();
+    let decl = flows.find("clock").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    // Not yet run out: the flow stands where it stood (D16).
+    assert!(host::tick(&dir.0, &dir.0).is_empty());
+    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
+    // Age the journal's last line past the timer, and the tick fires: the
+    // `timer` event moves it, and the state it lands on goes on by itself.
+    let file = journal::path(&dir.0, "clock");
+    let aged = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
+    fs::write(&file, aged).unwrap();
+    assert_eq!(host::tick(&dir.0, &dir.0), ["clock"]);
+    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("done"));
+    // Done has no timer: the next tick has nothing to fire.
+    assert!(host::tick(&dir.0, &dir.0).is_empty());
+}
+
+#[test]
+fn a_stopped_flow_waits_for_no_timer() {
+    let dir = TempDir::new();
+    let flows = read(&dir, CLOCK).unwrap();
+    let decl = flows.find("clock").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    host::stop(decl, &dir.0).unwrap();
+    // The human holds a stopped flow: its timer stands with it (D7).
+    let file = journal::path(&dir.0, "clock");
+    let aged = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
+    fs::write(&file, aged).unwrap();
+    assert!(host::tick(&dir.0, &dir.0).is_empty());
+    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
+}

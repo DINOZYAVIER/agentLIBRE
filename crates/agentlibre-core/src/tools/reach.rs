@@ -34,9 +34,9 @@ pub struct Reach<'a> {
     pub search: &'a dyn Searcher,
     /// Where the memory of the workspace is (AGL-006).
     pub memory: &'a dyn Home,
-    /// The plane whose flows the `flow` tool moves and reads; none outside
-    /// a plane (AGL-118, D2).
-    pub flows: Option<crate::plane::flow::host::Env<'a>>,
+    /// The daemon's holder of the plane's flows, which the `flow` tool asks;
+    /// none outside a plane (AGL-118, D2, D17).
+    pub flows: Option<crate::plane::flow::holder::Handle>,
 }
 
 /// A write a call made outside the workspace's files: to the forge
@@ -55,12 +55,17 @@ pub struct Ran {
 }
 
 /// The `flow` tool: the verb of `agl plane flow` itself, so that the agent
-/// and the human ask the same machine (AGL-118, D2, D7). What the agent may
-/// ask is `start`, `status` and `list`; a nudge beyond them is the human's,
-/// unless the flow's declaration gives it (D7).
-pub(super) fn flow_tool(call: &ToolCall, env: Option<crate::plane::flow::host::Env<'_>>, lang: Lang) -> ToolResult {
+/// and the human ask the same machine (AGL-118, D2, D7) — and, at home, the
+/// same thread: the verb goes to the plane's holder, the one driver of its
+/// flows (D17). What the agent may ask is `start`, `status` and `list`; a
+/// nudge beyond them is the human's, unless the flow's declaration gives it (D7).
+pub(super) fn flow_tool(
+    call: &ToolCall,
+    holder: Option<&crate::plane::flow::holder::Handle>,
+    lang: Lang,
+) -> ToolResult {
     use crate::plane::flow::Verb;
-    let Some(env) = env else {
+    let Some(holder) = holder else {
         return ToolResult {
             outcome: Outcome::Fail,
             content: tr!(lang, m::FLOW_NO_PLANE).to_string(),
@@ -80,7 +85,7 @@ pub(super) fn flow_tool(call: &ToolCall, env: Option<crate::plane::flow::host::E
             };
         }
     };
-    let said = crate::plane::flow::host::run(env.plane_dir, env.workdir, &verb, lang);
+    let said = holder.ask(verb, lang);
     ToolResult {
         outcome: if said.failed { Outcome::Fail } else { Outcome::Ok },
         content: said.text(),
@@ -105,7 +110,7 @@ pub fn run(call: &ToolCall, text: Option<&str>, reach: &mut Reach<'_>) -> Ran {
             result.content = shown(&result.content, &output);
             (result, None)
         }
-        "flow" => (flow_tool(call, reach.flows, reach.forge.lang), None),
+        "flow" => (flow_tool(call, reach.flows.as_ref(), reach.forge.lang), None),
         "memory" => {
             let (result, write) = memory_tool(call, text, reach.memory, reach.output_tokens, reach.backend);
             (result, write.map(Written::Memory))

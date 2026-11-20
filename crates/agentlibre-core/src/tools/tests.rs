@@ -1575,11 +1575,10 @@ fn in_a_plane_the_forge_is_the_planes_and_the_workspaces_by_store() {
 #[test]
 fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
     use super::reach::flow_tool;
-    use crate::plane::flow::FLOW_FILE;
-    use crate::plane::flow::host::Env;
+    use crate::plane::flow::{holder, FLOW_FILE};
 
     let plane = TempDir::new();
-    let ask = |env: Option<Env<'_>>, args: Vec<(&str, &str)>| {
+    let ask = |holder: Option<&holder::Handle>, args: Vec<(&str, &str)>| {
         flow_tool(
             &tool_call(
                 "flow",
@@ -1587,7 +1586,7 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
                     .map(|(name, value)| ((*name).to_owned(), Value::Text((*value).to_owned())))
                     .collect(),
             ),
-            env,
+            holder,
             Lang::En,
         )
     };
@@ -1595,7 +1594,10 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
     let out = ask(None, vec![("action", "start"), ("name", "one")]);
     assert_eq!(out.outcome, Outcome::Fail);
     assert_eq!(out.content, "flows live in a plane; this session is in none");
-    let here = Some(Env { plane_dir: &plane.0, workdir: &plane.0 });
+    // Inside one, every verb travels to the plane's holder (D17).
+    let registry = holder::Registry::default();
+    let handle = registry.holder(&plane.0, &plane.0);
+    let here = Some(&handle);
     // A plane that declares nothing answers, and a declared flow that never
     // ran says so (D7).
     let out = ask(here, vec![("action", "list")]);

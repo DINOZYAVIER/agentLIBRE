@@ -41,15 +41,6 @@ pub enum Waiting {
     Review { function: String, events: Vec<String> },
 }
 
-/// What the `flow` tool needs of the plane (AGL-118, D2, D7): its store,
-/// where `flow.nix` and the journals are, and the directory the flow's
-/// commands run in — the plane's own.
-#[derive(Clone, Copy, Debug)]
-pub struct Env<'a> {
-    pub plane_dir: &'a Path,
-    pub workdir: &'a Path,
-}
-
 /// Where a flow stands, folded from its journal (D3, D7).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Place {
@@ -214,6 +205,18 @@ pub fn start(decl: &FlowDecl, plane_dir: &Path, workdir: &Path) -> Result<Place,
     if matches!(journal::read(&file)?.last(), Some(Entry::Stopped { .. })) {
         run.restart()?;
     }
+    walk(decl, &mut run, plane_dir, workdir)
+}
+
+/// Turns the machine as far as its own kind goes (D5, D10): a state's command
+/// and launch run, their exits move it; a state whose actions need a turn, or
+/// no actions at all, ends the walk, and the place says what it waits for (D6).
+fn walk(
+    decl: &FlowDecl,
+    run: &mut FlowRun,
+    plane_dir: &Path,
+    workdir: &Path,
+) -> Result<Place, Error> {
     for _ in 0..MAX_WALK {
         let at = index(decl, run.state());
         // The state's actions in the order they are declared; the first event
@@ -249,12 +252,47 @@ pub fn start(decl: &FlowDecl, plane_dir: &Path, workdir: &Path) -> Result<Place,
     // outside event between: the declaration has no end, and the human has
     // to bound it (D9).
     Err(Error::PlaneFile {
-        path: file,
+        path: journal::path(plane_dir, decl.name()),
         detail: format!(
             "`{}`: {MAX_WALK} steps in a row without an event from outside; give a state `max_visits` or the flow `max_steps_total`",
             decl.name()
         ),
     })
+}
+
+/// Fires every flow whose `timer` has run out (D9, D16): a state's timer
+/// counts from the second of the flow's last journal line — the second it
+/// came to rest where it stands — and `timer` moves it as any event does,
+/// the states it lands on going on by themselves (D5). A stopped flow stands
+/// where the human left it (D7); a fold that refuses says so to `status`,
+/// not here (D11). The names of the flows whose timers fired come back.
+pub fn tick(plane_dir: &Path, workdir: &Path) -> Vec<String> {
+    let mut fired = Vec::new();
+    // A declaration that does not load ticks nothing; the next look tries
+    // again once the human mends it.
+    let Ok(decls) = FlowFile::load(plane_dir) else {
+        return fired;
+    };
+    for decl in decls.flows {
+        let file = journal::path(plane_dir, decl.name());
+        let Ok(entries) = journal::read(&file) else { continue };
+        let Some(last) = entries.last() else { continue };
+        if matches!(last, Entry::Stopped { .. }) {
+            continue;
+        }
+        let Ok(turn) = journal::fold(&decl, &file, &entries) else { continue };
+        let Some(state) = turn.state else { continue };
+        let at = index(&decl, &state);
+        let Some(due) = decl.timer(at) else { continue };
+        if journal::now().saturating_sub(last.time()) < due.as_secs() {
+            continue;
+        }
+        let Ok(mut run) = FlowRun::resume(&decl, plane_dir) else { continue };
+        let _ = run.on_event(&decl, Event::Timer);
+        let _ = walk(&decl, &mut run, plane_dir, workdir);
+        fired.push(decl.name().to_owned());
+    }
+    fired
 }
 
 /// A human stopped the flow (D7): the journal keeps where it stood.

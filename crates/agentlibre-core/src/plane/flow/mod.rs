@@ -9,6 +9,7 @@ use std::time::Duration;
 use crate::action::Outcome;
 
 pub mod act;
+pub mod holder;
 pub mod host;
 pub mod journal;
 use crate::error::{Error, FunctionProblem};
@@ -47,6 +48,7 @@ pub struct FlowDecl {
     initial: usize,
     max_steps_total: Option<u32>,
     actions: Vec<Vec<Action>>,
+    timers: Vec<Option<Duration>>,
 }
 
 impl FlowDecl {
@@ -72,6 +74,12 @@ impl FlowDecl {
     /// What the state `at` does (D9).
     pub fn actions(&self, at: usize) -> &[Action] {
         &self.actions[at]
+    }
+
+    /// The state's `timer`, seconds since the flow came to rest in it before
+    /// `timer` fires (D9, D16).
+    pub fn timer(&self, at: usize) -> Option<Duration> {
+        self.timers[at]
     }
 
     /// The name of the state `at`.
@@ -139,6 +147,9 @@ struct Declared {
     max_steps: Option<u32>,
     max_visits: Option<u32>,
     on_limit: Option<String>,
+    /// `timer = <seconds>`: while the flow stands in this state, `timer`
+    /// fires once the seconds run out (D9, D16).
+    timer: Option<Duration>,
 }
 
 /// Reads one flow of `flow.nix` (D1, D9).
@@ -159,6 +170,7 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
             "max_steps",
             "max_visits",
             "on_limit",
+            "timer",
         ])?;
         let limit = |body: &mut Section, key: &str| -> Result<Option<u32>, Error> {
             match body.integer(key)? {
@@ -170,6 +182,11 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
         let max_steps = limit(&mut body, "max_steps")?;
         let max_visits = limit(&mut body, "max_visits")?;
         let on_limit = body.string("on_limit")?;
+        let timer = match body.integer("timer")? {
+            Some(n) if n >= 1 => Some(Duration::from_secs(n as u64)),
+            Some(_) => return Err(bad(&body, "timer", FunctionProblem::NotPositive)),
+            None => None,
+        };
         let (next, otherwise) = read_next(&mut body)?;
         declared.push(Declared {
             name: state,
@@ -179,6 +196,7 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
             max_steps,
             max_visits,
             on_limit,
+            timer,
         });
     }
     resolve(&at, name, &initial, max_steps_total, declared)
@@ -248,24 +266,24 @@ fn read_next(at: &mut Section) -> Result<(Vec<Transition>, Option<String>), Erro
         }
         // An event is either a bare target — `next.timer = "build"` — or a
         // set of details, as a tool's is (D41, D9).
-        match next.section(&key)? {
-            Some(mut details) => {
-                for (name, target) in details.string_entries()? {
-                    read.push(Transition {
-                        name: key.clone(),
-                        detail: match name.as_str() {
-                            "any" => None,
-                            other => Some(other.to_string()),
-                        },
-                        target,
-                    });
-                }
+        if next.is_object(&key) {
+            let mut details = next.section(&key)?.expect("just seen");
+            for (name, target) in details.string_entries()? {
+                read.push(Transition {
+                    name: key.clone(),
+                    detail: match name.as_str() {
+                        "any" => None,
+                        other => Some(other.to_string()),
+                    },
+                    target,
+                });
             }
-            None => read.push(Transition {
+        } else {
+            read.push(Transition {
                 name: key.clone(),
                 detail: None,
                 target: next.required_string(&key)?,
-            }),
+            });
         }
     }
     Ok((read, otherwise))
@@ -290,6 +308,7 @@ fn resolve(
     let initial = index("initial", initial)?;
     let mut states = Vec::new();
     let mut actions = Vec::new();
+    let mut timers = Vec::new();
     for d in &declared {
         let mut transitions = Vec::new();
         for t in &d.next {
@@ -333,6 +352,7 @@ fn resolve(
             otherwise,
         ));
         actions.push(d.actions.clone());
+        timers.push(d.timer);
     }
     check_on_limit(at, &states)?;
     Ok(FlowDecl {
@@ -341,6 +361,7 @@ fn resolve(
         initial,
         max_steps_total,
         actions,
+        timers,
     })
 }
 

@@ -19,7 +19,7 @@ use super::FlowDecl;
 pub const JOURNAL_DIR: &str = "flow";
 
 /// Seconds since the epoch, as the session files keep time.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -45,6 +45,16 @@ pub enum Entry {
 }
 
 impl Entry {
+    /// The second the line was written (D16): the second a state stands
+    /// since, which a `timer` counts from.
+    pub fn time(&self) -> u64 {
+        match self {
+            Entry::Started { time, .. }
+            | Entry::Event { time, .. }
+            | Entry::Stopped { time, .. } => *time,
+        }
+    }
+
     /// The line as the journal holds it.
     fn to_line(&self) -> Json {
         match self {

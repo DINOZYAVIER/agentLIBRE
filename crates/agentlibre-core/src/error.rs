@@ -218,10 +218,6 @@ pub enum Error {
     Daemon { detail: String },
     /// No session of that id is open in the daemon.
     DaemonNoSession { id: String },
-    /// No session of that plane is open in the daemon, to run its flows
-    /// (AGL-118, D17): the daemon holds a plane's thread only while a
-    /// session of it is open.
-    DaemonNoPlane { name: String },
     /// `transcribe` for a directory with no session open in the daemon
     /// (AGL-076, D15).
     DaemonNoTranscriber { dir: PathBuf },
