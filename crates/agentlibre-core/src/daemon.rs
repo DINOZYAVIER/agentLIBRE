@@ -359,6 +359,9 @@ impl Daemon {
                     proto::FlowVerb::Stop { name } => plane::flow::Verb::Stop { name },
                     proto::FlowVerb::Status { name } => plane::flow::Verb::Status { name },
                     proto::FlowVerb::Reset { name } => plane::flow::Verb::Reset { name },
+                    proto::FlowVerb::Message { name, event } => {
+                        plane::flow::Verb::Message { name, event }
+                    }
                 };
                 match self.flow_handle(&plane) {
                     Ok(handle) => {

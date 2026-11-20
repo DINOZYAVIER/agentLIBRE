@@ -57,8 +57,9 @@ pub struct Ran {
 /// The `flow` tool: the verb of `agl plane flow` itself, so that the agent
 /// and the human ask the same machine (AGL-118, D2, D7) — and, at home, the
 /// same thread: the verb goes to the plane's holder, the one driver of its
-/// flows (D17). What the agent may ask is `start`, `status` and `list`; a
-/// nudge beyond them is the human's, unless the flow's declaration gives it (D7).
+/// flows (D17). What the agent may ask is `start`, `status`, `list` and
+/// `message`; the message arrives as a nudge, bounded state by state by the
+/// declaration's `nudges` (D15, D21).
 pub(super) fn flow_tool(
     call: &ToolCall,
     holder: Option<&crate::plane::flow::holder::Handle>,
@@ -76,11 +77,15 @@ pub(super) fn flow_tool(
         "list" => Verb::List,
         "start" if !name.is_empty() => Verb::Start { name: name.into() },
         "status" if !name.is_empty() => Verb::Status { name: name.into() },
+        "message" if !name.is_empty() => Verb::Nudge {
+            name: name.into(),
+            event: call.text("event").unwrap_or_default().into(),
+        },
         other => {
             return ToolResult {
                 outcome: Outcome::Fail,
                 content: format!(
-                    "`{other}` is no verb of a flow: `start` and `status` name one, `list` names none"
+                    "`{other}` is no verb of a flow: `start`, `status` and `message` name one, `list` names none"
                 ),
             };
         }

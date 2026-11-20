@@ -1639,6 +1639,9 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
         (vec![("action", "stop"), ("name", "one")], "`stop` is no verb of a flow"),
         (vec![("action", "start"), ("name", "two")], "no flow `two` in `flow.nix`"),
         (vec![("action", "start")], "`start` is no verb of a flow"),
+        // `message` is the tool's fourth verb, bounded by the state's
+        // `nudges`, and this state declares none (D15, D21).
+        (vec![("action", "message"), ("name", "one"), ("event", "go")], "`go` is no nudge of `done`"),
     ] {
         let out = ask(here, args);
         assert_eq!(out.outcome, Outcome::Fail);

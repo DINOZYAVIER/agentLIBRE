@@ -798,3 +798,34 @@ fn a_review_verdict_moves_the_flow_and_names_its_session() {
         "{entries:?}"
     );
 }
+
+/// A state that names the nudges its agent may deliver (D15).
+const GATE: &str = r#"{ agl, ... }: {
+  flow.gate = {
+    initial = "stood";
+    state.stood = { nudges = [ "go" ]; next.message.go = "gone"; };
+    state.gone = { };
+  };
+}
+"#;
+
+#[test]
+fn a_nudge_delivers_where_the_state_names_it() {
+    use crate::i18n::Lang;
+    let dir = TempDir::new();
+    let flows = read(&dir, GATE).unwrap();
+    let decl = flows.find("gate").unwrap();
+    let at = decl.states().iter().position(|s| s.name == "stood").unwrap();
+    assert_eq!(decl.nudges(at), ["go"]);
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    let run = |verb: Verb| host::run(&dir.0, &dir.0, &verb, Lang::En);
+    // The human delivers what the machine declared for it, bounded by no
+    // list; an undeclared event simply moves nothing (D21).
+    assert!(told(run(Verb::Message { name: "gate".into(), event: "jump".into() })).contains("stood"));
+    // The agent's way is bounded by `nudges` (D15).
+    let out = told(run(Verb::Nudge { name: "gate".into(), event: "jump".into() }));
+    assert!(out.contains("`jump` is no nudge of `stood`"), "{out}");
+    // And the declared one moves the machine through the ordinary table.
+    let out = told(run(Verb::Nudge { name: "gate".into(), event: "go".into() }));
+    assert!(out.contains("gone"), "{out}");
+}

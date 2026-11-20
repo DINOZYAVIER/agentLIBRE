@@ -129,6 +129,31 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
             Ok(decl) => place_said(name, place(decl, plane_dir)),
             Err(text) => refused(text),
         },
+        // D15, D21: a nudge is a `message` event delivered through the
+        // table. The agent's way is bounded state by state by `nudges`;
+        // the human's by nothing — the human owns the machine (D7).
+        Verb::Message { name, event } | Verb::Nudge { name, event } => match declared(name) {
+            Ok(decl) => {
+                let at = match place(decl, plane_dir) {
+                    Ok(place) => place.state.as_deref().and_then(|state| {
+                        decl.states().iter().position(|s| s.name == state)
+                    }),
+                    Err(error) => return Said::fault(&error, lang),
+                };
+                if matches!(verb, Verb::Nudge { .. })
+                    && !at.is_some_and(|at| decl.nudges(at).iter().any(|n| n == event))
+                {
+                    let state = at.map_or_else(
+                        || "?".to_string(),
+                        |at| decl.state_name(at).to_owned(),
+                    );
+                    return refused(format!("`{event}` is no nudge of `{state}`"));
+                }
+                settle(plane_dir, workdir, name, Event::Message(event.clone()), None);
+                place_said(name, place(decl, plane_dir))
+            }
+            Err(text) => refused(text),
+        },
         Verb::Reset { name } => match declared(name) {
             Ok(decl) => {
                 let file = journal::path(plane_dir, name);

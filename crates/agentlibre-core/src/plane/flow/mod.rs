@@ -53,6 +53,7 @@ pub struct FlowDecl {
     max_steps_total: Option<u32>,
     actions: Vec<Vec<Action>>,
     timers: Vec<Option<Duration>>,
+    nudges: Vec<Vec<String>>,
 }
 
 impl FlowDecl {
@@ -84,6 +85,12 @@ impl FlowDecl {
     /// `timer` fires (D9, D16).
     pub fn timer(&self, at: usize) -> Option<Duration> {
         self.timers[at]
+    }
+
+    /// The state's `nudges`: the `message` events this agent may deliver
+    /// here, empty by default (D15, D21).
+    pub fn nudges(&self, at: usize) -> &[String] {
+        &self.nudges[at]
     }
 
     /// The name of the state `at`.
@@ -154,6 +161,9 @@ struct Declared {
     /// `timer = <seconds>`: while the flow stands in this state, `timer`
     /// fires once the seconds run out (D9, D16).
     timer: Option<Duration>,
+    /// `nudges = [ "go" ]`: the `message` events this agent may deliver
+    /// in this state, empty by default (D15).
+    nudges: Vec<String>,
 }
 
 /// Reads one flow of `flow.nix` (D1, D9).
@@ -175,6 +185,7 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
             "max_visits",
             "on_limit",
             "timer",
+            "nudges",
         ])?;
         let limit = |body: &mut Section, key: &str| -> Result<Option<u32>, Error> {
             match body.integer(key)? {
@@ -191,6 +202,8 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
             Some(_) => return Err(bad(&body, "timer", FunctionProblem::NotPositive)),
             None => None,
         };
+        // The `message` events this agent may deliver here (D15).
+        let nudges = body.strings("nudges")?.unwrap_or_default();
         let (next, otherwise) = read_next(&mut body)?;
         declared.push(Declared {
             name: state,
@@ -201,6 +214,7 @@ fn read_flow(name: String, mut at: Section) -> Result<FlowDecl, Error> {
             max_visits,
             on_limit,
             timer,
+            nudges,
         });
     }
     resolve(&at, name, &initial, max_steps_total, declared)
@@ -323,6 +337,7 @@ fn resolve(
     let mut states = Vec::new();
     let mut actions = Vec::new();
     let mut timers = Vec::new();
+    let mut nudges = Vec::new();
     for d in &declared {
         let mut transitions = Vec::new();
         for t in &d.next {
@@ -367,6 +382,7 @@ fn resolve(
         ));
         actions.push(d.actions.clone());
         timers.push(d.timer);
+        nudges.push(d.nudges.clone());
     }
     check_on_limit(at, &states)?;
     Ok(FlowDecl {
@@ -376,6 +392,7 @@ fn resolve(
         max_steps_total,
         actions,
         timers,
+        nudges,
     })
 }
 
@@ -478,6 +495,12 @@ pub enum Verb {
     List,
     /// Begin again from `initial`, the old journal kept beside it (D11).
     Reset { name: String },
+    /// Deliver the `message.<event>` to a flow (D15, D21): the human's way,
+    /// bounded by no list — the human owns the machine (D7).
+    Message { name: String, event: String },
+    /// The agent's way of the same delivery, bounded state by state by the
+    /// declaration's `nudges` (D15, D21).
+    Nudge { name: String, event: String },
 }
 
 #[cfg(test)]

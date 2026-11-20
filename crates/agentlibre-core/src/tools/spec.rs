@@ -320,20 +320,27 @@ pub const SPECS: [Spec; 7] = [
                       plane's `flow.nix`, that survives turns and restarts. `start` moves \
                       it: a state runs its own command and moves on that command's exit; \
                       `status` answers from its journal where it stands, what it waits for \
-                      and the journal's last lines; `list` names the plane's flows. The \
-                      transitions are the plane's, never yours to invent; a nudge other \
-                      than these verbs is the human's.",
+                      and the journal's last lines; `list` names the plane's flows; \
+                      `message` delivers the event named by `event` as `message.<event>`, \
+                      only where the state declares it in its `nudges`. The transitions \
+                      are the plane's, never yours to invent; a nudge beyond the declared \
+                      list is the human's.",
         params: &[
             ParamSpec::of(
                 "action",
                 true,
-                Values::OneOf(&["start", "status", "list"]),
-                Some("start, status or list."),
+                Values::OneOf(&["start", "status", "list", "message"]),
+                Some("start, status, list or message."),
+            ),
+            ParamSpec::text(
+                "event",
+                false,
+                Some("The nudge's event name for message; not for the rest."),
             ),
             ParamSpec::text(
                 "name",
                 false,
-                Some("The flow's name for start and status; not for list."),
+                Some("The flow's name for start, status and message; not for list."),
             ),
         ],
         outcomes: OK_FAIL,

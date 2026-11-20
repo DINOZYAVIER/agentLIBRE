@@ -131,7 +131,8 @@ pub enum PlaneAction {
     Remove { name: String, dir: Option<String> },
     /// `delete <name> [--yes]` (D14).
     Delete { name: String, yes: bool },
-    /// `flow list|status|start|stop|reset [<flow>]` (AGL-118, D2, D7): the
+    /// `flow list|status|start|stop|reset [<flow>] | message <flow> <event>`
+    /// (AGL-118, D2, D7, D21): the
     /// plane of the current directory, the verb of the flow's own machine.
     Flow(crate::plane::flow::Verb),
 }
@@ -141,11 +142,22 @@ pub enum PlaneAction {
 fn flow_action(mut words: impl Iterator<Item = String>) -> Result<PlaneAction, Error> {
     let verb = words.next().ok_or_else(|| Error::MissingValue("flow".into()))?;
     let name = words.next();
+    use crate::plane::flow::Verb;
+    // `message <flow> <event>`: the one delivery verb of the nudges (D21).
+    if verb == "message" {
+        let event = words.next().ok_or_else(|| Error::MissingValue("event".into()))?;
+        if let Some(extra) = words.next() {
+            return Err(Error::UnknownOption(extra));
+        }
+        return Ok(PlaneAction::Flow(Verb::Message {
+            name: name.ok_or_else(|| Error::MissingValue("message".into()))?,
+            event,
+        }));
+    }
     if let Some(extra) = words.next() {
         return Err(Error::UnknownOption(extra));
     }
     let need = || name.clone().ok_or_else(|| Error::MissingValue(verb.clone()));
-    use crate::plane::flow::Verb;
     Ok(PlaneAction::Flow(match verb.as_str() {
         "list" => Verb::List,
         "start" => Verb::Start { name: need()? },
@@ -163,7 +175,7 @@ fn plane_args(args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
     let action = words
         .next()
         .ok_or_else(|| Error::MissingValue("plane".into()))?;
-    // `agl plane flow <verb> [<flow>]` (AGL-118, D2, D7): the plane is the
+    // `agl plane flow <verb> [<flow>]` (AGL-118, D2, D7, D21): the plane is the
     // current directory's, and the verb is the flow's own.
     if action == "flow" {
         return flow_action(words).map(Command::Plane);

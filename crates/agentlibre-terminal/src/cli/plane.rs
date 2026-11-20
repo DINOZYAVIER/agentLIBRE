@@ -122,6 +122,10 @@ fn flows(
         plane::flow::Verb::Stop { name } => proto::FlowVerb::Stop { name: name.clone() },
         plane::flow::Verb::Status { name } => proto::FlowVerb::Status { name: name.clone() },
         plane::flow::Verb::Reset { name } => proto::FlowVerb::Reset { name: name.clone() },
+        // The CLI speaks as the human; `Nudge` is the agent's own door (D21).
+        plane::flow::Verb::Message { name, event } | plane::flow::Verb::Nudge { name, event } => {
+            proto::FlowVerb::Message { name: name.clone(), event: event.clone() }
+        }
     };
     // A flow turns on a session's plane thread, so the daemon must already
     // run; it is not started from here, with no session to turn.

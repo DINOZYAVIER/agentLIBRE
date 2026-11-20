@@ -107,6 +107,8 @@ pub enum FlowVerb {
     Stop { name: String },
     Status { name: String },
     Reset { name: String },
+    /// Deliver `message.<event>` to a flow (AGL-118, D15, D21).
+    Message { name: String, event: String },
 }
 
 /// What `open` names (D10): as on the command line.
