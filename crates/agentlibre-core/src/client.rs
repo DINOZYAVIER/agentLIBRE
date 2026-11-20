@@ -21,6 +21,11 @@ use crate::paths::Paths;
 /// How long a daemon that was started may take to answer.
 const START_WAIT: Duration = Duration::from_secs(10);
 
+/// The unit of the daemon, asked for its start where it is installed
+/// (AGL-120, D4): the name a home module installs it under, so a unit and
+/// a forked process no longer race for the socket.
+pub const DAEMON_UNIT: &str = "agl-daemon";
+
 pub struct Client {
     out: Mutex<UnixStream>,
     from: Mutex<Receiver<Reply>>,
@@ -131,25 +136,35 @@ fn unexpected(reply: Reply) -> Error {
     }
 }
 
-/// Starts `agl daemon` apart from this process and waits until its socket
-/// answers (D6).
+/// Starts the daemon apart from this process and waits until its socket
+/// answers (D6). Where the `agl-daemon` unit is installed, systemd owns
+/// that one: the client asks the user manager for it and forks nothing
+/// (AGL-120, D4), so a unit and a terminal process no longer race for the
+/// socket; where there is no such unit, `agl daemon` still forks.
 fn start_daemon(socket: &Path) -> Result<UnixStream, Error> {
     let fail = |detail: String| Error::Daemon { detail };
-    let program = std::env::current_exe().map_err(|error| fail(error.to_string()))?;
-    let mut command = Command::new(program);
-    command
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Its own session: the terminal's Ctrl-C and its end do not reach it.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    if unit_installed_of(DAEMON_UNIT) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "start", DAEMON_UNIT])
+            .stdin(Stdio::null())
+            .output();
+    } else {
+        let program = std::env::current_exe().map_err(|error| fail(error.to_string()))?;
+        let mut command = Command::new(program);
+        command
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Its own session: the terminal's Ctrl-C and its end do not reach it.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        command.spawn().map_err(|error| fail(error.to_string()))?;
     }
-    command.spawn().map_err(|error| fail(error.to_string()))?;
     let since = Instant::now();
     loop {
         if let Ok(stream) = UnixStream::connect(socket) {
@@ -160,6 +175,25 @@ fn start_daemon(socket: &Path) -> Result<UnixStream, Error> {
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Whether `systemctl --user cat {unit}` says the unit is there: the `# /`
+/// marker before a unit file, or the `###` word for a masked one. No
+/// manager, no such unit, no answer of that kind: `false`, and the client
+/// forks as before.
+fn unit_installed(output: &str) -> bool {
+    output.lines().any(|line| line.starts_with("# /") || line.starts_with("###"))
+}
+
+/// Whether the daemon's unit is installed for this user's manager
+/// (AGL-120, D4).
+fn unit_installed_of(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["--user", "cat", unit])
+        .stdin(Stdio::null())
+        .output()
+        .map(|output| unit_installed(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or(false)
 }
 
 /// Who answers a plane's question: its kind and text in, the answer out.
@@ -354,5 +388,22 @@ pub fn done_of(done: proto::Done) -> crate::plane::Done {
             .map_err(|text| Error::Said { text })
         }),
         session: wire::view_of(done.session),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unit_installed;
+
+    /// The marker `systemctl --user cat` prints before a unit's text, and
+    /// its absence for a unit that has no files (AGL-120, D4).
+    #[test]
+    fn an_installed_unit_is_named_by_its_file() {
+        assert!(unit_installed("# /nix/store/abcd-agl-daemon.service/agl-daemon.service\n[Unit]\n"));
+        // A masked unit is installed too: the marker is a link, not a path.
+        assert!(unit_installed("### Unit agl-daemon.service is masked. ###\n"));
+        // No manager, or no unit: `cat` prints nothing to stdout.
+        assert!(!unit_installed(""));
+        assert!(!unit_installed("No files found for agl-daemon.service.\n"));
     }
 }

@@ -242,7 +242,17 @@ fn run(
         }
         Command::Daemon => {
             let (paths, _) = loaded?;
-            agentlibre_core::daemon::serve(paths)?;
+            // A daemon already answers: agl is served, not broken — it says
+            // so and exits 0 (AGL-120, D4), so a unit and a forked process
+            // that lose the race for the socket leave no failed unit behind.
+            if let Err(error) = agentlibre_core::daemon::serve(paths) {
+                if let Error::DaemonRunning { path } = error {
+                    println!("{}", tr!(*lang, m::DAEMON_SERVED, path = path.display()));
+                    return Ok(ExitCode::SUCCESS);
+                } else {
+                    return Err(error);
+                }
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Command::InPlane { .. } => unreachable!("taken apart above"),

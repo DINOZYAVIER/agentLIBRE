@@ -1468,6 +1468,13 @@ Forge (сховище артефактів робочої області, agentL
         uk: "на {path} уже відповідає інший agl daemon",
     };
 
+    /// `agl daemon` where a daemon already answers (AGL-120, D4): served,
+    /// not broken — it says so and exits 0.
+    pub const DAEMON_SERVED: Msg = Msg {
+        en: "agl is served: another daemon answers on {path}",
+        uk: "agl уже обслуговується: на {path} відповідає інший демон",
+    };
+
     pub const DAEMON_FAILED: Msg = Msg {
         en: "the daemon: {detail}",
         uk: "демон: {detail}",
