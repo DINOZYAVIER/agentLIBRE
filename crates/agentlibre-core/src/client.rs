@@ -265,7 +265,10 @@ impl Remote {
                     })
                     .collect(),
             },
-            Command::Start | Command::History(_) => return None,
+            // A flow's verb works on the plane's store, not on its session
+            // (AGL-118, D2): `agl plane flow` does it itself, and a daemon
+            // that serves it is a later piece of this same layer.
+            Command::Start | Command::History(_) | Command::Flow(_) => return None,
         };
         let failed = |error: Error| {
             let (turn, said) = if turn { (Some(Err(error)), None) } else { (None, Some(Err(error))) };

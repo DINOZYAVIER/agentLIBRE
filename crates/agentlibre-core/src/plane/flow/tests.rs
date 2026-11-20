@@ -399,3 +399,166 @@ fn a_reset_starts_again_and_keeps_the_journal() {
     assert_eq!(run.state(), "build");
     assert!(dir.0.join("flow").join("dev-loop.jsonl.old").is_file());
 }
+
+/// A flow whose commands are the shell's own, so a test runs them (D5).
+const WORK: &str = r#"{ agl, ... }: {
+  flow.work = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "true"; timeout = 10; };
+      next.exit.ok = "check";
+      next.exit.any = "halted";
+    };
+    state.check = {
+      action.review = { function = "reviewer"; events = [ "ok" "broken" ]; };
+      next.review.any = "halted";
+    };
+    state.halted = { };
+  };
+}
+"#;
+
+/// Two states that only run a command and hand the run to each other (D9).
+const CHASE: &str = r#"{ agl, ... }: {
+  flow.chase = {
+    initial = "one";
+    max_steps_total = 3;
+    state.one = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.any = "two";
+    };
+    state.two = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.any = "one";
+    };
+  };
+  flow.tail = {
+    initial = "one";
+    state.one = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.any = "two";
+    };
+    state.two = {
+      action.command = { cmd = "true"; timeout = 9; };
+      next.exit.any = "one";
+    };
+  };
+}
+"#;
+
+#[test]
+fn a_flow_that_was_never_started_has_no_place() {
+    let dir = TempDir::new();
+    let flows = read(&dir, WORK).unwrap();
+    let place = host::place(flows.find("work").unwrap(), &dir.0).unwrap();
+    assert_eq!(place, host::Place::default());
+}
+
+#[test]
+fn a_states_command_runs_and_its_exit_moves_the_flow() {
+    let dir = TempDir::new();
+    let flows = read(&dir, WORK).unwrap();
+    let place = host::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    assert_eq!(place.state.as_deref(), Some("check"));
+    assert_eq!(place.tail, ["started build", "exit.ok -> check"]);
+    // The review turn is the plane's to start; the flow waits for it (D6).
+    assert_eq!(
+        place.waiting,
+        [host::Waiting::Review {
+            function: "reviewer".into(),
+            events: vec!["ok".into(), "broken".into()],
+        }]
+    );
+}
+
+#[test]
+fn a_failing_command_takes_the_transition_written_for_it() {
+    let dir = TempDir::new();
+    // The same flow with a command that ends badly.
+    fs::write(
+        dir.0.join(FLOW_FILE),
+        WORK.replace("cmd = \"true\"", "cmd = \"exit 7\""),
+    )
+    .unwrap();
+    let flows = FlowFile::load(&dir.0).unwrap();
+    let place = host::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    assert_eq!(place.state.as_deref(), Some("halted"));
+    assert_eq!(place.tail, ["started build", "exit.fail -> halted"]);
+}
+
+#[test]
+fn a_stopped_flow_goes_on_from_where_it_stood() {
+    let dir = TempDir::new();
+    let flows = read(&dir, WORK).unwrap();
+    let decl = flows.find("work").unwrap();
+    host::start(decl, &dir.0, &dir.0).unwrap();
+    let place = host::stop(decl, &dir.0).unwrap();
+    assert!(place.stopped);
+    assert_eq!(place.state.as_deref(), Some("check"));
+    let place = host::start(decl, &dir.0, &dir.0).unwrap();
+    assert!(!place.stopped, "the flow moves again (D7)");
+    assert_eq!(place.state.as_deref(), Some("check"));
+    assert_eq!(
+        FlowRun::trail(&dir.0, decl).unwrap(),
+        // started, the exit, the stop that moved nothing, the start again.
+        ["build", "check", "check"]
+    );
+}
+
+#[test]
+fn the_steps_of_a_whole_run_bound_it() {
+    let dir = TempDir::new();
+    let flows = read(&dir, CHASE).unwrap();
+    let decl = flows.find("chase").unwrap();
+    let place = host::start(decl, &dir.0, &dir.0).unwrap();
+    // `max_steps_total = 3`: three commands, and the run stops where the
+    // third left it (D33).
+    assert_eq!(place.state.as_deref(), Some("two"));
+    assert_eq!(place.tail.len(), 4);
+}
+
+#[test]
+fn a_declaration_that_chases_its_tail_is_refused() {
+    let dir = TempDir::new();
+    let flows = read(&dir, CHASE).unwrap();
+    let decl = flows.find("tail").unwrap();
+    let error = host::start(decl, &dir.0, &dir.0).unwrap_err();
+    assert!(
+        matches!(&error, Error::PlaneFile { detail, .. } if detail.contains("max_visits")),
+        "{error:?}"
+    );
+}
+
+/// A verb's answer as one string: its told lines in order.
+fn told(said: crate::plane::Said) -> String {
+    said.lines
+        .iter()
+        .map(|line| match line {
+            crate::plane::Told::Output(text)
+            | crate::plane::Told::Notice(text)
+            | crate::plane::Told::Refusal(text)
+            | crate::plane::Told::Fault(text)
+            | crate::plane::Told::Pending(text) => text.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_verb_answers_what_the_flow_does_and_where_it_stands() {
+    let dir = TempDir::new();
+    read(&dir, WORK).unwrap();
+    let run = |verb: Verb| host::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En);
+    assert_eq!(told(run(Verb::List)), "work: not started");
+    assert_eq!(
+        told(run(Verb::Start { name: "work".into() })).replace('\n', " | "),
+        "work: check |   waits for review reviewer: ok|broken |   started build |   exit.ok -> check"
+    );
+    assert_eq!(told(run(Verb::List)), "work: check");
+    assert_eq!(
+        told(run(Verb::Status { name: "nope".into() })),
+        "no flow `nope` in `flow.nix`"
+    );
+    assert!(told(run(Verb::Reset { name: "work".into() })).starts_with("work: reset to `build`"));
+    assert_eq!(told(run(Verb::List)), "work: not started");
+}

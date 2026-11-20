@@ -51,6 +51,9 @@ pub enum Command {
     /// lines and its phases are sent, then the context as `Context`; a
     /// server that fails ends the command with its error in `said`.
     Start,
+    /// A verb of a flow of the plane (AGL-118, D2, D7): what the human's CLI
+    /// and the agent's tool ask, answered with what the flow's place says.
+    Flow(crate::plane::flow::Verb),
 }
 
 /// What a plane sends while it takes a command, and at its end.
@@ -300,6 +303,7 @@ impl Plane {
                 let _ = to.send(self.session.events.clone());
                 (None, None)
             }
+            Command::Flow(verb) => (None, Some(Ok(self.flow(verb)))),
             Command::Start => {
                 let said = self.start_server(&mut forward).err().map(|error| {
                     // AGL-103, D2: a start that failed stands in the record, red.

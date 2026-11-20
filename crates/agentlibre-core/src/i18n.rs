@@ -408,6 +408,54 @@ Plane (де йде робота над проєктом: його сесії, fo
         uk: "жодного plane; `agl plane new <назва>` створить",
     };
 
+    /// A flow of a session that is in no plane (AGL-118, D1).
+    pub const FLOW_NO_PLANE: Msg = Msg {
+        en: "flows live in a plane; this session is in none",
+        uk: "flows живуть у plane; ця сесія — у жодному",
+    };
+
+    /// A plane with no `flow.nix`, or one that declares nothing (AGL-118, D1).
+    pub const FLOW_NONE: Msg = Msg {
+        en: "no flows; `{file}` declares none",
+        uk: "жодних flows; `{file}` нічого не оголошує",
+    };
+
+    /// A flow the plane does not declare (AGL-118, D2).
+    pub const FLOW_UNKNOWN: Msg = Msg {
+        en: "no flow `{name}` in `{file}`",
+        uk: "немає flow `{name}` у `{file}`",
+    };
+
+    /// A flow whose journal has no lines yet (AGL-118, D3).
+    pub const FLOW_NOT_STARTED: Msg = Msg {
+        en: "{name}: not started",
+        uk: "{name}: не стартував",
+    };
+
+    /// A flow and the state it stands in (AGL-118, D7).
+    pub const FLOW_AT: Msg = Msg {
+        en: "{name}: {state}",
+        uk: "{name}: {state}",
+    };
+
+    /// The mark of a flow a human stopped (AGL-118, D7).
+    pub const FLOW_STOPPED: Msg = Msg {
+        en: "stopped",
+        uk: "зупинено",
+    };
+
+    /// What a flow's state waits for from a session (AGL-118, D6).
+    pub const FLOW_WAITS: Msg = Msg {
+        en: "waits for",
+        uk: "чекає на",
+    };
+
+    /// The flow reset: the old journal kept beside the new one (AGL-118, D11).
+    pub const FLOW_RESET: Msg = Msg {
+        en: "{name}: reset to `{state}`, the old journal is `{file}`",
+        uk: "{name}: скинуто до `{state}`, старий журнал — `{file}`",
+    };
+
     pub const PLANE_NONE_HERE: Msg = Msg {
         en: "the current directory is in no plane",
         uk: "поточна тека не входить у жоден plane",

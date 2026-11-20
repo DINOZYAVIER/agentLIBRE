@@ -156,16 +156,19 @@ pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinishe
             .position(|s| s.name == name)
             .expect("a state of the flow")
     };
-    // A journal that does not begin with `Started` is read from the flow's
-    // own beginning; `Stopped` ends the fold where it stands.
-    let first = match entries.first() {
+    // The fold follows the flow's last run: a `started` line begins one, and
+    // a `stopped` line only marks where a human left the flow (D3, D7).
+    let from = entries
+        .iter()
+        .rposition(|entry| matches!(entry, Entry::Started { .. }));
+    let first = match from.map(|at| &entries[at]) {
         Some(Entry::Started { state, .. }) => index(state),
         _ => decl.table().initial,
     };
     let mut at = first;
     let mut visits: Vec<(String, u32)> = vec![(decl.state_name(first).into(), 1)];
     let mut steps_in_visit = 0;
-    for entry in entries.iter().skip(1) {
+    for entry in entries.iter().skip(from.map_or(0, |at| at + 1)) {
         match entry {
             Entry::Event {
                 name,
@@ -195,9 +198,9 @@ pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinishe
                 };
                 steps_in_visit = 0;
             }
-            // A line that names a state without an event between: the fold
-            // follows the transitions, not the words.
-            Entry::Started { .. } | Entry::Stopped { .. } => break,
+            // A `stopped` line names a state without moving it; a `started`
+            // after it belongs to the run this fold follows (D7).
+            Entry::Started { .. } | Entry::Stopped { .. } => {}
         }
     }
     Ok(Unfinished {
@@ -265,14 +268,16 @@ impl<'d> FlowRun<'d> {
     pub fn trail(plane_dir: &Path, decl: &FlowDecl) -> Result<Vec<String>, Error> {
         let entries = read(&path(plane_dir, decl.name()))?;
         let states = decl.states();
-        let mut at = match entries.first() {
-            Some(Entry::Started { state, .. }) => state.clone(),
-            _ => decl.initial().into(),
-        };
+        let mut at = decl.initial().to_string();
         let mut trail = Vec::new();
         for entry in &entries {
             match entry {
-                Entry::Started { .. } => trail.push(at.clone()),
+                // A `started` line begins a run of the flow, the first or a
+                // new one after a stop (D7).
+                Entry::Started { state, .. } => {
+                    at = state.clone();
+                    trail.push(at.clone());
+                }
                 Entry::Event { name, detail, .. } => {
                     let index = states
                         .iter()
@@ -283,7 +288,9 @@ impl<'d> FlowRun<'d> {
                         .map_or(at.clone(), |next| decl.state_name(next).into());
                     trail.push(at.clone());
                 }
-                Entry::Stopped { .. } => break,
+                // A stopped line marks where the human left it; it moves
+                // nothing (D7).
+                Entry::Stopped { .. } => {}
             }
         }
         Ok(trail)
@@ -331,6 +338,19 @@ impl<'d> FlowRun<'d> {
             },
         )?;
         Ok(progress)
+    }
+
+    /// A stopped flow goes on (D7): a `started` line for the state it stood
+    /// in says the human moved it again, and the counts of its visits begin
+    /// anew, as they do for a machine that starts over (D44).
+    pub fn restart(&mut self) -> Result<(), Error> {
+        append(
+            &self.path,
+            &Entry::Started {
+                time: now(),
+                state: self.state().into(),
+            },
+        )
     }
 
     /// Says a human stopped the flow (D7): the journal keeps where it stood.

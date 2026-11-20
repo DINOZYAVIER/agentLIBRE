@@ -838,6 +838,15 @@ impl Plane {
         said
     }
 
+    /// A flow of the plane (AGL-118, D2, D7): `agl plane flow` and the agent's
+    /// `flow` tool come here, the same verb of the same machine.
+    pub fn flow(&mut self, verb: flow::Verb) -> Said {
+        let Some(plane) = &self.file else {
+            return Said::told(Told::Refusal(tr!(self.lang, m::FLOW_NO_PLANE).to_string()));
+        };
+        flow::host::run(&plane.dir, &self.workspace, &verb, self.lang)
+    }
+
     /// The line of a command for the session (AGL-047, D5); a session that
     /// will not take it is the surface's trouble (D4).
     fn keep(&mut self, said: &mut Said, event: Event) {

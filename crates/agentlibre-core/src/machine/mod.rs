@@ -26,6 +26,8 @@ pub enum Event {
     Call { tool: String, outcome: Outcome },
     /// A command a flow ran ended: `exit.ok` (D9).
     Exit(Outcome),
+    /// A launch a flow ran ended: `launch.ok` (D10).
+    Launch(Outcome),
     /// A turn of a session the flow started ended: `turn.end` (D9).
     TurnEnd,
     /// A flow's timer fired: `timer` (D9).
@@ -43,6 +45,7 @@ impl Event {
         match self {
             Event::Call { tool, outcome } => (tool, Some(outcome.name())),
             Event::Exit(outcome) => ("exit", Some(outcome.name())),
+            Event::Launch(outcome) => ("launch", Some(outcome.name())),
             Event::TurnEnd => ("turn", Some("end")),
             Event::Timer => ("timer", None),
             Event::Message(name) => ("message", Some(name)),

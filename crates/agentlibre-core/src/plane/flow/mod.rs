@@ -9,6 +9,7 @@ use std::time::Duration;
 use crate::action::Outcome;
 
 pub mod act;
+pub mod host;
 pub mod journal;
 use crate::error::{Error, FunctionProblem};
 use crate::function::State;
@@ -427,6 +428,22 @@ fn check_on_limit(at: &Section, states: &[State]) -> Result<(), Error> {
 }
 
 pub use journal::{Entry, FlowRun};
+
+/// What is asked of a flow (AGL-118, D2, D7): one verb for the human's CLI
+/// and the agent's tool, the same action of the same machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verb {
+    /// Start a flow, or go on with one a human stopped (D2, D7).
+    Start { name: String },
+    /// Stop a flow; it stays where it stood (D7).
+    Stop { name: String },
+    /// Where a flow stands, from the fold of its journal (D7).
+    Status { name: String },
+    /// The flows the plane declares, each with where it stands (D7).
+    List,
+    /// Begin again from `initial`, the old journal kept beside it (D11).
+    Reset { name: String },
+}
 
 #[cfg(test)]
 mod tests;
