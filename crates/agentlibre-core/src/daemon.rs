@@ -16,17 +16,21 @@ use std::thread;
 
 use agentlibre_proto::{self as proto, Ask, Lines, Reply, Request};
 
-use crate::backend::ReasoningLevel;
+use crate::backend::llama::Llama;
+use crate::backend::strata::Strata;
+use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
 use crate::engine::{Engine, Others};
 use crate::error::Error;
 use crate::forge;
+use crate::function::Function;
+use crate::grammar::{Expr, Grammar};
 use crate::i18n::{Lang, m};
 use crate::memory::MemoryAction;
 use crate::paths::Paths;
 use crate::phase::Observer;
 use crate::plane::{self, Command, Plane, Sent, wire};
 use crate::session::Session;
-use crate::settings::UserFile;
+use crate::settings::{ServerKind, Settings, UserFile};
 use crate::stop::Stop;
 use crate::tr;
 use crate::whisper::{Dictation, Voice};
@@ -384,7 +388,7 @@ impl Daemon {
     /// open sessions, and every ask gets its word back. Review turns (D19)
     /// join here when the daemon runs one.
     fn flow_turns(&self, inbox: mpsc::Receiver<plane::flow::holder::Need>) {
-        use plane::flow::holder::{Letter, Need};
+        use plane::flow::holder::{self, Letter, Need};
         for need in inbox {
             match need {
                 Need::Wake { plane_dir, wake } => {
@@ -397,7 +401,29 @@ impl Daemon {
                                 text: wake.text,
                             }
                         } else {
-                            Letter::Miss { flow: wake.flow }
+                            Letter::Miss {
+                                flow: wake.flow,
+                                kind: holder::SAY,
+                            }
+                        });
+                    }
+                }
+                Need::Review { plane_dir, review } => {
+                    let verdict = self.run_review(&plane_dir, &review);
+                    if let Some(handle) = self.flows.peek(&plane_dir) {
+                        handle.post(match verdict {
+                            Ok((answer, session)) => Letter::Verdict {
+                                flow: review.flow,
+                                event: crate::machine::Event::Answer {
+                                    check: holder::REVIEW.into(),
+                                    answer,
+                                },
+                                note: Some(format!("session {session}")),
+                            },
+                            Err(_) => Letter::Miss {
+                                flow: review.flow,
+                                kind: holder::REVIEW,
+                            },
                         });
                     }
                 }
@@ -451,6 +477,65 @@ impl Daemon {
             return true;
         }
         false
+    }
+
+    /// A review turn as D19 gives it: its own session of the plane under
+    /// the reviewer's Function, one `one_of`-constrained turn, the file
+    /// kept. No engine, no verdict — the miss says so and the state stands
+    /// until a poke asks again (D12).
+    fn run_review(
+        &self,
+        plane_dir: &Path,
+        review: &plane::flow::host::Review,
+    ) -> Result<(String, String), Error> {
+        let user = UserFile::load(&self.paths.settings_file())?;
+        let file = plane::PlaneFile::list(&self.paths)?
+            .into_iter()
+            .find(|found| found.dir == plane_dir)
+            .ok_or_else(|| Error::PlaneNotFound {
+                name: plane_dir.display().to_string(),
+            })?;
+        let plane_settings = file.settings()?;
+        let plane_functions = file.functions_dir();
+        let user_functions = self.paths.functions();
+        let function = Function::load(&[plane_functions.as_path(), user_functions.as_path()], &review.function)?;
+        let settings = Settings::resolve(
+            &user,
+            &self.paths.settings_file(),
+            (&file.settings_file(), &plane_settings),
+            None,
+            &function.model,
+        )?;
+        let backend: Arc<dyn Backend + Send + Sync> =
+            if settings.server.kind() == ServerKind::Strata {
+                Arc::new(Strata::new(&settings.server_url))
+            } else {
+                Arc::new(Llama::with_ca(
+                    &settings.server_url,
+                    settings.server.llama_private_ca.as_deref(),
+                )?)
+            };
+        let workspace = file
+            .directories
+            .first()
+            .cloned()
+            .unwrap_or_else(|| file.dir.clone());
+        let mut session = Session::create_run(
+            &self.paths.sessions(),
+            &review.function,
+            &workspace,
+            Some(&function.snapshot()),
+        )?;
+        let text = format!(
+            "flow `{}` stands in `{}`; answer with exactly one of: {}",
+            review.flow,
+            review.state,
+            review.events.join(" ")
+        );
+        session.append(crate::session::Event::User(text))?;
+        let answer = review_answer(&*backend, &function, &review.events)?;
+        session.append(crate::session::Event::Answer(answer.clone()))?;
+        Ok((answer, session.id))
     }
 
     /// A word to the plane's flows that something of theirs may have moved
@@ -831,6 +916,58 @@ fn write(out: &Mutex<UnixStream>, reply: &Reply) {
     let _ = proto::send(&mut *out, reply);
 }
 
+/// One `one_of` turn (D5, D19): the reviewer's system, the flow's line, and
+/// a grammar that allows only the declared event names. An answer outside
+/// them is no verdict — the machine's names are law — and fails to a miss.
+fn review_answer(
+    backend: &dyn Backend,
+    function: &Function,
+    events: &[String],
+) -> Result<String, Error> {
+    let context = backend.context_size().unwrap_or(8192);
+    let grammar = Grammar::new();
+    let root = Expr::one_of(events);
+    let grammar_str = grammar.render(&root);
+    let messages = vec![
+        ChatMessage::System(function.system_at(context)),
+        ChatMessage::User(format!(
+            "answer with exactly one of: {}",
+            events.join(" ")
+        )),
+    ];
+    let structured = Prompt {
+        messages: &messages,
+        instruction: None,
+        tools: &[],
+        preserve_thinking: false,
+        reasoning: Some(ReasoningLevel::Off),
+        format: &function.format,
+    };
+    let prompt = function.format.start_step(backend.render(&structured)?, false);
+    let generated = backend.generate(
+        &crate::backend::Request {
+            prompt: &prompt,
+            grammar: Some(&grammar_str),
+            stop: &[],
+            max_tokens: 32,
+            sampling: &function.sampling,
+            media: &[],
+            structured: backend.stirred().then_some(&structured),
+        },
+        &mut |_| {},
+        &mut |_| {},
+    )?;
+    let answer = generated.text.trim().to_owned();
+    if events.iter().any(|event| event == &answer) {
+        Ok(answer)
+    } else {
+        Err(Error::PlaneFile {
+            path: function.path.clone(),
+            detail: format!("`{answer}` is no event of the review"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1046,6 +1183,53 @@ mod tests {
             client.ask(&Request::Flow { plane: "nowhere".into(), verb: proto::FlowVerb::List }),
             Reply::Refused { .. }
         ));
+    }
+
+    /// A server that answers one fixed word, for the review turn's law (D5).
+    struct Echo(&'static str);
+
+    impl crate::backend::Backend for Echo {
+        fn render(&self, _prompt: &crate::backend::Prompt) -> Result<String, Error> {
+            Ok("prompt".into())
+        }
+        fn generate(
+            &self,
+            _request: &crate::backend::Request,
+            _on_thinking: &mut dyn FnMut(&str),
+            _on_text: &mut dyn FnMut(&str),
+        ) -> Result<crate::backend::Generated, Error> {
+            Ok(crate::backend::Generated {
+                text: self.0.into(),
+                stop: crate::backend::Stop::End,
+                thinking: None,
+                tool_calls: Vec::new(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                prefill: None,
+            })
+        }
+        fn count_tokens(&self, text: &str) -> Result<usize, Error> {
+            Ok(text.len())
+        }
+        fn context_size(&self) -> Result<usize, Error> {
+            Ok(16384)
+        }
+        fn health(&self) -> Option<u16> {
+            Some(200)
+        }
+        fn url(&self) -> &str {
+            "http://127.0.0.1:1"
+        }
+    }
+
+    #[test]
+    fn a_review_answer_outside_the_names_is_no_verdict() {
+        // D5, D19: the machine's names are law; prose is not a verdict.
+        use crate::function::Function;
+        let function = Function::load(&[Path::new("/none")], "fixture-minimal").unwrap();
+        let events = ["ok".to_string(), "broken".to_string()];
+        assert_eq!(review_answer(&Echo("ok"), &function, &events).unwrap(), "ok");
+        assert!(review_answer(&Echo("maybe"), &function, &events).is_err());
     }
 
     #[test]

@@ -258,6 +258,73 @@ pub fn wakeups(plane_dir: &Path) -> Vec<Wake> {
     wakes
 }
 
+/// A review standing for its verdict (D19): the flow, the reviewer's
+/// Function, the events its answer names, and the state it stands in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Review {
+    pub flow: String,
+    pub function: String,
+    pub events: Vec<String>,
+    pub state: String,
+}
+
+/// What the flows of `plane_dir` stand waiting for a verdict (D19): a
+/// state with `action.review`. No journal line guards the asking — the
+/// verdict itself moves the flow and ends it; the holder keeps an in-flight
+/// guard so a poke never stacks two turns of the same review (D20).
+pub fn reviews(plane_dir: &Path) -> Vec<Review> {
+    let mut need = Vec::new();
+    let Ok(decls) = FlowFile::load(plane_dir) else {
+        return need;
+    };
+    for decl in decls.flows {
+        let file = journal::path(plane_dir, decl.name());
+        let Ok(entries) = journal::read(&file) else {
+            continue;
+        };
+        let Some((state, _)) = resting(&entries) else {
+            continue;
+        };
+        let Some(at) = decl.states().iter().position(|s| s.name == state) else {
+            continue;
+        };
+        for action in decl.actions(at) {
+            if let Action::Review { function, events } = action {
+                need.push(Review {
+                    flow: decl.name().to_owned(),
+                    function: function.clone(),
+                    events: events.clone(),
+                    state: state.to_owned(),
+                });
+            }
+        }
+    }
+    need
+}
+
+/// Carries a verdict to `flow` and lets its states go on (D18, D19): the
+/// `review` event with its answer, `note` naming the session that turned.
+/// A flow that is gone or unreadable says so to `status`, not here (D11).
+pub fn settle(
+    plane_dir: &Path,
+    workdir: &Path,
+    flow: &str,
+    event: Event,
+    note: Option<String>,
+) {
+    let Ok(decls) = FlowFile::load(plane_dir) else {
+        return;
+    };
+    let Some(decl) = decls.find(flow) else {
+        return;
+    };
+    let Ok(mut run) = FlowRun::resume(decl, plane_dir) else {
+        return;
+    };
+    let _ = run.on_event_noted(decl, event, note);
+    let _ = walk(decl, &mut run, plane_dir, workdir);
+}
+
 /// Where the journal leaves its flow at rest: the state it stands in and
 /// the index of the line that entered it — `None` for a flow that never
 /// started or that a human stopped (D3, D7). The `into` of a line is read

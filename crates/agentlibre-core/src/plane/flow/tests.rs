@@ -729,8 +729,9 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     handle.ask(Verb::Start { name: "talk".into() }, Lang::En);
     // The verb that left a flow standing in a `say` asked for its wake (D18).
     let need = from.recv_timeout(Duration::from_secs(5)).expect("no need sent");
-    // `Need` has one kind today: a wake.
-    let Need::Wake { plane_dir, wake } = need;
+    let Need::Wake { plane_dir, wake } = need else {
+        panic!("not a wake");
+    };
     assert_eq!(plane_dir, dir.0);
     assert_eq!(wake.session, "last");
     // A poke while the wake is in flight asks nothing twice (D20).
@@ -752,6 +753,48 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     let entries = journal::read(&journal::path(&dir.0, "talk")).unwrap();
     assert!(
         matches!(entries.last(), Some(journal::Entry::Said { text, .. }) if text == &wake.text),
+        "{entries:?}"
+    );
+}
+
+#[test]
+fn a_review_verdict_moves_the_flow_and_names_its_session() {
+    use super::holder::{self, Letter, Need};
+    use crate::i18n::Lang;
+    use std::time::Duration;
+
+    let dir = TempDir::new();
+    let (to, from) = std::sync::mpsc::channel();
+    let registry = holder::Registry::with_delivery(to);
+    let handle = registry.holder(&dir.0, &dir.0);
+    read(&dir, WORK).unwrap();
+    handle.ask(Verb::Start { name: "work".into() }, Lang::En);
+    // The check state asks the daemon for its turn (D19).
+    let need = from.recv_timeout(Duration::from_secs(5)).expect("no review asked");
+    let Need::Review { review, .. } = need else { panic!("not a review") };
+    assert_eq!(
+        (review.flow.as_str(), review.function.as_str(), review.state.as_str()),
+        ("work", "reviewer", "check")
+    );
+    assert_eq!(review.events, ["ok", "broken"]);
+    // The verdict names one of the events; the journal keeps the session
+    // that turned beside the step (D5).
+    handle.post(Letter::Verdict {
+        flow: "work".into(),
+        event: Event::Answer { check: "review".into(), answer: "ok".into() },
+        note: Some("session s1".into()),
+    });
+    let status = handle.ask(Verb::Status { name: "work".into() }, Lang::En);
+    assert!(status.content.as_deref().is_some_and(|t| t.contains("halted")), "no move");
+    assert!(host::reviews(&dir.0).is_empty(), "asked again");
+    let entries = journal::read(&journal::path(&dir.0, "work")).unwrap();
+    assert!(
+        matches!(
+            entries.last(),
+            Some(journal::Entry::Event { name, detail, note, into, .. })
+                if name == "review" && detail.as_deref() == Some("ok")
+                    && into == "halted" && note.as_deref() == Some("session s1")
+        ),
         "{entries:?}"
     );
 }

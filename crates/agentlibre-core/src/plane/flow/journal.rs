@@ -33,12 +33,15 @@ pub(crate) fn now() -> u64 {
 pub enum Entry {
     /// The flow was started: the machine stands at `state`.
     Started { time: u64, state: String },
-    /// The event named `name` with `detail` moved the machine to `into`.
+    /// The event named `name` with `detail` moved the machine to `into`;
+    /// `note` says where the event came from, when that is worth naming —
+    /// a review's verdict gives the session that turned (D5).
     Event {
         time: u64,
         name: String,
         detail: Option<String>,
         into: String,
+        note: Option<String>,
     },
     /// A human stopped the flow; it stays where it stood (D7).
     Stopped { time: u64, state: String },
@@ -70,13 +73,20 @@ impl Entry {
                 name,
                 detail,
                 into,
-            } => json!({
-                "type": "event",
-                "time": time,
-                "name": name,
-                "detail": detail,
-                "into": into,
-            }),
+                note,
+            } => {
+                let mut line = json!({
+                    "type": "event",
+                    "time": time,
+                    "name": name,
+                    "detail": detail,
+                    "into": into,
+                });
+                if let Some(note) = note {
+                    line["note"] = json!(note);
+                }
+                line
+            }
             Entry::Stopped { time, state } => {
                 json!({ "type": "stopped", "time": time, "state": state })
             }
@@ -102,6 +112,7 @@ impl Entry {
                 name: value["name"].as_str()?.into(),
                 detail: value["detail"].as_str().map(Into::into),
                 into: value["into"].as_str()?.into(),
+                note: value["note"].as_str().map(Into::into),
             }),
             "stopped" => Some(Entry::Stopped {
                 time,
@@ -324,6 +335,17 @@ impl<'d> FlowRun<'d> {
 
     /// Writes `event` and moves, recording where it landed (D3).
     pub fn on_event(&mut self, decl: &FlowDecl, event: Event) -> Result<Progress, Error> {
+        self.on_event_noted(decl, event, None)
+    }
+
+    /// `on_event` with the journal's `note` on the line: a verdict names
+    /// the session that turned (D5, D19).
+    pub fn on_event_noted(
+        &mut self,
+        decl: &FlowDecl,
+        event: Event,
+        note: Option<String>,
+    ) -> Result<Progress, Error> {
         // The key is taken before the event moves into the machine (D4).
         let (name, detail) = {
             let (name, detail) = event.key();
@@ -348,6 +370,7 @@ impl<'d> FlowRun<'d> {
                     name,
                     detail,
                     into: self.state().into(),
+                    note,
                 },
             )?;
             return Ok(Progress::Continue);
@@ -361,6 +384,7 @@ impl<'d> FlowRun<'d> {
                 name,
                 detail,
                 into,
+                note,
             },
         )?;
         Ok(progress)

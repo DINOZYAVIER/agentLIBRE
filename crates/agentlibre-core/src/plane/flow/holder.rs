@@ -17,7 +17,8 @@ use crate::error::Error;
 use crate::i18n::Lang;
 use crate::plane::Said;
 
-use super::host::{self, Wake};
+use super::host::{self, Review, Wake};
+use crate::machine::Event;
 use super::journal::{self, Entry};
 use super::{FlowFile, Verb};
 
@@ -25,12 +26,19 @@ use super::{FlowFile, Verb};
 /// tick that moved nothing retries without spinning.
 const DUE_AGAIN: Duration = Duration::from_secs(1);
 
-/// What the holder asks of the daemon (D18): a wake to carry to a session.
-/// Review turns join this list when the daemon runs one (D19).
+/// What the holder asks of the daemon (D18): a wake to carry to a session,
+/// a review turn to run (D19).
 #[derive(Debug)]
 pub enum Need {
     Wake { plane_dir: PathBuf, wake: Wake },
+    Review { plane_dir: PathBuf, review: Review },
 }
+
+/// Which waiting turn a letter speaks of: a flow may stand on a `say` and
+/// a `review` in one state (D9), and each asks its own once (D20).
+pub type Kind = &'static str;
+pub const SAY: Kind = "say";
+pub const REVIEW: Kind = "review";
 
 /// What reaches the holder's thread: a verb, and the daemon's word back.
 pub enum Letter {
@@ -47,9 +55,17 @@ pub enum Letter {
         session: String,
         text: String,
     },
-    /// No open session of the plane answered to that name (D20): the flow
-    /// stands, and a poke — an opening, a turn's end — will ask again.
-    Miss { flow: String },
+    /// A verdict: the answer named one of the state's events (D5, D19),
+    /// `note` naming the session that turned. It moves the flow.
+    Verdict {
+        flow: String,
+        event: Event,
+        note: Option<String>,
+    },
+    /// No open session answered to a wake's name, or no verdict came (D20,
+    /// D19): the flow stands, and a poke — an opening, a turn's end — asks
+    /// again.
+    Miss { flow: String, kind: Kind },
     /// Look again (D18): a session of the plane opened, or one's turn ended.
     Poke,
 }
@@ -137,9 +153,11 @@ impl Handle {
 pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) -> Handle {
     let (asks, inbox) = mpsc::channel();
     thread::spawn(move || {
-        // Flows with a wake in flight (D20): asked, and the daemon has not
-        // answered yet; every ask gets its Delivered or Miss, so none sticks.
-        let mut pending: HashSet<String> = HashSet::new();
+        // Asks in flight (D20): sent, and the daemon has not answered yet;
+        // every ask gets its word, so none sticks.
+        let mut pending: HashSet<(String, Kind)> = HashSet::new();
+        // What stood waiting when the daemon died is asked anew (D20).
+        issue(&plane_dir, &needs, &mut pending);
         loop {
             match next_timer(&plane_dir) {
                 // A flow stands where a timer runs: wake when it runs out.
@@ -167,7 +185,7 @@ fn answer(
     workdir: &Path,
     letter: Letter,
     needs: &Option<Sender<Need>>,
-    pending: &mut HashSet<String>,
+    pending: &mut HashSet<(String, Kind)>,
 ) {
     match letter {
         Letter::Ask { verb, lang, reply } => {
@@ -180,7 +198,7 @@ fn answer(
             session,
             text,
         } => {
-            pending.remove(&flow);
+            pending.remove(&(flow.clone(), SAY));
             // Only a delivery writes the `said` line (D14); a late word
             // about a reset flow finds no journal and goes unsaid.
             let file = journal::path(plane_dir, &flow);
@@ -196,25 +214,38 @@ fn answer(
             }
             issue(plane_dir, needs, pending);
         }
-        Letter::Miss { flow } => {
-            pending.remove(&flow);
+        Letter::Verdict { flow, event, note } => {
+            pending.remove(&(flow.clone(), REVIEW));
+            host::settle(plane_dir, workdir, &flow, event, note);
+            issue(plane_dir, needs, pending);
+        }
+        Letter::Miss { flow, kind } => {
+            pending.remove(&(flow, kind));
         }
         Letter::Poke => issue(plane_dir, needs, pending),
     }
 }
 
-/// Sends every wake the flows stand waiting for (D18, D20); a flow with a
-/// wake in flight is not asked twice. Outside a daemon nothing is asked:
+/// Sends every wake and review the flows stand waiting for (D18, D19, D20);
+/// an ask in flight is not sent twice. Outside a daemon nothing is asked:
 /// the state stands, and `status` says what it waits for (D6).
-fn issue(plane_dir: &Path, needs: &Option<Sender<Need>>, pending: &mut HashSet<String>) {
+fn issue(plane_dir: &Path, needs: &Option<Sender<Need>>, pending: &mut HashSet<(String, Kind)>) {
     let Some(needs) = needs else {
         return;
     };
     for wake in host::wakeups(plane_dir) {
-        if pending.insert(wake.flow.clone()) {
+        if pending.insert((wake.flow.clone(), SAY)) {
             let _ = needs.send(Need::Wake {
                 plane_dir: plane_dir.to_path_buf(),
                 wake,
+            });
+        }
+    }
+    for review in host::reviews(plane_dir) {
+        if pending.insert((review.flow.clone(), REVIEW)) {
+            let _ = needs.send(Need::Review {
+                plane_dir: plane_dir.to_path_buf(),
+                review,
             });
         }
     }
