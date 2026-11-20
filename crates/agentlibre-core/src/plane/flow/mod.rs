@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::action::Outcome;
+
+pub mod journal;
 use crate::error::{Error, FunctionProblem};
 use crate::function::State;
 use crate::machine::Table;
@@ -400,6 +402,8 @@ fn check_on_limit(at: &Section, states: &[State]) -> Result<(), Error> {
     }
     Ok(())
 }
+
+pub use journal::{Entry, FlowRun};
 
 #[cfg(test)]
 mod tests;

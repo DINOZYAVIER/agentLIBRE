@@ -1,4 +1,6 @@
 use super::*;
+use super::journal;
+use crate::machine::Event;
 use crate::forge::testutil::TempDir;
 use std::fs;
 
@@ -163,4 +165,90 @@ fn a_key_a_flow_has_not_is_refused() {
         matches!(&error, Error::UnknownKey { key, .. } if key == "flow.one.state.a.tools"),
         "{error:?}"
     );
+}
+
+#[test]
+fn a_started_flow_writes_where_it_stands() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    let run = FlowRun::start(decl, &dir.0).unwrap();
+    assert_eq!(run.state(), "build");
+    let entries = journal::read(&journal::path(&dir.0, "dev-loop")).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(&entries[0], journal::Entry::Started { state, .. } if state == "build"));
+}
+
+#[test]
+fn a_journal_replays_to_the_position_it_left() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    {
+        let mut run = FlowRun::start(decl, &dir.0).unwrap();
+        run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
+        run.on_event(decl, Event::Answer {
+            check: "review".into(),
+            answer: "flaky".into(),
+        })
+        .unwrap();
+    }
+    // The daemon restarts: the position comes from the file, not from memory.
+    let entries = journal::read(&journal::path(&dir.0, "dev-loop")).unwrap();
+    assert_eq!(journal::fold(decl, &entries).state.as_deref(), Some("rollback"));
+    let run = FlowRun::resume(decl, &dir.0).unwrap();
+    assert_eq!(run.state(), "rollback");
+}
+
+#[test]
+fn the_trail_names_the_states_the_journal_walked() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    let mut run = FlowRun::start(decl, &dir.0).unwrap();
+    run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
+    run.on_event(decl, Event::Answer {
+        check: "review".into(),
+        answer: "broken".into(),
+    })
+    .unwrap();
+    drop(run);
+    assert_eq!(
+        FlowRun::trail(&dir.0, decl).unwrap(),
+        ["build", "check", "rollback"]
+    );
+}
+
+#[test]
+fn a_stopped_flow_keeps_where_it_stood() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    let mut run = FlowRun::start(decl, &dir.0).unwrap();
+    run.on_event(decl, Event::Exit(Outcome::Fail)).unwrap();
+    run.stop().unwrap();
+    let run = FlowRun::resume(decl, &dir.0).unwrap();
+    assert_eq!(run.state(), "rollback");
+}
+
+#[test]
+fn a_line_that_is_not_an_entry_is_named() {
+    let dir = TempDir::new();
+    fs::create_dir_all(dir.0.join(journal::JOURNAL_DIR)).unwrap();
+    fs::write(dir.0.join(journal::path(&dir.0, "one")), "not json\n").unwrap();
+    let error = journal::read(&journal::path(&dir.0, "one")).unwrap_err();
+    assert!(matches!(error, Error::PlaneFile { .. }), "{error:?}");
+}
+
+#[test]
+fn an_event_the_state_has_no_transition_for_moves_nothing() {
+    // `build` covers `exit.*` only: a turn's end there is written and ignored.
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    let mut run = FlowRun::start(decl, &dir.0).unwrap();
+    run.on_event(decl, Event::TurnEnd).unwrap();
+    assert_eq!(run.state(), "build");
+    drop(run);
+    assert_eq!(FlowRun::trail(&dir.0, decl).unwrap(), ["build", "build"]);
 }

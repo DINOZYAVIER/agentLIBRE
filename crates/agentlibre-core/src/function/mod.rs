@@ -228,16 +228,21 @@ impl State {
     /// The state the event named `name` with `detail` leads to (D43): what
     /// a journal replays without rebuilding the event itself (AGL-118, D3).
     pub fn next_named(&self, name: &str, detail: Option<&str>) -> usize {
+        self.next_option(name, detail)
+            .expect("complete transitions")
+    }
+
+    /// The state the event leads to, or `None` when the state has no
+    /// transition for it and no `otherwise`: a flow ignores an event that
+    /// moves nothing, where a turn's state is complete by loading (D21).
+    pub fn next_option(&self, name: &str, detail: Option<&str>) -> Option<usize> {
         let find = |wanted: Option<&str>| {
             self.transitions
                 .iter()
                 .find(|(t, o, _)| t == name && o.as_deref() == wanted)
                 .map(|&(_, _, target)| target)
         };
-        find(detail)
-            .or_else(|| find(None))
-            .or(self.otherwise)
-            .expect("complete transitions")
+        find(detail).or_else(|| find(None)).or(self.otherwise)
     }
 
     /// States the state can lead to.

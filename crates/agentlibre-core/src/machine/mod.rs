@@ -135,6 +135,12 @@ impl<'f> Machine<'f> {
 
     /// Records a call of `tool` that ended with `outcome` and moves to the
     /// next state. An answer ends the turn instead (D44).
+    /// Records an event from outside the machine and moves to the next state
+    /// (D4): what a flow's runner calls, as `after_call` does for a turn.
+    pub fn after_event(&mut self, event: Event) -> Progress {
+        self.after(Some(event))
+    }
+
     pub fn after_call(&mut self, tool: &str, outcome: Outcome) -> Progress {
         self.after(Some(Event::Call {
             tool: tool.into(),
