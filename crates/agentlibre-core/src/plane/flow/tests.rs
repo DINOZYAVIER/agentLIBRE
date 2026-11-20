@@ -1,5 +1,6 @@
 use super::*;
 use super::journal;
+use std::time::Instant;
 use crate::machine::Event;
 use crate::forge::testutil::TempDir;
 use std::fs;
@@ -251,4 +252,42 @@ fn an_event_the_state_has_no_transition_for_moves_nothing() {
     assert_eq!(run.state(), "build");
     drop(run);
     assert_eq!(FlowRun::trail(&dir.0, decl).unwrap(), ["build", "build"]);
+}
+
+#[test]
+fn a_commands_exit_code_is_the_verdict() {
+    let dir = TempDir::new();
+    assert_eq!(
+        act::run(&dir.0, "true", Duration::from_secs(10)).unwrap(),
+        Outcome::Ok
+    );
+    assert_eq!(
+        act::run(&dir.0, "false", Duration::from_secs(10)).unwrap(),
+        Outcome::Fail
+    );
+    assert_eq!(
+        act::run(&dir.0, "exit 3", Duration::from_secs(10)).unwrap(),
+        Outcome::Fail
+    );
+}
+
+#[test]
+fn a_command_that_outlives_its_timeout_is_a_timeout() {
+    let dir = TempDir::new();
+    let at = Instant::now();
+    assert_eq!(
+        act::run(&dir.0, "sleep 30", Duration::from_millis(200)).unwrap(),
+        Outcome::Timeout
+    );
+    assert!(at.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+fn a_command_runs_in_the_directory_it_is_given() {
+    let dir = TempDir::new();
+    assert_eq!(
+        act::run(&dir.0, "touch here", Duration::from_secs(10)).unwrap(),
+        Outcome::Ok
+    );
+    assert!(dir.0.join("here").is_file());
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::action::Outcome;
 
+pub mod act;
 pub mod journal;
 use crate::error::{Error, FunctionProblem};
 use crate::function::State;
