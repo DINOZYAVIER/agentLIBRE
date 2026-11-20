@@ -3,8 +3,19 @@
 
 use crate::action::Outcome;
 use crate::error::Error;
-use crate::function::{Function, State};
+use crate::function::State;
 use crate::session::Unfinished;
+
+/// What a machine runs on: its states, where it starts, and the limit of a
+/// whole run (AGL-118, D4). A Function's policy gives one today; a flow's
+/// declaration will give another, and neither knows about the other.
+#[derive(Debug, Clone, Copy)]
+pub struct Table<'a> {
+    pub states: &'a [State],
+    pub initial: usize,
+    /// The steps of one run; `None` is the unlimited (D40, AGL-021, D2).
+    pub max_steps_total: Option<u32>,
+}
 
 /// Whether the turn may go on after a step.
 #[derive(Debug, PartialEq, Eq)]
@@ -18,7 +29,7 @@ pub enum Progress {
 /// in `initial` with all counters at zero (D44, D84).
 #[derive(Debug)]
 pub struct Machine<'f> {
-    function: &'f Function,
+    table: Table<'f>,
     state: usize,
     /// Steps in the current visit of `state`.
     steps_in_visit: u32,
@@ -30,16 +41,16 @@ pub struct Machine<'f> {
 }
 
 impl<'f> Machine<'f> {
-    pub fn new(function: &'f Function) -> Machine<'f> {
+    pub fn new(table: Table<'f>) -> Machine<'f> {
         let mut machine = Machine {
-            function,
-            state: function.initial,
+            table,
+            state: table.initial,
             steps_in_visit: 0,
-            visits: vec![0; function.states.len()],
+            visits: vec![0; table.states.len()],
             steps_total: 0,
             entered: false,
         };
-        machine.enter(function.initial);
+        machine.enter(table.initial);
         machine
     }
 
@@ -47,12 +58,12 @@ impl<'f> Machine<'f> {
     /// the session, `max_steps_total` counts anew. `function_name` names
     /// the Function in errors.
     pub fn resume(
-        function: &'f Function,
+        table: Table<'f>,
         function_name: &str,
         turn: &Unfinished,
     ) -> Result<Machine<'f>, Error> {
         let index = |name: &str| {
-            function
+            table
                 .states
                 .iter()
                 .position(|s| s.name == name)
@@ -62,14 +73,14 @@ impl<'f> Machine<'f> {
                 })
         };
         let Some(state) = &turn.state else {
-            return Ok(Machine::new(function));
+            return Ok(Machine::new(table));
         };
-        let mut visits = vec![0; function.states.len()];
+        let mut visits = vec![0; table.states.len()];
         for (name, count) in &turn.visits {
             visits[index(name)?] = *count;
         }
         Ok(Machine {
-            function,
+            table,
             state: index(state)?,
             steps_in_visit: turn.steps_in_visit,
             visits,
@@ -80,7 +91,7 @@ impl<'f> Machine<'f> {
 
     /// The current state.
     pub fn state(&self) -> &'f State {
-        &self.function.states[self.state]
+        &self.table.states[self.state]
     }
 
     /// Whether the last call started a visit, to log it (D104).
@@ -117,7 +128,7 @@ impl<'f> Machine<'f> {
         }
         // A `None` limit is the unlimited (AGL-021, D2); it never stops.
         if self
-            .function
+            .table
             .max_steps_total
             .is_some_and(|max| self.steps_total >= max)
         {
@@ -131,7 +142,7 @@ impl<'f> Machine<'f> {
     /// used up (D93). `on_limit` has no cycles (D83), so this ends.
     fn enter(&mut self, mut target: usize) {
         loop {
-            let state = &self.function.states[target];
+            let state = &self.table.states[target];
             if !state
                 .max_visits
                 .is_some_and(|max| self.visits[target] >= max)

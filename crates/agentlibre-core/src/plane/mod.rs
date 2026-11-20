@@ -438,7 +438,7 @@ impl Plane {
         };
         // A turn to continue needs its state in the Function (D105).
         if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
-            Machine::resume(&function, &settings.function, &turn)?;
+            Machine::resume(function.table(), &settings.function, &turn)?;
         }
 
         let workspace = session

@@ -162,7 +162,7 @@ impl Agent<'_> {
     fn run_turn(&mut self, message: &str, report: &mut Reports<'_>) -> Result<TurnEnd, Error> {
         self.session.append(Event::User(message.into()))?;
         let unfinished = self.session.unfinished().expect("the turn has a message");
-        let mut machine = Machine::resume(self.function, self.function_name, &unfinished)?;
+        let mut machine = Machine::resume(self.function.table(), self.function_name, &unfinished)?;
         if unfinished.state.is_none() {
             self.enter(machine.state().name.as_str(), report)?;
         }

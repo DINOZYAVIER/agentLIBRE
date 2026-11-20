@@ -9,7 +9,7 @@ fn name(machine: &Machine) -> String {
 #[test]
 fn spec_example_explore_limits() {
     let coder = function(CODER).unwrap();
-    let mut machine = Machine::new(&coder);
+    let mut machine = Machine::new(coder.table());
     assert_eq!(name(&machine), "explore");
     // Staying in explore is one visit (D82); the 15th step uses it up.
     for _ in 0..14 {
@@ -23,7 +23,7 @@ fn spec_example_explore_limits() {
 #[test]
 fn spec_example_visits() {
     let coder = function(CODER).unwrap();
-    let mut machine = Machine::new(&coder);
+    let mut machine = Machine::new(coder.table());
     for _ in 0..2 {
         machine.after_call("edit", Outcome::Ok);
         assert_eq!(name(&machine), "verify");
@@ -40,14 +40,14 @@ fn spec_example_visits() {
 #[test]
 fn spec_example_success() {
     let coder = function(CODER).unwrap();
-    let mut machine = Machine::new(&coder);
+    let mut machine = Machine::new(coder.table());
     machine.after_call("bash", Outcome::Ok);
     machine.after_call("edit", Outcome::Fail);
     assert_eq!(name(&machine), "verify");
     machine.after_call("bash", Outcome::Timeout);
     assert_eq!(name(&machine), "answer");
     // A new message starts over (D44, D84).
-    assert_eq!(name(&Machine::new(&coder)), "explore");
+    assert_eq!(name(&Machine::new(coder.table())), "explore");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn step_limit() {
         r#"{ system = "s"; max_steps_total = 3; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
-    let mut machine = Machine::new(&function);
+    let mut machine = Machine::new(function.table());
     assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
     assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
     assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::StepLimit);
@@ -70,7 +70,7 @@ fn no_step_limit() {
         r#"{ system = "s"; max_steps_total = 0; initial = "a"; state.a = { tools.bash = { }; answer = true; next.otherwise = "a"; }; }"#,
     )
     .unwrap();
-    let mut machine = Machine::new(&function);
+    let mut machine = Machine::new(function.table());
     for _ in 0..51 {
         assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
     }
@@ -87,7 +87,7 @@ fn on_limit_chain() {
         }"#,
     )
     .unwrap();
-    let mut machine = Machine::new(&function);
+    let mut machine = Machine::new(function.table());
     machine.after_call("bash", Outcome::Ok);
     assert_eq!(name(&machine), "b");
     machine.after_call("bash", Outcome::Ok);
@@ -106,7 +106,7 @@ fn leaving_resets_the_visit_steps() {
         }"#,
     )
     .unwrap();
-    let mut machine = Machine::new(&function);
+    let mut machine = Machine::new(function.table());
     machine.after_call("bash", Outcome::Ok);
     machine.after_call("edit", Outcome::Ok);
     assert_eq!(name(&machine), "b");
@@ -126,7 +126,7 @@ fn resuming_an_unfinished_turn() {
         visits: vec![("explore".into(), 3), ("verify".into(), 2)],
         steps_in_visit: 14,
     };
-    let mut machine = Machine::resume(&coder, "coder", &turn).unwrap();
+    let mut machine = Machine::resume(coder.table(), "coder", &turn).unwrap();
     assert_eq!(name(&machine), "explore");
     // One more step uses up the visit's 15 steps (D105).
     machine.after_call("bash", Outcome::Ok);
@@ -138,7 +138,7 @@ fn resuming_an_unfinished_turn() {
         visits: vec![("explore".into(), 3), ("verify".into(), 2)],
         steps_in_visit: 0,
     };
-    let mut machine = Machine::resume(&coder, "coder", &turn).unwrap();
+    let mut machine = Machine::resume(coder.table(), "coder", &turn).unwrap();
     machine.after_call("edit", Outcome::Ok);
     assert_eq!(name(&machine), "verify");
     machine.after_call("bash", Outcome::Fail);
@@ -156,7 +156,7 @@ fn resuming_counts_total_steps_anew() {
         visits: vec![("a".into(), 1)],
         steps_in_visit: 2,
     };
-    let mut machine = Machine::resume(&function, "f", &turn).unwrap();
+    let mut machine = Machine::resume(function.table(), "f", &turn).unwrap();
     assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::Continue);
     assert_eq!(machine.after_call("bash", Outcome::Ok), Progress::StepLimit);
 }
@@ -170,7 +170,7 @@ fn resuming_without_a_state_starts_in_initial() {
         steps_in_visit: 0,
     };
     assert_eq!(
-        name(&Machine::resume(&coder, "coder", &turn).unwrap()),
+        name(&Machine::resume(coder.table(), "coder", &turn).unwrap()),
         "explore"
     );
     let gone = Unfinished {
@@ -179,7 +179,7 @@ fn resuming_without_a_state_starts_in_initial() {
         steps_in_visit: 0,
     };
     assert!(matches!(
-        Machine::resume(&coder, "coder", &gone),
+        Machine::resume(coder.table(), "coder", &gone),
         Err(Error::SessionState { state, .. }) if state == "review"
     ));
 }

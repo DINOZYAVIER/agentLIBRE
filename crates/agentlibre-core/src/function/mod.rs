@@ -236,6 +236,16 @@ pub fn check_name(name: &str) -> Result<(), Error> {
 }
 
 impl Function {
+    /// The table of the policy's states: what a `Machine` runs on
+    /// (AGL-118, D4).
+    pub fn table(&self) -> crate::machine::Table<'_> {
+        crate::machine::Table {
+            states: &self.states,
+            initial: self.initial,
+            max_steps_total: self.max_steps_total,
+        }
+    }
+
     /// Loads Function `name` (AGL-039, D10): the workspace's
     /// `<name>.nix` (`workspace_functions`), then the user's
     /// (`user_functions`), then the built-in `agl.functions.<name>`. An
