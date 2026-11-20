@@ -190,7 +190,8 @@ pub fn start(
     if health(llama) != Health::Down || port_open(&host, port) {
         let ours = unit_active(&server.unit)?;
         wait_ready(llama, ours.then_some(&server.unit), &what, say, lang)?;
-        if serves(llama, read_record(&server.dir).as_ref(), &effective, models)? {
+        // The probe of D3: the port answers mine, or another id.
+        if probe(llama, read_record(&server.dir).as_ref(), &effective, models)? == Door::Mine {
             say(&texts::already_running(&what, url, lang));
             return Ok(());
         }
@@ -434,33 +435,34 @@ impl Autostart {
         // The server of the other kind that agl owns stops first
         // (AGL-036, D10): the two do not fit the GPU together.
         self.switch(&mut |line| progress(ServerProgress::Line(line)))?;
-        match health(llama) {
-            // The server is ready: the check of D2 (AGL-033) decides —
-            // it serves the effective settings, or a mismatch restarts.
-            Health::Ready => {
-                if serves(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
-                    Ok(())
-                } else {
-                    progress(ServerProgress::Starting);
-                    self.restart(&what, &mut |line| progress(ServerProgress::Line(line)))
-                }
-            }
+        // The probe of D3 answers for the port: free, mine, loading,
+        // foreign — the id of the model and its config signs it.
+        match probe(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
+            // The port is ours: the server on it serves the id.
+            Door::Mine => Ok(()),
             // Someone loads it now: wait for it, as `start` does, then
-            // the check of D2 (AGL-033).
-            Health::Loading => {
+            // the check of D2 (AGL-033) on the ready server.
+            Door::Loading => {
                 progress(ServerProgress::Starting);
                 let mut say = |line: &str| progress(ServerProgress::Line(line));
                 wait_ready(llama, None, &what, &mut say, self.lang)?;
+                // Ready now: its id signs the answer (the check of D2).
                 if serves(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
                     Ok(())
                 } else {
                     self.restart(&what, &mut say)
                 }
             }
+            // A server answers that does not serve the id (or a deviating
+            // key): the restart consent of D2 (AGL-033), as today.
+            Door::Foreign => {
+                progress(ServerProgress::Starting);
+                self.restart(&what, &mut |line| progress(ServerProgress::Line(line)))
+            }
             // Connection refused: launch the server of the kind as a
             // background child (AGL-024, D2; AGL-033, D2 — both kinds);
             // a foreign process on the port is an error, not a target.
-            Health::Down => {
+            Door::Free => {
                 progress(ServerProgress::Starting);
                 let mut say = |line: &str| progress(ServerProgress::Line(line));
                 // The unit of the user manager when there is one (AGL-120,
@@ -996,6 +998,42 @@ pub fn command_line(model: &ServerFile, settings: &ServerFile) -> String {
         model.args.as_deref().unwrap_or_default(),
     );
     command.iter().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>().join(" ")
+}
+
+/// What the probe of a server's port answers (AGL-120, D3): the port is
+/// the door, the id — the model and its config — signs the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Door {
+    /// Nothing answers: the engine of the id starts here.
+    Free,
+    /// A server answers and serves the id: use it.
+    Mine,
+    /// A server answers while its model loads: the id is not readable
+    /// yet — wait for it, as `start` does.
+    Loading,
+    /// A server answers that does not serve the id: another's, not ours
+    /// to take — the engine of the id gets its own unit on its own port.
+    Foreign,
+}
+
+/// The probe of D3: what the port answers — nothing, our id, the id
+/// still loading, or another id. `record` is what the running server was
+/// launched with (AGL-035, D1), the only way to know its context.
+pub fn probe(
+    llama: &dyn Backend,
+    record: Option<&ServerFile>,
+    effective: &ServerFile,
+    models: &Path,
+) -> Result<Door, Error> {
+    match health(llama) {
+        Health::Down => Ok(Door::Free),
+        Health::Loading => Ok(Door::Loading),
+        Health::Ready => Ok(if serves(llama, record, effective, models)? {
+            Door::Mine
+        } else {
+            Door::Foreign
+        }),
+    }
 }
 
 /// The check of D2 (AGL-033): whether the server running at the url
@@ -2423,6 +2461,31 @@ mod tests {
         let url = model_server(&[200], None);
         let llama = Llama::new(&url);
         assert!(serves(&llama, None, &settings, models).unwrap());
+    }
+
+    #[test]
+    fn the_probe_of_the_door() {
+        // AGL-120 D3: the port answers free, mine, or a foreign one; a
+        // loading server answers that the id is not readable yet.
+        let models = Path::new("/m");
+        let settings = ServerFile {
+            model: Some("m.gguf".into()),
+            ..ServerFile::default()
+        };
+        // Free: nothing answers at the url.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert_eq!(probe(&Llama::new(&url), None, &settings, models).unwrap(), Door::Free);
+        // Mine: it names the model the settings ask for.
+        let url = model_server(&[200], Some("/m/m.gguf"));
+        assert_eq!(probe(&Llama::new(&url), None, &settings, models).unwrap(), Door::Mine);
+        // Foreign: it names another model — not ours to take.
+        let url = model_server(&[200], Some("/m/other.gguf"));
+        assert_eq!(probe(&Llama::new(&url), None, &settings, models).unwrap(), Door::Foreign);
+        // Loading: the id is not readable while the model loads.
+        let url = health_server(&[503]);
+        assert_eq!(probe(&Llama::new(&url), None, &settings, models).unwrap(), Door::Loading);
     }
 
     #[test]
