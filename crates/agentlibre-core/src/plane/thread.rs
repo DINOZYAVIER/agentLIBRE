@@ -52,8 +52,12 @@ pub enum Command {
     /// server that fails ends the command with its error in `said`.
     Start,
     /// A verb of a flow of the plane (AGL-118, D2, D7): what the human's CLI
-    /// and the agent's tool ask, answered with what the flow's place says.
-    Flow(crate::plane::flow::Verb),
+    /// and the agent's tool ask, answered on `reply` with what the flow's
+    /// place says — the one-shot client's reply, not a turn's `Done`.
+    Flow {
+        verb: crate::plane::flow::Verb,
+        reply: std::sync::mpsc::Sender<Said>,
+    },
 }
 
 /// What a plane sends while it takes a command, and at its end.
@@ -303,7 +307,11 @@ impl Plane {
                 let _ = to.send(self.session.events.clone());
                 (None, None)
             }
-            Command::Flow(verb) => (None, Some(Ok(self.flow(verb)))),
+            Command::Flow { verb, reply } => {
+                let said = self.flow(verb);
+                let _ = reply.send(said);
+                (None, None)
+            }
             Command::Start => {
                 let said = self.start_server(&mut forward).err().map(|error| {
                     // AGL-103, D2: a start that failed stands in the record, red.

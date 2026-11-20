@@ -327,7 +327,56 @@ impl Daemon {
                 });
                 None
             }
+            // A verb of a plane's flows, run on the plane's thread of an
+            // open session of it (AGL-118, D17): refused when none is open.
+            Request::Flow { plane, verb } => {
+                let verb = match verb {
+                    proto::FlowVerb::List => plane::flow::Verb::List,
+                    proto::FlowVerb::Start { name } => plane::flow::Verb::Start { name },
+                    proto::FlowVerb::Stop { name } => plane::flow::Verb::Stop { name },
+                    proto::FlowVerb::Status { name } => plane::flow::Verb::Status { name },
+                    proto::FlowVerb::Reset { name } => plane::flow::Verb::Reset { name },
+                };
+                let (to, from) = mpsc::channel();
+                if let Err(error) = self.flow_command(&plane, verb, to) {
+                    return refused(error);
+                }
+                // The plane's thread answers when its turn is done (AGL-073,
+                // D10); the reply waits for it without holding the loop.
+                thread::spawn(move || {
+                    let reply = from
+                        .recv()
+                        .map(|said| Reply::Said { plane, said: wire::said(&said, lang) })
+                        .unwrap_or_else(|_| Reply::Refused { error: Error::PlaneGone.message(lang) });
+                    self.send_to(client, &reply);
+                });
+                None
+            }
         }
+    }
+
+    /// Sends a flow's `verb` to the plane's thread of an open session of
+    /// `name`, answered on `reply` (AGL-118, D17): the first entry holding
+    /// the plane, any of them able to run the verb on the plane's store. Not
+    /// a turn and not a command of the session's record — the `Done` it
+    /// ends with goes to the subscribers, not to the asker, whose answer
+    /// comes on `reply`.
+    fn flow_command(
+        &self,
+        name: &str,
+        verb: plane::flow::Verb,
+        reply: Sender<plane::Said>,
+    ) -> Result<(), Error> {
+        let mut state = self.lock();
+        let entry = state
+            .sessions
+            .values_mut()
+            .find(|entry| entry.plane.as_deref() == Some(name))
+            .ok_or_else(|| Error::DaemonNoPlane { name: name.into() })?;
+        entry
+            .commands
+            .send(Command::Flow { verb, reply })
+            .map_err(|_| Error::PlaneGone)
     }
 
     /// A command that is not a turn.
@@ -832,6 +881,88 @@ mod tests {
             }
         };
         assert!(matches!(refused, Reply::Refused { .. }), "{refused:?}");
+    }
+
+    #[test]
+    fn a_flow_verb_turns_on_a_planes_thread() {
+        // AGL-118, D13, D17: `agl plane flow` over the socket, run on the
+        // plane's thread of an open session of its plane.
+        let dir = TempDir::new();
+        let (paths, socket) = daemon(&dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            r#"{ agl, ... }: { function = "fixture-minimal"; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
+        )
+        .unwrap();
+        let plane = plane::PlaneFile::create(&paths, "work", std::slice::from_ref(&project)).unwrap();
+        std::fs::write(
+            plane.dir.join("flow.nix"),
+            r#"{ agl, ... }: {
+  flow.one = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "true"; timeout = 10; };
+      next.exit.ok = "done";
+      next.exit.any = "broken";
+    };
+    state.done = { };
+    state.broken = { };
+  };
+}
+"#,
+        )
+        .unwrap();
+        // The flow verbs ride their own connection, as the CLI's do: a plain
+        // client that opened nothing, so it is no subscriber and hears only
+        // the flow's answer. A plain one holds no session; the verb runs on
+        // the session another opened on this plane.
+        let (mut agl, _) = Client::new(&socket, proto::VERSION);
+        let flow = |client: &mut Client, plane: &str, verb: proto::FlowVerb| {
+            client.ask(&Request::Flow { plane: plane.into(), verb })
+        };
+        // No session of the plane is open: the verb is refused (D17).
+        assert!(matches!(
+            flow(&mut agl, "work", proto::FlowVerb::List),
+            Reply::Refused { error } if error.contains("no session of plane work")
+        ));
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let open = Request::Open(proto::Open {
+            dir: project.to_string_lossy().into_owned(),
+            plane: Some("work".into()),
+            ..proto::Open::default()
+        });
+        assert!(matches!(client.ask(&open), Reply::Opened(_)), "the plane opens");
+        assert!(matches!(
+            flow(&mut agl, "work", proto::FlowVerb::List),
+            Reply::Said { plane, said } if plane == "work"
+                && said.lines == [proto::Told::Output("one: not started".into())]
+        ));
+        // The verb runs there: the state's command runs, its exit moves.
+        let Reply::Said { said, .. } = flow(&mut agl, "work", proto::FlowVerb::Start { name: "one".into() })
+        else {
+            panic!("no flow answer")
+        };
+        let text = said
+            .lines
+            .iter()
+            .map(|told| match told {
+                proto::Told::Output(text)
+                | proto::Told::Notice(text)
+                | proto::Told::Refusal(text)
+                | proto::Told::Fault(text)
+                | proto::Told::Pending(text) => text.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(text, "one: done\n  started build\n  exit.ok -> done");
+        // A flow the plane does not declare is a failed answer, not a refusal.
+        let Reply::Said { said, .. } = flow(&mut agl, "work", proto::FlowVerb::Start { name: "two".into() })
+        else {
+            panic!("no flow answer")
+        };
+        assert!(said.failed && format!("{:?}", said.lines).contains("no flow `two`"), "{said:?}");
     }
 
     #[test]

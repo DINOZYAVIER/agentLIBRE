@@ -4,6 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use agentlibre_core::client::Client;
+use agentlibre_proto::{self as proto, Reply, Request};
+
 use crate::cli::args::PlaneAction;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
@@ -100,9 +103,9 @@ fn act(
     })
 }
 
-/// A verb of the flows of the planes of `cwd` (AGL-118, D2, D7). A flow's
-/// commands run in the plane's first directory, which is where its builds
-/// are; a plane with no directory has none to run in (D9).
+/// A verb of the flows of the planes of `cwd` (AGL-118, D2, D13, D17): a
+/// thin client of the daemon — each plane's verb is sent to the daemon and
+/// run on that plane's thread, refused when no session of it is open there.
 fn flows(
     paths: &Paths,
     cwd: &Path,
@@ -113,17 +116,26 @@ fn flows(
     if planes.is_empty() {
         return Ok(tr!(lang, m::PLANE_NONE_HERE).to_string());
     }
+    let verb = match verb {
+        plane::flow::Verb::List => proto::FlowVerb::List,
+        plane::flow::Verb::Start { name } => proto::FlowVerb::Start { name: name.clone() },
+        plane::flow::Verb::Stop { name } => proto::FlowVerb::Stop { name: name.clone() },
+        plane::flow::Verb::Status { name } => proto::FlowVerb::Status { name: name.clone() },
+        plane::flow::Verb::Reset { name } => proto::FlowVerb::Reset { name: name.clone() },
+    };
+    // A flow turns on a session's plane thread, so the daemon must already
+    // run; it is not started from here, with no session to turn.
+    let client = Client::connect(paths, false, lang, false)?;
     let many = planes.len() > 1;
     planes
         .iter()
         .map(|plane| {
-            let workdir = plane
-                .directories
-                .first()
-                .cloned()
-                .unwrap_or_else(|| plane.dir.clone());
-            let said = plane::flow::host::run(&plane.dir, &workdir, verb, lang);
-            let text = said.text();
+            let reply =
+                client.ask(&Request::Flow { plane: plane.name.clone(), verb: verb.clone() }, &mut |_| {})?;
+            let Reply::Said { said, .. } = reply else {
+                return Err(Error::Said { text: format!("the daemon answered a flow with {reply:?}") });
+            };
+            let text = said_text(&said);
             if said.failed {
                 return Err(Error::Said { text });
             }
@@ -131,6 +143,21 @@ fn flows(
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|lines| lines.join("\n"))
+}
+
+/// What a flow verb said: its told lines in order (AGL-118, D7).
+fn said_text(said: &proto::Said) -> String {
+    said.lines
+        .iter()
+        .map(|told| match told {
+            proto::Told::Output(text)
+            | proto::Told::Notice(text)
+            | proto::Told::Refusal(text)
+            | proto::Told::Fault(text)
+            | proto::Told::Pending(text) => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A plane as `agl plane show` gives it: its name, id, store, sessions and

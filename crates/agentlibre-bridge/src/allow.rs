@@ -24,7 +24,8 @@ pub fn allowed(request: &Request) -> bool {
         | Request::Rename { .. }
         | Request::New { .. }
         | Request::Compact { .. }
-        | Request::Record { .. } => false,
+        | Request::Record { .. }
+        | Request::Flow { .. } => false,
     }
 }
 

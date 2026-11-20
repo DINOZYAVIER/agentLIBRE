@@ -91,6 +91,22 @@ pub enum Request {
     Close { session: String },
     /// A session's past: its events (AGL-073, D10).
     History { session: String },
+    /// A verb of a plane's flows (AGL-118, D13, D17): `agl plane flow`,
+    /// run on that plane's thread, answered with what the flow's place says.
+    Flow { plane: String, verb: FlowVerb },
+}
+
+/// A verb of a flow, as on the command line (AGL-118, D2, D7). `start`
+/// moves the machine, `stop` and `reset` are the human's outside it,
+/// `status` and `list` read it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum FlowVerb {
+    List,
+    Start { name: String },
+    Stop { name: String },
+    Status { name: String },
+    Reset { name: String },
 }
 
 /// What `open` names (D10): as on the command line.
@@ -132,6 +148,8 @@ pub enum Reply {
     Opened(Opened),
     Sessions { sessions: Vec<SessionInfo> },
     Transcribed { text: String },
+    /// What a flow verb said (AGL-118, D2, D7), of the plane named.
+    Said { plane: String, said: Said },
     /// A session's events, its past (AGL-073, D10).
     History { session: String, events: Vec<Event> },
     /// What a subscribed session does (D3).

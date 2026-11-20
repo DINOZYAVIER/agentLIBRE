@@ -88,6 +88,14 @@ fn every_request_round_trips_as_one_line() {
         },
         Request::Close { session: "s".into() },
         Request::History { session: "s".into() },
+        Request::Flow {
+            plane: "work".into(),
+            verb: FlowVerb::Start { name: "build".into() },
+        },
+        Request::Flow {
+            plane: "work".into(),
+            verb: FlowVerb::List,
+        },
     ];
     for request in requests {
         let (line, back) = round(&request);
@@ -153,6 +161,14 @@ fn what_a_plane_sends_round_trips() {
             session: "s".into(),
             ask: Ask::Yes,
             text: "restart? [y/N]".into(),
+        },
+        Reply::Said {
+            plane: "work".into(),
+            said: Said {
+                lines: vec![Told::Output("build: done".into())],
+                failed: false,
+                ..Said::default()
+            },
         },
     ];
     for reply in replies {

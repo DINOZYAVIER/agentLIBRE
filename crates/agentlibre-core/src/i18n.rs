@@ -1477,6 +1477,14 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сесія {id} не відкрита в демоні",
     };
 
+    /// `agl plane flow` for a plane with no session open in the daemon
+    /// (AGL-118, D17): until the daemon holds a flow thread per plane, a
+    /// flow turns on the thread of an open session of its plane.
+    pub const DAEMON_NO_PLANE: Msg = Msg {
+        en: "no session of plane {name} is open in the daemon, to turn its flows",
+        uk: "у демоні не відкрито жодної сесії площини {name}, щоб рухати її flows",
+    };
+
     pub const DAEMON_NO_TRANSCRIBER: Msg = Msg {
         en: "no session is open in the daemon for {dir}, to transcribe with its settings",
         uk: "у демоні не відкрито жодної сесії для {dir}, щоб розпізнати з її налаштуваннями",
@@ -3462,6 +3470,7 @@ impl Error {
             Error::DaemonRunning { path } => tr!(lang, m::DAEMON_RUNNING, path = path.display()),
             Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),
             Error::DaemonNoSession { id } => tr!(lang, m::DAEMON_NO_SESSION, id = id),
+            Error::DaemonNoPlane { name } => tr!(lang, m::DAEMON_NO_PLANE, name = name),
             Error::DaemonNoTranscriber { dir } => {
                 tr!(lang, m::DAEMON_NO_TRANSCRIBER, dir = dir.display())
             }
