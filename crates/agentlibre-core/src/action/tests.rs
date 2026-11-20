@@ -608,7 +608,7 @@ fn the_grammar_lists_the_tools_in_the_order_of_the_table() {
     // grammar lists the same calls in it.
     let (grammar, root) = grammar(&qwen(), &builtin(false));
     let text = grammar.render(&root);
-    let order = ["bash", "edit", "forge", "search", "memory", "view"];
+    let order = ["bash", "edit", "forge", "search", "memory", "view", "flow"];
     let places: Vec<usize> = order
         .iter()
         .map(|name| text.find(&format!("<function={name}>")).expect(name))

@@ -413,6 +413,7 @@ fn agent_searching<'a>(
         search,
         memory: &NoMemory,
         about: None,
+        flows: None,
     }
 }
 

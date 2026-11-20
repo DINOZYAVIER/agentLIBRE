@@ -41,6 +41,15 @@ pub enum Waiting {
     Review { function: String, events: Vec<String> },
 }
 
+/// What the `flow` tool needs of the plane (AGL-118, D2, D7): its store,
+/// where `flow.nix` and the journals are, and the directory the flow's
+/// commands run in — the plane's own.
+#[derive(Clone, Copy, Debug)]
+pub struct Env<'a> {
+    pub plane_dir: &'a Path,
+    pub workdir: &'a Path,
+}
+
 /// Where a flow stands, folded from its journal (D3, D7).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Place {

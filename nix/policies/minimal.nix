@@ -13,6 +13,7 @@
       view = { };
       search = { };
       memory = { };
+      flow = { };
     };
     answer = true;
     next.otherwise = "inference";

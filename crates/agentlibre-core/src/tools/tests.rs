@@ -1568,3 +1568,78 @@ fn in_a_plane_the_forge_is_the_planes_and_the_workspaces_by_store() {
     let listed = call(&[("action", "list")]).content;
     assert!(listed.contains("agl-001-in-the-plane") && !listed.contains("in-the-workspace"), "{listed}");
 }
+
+/// The `flow` tool is the verb of `agl plane flow` itself, so the agent and
+/// the human ask the same machine (AGL-118, D2, D7): a flow that moves by
+/// itself moves here, and `status` reads its journal back.
+#[test]
+fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
+    use super::reach::flow_tool;
+    use crate::plane::flow::FLOW_FILE;
+    use crate::plane::flow::host::Env;
+
+    let plane = TempDir::new();
+    let ask = |env: Option<Env<'_>>, args: Vec<(&str, &str)>| {
+        flow_tool(
+            &tool_call(
+                "flow",
+                args.iter()
+                    .map(|(name, value)| ((*name).to_owned(), Value::Text((*value).to_owned())))
+                    .collect(),
+            ),
+            env,
+            Lang::En,
+        )
+    };
+    // Outside a plane the tool fails and says why (D1).
+    let out = ask(None, vec![("action", "start"), ("name", "one")]);
+    assert_eq!(out.outcome, Outcome::Fail);
+    assert_eq!(out.content, "flows live in a plane; this session is in none");
+    let here = Some(Env { plane_dir: &plane.0, workdir: &plane.0 });
+    // A plane that declares nothing answers, and a declared flow that never
+    // ran says so (D7).
+    let out = ask(here, vec![("action", "list")]);
+    assert_eq!((out.outcome, out.content.as_str()), (Outcome::Ok, "no flows; `flow.nix` declares none"));
+    fs::write(
+        plane.0.join(FLOW_FILE),
+        r#"{ agl, ... }: {
+  flow.one = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "true"; timeout = 10; };
+      next.exit.ok = "done";
+      next.exit.any = "broken";
+    };
+    state.done = { };
+    state.broken = { };
+  };
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(ask(here, vec![("action", "list")]).content, "one: not started");
+    // `start` turns the machine: the state's own command runs and its exit
+    // moves it (D5), and the answer is the same short form as `status`.
+    let out = ask(here, vec![("action", "start"), ("name", "one")]);
+    assert_eq!(out.outcome, Outcome::Ok);
+    assert_eq!(out.content, "one: done\n  started build\n  exit.ok -> done");
+    // `status` answers from the journal, its last lines kept short (D7).
+    let out = ask(here, vec![("action", "status"), ("name", "one")]);
+    assert_eq!(out.outcome, Outcome::Ok);
+    assert!(
+        out.content.starts_with("one: done") && out.content.contains("exit.ok -> done"),
+        "{}",
+        out.content
+    );
+    // A verb beyond the tool's three is the human's (D7), as are a flow the
+    // plane does not declare and a `start` that names none.
+    for (args, text) in [
+        (vec![("action", "stop"), ("name", "one")], "`stop` is no verb of a flow"),
+        (vec![("action", "start"), ("name", "two")], "no flow `two` in `flow.nix`"),
+        (vec![("action", "start")], "`start` is no verb of a flow"),
+    ] {
+        let out = ask(here, args);
+        assert_eq!(out.outcome, Outcome::Fail);
+        assert!(out.content.starts_with(text), "{}", out.content);
+    }
+}

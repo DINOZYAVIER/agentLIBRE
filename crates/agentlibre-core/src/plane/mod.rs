@@ -102,6 +102,22 @@ pub struct Said {
 }
 
 impl Said {
+    /// What the command said, its lines in order (AGL-118, D7): a surface
+    /// that paints roles uses [`Said::lines`] itself.
+    pub fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|told| match told {
+                Told::Output(text)
+                | Told::Notice(text)
+                | Told::Refusal(text)
+                | Told::Fault(text)
+                | Told::Pending(text) => text.as_str(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// A command that met an error.
     fn fault(error: &Error, lang: Lang) -> Said {
         Said {
@@ -598,6 +614,10 @@ impl Plane {
             search: &*self.search,
             memory: &*self.memory,
             about: self.about.as_deref(),
+            flows: self
+                .file
+                .as_ref()
+                .map(|plane| flow::host::Env { plane_dir: &plane.dir, workdir: &self.workspace }),
         }
     }
 

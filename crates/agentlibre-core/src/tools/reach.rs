@@ -8,7 +8,8 @@ use crate::action::Outcome;
 use crate::attach::Transcriber;
 use crate::backend::{Backend, ToolCall};
 use crate::error::Error;
-use crate::i18n::Lang;
+use crate::i18n::{m, Lang};
+use crate::tr;
 use crate::media;
 use crate::memory::{self, Home};
 use crate::search::Searcher;
@@ -33,6 +34,9 @@ pub struct Reach<'a> {
     pub search: &'a dyn Searcher,
     /// Where the memory of the workspace is (AGL-006).
     pub memory: &'a dyn Home,
+    /// The plane whose flows the `flow` tool moves and reads; none outside
+    /// a plane (AGL-118, D2).
+    pub flows: Option<crate::plane::flow::host::Env<'a>>,
 }
 
 /// A write a call made outside the workspace's files: to the forge
@@ -48,6 +52,39 @@ pub enum Written {
 pub struct Ran {
     pub result: ToolResult,
     pub write: Option<Written>,
+}
+
+/// The `flow` tool: the verb of `agl plane flow` itself, so that the agent
+/// and the human ask the same machine (AGL-118, D2, D7). What the agent may
+/// ask is `start`, `status` and `list`; a nudge beyond them is the human's,
+/// unless the flow's declaration gives it (D7).
+pub(super) fn flow_tool(call: &ToolCall, env: Option<crate::plane::flow::host::Env<'_>>, lang: Lang) -> ToolResult {
+    use crate::plane::flow::Verb;
+    let Some(env) = env else {
+        return ToolResult {
+            outcome: Outcome::Fail,
+            content: tr!(lang, m::FLOW_NO_PLANE).to_string(),
+        };
+    };
+    let name = call.text("name").unwrap_or_default();
+    let verb = match call.text("action").unwrap_or_default() {
+        "list" => Verb::List,
+        "start" if !name.is_empty() => Verb::Start { name: name.into() },
+        "status" if !name.is_empty() => Verb::Status { name: name.into() },
+        other => {
+            return ToolResult {
+                outcome: Outcome::Fail,
+                content: format!(
+                    "`{other}` is no verb of a flow: `start` and `status` name one, `list` names none"
+                ),
+            };
+        }
+    };
+    let said = crate::plane::flow::host::run(env.plane_dir, env.workdir, &verb, lang);
+    ToolResult {
+        outcome: if said.failed { Outcome::Fail } else { Outcome::Ok },
+        content: said.text(),
+    }
 }
 
 /// Runs `call`. `text` is the text the model wrote before it (D114): the
@@ -68,6 +105,7 @@ pub fn run(call: &ToolCall, text: Option<&str>, reach: &mut Reach<'_>) -> Ran {
             result.content = shown(&result.content, &output);
             (result, None)
         }
+        "flow" => (flow_tool(call, reach.flows, reach.forge.lang), None),
         "memory" => {
             let (result, write) = memory_tool(call, text, reach.memory, reach.output_tokens, reach.backend);
             (result, write.map(Written::Memory))

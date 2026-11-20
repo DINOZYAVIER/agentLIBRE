@@ -106,7 +106,7 @@ const OK_FAIL: &[Outcome] = &[Outcome::Ok, Outcome::Fail];
 
 /// The built-in tools, in the order the prompt and the grammar list them
 /// (AGL-067, D11).
-pub const SPECS: [Spec; 6] = [
+pub const SPECS: [Spec; 7] = [
     Spec {
         name: "bash",
         description: "Run a shell command with `bash -c` in the workspace and return its \
@@ -312,6 +312,30 @@ pub const SPECS: [Spec; 6] = [
                       [Image#1] and you see it (or read what is said in it) in your next \
                       step.",
         params: &[ParamSpec::text("path", true, None)],
+        outcomes: OK_FAIL,
+    },
+    Spec {
+        name: "flow",
+        description: "The flows of the plane: the machine above the turn, declared in the \
+                      plane's `flow.nix`, that survives turns and restarts. `start` moves \
+                      it: a state runs its own command and moves on that command's exit; \
+                      `status` answers from its journal where it stands, what it waits for \
+                      and the journal's last lines; `list` names the plane's flows. The \
+                      transitions are the plane's, never yours to invent; a nudge other \
+                      than these verbs is the human's.",
+        params: &[
+            ParamSpec::of(
+                "action",
+                true,
+                Values::OneOf(&["start", "status", "list"]),
+                Some("start, status or list."),
+            ),
+            ParamSpec::text(
+                "name",
+                false,
+                Some("The flow's name for start and status; not for list."),
+            ),
+        ],
         outcomes: OK_FAIL,
     },
 ];

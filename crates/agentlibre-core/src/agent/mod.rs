@@ -124,6 +124,9 @@ pub struct Agent<'a> {
     pub memory: &'a dyn crate::memory::Home,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<&'a str>,
+    /// The plane whose flows the `flow` tool moves and reads; none outside
+    /// a plane (AGL-118, D2).
+    pub flows: Option<crate::plane::flow::host::Env<'a>>,
 }
 
 impl Agent<'_> {
@@ -387,6 +390,7 @@ impl Agent<'_> {
                         whisper: self.whisper,
                         search: self.search,
                         memory: self.memory,
+                        flows: self.flows,
                     },
                 );
                 let result = ran.result;

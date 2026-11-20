@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
-use crate::plane::{self, PlaneFile, Told};
+use crate::plane::{self, PlaneFile};
 use crate::session::Session;
 use crate::tr;
 
@@ -123,18 +123,7 @@ fn flows(
                 .cloned()
                 .unwrap_or_else(|| plane.dir.clone());
             let said = plane::flow::host::run(&plane.dir, &workdir, verb, lang);
-            let text = said
-                .lines
-                .iter()
-                .map(|line| match line {
-                    Told::Output(text)
-                    | Told::Notice(text)
-                    | Told::Refusal(text)
-                    | Told::Fault(text)
-                    | Told::Pending(text) => text.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = said.text();
             if said.failed {
                 return Err(Error::Said { text });
             }
