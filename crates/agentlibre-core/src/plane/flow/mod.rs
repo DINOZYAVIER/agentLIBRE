@@ -33,6 +33,9 @@ pub enum Action {
     /// `action.say = "<session>"`: a turn started in a session, named as
     /// `Open.resume` names one (D6, D9).
     Say { session: String },
+    /// `action.launch = { cmd; timeout; }`: what a rollback runs to bring the
+    /// artifact back; its event is `launch.ok`/`launch.fail` (D10).
+    Launch { cmd: String, timeout: Duration },
 }
 
 /// A flow as declared: its states, and what each of them does (D4, D9).
@@ -186,19 +189,24 @@ fn read_actions(at: &mut Section) -> Result<Vec<Action>, Error> {
     let Some(mut actions) = at.section("action")? else {
         return Ok(Vec::new());
     };
-    actions.check_keys(&["command", "review", "artifact", "say"])?;
+    actions.check_keys(&["command", "review", "artifact", "say", "launch"])?;
     let mut read = Vec::new();
-    if let Some(mut one) = actions.section("command")? {
+    let wait = |one: &mut Section| -> Result<(String, Duration), Error> {
         one.check_keys(&["cmd", "timeout"])?;
         let cmd = one.required_string("cmd")?;
         let timeout = match one.required_integer("timeout")? {
             n if n >= 1 => n as u64,
-            _ => return Err(bad(&one, "timeout", FunctionProblem::NotPositive)),
+            _ => return Err(bad(one, "timeout", FunctionProblem::NotPositive)),
         };
-        read.push(Action::Command {
-            cmd,
-            timeout: Duration::from_secs(timeout),
-        });
+        Ok((cmd, Duration::from_secs(timeout)))
+    };
+    if let Some(mut one) = actions.section("command")? {
+        let (cmd, timeout) = wait(&mut one)?;
+        read.push(Action::Command { cmd, timeout });
+    }
+    if let Some(mut one) = actions.section("launch")? {
+        let (cmd, timeout) = wait(&mut one)?;
+        read.push(Action::Launch { cmd, timeout });
     }
     if let Some(mut one) = actions.section("review")? {
         one.check_keys(&["function", "events"])?;
@@ -380,8 +388,22 @@ fn check_events(
                     }
                 }
             }
-            // An artifact is put in place, and a `say` starts a turn: neither
-            // has outcomes of its own (D6).
+            Action::Launch { .. } => {
+                for outcome in Outcome::ALL {
+                    if !covers("launch", outcome.name()) {
+                        return Err(bad(
+                            at,
+                            &key,
+                            FunctionProblem::MissingTransition {
+                                tool: "launch".into(),
+                                outcome: outcome.name().into(),
+                            },
+                        ));
+                    }
+                }
+            }
+            // An artifact is pointed at, and a `say` starts a turn: neither
+            // has an outcome of its own (D6, D10).
             Action::Artifact { .. } | Action::Say { .. } => {}
         }
     }

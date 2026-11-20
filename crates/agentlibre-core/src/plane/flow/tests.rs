@@ -196,7 +196,13 @@ fn a_journal_replays_to_the_position_it_left() {
     }
     // The daemon restarts: the position comes from the file, not from memory.
     let entries = journal::read(&journal::path(&dir.0, "dev-loop")).unwrap();
-    assert_eq!(journal::fold(decl, &entries).state.as_deref(), Some("rollback"));
+    assert_eq!(
+        journal::fold(decl, &journal::path(&dir.0, "dev-loop"), &entries)
+            .unwrap()
+            .state
+            .as_deref(),
+        Some("rollback")
+    );
     let run = FlowRun::resume(decl, &dir.0).unwrap();
     assert_eq!(run.state(), "rollback");
 }
@@ -290,4 +296,106 @@ fn a_command_runs_in_the_directory_it_is_given() {
         Outcome::Ok
     );
     assert!(dir.0.join("here").is_file());
+}
+
+/// `DEV` with `exit.ok` moved: what a human editing `flow.nix` under a
+/// running flow leaves behind (D11).
+const MOVED: &str = r#"{ agl, ... }: {
+  flow.dev-loop = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "cargo build"; timeout = 9; };
+      next.exit.ok = "halted";
+      next.exit.any = "halted";
+    };
+    state.halted = { };
+  };
+}
+"#;
+
+/// A rollback that points at an artifact and launches it (D10).
+const LAUNCH: &str = r#"{ agl, ... }: {
+  flow.back = {
+    initial = "rollback";
+    state.rollback = {
+      action.artifact = { dir = "result"; keep = 3; };
+      action.launch = { cmd = "result-prev/bin/agl"; timeout = 30; };
+      next.launch.ok = "halted";
+      next.launch.fail = "halted";
+      next.launch.timeout = "halted";
+      next.launch.interrupted = "halted";
+    };
+    state.halted = { };
+  };
+}
+"#;
+
+#[test]
+fn a_rollback_points_at_the_artifact_and_launches_it() {
+    let dir = TempDir::new();
+    let flows = read(&dir, LAUNCH).unwrap();
+    let decl = flows.find("back").unwrap();
+    let at = decl
+        .states()
+        .iter()
+        .position(|s| s.name == "rollback")
+        .unwrap();
+    let actions = decl.actions(at);
+    assert!(
+        matches!(
+            actions,
+            [Action::Launch { cmd, timeout }, Action::Artifact { keep: 3, .. }]
+              if cmd == "result-prev/bin/agl" && *timeout == Duration::from_secs(30)
+        ),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn a_launch_without_its_transition_is_named() {
+    let (key, problem) = problem_of(
+        r#"{ agl, ... }: { flow.one = { initial = "back"; state.back = { action.launch = { cmd = "run"; timeout = 1; }; }; }; }"#,
+    );
+    assert_eq!(key, "flow.one.state.back.next");
+    assert_eq!(
+        problem,
+        FunctionProblem::MissingTransition {
+            tool: "launch".into(),
+            outcome: "ok".into(),
+        }
+    );
+}
+
+#[test]
+fn an_edited_declaration_under_a_running_flow_is_refused() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    {
+        let mut run = FlowRun::start(decl, &dir.0).unwrap();
+        run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
+    }
+    // The same file now says `exit.ok` goes to `halted`: the running flow must
+    // not change shape under the human (D11).
+    let moved = read(&dir, MOVED).unwrap();
+    let moved = moved.find("dev-loop").unwrap();
+    let error = FlowRun::resume(moved, &dir.0).unwrap_err();
+    assert!(matches!(error, Error::PlaneFile { .. }), "{error:?}");
+}
+
+#[test]
+fn a_reset_starts_again_and_keeps_the_journal() {
+    let dir = TempDir::new();
+    let flows = read(&dir, DEV).unwrap();
+    let decl = flows.find("dev-loop").unwrap();
+    {
+        let mut run = FlowRun::start(decl, &dir.0).unwrap();
+        run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
+    }
+    let moved = read(&dir, MOVED).unwrap();
+    let moved = moved.find("dev-loop").unwrap();
+    journal::reset(&dir.0, "dev-loop").unwrap();
+    let run = FlowRun::resume(moved, &dir.0).unwrap();
+    assert_eq!(run.state(), "build");
+    assert!(dir.0.join("flow").join("dev-loop.jsonl.old").is_file());
 }

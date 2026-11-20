@@ -146,8 +146,10 @@ fn append(path: &Path, entry: &Entry) -> Result<(), Error> {
 }
 
 /// The position the journal leaves the machine at: the fold of its lines over
-/// the declaration (D3). `Session::unfinished` is the same law for a turn.
-pub fn fold(decl: &FlowDecl, entries: &[Entry]) -> Unfinished {
+/// the declaration (D3). `Session::unfinished` is the same law for a turn. A
+/// declaration whose transitions no longer give what the journal recorded is
+/// refused, not silently followed (D11).
+pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinished, Error> {
     let index = |name: &str| {
         decl.states()
             .iter()
@@ -165,11 +167,27 @@ pub fn fold(decl: &FlowDecl, entries: &[Entry]) -> Unfinished {
     let mut steps_in_visit = 0;
     for entry in entries.iter().skip(1) {
         match entry {
-            Entry::Event { name, detail, .. } => {
+            Entry::Event {
+                name,
+                detail,
+                into,
+                ..
+            } => {
                 // An event the state has no transition for moves nothing (D9).
-                at = decl.states()[at]
+                let next = decl.states()[at]
                     .next_option(name, detail.as_deref())
                     .unwrap_or(at);
+                if decl.state_name(next) != into.as_str() {
+                    return Err(Error::PlaneFile {
+                        path: path.into(),
+                        detail: format!(
+                            "`{name}` in `{}` gives `{}`, the journal recorded `{into}`",
+                            decl.state_name(at),
+                            decl.state_name(next)
+                        ),
+                    });
+                }
+                at = next;
                 let name = decl.state_name(at);
                 match visits.iter_mut().find(|(seen, _)| seen == name) {
                     Some((_, count)) => *count += 1,
@@ -182,15 +200,31 @@ pub fn fold(decl: &FlowDecl, entries: &[Entry]) -> Unfinished {
             Entry::Started { .. } | Entry::Stopped { .. } => break,
         }
     }
-    Unfinished {
+    Ok(Unfinished {
         state: Some(decl.state_name(at).into()),
         visits,
         steps_in_visit,
+    })
+}
+
+/// D11's way out: the journal is put aside as `<name>.jsonl.old`, so the flow
+/// starts again from its `initial` and the history stays readable beside it.
+/// A later reset replaces that file; no journal is nothing to reset.
+pub fn reset(plane_dir: &Path, flow: &str) -> Result<(), Error> {
+    let file = path(plane_dir, flow);
+    if !file.is_file() {
+        return Ok(());
     }
+    let old = PathBuf::from(format!("{}.old", file.display()));
+    fs::rename(&file, &old).map_err(|source| Error::Write {
+        path: old,
+        source,
+    })
 }
 
 /// A flow that runs: its machine, and the journal its steps are written to
 /// (D3). It borrows the declaration, which the plane holds.
+#[derive(Debug)]
 pub struct FlowRun<'d> {
     path: PathBuf,
     machine: Machine<'d>,
@@ -213,7 +247,7 @@ impl<'d> FlowRun<'d> {
         if entries.is_empty() {
             return Self::start(decl, plane_dir);
         }
-        let turn = fold(decl, &entries);
+        let turn = fold(decl, &file, &entries)?;
         let machine = Machine::resume(decl.table(), decl.name(), &turn)?;
         Ok(FlowRun {
             path: file,
