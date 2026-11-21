@@ -741,6 +741,10 @@ pub fn run(
                 keys.voice();
                 continue;
             }
+            if key == Key::Alt('r') {
+                (keys.voice_ask)();
+                continue;
+            }
             if key == Key::Ctrl('v') {
                 keys.paste();
                 continue;

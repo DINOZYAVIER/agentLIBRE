@@ -57,12 +57,29 @@ pub(super) fn grouped(n: usize) -> String {
     out
 }
 
-/// The state of the voice input, shown after the activity (AGL-016, D9).
+/// How a dictation ends: sent by itself, or left in the line to ask
+/// (AGL-123, D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendMode {
+    Auto,
+    Ask,
+}
+
+/// The state of the voice input, shown after the activity (AGL-016, D9;
+/// AGL-123: with its send mode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoiceLabel {
-    /// Seconds recorded so far.
-    Recording(u64),
-    Transcribing,
+    /// Seconds recorded so far, and the mode.
+    Recording(u64, SendMode),
+    Transcribing(SendMode),
+}
+
+/// The word of a send mode (AGL-123).
+pub fn mode_word(lang: Lang, mode: SendMode) -> &'static str {
+    match mode {
+        SendMode::Auto => tr!(lang, m::VOICE_MODE_AUTO),
+        SendMode::Ask => tr!(lang, m::VOICE_MODE_ASK),
+    }
 }
 
 /// What the dock looks like: its rows and where the cursor is.
@@ -483,12 +500,14 @@ impl State {
             label.push_str(&format!(" · {}", texts::speed(speed, lang)));
         }
         match self.voice {
-            Some(VoiceLabel::Recording(seconds)) => {
+            Some(VoiceLabel::Recording(seconds, mode)) => {
                 let time = format!("{}:{:02}", seconds / 60, seconds % 60);
-                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_RECORDING, time = time)));
+                let mode = mode_word(lang, mode);
+                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_RECORDING, time = time, mode = mode)));
             }
-            Some(VoiceLabel::Transcribing) => {
-                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_TRANSCRIBING)));
+            Some(VoiceLabel::Transcribing(mode)) => {
+                let mode = mode_word(lang, mode);
+                label.push_str(&format!(" · {}", tr!(lang, m::VOICE_TRANSCRIBING, mode = mode)));
             }
             None => {}
         }
@@ -893,19 +912,19 @@ mod tests {
     fn the_separator_shows_the_voice_input_after_the_activity() {
         let (dock, _) = dock(80, 20);
         let separator = |dock: &Dock| dock.lock().separator();
-        dock.set_voice(Some(VoiceLabel::Recording(7)));
+        dock.set_voice(Some(VoiceLabel::Recording(7, SendMode::Auto)));
         assert!(
-            separator(&dock).contains("Ready · Recording 0:07 · Ctrl-R to stop"),
+            separator(&dock).contains("Ready · Recording 0:07 · auto"),
             "{}",
             separator(&dock)
         );
-        dock.set_voice(Some(VoiceLabel::Recording(61)));
-        assert!(separator(&dock).contains("Recording 1:01"));
-        dock.set_voice(Some(VoiceLabel::Transcribing));
-        assert!(separator(&dock).contains("Ready · Transcribing…"));
+        dock.set_voice(Some(VoiceLabel::Recording(61, SendMode::Ask)));
+        assert!(separator(&dock).contains("Recording 1:01 · ask"));
+        dock.set_voice(Some(VoiceLabel::Transcribing(SendMode::Auto)));
+        assert!(separator(&dock).contains("Ready · Transcribing · auto…"));
         // A turn runs beside it (AGL-016, D7): both are shown.
         dock.activity(Phase::Writing);
-        assert!(separator(&dock).contains("Writing · Transcribing…"));
+        assert!(separator(&dock).contains("Writing · Transcribing · auto…"));
         dock.set_voice(None);
         assert!(!separator(&dock).contains("Transcribing"));
         assert!(separator(&dock).contains("Writing"));

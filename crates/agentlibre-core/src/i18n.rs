@@ -2358,16 +2358,29 @@ Forge (сховище артефактів робочої області, agentL
              (доки режим стоїть, миша виділяє лише з Shift)",
     };
 
-    /// The separator row while the voice is recorded (AGL-016, D9).
+    /// The separator row while the voice is recorded (AGL-016, D9; AGL-123):
+    /// `{mode}` is the send mode, auto or ask.
     pub const VOICE_RECORDING: Msg = Msg {
-        en: "Recording {time} · Ctrl-R to stop",
-        uk: "Запис {time} · Ctrl-R, щоб зупинити",
+        en: "Recording {time} · {mode}",
+        uk: "Запис {time} · {mode}",
     };
 
-    /// The separator row while the recording is turned into text.
+    /// The separator row while the recording is turned into text (AGL-123).
     pub const VOICE_TRANSCRIBING: Msg = Msg {
-        en: "Transcribing…",
-        uk: "Розпізнаю…",
+        en: "Transcribing · {mode}…",
+        uk: "Розпізнаю · {mode}…",
+    };
+
+    /// The send mode of the dictation: the transcript sends itself (AGL-123, D1).
+    pub const VOICE_MODE_AUTO: Msg = Msg {
+        en: "auto",
+        uk: "авто",
+    };
+
+    /// The send mode of the dictation: the transcript waits in the line (AGL-123, D1).
+    pub const VOICE_MODE_ASK: Msg = Msg {
+        en: "ask",
+        uk: "питати",
     };
 
     /// The recording had no words.

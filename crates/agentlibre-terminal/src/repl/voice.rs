@@ -2,12 +2,16 @@
 //! the microphone, the second press stops, the model when it hears
 //! (AGL-051), or else whisper, turns the recording into text and the text
 //! goes into the input line (D2, D3). It works while a turn runs (D7).
+//! AGL-123 adds the send mode: Alt-R starts a dictation that asks instead
+//! of sending, and upgrades the live one; Ctrl-R auto-sends the transcript.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::dock::{Dock, VoiceLabel};
+use super::dock::{Dock, SendMode, VoiceLabel};
+use super::editor::Outcome;
 use super::term::Key;
 use super::transcript::{Screen, notice_lines};
 use crate::whisper::Dictation;
@@ -24,6 +28,9 @@ const WATCH: Duration = Duration::from_millis(100);
 
 /// Starts a recording of at most the given number of seconds.
 pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, Error> + Send + Sync>;
+
+/// Queues an auto-sent transcript (AGL-123, D1).
+pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
 
 struct Active {
     recording: Box<dyn Recording>,
@@ -48,6 +55,10 @@ pub struct VoiceInput {
     limit: u32,
     lang: Lang,
     theme: Theme,
+    /// Whether the live dictation asks before sending (AGL-123, D1, D2).
+    ask: AtomicBool,
+    /// The callback that queues an auto-send message (AGL-123, D1).
+    send: Mutex<Option<Sender>>,
     state: Mutex<State>,
     next_id: Mutex<u64>,
 }
@@ -68,6 +79,8 @@ impl VoiceInput {
             limit,
             lang,
             theme,
+            ask: AtomicBool::new(false),
+            send: Mutex::new(None),
             state: Mutex::new(State::Idle),
             next_id: Mutex::new(0),
         }
@@ -88,22 +101,41 @@ impl VoiceInput {
         matches!(*self.lock(), State::Recording(_))
     }
 
-    /// Ctrl-R: starts a recording, or stops the one that goes (D2).
-    pub fn toggle(self: &Arc<Self>) {
-        let recording = match &*self.lock() {
-            State::Idle => false,
-            State::Recording(_) => true,
-            // The text of the last one is still being made.
-            State::Transcribing => return,
-        };
-        if recording {
-            self.finish();
-        } else {
-            self.start();
+    /// The dictation key of `mode` (AGL-123, D1, D2, D9): from idle it
+    /// starts; Ctrl-R stops a recording; Alt-R upgrades the live one to
+    /// ask — one way, a second Alt-R does nothing more.
+    pub fn press(self: &Arc<Self>, mode: SendMode) {
+        if matches!(&*self.lock(), State::Recording(_)) {
+            return match mode {
+                SendMode::Auto => self.finish(),
+                SendMode::Ask => self.upgrade(),
+            };
         }
+        if matches!(&*self.lock(), State::Transcribing) {
+            // The text is still being made: only the upgrade reaches it (D2).
+            if matches!(mode, SendMode::Ask) {
+                self.upgrade();
+            }
+            return;
+        }
+        self.start(mode);
     }
 
-    fn start(self: &Arc<Self>) {
+    /// Alt-R over a live dictation: ask from now on (AGL-123, D2).
+    fn upgrade(self: &Arc<Self>) {
+        self.ask.store(true, Ordering::Relaxed);
+        let label = match &*self.lock() {
+            State::Recording(active) => {
+                Some(VoiceLabel::Recording(active.since.elapsed().as_secs(), SendMode::Ask))
+            }
+            State::Transcribing => Some(VoiceLabel::Transcribing(SendMode::Ask)),
+            State::Idle => None,
+        };
+        self.dock.set_voice(label);
+    }
+
+    fn start(self: &Arc<Self>, mode: SendMode) {
+        self.ask.store(matches!(mode, SendMode::Ask), Ordering::Relaxed);
         // What takes the recording must be set up: told before the human
         // speaks.
         if let Err(error) = self.dictation.ready() {
@@ -136,7 +168,7 @@ impl VoiceInput {
             warm: Some(warm),
             id,
         });
-        self.dock.set_voice(Some(VoiceLabel::Recording(0)));
+        self.dock.set_voice(Some(VoiceLabel::Recording(0, mode)));
         let me = self.clone();
         thread::spawn(move || me.watch(id));
     }
@@ -153,7 +185,8 @@ impl VoiceInput {
                         let seconds = active.since.elapsed().as_secs();
                         if seconds != shown {
                             shown = seconds;
-                            self.dock.set_voice(Some(VoiceLabel::Recording(seconds)));
+                            let mode = self.mode();
+                            self.dock.set_voice(Some(VoiceLabel::Recording(seconds, mode)));
                         }
                         active.recording.finished()
                     }
@@ -179,24 +212,56 @@ impl VoiceInput {
                 }
             }
         };
-        self.dock.set_voice(Some(VoiceLabel::Transcribing));
+        self.dock.set_voice(Some(VoiceLabel::Transcribing(self.mode())));
         let me = self.clone();
         thread::spawn(move || {
             let result = me.text_of(active);
             *me.lock() = State::Idle;
             me.dock.set_voice(None);
+            // The mode is read last: an Alt-R during transcription still
+            // asks (AGL-123, D2).
+            let ask = matches!(me.mode(), SendMode::Ask);
             match result {
                 Ok(text) if text.is_empty() => {
+                    // Silence never sends (AGL-123, D8).
                     me.notice(tr!(me.lang, m::VOICE_NOTHING_HEARD), Role::StatusPending);
                 }
-                // The text goes in at the cursor, where the human was
-                // writing (D3).
-                Ok(text) => {
+                // Ask: the text goes in at the cursor, where the human was
+                // writing (D3). Auto: it goes whole and the message sends
+                // itself (AGL-123, D1).
+                Ok(text) if ask => {
                     me.dock.key(Key::Paste(format!("{text} ")));
+                }
+                Ok(text) if ask => {
+                    me.dock.key(Key::Paste(format!("{text} ")));
+                }
+                Ok(text) => {
+                    me.dock.key(Key::Paste(text));
+                    if let Outcome::Submit(message) = me.dock.key(Key::Enter) {
+                        let send = me.send.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if let Some(send) = send {
+                            send(message);
+                        }
+                    }
                 }
                 Err(error) => me.notice(&error.message(me.lang), Role::StatusFailure),
             }
         });
+    }
+
+    /// The send mode of the live dictation (AGL-123).
+    fn mode(&self) -> SendMode {
+        if self.ask.load(Ordering::Relaxed) {
+            SendMode::Ask
+        } else {
+            SendMode::Auto
+        }
+    }
+
+    /// The callback that sends the auto mode's message, wired by the input
+    /// loop which owns what queuing takes (AGL-123, D1).
+    pub fn on_send(&self, send: Sender) {
+        *self.send.lock().unwrap_or_else(|e| e.into_inner()) = Some(send);
     }
 
     fn text_of(&self, active: Active) -> Result<String, Error> {

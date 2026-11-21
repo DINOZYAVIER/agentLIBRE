@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
-use dock::Dock;
+use dock::{Dock, SendMode};
 use editor::{Editor, MenuItem, Outcome, save_history};
-use voice::VoiceInput;
+use voice::{Sender, VoiceInput};
 use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines, user_lines};
 
@@ -168,6 +168,8 @@ pub struct ModeKeys<'a> {
     pub cancel: &'a dyn Fn(),
     /// Ctrl-R: the dictation's own start or stop.
     pub voice: &'a dyn Fn(),
+    /// Alt-R: start a dictation that asks, or upgrade the live one (AGL-123).
+    pub voice_ask: &'a dyn Fn(),
     /// Ctrl-V: the clipboard's own paste.
     pub paste: &'a dyn Fn(),
 }
@@ -812,7 +814,11 @@ impl Input {
             return;
         }
         if key == Key::Ctrl('r') {
-            self.voice.toggle();
+            self.voice.press(SendMode::Auto);
+            return;
+        }
+        if key == Key::Alt('r') {
+            self.voice.press(SendMode::Ask);
             return;
         }
         if key == Key::Ctrl('v') {
@@ -829,7 +835,8 @@ impl Input {
                 interrupt: &|| self.interrupt(true),
                 recording: &|| self.voice.recording(),
                 cancel: &|| self.voice.cancel(),
-                voice: &|| self.voice.toggle(),
+                voice: &|| self.voice.press(SendMode::Auto),
+                voice_ask: &|| self.voice.press(SendMode::Ask),
                 paste: &|| self.paste(),
             };
             if let Some(message) = (self.open_inspect)(&keys) {
@@ -858,7 +865,8 @@ impl Input {
                 interrupt: &|| self.interrupt(true),
                 recording: &|| self.voice.recording(),
                 cancel: &|| self.voice.cancel(),
-                voice: &|| self.voice.toggle(),
+                voice: &|| self.voice.press(SendMode::Auto),
+                voice_ask: &|| self.voice.press(SendMode::Ask),
                 paste: &|| self.paste(),
             };
             if let Some(open) = &self.open_browser
@@ -898,7 +906,28 @@ impl Input {
 }
 
 /// Reads the keyboard until `done` (D115).
+/// The callback of an auto-sent dictation: it queues like `submitted`'s
+/// message path (AGL-123, D1); a transcript is never a command.
+fn voice_sender(control: Arc<Control>, dock: Arc<Dock>) -> Sender {
+    Arc::new(move |text: String| {
+        let mut inner = control.lock();
+        let pending = std::mem::take(&mut inner.pending);
+        inner.queue.push_back(Queued { text, pending });
+        let queued = inner.queue.len();
+        drop(inner);
+        dock.set_queued(queued);
+        control.wake.notify_all();
+    })
+}
+
 fn input_loop(input: Input, done: Arc<AtomicBool>) {
+    // Auto-send: the dictation's thread queues through the same pieces
+    // Enter uses, minus the command reading — a transcript is speech
+    // (AGL-123, D1).
+    input.voice.on_send(voice_sender(
+        input.control.clone(),
+        input.dock.clone(),
+    ));
     let mut parser = Parser::default();
     let mut buffer = [0u8; 4096];
     while !done.load(Ordering::SeqCst) {
@@ -1851,6 +1880,10 @@ mod tests {
             voice,
             said: Mutex::new(None),
             };
+        input.voice.on_send(voice_sender(
+            input.control.clone(),
+            input.dock.clone(),
+        ));
         Fixture {
             input,
             sink,
@@ -2032,7 +2065,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_records_and_the_second_press_puts_the_text_in_the_line() {
+    fn ctrl_r_records_and_the_second_press_sends_the_text() {
         let f = fixture();
         f.type_text("say ");
         f.input.key(Key::Ctrl('r'));
@@ -2041,19 +2074,61 @@ mod tests {
         assert_eq!(f.fake.log()[0], "start 60");
         eventually("warm up", || f.fake.log().contains(&"warm".to_string()));
         // The test dock is 40 columns wide: the label is cut at its end.
-        assert!(f.output().contains("Recording 0:00"), "{}", f.output());
+        // The label carries the send mode (AGL-123, D3, D7).
+        assert!(f.output().contains("Recording 0:00 · auto"), "{}", f.output());
         assert!(f.input.voice.recording());
         f.input.key(Key::Ctrl('r'));
-        eventually("the text", || f.input.dock.input_text() == "say hello world ");
+        // Auto-send: the whole line goes as a message, trimmed (AGL-123, D1, D8).
+        eventually("the send", || f.inner().texts() == ["say hello world"]);
+        assert!(f.input.dock.input_is_empty());
         assert_eq!(f.fake.log().last().unwrap(), "transcribe 3 bytes");
         assert!(f.fake.log().contains(&"stop".to_string()));
-        assert!(f.output().contains("Transcribing…"));
+        assert!(f.output().contains("Transcribing · auto…"));
         assert!(!f.input.voice.recording());
-        // Nothing was queued: the human sends the line when it is read.
-        assert!(f.inner().queue.is_empty());
         // And it can be done again.
         f.input.key(Key::Ctrl('r'));
         assert!(f.input.voice.recording());
+    }
+
+    #[test]
+    fn alt_r_asks_and_leaves_the_text_in_the_line() {
+        // AGL-123, D1, D4: the ask mode keeps the old behavior — the text
+        // waits in the line for the human to read it.
+        let f = fixture();
+        f.input.key(Key::Alt('r'));
+        assert!(f.output().contains("Recording 0:00 · ask"), "{}", f.output());
+        f.input.key(Key::Ctrl('r'));
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        assert!(f.output().contains("Transcribing · ask…"));
+        assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn alt_r_upgrades_the_live_dictation_one_way() {
+        // AGL-123, D2, D9: Alt-R over an auto recording makes it ask; a
+        // second Alt-R changes nothing back.
+        let f = fixture();
+        f.input.key(Key::Ctrl('r'));
+        f.input.key(Key::Alt('r'));
+        assert!(f.output().contains("· ask"), "{}", f.output());
+        f.input.key(Key::Alt('r'));
+        f.input.key(Key::Ctrl('r'));
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn alt_r_upgrades_while_the_text_is_made() {
+        // AGL-123, D2: the upgrade reaches even the transcription.
+        let f = fixture();
+        f.fake.hold.store(true, Ordering::SeqCst);
+        f.input.key(Key::Ctrl('r'));
+        f.input.key(Key::Ctrl('r'));
+        eventually("stop", || f.fake.log().contains(&"stop".to_string()));
+        f.input.key(Key::Alt('r'));
+        f.fake.hold.store(false, Ordering::SeqCst);
+        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        assert!(f.inner().queue.is_empty());
     }
 
     #[test]
@@ -2081,8 +2156,9 @@ mod tests {
         f.inner().running = true;
         f.input.key(Key::Ctrl('r'));
         f.input.key(Key::Ctrl('r'));
-        eventually("the text", || f.input.dock.input_text() == "hello world ");
-        // The turn went on: it was not interrupted, nothing was queued.
+        // Auto-send during a turn: the message queues, the turn is not
+        // interrupted (AGL-016, D7; AGL-123, D1).
+        eventually("the send", || f.inner().texts() == ["hello world"]);
         assert!(f.inner().running);
         assert_eq!(f.stops.load(Ordering::SeqCst), 0);
         // Ctrl-C with no recording is the usual stop of the turn.
@@ -2115,7 +2191,8 @@ mod tests {
         let f = fixture();
         f.input.key(Key::Ctrl('r'));
         f.fake.ended.store(true, Ordering::SeqCst);
-        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        // Auto-send: the limit-stop sends too (AGL-123, D1).
+        eventually("the send", || f.inner().texts() == ["hello world"]);
         assert!(!f.input.voice.recording());
         assert!(f.fake.log().contains(&"stop".to_string()));
     }
@@ -2142,7 +2219,7 @@ mod tests {
         assert_eq!(f.fake.log().iter().filter(|l| l.starts_with("start")).count(), 1);
         f.input.voice.cancel();
         f.fake.hold.store(false, Ordering::SeqCst);
-        eventually("the text", || f.input.dock.input_text() == "hello world ");
+        eventually("the send", || f.inner().texts() == ["hello world"]);
     }
 
     #[test]
