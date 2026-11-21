@@ -237,9 +237,6 @@ impl VoiceInput {
                 Ok(text) if ask => {
                     me.dock.key(Key::Paste(format!("{text} ")));
                 }
-                Ok(text) if ask => {
-                    me.dock.key(Key::Paste(format!("{text} ")));
-                }
                 Ok(text) => {
                     me.dock.key(Key::Paste(text));
                     if let Outcome::Submit(message) = me.dock.key(Key::Enter) {
