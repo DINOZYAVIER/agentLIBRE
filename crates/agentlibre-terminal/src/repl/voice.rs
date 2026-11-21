@@ -101,34 +101,39 @@ impl VoiceInput {
         matches!(*self.lock(), State::Recording(_))
     }
 
-    /// The dictation key of `mode` (AGL-123, D1, D2, D9): from idle it
-    /// starts; Ctrl-R stops a recording; Alt-R upgrades the live one to
-    /// ask — one way, a second Alt-R does nothing more.
+    /// The dictation key of `mode` (AGL-123, D1, D2, D11): from idle Ctrl-R
+    /// starts auto, Alt-R starts ask; Ctrl-R always stops the recording;
+    /// Alt-R flips the live dictation's mode, both ways, recording or
+    /// transcribing.
     pub fn press(self: &Arc<Self>, mode: SendMode) {
-        if matches!(&*self.lock(), State::Recording(_)) {
+        let recording = matches!(&*self.lock(), State::Recording(_));
+        if recording {
             return match mode {
                 SendMode::Auto => self.finish(),
-                SendMode::Ask => self.upgrade(),
+                SendMode::Ask => self.flip_mode(),
             };
         }
         if matches!(&*self.lock(), State::Transcribing) {
-            // The text is still being made: only the upgrade reaches it (D2).
+            // The text is still being made: only the flip reaches it (D11).
             if matches!(mode, SendMode::Ask) {
-                self.upgrade();
+                self.flip_mode();
             }
             return;
         }
         self.start(mode);
     }
 
-    /// Alt-R over a live dictation: ask from now on (AGL-123, D2).
-    fn upgrade(self: &Arc<Self>) {
-        self.ask.store(true, Ordering::Relaxed);
+    /// Alt-R over a live dictation: its mode flips, ask ⇄ auto
+    /// (AGL-123, D11).
+    fn flip_mode(self: &Arc<Self>) {
+        let ask = !self.ask.load(Ordering::Relaxed);
+        self.ask.store(ask, Ordering::Relaxed);
+        let mode = if ask { SendMode::Ask } else { SendMode::Auto };
         let label = match &*self.lock() {
             State::Recording(active) => {
-                Some(VoiceLabel::Recording(active.since.elapsed().as_secs(), SendMode::Ask))
+                Some(VoiceLabel::Recording(active.since.elapsed().as_secs(), mode))
             }
-            State::Transcribing => Some(VoiceLabel::Transcribing(SendMode::Ask)),
+            State::Transcribing => Some(VoiceLabel::Transcribing(mode)),
             State::Idle => None,
         };
         self.dock.set_voice(label);

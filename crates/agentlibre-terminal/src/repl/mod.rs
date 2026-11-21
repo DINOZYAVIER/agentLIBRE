@@ -2104,31 +2104,32 @@ mod tests {
     }
 
     #[test]
-    fn alt_r_upgrades_the_live_dictation_one_way() {
-        // AGL-123, D2, D9: Alt-R over an auto recording makes it ask; a
-        // second Alt-R changes nothing back.
+    fn alt_r_flips_the_live_dictation_both_ways() {
+        // AGL-123, D2, D11: Alt-R flips auto→ask→auto; Ctrl-R always stops.
         let f = fixture();
         f.input.key(Key::Ctrl('r'));
         f.input.key(Key::Alt('r'));
         assert!(f.output().contains("· ask"), "{}", f.output());
         f.input.key(Key::Alt('r'));
+        assert!(f.output().contains("· auto"), "{}", f.output());
+        // Flipped back to auto: Ctrl-R stops and sends.
         f.input.key(Key::Ctrl('r'));
-        eventually("the text", || f.input.dock.input_text() == "hello world ");
-        assert!(f.inner().queue.is_empty());
+        eventually("the send", || f.inner().texts() == ["hello world"]);
     }
 
     #[test]
-    fn alt_r_upgrades_while_the_text_is_made() {
-        // AGL-123, D2: the upgrade reaches even the transcription.
+    fn alt_r_flips_while_the_text_is_made() {
+        // AGL-123, D11: the flip reaches even the transcription, both ways.
         let f = fixture();
         f.fake.hold.store(true, Ordering::SeqCst);
         f.input.key(Key::Ctrl('r'));
         f.input.key(Key::Ctrl('r'));
         eventually("stop", || f.fake.log().contains(&"stop".to_string()));
         f.input.key(Key::Alt('r'));
+        f.input.key(Key::Alt('r'));
         f.fake.hold.store(false, Ordering::SeqCst);
-        eventually("the text", || f.input.dock.input_text() == "hello world ");
-        assert!(f.inner().queue.is_empty());
+        // Flipped to ask and back to auto: it sends.
+        eventually("the send", || f.inner().texts() == ["hello world"]);
     }
 
     #[test]
