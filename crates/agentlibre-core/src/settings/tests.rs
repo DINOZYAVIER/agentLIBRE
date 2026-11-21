@@ -110,6 +110,8 @@ fn the_whisper_table() {
             model: Some("w.bin".into()),
             args: Some(vec!["-t".into(), "12".into()]),
             private_ca: None,
+            draft_model: None,
+            draft_program: None,
         }
     );
     // The project wins per key, `args` as a whole.

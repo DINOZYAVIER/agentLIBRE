@@ -319,6 +319,50 @@ impl Transcriber for Autostart {
     }
 }
 
+/// The draft engine of the live dictation (AGL-122, D5, D8):
+/// `parakeet-cli` turns a chunk into text while the human speaks; the
+/// final pass stays whisper. Spawning it per chunk is the design — the
+/// model loads in a fraction of a second, so no server is needed (D8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Draft {
+    pub program: PathBuf,
+    pub model: PathBuf,
+}
+
+/// Threads of one draft chunk; the machine is also recording.
+const DRAFT_THREADS: &str = "12";
+
+impl Draft {
+    /// `[whisper]`'s draft keys resolved to paths: both set, both files
+    /// there — or `None`, which means drafts are silently off (AGL-122).
+    pub fn of(settings: &WhisperFile, models: &Path) -> Option<Draft> {
+        let program = PathBuf::from(settings.draft_program.as_deref()?);
+        let name = settings.draft_model.as_deref()?;
+        let model =
+            if Path::new(name).is_absolute() { PathBuf::from(name) } else { models.join(name) };
+        (program.is_file() && model.is_file()).then_some(Draft { program, model })
+    }
+
+    /// The draft text of a 16 kHz mono WAV chunk; empty means silence.
+    pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
+        let path = std::env::temp_dir().join(format!("agentLIBRE-draft-{}.wav", std::process::id()));
+        std::fs::write(&path, wav).map_err(|source| Error::Draft { detail: source.to_string() })?;
+        let out = Command::new(&self.program)
+            .args(["-m"]).args([&self.model])
+            .args(["-t", DRAFT_THREADS, "-np"])
+            .args(["-f"]).arg(&path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let out = out.map_err(|source| Error::Draft { detail: source.to_string() })?;
+        if !out.status.success() {
+            return Err(Error::Draft { detail: format!("exited with {}", out.status) });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +393,8 @@ mod tests {
             model: Some("w.bin".into()),
             args: Some(vec!["-t".into(), "12".into()]),
             private_ca: None,
+            draft_model: None,
+            draft_program: None,
         });
         let server = WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-whisper-server-60af300abea6");
@@ -387,6 +433,8 @@ mod tests {
             url: Some("http://127.0.0.1:18081".into()),
             model: Some("w.bin".into()),
             args: None,
+            draft_model: None,
+            draft_program: None,
             private_ca: None,
         };
         assert!(voice.ready().is_ok());

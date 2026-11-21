@@ -34,7 +34,7 @@ use crate::session::Session;
 use crate::settings::{ServerKind, Settings, UserFile};
 use crate::stop::Stop;
 use crate::tr;
-use crate::whisper::{Dictation, Voice};
+use crate::whisper::{Dictation, Draft, Voice};
 
 /// The daemon's socket of `runtime`, agentLIBRE's runtime directory (D7).
 pub fn socket_path(runtime: &Path) -> PathBuf {
@@ -715,6 +715,8 @@ impl Daemon {
             server_url: settings.server_url.clone(),
             context: plane.context,
             reasoning: plane.reasoning.map(|level| level.name().to_owned()),
+            draft: Draft::of(&plane.autostart.whisper, &plane.autostart.models)
+                .map(|draft| (draft.program, draft.model)),
         };
         let voice = Arc::new(Voice::of(&plane.autostart));
         let id = plane.session.id.clone();

@@ -1707,6 +1707,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "помилка ffmpeg: {detail}",
     };
 
+    /// `Error::Draft` (AGL-122).
+    pub const DRAFT: Msg = Msg {
+        en: "the draft engine failed: {detail}",
+        uk: "помилка чернового рушія: {detail}",
+    };
+
     /// `Error::ServerFailed` of a unit.
     pub const SERVER_FAILED: Msg = Msg {
         en: "the server stopped before it was ready; see journalctl --user -u {unit}",
@@ -3527,6 +3533,7 @@ impl Error {
             Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
             Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
             Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),
+            Error::Draft { detail } => tr!(lang, m::DRAFT, detail = detail),
             Error::ServerFailed { owner } => match owner {
                 ServerOwner::Unit(unit) => tr!(lang, m::SERVER_FAILED, unit = unit),
                 ServerOwner::Child(log) => tr!(lang, m::ENGINE_DIED, log = log.display()),

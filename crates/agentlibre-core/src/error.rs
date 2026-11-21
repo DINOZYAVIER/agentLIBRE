@@ -283,6 +283,9 @@ pub enum Error {
     MediaKind { path: PathBuf },
     /// `ffmpeg` or `ffprobe` cannot be run or failed.
     Ffmpeg { detail: String },
+    /// The draft engine (AGL-122) cannot be run or failed: the draft is
+    /// dropped, the final pass is untouched.
+    Draft { detail: String },
     /// A weights file is in none of the weights folders and nobody named
     /// its folder (AGL-039, D24c).
     WeightsNotFound { name: String, folders: Vec<PathBuf> },

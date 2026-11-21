@@ -38,6 +38,7 @@ use crate::function::catalog::Catalog;
 use crate::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
 use crate::tty::is_yes;
+use crate::whisper;
 use crate::error::Error;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
@@ -1200,10 +1201,15 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         reasoning,
     ));
     control.set_media_counts(&file);
+    // The live draft engine of the dictation (AGL-122, D5), when the
+    // daemon found both program and model.
+    let draft = opened.draft.map(|(program, model)| whisper::Draft { program, model });
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
         dictation,
         Box::new(crate::record::start),
+        Box::new(|limit| crate::record::start_chunked(limit, crate::record::Vad::default())),
+        draft,
         repl.max_record_seconds,
         lang,
         theme.clone(),
@@ -1816,6 +1822,17 @@ mod tests {
                     Ok(Box::new(FakeRecording(fake.clone())))
                 })
             },
+            {
+                let fake = fake.clone();
+                Box::new(move |limit| {
+                    if let Some(detail) = fake.record_error.lock().unwrap().clone() {
+                        return Err(Error::Ffmpeg { detail });
+                    }
+                    fake.log.lock().unwrap().push(format!("start {limit}"));
+                    Ok(Box::new(FakeRecording(fake.clone())))
+                })
+            },
+            None,
             60,
             Lang::En,
             Theme::plain(),

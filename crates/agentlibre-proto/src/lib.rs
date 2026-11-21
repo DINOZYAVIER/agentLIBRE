@@ -194,6 +194,10 @@ pub struct Opened {
     /// The server's context, when it answered at the start.
     pub context: Option<usize>,
     pub reasoning: Option<String>,
+    /// The draft engine of the live dictation (AGL-122, D5, D8): the
+    /// program and its model, both absolute; `None` — no drafts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 /// A session the daemon holds.

@@ -6,6 +6,7 @@
 //! of sending, and upgrades the live one; Ctrl-R auto-sends the transcript.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender as MpscSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,7 +15,7 @@ use super::dock::{Dock, SendMode, VoiceLabel};
 use super::editor::Outcome;
 use super::term::Key;
 use super::transcript::{Screen, notice_lines};
-use crate::whisper::Dictation;
+use crate::whisper::{Dictation, Draft};
 use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::record::Recording;
@@ -32,6 +33,35 @@ pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, Error> + Send 
 /// Queues an auto-sent transcript (AGL-123, D1).
 pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
 
+/// The draft engine at work (AGL-122): one thread turns chunks into text
+/// one by one, so the lines keep their order; when the last sender of
+/// the recording drops, it stops.
+struct DraftWorker {
+    chunks: MpscSender<Vec<u8>>,
+    texts: Receiver<String>,
+    _thread: JoinHandle<()>,
+}
+
+impl DraftWorker {
+    fn start(draft: Draft) -> DraftWorker {
+        let (ctx, crx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::channel::<String>();
+        let thread = thread::spawn(move || {
+            for chunk in crx.iter() {
+                // A chunk that failed or came out empty shows nothing:
+                // the final pass has the last word (D7).
+                if let Ok(text) = draft.transcribe(&chunk)
+                    && !text.is_empty()
+                    && tx.send(text).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        DraftWorker { chunks: ctx, texts: rx, _thread: thread }
+    }
+}
+
 struct Active {
     recording: Box<dyn Recording>,
     since: Instant,
@@ -39,6 +69,9 @@ struct Active {
     warm: Option<JoinHandle<Result<(), Error>>>,
     /// Tells a recording from the next one, for the thread that watches.
     id: u64,
+    /// The live draft of this recording, when a draft engine is set
+    /// (AGL-122, D5).
+    draft: Option<DraftWorker>,
 }
 
 enum State {
@@ -51,6 +84,11 @@ pub struct VoiceInput {
     dock: Arc<Dock>,
     dictation: Arc<dyn Dictation>,
     recorder: Recorder,
+    /// The chunking recorder of the draft mode (AGL-122, D6); used when
+    /// a draft engine is set.
+    recorder_chunked: Recorder,
+    /// The live draft engine, `None` without one (AGL-122, D5).
+    draft: Option<Draft>,
     /// The longest recording, in seconds (D5).
     limit: u32,
     lang: Lang,
@@ -64,10 +102,13 @@ pub struct VoiceInput {
 }
 
 impl VoiceInput {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dock: Arc<Dock>,
         dictation: Arc<dyn Dictation>,
         recorder: Recorder,
+        recorder_chunked: Recorder,
+        draft: Option<Draft>,
         limit: u32,
         lang: Lang,
         theme: Theme,
@@ -76,6 +117,8 @@ impl VoiceInput {
             dock,
             dictation,
             recorder,
+            recorder_chunked,
+            draft,
             limit,
             lang,
             theme,
@@ -147,11 +190,34 @@ impl VoiceInput {
             self.notice(&error.message(self.lang), Role::StatusFailure);
             return;
         }
-        let recording = match (self.recorder)(self.limit) {
+        // With a draft engine the recording chunks (D5, D6); without it
+        // today's single pass records.
+        let chunking = self.draft.is_some();
+        let recording = if chunking {
+            (self.recorder_chunked)(self.limit)
+        } else {
+            (self.recorder)(self.limit)
+        };
+        let recording = match recording {
             Ok(recording) => recording,
             Err(error) => {
-                self.notice(&error.message(self.lang), Role::StatusFailure);
-                return;
+                // A chunking recorder that cannot start falls back to
+                // the plain one: the dictation matters more than the
+                // draft.
+                if !chunking {
+                    self.notice(&error.message(self.lang), Role::StatusFailure);
+                    return;
+                }
+                match (self.recorder)(self.limit) {
+                    Ok(recording) => {
+                        self.notice(&error.message(self.lang), Role::Muted);
+                        recording
+                    }
+                    Err(error) => {
+                        self.notice(&error.message(self.lang), Role::StatusFailure);
+                        return;
+                    }
+                }
             }
         };
         let id = {
@@ -167,11 +233,13 @@ impl VoiceInput {
                     .warm_up(&mut |line| me.notice(line, Role::Muted))
             })
         };
+        let draft = self.draft.clone().map(DraftWorker::start);
         *self.lock() = State::Recording(Active {
             recording,
             since: Instant::now(),
             warm: Some(warm),
             id,
+            draft,
         });
         self.dock.set_voice(Some(VoiceLabel::Recording(0, mode)));
         let me = self.clone();
@@ -192,6 +260,19 @@ impl VoiceInput {
                             shown = seconds;
                             let mode = self.mode();
                             self.dock.set_voice(Some(VoiceLabel::Recording(seconds, mode)));
+                        }
+                        // The live draft (AGL-122): finished chunks go
+                        // to the engine, its finished lines to the
+                        // transcript; the final pass replaces them (D7).
+                        if let Some(worker) = active.draft.as_ref() {
+                            while let Some(chunk) = active.recording.poll_chunk() {
+                                if worker.chunks.send(chunk).is_err() {
+                                    break;
+                                }
+                            }
+                            while let Ok(text) = worker.texts.try_recv() {
+                                self.notice(&text, Role::Muted);
+                            }
                         }
                         active.recording.finished()
                     }

@@ -20,10 +20,16 @@ pub struct WhisperFile {
     pub args: Option<Vec<String>>,
     /// The certificate of the CA of an `https://` server (AGL-058, D12).
     pub private_ca: Option<String>,
+    /// A draft-engine weights file for the live dictation (AGL-122, D5):
+    /// a file name in the weights folders or an absolute path.
+    pub draft_model: Option<String>,
+    /// The draft engine program, `parakeet-cli` (AGL-122, D8).
+    pub draft_program: Option<String>,
 }
 
 impl WhisperFile {
-    const KEYS: &'static [&'static str] = &["url", "model", "args", "private_ca"];
+    const KEYS: &'static [&'static str] =
+        &["url", "model", "args", "private_ca", "draft_model", "draft_program"];
 
     pub fn parse(section: Option<Section>, path: &Path) -> Result<WhisperFile, Error> {
         let Some(mut whisper) = section else {
@@ -43,11 +49,17 @@ impl WhisperFile {
         if let Some(model) = &model {
             check_weights_name(model)?;
         }
+        let draft_model = whisper.string("draft_model")?;
+        if let Some(draft_model) = &draft_model {
+            check_weights_name(draft_model)?;
+        }
         Ok(WhisperFile {
             url,
             model,
             args: whisper.strings("args")?,
             private_ca: super::server::read_private_ca(&mut whisper)?,
+            draft_model,
+            draft_program: whisper.string("draft_program")?,
         })
     }
 
@@ -63,6 +75,8 @@ impl WhisperFile {
             model: self.model.clone().or_else(|| defaults.model.clone()),
             args: self.args.clone().or_else(|| defaults.args.clone()),
             private_ca: self.private_ca.clone().or_else(|| defaults.private_ca.clone()),
+            draft_model: self.draft_model.clone().or_else(|| defaults.draft_model.clone()),
+            draft_program: self.draft_program.clone().or_else(|| defaults.draft_program.clone()),
         }
     }
 }
