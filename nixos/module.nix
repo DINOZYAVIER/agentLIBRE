@@ -54,6 +54,16 @@ in
         RX 7900 XTX). Each is built on this machine for its CPU, with nixpkgs' ROCm.
       '';
     };
+    # The package as it runs: `package`, wrapped with `AGENTLIBRE_STRATA`
+    # when `strata` names a variant. Exported (internal) so a home-module
+    # daemon runs exactly what the system installs (AGL-120, D4), not the
+    # bare `package` — which would load with no engine to find.
+    wrappedPackage = lib.mkOption {
+      type = lib.types.package;
+      internal = true;
+      default = package;
+      description = "The wrapped agl package the system installs.";
+    };
   };
 
   config = lib.mkIf cfg.enable {

@@ -196,6 +196,11 @@
       # agl on a NixOS of one's own (AGL-056, D2).
       nixosModules.default = import ./nixos/module.nix { packages = self.packages.${system}; };
 
+      # The daemon as a home-manager user service (AGL-120, D4). agl is not
+      # a NixOS daemon — it reads its socket under XDG_RUNTIME_DIR — so the
+      # unit lives in the home; the consumer brings their own home-manager.
+      homeManagerModules.default = import ./home-manager/module.nix;
+
       # A whole NixOS-WSL system with agl (AGL-056, D4).
       nixosConfigurations.wsl = nixos-wsl.inputs.nixpkgs.lib.nixosSystem {
         inherit system;
@@ -303,6 +308,34 @@
           in
           assert ok;
           pkgs.runCommand "${cargo.package.name}-module" { } "touch $out";
+        # The home-module daemon unit, evaluated alone: home-manager is not
+        # an input here, so its `systemd.user.services` option is stubbed.
+        # Checks that enabling the module writes the user unit, and that the
+        # package defaults to the system module's wrapped one (AGL-120, D4).
+        homeModule =
+          let
+            evaluated = lib.evalModules {
+              modules = [
+                self.homeManagerModules.default
+                ({ options, ... }: {
+                  options.systemd.user.services = lib.mkOption {
+                    type = lib.types.attrsOf lib.types.raw;
+                    default = { };
+                  };
+                })
+                { services.agl-daemon.enable = true; }
+              ];
+              specialArgs = {
+                inherit pkgs;
+                osConfig.programs.agl.wrappedPackage = pkgs.bash;
+              };
+            };
+            unit = evaluated.config.systemd.user.services.agl-daemon;
+            ok = unit.Service.ExecStart == "${pkgs.bash}/bin/agl daemon"
+              && unit.Install.WantedBy == [ "default.target" ];
+          in
+          assert ok;
+          pkgs.runCommand "${cargo.package.name}-home-module" { } "touch $out";
         clippy = agl.overrideAttrs (old: {
           pname = "${cargo.package.name}-clippy";
           nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
