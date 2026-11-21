@@ -15,7 +15,7 @@ use crate::attach::{self, Pending, Transcriber};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, ReasoningLevel};
-use crate::engine::{Autostart, Engine, Others, ServerProgress, user_manager};
+use crate::engine::{Autostart, Engine, Others, ServerProgress, rebind_url, user_manager};
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::function::Function;
@@ -493,16 +493,23 @@ impl Plane {
         // `[server]` table when the file declares it, AGL-033, D1, D3), and
         // the backend and the url run on it. The backend is the Llama or the
         // Strata backend, by the effective settings' `[server] kind`
-        // (AGL-030, D1); the stirred mode runs on Strata.
-        let backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
-            Arc::new(Strata::new(&settings.server_url))
+        // (AGL-030, D1); the stirred mode runs on Strata. A server of the
+        // id already up elsewhere moves the run to it (AGL-120, D5): the run
+        // speaks to the registry's url, while `server` keeps the configured
+        // one so a launch there is named by the plain unit and a launch
+        // elsewhere by the id — the same rule `Autostart::unit` uses.
+        let run_url = rebind_url(paths.runtime.as_deref(), &settings.server);
+        let run_url = run_url.unwrap_or_else(|| settings.server_url.clone());
+        settings.server_url = run_url.clone();
+        let mut backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
+            Arc::new(Strata::new(&run_url))
         } else {
             Arc::new(Llama::with_ca(
-                &settings.server_url,
+                &run_url,
                 settings.server.llama_private_ca.as_deref(),
             )?)
         };
-        let autostart = Autostart {
+        let mut autostart = Autostart {
             llama: Arc::clone(&backend),
             project: project.clone(),
             effective: settings.server.clone(),
@@ -525,7 +532,9 @@ impl Plane {
         // (AGL-046, D10).
         let mut observer = Observer::new();
         let context = if one_request {
-            autostart.ensure(&mut |progress| match progress {
+            // A fresh-port launch (AGL-120, D3, D5) names the url the run
+            // moved to; `rebind_to` makes the plane speak to that server.
+            if let Some(url) = autostart.ensure(&mut |progress| match progress {
                 ServerProgress::Starting => {
                     observer.on(PhaseEvent::ServerStart);
                 }
@@ -533,11 +542,20 @@ impl Plane {
                     say(line);
                     opened_lines.push(line.to_owned());
                 }
-            })?;
+            })? {
+                autostart.rebind_to(&url)?;
+            }
+            backend = Arc::clone(&autostart.llama);
+            settings.server_url = autostart.llama.url().to_owned();
             Some(backend.context_size()?)
         } else {
             backend.context_size().ok()
         };
+        // A fresh-port launch (AGL-120, D3, D5) moved the run to another
+        // server: take the backend again, so the plane speaks to the one
+        // its id runs on. Without a launch it is the same Arc as before.
+        backend = Arc::clone(&autostart.llama);
+        settings.server_url = autostart.llama.url().to_owned();
         let resumed = session.is_some();
         let mut session = match session {
             Some(session) => session,
@@ -667,7 +685,15 @@ impl Plane {
                     surface.line(line);
                 }
             })
-            .and_then(|()| self.backend.context_size());
+            // A fresh-port launch moved the run (AGL-120, D3, D5): apply
+            // the url, then take the backend again before its context.
+            .and_then(|moved| {
+                if let Some(url) = moved {
+                    self.autostart.rebind_to(&url)?;
+                }
+                self.backend = Arc::clone(&self.autostart.llama);
+                self.backend.context_size()
+            });
         match ready {
             Ok(size) => self.turn_on_scoped(size, message, attached, &mut observer, surface),
             Err(error) => {

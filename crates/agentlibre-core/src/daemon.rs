@@ -20,7 +20,7 @@ use agentlibre_proto::{self as proto, Ask, Lines, Reply, Request};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
-use crate::engine::{Engine, Others, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
+use crate::engine::{Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name, unit_name_id};
 use crate::error::Error;
 use crate::forge;
 use crate::function::Function;
@@ -553,13 +553,23 @@ impl Daemon {
             &function.model,
         )?;
         let backend: Arc<dyn Backend + Send + Sync> =
-            if settings.server.kind() == ServerKind::Strata {
-                Arc::new(Strata::new(&settings.server_url))
-            } else {
-                Arc::new(Llama::with_ca(
+            // A server of the reviewer's id already up elsewhere moves this
+            // one-turn review to it (AGL-120, D5), as a session's open does.
+            match rebind_url(self.paths.runtime.as_deref(), &settings.server) {
+                Some(found) if settings.server.kind() == ServerKind::Strata => {
+                    Arc::new(Strata::new(&found))
+                }
+                Some(found) => Arc::new(Llama::with_ca(
+                    &found,
+                    settings.server.llama_private_ca.as_deref(),
+                )?),
+                None if settings.server.kind() == ServerKind::Strata => {
+                    Arc::new(Strata::new(&settings.server_url))
+                }
+                None => Arc::new(Llama::with_ca(
                     &settings.server_url,
                     settings.server.llama_private_ca.as_deref(),
-                )?)
+                )?),
             };
         let workspace = file
             .directories
@@ -718,6 +728,9 @@ impl Daemon {
         let opened_plane = plane_name.clone();
         // The clock of D2: a server stops after `idle_stop` seconds
         // without a turn; 0, an external server (AGL-052, D4) has none.
+        // The unit to stop is named by the id when the run moved to a
+        // server of its own (AGL-120, D3, D5), as `Autostart::unit` does:
+        // two servers of one project then stop their own, not each other's.
         let clock = settings
             .server
             .idle_stop
@@ -725,7 +738,13 @@ impl Daemon {
             .map(|seconds| Clock {
                 idle: Duration::from_secs(seconds),
                 last: Instant::now(),
-                unit: project.unit_key().map(|key| unit_name(&key)),
+                unit: project.unit_key().map(|key| {
+                    if reply.server_url == settings.server.url() {
+                        unit_name(&key)
+                    } else {
+                        unit_name_id(&key, &settings.server)
+                    }
+                }),
                 engine: Arc::clone(&engine),
                 dir: project.dir.clone(),
             });

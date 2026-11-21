@@ -133,6 +133,31 @@ pub fn unit_name(key: &str) -> String {
     format!("{UNIT_PREFIX}-{key}")
 }
 
+/// The unit of the project's server of one id (AGL-120, D3, D5): a
+/// foreign port left for its owner means the engine of the id runs on a
+/// port of its own, and a second server of one project needs a unit name
+/// of its own — the id (kind, model, context) hashes into the suffix, so
+/// two models of one project hold two units, and the same id finds its
+/// unit again across a restart.
+pub fn unit_name_id(key: &str, effective: &ServerFile) -> String {
+    let id = serde_json::json!(
+        [effective.kind().name(), effective.model, effective.strata_name, effective.context]
+    );
+    let short = crate::media::sha256_hex(id.to_string().as_bytes());
+    format!("{}-{key}-{}", UNIT_PREFIX, &short[..8])
+}
+
+/// The url a session runs on (AGL-120, D5): when a live registry file
+/// names a server of my id already up, its url; else the configured one,
+/// which the normal flow probes and starts as it does today. An external
+/// server (AGL-052, D4) is left outside the registry's care.
+pub fn rebind_url(runtime: Option<&Path>, effective: &ServerFile) -> Option<String> {
+    if effective.external() {
+        return None;
+    }
+    url_of_id(runtime, effective, &effective.url())
+}
+
 /// Asks the human a question of yes or no; `true` agrees.
 pub type AskYes = Arc<dyn Fn(&str, Lang) -> bool + Send + Sync>;
 
@@ -382,6 +407,9 @@ pub enum ServerProgress<'a> {
 pub struct Autostart {
     /// The backend the turn runs on: the `Llama` or the `Strata` backend,
     /// by the settings' `[server] kind` (AGL-030, D1); the plane's own.
+    /// A rebind of AGL-120, D5 replaces it: the run follows its id to the
+    /// url that serves it, and `Plane` takes this field again after
+    /// `ensure` when the urls differ.
     pub llama: Arc<dyn Backend + Send + Sync>,
     pub project: Workspace,
     /// The settings that actually run (AGL-033, D1): the function's
@@ -416,13 +444,108 @@ impl Autostart {
         what_of(&self.effective)
     }
 
+    /// Whether this run's server sits on a url of its own — not the one
+    /// the settings name (AGL-120, D5): then its unit is named by the id
+    /// too, so a second server of one project holds a unit of its own (D3).
+    fn per_unit_id(&self) -> bool {
+        self.llama.url() != self.effective.url()
+    }
+
+    /// The unit of this run's server: the project's, or the project's by
+    /// id when the server runs on a url of its own (AGL-120, D3, D5).
+    fn unit(&self) -> Option<String> {
+        let key = self.project.unit_key()?;
+        Some(if self.per_unit_id() {
+            unit_name_id(&key, &self.effective)
+        } else {
+            unit_name(&key)
+        })
+    }
+
+    /// A backend of `url` for the effective kind (AGL-120, D5): a new
+    /// `Llama` or `Strata`, not stored. `rebind_to` stores it as `llama`.
+    fn make_backend(&self, url: &str) -> Result<Arc<dyn Backend + Send + Sync>, Error> {
+        Ok(match self.effective.kind() {
+            ServerKind::Strata => Arc::new(crate::backend::strata::Strata::new(url)),
+            ServerKind::Llama => Arc::new(crate::backend::llama::Llama::with_ca(
+                url,
+                self.effective.llama_private_ca.as_deref(),
+            )?),
+        })
+    }
+
+    /// Moves the run to a server of `url` (AGL-120, D5): the fresh-port
+    /// launch of `ensure` names the url it launched at, and the caller —
+    /// after its borrow of `self` ends — applies it here so every later
+    /// wait and probe, and the plane's own backend, speak to the new one.
+    pub fn rebind_to(&mut self, url: &str) -> Result<Arc<dyn Backend + Send + Sync>, Error> {
+        let backend = self.make_backend(url)?;
+        self.llama = Arc::clone(&backend);
+        Ok(backend)
+    }
+
+    /// The url the run launched its own server at when the configured
+    /// one is foreign: the port of `url` plus one, and on, until nothing
+    /// listens (AGL-120, D3, D5) — the foreign port is left for its owner.
+    /// Launches the engine of the id at the next free port past `url` when
+    /// the configured one is foreign (AGL-120, D3, D5): the foreign port
+    /// is left for its owner, the unit is named by the id, and the fresh
+    /// url is returned for `rebind_to`. The caller applies it after its
+    /// borrow of `self` ends.
+    fn launch_at_fresh_url(&self, say: &mut dyn FnMut(&str)) -> Result<String, Error> {
+        let url = self.llama.url().to_owned();
+        let Some((host, port)) = local_address(&url) else {
+            return Err(Error::NotLocalServer { url });
+        };
+        let mut fresh = url.clone();
+        for next in port.saturating_add(1)..port.saturating_add(32) {
+            if !port_open(&host, next) {
+                fresh = with_port(&url, next);
+                break;
+            }
+        }
+        if fresh == url {
+            return Err(Error::PortBusy {
+                url,
+                units: active_units()?,
+            });
+        }
+        let backend = self.make_backend(&fresh)?;
+        let mut server = Server::of(
+            &self.project,
+            self.runtime.clone(),
+            &self.effective,
+            self.effective.clone(),
+        )?;
+        // The server of a foreign id runs on a port of its own, so its
+        // unit is named by the id too (AGL-120, D3, D5): a second server
+        // of one project holds a unit of its own, not the project's.
+        if let Some(key) = self.project.unit_key() {
+            server.unit = unit_name_id(&key, &self.effective);
+        }
+        server.url = fresh.clone();
+        launch_unit(
+            &server,
+            &self.effective,
+            &self.models,
+            self.path_var.clone(),
+            &*backend,
+            say,
+            self.lang,
+        )?;
+        Ok(fresh)
+    }
+
     /// Returns when the server answers and serves the effective settings
     /// (AGL-033, D2): it did, it was loading and is ready now and serves,
     /// or agl launched the server of the kind itself as a background
     /// child (AGL-024, D2) — restarting the one that does not serve,
     /// with the consent as today. `progress` is told when the wait for a
     /// server begins (AGL-046) and takes the progress lines.
-    pub fn ensure(&self, progress: &mut dyn FnMut(ServerProgress)) -> Result<(), Error> {
+    /// `Ok(Some(url))` names the url the run moved to when a fresh-port
+    /// launch replaced the foreign one (AGL-120, D3, D5); the caller
+    /// applies it with `rebind_to` after its borrow of `self` ends.
+    pub fn ensure(&self, progress: &mut dyn FnMut(ServerProgress)) -> Result<Option<String>, Error> {
         let llama = &*self.llama;
         let what = self.what()?;
         if self.effective.external() {
@@ -430,7 +553,8 @@ impl Autostart {
                 progress(ServerProgress::Starting);
             }
             let mut say = |line: &str| progress(ServerProgress::Line(line));
-            return check_outside(llama, &self.effective, &what, &mut say, self.lang);
+            return check_outside(llama, &self.effective, &what, &mut say, self.lang)
+                .map(|()| None);
         }
         // The server of the other kind that agl owns stops first
         // (AGL-036, D10): the two do not fit the GPU together.
@@ -439,7 +563,7 @@ impl Autostart {
         // foreign — the id of the model and its config signs it.
         match probe(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
             // The port is ours: the server on it serves the id.
-            Door::Mine => Ok(()),
+            Door::Mine => Ok(None),
             // Someone loads it now: wait for it, as `start` does, then
             // the check of D2 (AGL-033) on the ready server.
             Door::Loading => {
@@ -448,16 +572,26 @@ impl Autostart {
                 wait_ready(llama, None, &what, &mut say, self.lang)?;
                 // Ready now: its id signs the answer (the check of D2).
                 if serves(llama, read_record(&self.project.dir).as_ref(), &self.effective, &self.models)? {
-                    Ok(())
+                    Ok(None)
                 } else {
-                    self.restart(&what, &mut say)
+                    self.restart(&what, &mut say).map(|()| None)
                 }
             }
             // A server answers that does not serve the id (or a deviating
-            // key): the restart consent of D2 (AGL-033), as today.
+            // key). Where a user manager runs, the foreign port is left
+            // for its owner (AGL-120, D3, D5): the engine of the id gets
+            // its own unit on the next free port, and the run moves to it.
+            // Else the restart consent of D2 (AGL-033), as today.
+            Door::Foreign if self.units => {
+                progress(ServerProgress::Starting);
+                Ok(Some(self.launch_at_fresh_url(&mut |line| {
+                    progress(ServerProgress::Line(line))
+                })?))
+            }
             Door::Foreign => {
                 progress(ServerProgress::Starting);
                 self.restart(&what, &mut |line| progress(ServerProgress::Line(line)))
+                    .map(|()| None)
             }
             // Connection refused: launch the server of the kind as a
             // background child (AGL-024, D2; AGL-033, D2 — both kinds);
@@ -473,6 +607,7 @@ impl Autostart {
                 } else {
                     self.launch(&what, &mut say)
                 }
+                .map(|()| None)
             }
         }
     }
@@ -486,7 +621,7 @@ impl Autostart {
         if self.effective.external() {
             return Ok(());
         }
-        let unit = self.project.unit_key().map(|key| unit_name(&key));
+        let unit = self.unit();
         switch_kind(
             (&self.project.dir, self.runtime.as_deref()),
             unit.as_deref(),
@@ -513,14 +648,22 @@ impl Autostart {
     }
 
     /// The server of the kind starts as the unit of the project, the code
-    /// of `agl server start` (AGL-035, D2).
+    /// of `agl server start` (AGL-035, D2). The url is the run's own —
+    /// the backend's, which the settings' may not be when the run rebound
+    /// to a server of its id (AGL-120, D5).
     fn launch_as_unit(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        let server = Server::of(
+        let mut server = Server::of(
             &self.project,
             self.runtime.clone(),
             &self.effective,
             self.effective.clone(),
         )?;
+        // The run's own url and unit: plain at the configured port, by the
+        // id at one of its own (AGL-120, D3, D5) — as `unit` names them.
+        if let Some(unit) = self.unit() {
+            server.unit = unit;
+        }
+        server.url = self.llama.url().to_owned();
         launch_unit(
             &server,
             &self.effective,
@@ -537,7 +680,7 @@ impl Autostart {
     /// the port must be free, or it is busy (D7). Whether it was the unit
     /// (AGL-035, D2).
     fn stop_ours(&self) -> Result<bool, Error> {
-        let unit = self.project.unit_key().map(|key| unit_name(&key));
+        let unit = self.unit();
         // The pid of the server for its file (AGL-064, D3): the child in
         // hand, else the unit's.
         let child = self.engine.lock().unwrap().take();
@@ -1534,6 +1677,18 @@ fn http_address(url: &str) -> Option<(&str, u16)> {
         Some((host, port)) => (host, port.parse().ok()?),
         None => (authority, 80),
     })
+}
+
+/// `url` with its port replaced by `port` (AGL-120, D5): the authority's
+/// `:port` is swapped, or the bare host takes one.
+fn with_port(url: &str, port: u16) -> String {
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let (authority, path) = match rest.find('/') {
+        Some(at) => (&rest[..at], &rest[at..]),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit_once(':').map_or(authority, |(host, _)| host);
+    format!("http://{host}:{port}{path}")
 }
 
 fn url_port(url: &str) -> Option<u16> {
@@ -2546,6 +2701,66 @@ mod tests {
         // Away from that very url: nothing else serves my id.
         assert_eq!(url_of_id(Some(&runtime), &mine, "http://127.0.0.1:19001"), None);
         fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn a_second_server_of_one_project_names_its_unit_by_id() {
+        // AGL-120, D3, D5: two servers of one project (different ids) hold
+        // two units; the same id finds its unit again across a restart.
+        let key = "60af300abea6";
+        let a = model("a.gguf", 4096);
+        let a2 = model("a.gguf", 4096);
+        let b = model("b.gguf", 4096);
+        let c = model("a.gguf", 8192);
+        assert_eq!(unit_name_id(key, &a), unit_name_id(key, &a2));
+        assert_ne!(unit_name_id(key, &a), unit_name_id(key, &b));
+        // A different context is a different id, so a different unit.
+        assert_ne!(unit_name_id(key, &a), unit_name_id(key, &c));
+        assert!(unit_name_id(key, &a).starts_with(&format!("{UNIT_PREFIX}-{key}-")));
+        // And never the plain unit of the project.
+        assert_ne!(unit_name_id(key, &a), unit_name(key));
+    }
+
+    #[test]
+    fn the_run_rebinds_to_the_registrys_url_of_its_id() {
+        // AGL-120, D5: a live registry file of my id names the url to run
+        // on; none, or a server outside agl's care, keeps the configured.
+        let runtime = runtime_dir("rebind-url");
+        let servers = runtime.join("servers");
+        fs::create_dir_all(&servers).unwrap();
+        let pid = std::process::id();
+        fs::write(
+            servers.join(format!("{pid}.json")),
+            serde_json::json!({"pid": pid, "kind": "llama", "url": "http://127.0.0.1:19001", "model": "m.gguf"}).to_string(),
+        )
+        .unwrap();
+        // My id, configured elsewhere: the registry's url wins.
+        let mine = ServerFile {
+            llama_url: Some("http://127.0.0.1:18080".into()),
+            ..model("m.gguf", 4096)
+        };
+        assert_eq!(rebind_url(Some(&runtime), &mine).as_deref(), Some("http://127.0.0.1:19001"));
+        // Another id: nothing to rebind to.
+        let other = ServerFile {
+            llama_url: Some("http://127.0.0.1:18080".into()),
+            ..model("other.gguf", 4096)
+        };
+        assert_eq!(rebind_url(Some(&runtime), &other), None);
+        // A server outside agl's care: left alone, the configured url.
+        let outside = ServerFile {
+            llama_external: Some(true),
+            ..model("m.gguf", 4096)
+        };
+        assert_eq!(rebind_url(Some(&runtime), &outside), None);
+        fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn a_free_port_is_swapped_into_the_url() {
+        // AGL-120, D5: the fresh-port launch keeps the host, swaps the port.
+        assert_eq!(with_port("http://127.0.0.1:18080", 19001), "http://127.0.0.1:19001");
+        assert_eq!(with_port("http://localhost", 8080), "http://localhost:8080");
+        assert_eq!(with_port("http://127.0.0.1:18080/", 8081), "http://127.0.0.1:8081/");
     }
 
     #[test]

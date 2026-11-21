@@ -5,6 +5,7 @@
 //! holds too.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -214,7 +215,15 @@ impl Plane {
                     forward.line(line);
                 }
             })
-            .and_then(|()| self.backend.context_size());
+            // A fresh-port launch moved the run (AGL-120, D3, D5): apply
+            // the url, then take the backend again before its context.
+            .and_then(|moved| {
+                if let Some(url) = moved {
+                    self.autostart.rebind_to(&url)?;
+                }
+                self.backend = Arc::clone(&self.autostart.llama);
+                self.backend.context_size()
+            });
         match ready {
             Ok(size) => {
                 observer.end(PhaseEvent::Idle, &mut *forward);
