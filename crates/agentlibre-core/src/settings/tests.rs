@@ -74,7 +74,16 @@ fn user_file() {
             ..UserFile::default()
         }
     );
-    // The model keys are the Function's (AGL-039, D21).
+    // `server.idle_stop` is the seconds without a turn that stop a server
+    // (AGL-120, D2); it rides the effective settings from `server`.
+    assert_eq!(
+        user_of("server.idle_stop = 900;").unwrap().server.idle_stop,
+        Some(900)
+    );
+    let idle = user_of("server.idle_stop = 60;").unwrap().server;
+    assert_eq!(idle.effective(&ServerFile::default()).idle_stop, Some(60));
+    // A model key of a kind's set is unknown (AGL-039, D21).
+    // A model key of a kind's set is unknown (AGL-039, D21).
     for key in ["model", "context", "kind"] {
         assert!(
             matches!(user_of(&format!("server.llama.{key} = 1;")), Err(Error::UnknownKey { .. })),

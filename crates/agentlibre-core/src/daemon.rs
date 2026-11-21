@@ -13,13 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use agentlibre_proto::{self as proto, Ask, Lines, Reply, Request};
 
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
-use crate::engine::{Engine, Others};
+use crate::engine::{Engine, Others, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
 use crate::error::Error;
 use crate::forge;
 use crate::function::Function;
@@ -55,6 +56,16 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
         let daemon = Arc::clone(&daemon);
         move || daemon.flow_turns(inbox)
     });
+    // The idle clock of D2: a server no turn rewinds is stopped once its
+    // `idle_stop` passes, so a loaded model does not sit on the GPU while
+    // nobody talks; the next turn asks for a server again as on a cold start.
+    thread::spawn({
+        let daemon = Arc::clone(&daemon);
+        move || loop {
+            thread::sleep(SWEEP_POLL);
+            daemon.sweep();
+        }
+    });
     // Every plane that declares a flow gets its driver now (D12, D17): the
     // timers of a flow run with no session open and no model. A plane made
     // after this moment waits for the verb that first asks for its thread.
@@ -71,6 +82,9 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// How often the idle sweep looks at the clocks (AGL-120, D2).
+const SWEEP_POLL: Duration = Duration::from_secs(5);
 
 /// The socket, 0600 in a 0700 directory; a socket that no daemon answers
 /// is taken over, one that answers is another daemon's.
@@ -119,6 +133,27 @@ struct State {
     /// The engines of planes that ended, kept while a plane uses their
     /// server (D16): its url, the engine, the store of its record.
     engines: Vec<(String, Engine, PathBuf)>,
+    /// The servers an idle stop watches (AGL-120, D2), by url: a server
+    /// stops after its `idle` without a turn, any turn's end rewinding it.
+    clocks: HashMap<String, Clock>,
+}
+
+/// The idle clock of a server (AGL-120, D2): the seconds of no turn that
+/// stop it, the last turn's end, how to stop it (its unit, or the child
+/// agl owns), and the store of its record.
+#[derive(Clone)]
+struct Clock {
+    idle: Duration,
+    last: Instant,
+    unit: Option<String>,
+    engine: Arc<Mutex<Option<Engine>>>,
+    dir: PathBuf,
+}
+
+/// Whether a server's clock is due (AGL-120, D2): `elapsed` past `idle`
+/// with no turn running on it; an `idle` of 0 means never.
+fn due(idle: Duration, elapsed: Duration, busy: bool) -> bool {
+    !idle.is_zero() && !busy && elapsed >= idle
 }
 
 struct Client {
@@ -681,6 +716,19 @@ impl Daemon {
         });
         let parts = plane.start().into_parts();
         let opened_plane = plane_name.clone();
+        // The clock of D2: a server stops after `idle_stop` seconds
+        // without a turn; 0, an external server (AGL-052, D4) has none.
+        let clock = settings
+            .server
+            .idle_stop
+            .filter(|seconds| *seconds > 0 && !settings.server.external())
+            .map(|seconds| Clock {
+                idle: Duration::from_secs(seconds),
+                last: Instant::now(),
+                unit: project.unit_key().map(|key| unit_name(&key)),
+                engine: Arc::clone(&engine),
+                dir: project.dir.clone(),
+            });
         let entry = Entry {
             commands: parts.commands,
             stop: parts.stop,
@@ -695,7 +743,13 @@ impl Daemon {
             engine,
             project_dir: project.dir.clone(),
         };
-        self.lock().sessions.insert(id.clone(), entry);
+        let url = reply.server_url.clone();
+        let mut state = self.lock();
+        state.sessions.insert(id.clone(), entry);
+        if let Some(clock) = clock {
+            state.clocks.insert(url, clock);
+        }
+        drop(state);
         // A session of the plane opened: wakes that missed it may land now (D20).
         self.poke(opened_plane.as_deref());
         let daemon = Arc::clone(self);
@@ -719,6 +773,9 @@ impl Daemon {
         };
         let mut targets: HashSet<u64> = entry.subscribers.clone();
         let plane = entry.plane.clone();
+        // The url of the server this session runs on, for its idle clock
+        // (AGL-120, D2), taken before `entry`'s borrow of `state` ends.
+        let server_url = entry.opened.server_url.clone();
         let mut next = id.to_owned();
         let mut origin = None;
         let mut turn_ended = false;
@@ -765,6 +822,10 @@ impl Daemon {
         // the flow whose woken session just turned gets its `turn.end`
         // through the pair the wake left (D22).
         if turn_ended {
+            // Any turn on a server rewinds its idle clock (AGL-120, D2).
+            if let Some(clock) = state.clocks.get_mut(&server_url) {
+                clock.last = Instant::now();
+            }
             // `state` is held here already: collect the due pairs as owned
             // values, and post to the holders without touching it twice.
             let due: Vec<(PathBuf, String)> = state
@@ -873,6 +934,48 @@ impl Daemon {
         voice.transcribe(&wav, &mut |_| {})
     }
 
+    /// One look at the idle clocks (AGL-120, D2): a server whose clock
+    /// passed `idle_stop` with no turn running on it stops — its unit, or
+    /// the child agl owns. The clock stays: its `last` rewinds, so the
+    /// server a later turn brings up is watched again on the same clock.
+    fn sweep(&self) {
+        let runtime = self.paths.runtime.clone();
+        let due: Vec<(String, Clock)> = {
+            let state = self.lock();
+            state
+                .clocks
+                .iter()
+                .filter(|(url, clock)| {
+                    let busy = state
+                        .sessions
+                        .values()
+                        .any(|entry| &entry.opened.server_url == *url && entry.busy);
+                    due(clock.idle, clock.last.elapsed(), busy)
+                })
+                .map(|(url, clock)| (url.clone(), clock.clone()))
+                .collect()
+        };
+        for (url, clock) in due {
+            // A child agl owns stops first; else the unit of the project.
+            if let Some(engine) = clock.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let pid = engine.pid();
+                engine.shutdown();
+                remove_record(&clock.dir, runtime.as_deref(), Some(pid));
+            } else if let Some(unit) = &clock.unit
+                && unit_active(unit).unwrap_or(false)
+            {
+                let pid = unit_main_pid(unit);
+                let _ = systemctl(&["stop", unit]);
+                remove_record(&clock.dir, runtime.as_deref(), pid);
+            }
+            // Rewind: the clock is spent, and only a running server earns
+            // another stop. A turn rewinds it sooner (in `tell`).
+            if let Some(clock) = self.lock().clocks.get_mut(&url) {
+                clock.last = Instant::now();
+            }
+        }
+    }
+
     /// `client` no longer holds `session`, or anything when it is gone.
     fn release(&self, client: u64, session: Option<&str>) {
         let mut state = self.lock();
@@ -901,6 +1004,9 @@ impl Daemon {
             .values()
             .map(|entry| entry.opened.server_url.clone())
             .collect();
+        // Its clock goes with it (AGL-120, D2): with no session on the url,
+        // nothing rewinds the clock, and D16 has already stopped the engine.
+        state.clocks.retain(|url, _| used.contains(url));
         let runtime = self.paths.runtime.clone();
         let (keep, stop): (Vec<_>, Vec<_>) =
             std::mem::take(&mut state.engines).into_iter().partition(|(url, _, _)| used.contains(url));
@@ -1001,6 +1107,19 @@ mod tests {
 
     use super::*;
     use crate::forge::testutil::TempDir;
+
+    /// A server's clock is due once its idle passes with no turn on it
+    /// (AGL-120, D2); a running turn holds it, an idle of 0 never fires.
+    #[test]
+    fn an_idle_clock_is_due_when_its_time_passes() {
+        assert!(due(Duration::from_secs(30), Duration::from_secs(30), false));
+        assert!(due(Duration::from_secs(30), Duration::from_secs(31), false));
+        assert!(!due(Duration::from_secs(30), Duration::from_secs(29), false));
+        // A turn running on the server holds the clock.
+        assert!(!due(Duration::from_secs(30), Duration::from_secs(600), true));
+        // idle_stop = 0 means never.
+        assert!(!due(Duration::ZERO, Duration::from_secs(600), false));
+    }
 
     /// A daemon on the stores of `dir`, its user's server at a port where
     /// nothing answers, so that no test reaches a real server.

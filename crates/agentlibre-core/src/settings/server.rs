@@ -73,6 +73,9 @@ pub struct ServerFile {
     pub gguf: Option<Vec<String>>,
     /// The engine's environment of the `strata` kind (AGL-089, D5).
     pub env: Option<BTreeMap<String, String>>,
+    /// `server.idle_stop`: the seconds without a turn after which the
+    /// server stops (AGL-120, D2); `0` or unset means never.
+    pub idle_stop: Option<u64>,
 }
 
 /// `image_max_tokens` when the model does not set it (AGL-014, D23).
@@ -116,7 +119,7 @@ pub(super) fn read_private_ca(section: &mut Section) -> Result<Option<String>, E
 impl ServerFile {
     /// The keys of `server` of a settings file (AGL-035, D4; AGL-039,
     /// D21): the engine and the set of each kind, which holds its `url`.
-    const KEYS: &'static [&'static str] = &["engine", "llama", "strata"];
+    const KEYS: &'static [&'static str] = &["engine", "llama", "strata", "idle_stop"];
 
     /// Reads `server` of the settings file `path`.
     pub fn parse(section: Option<Section>, path: &Path) -> Result<ServerFile, Error> {
@@ -125,6 +128,9 @@ impl ServerFile {
         };
         server.check_keys(Self::KEYS)?;
         let engine = server.string("engine")?;
+        let idle_stop = server.integer("idle_stop")?.map(|seconds| {
+            u64::try_from(seconds).unwrap_or(0)
+        });
         let (llama_url, llama_external, llama_private_ca) = match server.section("llama")? {
             Some(mut table) => {
                 table.check_keys(&["url", "external", "private_ca"])?;
@@ -149,6 +155,7 @@ impl ServerFile {
             llama_external,
             llama_private_ca,
             engine,
+            idle_stop,
             ..ServerFile::default()
         })
     }
@@ -199,6 +206,7 @@ impl ServerFile {
                 .then(|| self.llama_private_ca.clone())
                 .flatten(),
             engine: self.engine.clone(),
+            idle_stop: self.idle_stop,
             ..model.clone()
         }
     }
@@ -250,6 +258,7 @@ impl ServerFile {
             strata_name: self.strata_name.clone().or_else(|| defaults.strata_name.clone()),
             gguf: self.gguf.clone().or_else(|| defaults.gguf.clone()),
             env: self.env.clone().or_else(|| defaults.env.clone()),
+            idle_stop: self.idle_stop.or(defaults.idle_stop),
         }
     }
 
@@ -334,6 +343,8 @@ impl ServerFile {
             strata_name: text("strata_name")?,
             gguf,
             env,
+            // Operational, not part of what a server serves: not recorded.
+            idle_stop: None,
         })
     }
 }
