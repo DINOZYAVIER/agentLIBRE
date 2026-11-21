@@ -1188,6 +1188,37 @@ fn sweep_runtime_files(dir: &Path) {
     }
 }
 
+/// The url already serving `effective`'s id (its kind and model), read
+/// from the AGL-064 runtime files (AGL-120, D5): the registry of servers
+/// agl started, keyed by pid. A live `<pid>.json` whose kind and model
+/// match names the url mine; `None` when none does — the engine I need is
+/// not up, so `Autostart` starts one at the next free port. The url of
+/// `url` is skipped: that is the foreign one we came away from.
+pub fn url_of_id(runtime: Option<&Path>, effective: &ServerFile, away: &str) -> Option<String> {
+    let dir = servers_dir(runtime?);
+    let model = model_of(effective).ok()??;
+    let kind = effective.kind().name();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let Ok(record) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let record: serde_json::Value = serde_json::from_str(&record).ok()?;
+        // The process behind a file must still run (AGL-064, D4).
+        let pid = record.get("pid")?.as_u64()?;
+        if !Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        if record.get("kind")?.as_str()? != kind || record.get("model")?.as_str()? != model {
+            continue;
+        }
+        let url = record.get("url")?.as_str()?;
+        if url != away {
+            return Some(url.to_owned());
+        }
+    }
+    None
+}
+
 /// The main process of the unit, while it runs.
 pub fn unit_main_pid(unit: &str) -> Option<u32> {
     let output = Command::new("systemctl")
@@ -2486,6 +2517,35 @@ mod tests {
         // Loading: the id is not readable while the model loads.
         let url = health_server(&[503]);
         assert_eq!(probe(&Llama::new(&url), None, &settings, models).unwrap(), Door::Loading);
+    }
+
+    #[test]
+    fn the_registry_names_the_url_of_its_id() {
+        // AGL-120, D5: a live `servers/<pid>.json` of my kind and model
+        // names the url already serving it; a foreign url is skipped, a
+        // dead pid's file ignored, a different model's file not mine.
+        let runtime = runtime_dir("registry-url");
+        let servers = runtime.join("servers");
+        fs::create_dir_all(&servers).unwrap();
+        let mine = model("m.gguf", 4096);
+        let other = model("other.gguf", 4096);
+        // A running server of my model, at a port of its own.
+        let pid = std::process::id();
+        fs::write(
+            servers.join(format!("{pid}.json")),
+            serde_json::json!({"pid": pid, "kind": "llama", "url": "http://127.0.0.1:19001", "model": "m.gguf"}).to_string(),
+        )
+        .unwrap();
+        // A different model: not mine.
+        assert_eq!(url_of_id(Some(&runtime), &other, "http://127.0.0.1:18080"), None);
+        // My model, away from a url that is not the recorded one: found.
+        assert_eq!(
+            url_of_id(Some(&runtime), &mine, "http://127.0.0.1:18080").as_deref(),
+            Some("http://127.0.0.1:19001")
+        );
+        // Away from that very url: nothing else serves my id.
+        assert_eq!(url_of_id(Some(&runtime), &mine, "http://127.0.0.1:19001"), None);
+        fs::remove_dir_all(&runtime).unwrap();
     }
 
     #[test]
