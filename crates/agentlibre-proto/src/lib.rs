@@ -225,10 +225,30 @@ pub struct SessionInfo {
     pub busy: bool,
 }
 
-/// A connection's lines.
+/// A connection's lines. `new` reads with no limit, as the clients of
+/// the daemon do; `with_limit` reads as the daemon does, whose limit of
+/// `LINE_LIMIT` answers a longer line with `Refused` and keeps the
+/// connection (AGL-121, D27, D54).
 pub struct Lines<R> {
     reader: R,
     line: String,
+    limit: Option<usize>,
+}
+
+/// The longest request line the daemon takes: enough for a base64 audio
+/// pass (AGL-121, D27).
+pub const LINE_LIMIT: usize = 32 << 20;
+
+/// The read of one line (AGL-121, D27, D54).
+#[derive(Debug)]
+pub enum Read<T> {
+    /// A message.
+    Message(T),
+    /// A line over the limit: read to its newline and dropped; the
+    /// answer is `Refused`, the connection stays (D54).
+    TooLong,
+    /// The end of the stream.
+    End,
 }
 
 impl<R: BufRead> Lines<R> {
@@ -236,18 +256,67 @@ impl<R: BufRead> Lines<R> {
         Lines {
             reader,
             line: String::new(),
+            limit: None,
         }
     }
 
-    /// The next message; `None` at the end. A line that is not a message is
-    /// an error of kind `InvalidData`.
-    pub fn read<T: for<'de> Deserialize<'de>>(&mut self) -> io::Result<Option<T>> {
+    /// Lines read with a longest line of `limit` (D27).
+    pub fn with_limit(reader: R, limit: usize) -> Lines<R> {
+        Lines {
+            limit: Some(limit),
+            ..Lines::new(reader)
+        }
+    }
+
+    /// The next message; `End` at the end. A line that is not a message
+    /// is an error of kind `InvalidData`. Over a limit, a longer line is
+    /// read to its newline, dropped, and told `TooLong` (AGL-121, D54).
+    pub fn read<T: for<'de> Deserialize<'de>>(&mut self) -> io::Result<Read<T>> {
         self.line.clear();
-        if self.reader.read_line(&mut self.line)? == 0 {
-            return Ok(None);
+        match self.limit {
+            None => {
+                if self.reader.read_line(&mut self.line)? == 0 {
+                    return Ok(Read::End);
+                }
+            }
+            Some(limit) => {
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut over = false;
+                loop {
+                    let chunk = self.reader.fill_buf()?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let room = (limit + 1).saturating_sub(bytes.len());
+                    match chunk.iter().position(|b| *b == b'\n') {
+                        Some(n) => {
+                            let take = (n + 1).min(room);
+                            bytes.extend_from_slice(&chunk[..take]);
+                            self.reader.consume(n + 1);
+                            over |= take < n + 1;
+                            break;
+                        }
+                        None => {
+                            let len = chunk.len();
+                            let take = len.min(room);
+                            bytes.extend_from_slice(&chunk[..take]);
+                            self.reader.consume(take);
+                            over |= take < len;
+                        }
+                    }
+                }
+                if bytes.is_empty() && !over {
+                    return Ok(Read::End);
+                }
+                if over {
+                    return Ok(Read::TooLong);
+                }
+                self.line = String::from_utf8(bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            }
         }
         serde_json::from_str(self.line.trim_end())
-            .map(Some)
+            .map(Read::Message)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 }

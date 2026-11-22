@@ -7,15 +7,15 @@ impl Daemon {
     pub(super) fn client(self: Arc<Self>, stream: UnixStream) {
         let Ok(out) = stream.try_clone() else { return };
         let out = Arc::new(Mutex::new(out));
-        let mut lines = Lines::new(BufReader::new(stream));
+        let mut lines = Lines::with_limit(BufReader::new(stream), proto::LINE_LIMIT);
         let (human, lang, pid) = match lines.read::<Request>() {
-            Ok(Some(Request::Hello {
+            Ok(Read::Message(Request::Hello {
                 version,
                 human,
                 lang,
                 pid,
             })) if version == proto::VERSION => (human, Lang::from_code(&lang).unwrap_or(Lang::En), pid),
-            Ok(Some(Request::Hello { version, lang, .. })) => {
+            Ok(Read::Message(Request::Hello { version, lang, .. })) => {
                 let lang = Lang::from_code(&lang).unwrap_or(Lang::En);
                 let error = tr!(lang, m::DAEMON_VERSION, theirs = version, ours = proto::VERSION);
                 write(&out, &Reply::Refused { error });
@@ -45,9 +45,22 @@ impl Daemon {
                 pid: std::process::id(),
             },
         );
-        while let Ok(Some(request)) = lines.read::<Request>() {
-            if let Some(reply) = Arc::clone(&self).request(id, lang, request) {
-                write(&out, &reply);
+        loop {
+            match lines.read::<Request>() {
+                Ok(Read::Message(request)) => {
+                    if let Some(reply) = Arc::clone(&self).request(id, lang, request) {
+                        write(&out, &reply);
+                    }
+                }
+                // AGL-121, D54: a line over the limit is dropped; `Refused`
+                // answers it, and the connection stays.
+                Ok(Read::TooLong) => write(
+                    &out,
+                    &Reply::Refused {
+                        error: tr!(lang, m::DAEMON_LINE_TOO_LONG, max = proto::LINE_LIMIT),
+                    },
+                ),
+                _ => break,
             }
         }
         self.gone(id);
@@ -306,6 +319,8 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     use crate::daemon::tests::{Client, daemon};
@@ -324,5 +339,22 @@ mod tests {
             client.ask(&Request::Subscribe { session: Some("none".into()) }),
             Reply::Refused { .. }
         ));
+    }
+
+    #[test]
+    fn a_line_over_the_limit_is_refused_and_the_connection_stays() {
+        // AGL-121, D54: the daemon drops the line, answers `Refused`,
+        // and goes on serving.
+        let dir = TempDir::new();
+        let (_, socket) = daemon(&dir);
+        let (mut client, hello) = Client::new(&socket, proto::VERSION);
+        assert!(matches!(hello, Reply::Hello { .. }));
+        let long = format!("{}{}\n", r#"{"request":"sessions"} "#, "x".repeat(proto::LINE_LIMIT));
+        client.out.write_all(long.as_bytes()).unwrap();
+        assert!(matches!(
+            client.next(),
+            Reply::Refused { error } if error.contains("bytes")
+        ));
+        assert_eq!(client.ask(&Request::Sessions), Reply::Sessions { sessions: Vec::new() });
     }
 }

@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentlibre_proto::{self as proto, Lines, Reply, Request};
+use agentlibre_proto::{self as proto, Lines, Read, Reply, Request};
 
 use crate::error::Error;
 use crate::i18n::Lang;
@@ -61,7 +61,7 @@ impl Client {
         let (to, from) = mpsc::channel();
         thread::spawn(move || {
             let mut lines = Lines::new(BufReader::new(reader));
-            while let Ok(Some(reply)) = lines.read::<Reply>() {
+            while let Ok(Read::Message(reply)) = lines.read::<Reply>() {
                 if to.send(reply).is_err() {
                     break;
                 }

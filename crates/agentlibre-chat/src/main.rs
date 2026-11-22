@@ -13,7 +13,7 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
+use agentlibre_proto::{self as proto, Ask, Phase, Read, Reply, Report, Request, Sent};
 use katarsa_app::App;
 use katarsa_reactive::signal;
 use katarsa_ui::reactive::{Ui, prop};
@@ -219,7 +219,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
                 });
             })
         };
-        while let Ok(Some(reply)) = lines.read::<Reply>() {
+        while let Ok(Read::Message(reply)) = lines.read::<Reply>() {
             if !post(reply) {
                 return;
             }

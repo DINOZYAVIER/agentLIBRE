@@ -1,12 +1,15 @@
 use super::*;
 
 /// `message` written as a line and read back.
-fn round<T: Serialize + for<'de> Deserialize<'de>>(message: &T) -> (String, T) {
+fn round<T: Serialize + for<'de> Deserialize<'de> + std::fmt::Debug>(message: &T) -> (String, T) {
     let mut out = Vec::new();
     send(&mut out, message).unwrap();
     let line = String::from_utf8(out.clone()).unwrap();
     assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "{line}");
-    let back = Lines::new(&out[..]).read().unwrap().unwrap();
+    let back = match Lines::new(&out[..]).read().unwrap() {
+        Read::Message(message) => message,
+        other => panic!("no message: {other:?}"),
+    };
     (line, back)
 }
 
@@ -182,7 +185,45 @@ fn a_line_that_is_no_message_is_invalid_data() {
     let mut lines = Lines::new(&b"{\"request\":\"nope\"}\n"[..]);
     let error = lines.read::<Request>().unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(Lines::new(&b""[..]).read::<Request>().unwrap().is_none());
+    assert!(matches!(
+        Lines::new(&b""[..]).read::<Request>().unwrap(),
+        Read::End
+    ));
+}
+
+#[test]
+fn a_line_over_the_limit_is_read_to_its_newline_and_dropped() {
+    // AGL-121, D27, D54: the daemon's limit; the line goes, the
+    // connection stays, and its next line still reads.
+    let data = b"{\"request\":\"sessions\"}\n{\"request\":\"nope\"}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n{\"request\":\"sessions\"}\n";
+    let mut lines = Lines::with_limit(&data[..], 32);
+    assert!(matches!(lines.read::<Request>().unwrap(), Read::Message(_)));
+    assert!(matches!(
+        lines.read::<Request>().unwrap(),
+        Read::TooLong
+    ));
+    assert!(matches!(lines.read::<Request>().unwrap(), Read::Message(_)));
+    assert!(matches!(lines.read::<Request>().unwrap(), Read::End));
+}
+
+#[test]
+fn a_limit_of_none_reads_what_it_likes() {
+    let line = format!("{}\n", "x".repeat(1000));
+    let mut lines = Lines::new(line.as_bytes());
+    assert!(lines.read::<Request>().is_err());
+}
+
+#[test]
+fn a_line_cut_by_the_limit_but_shorter_still_counts() {
+    // 16 bytes with no newline in the first room of 9: over the limit,
+    // dropped whole, and the stream after it is clean.
+    let data = b"0123456789abcdef\n";
+    let mut lines = Lines::with_limit(&data[..], 8);
+    assert!(matches!(
+        lines.read::<Request>().unwrap(),
+        Read::TooLong
+    ));
+    assert!(matches!(lines.read::<Request>().unwrap(), Read::End));
 }
 
 #[test]

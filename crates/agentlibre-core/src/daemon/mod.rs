@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentlibre_proto::{self as proto, Ask, Lines, Reply, Request};
+use agentlibre_proto::{self as proto, Ask, Lines, Read, Reply, Request};
 
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
@@ -251,9 +251,11 @@ mod tests {
         /// The next reply that is not a line told while a plane opens.
         pub(super) fn next(&mut self) -> Reply {
             loop {
-                match self.lines.read::<Reply>().unwrap().unwrap() {
-                    Reply::Sent { session, .. } if session.is_empty() => continue,
-                    reply => return reply,
+                match self.lines.read::<Reply>().unwrap() {
+                    Read::Message(Reply::Sent { session, .. }) if session.is_empty() => continue,
+                    Read::Message(reply) => return reply,
+                    Read::End => panic!("the daemon went"),
+                    Read::TooLong => continue,
                 }
             }
         }

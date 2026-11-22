@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agentlibre_proto::{self as proto, Lines, Reply, Request};
+use agentlibre_proto::{self as proto, Lines, Read, Reply, Request};
 
 /// How long a daemon that was started may take to answer.
 const START_WAIT: Duration = Duration::from_secs(10);
@@ -44,9 +44,10 @@ pub fn connect(lang: &str) -> Result<(UnixStream, Lines<BufReader<UnixStream>>),
     )
     .map_err(|error| error.to_string())?;
     match lines.read::<Reply>() {
-        Ok(Some(Reply::Hello { .. })) => Ok((out, lines)),
-        Ok(Some(Reply::Refused { error })) => Err(error),
-        Ok(other) => Err(format!("the daemon answered {other:?}")),
+        Ok(Read::Message(Reply::Hello { .. })) => Ok((out, lines)),
+        Ok(Read::Message(Reply::Refused { error })) => Err(error),
+        Ok(Read::Message(other)) => Err(format!("the daemon answered {other:?}")),
+        Ok(other) => Err(format!("the daemon line was {other:?}")),
         Err(error) => Err(error.to_string()),
     }
 }

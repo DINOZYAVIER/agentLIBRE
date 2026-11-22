@@ -1500,6 +1500,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "цей клієнт говорить протоколом {theirs}, демон — {ours}: запусти той самий agl",
     };
 
+    pub const DAEMON_LINE_TOO_LONG: Msg = Msg {
+        en: "the line of the request is over {max} bytes; it was dropped",
+        uk: "рядок запиту більший за {max} байтів; його відкинуто",
+    };
+
     pub const PLANE_GONE: Msg = Msg {
         en: "the run of the session ended before it answered; the session's file keeps what it did",
         uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
