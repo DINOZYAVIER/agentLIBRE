@@ -136,7 +136,7 @@ fn flows(
         .map(|plane| {
             let reply =
                 client.ask(&Request::Flow { plane: plane.name.clone(), verb: verb.clone() }, &mut |_| {})?;
-            let Reply::Said { said, .. } = reply else {
+            let Reply::Text { said, .. } = reply else {
                 return Err(Error::Said { text: format!("the daemon answered a flow with {reply:?}") });
             };
             let text = said_text(&said);
@@ -150,7 +150,7 @@ fn flows(
 }
 
 /// What a flow verb said: its told lines in order (AGL-118, D7).
-fn said_text(said: &proto::Said) -> String {
+fn said_text(said: &proto::Text) -> String {
     said.lines
         .iter()
         .map(|told| match told {

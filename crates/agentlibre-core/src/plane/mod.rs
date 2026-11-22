@@ -85,7 +85,7 @@ pub enum Told {
 /// (D4). What the record holds is `content`, or, for the stdin session, the
 /// lines it was told.
 #[derive(Default)]
-pub struct Said {
+pub struct Text {
     /// What to say, in its order.
     pub lines: Vec<Told>,
     /// A memory entry the command wrote, for the memory line of the surface.
@@ -101,9 +101,9 @@ pub struct Said {
     pub record_error: Option<Error>,
 }
 
-impl Said {
+impl Text {
     /// What the command said, its lines in order (AGL-118, D7): a surface
-    /// that paints roles uses [`Said::lines`] itself.
+    /// that paints roles uses [`Text::lines`] itself.
     pub fn text(&self) -> String {
         self.lines
             .iter()
@@ -119,16 +119,16 @@ impl Said {
     }
 
     /// A command that met an error.
-    fn fault(error: &Error, lang: Lang) -> Said {
-        Said {
+    fn fault(error: &Error, lang: Lang) -> Text {
+        Text {
             lines: vec![Told::Fault(error.message(lang))],
             failed: true,
-            ..Said::default()
+            ..Text::default()
         }
     }
 
     /// A command whose whole saying is one line, recorded as that line.
-    fn told(told: Told) -> Said {
+    fn told(told: Told) -> Text {
         let text = match &told {
             Told::Output(text)
             | Told::Notice(text)
@@ -136,10 +136,10 @@ impl Said {
             | Told::Fault(text)
             | Told::Pending(text) => text.clone(),
         };
-        Said {
+        Text {
             lines: vec![told],
             content: Some(text),
-            ..Said::default()
+            ..Text::default()
         }
     }
 }
@@ -675,7 +675,7 @@ impl Plane {
 
     /// `/remember name | text` (AGL-006, M34, M37): the entry is written with
     /// no turn; the model has it from the record of the command (AGL-047, D5).
-    pub fn remember(&mut self, name: &str, text: &str, workspace: bool) -> Said {
+    pub fn remember(&mut self, name: &str, text: &str, workspace: bool) -> Text {
         // The plane's memory, the workspace's by `--workspace` (AGL-077, D8).
         let found = if workspace {
             self.memory.write_workspace()
@@ -688,21 +688,21 @@ impl Plane {
             // in both surfaces, and the REPL records the error's text.
             Err(error) => {
                 let reason = error.message(self.lang);
-                return Said {
+                return Text {
                     lines: vec![Told::Refusal(
                         tr!(self.lang, m::REMEMBER_FAILED, reason = reason.clone()).to_string(),
                     )],
                     content: Some(reason),
                     failed: true,
-                    ..Said::default()
+                    ..Text::default()
                 };
             }
         };
         let (result, write) = memory::remember(&dir, name, text);
-        let mut said = Said {
+        let mut said = Text {
             lines: lines.into_iter().map(Told::Notice).collect(),
             content: Some(result.content),
-            ..Said::default()
+            ..Text::default()
         };
         match write {
             Some(write) => {
@@ -722,7 +722,7 @@ impl Plane {
     }
 
     /// `/memory remove <name>` once the human agreed (AGL-060, D7).
-    pub fn remove(&mut self, name: &str) -> Said {
+    pub fn remove(&mut self, name: &str) -> Text {
         let removed = self
             .memory
             .look()
@@ -730,50 +730,50 @@ impl Plane {
         match removed {
             Ok((content, write)) => {
                 let event = written(&write);
-                let mut said = Said {
+                let mut said = Text {
                     memory: Some(write),
                     content: Some(content),
-                    ..Said::default()
+                    ..Text::default()
                 };
                 self.keep(&mut said, event);
                 said
             }
-            Err(error) => Said::fault(&error, self.lang),
+            Err(error) => Text::fault(&error, self.lang),
         }
     }
 
     /// `/memory list`, `/memory show` (AGL-060, D5).
-    pub fn looked_at(&mut self, action: &MemoryAction) -> Said {
+    pub fn looked_at(&mut self, action: &MemoryAction) -> Text {
         match memory::looked_at(&*self.memory, action, self.lang) {
             Ok(text) => {
                 let text = text.trim_end().to_owned();
-                Said {
+                Text {
                     lines: vec![Told::Output(text.clone())],
                     content: Some(text),
-                    ..Said::default()
+                    ..Text::default()
                 }
             }
-            Err(error) => Said::fault(&error, self.lang),
+            Err(error) => Text::fault(&error, self.lang),
         }
     }
 
     /// `/rename <name>` (AGL-062, D7): the name is a line of the session's file.
-    pub fn rename(&mut self, name: &str) -> Said {
+    pub fn rename(&mut self, name: &str) -> Text {
         match self.session.rename(&self.project, name) {
             Ok(()) => {
                 let named = self.session.name.clone().unwrap_or_default();
-                Said::told(Told::Notice(
+                Text::told(Told::Notice(
                     tr!(self.lang, m::RENAMED, name = named).to_string(),
                 ))
             }
-            Err(error) => Said::fault(&error, self.lang),
+            Err(error) => Text::fault(&error, self.lang),
         }
     }
 
     /// `/new`: a new session on the plane with the `run` snapshot of its
     /// Function (AGL-063, D4). A surface clears what the old session held.
     /// A session that cannot be made ends the run: nothing else works.
-    pub fn new_session(&mut self) -> Result<Said, Error> {
+    pub fn new_session(&mut self) -> Result<Text, Error> {
         let new = Session::create_run(
             &self.sessions_dir,
             &self.function_name,
@@ -781,14 +781,14 @@ impl Plane {
             Some(&self.function.snapshot()),
         )?;
         self.session = new;
-        Ok(Said::told(Told::Notice(
+        Ok(Text::told(Told::Notice(
             tr!(self.lang, m::NEW_SESSION, id = self.session.id).to_string(),
         )))
     }
 
     /// `/compact`: the summary of the session's start; the reports of the
     /// turn that makes it go to `sink`.
-    pub fn compact(&mut self, sink: &mut dyn Sink) -> Said {
+    pub fn compact(&mut self, sink: &mut dyn Sink) -> Text {
         let stop = self.stop.clone();
         let result = stop.scope(|| {
             self.backend
@@ -796,9 +796,9 @@ impl Plane {
                 .and_then(|context| self.agent(context).compact(sink))
         });
         let interrupted = matches!(result, Err(Error::Interrupted));
-        let mut said = Said {
+        let mut said = Text {
             interrupted,
-            ..Said::default()
+            ..Text::default()
         };
         if let Some((text, role)) = compact_notice(result, &self.function, self.lang) {
             said.failed = role != Role::Muted;
@@ -817,7 +817,7 @@ impl Plane {
 
     /// The line of a command for the session (AGL-047, D5); a session that
     /// will not take it is the surface's trouble (D4).
-    fn keep(&mut self, said: &mut Said, event: Event) {
+    fn keep(&mut self, said: &mut Text, event: Event) {
         if let Err(error) = self.session.append(event) {
             said.record_error = Some(error);
         }

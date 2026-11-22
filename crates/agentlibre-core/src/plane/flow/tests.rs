@@ -531,7 +531,7 @@ fn a_declaration_that_chases_its_tail_is_refused() {
 }
 
 /// A verb's answer as one string: its told lines in order.
-fn told(said: crate::plane::Said) -> String {
+fn told(said: crate::plane::Text) -> String {
     said.lines
         .iter()
         .map(|line| match line {

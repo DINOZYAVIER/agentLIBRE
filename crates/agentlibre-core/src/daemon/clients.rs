@@ -230,7 +230,7 @@ impl Daemon {
                 match self.flow_holder(&plane) {
                     Ok(handle) => {
                         let said = handle.ask(verb, lang);
-                        Some(Reply::Said { plane, said: wire::said(&said, lang) })
+                        Some(Reply::Text { plane, said: wire::said(&said, lang) })
                     }
                     Err(error) => refused(error),
                 }

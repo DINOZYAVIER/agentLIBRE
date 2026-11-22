@@ -150,8 +150,9 @@ pub enum Reply {
     Opened(Opened),
     Sessions { sessions: Vec<SessionInfo> },
     Transcribed { text: String },
-    /// What a flow verb said (AGL-118, D2, D7), of the plane named.
-    Said { plane: String, said: Said },
+    /// What a flow verb answered (AGL-118, D2, D7), of the plane named (AGL-121,
+    /// D39): `Text`, and its wire tag `text`.
+    Text { plane: String, said: Text },
     /// A session's events, its past (AGL-073, D10).
     History { session: String, events: Vec<Event> },
     /// What a subscribed session does (D3).

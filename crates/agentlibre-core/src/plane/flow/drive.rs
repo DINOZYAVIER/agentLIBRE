@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::error::Error;
 use crate::i18n::{m, Lang};
 use crate::machine::{Event, Progress};
-use crate::plane::{Said, Told};
+use crate::plane::{Text, Told};
 use crate::tr;
 
 use super::act;
@@ -66,10 +66,10 @@ pub struct Place {
 /// flow's future transitions without a word — the fold refuses a mismatch
 /// (D11). A state's own commands run here, in `workdir`; what needs a turn
 /// waits for a session, and the place says what waits (D6, D7).
-pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
+pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Text {
     let decls = match FlowFile::load(plane_dir) {
         Ok(decls) => decls,
-        Err(error) => return Said::fault(&error, lang),
+        Err(error) => return Text::fault(&error, lang),
     };
     let declared = |name: &str| -> Result<&FlowDecl, String> {
         decls.find(name).ok_or_else(|| {
@@ -77,20 +77,20 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
         })
     };
     let place_said = |name: &str, result: Result<Place, Error>| match result {
-        Ok(place) => Said::told(Told::Output(said(lang, name, &place))),
-        Err(error) => Said::fault(&error, lang),
+        Ok(place) => Text::told(Told::Output(said(lang, name, &place))),
+        Err(error) => Text::fault(&error, lang),
     };
     // A refused verb did not do what was asked: it is a failed one (D2).
-    let refused = |text: String| Said {
+    let refused = |text: String| Text {
         lines: vec![Told::Refusal(text.clone())],
         content: Some(text),
         failed: true,
-        ..Said::default()
+        ..Text::default()
     };
     match verb {
         Verb::List => {
             if decls.flows.is_empty() {
-                return Said::told(Told::Notice(
+                return Text::told(Told::Notice(
                     tr!(lang, m::FLOW_NONE, file = FLOW_FILE).to_string(),
                 ));
             }
@@ -115,7 +115,7 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            Said::told(Told::Output(lines))
+            Text::told(Told::Output(lines))
         }
         Verb::Start { name } => match declared(name) {
             Ok(decl) => place_said(name, start(decl, plane_dir, workdir)),
@@ -138,7 +138,7 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
                     Ok(place) => place.state.as_deref().and_then(|state| {
                         decl.states().iter().position(|s| s.name == state)
                     }),
-                    Err(error) => return Said::fault(&error, lang),
+                    Err(error) => return Text::fault(&error, lang),
                 };
                 if matches!(verb, Verb::Nudge { .. })
                     && !at.is_some_and(|at| decl.nudges(at).iter().any(|n| n == event))
@@ -158,9 +158,9 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Said {
             Ok(decl) => {
                 let file = journal::path(plane_dir, name);
                 if let Err(error) = journal::reset(plane_dir, name) {
-                    return Said::fault(&error, lang);
+                    return Text::fault(&error, lang);
                 }
-                Said::told(Told::Notice(
+                Text::told(Told::Notice(
                     tr!(
                         lang,
                         m::FLOW_RESET,

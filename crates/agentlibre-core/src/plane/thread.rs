@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use super::{Plane, Said, Turn};
+use super::{Plane, Text, Turn};
 use crate::agent::{Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::ReasoningLevel;
@@ -93,7 +93,7 @@ pub struct Done {
     /// Why a turn stopped, in the words of its Function (`i18n::repl::stopped`).
     pub why: Option<String>,
     /// What a slash command said; `/new` fails as an error.
-    pub said: Option<Result<Said, Error>>,
+    pub said: Option<Result<Text, Error>>,
     /// The session as it is after the command.
     pub session: SessionView,
 }

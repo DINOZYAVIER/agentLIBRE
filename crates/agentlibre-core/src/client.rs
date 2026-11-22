@@ -205,14 +205,14 @@ impl Remote {
 
 /// A command's end as the plane's, its errors as the daemon said them.
 pub fn done_of(done: proto::Done) -> crate::plane::Done {
-    use crate::plane::{Said, wire};
+    use crate::plane::{Text, wire};
     crate::plane::Done {
         turn: done
             .turn
             .map(|turn| turn.map(wire::turn_end_of).map_err(|text| Error::Said { text })),
         why: done.why,
         said: done.said.map(|said| {
-            said.map(|said| Said {
+            said.map(|said| Text {
                 lines: said.lines.into_iter().map(wire::told_of).collect(),
                 memory: said.memory.map(wire::write_of),
                 content: said.content,

@@ -18,7 +18,7 @@ use crate::backend::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
 use crate::media::Source;
-use crate::plane::{Command, Done, Said, Sent, SessionView, Told};
+use crate::plane::{Command, Done, Text, Sent, SessionView, Told};
 use crate::session::{CommandRun, Event, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
@@ -259,8 +259,8 @@ impl Record {
     /// error go into the record, and what the command did when no answer was
     /// printed. A session that would not take the command's line ends the
     /// run (D4).
-    fn tell(&mut self, said: Said, lang: Lang) -> Result<(), Error> {
-        let Said {
+    fn tell(&mut self, said: Text, lang: Lang) -> Result<(), Error> {
+        let Text {
             lines,
             memory,
             content,

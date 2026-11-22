@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::error::Error;
 use crate::i18n::Lang;
-use crate::plane::Said;
+use crate::plane::Text;
 
 use super::drive::{self, Review, Wake};
 use crate::machine::Event;
@@ -46,7 +46,7 @@ pub enum Letter {
     Ask {
         verb: Verb,
         lang: Lang,
-        reply: Sender<Said>,
+        reply: Sender<Text>,
     },
     /// A wake went to its session; the holder writes the journal's `woke`
     /// line — no other hand writes it (D14, D20).
@@ -130,9 +130,9 @@ pub type Shared = Arc<Holders>;
 impl Holder {
     /// Asks the holder to do `verb` and waits for its word (D17): the one
     /// driver, so a verb waits its turn behind a command, not beside it (D13).
-    pub fn ask(&self, verb: Verb, lang: Lang) -> Said {
+    pub fn ask(&self, verb: Verb, lang: Lang) -> Text {
         let (to, from) = mpsc::channel();
-        let gone = || Said::fault(&Error::PlaneGone, lang);
+        let gone = || Text::fault(&Error::PlaneGone, lang);
         match self.asks.send(Letter::Ask {
             verb,
             lang,

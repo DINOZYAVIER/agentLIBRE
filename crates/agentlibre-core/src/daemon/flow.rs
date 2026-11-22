@@ -290,13 +290,13 @@ mod tests {
             client.ask(&Request::Flow { plane: "work".into(), verb })
         };
         // The holder of the plane was made when the verb asked, not before.
-        let Reply::Said { plane, said } = flow(&mut client, proto::FlowVerb::List) else {
+        let Reply::Text { plane, said } = flow(&mut client, proto::FlowVerb::List) else {
             panic!("no flow answer")
         };
         assert_eq!(plane, "work");
         assert_eq!(said.lines, [proto::Told::Output("one: not started".into())]);
         // The verb runs there: the state's command runs, its exit moves.
-        let Reply::Said { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "one".into() })
+        let Reply::Text { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "one".into() })
         else {
             panic!("no flow answer")
         };
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(text, "one: done\n  started build\n  exit.ok -> done");
         // A flow the plane does not declare is a failed answer, not a
         // refusal; a plane that is not there is a refusal.
-        let Reply::Said { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "two".into() })
+        let Reply::Text { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "two".into() })
         else {
             panic!("no flow answer")
         };
@@ -408,7 +408,7 @@ mod tests {
         })) else {
             panic!("not opened");
         };
-        let Reply::Said { said, .. } = client.ask(&Request::Flow {
+        let Reply::Text { said, .. } = client.ask(&Request::Flow {
             plane: "work".into(),
             verb: proto::FlowVerb::Start { name: "talk".into() },
         }) else {
@@ -468,7 +468,7 @@ mod tests {
         })) else {
             panic!("not opened");
         };
-        let Reply::Said { .. } = client.ask(&Request::Flow {
+        let Reply::Text { .. } = client.ask(&Request::Flow {
             plane: "work".into(),
             verb: proto::FlowVerb::Start { name: "talk".into() },
         }) else {

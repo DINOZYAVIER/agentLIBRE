@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use agentlibre_proto as wire;
 
-use super::{Done, Said, Sent, SessionView, Told};
+use super::{Done, Text, Sent, SessionView, Told};
 use crate::action::{Outcome, Value};
 use crate::agent::{Report, TurnEnd};
 use crate::attach::Pending;
@@ -92,8 +92,8 @@ pub fn turn_end_of(end: wire::TurnEnd) -> TurnEnd {
     }
 }
 
-pub fn said(said: &Said, lang: Lang) -> wire::Said {
-    wire::Said {
+pub fn said(said: &Text, lang: Lang) -> wire::Text {
+    wire::Text {
         lines: said
             .lines
             .iter()

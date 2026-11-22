@@ -166,12 +166,12 @@ fn what_a_plane_sends_round_trips() {
             ask: Ask::Yes,
             text: "restart? [y/N]".into(),
         },
-        Reply::Said {
+        Reply::Text {
             plane: "work".into(),
-            said: Said {
+            said: Text {
                 lines: vec![Told::Output("build: done".into())],
                 failed: false,
-                ..Said::default()
+                ..Text::default()
             },
         },
     ];

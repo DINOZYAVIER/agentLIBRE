@@ -27,7 +27,7 @@ pub struct Done {
     /// Why a turn stopped, in the words of its Function.
     pub why: Option<String>,
     /// What a slash command said; `/new` fails as an error.
-    pub said: Option<Result<Said, String>>,
+    pub said: Option<Result<Text, String>>,
     pub session: SessionView,
 }
 
@@ -53,9 +53,9 @@ pub enum TurnEnd {
     Stopped(StopReason),
 }
 
-/// What a slash command did (the core's `Said`).
+/// What a slash command did (the core's `Text`, AGL-121 D39).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Said {
+pub struct Text {
     pub lines: Vec<Told>,
     pub memory: Option<MemoryWrite>,
     pub content: Option<String>,

@@ -322,7 +322,7 @@ struct Question {
 
 /// What a slash command said (AGL-047, D5).
 #[derive(Default)]
-struct Said {
+struct Text {
     lines: Vec<String>,
     failed: bool,
 }
@@ -376,7 +376,7 @@ struct Input {
     /// Ctrl-R records the voice (AGL-016).
     voice: Arc<VoiceInput>,
     /// What the running slash command says, while one runs (AGL-047, D5).
-    said: Mutex<Option<Said>>,
+    said: Mutex<Option<Text>>,
 }
 
 impl Input {
@@ -424,7 +424,7 @@ impl Input {
             self.control.wake.notify_all();
             return;
         }
-        *self.said.lock().unwrap() = Some(Said::default());
+        *self.said.lock().unwrap() = Some(Text::default());
         // AGL-101: Enter echoes the command like a message, in the tool's
         // color as the menu paints it; the model never sees the line.
         let mut echo = user_lines(&self.theme, trimmed, self.dock.columns(), Role::Tool);
@@ -1082,7 +1082,7 @@ fn said(
 /// What a command of the run said (AGL-067, F2): an answer and a notice
 /// muted, a refusal and an error's text as a failure, a command cut short
 /// pending, and the memory line of an entry the command wrote.
-fn show_said(presenter: &Presenter, said: &crate::plane::Said, lang: Lang) {
+fn show_said(presenter: &Presenter, said: &crate::plane::Text, lang: Lang) {
     for told in &said.lines {
         let (text, role) = match told {
             Told::Output(text) | Told::Notice(text) => (text, Role::Muted),
