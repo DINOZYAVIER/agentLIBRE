@@ -14,7 +14,7 @@ impl Daemon {
         })
     }
 
-    /// Sends the session's plane the command `make` gives; `busy` marks a
+    /// Sends the session's run the command `make` gives; `busy` marks a
     /// turn until its end.
     pub(super) fn command(
         &self,
@@ -35,7 +35,7 @@ impl Daemon {
         Ok(())
     }
 
-    /// Opens a session's plane for `client`, or attaches it to the running
+    /// Opens a session's run for `client`, or attaches it to the running
     /// one (D12).
     pub(super) fn open(self: &Arc<Self>, client: u64, lang: Lang, open: proto::Open) -> Result<proto::Opened, Error> {
         let user = UserFile::load(&self.paths.settings_file())?;
@@ -81,7 +81,7 @@ impl Daemon {
         let engine = Arc::new(Mutex::new(None));
         let reasoning = open.reasoning.as_deref().and_then(ReasoningLevel::parse);
         let env = |name: &str| std::env::var_os(name);
-        let opened = Plane::open(plane::Opening {
+        let opened = Run::open(plane::Opening {
             env: &env,
             paths: &self.paths,
             user: &user,
@@ -99,26 +99,26 @@ impl Daemon {
             flows: Arc::clone(&self.flows),
         })?;
         let plane::Opened {
-            plane,
+            run,
             resumed,
             settings,
             observer,
         } = opened;
-        let plane_name = plane.file.as_ref().map(|file| file.name.clone());
+        let plane_name = run.file.as_ref().map(|file| file.name.clone());
         let reply = proto::Opened {
-            session: wire::view(&plane::SessionView::of(&plane.session), plane_name.as_deref()),
+            session: wire::view(&plane::SessionView::of(&run.session), plane_name.as_deref()),
             resumed,
-            function: plane.function_name.clone(),
-            workspace: plane.workspace.to_string_lossy().into_owned(),
+            function: run.function_name.clone(),
+            workspace: run.workspace.to_string_lossy().into_owned(),
             server_url: settings.server_url.clone(),
-            context: plane.context,
-            reasoning: plane.reasoning.map(|level| level.name().to_owned()),
-            draft: plane.autostart.project.unit_key().and_then(|key| {
+            context: run.context,
+            reasoning: run.reasoning.map(|level| level.name().to_owned()),
+            draft: run.autostart.project.unit_key().and_then(|key| {
                 Draft::of(
-                    &plane.autostart.whisper,
-                    &plane.autostart.models,
+                    &run.autostart.whisper,
+                    &run.autostart.models,
                     &key,
-                    plane.autostart.path_var.clone(),
+                    run.autostart.path_var.clone(),
                 )
                 .map(|draft| proto::DraftSpec {
                     url: draft.server.url,
@@ -129,15 +129,15 @@ impl Daemon {
                 })
             }),
         };
-        let voice = Arc::new(Voice::of(&plane.autostart));
-        let id = plane.session.id.clone();
+        let voice = Arc::new(Voice::of(&run.autostart));
+        let id = run.session.id.clone();
         // The FSM of a run of one request writes to the session from now.
         let observer = open.one_request.then(|| {
             let mut observer = observer;
-            observer.attach(&plane.session);
+            observer.attach(&run.session);
             observer
         });
-        let parts = plane.start().into_parts();
+        let parts = run.start().into_parts();
         let opened_plane = plane_name.clone();
         // The clock of D2: a server stops after `idle_stop` seconds
         // without a turn; 0, an external server (AGL-052, D4) has none.
@@ -196,7 +196,7 @@ impl Daemon {
         Ok(reply)
     }
 
-    /// What a plane sent goes to the clients that follow it; a command's
+    /// What a run sent goes to the clients that follow it; a command's
     /// end clears the session's turn and follows a new session's id.
     pub(super) fn tell(&self, id: &str, item: Sent) -> String {
         let mut state = self.lock();
@@ -249,7 +249,7 @@ impl Daemon {
             };
             write(&to.out, &reply);
         }
-        // A turn of the plane ended: its flows look again at what they wait
+        // A turn of the run ended: its flows look again at what they wait
         // for (D18) — a review's verdict asks through the next poke — and
         // the flow whose woken session just turned gets its `turn.end`
         // through the pair the wake left (D22).
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_second_open_of_a_session_attaches_and_the_last_close_ends_it() {
-        // D12: one plane for the session, held by both clients.
+        // D12: one run for the session, held by both clients.
         let dir = TempDir::new();
         let (paths, socket) = daemon(&dir);
         let project = dir.0.join("project");
@@ -366,7 +366,7 @@ mod tests {
         let Reply::Sessions { sessions } = first.ask(&Request::Sessions) else {
             panic!()
         };
-        assert_eq!(sessions.len(), 1, "one plane for both");
+        assert_eq!(sessions.len(), 1, "one run for both");
         // A command of one is told to both.
         assert_eq!(
             first.ask(&Request::Rename {

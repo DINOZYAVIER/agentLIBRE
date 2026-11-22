@@ -1,7 +1,7 @@
 //! agentLIBRE core (AGL-067, D2): the agent, the Functions, the backends,
 //! the forge and the memory, the engine's life and the plane a Function runs
 //! on — apart from any terminal. A surface reads its input, draws what comes
-//! out and takes its turns through a `Plane`.
+//! out and takes its turns through a `Run`.
 
 pub mod about;
 pub mod action;

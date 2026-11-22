@@ -1,7 +1,7 @@
-//! A plane on a thread of its own (AGL-075, D7): a surface holds a [`Handle`]
-//! that sends the plane its [`Command`]s and takes what it [`Sent`] by a
+//! A run on a thread of its own (AGL-075, D7): a surface holds a [`Handle`]
+//! that sends the run its [`Command`]s and takes what it [`Sent`] by a
 //! channel, the shape of a socket. A command sent while a turn runs waits
-//! for the turn's end. A turn is stopped by the plane's stop, which the handle
+//! for the turn's end. A turn is stopped by the run's stop, which the handle
 //! holds too.
 
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use super::{Plane, Text, Turn};
+use super::{Run, Text, Turn};
 use crate::agent::{Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::ReasoningLevel;
@@ -19,7 +19,7 @@ use crate::phase::Observer;
 use crate::session::{Event, Session};
 use crate::stop::Stop;
 
-/// What a surface asks of its plane.
+/// What a surface asks of its run.
 pub enum Command {
     /// A message and the media it names, at the reasoning level of the
     /// surface (AGL-013). `observer` saw the server's start of a run of one
@@ -39,7 +39,7 @@ pub enum Command {
     LookAt(MemoryAction),
     /// `/rename <name>` (AGL-062, D7).
     Rename(String),
-    /// `/new`: a new session of the plane.
+    /// `/new`: a new session of the run.
     New,
     /// `/compact`, at the reasoning level of the surface.
     Compact { reasoning: Option<ReasoningLevel> },
@@ -54,7 +54,7 @@ pub enum Command {
     Start,
 }
 
-/// What a plane sends while it takes a command, and at its end.
+/// What a run sends while it takes a command, and at its end.
 pub enum Sent {
     /// What the turn tells (AGL-067, D3).
     Report(Report),
@@ -72,7 +72,7 @@ pub enum Sent {
 }
 
 impl Sent {
-    /// Gives what the plane sent to the surface of the turn; a command's end
+    /// Gives what the run sent to the surface of the turn; a command's end
     /// is not for it.
     pub fn give(self, surface: &mut dyn Turn) {
         match self {
@@ -98,7 +98,7 @@ pub struct Done {
     pub session: SessionView,
 }
 
-/// What a surface holds of its plane's session after a command.
+/// What a surface holds of its run's session after a command.
 #[derive(Clone, Debug, Default)]
 pub struct SessionView {
     pub id: String,
@@ -124,7 +124,7 @@ impl SessionView {
     }
 }
 
-/// The surface's end of a plane on its thread. Dropping it ends the thread
+/// The surface's end of a run on its thread. Dropping it ends the thread
 /// once its command is done.
 pub struct Handle {
     commands: Option<Sender<Command>>,
@@ -133,7 +133,7 @@ pub struct Handle {
     thread: Option<JoinHandle<()>>,
 }
 
-/// A plane's handle taken apart (AGL-076): its commands, what it sends and
+/// A run's handle taken apart (AGL-076): its commands, what it sends and
 /// its thread, for a daemon that sends from one thread and listens on
 /// another. Dropping the commands ends the thread once its command is done.
 pub struct Parts {
@@ -144,19 +144,19 @@ pub struct Parts {
 }
 
 impl Handle {
-    /// The stop of the plane's turns.
+    /// The stop of the run's turns.
     pub fn stop(&self) -> &Stop {
         &self.stop
     }
 
-    /// Sends a command; false when the plane's thread is gone.
+    /// Sends a command; false when the run's thread is gone.
     pub fn send(&self, command: Command) -> bool {
         self.commands
             .as_ref()
             .is_some_and(|commands| commands.send(command).is_ok())
     }
 
-    /// What the plane sent next; `None` when its thread is gone.
+    /// What the run sent next; `None` when its thread is gone.
     pub fn recv(&self) -> Option<Sent> {
         self.sent.as_ref()?.recv().ok()
     }
@@ -171,8 +171,8 @@ impl Handle {
         }
     }
 
-    /// Sends `command` and waits for its end; what the plane sends before it
-    /// goes to `each`. `None` when the plane's thread is gone.
+    /// Sends `command` and waits for its end; what the run sends before it
+    /// goes to `each`. `None` when the run's thread is gone.
     pub fn ask(&self, command: Command, each: &mut dyn FnMut(Sent)) -> Option<Done> {
         if !self.send(command) {
             return None;
@@ -195,9 +195,9 @@ impl Drop for Handle {
     }
 }
 
-impl Plane {
+impl Run {
     /// The server's start of a session (AGL-046): what the REPL did as it
-    /// started, on the plane's thread.
+    /// started, on the run's thread.
     fn start_server(&mut self, forward: &mut Forward) -> Result<(), Error> {
         use crate::engine::ServerProgress;
         use crate::phase::{Observer, PhaseEvent};
@@ -238,7 +238,7 @@ impl Plane {
         }
     }
 
-    /// Moves the plane to a thread of its own (D7).
+    /// Moves the run to a thread of its own (D7).
     pub fn start(self) -> Handle {
         let (commands, inbox) = mpsc::channel();
         let (outbox, sent) = mpsc::channel();
@@ -439,8 +439,8 @@ mod tests {
         }
     }
 
-    /// A plane on `fake`, its session in `dir`, its server answering.
-    fn plane(dir: &TempDir, fake: Arc<Fake>) -> Plane {
+    /// A run on `fake`, its session in `dir`, its server answering.
+    fn run(dir: &TempDir, fake: Arc<Fake>) -> Run {
         let cwd = dir.0.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let (project, _) = crate::forge::resolve(&dir.0.join("data"), &cwd, Lang::En, true, &|_| {
@@ -454,7 +454,7 @@ mod tests {
             Session::create_run(&sessions, "fixture-minimal", &cwd, Some(&function.snapshot()))
                 .unwrap();
         let backend: Arc<dyn Backend + Send + Sync> = fake;
-        Plane {
+        Run {
             file: None,
             plane_forge: None,
             flows: None,
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn a_message_is_answered_on_the_planes_thread() {
         let dir = TempDir::new();
-        let handle = plane(&dir, Arc::default()).start();
+        let handle = run(&dir, Arc::default()).start();
         let mut reports = 0;
         let done = handle
             .ask(say("Hello"), &mut |sent| {
@@ -528,7 +528,7 @@ mod tests {
         let (held, free) = (Arc::new(Fake::default()), Arc::new(Fake::default()));
         held.hold.store(true, Ordering::SeqCst);
         free.hold.store(true, Ordering::SeqCst);
-        let (first, second) = (plane(&dir, held).start(), plane(&dir, free.clone()).start());
+        let (first, second) = (run(&dir, held).start(), run(&dir, free.clone()).start());
         assert!(first.send(say("one")) && second.send(say("two")));
         thread::sleep(Duration::from_millis(50));
         first.stop().request();
@@ -557,7 +557,7 @@ mod tests {
         let dir = TempDir::new();
         let fake = Arc::new(Fake::default());
         fake.hold.store(true, Ordering::SeqCst);
-        let handle = plane(&dir, fake.clone()).start();
+        let handle = run(&dir, fake.clone()).start();
         assert!(handle.send(say("one")));
         thread::sleep(Duration::from_millis(50));
         handle.stop().request();
@@ -580,7 +580,7 @@ mod tests {
         let dir = TempDir::new();
         let fake = Arc::new(Fake::default());
         fake.hold.store(true, Ordering::SeqCst);
-        let handle = plane(&dir, fake.clone()).start();
+        let handle = run(&dir, fake.clone()).start();
         assert!(handle.send(say("first")) && handle.send(say("second")));
         let release = {
             let fake = fake.clone();

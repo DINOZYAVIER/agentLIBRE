@@ -1,9 +1,9 @@
-//! The plane a Function runs on (AGL-067, F1, D10; AGL-075): what a session
+//! The run of a Function (AGL-067, F1, D10; AGL-075): what a session
 //! holds beside its Function — the backend, the
 //! session, the memory, the searcher, the engine's start. It outlives a
 //! session: `/new` and `/function` start a new one on it. The surfaces —
 //! `-p`, the stdin session, the REPL — read their input and draw what comes
-//! out; the plane takes a turn.
+//! out; the run takes a turn.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ pub use store::{PLANE_FILE, PlaneFile};
 
 pub use thread::{Command, Done, Handle, Parts, Sent, SessionView};
 
-/// What a surface gives a turn on the plane (AGL-067): where the reports go,
+/// What a surface gives a turn on the run (AGL-067): where the reports go,
 /// and the few things it shows of the turn's start.
 pub trait Turn: Sink {
     /// A line the start of the server or the transcription says (AGL-015,
@@ -80,7 +80,7 @@ pub enum Told {
     Pending(String),
 }
 
-/// What a slash command did (AGL-067, F2): the plane does the work once, and
+/// What a slash command did (AGL-067, F2): the run does the work once, and
 /// each surface shows [`Told`] and writes the session's record its own way
 /// (D4). What the record holds is `content`, or, for the stdin session, the
 /// lines it was told.
@@ -153,7 +153,7 @@ fn written(write: &Write) -> Event {
     }
 }
 
-/// Who answers while a plane is built and while its server starts (AGL-075,
+/// Who answers while a run is built and while its server starts (AGL-075,
 /// D8): the terminal asks the human; a caller with nobody to ask gives no
 /// `line` and refuses or agrees by `others`.
 #[derive(Clone)]
@@ -170,7 +170,7 @@ pub struct Asker {
 /// Asks the human for a line; `None` when there is no answer.
 pub type AskLine = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// What a plane is opened with (AGL-075): where, with what, and who answers.
+/// What a run is opened with (AGL-075): where, with what, and who answers.
 pub struct Opening<'a> {
     /// The environment: `PATH`, and what `about` reads.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
@@ -195,24 +195,24 @@ pub struct Opening<'a> {
     pub lang: Lang,
     pub stop: Stop,
     pub asker: Asker,
-    /// The daemon's flow holders (AGL-118, D17): a plane of the run takes
+    /// The daemon's flow holders (AGL-118, D17): a run in a plane takes
     /// its one driver from here, and its agent's `flow` tool asks it.
     pub flows: crate::plane::flow::holder::Shared,
 }
 
-/// A plane opened, and what its surface needs of the opening.
+/// A run opened, and what its surface needs of the opening.
 pub struct Opened {
-    pub plane: Plane,
-    /// Whether the session existed before this plane (D126).
+    pub run: Run,
+    /// Whether the session existed before this run (D126).
     pub resumed: bool,
-    /// The settings the plane resolved: the surface's colors, its REPL.
+    /// The settings the run resolved: the surface's colors, its REPL.
     pub settings: Settings,
     /// The FSM of the first turn, which saw the server's start of a run of
     /// one request (AGL-046, D10).
     pub observer: Observer,
 }
 
-pub struct Plane {
+pub struct Run {
     /// The plane's store, its id, name and directories, when the run is
     /// in one (AGL-077, D6, D15).
     pub file: Option<PlaneFile>,
@@ -249,16 +249,16 @@ pub struct Plane {
     pub memory: Arc<dyn Home>,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<String>,
-    /// What stops a turn on this plane (AGL-075): its turns run in its scope.
+    /// What stops a turn on this run (AGL-075): its turns run in its scope.
     pub stop: Stop,
-    /// The daemon's holder of this plane's flows (AGL-118, D17): the agent's
+    /// The daemon's holder of this run's flows (AGL-118, D17): the agent's
     /// `flow` tool asks it — the one driver the CLI asks. None outside a
-    /// plane; the daemon sets it on the plane it opens.
+    /// plane; the daemon sets it on the run it opens.
     pub flows: Option<flow::holder::Holder>,
 }
 
-impl Plane {
-    /// Opens a plane (AGL-075): the session resumed or made, its Function, the
+impl Run {
+    /// Opens a run (AGL-075): the session resumed or made, its Function, the
     /// settings, the weights, the backend, the search, the memory and what
     /// the model is told; a run of one request brings its server up first.
     pub fn open(opening: Opening) -> Result<Opened, Error> {
@@ -456,7 +456,7 @@ impl Plane {
         let mut observer = Observer::new();
         let context = if one_request {
             // A fresh-port launch (AGL-120, D3, D5) names the url the run
-            // moved to; `rebind_to` makes the plane speak to that server.
+            // moved to; `rebind_to` makes the run speak to that server.
             if let Some(url) = autostart.ensure(&mut |progress| match progress {
                 ServerProgress::Starting => {
                     observer.on(PhaseEvent::ServerStart);
@@ -475,7 +475,7 @@ impl Plane {
             backend.context_size().ok()
         };
         // A fresh-port launch (AGL-120, D3, D5) moved the run to another
-        // server: take the backend again, so the plane speaks to the one
+        // server: take the backend again, so the run speaks to the one
         // its id runs on. Without a launch it is the same Arc as before.
         backend = Arc::clone(&autostart.llama);
         settings.server_url = autostart.llama.url().to_owned();
@@ -503,7 +503,7 @@ impl Plane {
         let flows = plane_file
             .as_ref()
             .map(|file| flows.holder(&file.dir, &workspace));
-        let plane = Plane {
+        let run = Run {
             plane_forge: plane_file.as_ref().map(PlaneFile::forge_store),
             file: plane_file,
             function,
@@ -527,7 +527,7 @@ impl Plane {
             flows,
         };
         Ok(Opened {
-            plane,
+            run,
             resumed,
             settings,
             observer,
@@ -544,7 +544,7 @@ impl Plane {
         }
     }
 
-    /// The agent of a turn on this plane, for a server with a context of
+    /// The agent of a turn on this run, for a server with a context of
     /// `context` tokens: the one place an [`Agent`] is built.
     pub fn agent(&mut self, context: usize) -> Agent<'_> {
         Agent {
@@ -572,7 +572,7 @@ impl Plane {
 
     /// A turn for the message `message` and its `attached` media: the server
     /// is brought up when it does not answer, at the first request (AGL-015,
-    /// D10, AGL-024), and its context size read; then [`Plane::turn_on`].
+    /// D10, AGL-024), and its context size read; then [`Run::turn_on`].
     pub fn turn(
         &mut self,
         message: &str,
@@ -770,7 +770,7 @@ impl Plane {
         }
     }
 
-    /// `/new`: a new session on the plane with the `run` snapshot of its
+    /// `/new`: a new session on the run with the `run` snapshot of its
     /// Function (AGL-063, D4). A surface clears what the old session held.
     /// A session that cannot be made ends the run: nothing else works.
     pub fn new_session(&mut self) -> Result<Text, Error> {

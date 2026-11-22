@@ -1,9 +1,9 @@
-//! The daemon (AGL-076): it holds the planes of the sessions its clients
+//! The daemon (AGL-076): it holds the runs of the sessions its clients
 //! open and serves them on its one socket (D7), in the protocol of
-//! `agentlibre-proto` (D2, D8). A plane's question goes to the client that
+//! `agentlibre-proto` (D2, D8). A run's question goes to the client that
 //! opened it when that client has a human, and is refused otherwise (D11);
-//! a second `open` of a running session attaches to its plane (D12); an
-//! engine a plane launched is stopped when no plane uses it any more (D16).
+//! a second `open` of a running session attaches to its run (D12); an
+//! engine a run launched is stopped when no run uses it any more (D16).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufReader};
@@ -29,7 +29,7 @@ use crate::i18n::{Lang, m};
 use crate::memory::MemoryAction;
 use crate::paths::Paths;
 use crate::phase::Observer;
-use crate::plane::{self, Command, Plane, Sent, wire};
+use crate::plane::{self, Command, Run, Sent, wire};
 use crate::session::Session;
 use crate::settings::{ServerKind, Settings, UserFile};
 use crate::stop::Stop;
@@ -118,7 +118,7 @@ fn bind(runtime: &Path) -> Result<UnixListener, Error> {
 }
 
 struct Daemon {
-    /// The flow holders, one per plane store, shared with the planes opened
+    /// The flow holders, one per plane store, shared with the runs opened
     /// here (AGL-118, D17).
     flows: plane::flow::holder::Shared,
     paths: Paths,
@@ -137,7 +137,7 @@ struct State {
     /// The wake's pair (AGL-118, D22): (plane store, flow) to the session
     /// its wake woke; the end of that turn carries `turn.end` back.
     flow_wakes: HashMap<(PathBuf, String), String>,
-    /// The engines of planes that ended, kept while a plane uses their
+    /// The engines of runs that ended, kept while a run uses their
     /// server (D16): its url, the engine, the store of its record.
     engines: Vec<(String, Engine, PathBuf)>,
     /// The servers an idle stop watches (AGL-120, D2), by url: a server
@@ -154,7 +154,7 @@ struct Client {
     pid: u32,
 }
 
-/// A session's plane in the daemon.
+/// A session's run in the daemon.
 struct Entry {
     commands: Sender<Command>,
     stop: Stop,
@@ -169,9 +169,9 @@ struct Entry {
     /// The FSM that saw the server's start of a run of one request: its
     /// first message goes on from it (AGL-046, D10).
     observer: Option<Observer>,
-    /// The transcription of its plane (D15).
+    /// The transcription of its run (D15).
     voice: Arc<Voice>,
-    /// The engine its plane launched, if it did (D16), and its record's store.
+    /// The engine its run launched, if it did (D16), and its record's store.
     engine: Arc<Mutex<Option<Engine>>>,
     project_dir: PathBuf,
 }
@@ -250,7 +250,7 @@ mod tests {
             self.next()
         }
 
-        /// The next reply that is not a line told while a plane opens.
+        /// The next reply that is not a line told while a run opens.
         pub(super) fn next(&mut self) -> Reply {
             loop {
                 match self.lines.read::<Reply>().unwrap() {

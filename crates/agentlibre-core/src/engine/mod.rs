@@ -394,7 +394,7 @@ pub struct Autostart {
     /// The backend the turn runs on: the `Llama` or the `Strata` backend,
     /// by the settings' `[server] kind` (AGL-030, D1); the plane's own.
     /// A rebind of AGL-120, D5 replaces it: the run follows its id to the
-    /// url that serves it, and `Plane` takes this field again after
+    /// url that serves it, and `Run` takes this field again after
     /// `ensure` when the urls differ.
     pub llama: Arc<dyn Backend + Send + Sync>,
     pub project: Workspace,
