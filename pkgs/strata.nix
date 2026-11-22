@@ -123,6 +123,9 @@ stdenv.mkDerivation {
     table=$out/share/strata/tools/hip/gfx1100-hipblaslt-$v.txt
     if [ -e $table ]; then
       ln -s $table $out/share/strata/hipblaslt-tuning.txt
+    else
+      # Not an error, but not silent either (AGL-121, D32).
+      echo "warning: no hipBLASLt tuning table for gfx1100 at hipBLASLt $v: the engine reads prompts slower" >&2
     fi
     runHook postInstall
   '';
