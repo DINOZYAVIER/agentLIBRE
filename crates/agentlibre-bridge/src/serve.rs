@@ -7,7 +7,7 @@
 //! come to it. Its frames are read with a short timeout, and what the daemon
 //! sent meanwhile goes out between two reads.
 
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufReader};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -17,12 +17,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentlibre_proto::{self as proto, Request};
+use agentlibre_proto::{self as proto, Lines, Request};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use tungstenite::handshake::server::{ErrorResponse, Request as Upgrade, Response};
 use tungstenite::http::StatusCode;
-use tungstenite::protocol::CloseFrame;
+use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::{Message, WebSocket};
 
@@ -40,6 +40,9 @@ const PING: Duration = Duration::from_secs(30);
 const SILENT: Duration = Duration::from_secs(90);
 /// The connections at once; one more is closed at once.
 const CONNECTIONS: usize = 16;
+/// A failed token is answered after this pause, so that trying tokens
+/// in batch is no faster than one by one (AGL-121, D31).
+const TOKEN_PAUSE: Duration = Duration::from_millis(1000);
 
 /// What the bridge serves (D18).
 pub struct Config {
@@ -127,7 +130,10 @@ fn connection(shared: &Shared, stream: TcpStream, peer: &str) -> io::Result<()> 
                 eprintln!("agl-bridge: {error}");
                 return Err(status(StatusCode::INTERNAL_SERVER_ERROR));
             }
-            Some(Ok(None)) | None => return Err(status(StatusCode::UNAUTHORIZED)),
+            Some(Ok(None)) | None => {
+                thread::sleep(TOKEN_PAUSE);
+                return Err(status(StatusCode::UNAUTHORIZED));
+            }
         }
         // No daemon, no connection: the bridge never starts one (D18).
         match UnixStream::connect(&shared.socket) {
@@ -136,7 +142,12 @@ fn connection(shared: &Shared, stream: TcpStream, peer: &str) -> io::Result<()> 
         }
         Ok(response)
     };
-    let mut socket = match tungstenite::accept_hdr(tls, upgrade) {
+    // AGL-121, D31: a frame from a device is capped at the protocol's
+    // line limit, so one frame cannot hold more than a request line.
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(proto::LINE_LIMIT))
+        .max_frame_size(Some(proto::LINE_LIMIT));
+    let mut socket = match tungstenite::accept_hdr_with_config(tls, upgrade, Some(config)) {
         Ok(socket) => socket,
         // A refused upgrade has been answered; a handshake cut short or
         // too slow is just dropped.
@@ -167,17 +178,12 @@ fn relay(socket: &mut WebSocket<Tls>, daemon: UnixStream) -> &'static str {
     };
     let (to, from) = mpsc::channel::<String>();
     thread::spawn(move || {
-        let mut lines = BufReader::new(reader);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match lines.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if to.send(line.trim_end_matches('\n').to_owned()).is_err() {
-                        break;
-                    }
-                }
+        // AGL-121, D31: the daemon's lines come through `proto::Lines`,
+        // unparsed, and with no limit of their own (D54).
+        let mut lines = Lines::new(BufReader::new(reader));
+        while let Ok(Some(line)) = lines.read_raw() {
+            if to.send(line).is_err() {
+                break;
             }
         }
     });

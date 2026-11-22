@@ -319,6 +319,18 @@ impl<R: BufRead> Lines<R> {
             .map(Read::Message)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
+
+    /// The next line as it came, unparsed, without the limit; `None` at
+    /// the end. For one who passes the daemon's lines on without reading
+    /// them, as the bridge does (AGL-121, D31; D54: the clients read
+    /// with no limit).
+    pub fn read_raw(&mut self) -> io::Result<Option<String>> {
+        self.line.clear();
+        if self.reader.read_line(&mut self.line)? == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.line.trim_end().to_owned()))
+    }
 }
 
 /// Writes `message` as one line.
