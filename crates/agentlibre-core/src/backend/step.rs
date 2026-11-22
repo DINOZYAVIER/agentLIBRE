@@ -13,7 +13,7 @@ use crate::action::{self, Action, Actions};
 use crate::agent::{Report, Sink};
 use crate::error::Error;
 use crate::function::Function;
-use crate::session::{CutOff, Event, Session};
+use crate::session::CutOff;
 
 /// What a step asks of a backend.
 pub struct StepInput<'a> {
@@ -45,14 +45,44 @@ pub enum Stepped {
     Malformed(String),
 }
 
+/// What a step leaves for the session file, in the order it came: the
+/// thinking, then the grammar the action was asked under. The agent writes
+/// it, the backend does not (AGL-121, D21).
+#[derive(Debug, Default, PartialEq)]
+pub struct StepLog {
+    /// The thinking of the step, when it has any to keep.
+    pub thinking: Option<String>,
+    /// The grammar of the action, a completion server's.
+    pub grammar: Option<String>,
+}
+
+/// A step's outcome with its log, whichever way it ended: a step whose
+/// action's request broke after its thinking still has that thinking to
+/// write (AGL-121, D50).
+#[derive(Debug)]
+pub struct Step {
+    pub stepped: Result<Stepped, Error>,
+    pub log: StepLog,
+}
+
 /// The step of a completion server: the thinking to its mark, then the action
 /// under the grammar, parsed (D3, D110, D113, D131, D154; AGL-050). The
-/// thinking and the grammar are logged in `session` as they come.
+/// thinking and the grammar go to the log as they come.
 pub fn completion_step<B: Backend + ?Sized>(
     backend: &B,
-    session: &mut Session,
     input: &StepInput<'_>,
     sink: &mut dyn Sink,
+) -> Step {
+    let mut log = StepLog::default();
+    let stepped = completion(backend, input, sink, &mut log);
+    Step { stepped, log }
+}
+
+fn completion<B: Backend + ?Sized>(
+    backend: &B,
+    input: &StepInput<'_>,
+    sink: &mut dyn Sink,
+    log: &mut StepLog,
 ) -> Result<Stepped, Error> {
     let function = input.function;
     let format = &function.format;
@@ -87,7 +117,7 @@ pub fn completion_step<B: Backend + ?Sized>(
         }
         let text = thinking.text.trim_end().to_owned();
         if !text.is_empty() {
-            session.append(Event::Thinking(text.clone()))?;
+            log.thinking = Some(text.clone());
         }
         // A cut-off thinking or a call started inside it ends the
         // thinking too (D110, D113).
@@ -105,7 +135,7 @@ pub fn completion_step<B: Backend + ?Sized>(
         root = action::after_its_empty_block(format, root);
     }
     let grammar_str = grammar.render(&root);
-    session.record_input("grammar", &grammar_str)?;
+    log.grammar = Some(grammar_str.clone());
     let mut stream = TextStream::new(&format.call.begin_before);
     let cell = RefCell::new(&mut *sink);
     let generated = backend.generate_reading(
@@ -175,9 +205,19 @@ pub fn completion_step<B: Backend + ?Sized>(
 /// malformed one is told back for the agent's stir.
 pub fn structured_step<B: Backend + ?Sized>(
     backend: &B,
-    session: &mut Session,
     input: &StepInput<'_>,
     sink: &mut dyn Sink,
+) -> Step {
+    let mut log = StepLog::default();
+    let stepped = structured(backend, input, sink, &mut log);
+    Step { stepped, log }
+}
+
+fn structured<B: Backend + ?Sized>(
+    backend: &B,
+    input: &StepInput<'_>,
+    sink: &mut dyn Sink,
+    log: &mut StepLog,
 ) -> Result<Stepped, Error> {
     let function = input.function;
     let think = input.think;
@@ -258,7 +298,7 @@ pub fn structured_step<B: Backend + ?Sized>(
                 .map(str::trim_end)
                 .filter(|thinking| !thinking.is_empty())
             {
-                session.append(Event::Thinking(thinking.into()))?;
+                log.thinking = Some(thinking.into());
             }
             Ok(Stepped::Action(action))
         }

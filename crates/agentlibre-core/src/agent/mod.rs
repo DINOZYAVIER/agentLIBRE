@@ -8,8 +8,8 @@ use std::path::Path;
 use crate::action::Action;
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Stepped, Stop,
-    StepInput, ToolCall,
+    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Step, StepInput,
+    StepLog, Stepped, Stop, ToolCall,
 };
 use crate::error::Error;
 use crate::function::Function;
@@ -295,8 +295,7 @@ impl Agent<'_> {
                 reasoning,
                 format,
             };
-            let stepped = self.backend.step(
-                self.session,
+            let Step { stepped, log } = self.backend.step(
                 &StepInput {
                     function,
                     actions: &actions,
@@ -307,8 +306,11 @@ impl Agent<'_> {
                     context: self.context,
                 },
                 report,
-            )?;
-            match stepped {
+            );
+            // Only the agent writes the session (AGL-121, D21): the step's
+            // log first, also when the step failed after it (D50).
+            self.write_step_log(log)?;
+            match stepped? {
                 Stepped::Action(action) => return self.run_action(machine, report, action),
                 Stepped::CutOff(cut) => return self.cut_off(machine, report, cut),
                 Stepped::Malformed(detail) => {
@@ -331,6 +333,18 @@ impl Agent<'_> {
                 }
             }
         }
+    }
+
+    /// The thinking and the grammar of a step, in the order they came
+    /// (AGL-121, D21).
+    fn write_step_log(&mut self, log: StepLog) -> Result<(), Error> {
+        if let Some(thinking) = log.thinking {
+            self.session.append(Event::Thinking(thinking))?;
+        }
+        if let Some(grammar) = log.grammar {
+            self.session.record_input("grammar", &grammar)?;
+        }
+        Ok(())
     }
 
     /// The action of the step ran out of tokens (D154): it is recorded and

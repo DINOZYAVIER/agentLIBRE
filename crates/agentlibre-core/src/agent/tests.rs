@@ -100,14 +100,13 @@ impl Backend for Script {
 
     fn step(
         &self,
-        session: &mut Session,
         input: &crate::backend::StepInput<'_>,
         sink: &mut dyn Sink,
-    ) -> Result<crate::backend::Stepped, Error> {
+    ) -> crate::backend::Step {
         if self.stirred.get() {
-            crate::backend::structured_step(self, session, input, sink)
+            crate::backend::structured_step(self, input, sink)
         } else {
-            crate::backend::completion_step(self, session, input, sink)
+            crate::backend::completion_step(self, input, sink)
         }
     }
 
@@ -191,6 +190,14 @@ impl Backend for Script {
             .borrow_mut()
             .pop_front()
             .expect("a scripted output");
+        // A scripted request that the server does not answer.
+        if generated.text == "!unreachable" {
+            return Err(Error::ServerUnreachable {
+                kind: crate::settings::ServerKind::Llama,
+                url: "http://127.0.0.1:18080".into(),
+                detail: "connection refused".into(),
+            });
+        }
         if let Some(thinking) = &generated.thinking {
             for piece in thinking.split_inclusive(' ') {
                 on_thinking(piece);
@@ -599,6 +606,24 @@ fn kinds(session: &Session) -> Vec<&'static str> {
             Event::System { .. } => "system",
         })
         .collect()
+}
+
+#[test]
+fn a_failed_action_request_after_a_thinking_keeps_the_thinking_and_the_grammar() {
+    // AGL-121, D21, D50: the agent writes the step's log, also when the
+    // action's request fails; the file is what it was when the backend
+    // wrote it.
+    let dir = TempDir::new();
+    let minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
+    let script = Script::new(&[("I will list files", THOUGHT), ("!unreachable", Stop::End)]);
+    let (end, _, session) = run(&minimal, &script, &dir, "Say hello");
+    assert!(matches!(end, Err(Error::ServerUnreachable { .. })), "{end:?}");
+    assert_eq!(kinds(&session), ["user", "state", "thinking", "stop"]);
+    let file = fs::read_to_string(session.file_path()).unwrap();
+    let thinking = file.find("I will list files").unwrap();
+    let grammar = file.find("\"kind\":\"grammar\"").expect("the grammar's line");
+    let stop = file.rfind("server_error").expect("the stop's line");
+    assert!(thinking < grammar && grammar < stop, "{file}");
 }
 
 #[test]

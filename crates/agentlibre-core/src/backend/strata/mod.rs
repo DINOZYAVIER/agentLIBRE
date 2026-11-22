@@ -10,7 +10,7 @@ use serde_json::{Value as Json, json};
 
 use super::llama::{messages_json, tool_json};
 use super::http::Http;
-use super::{StepInput, Stepped, structured_step};
+use super::{Step, StepInput, structured_step};
 use super::{
     Prefill, PromptProgress, add_sampling,
     Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
@@ -20,7 +20,6 @@ use crate::action::{Kind, Value};
 use crate::agent::Sink;
 use crate::error::Error;
 use crate::format::Format;
-use crate::session::Session;
 use crate::settings::ServerKind;
 use crate::tools::Spec;
 
@@ -67,13 +66,8 @@ impl Backend for Strata {
         true
     }
 
-    fn step(
-        &self,
-        session: &mut Session,
-        input: &StepInput<'_>,
-        sink: &mut dyn Sink,
-    ) -> Result<Stepped, Error> {
-        structured_step(self, session, input, sink)
+    fn step(&self, input: &StepInput<'_>, sink: &mut dyn Sink) -> Step {
+        structured_step(self, input, sink)
     }
 
     fn health(&self) -> Option<u16> {

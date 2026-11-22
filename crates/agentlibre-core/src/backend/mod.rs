@@ -8,13 +8,12 @@ mod step;
 pub mod strata;
 
 pub use step::{completion_step, structured_step};
-pub use step::{StepInput, Stepped};
+pub use step::{Step, StepInput, StepLog, Stepped};
 
 use crate::action::Value;
 use crate::agent::Sink;
 use crate::error::Error;
 use crate::function::Sampling;
-use crate::session::Session;
 use crate::tools::Spec;
 
 /// The text that opens every message of the runtime to the model
@@ -350,15 +349,11 @@ pub trait Backend {
     /// the prompt, the state's actions and the budgets of `input`, giving
     /// the action, the cut-off or what was wrong with the output. The way of
     /// a completion server by default: the thinking to its mark, then the
-    /// action under the grammar. The thinking and the inputs of the step are
-    /// logged in `session`, the pieces go to `sink`.
-    fn step(
-        &self,
-        session: &mut Session,
-        input: &StepInput<'_>,
-        sink: &mut dyn Sink,
-    ) -> Result<Stepped, Error> {
-        completion_step(self, session, input, sink)
+    /// action under the grammar. The pieces go to `sink`; the thinking and
+    /// the grammar come back in the step's log, for the agent to write
+    /// (AGL-121, D21, D50).
+    fn step(&self, input: &StepInput<'_>, sink: &mut dyn Sink) -> Step {
+        completion_step(self, input, sink)
     }
 }
 
