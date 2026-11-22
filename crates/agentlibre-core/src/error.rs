@@ -398,6 +398,19 @@ pub enum Error {
     Remove { path: PathBuf, source: io::Error },
 }
 
+impl From<agentlibre_client::Error> for Error {
+    /// A client's error as agl's: the daemon, its words, its end
+    /// (AGL-121, D29). The clients' crate has no i18n; agl's words are here.
+    fn from(source: agentlibre_client::Error) -> Error {
+        match source {
+            agentlibre_client::Error::NoRuntime => Error::DaemonNoRuntime,
+            agentlibre_client::Error::Daemon { detail } => Error::Daemon { detail },
+            agentlibre_client::Error::Said { text } => Error::Said { text },
+            agentlibre_client::Error::Gone => Error::PlaneGone,
+        }
+    }
+}
+
 /// What the credential policy of `[search]` finds wrong with a file
 /// (AGL-019, D4).
 #[derive(Debug, PartialEq, Eq)]

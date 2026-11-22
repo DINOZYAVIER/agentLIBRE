@@ -44,9 +44,11 @@ mod flow;
 mod servers;
 mod session;
 
-/// The daemon's socket of `runtime`, agentLIBRE's runtime directory (D7).
+/// The daemon's socket of `runtime`, agentLIBRE's runtime directory (D7):
+/// the clients' crate names it, so client and server name the same file
+/// (AGL-121, D29).
 pub fn socket_path(runtime: &Path) -> PathBuf {
-    runtime.join(proto::SOCKET)
+    agentlibre_client::socket_path(runtime)
 }
 
 /// Serves the planes on the socket until the process ends.

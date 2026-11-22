@@ -1,9 +1,16 @@
-//! The conversation as the chat shows it (AGL-073 D9): the rows a session's
-//! reports, ends and past make. Plain data: the window draws it.
+//! The fold of what a session reports into a conversation (AGL-073 D9;
+//! AGL-121, D29): the rows its reports, ends and past make. Plain data:
+//! every surface that shows a conversation draws these rows, and so far the
+//! chat draws them.
+//!
+//! The strings of the rows are the chat's English ones; their i18n is a
+//! later piece of D53, which splits the messages too.
 
 use agentlibre_proto::{
     Done, Event, Outcome, PhaseEvent, Report, Sent, StopReason, ToolCall, TurnEnd,
 };
+
+use crate::reason_name;
 
 /// The most of a tool's argument its line shows.
 const ARGUMENT_CHARS: usize = 80;
@@ -227,18 +234,6 @@ impl Conversation {
 }
 
 const CUT_OFF: &str = "a generation was cut off at its token budget";
-
-/// A stop's reason as the session's file names it (`step_limit`…).
-fn reason_name(reason: StopReason) -> String {
-    match reason {
-        StopReason::StepLimit => "step_limit",
-        StopReason::ContextFull => "context_full",
-        StopReason::ServerError => "server_error",
-        StopReason::Interrupted => "interrupted",
-        StopReason::StirLimit => "stir_limit",
-    }
-    .to_owned()
-}
 
 /// A call's line (AGL-121, D52): its tool and the summary the wire
 /// carries, cut to the row's measure.

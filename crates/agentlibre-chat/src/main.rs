@@ -5,15 +5,12 @@
 //! Shift+Enter breaks a line, Escape or Stop stops the turn; a plane's yes
 //! or no question has two buttons (D11).
 
-mod daemon;
-mod model;
-
 use std::cell::RefCell;
-use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use agentlibre_proto::{self as proto, Ask, Phase, Read, Reply, Report, Request, Sent};
+use agentlibre_client::{Client, Conversation, Row, Start, Step, Who};
+use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
 use katarsa_app::App;
 use katarsa_reactive::signal;
 use katarsa_ui::reactive::{Ui, prop};
@@ -21,7 +18,6 @@ use katarsa_ui::retained::{Sty, Tone};
 use katarsa_ui::style::{Keys, Sheet, Style, StyleBuilder};
 use katarsa_wayland::WindowConfig;
 
-use model::{Conversation, Who};
 
 const HELP_EN: &str = "\
 Usage: agl-chat [--resume <id|name|last>] [--plane <name>] [--function <name>]
@@ -109,8 +105,8 @@ thread_local! {
 }
 
 /// Sends `request` to the daemon; a daemon gone is told by the reader.
-fn send(out: &Rc<RefCell<UnixStream>>, request: &Request) {
-    let _ = proto::send(&mut *out.borrow_mut(), request);
+fn send(client: &Client, request: &Request) {
+    let _ = client.send(request);
 }
 
 fn main() -> ExitCode {
@@ -139,8 +135,10 @@ fn main() -> ExitCode {
 
 fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let dir = std::env::current_dir()?;
-    let (out, mut lines) = daemon::connect(lang)?;
-    let out = Rc::new(RefCell::new(out));
+    // The daemon's socket and its start are the clients' crate's (AGL-121, D29).
+    let socket = agentlibre_client::socket_of_env(|name| std::env::var_os(name))
+        .ok_or("XDG_RUNTIME_DIR is not set, so the daemon has no place for its socket")?;
+    let out = Arc::new(Client::connect(&socket, true, lang, Start::OnPath)?);
     let conversation = signal(Conversation::default());
     let session = signal(None::<String>);
     let busy = signal(false);
@@ -149,7 +147,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
 
     let mut app = App::new("agl-chat")?;
     {
-        let out = Rc::clone(&out);
+        let out = Arc::clone(&out);
         let on_reply = move |reply: Reply| {
             let ours = |of: &str| session.with(|session| session.as_deref() == Some(of));
             match reply {
@@ -209,6 +207,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
     }
     // The daemon's lines, read apart and handed to the loop.
     let handle = app.handle();
+    let client = Arc::clone(&out);
     std::thread::spawn(move || {
         let post = |reply: Reply| {
             handle.post(move || {
@@ -219,7 +218,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
                 });
             })
         };
-        while let Ok(Read::Message(reply)) = lines.read::<Reply>() {
+        while let Ok(reply) = client.next() {
             if !post(reply) {
                 return;
             }
@@ -257,7 +256,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
 
 /// The window's UI.
 fn build(
-    out: &Rc<RefCell<UnixStream>>,
+    out: &Arc<Client>,
     conversation: katarsa_reactive::Signal<Conversation>,
     session: katarsa_reactive::Signal<Option<String>>,
     busy: katarsa_reactive::Signal<bool>,
@@ -268,7 +267,7 @@ fn build(
     ui.styles(styles()).expect("the chat's styles work out");
     ui.set_root_style(Sty::column().gap(10.0).pad(14.0));
     let stop = {
-        let out = Rc::clone(out);
+        let out = Arc::clone(out);
         move || {
             if busy.get()
                 && let Some(id) = session.get()
@@ -279,7 +278,7 @@ fn build(
     };
     ui.on_cancel(stop.clone());
     let answer = {
-        let out = Rc::clone(out);
+        let out = Arc::clone(out);
         move |yes: bool| {
             if let Some((id, _)) = question.get() {
                 let answer = Some(if yes { "yes" } else { "no" }.to_owned());
@@ -295,7 +294,7 @@ fn build(
         }
     };
     let submit = {
-        let out = Rc::clone(out);
+        let out = Arc::clone(out);
         move |text: String| {
             let text = text.trim().to_owned();
             let Some(id) = session.get() else { return };
@@ -439,7 +438,7 @@ fn steps(
             conversation
                 .rows
                 .get(at)
-                .map(model::Row::header)
+                .map(Row::header)
                 .unwrap_or_default()
         })
     });
@@ -454,7 +453,7 @@ fn steps(
             calls,
             |call| *call,
             move |cx, &call| {
-                let step = move |read: fn(&model::Step) -> String| {
+                let step = move |read: fn(&Step) -> String| {
                     conversation.with(|conversation| {
                         conversation
                             .rows

@@ -28,6 +28,15 @@ impl Lang {
         }
     }
 
+    /// The code of `language`, as the daemon's `hello` and `agl-notify`
+    /// take it (AGL-121, D23, D29).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Uk => "uk",
+        }
+    }
+
     /// The language of the first non-empty `LC_ALL`, `LC_MESSAGES` or
     /// `LANG`, or English when that language is not supported.
     pub fn from_locale(env: impl Fn(&str) -> Option<OsString>) -> Lang {

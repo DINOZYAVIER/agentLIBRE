@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agentlibre-bridge", "crates/agentlibre-core", "crates/agentlibre-notify", "crates/agentlibre-proto", "crates/agentlibre-terminal"]
+members = ["crates/agentlibre-bridge", "crates/agentlibre-client", "crates/agentlibre-core", "crates/agentlibre-notify", "crates/agentlibre-proto", "crates/agentlibre-terminal"]
 # The chat is built apart, in katarsa-shell's nix-shell (AGL-073 D6, D8).
 exclude = ["crates/agentlibre-chat"]
 resolver = "3"

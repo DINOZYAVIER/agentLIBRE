@@ -32,7 +32,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agentlibre_core::client::Client;
+use agentlibre_client::{Client, Start, reason_name};
 use agentlibre_proto::{
     Event, Phase, PhaseEvent, Reply, Report, Request, Sent, SessionInfo, StopReason,
 };
@@ -82,9 +82,10 @@ enum Input {
 
 /// Runs the notifier until the session bus goes.
 pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
-    if paths.runtime.is_none() {
-        return Err(Error::DaemonNoRuntime);
-    }
+    // The socket and the connection are the clients' crate's (AGL-121, D29).
+    let socket = agentlibre_client::socket_path(
+        paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?,
+    );
     let failed = |error: zbus::Error| Error::Notify {
         detail: error.to_string(),
     };
@@ -101,7 +102,7 @@ pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
         if client.is_none() && tried.is_none_or(|at| at.elapsed() >= RETRY) {
             tried = Some(Instant::now());
             // The daemon is not started from here: no session, nothing to tell.
-            if let Ok(connected) = Client::connect(paths, false, lang, false) {
+            if let Ok(connected) = Client::connect(&socket, false, lang.code(), Start::No) {
                 let connected = Arc::new(connected);
                 let reader = Arc::clone(&connected);
                 let to = inputs.clone();
@@ -348,14 +349,6 @@ impl Records {
             _ => Vec::new(),
         }
     }
-}
-
-/// A stop's reason as the session's file names it (`step_limit`…).
-fn reason_name(reason: StopReason) -> String {
-    serde_json::to_value(reason)
-        .ok()
-        .and_then(|json| json.as_str().map(str::to_owned))
-        .unwrap_or_default()
 }
 
 /// `text` cut to `chars` characters, an ellipsis ending what was cut.

@@ -1,199 +1,34 @@
-//! A client of the daemon (AGL-076, D5): its connection, the daemon started
-//! when none answers (D6), the requests and the replies, and what the
-//! daemon sends unasked — what a session does and a plane's questions.
+//! The core's side of a client of the daemon (AGL-076, D5, D7): the
+//! connection itself is the clients' crate's (AGL-121, D29), and what is
+//! here is only the part that knows agl's paths, its language and its
+//! plane: `connect` with a `Paths`, and `Remote`, a session's plane held
+//! over the daemon's protocol.
 
-use std::io::BufReader;
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
-use std::time::{Duration, Instant};
 
-use agentlibre_proto::{self as proto, Lines, Read, Reply, Request};
+use agentlibre_client::Client;
+use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::error::Error;
 use crate::i18n::Lang;
 use crate::paths::Paths;
 
-/// How long a daemon that was started may take to answer.
-const START_WAIT: Duration = Duration::from_secs(10);
-
-/// The unit of the daemon, asked for its start where it is installed
-/// (AGL-120, D4): the name a home module installs it under, so a unit and
-/// a forked process no longer race for the socket.
-pub const DAEMON_UNIT: &str = "agl-daemon";
-
-pub struct Client {
-    out: Mutex<UnixStream>,
-    from: Mutex<Receiver<Reply>>,
-    /// The daemon's pid, from its `hello`.
-    pub pid: u32,
-}
-
-impl Client {
-    /// Connects to the daemon of `paths`, which is started when none
-    /// answers and `start` says so (D6); `human` says whether a human
-    /// answers the planes' questions (D11).
-    pub fn connect(paths: &Paths, human: bool, lang: Lang, start: bool) -> Result<Client, Error> {
-        let runtime = paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?;
-        let socket = crate::daemon::socket_path(runtime);
-        let stream = match UnixStream::connect(&socket) {
-            Ok(stream) => stream,
-            Err(_) if start => start_daemon(&socket)?,
-            Err(source) => {
-                return Err(Error::Daemon {
-                    detail: format!("{}: {source}", socket.display()),
-                });
-            }
-        };
-        Client::of(stream, human, lang)
-    }
-
-    /// A client on `stream`, its `hello` said.
-    pub fn of(stream: UnixStream, human: bool, lang: Lang) -> Result<Client, Error> {
-        let fail = |source: std::io::Error| Error::Daemon {
-            detail: source.to_string(),
-        };
-        let reader = stream.try_clone().map_err(fail)?;
-        let (to, from) = mpsc::channel();
-        thread::spawn(move || {
-            let mut lines = Lines::new(BufReader::new(reader));
-            while let Ok(Read::Message(reply)) = lines.read::<Reply>() {
-                if to.send(reply).is_err() {
-                    break;
-                }
-            }
-        });
-        let client = Client {
-            out: Mutex::new(stream),
-            from: Mutex::new(from),
-            pid: 0,
-        };
-        let code = match lang {
-            Lang::En => "en",
-            Lang::Uk => "uk",
-        };
-        match client.ask(
-            &Request::Hello {
-                version: proto::VERSION,
-                human,
-                lang: code.into(),
-                pid: std::process::id(),
-            },
-            &mut |_| {},
-        )? {
-            Reply::Hello { pid, .. } => Ok(Client { pid, ..client }),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    /// Sends `request` and waits for its reply; what the daemon sends
-    /// meanwhile unasked goes to `each`. A refusal is an error.
-    pub fn ask(&self, request: &Request, each: &mut dyn FnMut(Reply)) -> Result<Reply, Error> {
-        self.send(request)?;
-        loop {
-            match self.next()? {
-                Reply::Refused { error } => return Err(Error::Said { text: error }),
-                reply if is_unasked(&reply) => each(reply),
-                reply => return Ok(reply),
-            }
-        }
-    }
-
-    /// Sends `request`; its reply comes as the others.
-    pub fn send(&self, request: &Request) -> Result<(), Error> {
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        proto::send(&mut *out, request).map_err(|source| Error::Daemon {
-            detail: source.to_string(),
-        })
-    }
-
-    /// What the daemon sent that waits, if anything.
-    pub fn try_next(&self) -> Option<Reply> {
-        let from = self.from.lock().unwrap_or_else(|e| e.into_inner());
-        from.try_recv().ok()
-    }
-
-    /// What the daemon sends next.
-    pub fn next(&self) -> Result<Reply, Error> {
-        let from = self.from.lock().unwrap_or_else(|e| e.into_inner());
-        from.recv().map_err(|_| Error::PlaneGone)
-    }
-}
-
-/// What the daemon sends without a request: what a session does, a plane's
-/// question.
-pub fn is_unasked(reply: &Reply) -> bool {
-    matches!(reply, Reply::Sent { .. } | Reply::Done { .. } | Reply::Question { .. })
-}
-
-fn unexpected(reply: Reply) -> Error {
-    Error::Daemon {
-        detail: format!("an unexpected reply: {reply:?}"),
-    }
-}
-
-/// Starts the daemon apart from this process and waits until its socket
-/// answers (D6). Where the `agl-daemon` unit is installed, systemd owns
-/// that one: the client asks the user manager for it and forks nothing
-/// (AGL-120, D4), so a unit and a terminal process no longer race for the
-/// socket; where there is no such unit, `agl daemon` still forks.
-fn start_daemon(socket: &Path) -> Result<UnixStream, Error> {
-    let fail = |detail: String| Error::Daemon { detail };
-    if unit_installed_of(DAEMON_UNIT) {
-        let _ = Command::new("systemctl")
-            .args(["--user", "start", DAEMON_UNIT])
-            .stdin(Stdio::null())
-            .output();
+/// Connects to the daemon of `paths`, which is started when none answers
+/// and `start` says so (D6); `human` says whether a human answers the
+/// planes' questions (D11).
+pub fn connect(paths: &Paths, human: bool, lang: Lang, start: bool) -> Result<Client, Error> {
+    let runtime = paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?;
+    let start = if start {
+        agentlibre_client::Start::ThisExe
     } else {
-        let program = std::env::current_exe().map_err(|error| fail(error.to_string()))?;
-        let mut command = Command::new(program);
-        command
-            .arg("daemon")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Its own session: the terminal's Ctrl-C and its end do not reach it.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        command.spawn().map_err(|error| fail(error.to_string()))?;
-    }
-    let since = Instant::now();
-    loop {
-        if let Ok(stream) = UnixStream::connect(socket) {
-            return Ok(stream);
-        }
-        if since.elapsed() > START_WAIT {
-            return Err(fail(format!("{} does not answer", socket.display())));
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Whether `systemctl --user cat {unit}` says the unit is there: the `# /`
-/// marker before a unit file, or the `###` word for a masked one. No
-/// manager, no such unit, no answer of that kind: `false`, and the client
-/// forks as before.
-fn unit_installed(output: &str) -> bool {
-    output.lines().any(|line| line.starts_with("# /") || line.starts_with("###"))
-}
-
-/// Whether the daemon's unit is installed for this user's manager
-/// (AGL-120, D4).
-fn unit_installed_of(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["--user", "cat", unit])
-        .stdin(Stdio::null())
-        .output()
-        .map(|output| unit_installed(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or(false)
+        agentlibre_client::Start::No
+    };
+    Ok(Client::connect(
+        &crate::daemon::socket_path(runtime),
+        human,
+        lang.code(),
+        start,
+    )?)
 }
 
 /// Who answers a plane's question: its kind and text in, the answer out.
@@ -325,7 +160,7 @@ impl Remote {
         }
         // The command's own reply first; what the plane sends follows.
         let mut each_unasked = |reply: Reply| self.unasked(&session, reply, each);
-        if let Err(error) = self.client.ask(&request, &mut each_unasked) {
+        if let Err(error) = self.client.ask(&request, &mut each_unasked).map_err(Error::from) {
             return Some(failed(error));
         }
         loop {
@@ -388,22 +223,5 @@ pub fn done_of(done: proto::Done) -> crate::plane::Done {
             .map_err(|text| Error::Said { text })
         }),
         session: wire::view_of(done.session),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unit_installed;
-
-    /// The marker `systemctl --user cat` prints before a unit's text, and
-    /// its absence for a unit that has no files (AGL-120, D4).
-    #[test]
-    fn an_installed_unit_is_named_by_its_file() {
-        assert!(unit_installed("# /nix/store/abcd-agl-daemon.service/agl-daemon.service\n[Unit]\n"));
-        // A masked unit is installed too: the marker is a link, not a path.
-        assert!(unit_installed("### Unit agl-daemon.service is masked. ###\n"));
-        // No manager, or no unit: `cat` prints nothing to stdout.
-        assert!(!unit_installed(""));
-        assert!(!unit_installed("No files found for agl-daemon.service.\n"));
     }
 }

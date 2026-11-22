@@ -30,9 +30,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentlibre-client"
+version = "0.0.2"
+dependencies = [
+ "agentlibre-proto",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "agentlibre-core"
 version = "0.0.2"
 dependencies = [
+ "agentlibre-client",
  "agentlibre-proto",
  "base64",
  "hex",
@@ -46,6 +56,7 @@ dependencies = [
 name = "agentlibre-notify"
 version = "0.0.2"
 dependencies = [
+ "agentlibre-client",
  "agentlibre-core",
  "agentlibre-proto",
  "serde_json",

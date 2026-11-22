@@ -15,10 +15,7 @@ pub fn run(lang: Lang) -> Result<ExitCode, Error> {
             source: io::Error::other("no directory beside this executable"),
         });
     };
-    let code = match lang {
-        Lang::En => "en",
-        Lang::Uk => "uk",
-    };
+    let code = lang.code();
     let status = Command::new(dir.join("agl-notify"))
         .arg("--lang")
         .arg(code)

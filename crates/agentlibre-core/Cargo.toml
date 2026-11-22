@@ -11,6 +11,7 @@ description = "agentLIBRE core: the agent, the Functions, the backends, the forg
 testutil = []
 
 [dependencies]
+agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-proto = { path = "../agentlibre-proto" }
 base64 = "0.23"
 hex = "0.4"

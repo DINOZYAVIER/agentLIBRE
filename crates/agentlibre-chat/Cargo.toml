@@ -16,6 +16,7 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
+agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-proto = { path = "../agentlibre-proto" }
 katarsa-app = { path = "../../../katarsa-shell/crates/katarsa-app" }
 katarsa-reactive = { path = "../../../katarsa-shell/crates/katarsa-reactive" }

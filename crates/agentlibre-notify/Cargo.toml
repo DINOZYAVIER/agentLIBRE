@@ -12,6 +12,7 @@ name = "agl-notify"
 path = "src/bin/agl-notify.rs"
 
 [dependencies]
+agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-core = { path = "../agentlibre-core" }
 agentlibre-proto = { path = "../agentlibre-proto" }
 serde_json = "1"

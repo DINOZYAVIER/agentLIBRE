@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use agentlibre_core::client::{Client, Remote};
+use agentlibre_core::client::{self, Remote};
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
 use crate::backend::ReasoningLevel;
@@ -34,7 +34,7 @@ pub struct Opening<'a> {
 /// plain terminal when there is one (D11).
 pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>, proto::Opened), Error> {
     let human = crate::tty::is_interactive();
-    let client = Client::connect(paths, human, lang, true)?;
+    let client = client::connect(paths, human, lang, true)?;
     let request = Request::Open(proto::Open {
         dir: opening.cwd.to_string_lossy().into_owned(),
         plane: opening.plane.map(str::to_owned),
@@ -121,7 +121,7 @@ impl Dictation for RemoteVoice {
         _prompt: Option<&str>,
         _say: &mut dyn FnMut(&str),
     ) -> Result<String, Error> {
-        let client = Client::connect(&self.paths, false, self.lang, true)?;
+        let client = client::connect(&self.paths, false, self.lang, true)?;
         let request = Request::Transcribe {
             dir: self.dir.clone(),
             plane: self.plane.clone(),
