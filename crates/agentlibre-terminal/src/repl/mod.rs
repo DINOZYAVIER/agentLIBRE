@@ -2,6 +2,7 @@
 //! the terminal while the turn runs, or lines on stdin without a terminal.
 
 mod browser;
+mod card;
 mod dock;
 mod editor;
 mod inspect;
@@ -26,7 +27,8 @@ use dock::{Dock, SendMode};
 use editor::{Editor, MenuItem, Outcome, save_history};
 use voice::{DraftEngine, Sender, VoiceInput};
 use term::{Key, Parser, RawGuard};
-use transcript::{Presenter, Screen, notice_lines, user_lines};
+use card::{notice_lines, user_lines};
+use transcript::{Presenter, Screen};
 
 use crate::Setup;
 use crate::agent::{Report, Sink, TurnEnd};

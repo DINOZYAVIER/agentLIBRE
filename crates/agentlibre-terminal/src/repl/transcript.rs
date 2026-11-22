@@ -6,11 +6,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::card::{self, Fold, Render, block_lines, notice_block_lines, summary, user_lines};
 use super::dock::grouped;
-use super::markdown;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use crate::records::{self, Record};
-use super::text::{StreamWrap, clean, hard_wrap, width, wrap_line};
+use super::text::StreamWrap;
 use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use crate::i18n::{Lang, m, repl as texts};
@@ -266,57 +266,31 @@ impl Presenter {
     /// the label in the tool's color, and the thinking's rows under the
     /// gutter, muted: all of them, or its head and its tail (AGL-092, D2).
     /// The time is in the step's rule, the full text in the inspect mode.
+    /// AGL-121, D14: the drawing is `card::thinking`'s, asked at the
+    /// transcript's level of detail and with no focus.
     pub fn show_thinking(&self, thinking: &str) {
-        let lines = self.thinking_block(thinking);
+        let lines = card::thinking(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            thinking,
+            self.thinking_detail,
+            false,
+        );
         if !lines.is_empty() {
             self.screen.print(&lines);
         }
     }
 
-    /// The thinking's block at the transcript's level (AGL-092, D2): all of
-    /// it, or its head and its tail; nothing at all when the level is `off`
-    /// or the thinking has no text (AGL-099, D2). AGL-105, D1: the block is
-    /// gray, its own and the Markdown's accents alike; only the inspect
-    /// mode's focus gives them back.
-    fn thinking_block(&self, thinking: &str) -> Vec<String> {
-        if self.thinking_detail == Detail::Off {
-            return Vec::new();
-        }
-        block_lines(
-            &self.theme.gray(),
-            self.lang,
-            self.screen.columns(),
-            tr!(self.lang, m::THINKING),
-            thinking,
-            Role::Thinking,
-            if self.thinking_detail == Detail::Full {
-                Fold::Whole
-            } else {
-                Fold::Folded
-            },
-            Render::Markdown,
-        )
-    }
-
     /// The text before a call (D9): its first three lines; the rest is in
     /// the inspect mode.
     pub fn show_text(&self, text: &str) {
-        self.screen.print(&self.text_block(text));
-    }
-
-    /// The block of the text before a call (D9): its first three lines,
-    /// as Markdown, with `…` when more. It stands inside its block, above
-    /// the card, so it ends with no blank row (AGL-085, D1).
-    fn text_block(&self, text: &str) -> Vec<String> {
-        let mut lines = markdown::render(text.trim(), self.screen.columns(), &self.theme);
-        if lines.len() > 3 {
-            lines.truncate(3);
-            lines
-                .last_mut()
-                .expect("three lines")
-                .push_str(&self.theme.paint(Role::Muted, "…"));
-        }
-        lines
+        self.screen.print(&card::text(
+            &self.theme,
+            self.screen.columns(),
+            text,
+            false,
+        ));
     }
 
     /// The answer's block, with the row of its time when that is known.
@@ -401,14 +375,18 @@ impl Presenter {
     // Lines.
 
     fn answer_lines(&self, text: &str, time: Option<String>) -> Vec<String> {
-        let columns = self.screen.columns();
-        let mut lines = Vec::new();
         // AGL-097: the answer is set off by a blank row before it — it is
         // the main thing, and it takes no gutter. The dock drops this row
         // when the block before it already ended with one.
-        lines.push(String::new());
-        lines.extend(markdown::render(text.trim(), columns, &self.theme));
-        lines.extend(time);
+        let mut lines = vec![String::new()];
+        lines.extend(card::answer(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            text,
+            time,
+            false,
+        ));
         lines.push(String::new());
         lines
     }
@@ -456,9 +434,9 @@ impl Presenter {
     }
 
     /// The compact card of a finished step (AGL-066, D1, D2, D6; AGL-080,
-    /// D1; AGL-095, D2, D5): the tool's name and status, its input at the
-    /// level of `repl.tool`, the result's block at the tool's own level, and
-    /// the phases' times.
+    /// D1; AGL-095, D2, D5; AGL-121, D14): `card::tool`'s drawing at the
+    /// settings' levels of detail, with the phases' row under it and the
+    /// blank that ends the block.
     fn card(
         &self,
         call: &ToolCall,
@@ -466,59 +444,22 @@ impl Presenter {
         hint: &str,
         items: &[String],
     ) -> Vec<String> {
-        let columns = self.screen.columns();
-        let (status_text, status_role) = records::status(result.map(|result| result.outcome));
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "{}  {}",
-            self.theme.paint(
-                Role::Tool,
-                &format!("{} {}", tr!(self.lang, m::TOOL_LABEL), call.name)
-            ),
-            self.theme.paint(status_role, &status_text)
-        ));
-        // AGL-068: the row under the gutter says what the call did — the
-        // command, the file, the query, or the action of a forge or a
-        // memory call — in the muted color, as the thinking's (D26).
-        // AGL-095, D5: `off` says nothing of it, `flexible` its one line,
-        // `full` the whole of what was sent.
-        let input = match self.tool_detail {
-            Detail::Off => String::new(),
-            Detail::Flexible => hint.to_owned(),
-            Detail::Full => records::call_input(call),
-        };
-        let inner = columns.saturating_sub(BODY_PREFIX).max(1);
-        let mut rows = Vec::new();
-        for line in clean(&input).lines() {
-            for row in hard_wrap(line, inner) {
-                rows.push(self.theme.paint(Role::Muted, &row));
-            }
-        }
-        lines.extend(elbow_rows(&self.theme, rows));
-        // AGL-095, D2: the tool's answer, at the tool's own level, folded by
-        // the thinking's rule; `off` keeps it out of the transcript.
-        if self.result_detail != Detail::Off {
-            let content = result
-                .map(|result| result.content.as_str())
-                .unwrap_or_default();
-            lines.extend(block_lines(
-                &self.theme,
-                self.lang,
-                columns,
-                tr!(self.lang, m::RESULT_LABEL),
-                &clean(content),
-                Role::Muted,
-                if self.result_detail == Detail::Full {
-                    Fold::Whole
-                } else {
-                    Fold::Folded
-                },
-                Render::Plain,
-            ));
-        }
+        let mut lines = card::tool(
+            &self.theme,
+            self.lang,
+            self.screen.columns(),
+            call,
+            result,
+            hint,
+            self.tool_detail,
+            self.result_detail,
+            false,
+        );
         // D27, AGL-080 and AGL-087 D1: the phases in the tool's color, with
         // no rule; with no phase to name the row says nothing, and none.
         if !items.is_empty() {
+            let (status_text, status_role) =
+                records::status(result.map(|result| result.outcome));
             lines.push(self.summary(
                 Some((status_text.as_str(), status_role)),
                 items,
@@ -698,7 +639,7 @@ impl Presenter {
 
     fn text(&mut self, text: &str) {
         self.generation_done();
-        self.replace_streamed(self.text_block(text));
+        self.replace_streamed(card::text(&self.theme, self.screen.columns(), text, false));
     }
 
     fn answer(&mut self, text: &str) {
@@ -869,273 +810,6 @@ fn window_speed(window: &VecDeque<Instant>) -> Option<f64> {
     (span > 0.0).then(|| window.len() as f64 / span)
 }
 
-/// An event's notice as a block (AGL-099, D1): the label in the tool's
-/// color, the rest under the elbow — the look of the THINKING and RESULT
-/// blocks; a label with no body prints alone, with no placeholder. What
-/// carries no label of its own — the server's line, a command's answer,
-/// an error — hangs under the elbow too (AGL-106, D2), in its own role.
-pub fn notice_block_lines(
-    theme: &Theme,
-    lang: Lang,
-    columns: usize,
-    text: &str,
-    role: Role,
-) -> Vec<String> {
-    let Some((label, body)) = crate::status::notice_parts(text, lang) else {
-        let inner = columns.saturating_sub(BODY_PREFIX).max(1);
-        let rows = text
-            .lines()
-            .flat_map(|line| hard_wrap(&clean(line), inner))
-            .map(|row| theme.paint(role, &row))
-            .collect();
-        return elbow_rows(theme, rows);
-    };
-    let mut lines = vec![theme.paint(Role::Tool, &label)];
-    if body.trim().is_empty() {
-        return lines;
-    }
-    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
-    let mut rows = Vec::new();
-    for line in clean(&body).lines() {
-        for row in hard_wrap(line, inner) {
-            rows.push(theme.paint(role, &row));
-        }
-    }
-    lines.extend(elbow_rows(theme, rows));
-    lines
-}
-
-pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Vec<String> {
-    text.lines()
-        .flat_map(|line| hard_wrap(&clean(line), columns))
-        .map(|line| theme.paint(role, &line))
-        .collect()
-}
-
-/// A step's row: its status and its items over ` · `, with no rule around
-/// them (AGL-066, D26; AGL-080, D1). A row longer than the width wraps as
-/// the terminal lets it (AGL-045).
-pub fn summary(
-    theme: &Theme,
-    status: Option<(&str, Role)>,
-    items: &[String],
-    item_role: Role,
-) -> String {
-    let mut parts: Vec<(String, Role)> = Vec::new();
-    if let Some((text, status_role)) = status {
-        parts.push((text.into(), status_role));
-        if !items.is_empty() {
-            parts.push((" · ".into(), item_role));
-        }
-    }
-    if !items.is_empty() {
-        parts.push((items.join(" · "), item_role));
-    }
-    parts
-        .iter()
-        .map(|(text, role)| theme.paint(*role, text))
-        .collect()
-}
-
-/// The user's message as rows on the input background (D138). Its marker is
-/// the input's own, two columns wide (AGL-094, D1), so a message of the
-/// human and what he types begin at the same column. The text takes `role`:
-/// a message the color of the input, a command the tool's (AGL-101).
-pub fn user_lines(theme: &Theme, message: &str, columns: usize, role: Role) -> Vec<String> {
-    let columns = columns.max(4);
-    let background = theme.start(Role::InputBackground);
-    let reset = theme.reset();
-    let mut rows = Vec::new();
-    for line in clean(message).trim_end().split('\n') {
-        rows.extend(wrap_line(line, columns - 2));
-    }
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let marker = if index == 0 { "› " } else { "  " };
-            let pad = " ".repeat(columns - 2 - width(row));
-            format!(
-                "{background}{}{background}{}{background}{pad}{reset}",
-                theme.paint(Role::InputPrompt, marker),
-                theme.paint(role, row)
-            )
-        })
-        .collect()
-}
-
-/// The lines of the thinking the transcript shows by default (AGL-068);
-/// the full text is in the inspect mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fold {
-    /// Every row of it.
-    Whole,
-    /// Its head and its tail, with `⋯` between them (AGL-092, D4).
-    Folded,
-}
-
-/// The rows of the thinking's head: as many of its first paragraph as these
-/// allow (AGL-092, D4).
-const THINKING_HEAD: usize = 3;
-/// The rows of the thinking's tail: as many of its last rows as these
-/// allow, two more when that is where a paragraph begins.
-const THINKING_TAIL: usize = 5;
-/// A fold that would hide fewer rows than these is not worth a row of `⋯`.
-const THINKING_FOLD_MIN: usize = 3;
-
-/// A row of a folded block: the thinking's own, or the count of the rows
-/// that are hidden.
-enum Shown {
-    Row(String),
-    Hidden(usize),
-}
-
-/// Whether a block renders the thinking's Markdown (AGL-093, D1): the
-/// printed card does, the live block does not — that is redrawn with every
-/// piece, and the whole of the text with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Render {
-    Plain,
-    Markdown,
-}
-
-/// The rows of a block, each wrapped to `inner` and painted for `text_role`,
-/// with the row where every paragraph of it begins: a run of its non-empty
-/// lines, as the model or the tool wrote them (AGL-092, D4; AGL-093, D1;
-/// AGL-095, D2).
-fn block_rows(
-    text: &str,
-    inner: usize,
-    theme: &Theme,
-    text_role: Role,
-    render: Render,
-) -> (Vec<String>, Vec<usize>) {
-    let mut rows: Vec<String> = Vec::new();
-    let mut starts: Vec<usize> = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
-    let mut flush = |paragraph: &mut Vec<String>, rows: &mut Vec<String>| {
-        if paragraph.is_empty() {
-            return;
-        }
-        starts.push(rows.len());
-        match render {
-            Render::Plain => rows.extend(paragraph.iter().flat_map(|line| {
-                hard_wrap(line, inner).into_iter().map(|row| theme.paint(text_role, &row))
-            })),
-            Render::Markdown => rows.extend(
-                markdown::render(&paragraph.join("\n"), inner, theme)
-                    .into_iter()
-                    .map(|row| theme.on_style(text_role, &row)),
-            ),
-        }
-        paragraph.clear();
-    };
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            flush(&mut paragraph, &mut rows);
-            continue;
-        }
-        paragraph.push(clean(line));
-    }
-    flush(&mut paragraph, &mut rows);
-    (rows, starts)
-}
-
-/// The rows a folded thinking keeps (AGL-092, D4): the first paragraph's
-/// first rows, `⋯ n` for what lies between, and its last rows — the tail
-/// reaching back to the start of its paragraph when two rows buy that, so
-/// it never opens in the middle of a paragraph and always shows how the
-/// thinking ended. A thinking with no room for `⋯` shows all of it.
-fn fold_rows(rows: &[String], starts: &[usize]) -> Vec<Shown> {
-    let total = rows.len();
-    let all = || rows.iter().map(|row| Shown::Row(row.clone())).collect();
-    // The rows of the first paragraph: what ends it is where the second
-    // one begins.
-    let paragraph = *starts.get(1).unwrap_or(&total);
-    let head = paragraph.min(THINKING_HEAD);
-    if total < head + THINKING_TAIL + THINKING_FOLD_MIN {
-        return all();
-    }
-    let mut tail = total - THINKING_TAIL;
-    if let Some(start) = starts.iter().rev().find(|start| **start < tail)
-        && tail - start <= 2
-    {
-        tail = *start;
-    }
-    let Some(hidden) = tail.checked_sub(head) else {
-        return all();
-    };
-    let mut kept: Vec<Shown> = rows[..head]
-        .iter()
-        .map(|row| Shown::Row(row.clone()))
-        .collect();
-    kept.push(Shown::Hidden(hidden));
-    kept.extend(rows[tail..].iter().map(|row| Shown::Row(row.clone())));
-    kept
-}
-
-/// The lines of one block (AGL-104, D1): the label in the tool's color,
-/// and its rows below, painted for `text_role` (D23, D24; AGL-095, D2) —
-/// all of them, or the head and the tail of them, or, when the block has no
-/// text of its own, the placeholder that keeps its place (AGL-095, D4).
-/// The body hangs under `⎿ `, the rows that follow stand under it.
-#[allow(clippy::too_many_arguments)]
-pub fn block_lines(
-    theme: &Theme,
-    lang: Lang,
-    columns: usize,
-    label: &str,
-    text: &str,
-    text_role: Role,
-    fold: Fold,
-    render: Render,
-) -> Vec<String> {
-    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
-    let (rows, starts) = block_rows(text, inner, theme, text_role, render);
-    let kept = match fold {
-        Fold::Whole => rows.iter().map(|row| Shown::Row(row.clone())).collect(),
-        Fold::Folded => fold_rows(&rows, &starts),
-    };
-    let mut lines = vec![theme.paint(Role::Tool, label)];
-    if rows.is_empty() {
-        let placeholder = theme.paint(Role::Muted, tr!(lang, m::EMPTY));
-        lines.extend(elbow_rows(theme, vec![placeholder]));
-        return lines;
-    }
-    let kept = kept
-        .into_iter()
-        .map(|row| match row {
-            Shown::Row(row) => row,
-            Shown::Hidden(n) => theme.paint(Role::Muted, &tr!(lang, m::THINKING_FOLDED, n = n)),
-        })
-        .collect();
-    lines.extend(elbow_rows(theme, kept));
-    lines
-}
-
-/// The width of the body's prefix (AGL-104, D1): `⎿ ` before a block's
-/// first row, two spaces before the rows that follow.
-pub const BODY_PREFIX: usize = 2;
-
-/// The body's rows with their prefix (AGL-104, D1; AGL-106, D1): the elbow
-/// in the muted color — dark, whatever block it begins — before the first
-/// row, and two spaces before the rest, so they all stand under it.
-pub fn elbow_rows(theme: &Theme, rows: Vec<String>) -> Vec<String> {
-    let elbow = theme.paint(Role::Muted, "⎿ ");
-    rows.into_iter()
-        .enumerate()
-        .map(|(n, row)| {
-            format!(
-                "{}{row}",
-                if n == 0 {
-                    elbow.as_str()
-                } else {
-                    "  "
-                }
-            )
-        })
-        .collect()
-}
-
 /// The live block of a thinking longer than the room above the dock
 /// (AGL-092, D3): its last rows, with the label's row kept on top — what
 /// the model thinks now is worth more than what it thought first.
@@ -1158,6 +832,7 @@ mod tests {
 
     use super::*;
     use crate::action::{Outcome, Value};
+    use crate::repl::text::width;
     use crate::phase::{Observer, PhaseEvent, Reports};
     use crate::session::ForgeKind;
 

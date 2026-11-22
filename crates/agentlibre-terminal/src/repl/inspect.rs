@@ -12,19 +12,16 @@
 
 use std::path::Path;
 
+use super::card::{self, notice_lines, summary, user_lines};
 use super::dock::{Dock, Layout};
-use super::markdown;
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
-use super::transcript::{
-    BODY_PREFIX, Fold, Render, block_lines, elbow_rows, notice_lines, summary,
-    user_lines,
-};
 use super::ModeKeys;
 use crate::backend::ToolCall;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::records::{self, BlockKind, Record};
 use crate::session::{Event, TransitionLine};
+use crate::settings::Detail;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
@@ -433,7 +430,14 @@ impl Inspect {
                 Some(BlockKind::Result) => {
                     result_block(theme, lang, columns, call, result.as_ref(), outputs, focused)
                 }
-                _ => thinking_block(theme, lang, columns, thinking.as_deref(), focused),
+                _ => card::thinking(
+                    theme,
+                    lang,
+                    columns,
+                    thinking.as_deref().unwrap_or_default(),
+                    Detail::Flexible,
+                    focused,
+                ),
             },
             Record::Answer {
                 text,
@@ -443,7 +447,14 @@ impl Inspect {
                 if record.blocks().get(block).copied() == Some(BlockKind::Answer) {
                     answer_block(theme, lang, columns, text, time.as_ref().copied(), focused)
                 } else {
-                    thinking_block(theme, lang, columns, thinking.as_deref(), focused)
+                    card::thinking(
+                        theme,
+                        lang,
+                        columns,
+                        thinking.as_deref().unwrap_or_default(),
+                        Detail::Flexible,
+                        focused,
+                    )
                 }
             }
         }
@@ -467,35 +478,12 @@ fn is_user(record: &Record) -> bool {
     matches!(record, Record::User(_))
 }
 
-/// The thinking's block (D19; AGL-098, D2): whole on the focus, folded off
-/// it; the placeholder when the step has no thinking (AGL-095, D4). D23,
-/// AGL-085 D3, AGL-093 D2: the rows carry their own style, and the block
-/// the focus stands on takes the color of a message's text. AGL-105, D1:
-/// off the focus the block is gray, and its accents — the label's, the
-/// Markdown's — come back only where the focus stands on it.
-fn thinking_block(
-    theme: &Theme,
-    lang: Lang,
-    columns: usize,
-    thinking: Option<&str>,
-    focused: bool,
-) -> Vec<String> {
-    let gray = theme.gray();
-    block_lines(
-        if focused { theme } else { &gray },
-        lang,
-        columns,
-        tr!(lang, m::THINKING),
-        &clean(thinking.unwrap_or_default()),
-        if focused { Role::InputText } else { Role::Thinking },
-        if focused { Fold::Whole } else { Fold::Folded },
-        Render::Markdown,
-    )
-}
-
 /// The tool's block (D19; AGL-098, D2): the text the model wrote before
 /// the call — its head off the focus — and the card, whose input row is
 /// the hint off the focus and the whole of what was sent on it (D4).
+/// AGL-121, D14: the drawing is `card::text`'s and `card::tool`'s, asked
+/// with the focus; the inspect mode keeps the result out of the card, it
+/// draws it as a block of its own.
 #[allow(clippy::too_many_arguments)]
 fn tool_block(
     theme: &Theme,
@@ -511,15 +499,7 @@ fn tool_block(
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(text) = text {
-        let mut block = markdown::render(text.trim(), columns, theme);
-        if !focused && block.len() > 3 {
-            block.truncate(3);
-            block
-                .last_mut()
-                .expect("three lines")
-                .push_str(&theme.paint(Role::Muted, "…"));
-        }
-        lines.extend(block);
+        lines.extend(card::text(theme, columns, text, focused));
     }
     let mut items = records::phase_items(phases);
     if let Some(elapsed) = time {
@@ -529,22 +509,24 @@ fn tool_block(
             texts::duration(elapsed.as_secs())
         ));
     }
-    let input = if focused {
-        records::call_input(call)
-    } else {
-        hint.to_owned()
-    };
-    // AGL-098: as the thinking's on the focus, the whole input on it
-    // stands in the color of a message's text.
-    lines.extend(card_lines(
+    lines.extend(card::tool(
         theme,
         lang,
         columns,
         call,
         result,
-        &input,
-        &items,
+        hint,
+        Detail::Flexible,
+        Detail::Off,
         focused,
+    ));
+    // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
+    let (status_text, status_role) = records::status(result.map(|result| result.outcome));
+    lines.push(summary(
+        theme,
+        Some((status_text.as_str(), status_role)),
+        &items,
+        Role::Tool,
     ));
     lines
 }
@@ -552,7 +534,8 @@ fn tool_block(
 /// The result's block (AGL-095, D2; AGL-098, D2): whole on the focus —
 /// from the output's file when the call's output was cut (AGL-049) — and
 /// folded as in the transcript off it; the placeholder when the result is
-/// not known.
+/// not known. AGL-121, D14: the drawing is `card::result`'s, asked with
+/// the focus; taking the whole from the file stays the mode's own.
 #[allow(clippy::too_many_arguments)]
 fn result_block(
     theme: &Theme,
@@ -571,27 +554,11 @@ fn result_block(
             std::fs::read_to_string(&file).unwrap_or_else(|_| result.content.clone())
         }
     };
-    block_lines(
-        theme,
-        lang,
-        columns,
-        tr!(lang, m::RESULT_LABEL),
-        &content,
-        // AGL-098: as the thinking's, the block under the focus stands in
-        // the color of a message's text.
-        if focused {
-            Role::InputText
-        } else {
-            Role::Muted
-        },
-        if focused { Fold::Whole } else { Fold::Folded },
-        Render::Plain,
-    )
+    card::result(theme, lang, columns, &content, Detail::Flexible, focused)
 }
 
-/// The answer's block (AGL-098, D2; AGL-100; AGL-104, D1): a head for the
-/// focus to stand on, as the other blocks have, and its text, in full (D1),
-/// plain below the elbow; on the focus the time the turn took joins it
+/// The answer's block (AGL-098, D2; AGL-100; AGL-104, D1): `card::answer`
+/// with its head, and on the focus the time the turn took joins it
 /// (AGL-080, D2).
 fn answer_block(
     theme: &Theme,
@@ -601,80 +568,15 @@ fn answer_block(
     time: Option<std::time::Duration>,
     focused: bool,
 ) -> Vec<String> {
-    // AGL-104, D1: the label's row, and the text under the elbow.
-    let mut lines = vec![theme.paint(Role::Tool, tr!(lang, m::ANSWER_LABEL))];
-    let body = markdown::render(
-        text.trim(),
-        columns.saturating_sub(BODY_PREFIX).max(1),
-        theme,
-    );
-    lines.extend(elbow_rows(theme, body));
-    if focused {
-        let items: Vec<String> = time
-            .iter()
-            .map(|elapsed| {
-                tr!(
-                    lang,
-                    m::WORKED_FOR,
-                    time = texts::duration(elapsed.as_secs())
-                )
-            })
-            .collect();
-        if !items.is_empty() {
-            lines.push(summary(theme, None, &items, Role::Tool));
-        }
-    }
-    lines
-}
-
-/// The compact card of a call, as the inspect mode draws it (D6; AGL-080,
-/// D1): the tool's line with its status, the lines of the input, the row of
-/// its phases.
-#[allow(clippy::too_many_arguments)]
-fn card_lines(
-    theme: &Theme,
-    lang: Lang,
-    columns: usize,
-    call: &ToolCall,
-    result: Option<&ToolResult>,
-    input: &str,
-    items: &[String],
-    focused: bool,
-) -> Vec<String> {
-    let (status_text, status_role) = records::status(result.map(|result| result.outcome));
-    // AGL-068: the action of a forge or a memory call is in the hint row.
-    let mut lines = vec![format!(
-        "{}  {}",
-        theme.paint(
-            Role::Tool,
-            &format!("{} {}", tr!(lang, m::TOOL_LABEL), call.name)
-        ),
-        theme.paint(status_role, &status_text)
-    )];
-    // D26: the tool's row, like the thinking's, in the muted color — on
-    // the focus, as the thinking's there, in the color of a message's text.
-    let input_role = if focused {
-        Role::InputText
-    } else {
-        Role::Muted
-    };
-    // AGL-104, D1: the input's rows hang under the elbow.
-    let inner = columns.saturating_sub(BODY_PREFIX).max(1);
-    let mut rows = Vec::new();
-    for line in clean(input).lines() {
-        for row in hard_wrap(line, inner) {
-            rows.push(theme.paint(input_role, &row));
-        }
-    }
-    lines.extend(elbow_rows(theme, rows));
-    // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
-    lines.push(summary(
-        theme,
-        Some((status_text.as_str(), status_role)),
-        items,
-        Role::Tool,
-    ));
-    lines
+    let time = time.filter(|_| focused).map(|elapsed| {
+        let items = [tr!(
+            lang,
+            m::WORKED_FOR,
+            time = texts::duration(elapsed.as_secs())
+        )];
+        summary(theme, None, &items, Role::Tool)
+    });
+    card::answer(theme, lang, columns, text, time, true)
 }
 
 /// The inspect mode on the terminal (D4, D8): the alternate screen, the
