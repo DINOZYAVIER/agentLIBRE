@@ -7,7 +7,7 @@ use crate::agent::{Report, Sink};
 use crate::backend::ToolCall;
 use crate::i18n::{self, Lang, m};
 use crate::session::{CutOff, Event, ForgeKind};
-use crate::tools::ToolResult;
+use crate::tools::{spec::call_summary, ToolResult};
 use crate::tr;
 
 /// How much of a command the progress line shows.
@@ -105,7 +105,7 @@ impl StderrReport {
     }
 
     fn call(&mut self, call: &ToolCall) {
-        eprintln!("> {}: {}", call.name, call_summary(call));
+        eprintln!("> {}: {}", call.name, cut(&call_summary(call), COMMAND_WIDTH));
     }
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
@@ -136,65 +136,13 @@ impl StderrReport {
     }
 }
 
-/// `bash`: the command's first line, shortened; `search`: the source and
-/// the query; `edit`: the path.
-pub fn call_summary(call: &ToolCall) -> String {
-    let text = |name: &str| call.text(name).unwrap_or_default();
-    if call.name == "search" {
-        let summary = format!("{}: {}", text("source"), text("query"));
-        return summary.chars().take(COMMAND_WIDTH).collect();
+/// A summary cut to `chars` characters, an ellipsis ending what was cut.
+fn cut(text: &str, chars: usize) -> String {
+    if text.chars().count() <= chars {
+        return text.to_owned();
     }
-    if call.name == "memory" {
-        // The action and what it is about: the title of an add, else the name.
-        let about = [text("title"), text("name")].into_iter().find(|t| !t.is_empty());
-        let summary = format!("{} {}", text("action"), about.unwrap_or_default());
-        return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
-    }
-    if call.name == "forge" {
-        // The action and what it is about: the name, the title of a new;
-        // plus what the action does to it (AGL-066, D10), and, for an
-        // edit, what it changed (D18).
-        let action = text("action");
-        let about = if !text("name").is_empty() {
-            text("name")
-        } else {
-            text("title")
-        };
-        let first_line = |s: &str| -> String {
-            s.lines()
-                .find(|line| !line.trim().is_empty())
-                .map(|line| line.trim())
-                .unwrap_or_default()
-                .to_owned()
-        };
-        let extra = match action {
-            "append" => text("section").to_owned(),
-            "status" => text("state").to_owned(),
-            "rename" => text("new").to_owned(),
-            "edit" => {
-                let old = first_line(text("old"));
-                let new = first_line(text("new"));
-                if old.is_empty() && new.is_empty() {
-                    String::new()
-                } else {
-                    format!("“{old}” → “{new}”")
-                }
-            }
-            _ => String::new(),
-        };
-        let summary = format!("{action} {about} {extra}");
-        return summary.trim_end().chars().take(COMMAND_WIDTH).collect();
-    }
-    if call.name != "bash" {
-        return text("path").to_owned();
-    }
-    let command = text("command");
-    let first = command.lines().next().unwrap_or_default();
-    let mut summary: String = first.chars().take(COMMAND_WIDTH).collect();
-    if summary.len() < command.len() {
-        summary.push_str(" …");
-    }
-    summary
+    let kept: String = text.chars().take(chars.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
 }
 
 /// `edit`: its message; `search`: how many results; `bash`: the outcome,
@@ -249,10 +197,7 @@ mod tests {
     #[test]
     fn summaries() {
         assert_eq!(call_summary(&bash("ls -la")), "ls -la");
-        assert_eq!(
-            call_summary(&bash("cat <<EOF > a\nx\nEOF")),
-            "cat <<EOF > a …"
-        );
+        assert_eq!(call_summary(&bash("cat <<EOF > a\nx\nEOF")), "cat <<EOF > a");
         let failed = ToolResult {
             outcome: Outcome::Fail,
             content: "a\nb\nexit code: 101".into(),
@@ -372,7 +317,7 @@ mod forge_tests {
                 ("name", "agl-066"),
                 ("new", "agl-067"),
             ])),
-            "rename agl-066 agl-067"
+            "rename agl-066 → agl-067"
         );
         assert_eq!(
             call_summary(&call(&[("action", "new"), ("title", "The task")])),

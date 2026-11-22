@@ -298,8 +298,13 @@ impl Records {
     fn read(&mut self, sent: &Sent, lang: Lang) -> Vec<Act> {
         let thinking = || Act::Live(tr!(lang, m::NOTIFY_THINKING).to_string());
         match sent {
-            Sent::Report(Report::Event(Event::Call { call, .. })) => {
-                self.last_call = Some((call.name.clone(), argument(&call.args)));
+            Sent::Report(Report::Event(Event::Call { call, summary, .. })) => {
+                // AGL-121, D52: the summary rides the wire; notify keeps
+                // no copy of its own to make.
+                self.last_call = Some((
+                    call.name.clone(),
+                    cut(summary.as_deref().unwrap_or_default(), ARGUMENT_CHARS),
+                ));
                 Vec::new()
             }
             Sent::Report(Report::Event(Event::Answer(text))) => vec![Act::End(text.clone())],
@@ -350,35 +355,6 @@ fn reason_name(reason: StopReason) -> String {
         .ok()
         .and_then(|json| json.as_str().map(str::to_owned))
         .unwrap_or_default()
-}
-
-/// A call's argument in short: its first text value's first line, or the
-/// arguments as JSON, at most [`ARGUMENT_CHARS`].
-fn argument(args: &[(String, agentlibre_proto::Value)]) -> String {
-    use agentlibre_proto::Value as Arg;
-    let first = args
-        .iter()
-        .find_map(|(_, value)| match value {
-            Arg::Text(text) => Some(text.lines().next().unwrap_or_default().trim().to_owned()),
-            Arg::Int(_) => None,
-        })
-        .unwrap_or_else(|| {
-            if args.is_empty() {
-                return String::new();
-            }
-            let object: serde_json::Map<String, Json> = args
-                .iter()
-                .map(|(name, value)| {
-                    let value = match value {
-                        Arg::Text(text) => Json::from(text.as_str()),
-                        Arg::Int(number) => Json::from(*number),
-                    };
-                    (name.clone(), value)
-                })
-                .collect();
-            Json::Object(object).to_string()
-        });
-    cut(&first, ARGUMENT_CHARS)
 }
 
 /// `text` cut to `chars` characters, an ellipsis ending what was cut.
@@ -776,6 +752,8 @@ mod tests {
     fn call(tool: &str, command: &str) -> Sent {
         event(Event::Call {
             text: None,
+            // What the daemon of the table computes (AGL-121, D52).
+            summary: Some(command.lines().next().unwrap_or_default().to_owned()),
             call: ToolCall {
                 id: "c1".into(),
                 name: tool.into(),
@@ -850,16 +828,9 @@ mod tests {
 
     #[test]
     fn arguments_and_answers_are_cut_short() {
+        assert_eq!(cut("/a/b", ARGUMENT_CHARS), "/a/b");
         assert_eq!(
-            argument(&[("path".into(), Arg::Text("/a/b".into()))]),
-            "/a/b"
-        );
-        assert_eq!(argument(&[("n".into(), Arg::Int(3))]), r#"{"n":3}"#);
-        assert_eq!(argument(&[]), "");
-        assert_eq!(
-            argument(&[("q".into(), Arg::Text("x".repeat(100)))])
-                .chars()
-                .count(),
+            cut(&"x".repeat(100), ARGUMENT_CHARS).chars().count(),
             ARGUMENT_CHARS
         );
         assert_eq!(beginning("one\n\ntwo"), "one\ntwo");

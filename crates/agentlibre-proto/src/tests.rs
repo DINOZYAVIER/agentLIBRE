@@ -112,6 +112,7 @@ fn every_request_round_trips_as_one_line() {
 fn what_a_plane_sends_round_trips() {
     let call = Event::Call {
         text: Some("let me look".into()),
+        summary: Some("ls".into()),
         call: ToolCall {
             id: "c1".into(),
             name: "bash".into(),

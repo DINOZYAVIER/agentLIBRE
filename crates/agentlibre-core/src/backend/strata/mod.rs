@@ -563,7 +563,7 @@ mod tests {
     use crate::backend::{Message, Prompt, Stop, ToolCall};
     use crate::format::tests::qwen;
     use crate::function::Sampling;
-    use crate::tools::spec::{ParamSpec, Values};
+    use crate::tools::spec::{self, ParamSpec, Values};
 
     /// The doc of the `bash` tool, as the flat prompt shows it (AGL-030, D2).
     const BASH: Spec = Spec {
@@ -579,6 +579,7 @@ mod tests {
             ),
         ],
         outcomes: &[],
+        summary: spec::first_line,
     };
 
     /// The flat prompt of a fixed conversation (AGL-030, D2): the system

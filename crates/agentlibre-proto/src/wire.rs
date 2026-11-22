@@ -124,6 +124,11 @@ pub enum Event {
     Call {
         text: Option<String>,
         call: ToolCall,
+        /// What the call did, in one line, by the daemon's table of
+        /// tools (AGL-121, D52); an older client ignores it, and one
+        /// reading the wire has no copy of its own to make.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     Result {
         id: String,

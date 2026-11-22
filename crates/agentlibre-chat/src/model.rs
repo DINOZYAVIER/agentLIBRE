@@ -82,11 +82,11 @@ impl Conversation {
             match event {
                 Event::User(text) => conversation.push(Who::You, text.clone()),
                 Event::Answer(text) => conversation.push(Who::Agent, text.clone()),
-                Event::Call { text, call } => {
+                Event::Call { text, call, summary } => {
                     if let Some(text) = text.as_ref().filter(|text| !text.trim().is_empty()) {
                         conversation.push(Who::Agent, text.clone());
                     }
-                    conversation.call(call);
+                    conversation.call(call, summary.clone());
                 }
                 Event::Stop(reason) if *reason != StopReason::Interrupted => {
                     conversation.push(Who::Note, format!("stopped: {}", reason_name(*reason)));
@@ -113,14 +113,14 @@ impl Conversation {
 
     /// A call: a step of the last row of steps, or of a new one after the
     /// agent's text (D1).
-    fn call(&mut self, call: &ToolCall) {
+    fn call(&mut self, call: &ToolCall, summary: Option<String>) {
         if self.rows.last().is_none_or(|row| row.who != Who::Steps) {
             self.push(Who::Steps, String::new());
         }
         let row = self.rows.last_mut().expect("a row of steps");
         row.steps.push(Step {
             id: call.id.clone(),
-            line: call_line(call),
+            line: call_line(&call.name, summary.as_deref().unwrap_or_default()),
             output: None,
             failed: false,
         });
@@ -171,7 +171,7 @@ impl Conversation {
                 };
                 self.rows[at].text.push_str(piece);
             }
-            Report::Event(Event::Call { text, call }) => {
+            Report::Event(Event::Call { text, call, summary }) => {
                 // What was written before the call is its text.
                 match (self.streaming.take(), text) {
                     (Some(at), Some(text)) => self.rows[at].text = text.clone(),
@@ -240,23 +240,17 @@ fn reason_name(reason: StopReason) -> String {
     .to_owned()
 }
 
-/// A call's line: its tool and the first line of its first text argument.
-fn call_line(call: &ToolCall) -> String {
-    let argument = call
-        .args
-        .iter()
-        .find_map(|(_, value)| match value {
-            Value::Text(text) => Some(text.lines().next().unwrap_or_default().trim().to_owned()),
-            Value::Int(_) => None,
-        })
-        .unwrap_or_default();
+/// A call's line (AGL-121, D52): its tool and the summary the wire
+/// carries, cut to the row's measure.
+fn call_line(name: &str, argument: &str) -> String {
+    let argument = argument.trim().to_owned();
     let argument = if argument.chars().count() > ARGUMENT_CHARS {
         let kept: String = argument.chars().take(ARGUMENT_CHARS - 1).collect();
         format!("{}…", kept.trim_end())
     } else {
         argument
     };
-    format!("→ {} {argument}", call.name).trim_end().to_owned()
+    format!("→ {name} {argument}").trim_end().to_owned()
 }
 
 #[cfg(test)]

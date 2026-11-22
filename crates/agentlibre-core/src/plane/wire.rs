@@ -231,14 +231,23 @@ pub fn event(event: Event) -> wire::Event {
         Event::User(text) => wire::Event::User(text),
         Event::State(name) => wire::Event::State(name),
         Event::Thinking(text) => wire::Event::Thinking(text),
-        Event::Call { text, call } => wire::Event::Call {
-            text,
-            call: wire::ToolCall {
-                id: call.id,
-                name: call.name,
-                args: call.args.into_iter().map(|(name, value)| (name, self::value(value))).collect(),
-            },
-        },
+        Event::Call { text, call } => {
+            // AGL-121, D52: the summary rides the wire; the session's
+            // file does not keep it.
+            let summary = crate::tools::spec::call_summary(&call);
+            wire::Event::Call {
+                text,
+                summary: Some(summary),
+                call: wire::ToolCall {
+                    id: call.id,
+                    name: call.name,
+                    args: call.args
+                        .into_iter()
+                        .map(|(name, value)| (name, self::value(value)))
+                        .collect(),
+                },
+            }
+        }
         Event::Result { id, outcome, content } => wire::Event::Result {
             id,
             outcome: self::outcome(outcome),
@@ -290,7 +299,7 @@ pub fn event_of(event: wire::Event) -> Event {
         wire::Event::User(text) => Event::User(text),
         wire::Event::State(name) => Event::State(name),
         wire::Event::Thinking(text) => Event::Thinking(text),
-        wire::Event::Call { text, call } => Event::Call {
+        wire::Event::Call { text, call, .. } => Event::Call {
             text,
             call: ToolCall {
                 id: call.id,
@@ -603,6 +612,27 @@ mod tests {
         for report in reports {
             assert_eq!(report_of(self::report(report.clone())), report);
         }
+    }
+
+    #[test]
+    fn the_call_on_the_wire_carries_the_summary_of_the_table() {
+        // AGL-121, D52: the daemon computes it, the wire carries it.
+        let event = Event::Call {
+            text: None,
+            call: ToolCall {
+                id: "c1".into(),
+                name: "forge".into(),
+                args: vec![
+                    ("action".into(), Value::Text("rename".into())),
+                    ("name".into(), Value::Text("agl-066".into())),
+                    ("new".into(), Value::Text("agl-067".into())),
+                ],
+            },
+        };
+        let wire::Event::Call { summary, .. } = self::event(event) else {
+            panic!("not a call");
+        };
+        assert_eq!(summary.as_deref(), Some("rename agl-066 → agl-067"));
     }
 
     #[test]

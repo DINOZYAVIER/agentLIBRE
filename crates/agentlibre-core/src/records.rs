@@ -177,55 +177,11 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
     Record::Notice { line, role, detail }
 }
 
-/// One line of the input (D6): the command, the file of an edit, the
-/// query of a search. A forge or a memory call says what it did: the
-/// action, the entry (the title of a `new`), and the action's detail —
-/// the section of an append, the state of a status, the new name of a
-/// rename (AGL-068).
+/// One line of the input (D6): the table of built-in tools says how
+/// each tool sums up (AGL-121, D15); for a tool of a Function, the
+/// first text argument.
 pub fn call_hint(call: &ToolCall) -> String {
-    let text = |name: &str| call.text(name).unwrap_or_default();
-    if matches!(call.name.as_str(), "forge" | "memory") {
-        let action = text("action");
-        let entry = if text("name").is_empty() {
-            text("title").to_owned()
-        } else {
-            text("name").to_owned()
-        };
-        let mut hint = if entry.is_empty() {
-            action.to_owned()
-        } else {
-            format!("{action} {entry}")
-        };
-        match (call.name.as_str(), action) {
-            ("forge", "append") => hint.push_str(&format!(" {}", text("section"))),
-            ("forge", "status") => hint.push_str(&format!(" {}", text("state"))),
-            ("forge", "rename") => hint.push_str(&format!(" → {}", text("new"))),
-            _ => {}
-        }
-        return hint;
-    }
-    let head: String = match call.name.as_str() {
-        "edit" => text("path").to_owned(),
-        "search" => format!("{}: {}", text("source"), text("query")),
-        _ => text("command").to_owned(),
-    };
-    let line = head.lines().next().unwrap_or_default();
-    if !line.is_empty() {
-        return line.to_owned();
-    }
-    // A call whose input has no line of its own keeps its first text
-    // argument (AGL-066, D12).
-    call.args
-        .iter()
-        .find_map(|(_, value)| match value {
-            Value::Text(value) => value
-                .lines()
-                .next()
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned),
-            _ => None,
-        })
-        .unwrap_or_default()
+    crate::tools::spec::call_summary(call)
 }
 
 /// What a call sent, in full (AGL-095, D5): the command, the edit with its
@@ -729,7 +685,7 @@ mod tests {
                 ("new".into(), Value::Text("b".into())),
             ],
         };
-        assert_eq!(call_hint(&edit), "edit agl-066");
+        assert_eq!(call_hint(&edit), "edit agl-066 “a” → “b”");
         let list = ToolCall {
             id: "c1".into(),
             name: "forge".into(),

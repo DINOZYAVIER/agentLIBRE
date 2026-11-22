@@ -3,10 +3,11 @@
 //! prompt's template, the grammar, the keys a Function may constrain, the
 //! order the session file restores and the transitions read it.
 
-use crate::action::{Constraint, Kind, Outcome, Param, Tool};
+use crate::action::{Constraint, Kind, Outcome, Param, Tool, Value};
+use crate::backend::ToolCall;
 
 /// What a built-in tool is.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Spec {
     pub name: &'static str,
     /// What the template tells the model of the tool (D14, D95).
@@ -15,6 +16,10 @@ pub struct Spec {
     pub params: &'static [ParamSpec],
     /// The ends a call of the tool can have (D16, D25, D26).
     pub outcomes: &'static [Outcome],
+    /// How to say in one line what a call of the tool did (AGL-121,
+    /// D15): the one summary the progress lines, the REPL and the wire
+    /// all read (D52).
+    pub summary: fn(&ToolCall) -> String,
 }
 
 /// A parameter of a built-in tool.
@@ -104,6 +109,102 @@ impl Spec {
 
 const OK_FAIL: &[Outcome] = &[Outcome::Ok, Outcome::Fail];
 
+/// The first text argument's first line: the summary of a tool the table
+/// does not know (AGL-066, D12; AGL-121, D15).
+pub fn first_line(call: &ToolCall) -> String {
+    call.args
+        .iter()
+        .find_map(|(_, value)| match value {
+            Value::Text(text) => text
+                .lines()
+                .next()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned),
+            Value::Int(_) => None,
+        })
+        .unwrap_or_default()
+}
+
+fn text(call: &ToolCall, name: &str) -> String {
+    call.text(name).unwrap_or_default().to_owned()
+}
+
+/// `bash`: the command's first line.
+fn command(call: &ToolCall) -> String {
+    text(call, "command").lines().next().unwrap_or_default().to_owned()
+}
+
+/// `edit`, `view`: the file.
+fn file(call: &ToolCall) -> String {
+    text(call, "path")
+}
+
+/// `search`: the source and the query.
+fn query(call: &ToolCall) -> String {
+    format!("{}: {}", text(call, "source"), text(call, "query"))
+}
+
+/// What a `forge` or a `memory` call is about: the entry, the title of a
+/// `new` when the call makes one.
+fn entry(call: &ToolCall) -> String {
+    let name = text(call, "name");
+    if name.is_empty() {
+        text(call, "title")
+    } else {
+        name
+    }
+}
+
+/// `forge`: the action, the entry and what the action does to it — the
+/// section of an append, the state of a status, the new name of a rename,
+/// the pair of lines of an edit (AGL-068; the `→` forms, AGL-121, D15).
+fn forge(call: &ToolCall) -> String {
+    let action = text(call, "action");
+    let entry = entry(call);
+    let mut summary = if entry.is_empty() {
+        action.clone()
+    } else {
+        format!("{action} {entry}")
+    };
+    match action.as_str() {
+        "append" => summary.push_str(&format!(" {}", text(call, "section"))),
+        "status" => summary.push_str(&format!(" {}", text(call, "state"))),
+        "rename" => summary.push_str(&format!(" → {}", text(call, "new"))),
+        "edit" => {
+            let first = |s: &str| {
+                s.lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let (old, new) = (first(&text(call, "old")), first(&text(call, "new")));
+            if !old.is_empty() || !new.is_empty() {
+                summary.push_str(&format!(" “{old}” → “{new}”"));
+            }
+        }
+        _ => {}
+    }
+    summary
+}
+
+/// `memory`: the action and its entry.
+fn memory(call: &ToolCall) -> String {
+    let action = text(call, "action");
+    let entry = entry(call);
+    if entry.is_empty() {
+        action
+    } else {
+        format!("{action} {entry}")
+    }
+}
+
+/// What a call did in one line (AGL-121, D15): the tool's own rule from
+/// the table, the first text argument's line for a tool of a Function.
+pub fn call_summary(call: &ToolCall) -> String {
+    spec(&call.name).map_or_else(|| first_line(call), |spec| (spec.summary)(call))
+}
+
 /// The built-in tools, in the order the prompt and the grammar list them
 /// (AGL-067, D11).
 pub const SPECS: [Spec; 7] = [
@@ -122,6 +223,7 @@ pub const SPECS: [Spec; 7] = [
             ),
         ],
         outcomes: &[Outcome::Ok, Outcome::Fail, Outcome::Timeout],
+        summary: command,
     },
     Spec {
         name: "edit",
@@ -136,6 +238,7 @@ pub const SPECS: [Spec; 7] = [
             ParamSpec::text("new", true, None),
         ],
         outcomes: OK_FAIL,
+        summary: file,
     },
     Spec {
         name: "forge",
@@ -214,6 +317,7 @@ pub const SPECS: [Spec; 7] = [
             ),
         ],
         outcomes: OK_FAIL,
+        summary: forge,
     },
     Spec {
         name: "search",
@@ -246,6 +350,7 @@ pub const SPECS: [Spec; 7] = [
             ),
         ],
         outcomes: OK_FAIL,
+        summary: query,
     },
     Spec {
         name: "memory",
@@ -304,6 +409,7 @@ pub const SPECS: [Spec; 7] = [
             ),
         ],
         outcomes: OK_FAIL,
+        summary: memory,
     },
     Spec {
         name: "view",
@@ -313,6 +419,7 @@ pub const SPECS: [Spec; 7] = [
                       step.",
         params: &[ParamSpec::text("path", true, None)],
         outcomes: OK_FAIL,
+        summary: file,
     },
     Spec {
         name: "flow",
@@ -344,6 +451,7 @@ pub const SPECS: [Spec; 7] = [
             ),
         ],
         outcomes: OK_FAIL,
+        summary: first_line,
     },
 ];
 
