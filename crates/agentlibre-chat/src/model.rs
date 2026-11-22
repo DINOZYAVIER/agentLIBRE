@@ -2,7 +2,7 @@
 //! reports, ends and past make. Plain data: the window draws it.
 
 use agentlibre_proto::{
-    Done, Event, Outcome, PhaseEvent, Report, Sent, StopReason, ToolCall, TurnEnd, Value,
+    Done, Event, Outcome, PhaseEvent, Report, Sent, StopReason, ToolCall, TurnEnd,
 };
 
 /// The most of a tool's argument its line shows.
@@ -183,7 +183,7 @@ impl Conversation {
                     }
                     _ => {}
                 }
-                self.call(call);
+                self.call(call, summary.clone());
             }
             Report::Event(Event::Answer(text)) => match self.streaming.take() {
                 Some(at) => self.rows[at].text = text.clone(),
@@ -255,7 +255,7 @@ fn call_line(name: &str, argument: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agentlibre_proto::{Phase, SessionView, Transition};
+    use agentlibre_proto::{Phase, SessionView, Transition, Value};
 
     use super::*;
 
@@ -307,6 +307,7 @@ mod tests {
         conversation.sent(&Sent::Report(Report::Event(Event::Call {
             text: None,
             call: call("read", "big"),
+            summary: Some("big".into()),
         })));
         let long: Vec<String> = (1..=25).map(|line| line.to_string()).collect();
         conversation.sent(&Sent::Report(Report::Event(Event::Result {
@@ -347,12 +348,14 @@ mod tests {
         conversation.sent(&Sent::Report(Report::Event(Event::Call {
             text: Some("Let me look.".into()),
             call: call("read", "src/main.rs\nmore"),
+            summary: Some("src/main.rs".into()),
         })));
         conversation.sent(&step());
         // A call with no text before it leaves no empty row.
         conversation.sent(&Sent::Report(Report::Event(Event::Call {
             text: None,
             call: call("bash", "ls"),
+            summary: Some("ls".into()),
         })));
         conversation.sent(&step());
         conversation.sent(&text("It is"));
@@ -401,6 +404,7 @@ mod tests {
             Event::Call {
                 text: Some("Looking.".into()),
                 call: call("read", "a"),
+                summary: Some("a".into()),
             },
             Event::Answer("hello".into()),
             Event::Stop(StopReason::Interrupted),
