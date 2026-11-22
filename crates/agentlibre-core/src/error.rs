@@ -174,8 +174,9 @@ pub enum Error {
     NotLocalServer { url: String },
     /// The file of `private_ca` cannot be used (AGL-058, D12).
     ServerCa { path: PathBuf, detail: String },
-    /// The server's certificate is not trusted (AGL-058, D12).
-    ServerCertificate { url: String, detail: String },
+    /// The server's certificate is not trusted (AGL-058, D12); `key` is the
+    /// setting that names a private CA for that server (AGL-121, D4).
+    ServerCertificate { url: String, detail: String, key: &'static str },
     /// `server.llama.external`, and nothing answers there (AGL-052, D4).
     OutsideServerDown { url: String },
     /// `server.llama.external`, and it serves another model (AGL-052, D5).

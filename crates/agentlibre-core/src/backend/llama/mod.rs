@@ -39,6 +39,15 @@ impl Llama {
         })
     }
 
+    /// The same client, its certificate failures naming `key` instead of
+    /// `server.llama.private_ca`: the probe of a whisper server (AGL-121,
+    /// D4).
+    pub fn naming_ca(self, key: &'static str) -> Llama {
+        Llama {
+            http: self.http.naming_ca(key),
+        }
+    }
+
     /// Sends a request and parses the JSON reply.
     /// The text of `wav` as the model hears it (AGL-051): the language is
     /// the one spoken, and the human checks it in the input line. A recording

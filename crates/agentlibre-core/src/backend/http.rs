@@ -14,6 +14,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A client of the server of `kind` at `url`.
 pub(super) struct Http {
     kind: ServerKind,
+    /// The setting that names a private CA for this server, which a
+    /// certificate failure points to (AGL-121, D4).
+    ca_key: &'static str,
     pub(super) url: String,
     pub(super) agent: ureq::Agent,
 }
@@ -43,20 +46,32 @@ impl Http {
     fn of(kind: ServerKind, url: &str, agent: ureq::Agent) -> Http {
         Http {
             kind,
+            ca_key: match kind {
+                ServerKind::Llama => "server.llama.private_ca",
+                ServerKind::Strata => "server.strata.private_ca",
+            },
             url: url.trim_end_matches('/').into(),
             agent,
         }
     }
 
-    /// A server that does not answer; for the llama-server, one whose
-    /// certificate is not trusted (AGL-058, D12: the message names
-    /// `server.llama.private_ca`, which Strata has not).
+    /// The same client, its certificate failures pointing to `key`: a
+    /// whisper server is probed by a llama client (AGL-121, D4).
+    pub(super) fn naming_ca(mut self, key: &'static str) -> Http {
+        self.ca_key = key;
+        self
+    }
+
+    /// A server that does not answer, or one whose certificate is not
+    /// trusted (AGL-058, D12), named with the setting of its CA (AGL-121,
+    /// D4).
     pub(super) fn unreachable(&self, error: impl std::fmt::Display) -> Error {
         let detail = error.to_string();
-        if self.kind == ServerKind::Llama && super::is_certificate_problem(&detail) {
+        if super::is_certificate_problem(&detail) {
             return Error::ServerCertificate {
                 url: self.url.clone(),
                 detail,
+                key: self.ca_key,
             };
         }
         Error::ServerUnreachable {
@@ -116,5 +131,30 @@ impl Http {
             .read_to_string()
             .map_err(|error| self.unreachable(error))?;
         serde_json::from_str(&text).map_err(|error| self.bad_reply(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    #[test]
+    fn a_certificate_failure_names_the_ca_setting_of_its_server() {
+        // AGL-121, D4: the key of the server that failed, not llama's alone.
+        let refused = |http: Http| http.unreachable("invalid peer certificate: UnknownIssuer");
+        let key = |http: Http| match refused(http) {
+            Error::ServerCertificate { key, .. } => key,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(key(Http::new(ServerKind::Llama, "https://a")), "server.llama.private_ca");
+        assert_eq!(key(Http::new(ServerKind::Strata, "https://a")), "server.strata.private_ca");
+        let whisper = Http::new(ServerKind::Llama, "https://a").naming_ca("whisper.private_ca");
+        let text = refused(whisper).message(Lang::En);
+        assert!(text.contains("`whisper.private_ca`"), "{text}");
+        assert!(matches!(
+            Http::new(ServerKind::Strata, "http://a").unreachable("connection refused"),
+            Error::ServerUnreachable { .. }
+        ));
     }
 }

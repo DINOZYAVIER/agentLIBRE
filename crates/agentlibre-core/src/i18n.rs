@@ -1380,8 +1380,8 @@ Forge (сховище артефактів робочої області, agentL
 
     /// `Error::ServerCertificate` (AGL-058, D12).
     pub const SERVER_CERTIFICATE: Msg = Msg {
-        en: "the certificate of the server at {url} is not trusted: {detail}\nIf a private CA signs it, name its certificate in `server.llama.private_ca`",
-        uk: "сертифікату сервера за {url} немає довіри: {detail}\nЯкщо його підписує приватний CA, вкажи сертифікат CA у `server.llama.private_ca`",
+        en: "the certificate of the server at {url} is not trusted: {detail}\nIf a private CA signs it, name its certificate in `{key}`",
+        uk: "сертифікату сервера за {url} немає довіри: {detail}\nЯкщо його підписує приватний CA, вкажи сертифікат CA у `{key}`",
     };
 
     /// `Error::OutsideServerDown`.
@@ -3459,8 +3459,8 @@ impl Error {
             Error::ServerCa { path, detail } => {
                 tr!(lang, m::SERVER_CA, path = path.display(), detail = detail)
             }
-            Error::ServerCertificate { url, detail } => {
-                tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail)
+            Error::ServerCertificate { url, detail, key } => {
+                tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail, key = key)
             }
             Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
             Error::WslNotMirrored { mode } => tr!(lang, m::WSL_NOT_MIRRORED, mode = mode),

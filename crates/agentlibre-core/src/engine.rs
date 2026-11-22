@@ -1092,6 +1092,16 @@ pub fn file_name(path: &str) -> &str {
 /// A server outside agl (AGL-052, D4, D5): down, an error; loading, waited
 /// for; ready, it must serve the file of the Function by its name. Nothing is
 /// started, stopped or restarted, and a server that names no model passes.
+/// The cause of a probe that found nothing up, when it is a certificate
+/// not trusted: such a server answers, it is not down (AGL-058, D12;
+/// AGL-121, D4).
+pub fn certificate_refused(probe: &dyn Backend) -> Option<Error> {
+    match probe.context_size() {
+        Err(error @ Error::ServerCertificate { .. }) => Some(error),
+        _ => None,
+    }
+}
+
 pub fn check_outside(
     llama: &dyn Backend,
     effective: &ServerFile,
@@ -1101,9 +1111,7 @@ pub fn check_outside(
 ) -> Result<(), Error> {
     match health(llama) {
         Health::Down => {
-            // A certificate it does not trust is not a server that is down
-            // (AGL-058, D12).
-            if let Err(error @ Error::ServerCertificate { .. }) = llama.context_size() {
+            if let Some(error) = certificate_refused(llama) {
                 return Err(error);
             }
             return Err(Error::OutsideServerDown { url: llama.url().to_owned() });
@@ -1868,6 +1876,55 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    /// A server whose `context_size` answers `error`, for the probe's cause.
+    struct Answers(fn() -> Error);
+
+    impl Backend for Answers {
+        fn render(&self, _: &crate::backend::Prompt) -> Result<String, Error> {
+            unreachable!()
+        }
+        fn generate(
+            &self,
+            _: &crate::backend::Request,
+            _: &mut dyn FnMut(&str),
+            _: &mut dyn FnMut(&str),
+        ) -> Result<crate::backend::Generated, Error> {
+            unreachable!()
+        }
+        fn count_tokens(&self, _: &str) -> Result<usize, Error> {
+            unreachable!()
+        }
+        fn context_size(&self) -> Result<usize, Error> {
+            Err((self.0)())
+        }
+        fn health(&self) -> Option<u16> {
+            None
+        }
+        fn url(&self) -> &str {
+            "https://whisper.lan:18081"
+        }
+    }
+
+    #[test]
+    fn a_certificate_not_trusted_is_the_cause_of_a_probe_down() {
+        // AGL-121, D4: a remote whisper says why, not that it is not local.
+        let untrusted = Answers(|| Error::ServerCertificate {
+            url: "https://whisper.lan:18081".into(),
+            detail: "invalid peer certificate: UnknownIssuer".into(),
+            key: "whisper.private_ca",
+        });
+        assert!(matches!(
+            certificate_refused(&untrusted),
+            Some(Error::ServerCertificate { key: "whisper.private_ca", .. })
+        ));
+        let down = Answers(|| Error::ServerUnreachable {
+            kind: ServerKind::Llama,
+            url: "https://whisper.lan:18081".into(),
+            detail: "connection refused".into(),
+        });
+        assert!(certificate_refused(&down).is_none());
+    }
 
     #[test]
     fn status_lines() {

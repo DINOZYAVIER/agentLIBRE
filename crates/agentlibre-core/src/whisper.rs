@@ -11,7 +11,8 @@ use crate::attach::Transcriber;
 use crate::backend::Backend;
 use crate::backend::llama::Llama;
 use crate::engine::{
-    Autostart, Health, find_program, health, local_address, port_open, unit_active, wait_ready,
+    Autostart, Health, certificate_refused, find_program, health, local_address, port_open,
+    unit_active, wait_ready,
 };
 use crate::error::Error;
 use crate::forge::Workspace;
@@ -109,11 +110,18 @@ pub fn ensure(
     say: &mut dyn FnMut(&str),
     lang: Lang,
 ) -> Result<(), Error> {
-    let probe = Llama::with_ca(&server.url, server.private_ca.as_deref())?;
+    let probe =
+        Llama::with_ca(&server.url, server.private_ca.as_deref())?.naming_ca("whisper.private_ca");
     match health(&probe) {
         Health::Ready => return Ok(()),
         Health::Loading => return wait_ready(&probe, None, "whisper-server", say, lang),
-        Health::Down => {}
+        // A remote whisper whose certificate is not trusted says so, not
+        // that it is not local (AGL-121, D4).
+        Health::Down => {
+            if let Some(error) = certificate_refused(&probe) {
+                return Err(error);
+            }
+        }
     }
     if unit_active(&server.unit)? {
         return wait_ready(&probe, Some(&server.unit), "whisper-server", say, lang);
