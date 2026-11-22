@@ -245,14 +245,14 @@ fn next_timer(plane_dir: &Path) -> Option<Duration> {
     let decls = FlowFile::load(plane_dir).ok()?;
     let now = journal::now();
     let mut next: Option<u64> = None;
-    for decl in decls.flows {
+    for decl in decls.flows.iter() {
         let file = journal::path(plane_dir, decl.name());
         let Ok(entries) = journal::read(&file) else { continue };
         let Some(last) = entries.last() else { continue };
         if matches!(last, Entry::Stopped { .. }) {
             continue;
         }
-        let Ok(turn) = journal::fold(&decl, &file, &entries) else { continue };
+        let Ok(turn) = journal::fold(decl, &file, &entries) else { continue };
         let Some(state) = turn.state else { continue };
         let at = decl.states().iter().position(|s| s.name == state)?;
         let Some(due) = decl.timer(at) else { continue };

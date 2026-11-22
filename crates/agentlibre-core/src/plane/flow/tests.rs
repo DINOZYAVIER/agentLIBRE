@@ -36,7 +36,7 @@ const DEV: &str = r#"{ agl, ... }: {
 
 /// Writes `text` as the plane's `flow.nix` and reads it back; `dir` outlives
 /// the read, so a test that fails keeps its file for the message.
-fn read(dir: &TempDir, text: &str) -> Result<FlowFile, Error> {
+fn read(dir: &TempDir, text: &str) -> Result<Arc<FlowFile>, Arc<Error>> {
     fs::write(dir.0.join(FLOW_FILE), text).unwrap();
     FlowFile::load(&dir.0)
 }
@@ -44,8 +44,8 @@ fn read(dir: &TempDir, text: &str) -> Result<FlowFile, Error> {
 fn problem_of(text: &str) -> (String, FunctionProblem) {
     let dir = TempDir::new();
     let error = read(&dir, text).expect_err("a flow that does not load");
-    match error {
-        Error::Function { key, problem, .. } => (key, problem),
+    match &*error {
+        Error::Function { key, problem, .. } => (key.clone(), problem.clone()),
         other => panic!("not a load problem: {other:?}"),
     }
 }
@@ -164,7 +164,7 @@ fn a_key_a_flow_has_not_is_refused() {
     )
     .expect_err("a flow that does not load");
     assert!(
-        matches!(&error, Error::UnknownKey { key, .. } if key == "flow.one.state.a.tools"),
+        matches!(&*error, Error::UnknownKey { key, .. } if key == "flow.one.state.a.tools"),
         "{error:?}"
     );
 }

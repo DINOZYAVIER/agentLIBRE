@@ -341,7 +341,7 @@ pub fn wakeups(plane_dir: &Path) -> Vec<Wake> {
     let Ok(decls) = FlowFile::load(plane_dir) else {
         return wakes;
     };
-    for decl in decls.flows {
+    for decl in decls.flows.iter() {
         let file = journal::path(plane_dir, decl.name());
         let Ok(entries) = journal::read(&file) else {
             continue;
@@ -402,7 +402,7 @@ pub fn reviews(plane_dir: &Path) -> Vec<Review> {
     let Ok(decls) = FlowFile::load(plane_dir) else {
         return need;
     };
-    for decl in decls.flows {
+    for decl in decls.flows.iter() {
         let file = journal::path(plane_dir, decl.name());
         let Ok(entries) = journal::read(&file) else {
             continue;
@@ -581,28 +581,28 @@ pub fn tick(plane_dir: &Path, workdir: &Path, mut flight: Option<&mut Flight>) -
     let Ok(decls) = FlowFile::load(plane_dir) else {
         return fired;
     };
-    for decl in decls.flows {
+    for decl in decls.flows.iter() {
         let file = journal::path(plane_dir, decl.name());
         let Ok(entries) = journal::read(&file) else { continue };
         let Some(last) = entries.last() else { continue };
         if matches!(last, Entry::Stopped { .. }) {
             continue;
         }
-        let Ok(turn) = journal::fold(&decl, &file, &entries) else { continue };
+        let Ok(turn) = journal::fold(decl, &file, &entries) else { continue };
         let Some(state) = turn.state else { continue };
-        let at = index(&decl, &state);
+        let at = index(decl, &state);
         let Some(due) = decl.timer(at) else { continue };
         if journal::now().saturating_sub(last.time()) < due.as_secs() {
             continue;
         }
-        let Ok(mut run) = FlowRun::resume(&decl, plane_dir) else { continue };
+        let Ok(mut run) = FlowRun::resume(decl, plane_dir) else { continue };
         let before = run.state().to_owned();
-        let _ = run.on_event(&decl, Event::Timer);
+        let _ = run.on_event(decl, Event::Timer);
         // A timer that moved the machine off a running command ends it (D57).
         if run.state() != before && let Some(flight) = flight.as_mut() {
             flight.kill(decl.name());
         }
-        let _ = walk(&decl, &mut run, plane_dir, workdir, flight.as_deref_mut());
+        let _ = walk(decl, &mut run, plane_dir, workdir, flight.as_deref_mut());
         fired.push(decl.name().to_owned());
     }
     fired

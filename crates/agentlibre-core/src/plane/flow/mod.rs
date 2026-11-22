@@ -3,8 +3,10 @@
 //! exit code, a turn's end, a timer, a human's message — and whose actions
 //! are mechanical or start a turn.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use crate::action::Outcome;
 
@@ -147,26 +149,59 @@ pub struct FlowFile {
     pub flows: Vec<FlowDecl>,
 }
 
+/// What `load` keeps by the file's mtime (AGL-121, D36): a `flow.nix` is
+/// evaluated once and read from here until the file changes — not per
+/// letter, not per timer retry. A change in a file it imports goes unseen;
+/// the real ones import none. A failed read is kept too: a broken file
+/// says the same thing to every look until the human mends it.
+type Reading = (SystemTime, Result<Arc<FlowFile>, Arc<Error>>);
+
+static CACHE: OnceLock<Mutex<HashMap<PathBuf, Reading>>> = OnceLock::new();
+
 impl FlowFile {
-    /// Reads `<plane_dir>/flow.nix`; no file is no flows (D1).
-    pub fn load(plane_dir: &Path) -> Result<FlowFile, Error> {
+    /// Reads `<plane_dir>/flow.nix` through the mtime cache (D36); no file
+    /// is no flows (D1).
+    pub fn load(plane_dir: &Path) -> Result<Arc<FlowFile>, Arc<Error>> {
         let path = plane_dir.join(FLOW_FILE);
-        if !path.is_file() {
-            return Ok(FlowFile::default());
+        // No file, or no mtime to key on: no flows, and no cache.
+        let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
+            return Ok(Arc::new(FlowFile::default()));
+        };
+        let cache = CACHE.get_or_init(Default::default);
+        let held = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .filter(|(at, _)| *at == mtime)
+            .map(|(_, read)| read.clone());
+        match held {
+            Some(read) => read,
+            None => {
+                let read = read_file(&path).map(Arc::new).map_err(Arc::new);
+                cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(path, (mtime, read.clone()));
+                read
+            }
         }
-        let mut top = Section::top(&path, nix::eval_file(&path)?)?;
-        top.check_keys(&["flow"])?;
-        let mut declared = top.section("flow")?.ok_or_else(|| top.missing("flow"))?;
-        let mut flows = Vec::new();
-        for (name, at) in declared.sections()? {
-            flows.push(read_flow(name, at)?);
-        }
-        Ok(FlowFile { flows })
     }
 
     pub fn find(&self, name: &str) -> Option<&FlowDecl> {
         self.flows.iter().find(|f| f.name == name)
     }
+}
+
+/// The one evaluation of `flow.nix`: the nix read and the declarations.
+fn read_file(path: &Path) -> Result<FlowFile, Error> {
+    let mut top = Section::top(path, nix::eval_file(path)?)?;
+    top.check_keys(&["flow"])?;
+    let mut declared = top.section("flow")?.ok_or_else(|| top.missing("flow"))?;
+    let mut flows = Vec::new();
+    for (name, at) in declared.sections()? {
+        flows.push(read_flow(name, at)?);
+    }
+    Ok(FlowFile { flows })
 }
 
 /// The error of a flow file; `key` locates it in the file (D1).
