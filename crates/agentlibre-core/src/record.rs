@@ -64,8 +64,9 @@ pub struct Vad {
     /// 700 — measured on the human's own recordings, not on ffmpeg's
     /// book-example −30 dB, which their levels never reach.
     pub rms_on: i64,
-    /// A silence this long ends the speech segment; 0.5 s bridges the
-    /// pauses between words without letting chunks run on.
+    /// A silence this long ends the speech segment; 0.4 s bridges the
+    /// pauses between words without letting chunks run on, and answers
+    /// the speaker fast enough to read as live.
     pub silence_ms: u32,
     /// How much of the previous chunk's tail a new chunk repeats.
     pub overlap_ms: u32,
@@ -75,7 +76,7 @@ pub struct Vad {
 
 impl Default for Vad {
     fn default() -> Vad {
-        Vad { rms_on: 300, silence_ms: 500, overlap_ms: 300, max_speech_ms: 12000 }
+        Vad { rms_on: 300, silence_ms: 400, overlap_ms: 300, max_speech_ms: 12000 }
     }
 }
 

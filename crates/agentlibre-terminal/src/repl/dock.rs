@@ -24,6 +24,9 @@ use crate::tr;
 const MAX_INPUT_ROWS: usize = 6;
 /// The most menu rows the dock shows.
 const MAX_MENU_ROWS: usize = 6;
+/// How many rows of the dictation draft the dock shows (AGL-122).
+const DRAFT_ROWS: usize = 3;
+
 /// How many printed lines are remembered for erasing.
 const REMEMBERED_LINES: usize = 400;
 
@@ -101,6 +104,9 @@ struct State {
     context_used: Option<usize>,
     /// The voice input, in the separator row (AGL-016).
     voice: Option<VoiceLabel>,
+    /// The live dictation draft (AGL-122): text that grows in place
+    /// while the human speaks, in dim rows above the dock.
+    draft: Option<String>,
     /// The decoding speed of the current generation (AGL-012).
     speed: Option<f64>,
     /// The reading of the prompt going on (AGL-046, D19).
@@ -144,6 +150,7 @@ impl Dock {
                 context: 0,
                 context_used: None,
                 voice: None,
+                draft: None,
                 speed: None,
                 reading: None,
                 editor,
@@ -198,6 +205,16 @@ impl Dock {
         let mut state = self.lock();
         if state.voice != voice {
             state.voice = voice;
+            state.redraw("");
+        }
+    }
+
+    /// Shows the dictation draft (AGL-122) in dim rows above the dock,
+    /// replacing it whole; `None` removes the block.
+    pub fn set_draft(&self, draft: Option<String>) {
+        let mut state = self.lock();
+        if state.draft != draft {
+            state.draft = draft;
             state.redraw("");
         }
     }
@@ -258,6 +275,7 @@ impl Dock {
     pub fn finish(&self) {
         let mut state = self.lock();
         state.live.clear();
+        state.draft = None;
         state.erase_dock();
         let _ = state.out.flush();
         state.drawn = None;
@@ -437,6 +455,14 @@ impl State {
         let columns = self.columns;
         let mut rows = Vec::new();
         rows.extend(self.live.iter().cloned());
+        // The dictation draft (AGL-122): the last rows of the text
+        // spoken so far; what falls off the top stays in the buffer.
+        if let Some(text) = &self.draft {
+            let lines: Vec<String> =
+                text.lines().flat_map(|line| hard_wrap(line, self.columns)).collect();
+            let first = lines.len().saturating_sub(DRAFT_ROWS);
+            rows.extend(lines[first..].iter().map(|line| self.theme.paint(Role::Muted, line)));
+        }
         rows.push(self.separator());
         rows.push(background_row(theme, &[], columns));
 

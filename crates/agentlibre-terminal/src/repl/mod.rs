@@ -24,7 +24,7 @@ use std::thread;
 
 use dock::{Dock, SendMode};
 use editor::{Editor, MenuItem, Outcome, save_history};
-use voice::{Sender, VoiceInput};
+use voice::{DraftEngine, Sender, VoiceInput};
 use term::{Key, Parser, RawGuard};
 use transcript::{Presenter, Screen, notice_lines, user_lines};
 
@@ -1203,7 +1203,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.set_media_counts(&file);
     // The live draft engine of the dictation (AGL-122, D5), when the
     // daemon found both program and model.
-    let draft = opened.draft.map(|(program, model)| whisper::Draft { program, model });
+    let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|(program, model)| {
+        Arc::new(whisper::Draft { program, model }) as Arc<dyn DraftEngine>
+    });
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
         dictation,
@@ -1728,6 +1730,18 @@ mod tests {
         text: Mutex<String>,
         /// While true the transcription waits.
         hold: std::sync::atomic::AtomicBool,
+        /// The chunks the fake recording still owes the draft (AGL-122).
+        chunks: std::sync::atomic::AtomicUsize,
+        drafts: std::sync::atomic::AtomicUsize,
+    }
+
+    /// The draft engine of the tests: every chunk becomes its number.
+    struct FakeDraft(Arc<Fake>);
+
+    impl crate::repl::voice::DraftEngine for FakeDraft {
+        fn transcribe(&self, _wav: &[u8]) -> Result<String, Error> {
+            Ok(format!("draft{}", self.0.drafts.fetch_add(1, Ordering::SeqCst) + 1))
+        }
     }
 
     impl Fake {
@@ -1748,6 +1762,15 @@ mod tests {
         }
         fn cancel(self: Box<Self>) {
             self.0.log.lock().unwrap().push("cancel".into());
+        }
+        fn poll_chunk(&mut self) -> Option<Vec<u8>> {
+            // A chunk per call, as many as the test owed (AGL-122).
+            let left = self.0.chunks.load(Ordering::SeqCst);
+            if left == 0 {
+                return None;
+            }
+            self.0.chunks.store(left - 1, Ordering::SeqCst);
+            Some(vec![0u8; 45])
         }
     }
 
@@ -1832,7 +1855,7 @@ mod tests {
                     Ok(Box::new(FakeRecording(fake.clone())))
                 })
             },
-            None,
+            Some(Arc::new(FakeDraft(fake.clone()))),
             60,
             Lang::En,
             Theme::plain(),
@@ -2118,6 +2141,21 @@ mod tests {
         eventually("the text", || f.input.dock.input_text() == "hello world ");
         assert!(f.output().contains("Transcribing · ask…"));
         assert!(f.inner().queue.is_empty());
+    }
+
+    #[test]
+    fn the_draft_grows_in_place_while_the_human_speaks() {
+        // AGL-122, D7: chunk texts join into one block, not notice
+        // line after notice line; the block goes when the final pass
+        // starts.
+        let f = fixture();
+        f.fake.chunks.store(2, Ordering::SeqCst);
+        f.input.key(Key::Ctrl('r'));
+        eventually("the joined draft", || f.output().contains("draft1 draft2"));
+        f.input.key(Key::Ctrl('r'));
+        eventually("the send", || f.inner().texts() == ["hello world"]);
+        // The final pass took the stage: no draft rows stand under it.
+        assert!(!f.output().rsplit("hello world").next().unwrap().contains("draft1"));
     }
 
     #[test]

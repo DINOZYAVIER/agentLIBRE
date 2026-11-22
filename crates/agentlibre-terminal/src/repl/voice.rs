@@ -33,6 +33,18 @@ pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, Error> + Send 
 /// Queues an auto-sent transcript (AGL-123, D1).
 pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
 
+/// What turns a chunk into draft text; `whisper::Draft` is the engine,
+/// the tests fake it (AGL-122).
+pub trait DraftEngine: Send + Sync {
+    fn transcribe(&self, wav: &[u8]) -> Result<String, Error>;
+}
+
+impl DraftEngine for Draft {
+    fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
+        Draft::transcribe(self, wav)
+    }
+}
+
 /// The draft engine at work (AGL-122): one thread turns chunks into text
 /// one by one, so the lines keep their order; when the last sender of
 /// the recording drops, it stops.
@@ -43,7 +55,7 @@ struct DraftWorker {
 }
 
 impl DraftWorker {
-    fn start(draft: Draft) -> DraftWorker {
+    fn start(draft: Arc<dyn DraftEngine>) -> DraftWorker {
         let (ctx, crx) = mpsc::channel::<Vec<u8>>();
         let (tx, rx) = mpsc::channel::<String>();
         let thread = thread::spawn(move || {
@@ -71,7 +83,9 @@ struct Active {
     id: u64,
     /// The live draft of this recording, when a draft engine is set
     /// (AGL-122, D5).
-    draft: Option<DraftWorker>,
+    worker: Option<DraftWorker>,
+    /// The draft text spoken so far, shown by the dock in place.
+    text: String,
 }
 
 enum State {
@@ -88,7 +102,7 @@ pub struct VoiceInput {
     /// a draft engine is set.
     recorder_chunked: Recorder,
     /// The live draft engine, `None` without one (AGL-122, D5).
-    draft: Option<Draft>,
+    draft: Option<Arc<dyn DraftEngine>>,
     /// The longest recording, in seconds (D5).
     limit: u32,
     lang: Lang,
@@ -108,7 +122,7 @@ impl VoiceInput {
         dictation: Arc<dyn Dictation>,
         recorder: Recorder,
         recorder_chunked: Recorder,
-        draft: Option<Draft>,
+        draft: Option<Arc<dyn DraftEngine>>,
         limit: u32,
         lang: Lang,
         theme: Theme,
@@ -233,13 +247,15 @@ impl VoiceInput {
                     .warm_up(&mut |line| me.notice(line, Role::Muted))
             })
         };
-        let draft = self.draft.clone().map(DraftWorker::start);
+        let worker = self.draft.clone().map(DraftWorker::start);
+        self.dock.set_draft(None);
         *self.lock() = State::Recording(Active {
             recording,
             since: Instant::now(),
             warm: Some(warm),
             id,
-            draft,
+            worker,
+            text: String::new(),
         });
         self.dock.set_voice(Some(VoiceLabel::Recording(0, mode)));
         let me = self.clone();
@@ -264,14 +280,26 @@ impl VoiceInput {
                         // The live draft (AGL-122): finished chunks go
                         // to the engine, its finished lines to the
                         // transcript; the final pass replaces them (D7).
-                        if let Some(worker) = active.draft.as_ref() {
+                        if let Some(worker) = active.worker.as_ref() {
                             while let Some(chunk) = active.recording.poll_chunk() {
                                 if worker.chunks.send(chunk).is_err() {
                                     break;
                                 }
                             }
+                            // The draft grows in place, not line after
+                            // line (AGL-122): the whole text is set
+                            // again and the dock shows its last rows.
+                            let mut grew = false;
                             while let Ok(text) = worker.texts.try_recv() {
-                                self.notice(&text, Role::Muted);
+                                if !active.text.is_empty() {
+                                    active.text.push(' ');
+                                }
+                                active.text.push_str(&text);
+                                grew = true;
+                            }
+                            if grew {
+                                let text = active.text.clone();
+                                self.dock.set_draft(Some(text));
                             }
                         }
                         active.recording.finished()
@@ -298,6 +326,9 @@ impl VoiceInput {
                 }
             }
         };
+        // D7: the final pass replaces the draft in place — the block
+        // goes, the label says what is happening.
+        self.dock.set_draft(None);
         self.dock.set_voice(Some(VoiceLabel::Transcribing(self.mode())));
         let me = self.clone();
         thread::spawn(move || {
@@ -382,6 +413,7 @@ impl VoiceInput {
         };
         if let Some(active) = active {
             active.recording.cancel();
+            self.dock.set_draft(None);
             self.dock.set_voice(None);
         }
     }
