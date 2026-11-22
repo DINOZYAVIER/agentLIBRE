@@ -34,8 +34,9 @@ pub enum Event {
     Timer,
     /// A human's message: `message.<name>` (D9).
     Message(String),
-    /// A check-turn's answer, one of its `events` (D5, D9): `<check>.<answer>`.
-    Answer { check: String, answer: String },
+    /// A check-turn's verdict: the answer named one of its `events` (D5, D9;
+    /// AGL-121, D39), the key `<check>.<answer>`.
+    Verdict { check: String, answer: String },
 }
 
 impl Event {
@@ -49,7 +50,7 @@ impl Event {
             Event::TurnEnd => ("turn", Some("end")),
             Event::Timer => ("timer", None),
             Event::Message(name) => ("message", Some(name)),
-            Event::Answer { check, answer } => (check, Some(answer)),
+            Event::Verdict { check, answer } => (check, Some(answer)),
         }
     }
 }

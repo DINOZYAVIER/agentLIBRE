@@ -1578,7 +1578,7 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
     use crate::plane::flow::{holder, FLOW_FILE};
 
     let plane = TempDir::new();
-    let ask = |holder: Option<&holder::Handle>, args: Vec<(&str, &str)>| {
+    let ask = |holder: Option<&holder::Holder>, args: Vec<(&str, &str)>| {
         flow_tool(
             &tool_call(
                 "flow",
@@ -1595,7 +1595,7 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
     assert_eq!(out.outcome, Outcome::Fail);
     assert_eq!(out.content, "flows live in a plane; this session is in none");
     // Inside one, every verb travels to the plane's holder (D17).
-    let registry = holder::Registry::default();
+    let registry = holder::Holders::default();
     let handle = registry.holder(&plane.0, &plane.0);
     let here = Some(&handle);
     // A plane that declares nothing answers, and a declared flow that never

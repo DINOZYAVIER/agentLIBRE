@@ -189,7 +189,7 @@ fn a_journal_replays_to_the_position_it_left() {
     {
         let mut run = FlowRun::start(decl, &dir.0).unwrap();
         run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
-        run.on_event(decl, Event::Answer {
+        run.on_event(decl, Event::Verdict {
             check: "review".into(),
             answer: "flaky".into(),
         })
@@ -215,7 +215,7 @@ fn the_trail_names_the_states_the_journal_walked() {
     let decl = flows.find("dev-loop").unwrap();
     let mut run = FlowRun::start(decl, &dir.0).unwrap();
     run.on_event(decl, Event::Exit(Outcome::Ok)).unwrap();
-    run.on_event(decl, Event::Answer {
+    run.on_event(decl, Event::Verdict {
         check: "review".into(),
         answer: "broken".into(),
     })
@@ -451,21 +451,21 @@ const CHASE: &str = r#"{ agl, ... }: {
 fn a_flow_that_was_never_started_has_no_place() {
     let dir = TempDir::new();
     let flows = read(&dir, WORK).unwrap();
-    let place = host::place(flows.find("work").unwrap(), &dir.0).unwrap();
-    assert_eq!(place, host::Place::default());
+    let place = drive::place(flows.find("work").unwrap(), &dir.0).unwrap();
+    assert_eq!(place, drive::Place::default());
 }
 
 #[test]
 fn a_states_command_runs_and_its_exit_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, WORK).unwrap();
-    let place = host::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
     assert_eq!(place.state.as_deref(), Some("check"));
     assert_eq!(place.tail, ["started build", "exit.ok -> check"]);
     // The review turn is the plane's to start; the flow waits for it (D6).
     assert_eq!(
         place.waiting,
-        [host::Waiting::Review {
+        [drive::Waiting::Review {
             function: "reviewer".into(),
             events: vec!["ok".into(), "broken".into()],
         }]
@@ -482,7 +482,7 @@ fn a_failing_command_takes_the_transition_written_for_it() {
     )
     .unwrap();
     let flows = FlowFile::load(&dir.0).unwrap();
-    let place = host::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
     assert_eq!(place.state.as_deref(), Some("halted"));
     assert_eq!(place.tail, ["started build", "exit.fail -> halted"]);
 }
@@ -492,11 +492,11 @@ fn a_stopped_flow_goes_on_from_where_it_stood() {
     let dir = TempDir::new();
     let flows = read(&dir, WORK).unwrap();
     let decl = flows.find("work").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
-    let place = host::stop(decl, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0).unwrap();
+    let place = drive::stop(decl, &dir.0).unwrap();
     assert!(place.stopped);
     assert_eq!(place.state.as_deref(), Some("check"));
-    let place = host::start(decl, &dir.0, &dir.0).unwrap();
+    let place = drive::start(decl, &dir.0, &dir.0).unwrap();
     assert!(!place.stopped, "the flow moves again (D7)");
     assert_eq!(place.state.as_deref(), Some("check"));
     assert_eq!(
@@ -511,7 +511,7 @@ fn the_steps_of_a_whole_run_bound_it() {
     let dir = TempDir::new();
     let flows = read(&dir, CHASE).unwrap();
     let decl = flows.find("chase").unwrap();
-    let place = host::start(decl, &dir.0, &dir.0).unwrap();
+    let place = drive::start(decl, &dir.0, &dir.0).unwrap();
     // `max_steps_total = 3`: three commands, and the run stops where the
     // third left it (D33).
     assert_eq!(place.state.as_deref(), Some("two"));
@@ -523,7 +523,7 @@ fn a_declaration_that_chases_its_tail_is_refused() {
     let dir = TempDir::new();
     let flows = read(&dir, CHASE).unwrap();
     let decl = flows.find("tail").unwrap();
-    let error = host::start(decl, &dir.0, &dir.0).unwrap_err();
+    let error = drive::start(decl, &dir.0, &dir.0).unwrap_err();
     assert!(
         matches!(&error, Error::PlaneFile { detail, .. } if detail.contains("max_visits")),
         "{error:?}"
@@ -549,7 +549,7 @@ fn told(said: crate::plane::Said) -> String {
 fn a_verb_answers_what_the_flow_does_and_where_it_stands() {
     let dir = TempDir::new();
     read(&dir, WORK).unwrap();
-    let run = |verb: Verb| host::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En);
+    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En);
     assert_eq!(told(run(Verb::List)), "work: not started");
     assert_eq!(
         told(run(Verb::Start { name: "work".into() })).replace('\n', " | "),
@@ -606,10 +606,10 @@ fn a_due_timer_fires_and_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, CLOCK).unwrap();
     let decl = flows.find("clock").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0).unwrap();
     // Not yet run out: the flow stands where it stood (D16).
-    assert!(host::tick(&dir.0, &dir.0).is_empty());
-    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
+    assert!(drive::tick(&dir.0, &dir.0).is_empty());
+    assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
     // Age the journal's last line past the timer, and the tick fires: the
     // `timer` event moves it, and the state it lands on goes on by itself.
     let file = journal::path(&dir.0, "clock");
@@ -617,10 +617,10 @@ fn a_due_timer_fires_and_moves_the_flow() {
         .unwrap()
         .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
     fs::write(&file, aged).unwrap();
-    assert_eq!(host::tick(&dir.0, &dir.0), ["clock"]);
-    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("done"));
+    assert_eq!(drive::tick(&dir.0, &dir.0), ["clock"]);
+    assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("done"));
     // Done has no timer: the next tick has nothing to fire.
-    assert!(host::tick(&dir.0, &dir.0).is_empty());
+    assert!(drive::tick(&dir.0, &dir.0).is_empty());
 }
 
 #[test]
@@ -628,16 +628,16 @@ fn a_stopped_flow_waits_for_no_timer() {
     let dir = TempDir::new();
     let flows = read(&dir, CLOCK).unwrap();
     let decl = flows.find("clock").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
-    host::stop(decl, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0).unwrap();
+    drive::stop(decl, &dir.0).unwrap();
     // The human holds a stopped flow: its timer stands with it (D7).
     let file = journal::path(&dir.0, "clock");
     let aged = std::fs::read_to_string(&file)
         .unwrap()
         .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
     fs::write(&file, aged).unwrap();
-    assert!(host::tick(&dir.0, &dir.0).is_empty());
-    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
+    assert!(drive::tick(&dir.0, &dir.0).is_empty());
+    assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
 }
 
 /// A flow whose second state waits for a wake (D6, D20).
@@ -661,12 +661,12 @@ fn a_say_waits_until_its_wake_is_delivered() {
     let dir = TempDir::new();
     let flows = read(&dir, TALK).unwrap();
     let decl = flows.find("talk").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0).unwrap();
     // The flow stands in `stood`, and its wake names the session and the
     // line D14 gives it: itself and where it stands.
     assert_eq!(
-        host::wakeups(&dir.0),
-        [host::Wake {
+        drive::wakeups(&dir.0),
+        [drive::Wake {
             flow: "talk".into(),
             session: "last".into(),
             text: "flow `talk` stands in `stood`; read `flow status talk`".into(),
@@ -684,10 +684,10 @@ fn a_say_waits_until_its_wake_is_delivered() {
         },
     )
     .unwrap();
-    assert!(host::wakeups(&dir.0).is_empty());
+    assert!(drive::wakeups(&dir.0).is_empty());
     // A stopped flow holds its wake with it (D7).
-    host::stop(decl, &dir.0).unwrap();
-    assert!(host::wakeups(&dir.0).is_empty());
+    drive::stop(decl, &dir.0).unwrap();
+    assert!(drive::wakeups(&dir.0).is_empty());
     let _ = Lang::En;
 }
 
@@ -704,10 +704,10 @@ fn a_say_table_overrides_the_wakes_line() {
     .unwrap();
     let flows = FlowFile::load(&dir.0).unwrap();
     let decl = flows.find("talk").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0).unwrap();
     assert_eq!(
-        host::wakeups(&dir.0),
-        [host::Wake {
+        drive::wakeups(&dir.0),
+        [drive::Wake {
             flow: "talk".into(),
             session: "agl:dev".into(),
             text: "the build broke".into(),
@@ -723,7 +723,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
 
     let dir = TempDir::new();
     let (to, from) = std::sync::mpsc::channel();
-    let registry = holder::Registry::with_delivery(to);
+    let registry = holder::Holders::with_delivery(to);
     let handle = registry.holder(&dir.0, &dir.0);
     read(&dir, TALK).unwrap();
     handle.ask(Verb::Start { name: "talk".into() }, Lang::En);
@@ -738,7 +738,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     handle.post(Letter::Poke);
     // A second ask would wait behind nothing; `wakeups` answers the double.
     drop(from.recv_timeout(Duration::from_millis(300)));
-    assert!(host::wakeups(&dir.0).len() == 1, "asked twice");
+    assert!(drive::wakeups(&dir.0).len() == 1, "asked twice");
     // The delivery comes back, the `said` line goes to the journal, and no
     // wake stands (D14, D20); a later ask waits behind it, so the journal
     // is written by then.
@@ -749,7 +749,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     });
     let status = handle.ask(Verb::Status { name: "talk".into() }, Lang::En);
     assert!(status.content.as_deref().is_some_and(|t| t.contains("stood")), "no status");
-    assert!(host::wakeups(&dir.0).is_empty());
+    assert!(drive::wakeups(&dir.0).is_empty());
     let entries = journal::read(&journal::path(&dir.0, "talk")).unwrap();
     assert!(
         matches!(entries.last(), Some(journal::Entry::Said { text, .. }) if text == &wake.text),
@@ -765,7 +765,7 @@ fn a_review_verdict_moves_the_flow_and_names_its_session() {
 
     let dir = TempDir::new();
     let (to, from) = std::sync::mpsc::channel();
-    let registry = holder::Registry::with_delivery(to);
+    let registry = holder::Holders::with_delivery(to);
     let handle = registry.holder(&dir.0, &dir.0);
     read(&dir, WORK).unwrap();
     handle.ask(Verb::Start { name: "work".into() }, Lang::En);
@@ -781,12 +781,12 @@ fn a_review_verdict_moves_the_flow_and_names_its_session() {
     // that turned beside the step (D5).
     handle.post(Letter::Verdict {
         flow: "work".into(),
-        event: Event::Answer { check: "review".into(), answer: "ok".into() },
+        event: Event::Verdict { check: "review".into(), answer: "ok".into() },
         note: Some("session s1".into()),
     });
     let status = handle.ask(Verb::Status { name: "work".into() }, Lang::En);
     assert!(status.content.as_deref().is_some_and(|t| t.contains("halted")), "no move");
-    assert!(host::reviews(&dir.0).is_empty(), "asked again");
+    assert!(drive::reviews(&dir.0).is_empty(), "asked again");
     let entries = journal::read(&journal::path(&dir.0, "work")).unwrap();
     assert!(
         matches!(
@@ -817,8 +817,8 @@ fn a_nudge_delivers_where_the_state_names_it() {
     let decl = flows.find("gate").unwrap();
     let at = decl.states().iter().position(|s| s.name == "stood").unwrap();
     assert_eq!(decl.nudges(at), ["go"]);
-    host::start(decl, &dir.0, &dir.0).unwrap();
-    let run = |verb: Verb| host::run(&dir.0, &dir.0, &verb, Lang::En);
+    drive::start(decl, &dir.0, &dir.0).unwrap();
+    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, Lang::En);
     // The human delivers what the machine declared for it, bounded by no
     // list; an undeclared event simply moves nothing (D21).
     assert!(told(run(Verb::Message { name: "gate".into(), event: "jump".into() })).contains("stood"));
@@ -837,7 +837,7 @@ fn a_woken_sessions_turn_end_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, GATE).unwrap();
     let decl = flows.find("gate").unwrap();
-    host::start(decl, &dir.0, &dir.0).unwrap();
-    host::settle(&dir.0, &dir.0, "gate", Event::TurnEnd, None);
-    assert_eq!(host::place(decl, &dir.0).unwrap().state.as_deref(), Some("gone"));
+    drive::start(decl, &dir.0, &dir.0).unwrap();
+    drive::settle(&dir.0, &dir.0, "gate", Event::TurnEnd, None);
+    assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("gone"));
 }

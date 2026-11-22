@@ -17,7 +17,7 @@ use crate::error::Error;
 use crate::i18n::Lang;
 use crate::plane::Said;
 
-use super::host::{self, Review, Wake};
+use super::drive::{self, Review, Wake};
 use crate::machine::Event;
 use super::journal::{self, Entry};
 use super::{FlowFile, Verb};
@@ -73,10 +73,10 @@ pub enum Letter {
     Poke,
 }
 
-/// The holder's handle, held by the daemon (D17); letters go in, the flow's
-/// word comes back.
+/// The holder, held by the daemon (D17, AGL-121 D39): letters go in, the
+/// flow's word comes back.
 #[derive(Clone)]
-pub struct Handle {
+pub struct Holder {
     asks: Sender<Letter>,
 }
 
@@ -85,37 +85,37 @@ pub struct Handle {
 /// tick all ask the same thread and none of them writes the journal beside
 /// another (D13).
 #[derive(Default)]
-pub struct Registry {
-    holders: Mutex<HashMap<PathBuf, Handle>>,
+pub struct Holders {
+    holders: Mutex<HashMap<PathBuf, Holder>>,
     /// The daemon's ear for its flows' needs (D18); `None` outside a daemon,
     /// where a waiting state simply stands and `status` says so.
     needs: Option<Sender<Need>>,
 }
 
-impl Registry {
+impl Holders {
     /// A registry whose holders ask this daemon for the turns they wait for
     /// (D18).
     pub fn with_delivery(needs: Sender<Need>) -> Self {
-        Registry {
+        Holders {
             holders: Mutex::new(HashMap::new()),
             needs: Some(needs),
         }
     }
 
     /// The holder of the plane `plane_dir`, made when first asked (D17).
-    pub fn holder(&self, plane_dir: &Path, workdir: &Path) -> Handle {
+    pub fn holder(&self, plane_dir: &Path, workdir: &Path) -> Holder {
         let mut holders = self.holders.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(handle) = holders.get(plane_dir) {
-            return handle.clone();
+        if let Some(one) = holders.get(plane_dir) {
+            return one.clone();
         }
-        let handle = spawn(plane_dir.to_path_buf(), workdir.to_path_buf(), self.needs.clone());
-        holders.insert(plane_dir.to_path_buf(), handle.clone());
-        handle
+        let one = spawn(plane_dir.to_path_buf(), workdir.to_path_buf(), self.needs.clone());
+        holders.insert(plane_dir.to_path_buf(), one.clone());
+        one
     }
 
     /// The holder of `plane_dir` when one runs; never starts one (D18): the
     /// poke of a turn's end follows only flows that already have a driver.
-    pub fn peek(&self, plane_dir: &Path) -> Option<Handle> {
+    pub fn peek(&self, plane_dir: &Path) -> Option<Holder> {
         self.holders
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -125,9 +125,9 @@ impl Registry {
 }
 
 /// The holders, shared by the daemon and the planes it opens (D17).
-pub type Shared = Arc<Registry>;
+pub type Shared = Arc<Holders>;
 
-impl Handle {
+impl Holder {
     /// Asks the holder to do `verb` and waits for its word (D17): the one
     /// driver, so a verb waits its turn behind a command, not beside it (D13).
     pub fn ask(&self, verb: Verb, lang: Lang) -> Said {
@@ -153,7 +153,7 @@ impl Handle {
 /// The holder of the flows of `plane_dir`, whose states' commands run in
 /// `workdir` (D17): idle until a verb comes, a timer runs out, or the
 /// daemon answers a wake (D18).
-pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) -> Handle {
+pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) -> Holder {
     let (asks, inbox) = mpsc::channel();
     thread::spawn(move || {
         // Asks in flight (D20): sent, and the daemon has not answered yet;
@@ -167,7 +167,7 @@ pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) 
                 Some(wait) => match inbox.recv_timeout(wait) {
                     Ok(letter) => answer(&plane_dir, &workdir, letter, &needs, &mut pending),
                     Err(RecvTimeoutError::Timeout) => {
-                        host::tick(&plane_dir, &workdir);
+                        drive::tick(&plane_dir, &workdir);
                         issue(&plane_dir, &needs, &mut pending);
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
@@ -180,7 +180,7 @@ pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) 
             }
         }
     });
-    Handle { asks }
+    Holder { asks }
 }
 
 fn answer(
@@ -192,7 +192,7 @@ fn answer(
 ) {
     match letter {
         Letter::Ask { verb, lang, reply } => {
-            let said = host::run(plane_dir, workdir, &verb, lang);
+            let said = drive::run(plane_dir, workdir, &verb, lang);
             let _ = reply.send(said);
             issue(plane_dir, needs, pending);
         }
@@ -219,14 +219,14 @@ fn answer(
         }
         Letter::Verdict { flow, event, note } => {
             pending.remove(&(flow.clone(), REVIEW));
-            host::settle(plane_dir, workdir, &flow, event, note);
+            drive::settle(plane_dir, workdir, &flow, event, note);
             issue(plane_dir, needs, pending);
         }
         Letter::Miss { flow, kind } => {
             pending.remove(&(flow, kind));
         }
         Letter::TurnEnd { flow } => {
-            host::settle(plane_dir, workdir, &flow, Event::TurnEnd, None);
+            drive::settle(plane_dir, workdir, &flow, Event::TurnEnd, None);
             issue(plane_dir, needs, pending);
         }
         Letter::Poke => issue(plane_dir, needs, pending),
@@ -240,7 +240,7 @@ fn issue(plane_dir: &Path, needs: &Option<Sender<Need>>, pending: &mut HashSet<(
     let Some(needs) = needs else {
         return;
     };
-    for wake in host::wakeups(plane_dir) {
+    for wake in drive::wakeups(plane_dir) {
         if pending.insert((wake.flow.clone(), SAY)) {
             let _ = needs.send(Need::Wake {
                 plane_dir: plane_dir.to_path_buf(),
@@ -248,7 +248,7 @@ fn issue(plane_dir: &Path, needs: &Option<Sender<Need>>, pending: &mut HashSet<(
             });
         }
     }
-    for review in host::reviews(plane_dir) {
+    for review in drive::reviews(plane_dir) {
         if pending.insert((review.flow.clone(), REVIEW)) {
             let _ = needs.send(Need::Review {
                 plane_dir: plane_dir.to_path_buf(),

@@ -1,7 +1,7 @@
 //! Running the mechanical actions of a flow (AGL-118, D5, D9): a command of
 //! the declaration, whose exit code is the verdict where one exists. Where no
 //! exit code exists by nature, the verdict is a check-turn (D5), and that
-//! belongs to the plane's host, not here.
+//! belongs to the plane's driver, not here.
 
 use std::os::unix::process::CommandExt;
 use std::path::Path;

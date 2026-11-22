@@ -6,7 +6,7 @@ impl Daemon {
     /// The daemon's holder of the plane `name` (AGL-118, D17): its store
     /// gives the journals, its first directory the place a state's commands
     /// run — where its builds are (D9).
-    pub(super) fn flow_handle(&self, name: &str) -> Result<plane::flow::holder::Handle, Error> {
+    pub(super) fn flow_holder(&self, name: &str) -> Result<plane::flow::holder::Holder, Error> {
         let file = plane::PlaneFile::open(&self.paths, name)?;
         let workdir = file
             .directories
@@ -46,7 +46,7 @@ impl Daemon {
                         handle.post(match verdict {
                             Ok((answer, session)) => Letter::Verdict {
                                 flow: review.flow,
-                                event: crate::machine::Event::Answer {
+                                event: crate::machine::Event::Verdict {
                                     check: holder::REVIEW.into(),
                                     answer,
                                 },
@@ -67,7 +67,7 @@ impl Daemon {
     /// (AGL-062: `last`, a name, a start of an id); that session's queue
     /// takes the line as a human's `say` does. None answers — no delivery,
     /// and the flow stands (D20).
-    pub(super) fn deliver_wake(&self, plane_dir: &Path, wake: &plane::flow::host::Wake) -> bool {
+    pub(super) fn deliver_wake(&self, plane_dir: &Path, wake: &plane::flow::drive::Wake) -> bool {
         let mut state = self.lock();
         let mut dirs: HashMap<String, PathBuf> = HashMap::new();
         let mut ids: Vec<String> = state
@@ -123,7 +123,7 @@ impl Daemon {
     pub(super) fn run_review(
         &self,
         plane_dir: &Path,
-        review: &plane::flow::host::Review,
+        review: &plane::flow::drive::Review,
     ) -> Result<(String, String), Error> {
         let user = UserFile::load(&self.paths.settings_file())?;
         let file = plane::PlaneFile::list(&self.paths)?

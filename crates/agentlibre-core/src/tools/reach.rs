@@ -36,7 +36,7 @@ pub struct Reach<'a> {
     pub memory: &'a dyn Home,
     /// The daemon's holder of the plane's flows, which the `flow` tool asks;
     /// none outside a plane (AGL-118, D2, D17).
-    pub flows: Option<crate::plane::flow::holder::Handle>,
+    pub flows: Option<crate::plane::flow::holder::Holder>,
 }
 
 /// A write a call made outside the workspace's files: to the forge
@@ -62,7 +62,7 @@ pub struct Ran {
 /// declaration's `nudges` (D15, D21).
 pub(super) fn flow_tool(
     call: &ToolCall,
-    holder: Option<&crate::plane::flow::holder::Handle>,
+    holder: Option<&crate::plane::flow::holder::Holder>,
     lang: Lang,
 ) -> ToolResult {
     use crate::plane::flow::Verb;

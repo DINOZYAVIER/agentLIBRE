@@ -254,7 +254,7 @@ pub struct Plane {
     /// The daemon's holder of this plane's flows (AGL-118, D17): the agent's
     /// `flow` tool asks it — the one driver the CLI asks. None outside a
     /// plane; the daemon sets it on the plane it opens.
-    pub flows: Option<flow::holder::Handle>,
+    pub flows: Option<flow::holder::Holder>,
 }
 
 impl Plane {

@@ -1,4 +1,4 @@
-//! Hosting a flow above the turn (AGL-118, D3, D7): the journal is the truth,
+//! Driving a flow above the turn (AGL-118, D3, D7; AGL-121, D39): the journal is the truth,
 //! so a run is folded from it when it is touched and set down again; what a
 //! state does by itself runs here, on the plane's thread. What needs a turn —
 //! a `say` or a review — waits for a session, and `status` says what waits

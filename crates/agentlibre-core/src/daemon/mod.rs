@@ -58,7 +58,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
     // The daemon's ear for the wakes its flows wait on (D18, D20).
     let (needs, inbox) = mpsc::channel();
     let daemon = Arc::new(Daemon {
-        flows: Arc::new(plane::flow::holder::Registry::with_delivery(needs)),
+        flows: Arc::new(plane::flow::holder::Holders::with_delivery(needs)),
         paths,
         state: Mutex::new(State::default()),
     });

@@ -126,7 +126,7 @@ pub struct Agent<'a> {
     pub about: Option<&'a str>,
     /// The daemon's holder of the plane's flows, which the `flow` tool asks;
     /// none outside a plane (AGL-118, D2, D17).
-    pub flows: Option<crate::plane::flow::holder::Handle>,
+    pub flows: Option<crate::plane::flow::holder::Holder>,
 }
 
 impl Agent<'_> {

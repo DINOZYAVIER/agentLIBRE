@@ -227,7 +227,7 @@ impl Daemon {
                         plane::flow::Verb::Message { name, event }
                     }
                 };
-                match self.flow_handle(&plane) {
+                match self.flow_holder(&plane) {
                     Ok(handle) => {
                         let said = handle.ask(verb, lang);
                         Some(Reply::Said { plane, said: wire::said(&said, lang) })
