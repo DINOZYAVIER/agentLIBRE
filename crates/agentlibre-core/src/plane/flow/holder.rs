@@ -13,8 +13,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::Error;
-use crate::i18n::Lang;
+use crate::i18n::{m, Lang};
 use crate::plane::Text;
+use crate::tr;
 
 use super::drive::{self, Review, Wake, Word};
 use crate::machine::Event;
@@ -31,6 +32,9 @@ const DUE_AGAIN: Duration = Duration::from_secs(1);
 pub enum Need {
     Wake { plane_dir: PathBuf, wake: Wake },
     Review { plane_dir: PathBuf, review: Review },
+    /// A driver error dropped (AGL-121, D37): the daemon writes it to its
+    /// log; `status` shows it as a warning line from the driver's memory.
+    Warn { plane_dir: PathBuf, text: String },
 }
 
 impl Need {
@@ -38,7 +42,9 @@ impl Need {
     /// to the one thread of its plane.
     pub fn plane_dir(&self) -> &Path {
         match self {
-            Need::Wake { plane_dir, .. } | Need::Review { plane_dir, .. } => plane_dir,
+            Need::Wake { plane_dir, .. }
+            | Need::Review { plane_dir, .. }
+            | Need::Warn { plane_dir, .. } => plane_dir,
         }
     }
 }
@@ -107,7 +113,7 @@ impl Holder {
         thread::spawn(move || {
             // Commands run off this thread; their word comes back as a
             // letter, so the holder answers verbs while a build runs (D35).
-            let mut flight = drive::Flight::new(move |word| {
+            let mut flight = drive::Flight::new(plane_dir.clone(), needs.clone(), move |word| {
                 let _ = posted.send(Letter::Exited(word));
             });
             // Asks in flight (D20): sent, and the daemon has not answered yet;
@@ -124,6 +130,7 @@ impl Holder {
                         }
                         Err(RecvTimeoutError::Timeout) => {
                             drive::tick(&plane_dir, &workdir, Some(&mut flight));
+                            flight.clean_pass();
                             issue(&plane_dir, &needs, &mut pending);
                         }
                         Err(RecvTimeoutError::Disconnected) => return,
@@ -176,9 +183,23 @@ fn answer(
         Letter::Ask { verb, lang, reply } => {
             // A verb of a flow whose command runs answers now: the command
             // is off this thread, and `stop` ends it (D35).
-            let said = drive::run(plane_dir, workdir, &verb, lang, Some(flight));
+            let read = matches!(verb, Verb::Status { .. } | Verb::List);
+            let mut said = drive::run(plane_dir, workdir, &verb, lang, Some(flight));
+            // A dropped driver error shows as a warning line beside the
+            // place, until a clean pass clears it (D37).
+            if let Some(warning) = flight.warning().map(str::to_owned) {
+                let line = tr!(lang, m::FLOW_WARN, text = warning);
+                said.lines.push(crate::plane::Told::Notice(line.clone()));
+                said.content =
+                    Some(said.content.map_or(line.clone(), |c| format!("{c}
+{line}")));
+            }
             let _ = reply.send(said);
             issue(plane_dir, needs, pending);
+            // A status read shows the warning, it does not spend it (D37).
+            if read {
+                return;
+            }
         }
         Letter::Delivered {
             flow,
@@ -220,6 +241,8 @@ fn answer(
             issue(plane_dir, needs, pending);
         }
     }
+    // A pass that dropped nothing clears the warning (D37).
+    flight.clean_pass();
 }
 
 /// Sends every wake and review the flows stand waiting for (D18, D19, D20);

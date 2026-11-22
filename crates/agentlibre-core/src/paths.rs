@@ -60,6 +60,12 @@ impl Paths {
     }
 
     /// The input history of the REPL (D133).
+    /// The daemon's log (AGL-121, D37): the errors its flows' driver
+    /// dropped, and nothing else.
+    pub fn log_file(&self) -> PathBuf {
+        self.data.join("daemon.log")
+    }
+
     pub fn history_file(&self) -> PathBuf {
         self.state.join("history.jsonl")
     }

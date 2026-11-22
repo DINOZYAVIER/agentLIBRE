@@ -74,6 +74,10 @@ impl Daemon {
     fn flow_need(&self, need: plane::flow::holder::Need) {
         use plane::flow::holder::{self, Letter, Need};
         match need {
+            Need::Warn { plane_dir, text } => {
+                // The driver dropped an error: the log keeps it (D37).
+                self.log(&plane_dir, &text);
+            }
             Need::Wake { plane_dir, wake } => {
                 self.flow_gate.acquire();
                 let delivered = self.deliver_wake(&plane_dir, &wake);
@@ -111,10 +115,12 @@ impl Daemon {
                             },
                             note: Some(format!("session {session}")),
                         },
-                        Err(_) => Letter::Miss {
-                            flow: review.flow,
-                            kind: holder::REVIEW,
-                        },
+                        Err(error) => {
+                            // A review that could not turn: the state
+                            // stands, and the log says why (D37).
+                            self.log(&plane_dir, &error.message(Lang::En));
+                            Letter::Miss { flow: review.flow, kind: holder::REVIEW }
+                        }
                     });
                 }
             }
@@ -234,6 +240,22 @@ impl Daemon {
         let answer = review_answer(&*backend, &function, &review.events)?;
         session.append(crate::session::Event::Answer(answer.clone()))?;
         Ok((answer, session.id))
+    }
+
+    /// The daemon's log (AGL-121, D37): one line per thing the driver
+    /// dropped, in `daemon.log` beside the data. A log that cannot be
+    /// written is the end of it: there is nowhere behind this one.
+    pub(super) fn log(&self, plane_dir: &Path, text: &str) {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let plane = plane_dir
+            .file_name()
+            .map_or(String::new(), |name| name.to_string_lossy().into_owned());
+        let line = format!("{} {plane}: {text}\n", plane::flow::journal::now());
+        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(self.paths.log_file())
+        {
+            let _ = log.write_all(line.as_bytes());
+        }
     }
 
     /// Holds `file` as a plane of the daemon and starts its driver (D12,

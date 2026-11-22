@@ -945,3 +945,33 @@ fn a_stop_ends_the_whole_group_and_writes_stopped_alone() {
     ask(Verb::Stop { name: "long".into() });
     until(|| !alive(pid_of(&dir, "pid").unwrap()));
 }
+
+#[test]
+fn a_dropped_error_shows_as_a_warning_until_a_clean_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    read(&dir, WORK).unwrap();
+    let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
+    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    ask(Verb::Start { name: "work".into() });
+    until(|| ask(Verb::Status { name: "work".into() }).contains("check"));
+    // The journal goes unwritable: a verdict arrives and cannot be written.
+    let file = journal::path(&dir.0, "work");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+    let verdict = || holder::Letter::Verdict {
+        flow: "work".into(),
+        event: Event::Verdict { check: "review".into(), answer: "ok".into() },
+        note: None,
+    };
+    holder.post(verdict());
+    // Letters land in order, so the status after the verdict already sees
+    // what was dropped, and says so as a warning line (D37).
+    let said = ask(Verb::Status { name: "work".into() });
+    assert!(said.contains("check") && said.contains("warning:"), "{said}");
+    // The journal mends; a clean pass clears the warning (D37).
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    holder.post(verdict());
+    let said = ask(Verb::Status { name: "work".into() });
+    assert!(!said.contains("warning:"), "{said}");
+    assert!(said.contains("halted"), "{said}");
+}

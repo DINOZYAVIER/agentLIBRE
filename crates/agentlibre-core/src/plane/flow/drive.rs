@@ -9,7 +9,8 @@
 //! points at the plane's builds (D6, D10).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,12 +53,64 @@ pub struct Flight {
     running: HashMap<String, Running>,
     seq: u64,
     post: Arc<dyn Fn(Word) + Send + Sync>,
+    /// The plane these commands belong to, for the daemon's log (D37).
+    plane_dir: PathBuf,
+    /// The daemon's ear, for the log; outside a daemon a dropped error
+    /// has no log and only the status line keeps it (D37).
+    needs: Option<Sender<super::holder::Need>>,
+    /// The driver's last dropped error (D37): `status` shows it as a
+    /// warning line, and a clean pass clears it.
+    warned: Option<String>,
+    dirty: bool,
 }
 
 impl Flight {
-    /// A flight whose command words go to `post`: the holder's letter.
-    pub fn new(post: impl Fn(Word) + Send + Sync + 'static) -> Flight {
-        Flight { running: HashMap::new(), seq: 0, post: Arc::new(post) }
+    /// A flight for the plane `plane_dir`, whose command words go to
+    /// `post` and whose dropped errors go to `needs` for the daemon's
+    /// log (D37).
+    pub fn new(
+        plane_dir: PathBuf,
+        needs: Option<Sender<super::holder::Need>>,
+        post: impl Fn(Word) + Send + Sync + 'static,
+    ) -> Flight {
+        Flight {
+            running: HashMap::new(),
+            seq: 0,
+            post: Arc::new(post),
+            plane_dir,
+            needs,
+            warned: None,
+            dirty: false,
+        }
+    }
+
+    /// A dropped driver error (AGL-121, D37): to the daemon's log when
+    /// the daemon is listening — once per distinct text, so a timer that
+    /// keeps falling on the same stone logs once — and kept for `status`
+    /// to show until a clean pass clears it.
+    pub fn warn(&mut self, text: String) {
+        self.dirty = true;
+        let fresh = self.warned.as_deref() != Some(text.as_str());
+        if fresh && let Some(needs) = &self.needs {
+            let _ = needs.send(super::holder::Need::Warn {
+                plane_dir: self.plane_dir.clone(),
+                text: text.clone(),
+            });
+        }
+        self.warned = Some(text);
+    }
+
+    /// The warning line `status` shows beside the place (D37).
+    pub fn warning(&self) -> Option<&str> {
+        self.warned.as_deref()
+    }
+
+    /// A pass that dropped nothing: the thing that broke has mended, and
+    /// the warning goes with it (D37).
+    pub fn clean_pass(&mut self) {
+        if !std::mem::take(&mut self.dirty) {
+            self.warned = None;
+        }
     }
 
     /// Whether `flow` has a command running: a `start` then answers its
@@ -438,8 +491,12 @@ pub fn settle(
     note: Option<String>,
     mut flight: Option<&mut Flight>,
 ) {
-    let Ok(decls) = FlowFile::load(plane_dir) else {
-        return;
+    let decls = match FlowFile::load(plane_dir) {
+        Ok(decls) => decls,
+        Err(error) => {
+            warn(flight, &error);
+            return;
+        }
     };
     let Some(decl) = decls.find(flow) else {
         return;
@@ -448,13 +505,18 @@ pub fn settle(
         return;
     };
     let before = run.state().to_owned();
-    let _ = run.on_event_noted(decl, event, note);
+    if let Err(error) = run.on_event_noted(decl, event, note) {
+        warn(flight, &error);
+        return;
+    }
     // A machine that has left the state of a running command ends it: its
     // word belongs to a state that is no more (D57).
     if run.state() != before && let Some(flight) = flight.as_mut() {
         flight.kill(flow);
     }
-    let _ = walk(decl, &mut run, plane_dir, workdir, flight);
+    if let Err(error) = walk(decl, &mut run, plane_dir, workdir, flight.as_deref_mut()) {
+        warn(flight, &error);
+    }
 }
 
 /// Where the journal leaves its flow at rest: the state it stands in and
@@ -500,6 +562,14 @@ pub fn start(
         run.restart()?;
     }
     walk(decl, &mut run, plane_dir, workdir, flight)
+}
+
+/// A dropped driver error (AGL-121, D37): to the log through the flight;
+/// a driver with no flight has no thread of its own and nowhere to drop.
+fn warn(flight: Option<&mut Flight>, error: &Error) {
+    if let Some(flight) = flight {
+        flight.warn(error.message(Lang::En));
+    }
 }
 
 /// Turns the machine as far as its own kind goes (D5, D10): a state's command
@@ -578,8 +648,12 @@ pub fn tick(plane_dir: &Path, workdir: &Path, mut flight: Option<&mut Flight>) -
     let mut fired = Vec::new();
     // A declaration that does not load ticks nothing; the next look tries
     // again once the human mends it.
-    let Ok(decls) = FlowFile::load(plane_dir) else {
-        return fired;
+    let decls = match FlowFile::load(plane_dir) {
+        Ok(decls) => decls,
+        Err(error) => {
+            warn(flight.as_deref_mut(), &error);
+            return fired;
+        }
     };
     for decl in decls.flows.iter() {
         let file = journal::path(plane_dir, decl.name());
@@ -588,7 +662,15 @@ pub fn tick(plane_dir: &Path, workdir: &Path, mut flight: Option<&mut Flight>) -
         if matches!(last, Entry::Stopped { .. }) {
             continue;
         }
-        let Ok(turn) = journal::fold(decl, &file, &entries) else { continue };
+        // A fold that refuses says so to `status` (D11) and once to the
+        // log (D37); the timer of the other flows goes on.
+        let turn = match journal::fold(decl, &file, &entries) {
+            Ok(turn) => turn,
+            Err(error) => {
+                warn(flight.as_deref_mut(), &error);
+                continue;
+            }
+        };
         let Some(state) = turn.state else { continue };
         let at = index(decl, &state);
         let Some(due) = decl.timer(at) else { continue };
@@ -602,7 +684,9 @@ pub fn tick(plane_dir: &Path, workdir: &Path, mut flight: Option<&mut Flight>) -
         if run.state() != before && let Some(flight) = flight.as_mut() {
             flight.kill(decl.name());
         }
-        let _ = walk(decl, &mut run, plane_dir, workdir, flight.as_deref_mut());
+        if let Err(error) = walk(decl, &mut run, plane_dir, workdir, flight.as_deref_mut()) {
+            warn(flight.as_deref_mut(), &error);
+        }
         fired.push(decl.name().to_owned());
     }
     fired
@@ -646,9 +730,15 @@ pub fn ended(plane_dir: &Path, workdir: &Path, word: Word, flight: &mut Flight) 
     match run.on_event(decl, event) {
         Ok(Progress::Continue) => {}
         // The limit of the whole run ends it where the exit left it (D33).
-        Ok(Progress::StepLimit) | Err(_) => return,
+        Ok(Progress::StepLimit) => return,
+        Err(error) => {
+            warn(Some(flight), &error);
+            return;
+        }
     }
-    let _ = walk(decl, &mut run, plane_dir, workdir, Some(flight));
+    if let Err(error) = walk(decl, &mut run, plane_dir, workdir, Some(&mut *flight)) {
+        warn(Some(&mut *flight), &error);
+    }
 }
 
 /// What the state `name` asks of a session (D6).

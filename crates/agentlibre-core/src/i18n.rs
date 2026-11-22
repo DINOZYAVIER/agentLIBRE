@@ -469,6 +469,12 @@ Plane (де йде робота над проєктом: його сесії, fo
         uk: "чекає на",
     };
 
+    /// A driver error dropped and kept for the human (AGL-121, D37).
+    pub const FLOW_WARN: Msg = Msg {
+        en: "warning: {text}",
+        uk: "попередження: {text}",
+    };
+
     /// The flow reset: the old journal kept beside the new one (AGL-118, D11).
     pub const FLOW_RESET: Msg = Msg {
         en: "{name}: reset to `{state}`, the old journal is `{file}`",
