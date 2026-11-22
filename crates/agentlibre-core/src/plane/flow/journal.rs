@@ -13,7 +13,7 @@ use crate::error::Error;
 use crate::machine::{Event, Machine, Progress};
 use crate::session::Unfinished;
 
-use super::FlowDecl;
+use super::{FlowDecl, FlowState};
 
 /// The directory of the journals in a plane's store, beside `flow.nix` (D1, D3).
 pub const JOURNAL_DIR: &str = "flow";
@@ -271,7 +271,7 @@ pub fn reset(plane_dir: &Path, flow: &str) -> Result<(), Error> {
 #[derive(Debug)]
 pub struct FlowRun<'d> {
     path: PathBuf,
-    machine: Machine<'d>,
+    machine: Machine<'d, FlowState>,
 }
 
 impl<'d> FlowRun<'d> {

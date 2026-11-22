@@ -13,8 +13,7 @@ pub mod holder;
 pub mod drive;
 pub mod journal;
 use crate::error::{Error, FunctionProblem};
-use crate::function::State;
-use crate::machine::Table;
+use crate::machine::{Table, Transitions};
 use crate::nix::{self, Section};
 
 /// The file of a plane's flows, beside `plane.nix` (D1).
@@ -44,22 +43,60 @@ pub enum Action {
     Launch { cmd: String, timeout: Duration },
 }
 
-/// A flow as declared: its states, and what each of them does (D4, D9).
+/// A state of a flow as declared (AGL-118, D9; AGL-121, D42): what the flow
+/// does here, what it waits for, and the transitions and limits one reader
+/// reads (D56) — a state of its own, not a policy's with vectors beside it.
+#[derive(Debug)]
+pub struct FlowState {
+    name: String,
+    /// `action.*`: what the state does, in the order it runs (D9).
+    actions: Vec<Action>,
+    /// `timer = <seconds>`: while the flow stands in this state, `timer`
+    /// fires once the seconds run out (D9, D16).
+    timer: Option<Duration>,
+    /// `nudges = [ "go" ]`: the `message` events this agent may deliver
+    /// in this state, empty by default (D15, D21).
+    nudges: Vec<String>,
+    /// The transitions and the limits (AGL-118, D4; AGL-121, D56).
+    transitions: Transitions,
+}
+
+impl FlowState {
+    /// The state the event named `name` with `detail` leads to, or `None`
+    /// when nothing moves (D21): what a journal replays (AGL-118, D3).
+    pub fn next_option(&self, name: &str, detail: Option<&str>) -> Option<usize> {
+        self.transitions.next_option(name, detail)
+    }
+
+    /// The state the named event leads to (D43).
+    pub fn next_named(&self, name: &str, detail: Option<&str>) -> usize {
+        self.transitions.next_named(name, detail)
+    }
+}
+
+impl crate::machine::State for FlowState {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn transitions(&self) -> &Transitions {
+        &self.transitions
+    }
+}
+
+/// A flow as declared: its states, each with what it does (D4, D9; D42).
 #[derive(Debug)]
 pub struct FlowDecl {
     name: String,
-    states: Vec<State>,
+    states: Vec<FlowState>,
     initial: usize,
     max_steps_total: Option<u32>,
-    actions: Vec<Vec<Action>>,
-    timers: Vec<Option<Duration>>,
-    nudges: Vec<Vec<String>>,
 }
 
 impl FlowDecl {
-    /// The table its machine runs on, the same type a policy's states give
-    /// (D4): one reader of transitions for both layers.
-    pub fn table(&self) -> Table<'_> {
+    /// The table its machine runs on: the same reader a policy's states
+    /// give (D4, D56), over this flow's own states (D42).
+    pub fn table(&self) -> Table<'_, FlowState> {
         Table {
             states: &self.states,
             initial: self.initial,
@@ -78,19 +115,19 @@ impl FlowDecl {
 
     /// What the state `at` does (D9).
     pub fn actions(&self, at: usize) -> &[Action] {
-        &self.actions[at]
+        &self.states[at].actions
     }
 
     /// The state's `timer`, seconds since the flow came to rest in it before
     /// `timer` fires (D9, D16).
     pub fn timer(&self, at: usize) -> Option<Duration> {
-        self.timers[at]
+        self.states[at].timer
     }
 
     /// The state's `nudges`: the `message` events this agent may deliver
     /// here, empty by default (D15, D21).
     pub fn nudges(&self, at: usize) -> &[String] {
-        &self.nudges[at]
+        &self.states[at].nudges
     }
 
     /// The name of the state `at`.
@@ -99,7 +136,7 @@ impl FlowDecl {
     }
 
     /// The states in order, as `agl plane flow status` walks them.
-    pub fn states(&self) -> &[State] {
+    pub fn states(&self) -> &[FlowState] {
         &self.states
     }
 }
@@ -335,9 +372,6 @@ fn resolve(
     };
     let initial = index("initial", initial)?;
     let mut states = Vec::new();
-    let mut actions = Vec::new();
-    let mut timers = Vec::new();
-    let mut nudges = Vec::new();
     for d in &declared {
         let mut transitions = Vec::new();
         for t in &d.next {
@@ -372,17 +406,19 @@ fn resolve(
             ));
         }
         check_events(at, d, &transitions, otherwise.is_some())?;
-        states.push(State::of_table(
-            d.name.clone(),
-            d.max_steps,
-            d.max_visits,
-            on_limit,
-            transitions,
-            otherwise,
-        ));
-        actions.push(d.actions.clone());
-        timers.push(d.timer);
-        nudges.push(d.nudges.clone());
+        states.push(FlowState {
+            name: d.name.clone(),
+            actions: d.actions.clone(),
+            timer: d.timer,
+            nudges: d.nudges.clone(),
+            transitions: Transitions {
+                max_steps: d.max_steps,
+                max_visits: d.max_visits,
+                on_limit,
+                next: transitions,
+                otherwise,
+            },
+        });
     }
     check_on_limit(at, &states)?;
     Ok(FlowDecl {
@@ -390,9 +426,6 @@ fn resolve(
         states,
         initial,
         max_steps_total,
-        actions,
-        timers,
-        nudges,
     })
 }
 
@@ -464,11 +497,11 @@ fn check_events(
 }
 
 /// `on_limit` has no cycles (D83), so entering a limit always ends.
-fn check_on_limit(at: &Section, states: &[State]) -> Result<(), Error> {
+fn check_on_limit(at: &Section, states: &[FlowState]) -> Result<(), Error> {
     for from in 0..states.len() {
         let mut seen = vec![false; states.len()];
         let mut at_state = from;
-        while let Some(next) = states[at_state].on_limit {
+        while let Some(next) = states[at_state].transitions.on_limit {
             if seen[next] {
                 return Err(bad(at, "state", FunctionProblem::OnLimitCycle));
             }

@@ -14,7 +14,7 @@ use crate::download::FileSource;
 use crate::error::{Error, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
-use crate::machine::Event;
+use crate::machine::Transitions;
 use crate::media::sha256_hex;
 use crate::nix::{self, Section};
 use crate::settings::{ServerFile, ServerKind};
@@ -179,79 +179,18 @@ pub struct State {
     pub instruction: Option<String>,
     pub actions: Actions,
     pub think: bool,
-    pub max_steps: Option<u32>,
-    pub max_visits: Option<u32>,
-    pub on_limit: Option<usize>,
-    /// The transitions other than `otherwise`: an event's name, its detail
-    /// (`None` for `any`) and the target state (D43, D9).
-    transitions: Vec<(String, Option<String>, usize)>,
-    /// `next.otherwise`.
-    otherwise: Option<usize>,
+    /// The transitions and the limits one reader reads (AGL-118, D4;
+    /// AGL-121, D56).
+    pub transitions: Transitions,
 }
 
-impl State {
-    /// A state of a table that has no actions of the model: what a flow's
-    /// declaration builds (AGL-118, D4). Its limits and transitions are a
-    /// policy state's, and one machine runs on both.
-    pub(crate) fn of_table(
-        name: String,
-        max_steps: Option<u32>,
-        max_visits: Option<u32>,
-        on_limit: Option<usize>,
-        transitions: Vec<(String, Option<String>, usize)>,
-        otherwise: Option<usize>,
-    ) -> State {
-        State {
-            name,
-            instruction: None,
-            actions: Actions {
-                tools: Vec::new(),
-                answer: false,
-            },
-            think: false,
-            max_steps,
-            max_visits,
-            on_limit,
-            transitions,
-            otherwise,
-        }
+impl crate::machine::State for State {
+    fn name(&self) -> &str {
+        &self.name
     }
 
-    /// The state `event` leads to; the most specific key wins (D43): the
-    /// detail, then `any`, then `otherwise`. Loading guarantees an answer
-    /// (D21).
-    pub fn next(&self, event: &Event) -> usize {
-        let (name, detail) = event.key();
-        self.next_named(name, detail)
-    }
-
-    /// The state the event named `name` with `detail` leads to (D43): what
-    /// a journal replays without rebuilding the event itself (AGL-118, D3).
-    pub fn next_named(&self, name: &str, detail: Option<&str>) -> usize {
-        self.next_option(name, detail)
-            .expect("complete transitions")
-    }
-
-    /// The state the event leads to, or `None` when the state has no
-    /// transition for it and no `otherwise`: a flow ignores an event that
-    /// moves nothing, where a turn's state is complete by loading (D21).
-    pub fn next_option(&self, name: &str, detail: Option<&str>) -> Option<usize> {
-        let find = |wanted: Option<&str>| {
-            self.transitions
-                .iter()
-                .find(|(t, o, _)| t == name && o.as_deref() == wanted)
-                .map(|&(_, _, target)| target)
-        };
-        find(detail).or_else(|| find(None)).or(self.otherwise)
-    }
-
-    /// States the state can lead to.
-    fn targets(&self) -> impl Iterator<Item = usize> + '_ {
-        self.transitions
-            .iter()
-            .map(|&(_, _, target)| target)
-            .chain(self.otherwise)
-            .chain(self.on_limit)
+    fn transitions(&self) -> &Transitions {
+        &self.transitions
     }
 }
 
@@ -278,7 +217,7 @@ pub fn check_name(name: &str) -> Result<(), Error> {
 impl Function {
     /// The table of the policy's states: what a `Machine` runs on
     /// (AGL-118, D4).
-    pub fn table(&self) -> crate::machine::Table<'_> {
+    pub fn table(&self) -> crate::machine::Table<'_, State> {
         crate::machine::Table {
             states: &self.states,
             initial: self.initial,
@@ -540,11 +479,13 @@ impl Function {
                     answer: true,
                 },
                 think: true,
-                max_steps: None,
-                max_visits: None,
-                on_limit: None,
-                transitions: Vec::new(),
-                otherwise: Some(0),
+                transitions: Transitions {
+                    max_steps: None,
+                    max_visits: None,
+                    on_limit: None,
+                    next: Vec::new(),
+                    otherwise: Some(0),
+                },
             }],
             model: ServerFile::default(),
         }
@@ -913,11 +854,13 @@ fn read_state(
         instruction,
         actions: Actions { tools, answer },
         think,
-        max_steps,
-        max_visits,
-        on_limit,
-        transitions,
-        otherwise,
+        transitions: Transitions {
+            max_steps,
+            max_visits,
+            on_limit,
+            next: transitions,
+            otherwise,
+        },
     })
 }
 
@@ -1007,13 +950,13 @@ fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Erro
         problem,
     };
     for (start, state) in states.iter().enumerate() {
-        let mut current = state.on_limit;
+        let mut current = state.transitions.on_limit;
         for _ in 0..states.len() {
             match current {
                 Some(next) if next == start => {
                     return Err(error(state, ".on_limit", FunctionProblem::OnLimitCycle));
                 }
-                Some(next) => current = states[next].on_limit,
+                Some(next) => current = states[next].transitions.on_limit,
                 None => break,
             }
         }
@@ -1024,7 +967,7 @@ fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Erro
         if std::mem::replace(&mut reached[index], true) {
             continue;
         }
-        queue.extend(states[index].targets());
+        queue.extend(states[index].transitions.targets());
     }
     match reached.iter().position(|reached| !reached) {
         Some(index) => Err(error(&states[index], "", FunctionProblem::Unreachable)),

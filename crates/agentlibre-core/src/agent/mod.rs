@@ -12,7 +12,7 @@ use crate::backend::{
     StepLog, Stepped, Stop, ToolCall,
 };
 use crate::error::Error;
-use crate::function::Function;
+use crate::function::{Function, State};
 use crate::machine::{Machine, Progress};
 use crate::media;
 use crate::phase::{Observer, PhaseEvent, Reports, StepRecord, Transition};
@@ -206,7 +206,7 @@ impl Agent<'_> {
     /// One step; `None` when the turn goes on.
     fn step(
         &mut self,
-        machine: &mut Machine,
+        machine: &mut Machine<'_, State>,
         report: &mut Reports<'_>,
     ) -> Result<Option<TurnEnd>, Error> {
         report.send(Report::Prefill);
@@ -351,7 +351,7 @@ impl Agent<'_> {
     /// discarded, and the machine moves on.
     fn cut_off(
         &mut self,
-        machine: &mut Machine,
+        machine: &mut Machine<'_, State>,
         report: &mut Reports<'_>,
         cut: CutOff,
     ) -> Result<Option<TurnEnd>, Error> {
@@ -370,7 +370,7 @@ impl Agent<'_> {
     /// its tool and the machine takes its outcome.
     fn run_action(
         &mut self,
-        machine: &mut Machine,
+        machine: &mut Machine<'_, State>,
         report: &mut Reports<'_>,
         action: Action,
     ) -> Result<Option<TurnEnd>, Error> {

@@ -2,7 +2,7 @@ use super::*;
 use crate::function::tests::{CODER, function, with_states};
 use crate::session::Unfinished;
 
-fn name(machine: &Machine) -> String {
+fn name(machine: &Machine<'_, crate::function::State>) -> String {
     machine.state().name.clone()
 }
 
