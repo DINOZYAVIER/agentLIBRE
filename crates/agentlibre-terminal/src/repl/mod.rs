@@ -1203,8 +1203,19 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.set_media_counts(&file);
     // The live draft engine of the dictation (AGL-122, D5), when the
     // daemon found both program and model.
-    let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|(program, model)| {
-        Arc::new(whisper::Draft { program, model }) as Arc<dyn DraftEngine>
+    let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|spec| {
+        Arc::new(whisper::Draft {
+            server: whisper::WhisperServer {
+                unit: spec.unit,
+                url: spec.url,
+                private_ca: None,
+                model: spec.model,
+                args: spec.args,
+                program: spec.program,
+            },
+            models: PathBuf::new(),
+            path_var: std::env::var_os("PATH"),
+        }) as Arc<dyn DraftEngine>
     });
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),

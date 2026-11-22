@@ -715,8 +715,21 @@ impl Daemon {
             server_url: settings.server_url.clone(),
             context: plane.context,
             reasoning: plane.reasoning.map(|level| level.name().to_owned()),
-            draft: Draft::of(&plane.autostart.whisper, &plane.autostart.models)
-                .map(|draft| (draft.program, draft.model)),
+            draft: plane.autostart.project.unit_key().and_then(|key| {
+                Draft::of(
+                    &plane.autostart.whisper,
+                    &plane.autostart.models,
+                    &key,
+                    plane.autostart.path_var.clone(),
+                )
+                .map(|draft| proto::DraftSpec {
+                    url: draft.server.url,
+                    unit: draft.server.unit,
+                    model: draft.server.model,
+                    program: draft.server.program,
+                    args: draft.server.args,
+                })
+            }),
         };
         let voice = Arc::new(Voice::of(&plane.autostart));
         let id = plane.session.id.clone();

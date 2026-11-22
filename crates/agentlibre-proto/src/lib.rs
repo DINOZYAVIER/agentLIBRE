@@ -194,10 +194,21 @@ pub struct Opened {
     /// The server's context, when it answered at the start.
     pub context: Option<usize>,
     pub reasoning: Option<String>,
-    /// The draft engine of the live dictation (AGL-122, D5, D8): the
-    /// program and its model, both absolute; `None` — no drafts.
+    /// The draft server of the live dictation (AGL-122, D9); `None` —
+    /// no drafts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    pub draft: Option<DraftSpec>,
+}
+
+/// The draft server as the daemon resolved it (AGL-122, D9): a
+/// whisper-server unit of its own, named, aimed, and idle-timed.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DraftSpec {
+    pub url: String,
+    pub unit: String,
+    pub model: String,
+    pub program: Option<String>,
+    pub args: Vec<String>,
 }
 
 /// A session the daemon holds.

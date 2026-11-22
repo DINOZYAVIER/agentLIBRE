@@ -112,6 +112,7 @@ fn the_whisper_table() {
             private_ca: None,
             draft_model: None,
             draft_program: None,
+            draft_url: None,
         }
     );
     // The project wins per key, `args` as a whole.

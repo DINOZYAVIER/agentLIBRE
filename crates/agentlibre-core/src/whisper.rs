@@ -32,6 +32,9 @@ pub struct WhisperServer {
     pub private_ca: Option<String>,
     pub model: String,
     pub args: Vec<String>,
+    /// The server binary by path (AGL-122, D9); `None` — `whisper-server`
+    /// found in PATH.
+    pub program: Option<String>,
 }
 
 impl WhisperServer {
@@ -58,6 +61,7 @@ impl WhisperServer {
             private_ca: settings.private_ca.clone(),
             model: model.clone(),
             args: settings.args.clone().unwrap_or_default(),
+            program: None,
         })
     }
 }
@@ -125,9 +129,18 @@ pub fn ensure(
             path: model,
         });
     }
-    let program = find_program("whisper-server", path_var).ok_or_else(|| Error::EngineNotFound {
-        engine: "whisper-server".into(),
-    })?;
+    let program = match &server.program {
+        Some(p) => {
+            let path = PathBuf::from(p);
+            if !path.is_file() {
+                return Err(Error::EngineNotFound { engine: p.clone() });
+            }
+            path
+        }
+        None => find_program("whisper-server", path_var).ok_or_else(|| Error::EngineNotFound {
+            engine: "whisper-server".into(),
+        })?,
+    };
     let output = Command::new("systemd-run")
         .args(systemd_run_args(server, &program, &model, &host, port))
         .stdin(Stdio::null())
@@ -319,47 +332,65 @@ impl Transcriber for Autostart {
     }
 }
 
-/// The draft engine of the live dictation (AGL-122, D5, D8):
-/// `parakeet-cli` turns a chunk into text while the human speaks; the
-/// final pass stays whisper. Spawning it per chunk is the design — the
-/// model loads in a fraction of a second, so no server is needed (D8).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The name every unit of a draft server starts with (AGL-122, D9).
+pub const DRAFT_PREFIX: &str = "agentLIBRE-draft-server";
+
+/// A draft server that nobody feeds for this long goes away on its own
+/// (AGL-122, D9): the fork's `--idle-exit`, spoken to the unit.
+const DRAFT_IDLE: &str = "300";
+
+/// The draft engine of the live dictation (AGL-122, D5, D9): a second
+/// whisper-server, serving a Parakeet model, run as its own transient
+/// unit and asked over the same `/inference` API as whisper.
 pub struct Draft {
-    pub program: PathBuf,
-    pub model: PathBuf,
+    pub server: WhisperServer,
+    pub models: PathBuf,
+    pub path_var: Option<OsString>,
 }
 
-/// Threads of one draft chunk; the machine is also recording.
-const DRAFT_THREADS: &str = "12";
-
 impl Draft {
-    /// `[whisper]`'s draft keys resolved to paths: both set, both files
-    /// there — or `None`, which means drafts are silently off (AGL-122).
-    pub fn of(settings: &WhisperFile, models: &Path) -> Option<Draft> {
-        let program = PathBuf::from(settings.draft_program.as_deref()?);
+    /// `[whisper]`'s draft keys resolved to a server: `draft_url` and
+    /// `draft_model` set, the model file there — or `None`, which means
+    /// drafts are silently off. `key` names the unit, as the project's
+    /// unit key names whisper's.
+    pub fn of(
+        settings: &WhisperFile,
+        models: &Path,
+        key: &str,
+        path_var: Option<OsString>,
+    ) -> Option<Draft> {
+        let url = settings.draft_url.as_deref()?;
         let name = settings.draft_model.as_deref()?;
         let model =
             if Path::new(name).is_absolute() { PathBuf::from(name) } else { models.join(name) };
-        (program.is_file() && model.is_file()).then_some(Draft { program, model })
+        if !model.is_file() {
+            return None;
+        }
+        let mut args = settings.args.clone().unwrap_or_default();
+        if !args.iter().any(|a| a == "--idle-exit") {
+            args.extend(["--idle-exit".into(), DRAFT_IDLE.into()]);
+        }
+        Some(Draft {
+            server: WhisperServer {
+                unit: format!("{DRAFT_PREFIX}-{key}"),
+                url: url.into(),
+                private_ca: None,
+                // The absolute path: `ensure` joins it with `models`,
+                // and an absolute joins to itself.
+                model: model.to_string_lossy().into_owned(),
+                args,
+                program: settings.draft_program.clone(),
+            },
+            models: models.to_path_buf(),
+            path_var,
+        })
     }
 
-    /// The draft text of a 16 kHz mono WAV chunk; empty means silence.
+    /// The draft text of a 16 kHz mono WAV chunk: bring the server up
+    /// when it sleeps (the first chunk pays the load, D9), ask, return.
     pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
-        let path = std::env::temp_dir().join(format!("agentLIBRE-draft-{}.wav", std::process::id()));
-        std::fs::write(&path, wav).map_err(|source| Error::Draft { detail: source.to_string() })?;
-        let out = Command::new(&self.program)
-            .args(["-m"]).args([&self.model])
-            .args(["-t", DRAFT_THREADS, "-np"])
-            .args(["-f"]).arg(&path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output();
-        let _ = std::fs::remove_file(&path);
-        let out = out.map_err(|source| Error::Draft { detail: source.to_string() })?;
-        if !out.status.success() {
-            return Err(Error::Draft { detail: format!("exited with {}", out.status) });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        ensure(&self.server, &self.models, self.path_var.clone(), &mut |_| {}, Lang::En)?;
+        transcribe(&self.server.url, self.server.private_ca.as_deref(), wav)
     }
 }
 
@@ -395,6 +426,7 @@ mod tests {
             private_ca: None,
             draft_model: None,
             draft_program: None,
+            draft_url: None,
         });
         let server = WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")).unwrap();
         assert_eq!(server.unit, "agentLIBRE-whisper-server-60af300abea6");
@@ -435,6 +467,7 @@ mod tests {
             args: None,
             draft_model: None,
             draft_program: None,
+            draft_url: None,
             private_ca: None,
         };
         assert!(voice.ready().is_ok());
@@ -539,6 +572,7 @@ mod tests {
             private_ca: None,
             model: "w.bin".into(),
             args: vec!["-t".into(), "12".into(), "-l".into(), "uk".into()],
+            program: None,
         };
         let args = systemd_run_args(
             &server,
