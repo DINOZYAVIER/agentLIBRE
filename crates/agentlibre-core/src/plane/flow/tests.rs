@@ -459,7 +459,7 @@ fn a_flow_that_was_never_started_has_no_place() {
 fn a_states_command_runs_and_its_exit_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, WORK).unwrap();
-    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0, None).unwrap();
     assert_eq!(place.state.as_deref(), Some("check"));
     assert_eq!(place.tail, ["started build", "exit.ok -> check"]);
     // The review turn is the plane's to start; the flow waits for it (D6).
@@ -482,7 +482,7 @@ fn a_failing_command_takes_the_transition_written_for_it() {
     )
     .unwrap();
     let flows = FlowFile::load(&dir.0).unwrap();
-    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0).unwrap();
+    let place = drive::start(flows.find("work").unwrap(), &dir.0, &dir.0, None).unwrap();
     assert_eq!(place.state.as_deref(), Some("halted"));
     assert_eq!(place.tail, ["started build", "exit.fail -> halted"]);
 }
@@ -492,11 +492,11 @@ fn a_stopped_flow_goes_on_from_where_it_stood() {
     let dir = TempDir::new();
     let flows = read(&dir, WORK).unwrap();
     let decl = flows.find("work").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
-    let place = drive::stop(decl, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
+    let place = drive::stop(decl, &dir.0, None).unwrap();
     assert!(place.stopped);
     assert_eq!(place.state.as_deref(), Some("check"));
-    let place = drive::start(decl, &dir.0, &dir.0).unwrap();
+    let place = drive::start(decl, &dir.0, &dir.0, None).unwrap();
     assert!(!place.stopped, "the flow moves again (D7)");
     assert_eq!(place.state.as_deref(), Some("check"));
     assert_eq!(
@@ -511,7 +511,7 @@ fn the_steps_of_a_whole_run_bound_it() {
     let dir = TempDir::new();
     let flows = read(&dir, CHASE).unwrap();
     let decl = flows.find("chase").unwrap();
-    let place = drive::start(decl, &dir.0, &dir.0).unwrap();
+    let place = drive::start(decl, &dir.0, &dir.0, None).unwrap();
     // `max_steps_total = 3`: three commands, and the run stops where the
     // third left it (D33).
     assert_eq!(place.state.as_deref(), Some("two"));
@@ -523,7 +523,7 @@ fn a_declaration_that_chases_its_tail_is_refused() {
     let dir = TempDir::new();
     let flows = read(&dir, CHASE).unwrap();
     let decl = flows.find("tail").unwrap();
-    let error = drive::start(decl, &dir.0, &dir.0).unwrap_err();
+    let error = drive::start(decl, &dir.0, &dir.0, None).unwrap_err();
     assert!(
         matches!(&error, Error::PlaneFile { detail, .. } if detail.contains("max_visits")),
         "{error:?}"
@@ -549,7 +549,7 @@ fn told(said: crate::plane::Text) -> String {
 fn a_verb_answers_what_the_flow_does_and_where_it_stands() {
     let dir = TempDir::new();
     read(&dir, WORK).unwrap();
-    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En);
+    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En, None);
     assert_eq!(told(run(Verb::List)), "work: not started");
     assert_eq!(
         told(run(Verb::Start { name: "work".into() })).replace('\n', " | "),
@@ -606,9 +606,9 @@ fn a_due_timer_fires_and_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, CLOCK).unwrap();
     let decl = flows.find("clock").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
     // Not yet run out: the flow stands where it stood (D16).
-    assert!(drive::tick(&dir.0, &dir.0).is_empty());
+    assert!(drive::tick(&dir.0, &dir.0, None).is_empty());
     assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
     // Age the journal's last line past the timer, and the tick fires: the
     // `timer` event moves it, and the state it lands on goes on by itself.
@@ -617,10 +617,10 @@ fn a_due_timer_fires_and_moves_the_flow() {
         .unwrap()
         .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
     fs::write(&file, aged).unwrap();
-    assert_eq!(drive::tick(&dir.0, &dir.0), ["clock"]);
+    assert_eq!(drive::tick(&dir.0, &dir.0, None), ["clock"]);
     assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("done"));
     // Done has no timer: the next tick has nothing to fire.
-    assert!(drive::tick(&dir.0, &dir.0).is_empty());
+    assert!(drive::tick(&dir.0, &dir.0, None).is_empty());
 }
 
 #[test]
@@ -628,15 +628,15 @@ fn a_stopped_flow_waits_for_no_timer() {
     let dir = TempDir::new();
     let flows = read(&dir, CLOCK).unwrap();
     let decl = flows.find("clock").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
-    drive::stop(decl, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
+    drive::stop(decl, &dir.0, None).unwrap();
     // The human holds a stopped flow: its timer stands with it (D7).
     let file = journal::path(&dir.0, "clock");
     let aged = std::fs::read_to_string(&file)
         .unwrap()
         .replace(&format!("\"time\":{}", journal::now()), "\"time\":1");
     fs::write(&file, aged).unwrap();
-    assert!(drive::tick(&dir.0, &dir.0).is_empty());
+    assert!(drive::tick(&dir.0, &dir.0, None).is_empty());
     assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("wait"));
 }
 
@@ -661,7 +661,7 @@ fn a_say_waits_until_its_wake_is_delivered() {
     let dir = TempDir::new();
     let flows = read(&dir, TALK).unwrap();
     let decl = flows.find("talk").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
     // The flow stands in `stood`, and its wake names the session and the
     // line D14 gives it: itself and where it stands.
     assert_eq!(
@@ -686,7 +686,7 @@ fn a_say_waits_until_its_wake_is_delivered() {
     .unwrap();
     assert!(drive::wakeups(&dir.0).is_empty());
     // A stopped flow holds its wake with it (D7).
-    drive::stop(decl, &dir.0).unwrap();
+    drive::stop(decl, &dir.0, None).unwrap();
     assert!(drive::wakeups(&dir.0).is_empty());
     let _ = Lang::En;
 }
@@ -704,7 +704,7 @@ fn a_say_table_overrides_the_wakes_line() {
     .unwrap();
     let flows = FlowFile::load(&dir.0).unwrap();
     let decl = flows.find("talk").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
     assert_eq!(
         drive::wakeups(&dir.0),
         [drive::Wake {
@@ -815,8 +815,8 @@ fn a_nudge_delivers_where_the_state_names_it() {
     let decl = flows.find("gate").unwrap();
     let at = decl.states().iter().position(|s| s.name == "stood").unwrap();
     assert_eq!(decl.nudges(at), ["go"]);
-    drive::start(decl, &dir.0, &dir.0).unwrap();
-    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, Lang::En);
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
+    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, Lang::En, None);
     // The human delivers what the machine declared for it, bounded by no
     // list; an undeclared event simply moves nothing (D21).
     assert!(told(run(Verb::Message { name: "gate".into(), event: "jump".into() })).contains("stood"));
@@ -835,7 +835,113 @@ fn a_woken_sessions_turn_end_moves_the_flow() {
     let dir = TempDir::new();
     let flows = read(&dir, GATE).unwrap();
     let decl = flows.find("gate").unwrap();
-    drive::start(decl, &dir.0, &dir.0).unwrap();
-    drive::settle(&dir.0, &dir.0, "gate", Event::TurnEnd, None);
+    drive::start(decl, &dir.0, &dir.0, None).unwrap();
+    drive::settle(&dir.0, &dir.0, "gate", Event::TurnEnd, None, None);
     assert_eq!(drive::place(decl, &dir.0).unwrap().state.as_deref(), Some("gone"));
+}
+
+// ——— A command off the holder's thread (AGL-121, D35, D57) —————
+
+/// A flow whose command sleeps: it writes its own pid and the pid of the
+/// child it leaves behind, so a test can ask of each whether it lives (D57).
+const SLEEP: &str = r#"{ agl, ... }: {
+  flow.long = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "echo $$ > pid; sleep 300 & echo $! > child; wait"; timeout = 400; };
+      next.exit.any = "halted";
+    };
+    state.halted = { };
+  };
+}
+"#;
+
+/// The pid a test's command wrote in `file`, once it has.
+fn pid_of(dir: &TempDir, file: &str) -> Option<u32> {
+    fs::read_to_string(dir.0.join(file)).ok()?.trim().parse().ok()
+}
+
+/// Whether the process lives: a signal of 0 only asks (D35).
+fn alive(pid: u32) -> bool {
+    // SAFETY: `pid` names a process this test started; 0 asks and harms not.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Wait until `what` holds: a command's word comes on its watcher's thread,
+/// not at the call (D35).
+fn until(what: impl Fn() -> bool) {
+    let stop = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < stop && !what() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(what(), "never held within 10 s");
+}
+
+#[test]
+fn a_states_command_moves_the_flow_when_its_word_comes() {
+    // The holder answers `start` where the command stands, and the exit
+    // line arrives with the word from the watcher thread (D35).
+    let dir = TempDir::new();
+    fs::write(
+        dir.0.join(FLOW_FILE),
+        r#"{ agl, ... }: {
+  flow.quick = {
+    initial = "build";
+    state.build = {
+      action.command = { cmd = "sleep 0.3; true"; timeout = 10; };
+      next.exit.ok = "done";
+      next.exit.any = "halted";
+    };
+    state.done = { };
+    state.halted = { };
+  };
+}
+"#,
+    )
+    .unwrap();
+    let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
+    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    assert_eq!(ask(Verb::Start { name: "quick".into() }), "quick: build\n  started build");
+    until(|| {
+        ask(Verb::Status { name: "quick".into() })
+            == "quick: done\n  started build\n  exit.ok -> done"
+    });
+}
+
+#[test]
+fn a_stop_ends_the_whole_group_and_writes_stopped_alone() {
+    let dir = TempDir::new();
+    fs::write(dir.0.join(FLOW_FILE), SLEEP).unwrap();
+    let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
+    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    // `start` answers at once, where the command stands (D35).
+    assert_eq!(ask(Verb::Start { name: "long".into() }), "long: build\n  started build");
+    until(|| pid_of(&dir, "pid").is_some() && pid_of(&dir, "child").is_some());
+    // `status` answers while it runs, and a second `start` runs no second
+    // command (D35).
+    let first = pid_of(&dir, "pid").unwrap();
+    assert_eq!(ask(Verb::Status { name: "long".into() }), "long: build\n  started build");
+    assert_eq!(ask(Verb::Start { name: "long".into() }), "long: build\n  started build");
+    assert_eq!(pid_of(&dir, "pid").unwrap(), first, "the same command, not a second one");
+    // `stop` ends the group whole: the sleeper and its child both (D57).
+    assert_eq!(
+        ask(Verb::Stop { name: "long".into() }),
+        "long: build (stopped)\n  started build\n  stopped build"
+    );
+    until(|| !alive(first) && !alive(pid_of(&dir, "child").unwrap()));
+    // The killed command's word finds nothing: the journal keeps `stopped`
+    // alone, with no exit line (D57).
+    assert_eq!(
+        ask(Verb::Status { name: "long".into() }),
+        "long: build (stopped)\n  started build\n  stopped build"
+    );
+    // A later `start` runs the state's command again (D57).
+    assert_eq!(
+        ask(Verb::Start { name: "long".into() }),
+        "long: build\n  started build\n  stopped build\n  started build"
+    );
+    until(|| pid_of(&dir, "pid").unwrap() != first);
+    // And out of the test's way again.
+    ask(Verb::Stop { name: "long".into() });
+    until(|| !alive(pid_of(&dir, "pid").unwrap()));
 }

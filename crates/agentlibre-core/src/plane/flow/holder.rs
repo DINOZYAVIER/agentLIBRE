@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::i18n::Lang;
 use crate::plane::Text;
 
-use super::drive::{self, Review, Wake};
+use super::drive::{self, Review, Wake, Word};
 use crate::machine::Event;
 use super::journal::{self, Entry};
 use super::{FlowFile, Verb};
@@ -70,6 +70,10 @@ pub enum Letter {
     TurnEnd { flow: String },
     /// Look again (D18): a session of the plane opened, or one's turn ended.
     Poke,
+    /// A state's command ended (D35): its word from the watcher thread. A
+    /// word the machine has left behind finds nothing and writes nothing
+    /// (D57), so a `stop` leaves `stopped` alone in the journal.
+    Exited(Word),
 }
 
 /// The holder of a plane's flows (AGL-118, D12, D17): the one driver its
@@ -89,7 +93,13 @@ impl Holder {
     /// state simply stands and `status` says so.
     pub fn spawn(plane_dir: PathBuf, workdir: PathBuf, needs: Option<Sender<Need>>) -> Holder {
         let (asks, inbox) = mpsc::channel();
+        let posted = asks.clone();
         thread::spawn(move || {
+            // Commands run off this thread; their word comes back as a
+            // letter, so the holder answers verbs while a build runs (D35).
+            let mut flight = drive::Flight::new(move |word| {
+                let _ = posted.send(Letter::Exited(word));
+            });
             // Asks in flight (D20): sent, and the daemon has not answered yet;
             // every ask gets its word, so none sticks.
             let mut pending: HashSet<(String, Kind)> = HashSet::new();
@@ -99,16 +109,20 @@ impl Holder {
                 match next_timer(&plane_dir) {
                     // A flow stands where a timer runs: wake when it runs out.
                     Some(wait) => match inbox.recv_timeout(wait) {
-                        Ok(letter) => answer(&plane_dir, &workdir, letter, &needs, &mut pending),
+                        Ok(letter) => {
+                            answer(&plane_dir, &workdir, letter, &needs, &mut pending, &mut flight)
+                        }
                         Err(RecvTimeoutError::Timeout) => {
-                            drive::tick(&plane_dir, &workdir);
+                            drive::tick(&plane_dir, &workdir, Some(&mut flight));
                             issue(&plane_dir, &needs, &mut pending);
                         }
                         Err(RecvTimeoutError::Disconnected) => return,
                     },
                     // Nothing armed: sleep until a letter comes.
                     None => match inbox.recv() {
-                        Ok(letter) => answer(&plane_dir, &workdir, letter, &needs, &mut pending),
+                        Ok(letter) => {
+                            answer(&plane_dir, &workdir, letter, &needs, &mut pending, &mut flight)
+                        }
                         Err(_) => return,
                     },
                 }
@@ -118,7 +132,8 @@ impl Holder {
     }
 
     /// Asks the holder to do `verb` and waits for its word (D17): the one
-    /// driver, so a verb waits its turn behind a command, not beside it (D13).
+    /// driver of the journal, while a state's command runs off the thread
+    /// and `status` answers beside it (D35).
     pub fn ask(&self, verb: Verb, lang: Lang) -> Text {
         let (to, from) = mpsc::channel();
         let gone = || Text::fault(&Error::PlaneGone, lang);
@@ -145,10 +160,13 @@ fn answer(
     letter: Letter,
     needs: &Option<Sender<Need>>,
     pending: &mut HashSet<(String, Kind)>,
+    flight: &mut drive::Flight,
 ) {
     match letter {
         Letter::Ask { verb, lang, reply } => {
-            let said = drive::run(plane_dir, workdir, &verb, lang);
+            // A verb of a flow whose command runs answers now: the command
+            // is off this thread, and `stop` ends it (D35).
+            let said = drive::run(plane_dir, workdir, &verb, lang, Some(flight));
             let _ = reply.send(said);
             issue(plane_dir, needs, pending);
         }
@@ -175,17 +193,22 @@ fn answer(
         }
         Letter::Verdict { flow, event, note } => {
             pending.remove(&(flow.clone(), REVIEW));
-            drive::settle(plane_dir, workdir, &flow, event, note);
+            drive::settle(plane_dir, workdir, &flow, event, note, Some(flight));
             issue(plane_dir, needs, pending);
         }
         Letter::Miss { flow, kind } => {
             pending.remove(&(flow, kind));
         }
         Letter::TurnEnd { flow } => {
-            drive::settle(plane_dir, workdir, &flow, Event::TurnEnd, None);
+            drive::settle(plane_dir, workdir, &flow, Event::TurnEnd, None, Some(flight));
             issue(plane_dir, needs, pending);
         }
         Letter::Poke => issue(plane_dir, needs, pending),
+        Letter::Exited(word) => {
+            // The word moves the machine, and what it waits for is asked (D35).
+            drive::ended(plane_dir, workdir, word, flight);
+            issue(plane_dir, needs, pending);
+        }
     }
 }
 

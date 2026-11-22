@@ -290,30 +290,44 @@ mod tests {
         let flow = |client: &mut Client, verb: proto::FlowVerb| {
             client.ask(&Request::Flow { plane: "work".into(), verb })
         };
+        let told = |client: &mut Client, verb: proto::FlowVerb| -> String {
+            let Reply::Text { said, .. } = flow(client, verb) else {
+                panic!("no flow answer")
+            };
+            said.lines
+                .iter()
+                .map(|told| match told {
+                    proto::Told::Output(text)
+                    | proto::Told::Notice(text)
+                    | proto::Told::Refusal(text)
+                    | proto::Told::Fault(text)
+                    | proto::Told::Pending(text) => text.as_str(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         // The holder of the plane was made when the verb asked, not before.
         let Reply::Text { plane, said } = flow(&mut client, proto::FlowVerb::List) else {
             panic!("no flow answer")
         };
         assert_eq!(plane, "work");
         assert_eq!(said.lines, [proto::Told::Output("one: not started".into())]);
-        // The verb runs there: the state's command runs, its exit moves.
-        let Reply::Text { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "one".into() })
-        else {
-            panic!("no flow answer")
-        };
-        let text = said
-            .lines
-            .iter()
-            .map(|told| match told {
-                proto::Told::Output(text)
-                | proto::Told::Notice(text)
-                | proto::Told::Refusal(text)
-                | proto::Told::Fault(text)
-                | proto::Told::Pending(text) => text.as_str(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(text, "one: done\n  started build\n  exit.ok -> done");
+        // The command runs off the holder's thread (AGL-121, D35): `start`
+        // answers where the flow stands, and the exit line comes with the
+        // command's word.
+        assert_eq!(
+            told(&mut client, proto::FlowVerb::Start { name: "one".into() }),
+            "one: build\n  started build"
+        );
+        let stop = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let text = told(&mut client, proto::FlowVerb::Status { name: "one".into() });
+            if text == "one: done\n  started build\n  exit.ok -> done" {
+                break;
+            }
+            assert!(std::time::Instant::now() < stop, "no word in 10 s: {text}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         // A flow the plane does not declare is a failed answer, not a
         // refusal; a plane that is not there is a refusal.
         let Reply::Text { said, .. } = flow(&mut client, proto::FlowVerb::Start { name: "two".into() })

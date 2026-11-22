@@ -8,8 +8,12 @@
 //! asked: a build and a launch are the plane's own, as `action.artifact`
 //! points at the plane's builds (D6, D10).
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
+use crate::action::Outcome;
 use crate::error::Error;
 use crate::i18n::{m, Lang};
 use crate::machine::{Event, Progress};
@@ -19,6 +23,90 @@ use crate::tr;
 use super::act;
 use super::journal::{self, Entry, FlowRun};
 use super::{Action, FlowDecl, FlowFile, Verb, FLOW_FILE};
+
+/// A command's word to the holder (AGL-121, D35): the flow whose command
+/// ended, the number of the start it answers, whether it was a `launch`,
+/// and its outcome. The watcher thread of `act` posts it; nothing else
+/// writes an exit line (D57).
+#[derive(Debug)]
+pub struct Word {
+    pub flow: String,
+    pub seq: u64,
+    pub launch: bool,
+    pub outcome: Outcome,
+}
+
+/// A command running for a flow: the number of its start, and the child
+/// whose end sends the word (D35).
+struct Running {
+    seq: u64,
+    child: act::Child,
+}
+
+/// The commands the driver has running (AGL-121, D35, D57): a flow's
+/// `command` and `launch` start in a process group of their own, off the
+/// thread that drove them, and their word comes back as a `Letter::Exited`
+/// to the holder. One command per flow: the first event of a state leaves
+/// the rest of its actions behind (D9).
+pub struct Flight {
+    running: HashMap<String, Running>,
+    seq: u64,
+    post: Arc<dyn Fn(Word) + Send + Sync>,
+}
+
+impl Flight {
+    /// A flight whose command words go to `post`: the holder's letter.
+    pub fn new(post: impl Fn(Word) + Send + Sync + 'static) -> Flight {
+        Flight { running: HashMap::new(), seq: 0, post: Arc::new(post) }
+    }
+
+    /// Whether `flow` has a command running: a `start` then answers its
+    /// place instead of running the command again (D35).
+    pub fn running(&self, flow: &str) -> bool {
+        self.running.contains_key(flow)
+    }
+
+    /// Ends `flow`'s command whole (D57): the group goes, and its word
+    /// finds nothing — `stop` writes no exit line, the journal keeps
+    /// `stopped` alone.
+    pub fn kill(&mut self, flow: &str) {
+        if let Some(running) = self.running.remove(flow) {
+            act::kill(running.child);
+        }
+    }
+
+    /// Starts `cmd` for `flow` in `dir` and lets its word come back (D35).
+    fn start(
+        &mut self,
+        dir: &Path,
+        flow: &str,
+        cmd: &str,
+        timeout: Duration,
+        launch: bool,
+    ) -> Result<(), Error> {
+        self.seq += 1;
+        let seq = self.seq;
+        let post = self.post.clone();
+        let started = flow.to_owned();
+        let child = act::spawn(dir, cmd, timeout, move |outcome| {
+            post(Word { flow: started, seq, launch, outcome });
+        })?;
+        self.running.insert(flow.to_owned(), Running { seq, child });
+        Ok(())
+    }
+
+    /// Whether the word answers the command still running for its flow: a
+    /// stale word — after a `stop`, a `reset`, a move — finds nothing.
+    fn accept(&mut self, word: &Word) -> bool {
+        match self.running.get(&word.flow) {
+            Some(running) if running.seq == word.seq => {
+                self.running.remove(&word.flow);
+                true
+            }
+            _ => false,
+        }
+    }
+}
 
 /// The journal's lines `status` shows (D7): the fold answers short, the prose
 /// stays in the journal.
@@ -64,9 +152,16 @@ pub struct Place {
 /// agent's `flow` tool, the same verb of the same machine. The declarations
 /// are read again every time, so an edited `flow.nix` cannot move a running
 /// flow's future transitions without a word — the fold refuses a mismatch
-/// (D11). A state's own commands run here, in `workdir`; what needs a turn
-/// waits for a session, and the place says what waits (D6, D7).
-pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Text {
+/// (D11). A state's own commands run in `workdir`: inline when `flight` is
+/// `None`, and started off the thread when one is given (D35); what needs a
+/// turn waits for a session, and the place says what waits (D6, D7).
+pub fn run(
+    plane_dir: &Path,
+    workdir: &Path,
+    verb: &Verb,
+    lang: Lang,
+    flight: Option<&mut Flight>,
+) -> Text {
     let decls = match FlowFile::load(plane_dir) {
         Ok(decls) => decls,
         Err(error) => return Text::fault(&error, lang),
@@ -118,11 +213,11 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Text {
             Text::told(Told::Output(lines))
         }
         Verb::Start { name } => match declared(name) {
-            Ok(decl) => place_said(name, start(decl, plane_dir, workdir)),
+            Ok(decl) => place_said(name, start(decl, plane_dir, workdir, flight)),
             Err(text) => refused(text),
         },
         Verb::Stop { name } => match declared(name) {
-            Ok(decl) => place_said(name, stop(decl, plane_dir)),
+            Ok(decl) => place_said(name, stop(decl, plane_dir, flight)),
             Err(text) => refused(text),
         },
         Verb::Status { name } => match declared(name) {
@@ -149,13 +244,18 @@ pub fn run(plane_dir: &Path, workdir: &Path, verb: &Verb, lang: Lang) -> Text {
                     );
                     return refused(format!("`{event}` is no nudge of `{state}`"));
                 }
-                settle(plane_dir, workdir, name, Event::Message(event.clone()), None);
+                settle(plane_dir, workdir, name, Event::Message(event.clone()), None, flight);
                 place_said(name, place(decl, plane_dir))
             }
             Err(text) => refused(text),
         },
         Verb::Reset { name } => match declared(name) {
             Ok(decl) => {
+                // A reset starts the journal over; a command running for
+                // the old run ends whole with it (D57).
+                if let Some(flight) = flight {
+                    flight.kill(name);
+                }
                 let file = journal::path(plane_dir, name);
                 if let Err(error) = journal::reset(plane_dir, name) {
                     return Text::fault(&error, lang);
@@ -336,6 +436,7 @@ pub fn settle(
     flow: &str,
     event: Event,
     note: Option<String>,
+    mut flight: Option<&mut Flight>,
 ) {
     let Ok(decls) = FlowFile::load(plane_dir) else {
         return;
@@ -346,8 +447,14 @@ pub fn settle(
     let Ok(mut run) = FlowRun::resume(decl, plane_dir) else {
         return;
     };
+    let before = run.state().to_owned();
     let _ = run.on_event_noted(decl, event, note);
-    let _ = walk(decl, &mut run, plane_dir, workdir);
+    // A machine that has left the state of a running command ends it: its
+    // word belongs to a state that is no more (D57).
+    if run.state() != before && let Some(flight) = flight.as_mut() {
+        flight.kill(flow);
+    }
+    let _ = walk(decl, &mut run, plane_dir, workdir, flight);
 }
 
 /// Where the journal leaves its flow at rest: the state it stands in and
@@ -379,7 +486,12 @@ fn resting(entries: &[Entry]) -> Option<(&str, usize)> {
 /// themselves (D5, D10). A state whose actions need a turn ends the run, and
 /// the place says what it waits for (D6); the limit of the whole run stops it
 /// for good, and the journal keeps that too (D33).
-pub fn start(decl: &FlowDecl, plane_dir: &Path, workdir: &Path) -> Result<Place, Error> {
+pub fn start(
+    decl: &FlowDecl,
+    plane_dir: &Path,
+    workdir: &Path,
+    flight: Option<&mut Flight>,
+) -> Result<Place, Error> {
     let file = journal::path(plane_dir, decl.name());
     let mut run = FlowRun::resume(decl, plane_dir)?;
     // A stop is not a wall: `start` moves the flow again from where it stood,
@@ -387,17 +499,20 @@ pub fn start(decl: &FlowDecl, plane_dir: &Path, workdir: &Path) -> Result<Place,
     if matches!(journal::read(&file)?.last(), Some(Entry::Stopped { .. })) {
         run.restart()?;
     }
-    walk(decl, &mut run, plane_dir, workdir)
+    walk(decl, &mut run, plane_dir, workdir, flight)
 }
 
 /// Turns the machine as far as its own kind goes (D5, D10): a state's command
 /// and launch run, their exits move it; a state whose actions need a turn, or
 /// no actions at all, ends the walk, and the place says what it waits for (D6).
+/// With a `flight` the command is started off the thread and the walk ends
+/// where it stands, waiting for the command's word (D35).
 fn walk(
     decl: &FlowDecl,
     run: &mut FlowRun,
     plane_dir: &Path,
     workdir: &Path,
+    mut flight: Option<&mut Flight>,
 ) -> Result<Place, Error> {
     for _ in 0..MAX_WALK {
         let at = index(decl, run.state());
@@ -406,11 +521,22 @@ fn walk(
         let mut moved = false;
         for action in decl.actions(at) {
             let event = match action {
-                Action::Command { cmd, timeout } => {
-                    Some(Event::Exit(act::run(workdir, cmd, *timeout)?))
-                }
-                Action::Launch { cmd, timeout } => {
-                    Some(Event::Launch(act::run(workdir, cmd, *timeout)?))
+                Action::Command { cmd, timeout } | Action::Launch { cmd, timeout } => {
+                    let launch = matches!(action, Action::Launch { .. });
+                    match flight.as_mut() {
+                        // A command already running: the walk stands with
+                        // it until its word comes (D35).
+                        Some(f) if f.running(decl.name()) => return place(decl, plane_dir),
+                        Some(f) => {
+                            f.start(workdir, decl.name(), cmd, *timeout, launch)?;
+                            return place(decl, plane_dir);
+                        }
+                        None => Some(if launch {
+                            Event::Launch(act::run(workdir, cmd, *timeout)?)
+                        } else {
+                            Event::Exit(act::run(workdir, cmd, *timeout)?)
+                        }),
+                    }
                 }
                 // An artifact is pointed at; a `wake` and a review are turns
                 // of a session (D6, D10).
@@ -448,7 +574,7 @@ fn walk(
 /// the states it lands on going on by themselves (D5). A stopped flow stands
 /// where the human left it (D7); a fold that refuses says so to `status`,
 /// not here (D11). The names of the flows whose timers fired come back.
-pub fn tick(plane_dir: &Path, workdir: &Path) -> Vec<String> {
+pub fn tick(plane_dir: &Path, workdir: &Path, mut flight: Option<&mut Flight>) -> Vec<String> {
     let mut fired = Vec::new();
     // A declaration that does not load ticks nothing; the next look tries
     // again once the human mends it.
@@ -470,18 +596,59 @@ pub fn tick(plane_dir: &Path, workdir: &Path) -> Vec<String> {
             continue;
         }
         let Ok(mut run) = FlowRun::resume(&decl, plane_dir) else { continue };
+        let before = run.state().to_owned();
         let _ = run.on_event(&decl, Event::Timer);
-        let _ = walk(&decl, &mut run, plane_dir, workdir);
+        // A timer that moved the machine off a running command ends it (D57).
+        if run.state() != before && let Some(flight) = flight.as_mut() {
+            flight.kill(decl.name());
+        }
+        let _ = walk(&decl, &mut run, plane_dir, workdir, flight.as_deref_mut());
         fired.push(decl.name().to_owned());
     }
     fired
 }
 
-/// A human stopped the flow (D7): the journal keeps where it stood.
-pub fn stop(decl: &FlowDecl, plane_dir: &Path) -> Result<Place, Error> {
+/// A human stopped the flow (D7): the journal keeps where it stood. A
+/// command running for it ends whole with the stop (D57); its word finds
+/// nothing and writes no exit line.
+pub fn stop(decl: &FlowDecl, plane_dir: &Path, flight: Option<&mut Flight>) -> Result<Place, Error> {
+    if let Some(flight) = flight {
+        flight.kill(decl.name());
+    }
     let run = FlowRun::resume(decl, plane_dir)?;
     run.stop()?;
     place(decl, plane_dir)
+}
+
+/// Carries a command's word to its flow (AGL-121, D35): the journal's exit
+/// or launch line, and the states that go on by themselves. A word from a
+/// command the machine has left — stopped, reset, moved on — is dropped:
+/// `stop` writes `stopped` alone, no exit line (D57).
+pub fn ended(plane_dir: &Path, workdir: &Path, word: Word, flight: &mut Flight) {
+    if !flight.accept(&word) {
+        return;
+    }
+    // A declaration that does not load says so to `status`, not here (D11).
+    let Ok(decls) = FlowFile::load(plane_dir) else {
+        return;
+    };
+    let Some(decl) = decls.find(&word.flow) else {
+        return;
+    };
+    let Ok(mut run) = FlowRun::resume(decl, plane_dir) else {
+        return;
+    };
+    let event = if word.launch {
+        Event::Launch(word.outcome)
+    } else {
+        Event::Exit(word.outcome)
+    };
+    match run.on_event(decl, event) {
+        Ok(Progress::Continue) => {}
+        // The limit of the whole run ends it where the exit left it (D33).
+        Ok(Progress::StepLimit) | Err(_) => return,
+    }
+    let _ = walk(decl, &mut run, plane_dir, workdir, Some(flight));
 }
 
 /// What the state `name` asks of a session (D6).

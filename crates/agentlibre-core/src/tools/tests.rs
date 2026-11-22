@@ -1619,13 +1619,21 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
     )
     .unwrap();
     assert_eq!(ask(here, vec![("action", "list")]).content, "one: not started");
-    // `start` turns the machine: the state's own command runs and its exit
-    // moves it (D5), and the answer is the same short form as `status`.
+    // `start` turns the machine: the state's own command runs off the
+    // holder's thread, and the answer is where the flow stands (D35, D5).
     let out = ask(here, vec![("action", "start"), ("name", "one")]);
     assert_eq!(out.outcome, Outcome::Ok);
-    assert_eq!(out.content, "one: done\n  started build\n  exit.ok -> done");
-    // `status` answers from the journal, its last lines kept short (D7).
-    let out = ask(here, vec![("action", "status"), ("name", "one")]);
+    assert_eq!(out.content, "one: build\n  started build");
+    // `status` answers from the journal, its last lines kept short (D7);
+    // the exit line arrives with the command's word (D35).
+    let stop = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let out = loop {
+        let out = ask(here, vec![("action", "status"), ("name", "one")]);
+        if out.content.contains("exit.ok -> done") || std::time::Instant::now() > stop {
+            break out;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_eq!(out.outcome, Outcome::Ok);
     assert!(
         out.content.starts_with("one: done") && out.content.contains("exit.ok -> done"),
