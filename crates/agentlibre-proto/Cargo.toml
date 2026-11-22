@@ -7,5 +7,6 @@ publish.workspace = true
 description = "agentLIBRE's protocol: what a client says to the daemon's planes and what they tell it, one line of JSON each"
 
 [dependencies]
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

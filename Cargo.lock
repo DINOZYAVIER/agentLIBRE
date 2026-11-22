@@ -22,6 +22,7 @@ name = "agentlibre-bridge"
 version = "0.0.2"
 dependencies = [
  "agentlibre-proto",
+ "hex",
  "rcgen",
  "ring",
  "rustls",
@@ -34,7 +35,10 @@ name = "agentlibre-core"
 version = "0.0.2"
 dependencies = [
  "agentlibre-proto",
+ "base64",
+ "hex",
  "libc",
+ "ring",
  "serde_json",
  "ureq",
 ]
@@ -43,6 +47,7 @@ dependencies = [
 name = "agentlibre-proto"
 version = "0.0.2"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]
