@@ -320,6 +320,38 @@ fn free_name(dir: &Path, title: &str) -> Option<String> {
     Some(name)
 }
 
+/// An advisory lock on a memory folder, held for one read-modify-write of
+/// its index and its entries' files (AGL-121, D49): the `memory` tool and
+/// `agl memory` both take it, so neither loses the other's line. It is on
+/// the folder, not on `MEMORY.md`, which [`write_atomic`] replaces by a
+/// rename; the kernel drops it when it is dropped or the process ends.
+struct FolderLock(#[allow(dead_code)] fs::File);
+
+fn lock_folder(dir: &Path) -> std::io::Result<FolderLock> {
+    use std::os::fd::AsRawFd;
+    let folder = fs::File::open(dir)?;
+    loop {
+        // SAFETY: `flock` on a descriptor this function owns.
+        if unsafe { libc::flock(folder.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(FolderLock(folder));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// The lock of `dir` for a change that needs the folder to exist: `None`
+/// when it does not, as there is nothing to change then.
+fn lock_existing(dir: &Path) -> Result<Option<FolderLock>, String> {
+    match lock_folder(dir) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Cannot lock {}: {error}", dir.display())),
+    }
+}
+
 /// `add title hook text` (M32): writes `<slug>.md` and appends its index
 /// line. The body is the `text`; when it is empty, the `call_text` that
 /// preceded the call (AGL-029, D1). A failure names the missing fields
@@ -360,12 +392,17 @@ pub fn add(
         };
         return fail(format!("`add` needs {list}."));
     }
-    let Some(name) = free_name(dir, &title) else {
-        return fail("The title needs letters or digits to make a file name.");
-    };
     if let Err(error) = fs::create_dir_all(dir) {
         return fail(format!("Cannot create {}: {error}", dir.display()));
     }
+    // Held from the choice of the name to the index line (D49).
+    let _lock = match lock_folder(dir) {
+        Ok(lock) => lock,
+        Err(error) => return fail(format!("Cannot lock {}: {error}", dir.display())),
+    };
+    let Some(name) = free_name(dir, &title) else {
+        return fail("The title needs letters or digits to make a file name.");
+    };
     let entry = format!("# {title}\n\n{body}\n");
     if let Err(error) = write_atomic(&entry_path(dir, &name), &entry) {
         return fail(format!("Cannot write the entry: {error:?}"));
@@ -451,6 +488,10 @@ pub fn edit_entry(dir: &Path, name: &str, old: &str, new: &str) -> (ToolResult, 
 /// written before the index, as `add` does it: an index failure leaves
 /// the line stale, never an orphaned entry.
 pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, Option<Write>) {
+    let _lock = match lock_existing(dir) {
+        Ok(lock) => lock,
+        Err(error) => return fail(error),
+    };
     if !valid_name(name) || !entry_path(dir, name).is_file() {
         return fail(format!("No memory entry `{name}`."));
     }
@@ -522,6 +563,10 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
     // The entry's own line is the one whose link is its: a hook that quotes
     // another entry's link is not that entry's line (AGL-121, D7).
     let its = |line: &str| index_line(line).is_some_and(|(_, linked, _)| linked == name);
+    let _lock = match lock_existing(dir) {
+        Ok(lock) => lock,
+        Err(error) => return fail(error),
+    };
     // An index that cannot be read is not an empty one: writing the lines
     // kept would lose all of them (AGL-060).
     let index = match fs::read_to_string(dir.join(INDEX)) {
@@ -1150,6 +1195,33 @@ mod tests {
         assert_eq!(remove(&dir.0, &one).0.outcome, Outcome::Fail);
         remove(&dir.0, &two);
         assert_eq!(fs::read_to_string(dir.0.join(INDEX)).unwrap(), "");
+    }
+
+    #[test]
+    fn writers_at_once_keep_every_line_of_the_index() {
+        let dir = TempDir::new();
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let dir = dir.0.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        let (result, _) =
+                            add(&dir, &format!("Entry {t} {i}"), "a hook", "a text", None);
+                        assert_eq!(result.outcome, Outcome::Ok);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
+        assert_eq!(index.lines().count(), 80);
+        for t in 0..8 {
+            for i in 0..10 {
+                assert!(index.contains(&format!("[Entry {t} {i}](entry-{t}-{i}.md)")));
+            }
+        }
     }
 
     #[test]
