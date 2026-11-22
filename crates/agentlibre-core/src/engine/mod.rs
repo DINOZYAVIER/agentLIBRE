@@ -295,10 +295,7 @@ fn launch_unit(
                     engine: engine.to_owned(),
                 }
             })?;
-            let windows = crate::wsl::is_windows_program(&program);
-            if windows {
-                crate::wsl::check_network()?;
-            }
+            let windows = crate::wsl::WindowsEngine::new(&program, host.clone(), port)?;
             let context = effective.context.unwrap_or(DEFAULT_CONTEXT);
             let extra = effective.args.clone().unwrap_or_default();
             let projector = projector_args(effective, models)?;
@@ -312,7 +309,10 @@ fn launch_unit(
                 &spec,
                 &extra,
             );
-            if windows { crate::wsl::windows_paths(args, &program)? } else { args }
+            match windows {
+                Some(engine) => engine.command(args, &program)?,
+                None => args,
+            }
         }
     };
     let output = Command::new("systemd-run")
@@ -753,8 +753,9 @@ pub struct Engine {
     child: Child,
     /// Whether the child is already reaped (by `is_alive` or `shutdown`).
     dead: bool,
-    /// Where a Windows engine listens: what runs in WSL is only its relay.
-    windows: Option<(String, u16)>,
+    /// The engine on the Windows side, when that is one: what runs in WSL
+    /// is only its relay.
+    windows: Option<crate::wsl::WindowsEngine>,
 }
 
 impl Engine {
@@ -799,10 +800,7 @@ impl Engine {
             .to_owned();
         let program = engine_program(&engine, path_var)
             .ok_or_else(|| Error::EngineNotFound { engine: engine.clone() })?;
-        let windows = crate::wsl::is_windows_program(&program);
-        if windows {
-            crate::wsl::check_network()?;
-        }
+        let windows = crate::wsl::WindowsEngine::new(&program, host.clone(), port)?;
         let context = settings.context.unwrap_or(DEFAULT_CONTEXT);
         let extra = settings.args.clone().unwrap_or_default();
         let projector = projector_args(settings, models)?;
@@ -828,7 +826,10 @@ impl Engine {
         // program, the rest are the arguments.
         let command =
             engine_args(&program, &model, (context, &host, port), &projector, &spec, &extra);
-        let command = if windows { crate::wsl::windows_paths(command, &program)? } else { command };
+        let command = match &windows {
+            Some(engine) => engine.command(command, &program)?,
+            None => command,
+        };
         let child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
@@ -839,11 +840,7 @@ impl Engine {
                 engine,
                 source,
             })?;
-        Ok(Engine {
-            child,
-            dead: false,
-            windows: windows.then_some((host, port)),
-        })
+        Ok(Engine { child, dead: false, windows })
     }
 
     /// The child's process id.
@@ -875,10 +872,10 @@ impl Engine {
     /// tool, then `SIGKILL`.
     pub fn shutdown(mut self) {
         self.end_child();
-        if let Some((host, port)) = &self.windows
-            && port_open(host, *port)
+        if let Some(windows) = &self.windows
+            && port_open(&windows.host, windows.port)
         {
-            crate::wsl::stop_engine_on_port(*port);
+            windows.stop();
         }
     }
 
@@ -1209,7 +1206,7 @@ fn serves(
 
 /// Whether the server's name of its model is the `expected` one: the same, or, for
 /// a server on Windows, which names it by the Windows path it was given
-/// (`crate::wsl::windows_paths`), the same file name (AGL-056).
+/// (`crate::wsl::WindowsEngine::command`), the same file name (AGL-056).
 pub fn same_model(observed: &str, expected: &str) -> bool {
     observed == expected
         || observed.contains('\\')

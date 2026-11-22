@@ -10,7 +10,7 @@ use std::process::Command;
 use crate::error::Error;
 
 /// Whether `program` is a Windows one.
-pub fn is_windows_program(program: &Path) -> bool {
+fn is_windows_program(program: &Path) -> bool {
     program.extension().is_some_and(|extension| extension == "exe")
 }
 
@@ -18,6 +18,45 @@ pub fn is_windows_program(program: &Path) -> bool {
 pub fn engine_is_windows() -> bool {
     std::env::var_os(crate::programs::ENGINES_VAR)
         .is_some_and(|dir| Path::new(&dir).join("llama-server.exe").is_file())
+}
+
+/// The engine that runs on the Windows side of WSL (AGL-052, D9, D10;
+/// AGL-121, D5): `new` checks before the launch, `command` makes the
+/// command see Windows paths, and `stop` ends it by the port — Windows
+/// knows no process of the Linux relay, so the port is the handle
+/// (AGL-058, D13).
+pub struct WindowsEngine {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+}
+
+impl WindowsEngine {
+    /// The engine of `program` listening at `host`:`port`, when its name
+    /// says Windows; `None` when it does not. The check of the network
+    /// (D10) comes first: no engine starts on a WSL that cannot reach it.
+    pub fn new(program: &Path, host: String, port: u16) -> Result<Option<WindowsEngine>, Error> {
+        if !is_windows_program(program) {
+            return Ok(None);
+        }
+        check_network()?;
+        Ok(Some(WindowsEngine { host, port }))
+    }
+
+    /// `command` with its absolute paths, but for `program`, as Windows
+    /// sees them (D9).
+    pub fn command(
+        &self,
+        command: Vec<OsString>,
+        program: &Path,
+    ) -> Result<Vec<OsString>, Error> {
+        windows_paths(command, program)
+    }
+
+    /// Ends what listens on the port when that is `llama-server`, and no
+    /// other (AGL-058, D13).
+    pub fn stop(&self) {
+        stop_engine_on_port(self.port);
+    }
 }
 
 /// agl's own weights folder (AGL-056, D7, D8): with an engine on Windows,
@@ -70,7 +109,7 @@ fn models_under(
 }
 
 /// The network of WSL must be the mirrored one (`wslinfo` tells).
-pub fn check_network() -> Result<(), Error> {
+fn check_network() -> Result<(), Error> {
     let mode = Command::new("wslinfo")
         .arg("--networking-mode")
         .output()
@@ -87,7 +126,7 @@ pub fn check_network() -> Result<(), Error> {
 }
 
 /// `command` with its absolute paths, but for `program`, as Windows sees them.
-pub fn windows_paths(command: Vec<OsString>, program: &Path) -> Result<Vec<OsString>, Error> {
+fn windows_paths(command: Vec<OsString>, program: &Path) -> Result<Vec<OsString>, Error> {
     convert_paths(command, program, &|path| {
         let output = Command::new("wslpath").arg("-w").arg(path).output().ok()?;
         output
@@ -126,7 +165,7 @@ fn stop_script(port: u16) -> String {
 /// Ends the engine on the Windows side that listens on `port`, and no other
 /// (AGL-058, D13): Windows knows no process of Linux, so it goes by the port.
 /// Whether one was ended.
-pub fn stop_engine_on_port(port: u16) -> bool {
+fn stop_engine_on_port(port: u16) -> bool {
     Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &stop_script(port)])
         .current_dir("/mnt/c")
