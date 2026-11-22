@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use crate::backend::Backend;
 use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
+use crate::ask::ask_terminal;
 use crate::engine::*;
 use crate::error::Error;
 use crate::i18n::{Lang, m, server as texts};

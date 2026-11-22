@@ -132,7 +132,7 @@ pub fn run(
                         listed: &user.models,
                         user_path: &paths.settings_file(),
                     },
-                    &crate::engine::ask_line,
+                    &crate::ask::ask_line,
                     &|line| eprintln!("{line}"),
                     lang,
                 )?;
