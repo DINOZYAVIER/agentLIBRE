@@ -1212,6 +1212,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 model: spec.model,
                 args: spec.args,
                 program: spec.program,
+                heard: std::sync::OnceLock::new(),
             },
             models: PathBuf::new(),
             path_var: std::env::var_os("PATH"),

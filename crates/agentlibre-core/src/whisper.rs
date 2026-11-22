@@ -35,6 +35,10 @@ pub struct WhisperServer {
     /// The server binary by path (AGL-122, D9); `None` — `whisper-server`
     /// found in PATH.
     pub program: Option<String>,
+    /// The language the server heard on the first request (AGL-122): from
+    /// then on it goes with every request, and whisper stops hearing it
+    /// over again — the detection costs the human three seconds a time.
+    pub heard: std::sync::OnceLock<String>,
 }
 
 impl WhisperServer {
@@ -62,6 +66,7 @@ impl WhisperServer {
             model: model.clone(),
             args: settings.args.clone().unwrap_or_default(),
             program: None,
+            heard: std::sync::OnceLock::new(),
         })
     }
 }
@@ -164,10 +169,26 @@ pub fn ensure(
 }
 
 /// The text of `wav` (16 kHz mono) from the whisper server at `url`.
-pub fn transcribe(url: &str, private_ca: Option<&str>, wav: &[u8]) -> Result<String, Error> {
+pub fn transcribe(
+    url: &str,
+    private_ca: Option<&str>,
+    heard: &std::sync::OnceLock<String>,
+    wav: &[u8],
+) -> Result<String, Error> {
     let boundary = "----agentLIBREwhisper7f3a9c";
     let mut body: Vec<u8> = Vec::new();
-    for (name, value) in [("response_format", "json"), ("temperature", "0.0")] {
+    // Until the server names its language once, ask for the verbose
+    // answer that carries the name; every answer after that says it
+    // up front and skips the three-second re-hearing (AGL-122).
+    let language = heard.get();
+    let mut fields: Vec<(&str, &str)> = vec![
+        ("response_format", if language.is_some() { "json" } else { "verbose_json" }),
+        ("temperature", "0.0"),
+    ];
+    if let Some(language) = language {
+        fields.push(("language", language));
+    }
+    for (name, value) in fields {
         body.extend_from_slice(
             format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
                 .as_bytes(),
@@ -212,6 +233,9 @@ pub fn transcribe(url: &str, private_ca: Option<&str>, wav: &[u8]) -> Result<Str
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|error| fail(error.to_string()))?;
     if let Some(error) = json["error"].as_str() {
         return Err(fail(error.into()));
+    }
+    if let Some(detected) = json["language"].as_str() {
+        let _ = heard.set(detected.to_owned());
     }
     json["text"]
         .as_str()
@@ -318,7 +342,7 @@ impl Dictation for Voice {
         }
         let server = self.server()?;
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
-        transcribe(&server.url, server.private_ca.as_deref(), wav)
+        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, wav)
     }
 }
 
@@ -328,7 +352,7 @@ impl Transcriber for Autostart {
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
         say(&tr!(self.lang, m::TRANSCRIBING, name = source.name));
         let wav = media::audio_to_wav(&source.bytes)?;
-        transcribe(&server.url, server.private_ca.as_deref(), &wav)
+        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, &wav)
     }
 }
 
@@ -380,6 +404,7 @@ impl Draft {
                 model: model.to_string_lossy().into_owned(),
                 args,
                 program: settings.draft_program.clone(),
+                heard: std::sync::OnceLock::new(),
             },
             models: models.to_path_buf(),
             path_var,
@@ -390,7 +415,7 @@ impl Draft {
     /// when it sleeps (the first chunk pays the load, D9), ask, return.
     pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
         ensure(&self.server, &self.models, self.path_var.clone(), &mut |_| {}, Lang::En)?;
-        transcribe(&self.server.url, self.server.private_ca.as_deref(), wav)
+        transcribe(&self.server.url, self.server.private_ca.as_deref(), &self.server.heard, wav)
     }
 }
 
@@ -573,6 +598,7 @@ mod tests {
             model: "w.bin".into(),
             args: vec!["-t".into(), "12".into(), "-l".into(), "uk".into()],
             program: None,
+            heard: std::sync::OnceLock::new(),
         };
         let args = systemd_run_args(
             &server,
@@ -648,24 +674,41 @@ mod tests {
     #[test]
     fn the_audio_goes_as_a_multipart_form_and_the_text_comes_back_trimmed() {
         let (url, handle) = one_reply(200, "{\"text\":\" And so my fellow Americans,\\n ask not\\n\"}");
-        let text = transcribe(&url, None, b"RIFFwav").unwrap();
+        let text = transcribe(&url, None, &std::sync::OnceLock::new(), b"RIFFwav").unwrap();
         assert_eq!(text, "And so my fellow Americans, ask not");
         let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
         assert!(request.starts_with("POST /inference HTTP/1.1"), "{request}");
         assert!(request.contains("multipart/form-data; boundary="));
         assert!(request.contains("name=\"file\"; filename=\"audio.wav\""));
-        assert!(request.contains("name=\"response_format\"\r\n\r\njson"));
+        assert!(request.contains("name=\"response_format\"\r\n\r\nverbose_json"));
         assert!(request.contains("RIFFwav"));
+    }
+
+    #[test]
+    fn a_heard_language_goes_with_every_request_afterwards() {
+        // AGL-122: the server names its language once, every request
+        // after that says it up front and saves the three-second
+        // re-hearing.
+        let heard = std::sync::OnceLock::new();
+        let (url, handle) = one_reply(200, "{\"text\":\" hi\",\"language\":\"russian\"}");
+        transcribe(&url, None, &heard, b"x").unwrap();
+        handle.join().unwrap();
+        assert_eq!(heard.get().map(String::as_str), Some("russian"));
+        let (url, handle) = one_reply(200, "{\"text\":\" again\"}");
+        transcribe(&url, None, &heard, b"x").unwrap();
+        let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
+        assert!(request.contains("name=\"language\"\r\n\r\nrussian"), "{request}");
+        assert!(request.contains("name=\"response_format\"\r\n\r\njson"));
     }
 
     #[test]
     fn a_whisper_error_is_an_error_with_its_text() {
         let (url, handle) = one_reply(500, "{\"error\":\"boom\"}");
-        let error = transcribe(&url, None, b"x").unwrap_err();
+        let error = transcribe(&url, None, &std::sync::OnceLock::new(), b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail.contains("500") && detail.contains("boom")));
         let (url, handle) = one_reply(200, "{\"error\":\"no audio\"}");
-        let error = transcribe(&url, None, b"x").unwrap_err();
+        let error = transcribe(&url, None, &std::sync::OnceLock::new(), b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail == "no audio"));
     }
