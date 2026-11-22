@@ -45,7 +45,7 @@ use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
 use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
 use crate::status::{
-    COMMANDS, Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
+    Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use crate::style::Role;
 use crate::theme::Theme;
@@ -1171,11 +1171,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         plane: opened.session.plane.clone(),
         server: opened.server_url.clone(),
     };
-    let commands: Vec<MenuItem> = COMMANDS
+    let commands: Vec<MenuItem> = crate::cli::commands::SLASH
         .iter()
-        .map(|name| MenuItem {
-            name,
-            description: texts::command(name, lang).into(),
+        .map(|cmd| MenuItem {
+            name: cmd.name,
+            description: texts::command(cmd.name, lang).into(),
         })
         .collect();
     let editor = Editor::new(editor::load_history(&history_file), commands);
@@ -1835,10 +1835,10 @@ mod tests {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let sink = Sink::default();
-        let commands = COMMANDS
+        let commands = crate::cli::commands::SLASH
             .iter()
-            .map(|name| MenuItem {
-                name,
+            .map(|cmd| MenuItem {
+                name: cmd.name,
                 description: String::new(),
             })
             .collect();

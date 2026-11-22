@@ -10,6 +10,7 @@ use crate::Setup;
 use crate::agent::TurnEnd;
 use crate::attach::{self, Pending};
 use crate::cli::args::{MemoryAction, memory_action};
+use crate::cli::commands;
 use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::i18n::{Lang, m};
@@ -82,6 +83,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
             let name = message.split_whitespace().next().unwrap_or(message);
             // What the command says goes to the session too (AGL-047, D5).
             let mut said = Record::default();
+            // The table says which commands a session without a terminal
+            // takes (AGL-121, D9); the rest are unknown here.
+            if !commands::takes(name, commands::STDIN) {
+                said.fail(tr!(lang, m::UNKNOWN_COMMAND, name = name).to_string());
+                said.record(&mut ask, &mut session, message)?;
+                continue;
+            }
             match name {
                 "/quit" | "/exit" => {
                     said.record(&mut ask, &mut session, message)?;

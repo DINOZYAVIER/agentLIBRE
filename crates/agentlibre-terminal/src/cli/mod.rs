@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod bridge;
+pub mod commands;
 pub mod forge;
 pub mod function;
 pub mod help;
