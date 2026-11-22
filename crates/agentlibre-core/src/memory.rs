@@ -519,7 +519,9 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
     if !valid_name(name) {
         return fail(format!("No memory entry `{name}`."));
     }
-    let link = format!("]({name}.md)");
+    // The entry's own line is the one whose link is its: a hook that quotes
+    // another entry's link is not that entry's line (AGL-121, D7).
+    let its = |line: &str| index_line(line).is_some_and(|(_, linked, _)| linked == name);
     // An index that cannot be read is not an empty one: writing the lines
     // kept would lose all of them (AGL-060).
     let index = match fs::read_to_string(dir.join(INDEX)) {
@@ -528,12 +530,12 @@ pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
         Err(error) => return fail(format!("Cannot read the index: {error}")),
     };
     let file = entry_path(dir, name).is_file();
-    if !file && !index.lines().any(|line| line.contains(&link)) {
+    if !file && !index.lines().any(its) {
         return fail(format!("No memory entry `{name}`."));
     }
     let kept: String = index
         .lines()
-        .filter(|line| !line.contains(&link))
+        .filter(|line| !its(line))
         .map(|line| format!("{line}\n"))
         .collect();
     if let Err(error) = write_atomic(&dir.join(INDEX), &kept) {
@@ -1148,6 +1150,20 @@ mod tests {
         assert_eq!(remove(&dir.0, &one).0.outcome, Outcome::Fail);
         remove(&dir.0, &two);
         assert_eq!(fs::read_to_string(dir.0.join(INDEX)).unwrap(), "");
+    }
+
+    #[test]
+    fn remove_keeps_a_hook_that_quotes_another_entrys_link() {
+        let dir = TempDir::new();
+        let one = added(&dir.0, "One", "first", "1");
+        let two = added(&dir.0, "Two", "see [One](one.md) first", "2");
+        let (result, _) = remove(&dir.0, &one);
+        assert_eq!(result.outcome, Outcome::Ok);
+        assert!(entry_path(&dir.0, &two).exists());
+        assert_eq!(
+            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
+            format!("- [Two]({two}.md) — see [One](one.md) first\n")
+        );
     }
 
     #[test]
