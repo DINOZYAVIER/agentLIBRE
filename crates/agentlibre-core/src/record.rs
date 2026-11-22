@@ -64,45 +64,46 @@ pub struct Vad {
     /// 700 — measured on the human's own recordings, not on ffmpeg's
     /// book-example −30 dB, which their levels never reach.
     pub rms_on: i64,
-    /// A silence this long ends the speech segment; 0.4 s bridges the
-    /// pauses between words without letting chunks run on, and answers
-    /// the speaker fast enough to read as live.
-    pub silence_ms: u32,
-    /// How much of the previous chunk's tail a new chunk repeats.
+    /// A window leaves the chunker this often, pause or no pause
+    /// (AGL-122, D10): the draft answers on the clock, not on phrases.
+    pub hop_ms: u32,
+    /// How much of the previous window's tail a new window repeats; the
+    /// repeated words fall out at the text, where the worker matches
+    /// them, not at the audio.
     pub overlap_ms: u32,
-    /// A speech segment is cut at this length even without a pause.
-    pub max_speech_ms: u32,
 }
 
 impl Default for Vad {
     fn default() -> Vad {
-        Vad { rms_on: 300, silence_ms: 400, overlap_ms: 300, max_speech_ms: 12000 }
+        Vad { rms_on: 300, hop_ms: 1200, overlap_ms: 800 }
     }
 }
 
 /// A frame: 20 ms of 16 kHz mono audio.
 const FRAME_SAMPLES: usize = 320;
 
-/// Cuts a 16 kHz mono PCM stream into speech chunks at silences
-/// (AGL-122, D6): RMS per 20 ms frame, a chunk ends `silence_ms` after
-/// the last loud frame, the next one repeats `overlap_ms` of the tail;
-/// a never-pausing segment is cut at `max_speech_ms`.
+/// Cuts a 16 kHz mono PCM stream into rolling draft windows
+/// (AGL-122, D10): every `hop_ms` the audio since the last window goes
+/// out — the next one starting `overlap_ms` before the previous cut —
+/// and a window with no loud frame is dropped whole, silence being
+/// cheap to keep but dear to transcribe.
 #[derive(Debug)]
 pub struct Chunker {
     vad: Vad,
-    /// The kept audio, from `base` on; never longer than a chunk plus
+    /// The kept audio, from `base` on; never longer than a window plus
     /// the overlap, so the positions below are `base + kept.len()`.
     kept: VecDeque<i16>,
     base: u64,
     /// Samples fed since the start.
     written: u64,
+    /// The pending window's start, `None` while the silence holds.
     start: Option<u64>,
-    /// Loud frames of the speech segment in progress.
-    started_frames: u64,
-    silence: u32,
-    silence_on_frames: u64,
-    max_frames: u64,
-    tail_frames: u64,
+    /// A loud frame came since the last window.
+    voiced: bool,
+    /// The sample position the next window is due at.
+    due: u64,
+    hop_samples: u64,
+    tail_samples: u64,
 }
 
 impl Chunker {
@@ -113,11 +114,10 @@ impl Chunker {
             base: 0,
             written: 0,
             start: None,
-            started_frames: 0,
-            silence: 0,
-            silence_on_frames: (vad.silence_ms as u64).div_ceil(20),
-            max_frames: (vad.max_speech_ms as u64) / 20,
-            tail_frames: (vad.overlap_ms as u64) / 20,
+            voiced: false,
+            due: (vad.hop_ms as u64) * 16,
+            hop_samples: (vad.hop_ms as u64) * 16,
+            tail_samples: (vad.overlap_ms as u64) * 16,
         }
     }
 
@@ -130,7 +130,7 @@ impl Chunker {
         Some(((sum / FRAME_SAMPLES as i64) as f64).sqrt() as i64)
     }
 
-    /// Feeds samples; every finished chunk comes out as it ends.
+    /// Feeds samples; every finished window comes out as it ends.
     pub fn push(&mut self, samples: &[i16]) -> Vec<Vec<i16>> {
         let mut out = Vec::new();
         for frame in samples.chunks(FRAME_SAMPLES) {
@@ -142,50 +142,50 @@ impl Chunker {
                 None => continue,
             };
             if rms >= self.vad.rms_on {
-                self.start.get_or_insert(self.written - frame.len() as u64);
-                self.started_frames += 1;
-                self.silence = 0;
-            } else if self.start.is_some() {
-                self.silence += 1;
+                let back = (self.written - frame.len() as u64)
+                    .saturating_sub(self.tail_samples)
+                    .max(self.base);
+                self.start = Some(self.start.map_or(back, |s| s.min(back)));
+                self.voiced = true;
             }
-            if self.start.is_some() {
-                // One cut per frame: the silence ended the segment, or
-                // it reached the forced length, never both.
-                if self.silence as u64 >= self.silence_on_frames {
-                    out.push(self.cut(true));
-                } else if self.started_frames >= self.max_frames {
-                    out.push(self.cut(false));
+            if self.written >= self.due {
+                self.due = self.written + self.hop_samples;
+                if self.voiced {
+                    out.push(self.cut());
+                } else {
+                    self.drop_silence();
                 }
             }
         }
         out
     }
 
-    /// The tail of an unfinished speech segment, at the end of the
-    /// recording.
+    /// The pending window at the end of the recording: whatever speech
+    /// has no window yet goes out whole.
     pub fn flush(&mut self) -> Option<Vec<i16>> {
         let start = self.start?;
-        let end = self.written - (self.silence as u64) * FRAME_SAMPLES as u64;
         self.start = None;
-        self.silence = 0;
-        if end <= start {
+        self.voiced = false;
+        if start >= self.written {
             return None;
         }
-        Some(self.take(start, end))
+        Some(self.take(start, self.written))
     }
 
-    /// The chunk in progress, from `start` to the last judged sample.
-    fn cut(&mut self, silence_end: bool) -> Vec<i16> {
-        let start = self.start.unwrap();
-        // The silence that ended the segment belongs to neither chunk.
-        let end = self.written - if silence_end { (self.silence as u64) * FRAME_SAMPLES as u64 } else { 0 };
-        // A silence closes the segment; a forced cut opens the next one
-        // `overlap_ms` before the cut, so no word is lost on the seam.
-        self.start = if silence_end { None } else { Some(end - self.tail_frames * FRAME_SAMPLES as u64) };
-        let chunk = self.take(start, end);
-        self.started_frames = 0;
-        self.silence = 0;
-        chunk
+    /// Closes the window, from its start to now, and opens the next one
+    /// `overlap_ms` before the cut, so no word is lost on the seam.
+    fn cut(&mut self) -> Vec<i16> {
+        let start = self.start.take().unwrap_or(self.base).max(self.base);
+        self.start = Some((self.written - self.tail_samples).max(self.base));
+        self.voiced = false;
+        self.take(start, self.written)
+    }
+
+    /// A window of pure silence: nothing to hear, nothing to keep.
+    fn drop_silence(&mut self) {
+        self.start = None;
+        self.voiced = false;
+        self.take(self.written, self.written);
     }
 
     /// The kept samples from `from` to `to`, dropping what lies before
@@ -253,40 +253,50 @@ mod chunker_tests {
     }
 
     #[test]
-    fn a_speech_segment_ends_at_a_long_silence() {
-        let mut c = Chunker::new(Vad::default());
+    fn a_window_leaves_on_the_clock() {
+        // The draft answers on the clock, not on phrases (D10): speech
+        // gets its window at the hop even though it never paused.
+        let mut c = Chunker::new(Vad::default()); // 1.2 s hop
         let mut chunks = Vec::new();
-        chunks.extend(c.push(&tone(3 * 20 * FRAME_SAMPLES)));
-        assert!(chunks.is_empty(), "the silence has not ended yet");
-        chunks.extend(c.push(&silence(25 * FRAME_SAMPLES)));
-        assert_eq!(chunks.len(), 1);
-        // The tone is in, the trailing silence is not.
-        assert!(chunks[0].len() <= 4 * 20 * FRAME_SAMPLES && chunks[0].len() >= 3 * 20 * FRAME_SAMPLES);
-        // A silence alone opens no chunk.
-        chunks.extend(c.push(&silence(50 * FRAME_SAMPLES)));
+        chunks.extend(c.push(&tone(20 * FRAME_SAMPLES)));
+        assert!(chunks.is_empty(), "the hop has not come yet");
+        chunks.extend(c.push(&tone(40 * FRAME_SAMPLES)));
         assert_eq!(chunks.len(), 1);
     }
 
     #[test]
-    fn two_segments_come_out_in_order() {
+    fn windows_come_out_in_order_on_one_breath() {
         let mut c = Chunker::new(Vad::default());
         let mut chunks = Vec::new();
-        chunks.extend(c.push(&tone(2 * 20 * FRAME_SAMPLES)));
-        chunks.extend(c.push(&silence(25 * FRAME_SAMPLES)));
-        chunks.extend(c.push(&tone(3 * 20 * FRAME_SAMPLES)));
-        chunks.extend(c.push(&silence(25 * FRAME_SAMPLES)));
-        assert_eq!(chunks.len(), 2);
-    }
-
-    #[test]
-    fn the_next_chunk_repeats_the_tail_of_the_previous() {
-        // A never-pausing speech is cut at the maximum; the next chunk
-        // starts `overlap_ms` before the cut (D6).
-        let vad = Vad { max_speech_ms: 400, overlap_ms: 300, ..Vad::default() };
-        let mut c = Chunker::new(vad);
-        let chunks = c.push(&tone(3 * 20 * FRAME_SAMPLES));
+        chunks.extend(c.push(&tone(30 * FRAME_SAMPLES)));
+        chunks.extend(c.push(&tone(40 * FRAME_SAMPLES)));
+        chunks.extend(c.push(&tone(60 * FRAME_SAMPLES)));
+        chunks.extend(c.push(&tone(30 * FRAME_SAMPLES)));
         assert!(chunks.len() >= 2, "{:?}", chunks.len());
-        // The next chunk repeats `overlap_ms` of the previous tail (D6).
+    }
+
+    #[test]
+    fn a_silent_window_opens_nothing() {
+        let mut c = Chunker::new(Vad::default());
+        let chunks = c.push(&silence(200 * FRAME_SAMPLES));
+        assert!(chunks.is_empty(), "silence never reaches the engine");
+        assert!(c.flush().is_none());
+        // Speech after a silence starts a fresh window, not a re-heard
+        // quarter-hour of dropped quiet.
+        let mut chunks = c.push(&tone(30 * FRAME_SAMPLES));
+        chunks.extend(c.push(&tone(40 * FRAME_SAMPLES)));
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].len() <= 80 * FRAME_SAMPLES, "{:?}", chunks[0].len());
+    }
+
+    #[test]
+    fn the_next_window_repeats_the_tail_of_the_previous() {
+        // The seam of consecutive windows carries `overlap_ms` of the
+        // same audio; the worker folds the doubled words at the text.
+        let vad = Vad { hop_ms: 400, overlap_ms: 300, ..Vad::default() };
+        let mut c = Chunker::new(vad);
+        let chunks = c.push(&tone(60 * FRAME_SAMPLES));
+        assert!(chunks.len() >= 2, "{:?}", chunks.len());
         assert_eq!(&chunks[0][chunks[0].len() - 4800..], &chunks[1][..4800]);
     }
 
@@ -315,10 +325,11 @@ mod chunker_tests {
             .map(|i| if i / 32 % 2 == 0 { 700 } else { -700 })
             .collect();
         let hum: Vec<i16> = (0..40 * FRAME_SAMPLES).map(|i| if i / 8 % 2 == 0 { 190 } else { -190 }).collect();
-        let mut chunks = c.push(&quiet);
-        chunks.extend(c.push(&hum));
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].len() >= 190 * FRAME_SAMPLES);
+        let chunks = c.push(&quiet);
+        assert!(!chunks.is_empty(), "the human's speech level cuts windows");
+        let mut hum_only = Chunker::new(Vad::default());
+        let chunks = hum_only.push(&hum);
+        assert!(chunks.is_empty(), "the room hum alone opens no window");
     }
 
     #[test]
@@ -353,6 +364,8 @@ struct Ffmpeg {
     rx: Option<Receiver<Vec<i16>>>,
     chunker: Option<Chunker>,
     full: Vec<i16>,
+    /// Windows a single read cut but this poll has not given up yet.
+    pending: std::collections::VecDeque<Vec<i16>>,
 }
 
 impl Ffmpeg {
@@ -396,6 +409,7 @@ impl Ffmpeg {
             rx: None,
             chunker: None,
             full: Vec::new(),
+            pending: std::collections::VecDeque::new(),
         };
         // No source or no sound server: ffmpeg fails at once, and the
         // human is told before speaking.
@@ -465,6 +479,7 @@ impl Ffmpeg {
             rx: Some(rx),
             chunker: Some(Chunker::new(vad)),
             full: Vec::new(),
+            pending: std::collections::VecDeque::new(),
         };
         // As in `start`: no source or no sound server fails at once.
         let watched = Instant::now();
@@ -511,13 +526,18 @@ impl Recording for Ffmpeg {
     }
 
     fn poll_chunk(&mut self) -> Option<Vec<u8>> {
+        if let Some(chunk) = self.pending.pop_front() {
+            return Some(wav16k(&chunk));
+        }
         let rx = self.rx.as_mut()?;
         loop {
             match rx.try_recv() {
                 Ok(samples) => {
                     self.full.extend(samples.iter().copied());
                     let chunks = self.chunker.as_mut()?.push(&samples);
-                    if let Some(chunk) = chunks.into_iter().next() {
+                    let mut queue = std::collections::VecDeque::from(chunks);
+                    if let Some(chunk) = queue.pop_front() {
+                        self.pending = queue;
                         return Some(wav16k(&chunk));
                     }
                 }

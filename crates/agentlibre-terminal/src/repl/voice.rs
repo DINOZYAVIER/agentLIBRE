@@ -59,7 +59,13 @@ impl DraftWorker {
         let (ctx, crx) = mpsc::channel::<Vec<u8>>();
         let (tx, rx) = mpsc::channel::<String>();
         let thread = thread::spawn(move || {
-            for chunk in crx.iter() {
+            while let Ok(mut chunk) = crx.recv() {
+                // The latest window when the engine falls behind the
+                // clock (D10): a stale window would lag the human's
+                // mouth, and the next one re-hears its tail anyway.
+                while let Ok(fresher) = crx.try_recv() {
+                    chunk = fresher;
+                }
                 // A chunk that failed or came out empty shows nothing:
                 // the final pass has the last word (D7).
                 if let Ok(text) = draft.transcribe(&chunk)
@@ -72,6 +78,38 @@ impl DraftWorker {
         });
         DraftWorker { chunks: ctx, texts: rx, _thread: thread }
     }
+}
+
+/// The draft after one more window's text (AGL-122, D10): the windows
+/// overlap in audio, so their texts repeat the words on the seam — the
+/// longest run of words that ends the draft and begins the new text is
+/// spoken once. Words compare lowercase and bare of punctuation, which
+/// two hearings of the same syllable rarely agree on otherwise.
+fn merge_draft(text: &str, fresh: &str) -> String {
+    fn norm(word: &str) -> String {
+        word.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+    let old: Vec<&str> = text.split_whitespace().collect();
+    let new: Vec<&str> = fresh.split_whitespace().collect();
+    let cap = old.len().min(new.len()).min(8);
+    let mut shared = 0;
+    for n in (1..=cap).rev() {
+        if old[old.len() - n..].iter().map(|w| norm(w)).eq(new[..n].iter().map(|w| norm(w))) {
+            shared = n;
+            break;
+        }
+    }
+    let mut out = text.to_owned();
+    for word in &new[shared..] {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 struct Active {
@@ -291,10 +329,7 @@ impl VoiceInput {
                             // again and the dock shows its last rows.
                             let mut grew = false;
                             while let Ok(text) = worker.texts.try_recv() {
-                                if !active.text.is_empty() {
-                                    active.text.push(' ');
-                                }
-                                active.text.push_str(&text);
+                                active.text = merge_draft(&active.text, &text);
                                 grew = true;
                             }
                             if grew {
@@ -416,5 +451,38 @@ impl VoiceInput {
             self.dock.set_draft(None);
             self.dock.set_voice(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::merge_draft;
+
+    #[test]
+    fn the_words_on_the_seam_are_spoken_once() {
+        // The windows overlap in audio, so the engine hears "still wa"
+        // twice: the draft must not write it twice (D10).
+        assert_eq!(merge_draft("he said still waiting", "still waiting for you"), "he said still waiting for you");
+    }
+
+    #[test]
+    fn the_seam_survives_case_and_punctuation_disputes() {
+        // Two hearings of the same syllable disagree on commas and
+        // caps; the fold does not care.
+        assert_eq!(merge_draft("пришел, и", "И ушел"), "пришел, и ушел");
+    }
+
+    #[test]
+    fn no_seam_means_plain_append() {
+        assert_eq!(merge_draft("one two", "three four"), "one two three four");
+        assert_eq!(merge_draft("", "first"), "first");
+        assert_eq!(merge_draft("kept", ""), "kept");
+    }
+
+    #[test]
+    fn a_repeated_word_is_not_eaten_when_it_is_not_the_seam() {
+        // The fold looks only at the seam: a word that repeats in the
+        // middle of the new text is nobody's echo.
+        assert_eq!(merge_draft("the word", "a word here more"), "the word a word here more");
     }
 }

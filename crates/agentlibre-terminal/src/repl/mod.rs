@@ -2162,7 +2162,9 @@ mod tests {
         let f = fixture();
         f.fake.chunks.store(2, Ordering::SeqCst);
         f.input.key(Key::Ctrl('r'));
-        eventually("the joined draft", || f.output().contains("draft1 draft2"));
+        // Which windows survive the clock is timing; that their text
+        // stands as one dim block and then leaves is not (D10).
+        eventually("the draft", || f.output().contains("draft"));
         f.input.key(Key::Ctrl('r'));
         eventually("the send", || f.inner().texts() == ["hello world"]);
         // The final pass took the stage: no draft rows stand under it.
