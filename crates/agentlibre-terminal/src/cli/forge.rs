@@ -8,6 +8,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 
+use crate::clock;
 use crate::error::Error;
 use crate::forge;
 use crate::forge::task_spec;
@@ -399,7 +400,7 @@ fn range(
         return Ok(ExitCode::FAILURE);
     }
     outln!("{}", range_line(lang, name, &spec));
-    artifact.updated = task_spec::today();
+    artifact.updated = clock::today();
     artifact.type_table = task_spec_table(spec);
     forge::write_artifact(&artifact)?;
     Ok(ExitCode::SUCCESS)
@@ -997,7 +998,7 @@ mod tests {
             Err(Error::BadState { .. })
         ));
         // The lifecycle is the task-spec's.
-        let mut note = task_spec::scaffold("note", &task_spec::today());
+        let mut note = task_spec::scaffold("note", &clock::today());
         note.type_name = "note".into();
         note.path = data.join(&key).join("forge/note/note.md");
         forge::write_artifact(&note).unwrap();

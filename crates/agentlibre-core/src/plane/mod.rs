@@ -27,7 +27,7 @@ use crate::paths::Paths;
 use crate::phase::{Observer, PhaseEvent};
 use crate::programs;
 use crate::search::{self, Searcher};
-use crate::session::{self, Event, Session};
+use crate::session::{Event, Session};
 use crate::settings::{self, ServerFile, ServerKind, Settings, UserFile, function_name};
 use crate::status::compact_notice;
 use crate::stop::Stop;
@@ -942,7 +942,7 @@ fn about_of(
         in_wsl,
         wsl::engine_is_windows(),
     );
-    let now = session::utc_now();
+    let now = crate::clock::utc_now();
     let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
     let (server_kind, model) = match settings.server.kind() {
         ServerKind::Strata => ("strata", settings.server.strata_name.as_deref()),

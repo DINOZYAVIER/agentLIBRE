@@ -398,7 +398,7 @@ fn forge_new_is_the_engine_scaffold() {
     );
     let artifact = forge::load_artifact(&path).unwrap();
     assert_eq!(artifact.status, "open");
-    assert_eq!(artifact.created, task_spec::today());
+    assert_eq!(artifact.created, clock::today());
     assert!(artifact.body.starts_with("\n## Objective\n"));
     // The first write materialized the store and its marker.
     assert!(f.ws.dir.join(forge::MARKER_FILE).is_file());
@@ -663,7 +663,7 @@ fn forge_edit_is_the_workspace_edit_on_the_body() {
     let edited = forge::load_artifact(&artifact.path).unwrap();
     assert!(edited.body.contains("## Goal"));
     assert!(!edited.body.contains("## Objective"));
-    assert_eq!(edited.updated, task_spec::today());
+    assert_eq!(edited.updated, clock::today());
     assert_eq!(edited.created, "2026-01-01");
     // A missing `old` and an ambiguous one are clean failures.
     assert_eq!(
@@ -737,7 +737,7 @@ fn forge_append_is_a_bullet_under_the_section() {
         "{}",
         appended.body
     );
-    assert_eq!(appended.updated, task_spec::today());
+    assert_eq!(appended.updated, clock::today());
     // The last section, at the end of the body.
     let result = f.call(
         "append",
@@ -882,7 +882,7 @@ fn forge_status_walks_the_lifecycle() {
         );
         let moved = forge::load_artifact(&artifact.path).unwrap();
         assert_eq!(moved.status, to);
-        assert_eq!(moved.updated, task_spec::today());
+        assert_eq!(moved.updated, clock::today());
     }
     // The body is byte-identical through the walk.
     assert_eq!(

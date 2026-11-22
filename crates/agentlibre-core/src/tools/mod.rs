@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::action::Outcome;
+use crate::clock;
 use crate::backend::ToolCall;
 use crate::i18n::Lang;
 use crate::session::{ForgeKind, INTERRUPTED};
@@ -560,7 +561,7 @@ fn forge_edit(
     lang: crate::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
-    use crate::forge::{self, task_spec};
+    use crate::forge;
     use crate::i18n::m;
     use crate::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "edit", "name"))?;
@@ -601,7 +602,7 @@ fn forge_edit(
             edited.push_str(new);
             edited.push_str(&body[start + old.len()..]);
             artifact.body = edited;
-            artifact.updated = task_spec::today();
+            artifact.updated = clock::today();
             forge::write_artifact(&artifact)?;
             Ok(format!("Replaced 1 occurrence in {name}."))
         }
@@ -660,7 +661,7 @@ fn forge_append(
     lang: crate::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
-    use crate::forge::{self, task_spec};
+    use crate::forge;
     use crate::i18n::m;
     use crate::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "append", "name"))?;
@@ -715,7 +716,7 @@ fn forge_append(
         .into());
     }
     artifact.body = new_body;
-    artifact.updated = task_spec::today();
+    artifact.updated = clock::today();
     forge::write_artifact(&artifact)?;
     Ok(format!("appended a bullet to ## {section} in {name}"))
 }
@@ -804,7 +805,7 @@ fn forge_rename(
     lang: crate::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
     use crate::error::Error;
-    use crate::forge::{self, task_spec};
+    use crate::forge;
     use crate::i18n::m;
     use crate::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "rename", "name"))?;
@@ -834,7 +835,7 @@ fn forge_rename(
     let mut renamed = artifact.clone();
     renamed.name = new.to_owned();
     renamed.path = new_path;
-    renamed.updated = task_spec::today();
+    renamed.updated = clock::today();
     forge::write_artifact(&renamed)?;
     // Every reference to the old name in the store points to the new
     // one; an artifact is rewritten only when it changed.
@@ -855,7 +856,7 @@ fn forge_rename(
             }
         }
         if changed {
-            other.updated = task_spec::today();
+            other.updated = clock::today();
             forge::write_artifact(&other)?;
         }
     }

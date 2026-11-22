@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use super::task_spec::{self, Status};
 use super::{Artifact, Header, Workspace};
+use crate::clock;
 use crate::error::Error;
 use crate::i18n::Lang;
 
@@ -83,7 +84,7 @@ pub fn new_task_spec(
         .join("forge")
         .join(task_spec::TYPE)
         .join(format!("{name}.md"));
-    let mut artifact = task_spec::scaffold(&name, &task_spec::today());
+    let mut artifact = task_spec::scaffold(&name, &clock::today());
     artifact.path = path.clone();
     // The store is materialized on the first write.
     let lines = super::materialize(ws, lang)?;
@@ -131,7 +132,7 @@ pub fn change_status(ws: &Workspace, name: &str, state: &str) -> Result<StatusCh
     }
     let mut artifact = artifact;
     artifact.status = to.name().to_owned();
-    artifact.updated = task_spec::today();
+    artifact.updated = clock::today();
     super::write_artifact(&artifact)?;
     Ok(StatusChanged { artifact, from, to })
 }

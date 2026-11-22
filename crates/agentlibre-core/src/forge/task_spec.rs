@@ -250,11 +250,6 @@ fn numbered(name: &str) -> Option<(&str, u32)> {
     Some((prefix, digits.parse().ok()?))
 }
 
-/// Today's calendar date, `YYYY-MM-DD`, from the system clock.
-pub fn today() -> String {
-    crate::session::utc_now()[..10].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,11 +480,5 @@ mod tests {
             git_flag(&spec, &repo),
             Err(Error::CommitNotFound { id, .. }) if id == "nope"
         ));
-    }
-
-    #[test]
-    fn today_is_a_calendar_date() {
-        let today = today();
-        assert!(crate::forge::check_date("today", &today, Path::new("/x")).is_ok());
     }
 }

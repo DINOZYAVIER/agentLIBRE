@@ -16,7 +16,8 @@ use serde_json::{Value as Json, json};
 use crate::action::Outcome;
 use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress};
-use crate::session::{Event, Session, StopReason, utc_now};
+use crate::clock::utc_now;
+use crate::session::{Event, Session, StopReason};
 
 /// The version of the lines this module writes.
 const SCHEMA: u32 = 1;

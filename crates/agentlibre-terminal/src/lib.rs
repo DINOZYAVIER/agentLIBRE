@@ -14,6 +14,7 @@ pub(crate) use agentlibre_core::{
     agent,
     attach,
     backend,
+    clock,
     engine,
     error,
     forge,
