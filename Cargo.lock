@@ -14,7 +14,6 @@ dependencies = [
  "qrcode",
  "serde_json",
  "unicode-width",
- "zbus",
 ]
 
 [[package]]
@@ -41,6 +40,16 @@ dependencies = [
  "ring",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "agentlibre-notify"
+version = "0.0.2"
+dependencies = [
+ "agentlibre-core",
+ "agentlibre-proto",
+ "serde_json",
+ "zbus",
 ]
 
 [[package]]

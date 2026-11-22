@@ -1,0 +1,18 @@
+[package]
+name = "agentlibre-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "agentLIBRE's desktop notifier: the daemon's sessions on the notification server, answered from it (AGL-074, AGL-121 D23)"
+
+# The notifier runs as a binary of its own, so that zbus leaves the agl build (D23).
+[[bin]]
+name = "agl-notify"
+path = "src/bin/agl-notify.rs"
+
+[dependencies]
+agentlibre-core = { path = "../agentlibre-core" }
+agentlibre-proto = { path = "../agentlibre-proto" }
+serde_json = "1"
+zbus = "5"

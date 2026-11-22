@@ -390,6 +390,8 @@ pub enum Error {
     RehomeInUse { current: String, target: String },
     /// A verification cmd of `forge check` cannot be run.
     CmdSpawn { source: io::Error },
+    /// `agl notify` cannot start the `agl-notify` beside it (AGL-121, D23).
+    NotifySpawn { source: io::Error },
     /// A task-spec id does not resolve in the workspace repository.
     CommitNotFound { id: String, repo: PathBuf },
     /// An artifact file cannot be removed.

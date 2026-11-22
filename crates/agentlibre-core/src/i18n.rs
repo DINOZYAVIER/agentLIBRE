@@ -3028,6 +3028,12 @@ Forge (сховище артефактів робочої області, agentL
         uk: "команду перевірки не можна запустити: {source}",
     };
 
+    /// `Error::NotifySpawn`.
+    pub const NOTIFY_SPAWN: Msg = Msg {
+        en: "cannot start the notifier beside this executable: {source}",
+        uk: "не можна запустити нотифікатор поруч із цим файлом: {source}",
+    };
+
     /// The store ask of a forge command (a terminal only).
     pub const FORGE_ASK_STORE: Msg = Msg {
         en: "which store is this workspace?",
@@ -3791,6 +3797,7 @@ impl Error {
                 tr!(lang, m::REHOME_IN_USE, current = current, target = target)
             }
             Error::CmdSpawn { source } => tr!(lang, m::CMD_SPAWN, source = source),
+            Error::NotifySpawn { source } => tr!(lang, m::NOTIFY_SPAWN, source = source),
             Error::CommitNotFound { id, repo } => {
                 tr!(lang, m::COMMIT_NOT_FOUND, id = id, repo = repo.display())
             }

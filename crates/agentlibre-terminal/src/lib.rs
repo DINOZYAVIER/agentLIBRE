@@ -235,10 +235,8 @@ fn run(
             let cwd = std::env::current_dir().map_err(Error::CurrentDir)?;
             return cli::session::run(show, plane, &user, &paths, &cwd, *lang);
         }
-        Command::Notify => {
-            let (paths, _) = loaded?;
-            return cli::notify::run(&paths, *lang);
-        }
+        // The launcher starts `agl-notify` beside itself; it needs no paths (D23).
+        Command::Notify => return cli::notify::run(*lang),
         Command::Bridge(action) => {
             let (paths, user) = loaded?;
             return cli::bridge::run(action, &user, &paths, *lang);
