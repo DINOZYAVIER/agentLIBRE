@@ -576,6 +576,21 @@ fn a_llama_server_may_be_outside_and_a_strata_one_not() {
 }
 
 #[test]
+fn a_strata_server_takes_a_private_ca_as_a_llama_one_does() {
+    // AGL-121, D2: `server.strata.private_ca`, the kind's own.
+    let read = |text: &str| user_of(&format!("server = {text};")).map(|file| file.server);
+    let server =
+        read(r#"{ strata = { url = "https://gpu.lan:18088"; private_ca = "/c/ca.crt"; }; }"#)
+            .unwrap();
+    assert_eq!(server.strata_private_ca.as_deref(), Some("/c/ca.crt"));
+    let strata = ServerFile { kind: Some("strata".into()), ..ServerFile::default() };
+    assert_eq!(server.effective(&strata).private_ca(), Some("/c/ca.crt"));
+    // A llama Function's server does not take the Strata set's CA.
+    assert_eq!(server.effective(&ServerFile::default()).private_ca(), None);
+    assert!(read(r#"{ strata = { private_ca = "ca.crt"; }; }"#).is_err());
+}
+
+#[test]
 fn the_planes_settings_win_over_the_workspaces_key_by_key() {
     // AGL-077, D7: the user's, the workspace's, the plane's.
     let workspace = ProjectFile {

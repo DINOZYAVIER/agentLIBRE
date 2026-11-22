@@ -25,7 +25,7 @@ pub fn run(
     lang: Lang,
 ) -> Result<ExitCode, Error> {
     let effective = server.effective_settings()?;
-    let llama = Llama::with_ca(&server.url, effective.llama_private_ca.as_deref())?;
+    let llama = Llama::with_ca(&server.url, effective.private_ca())?;
     let external = effective.external();
     match action {
         // `lib` prints it before anything is resolved.

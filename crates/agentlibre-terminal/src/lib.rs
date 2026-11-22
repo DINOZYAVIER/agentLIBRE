@@ -173,6 +173,7 @@ fn run(
             let mut model = function.model.clone();
             model.llama_external = settings.llama_external;
             model.llama_private_ca = settings.llama_private_ca.clone();
+            model.strata_private_ca = settings.strata_private_ca.clone();
             let missing = match action {
                 cli::args::ServerAction::Start if tty::is_interactive() => {
                     weights::Missing::Ask(&engine::ask_line, &|line| eprintln!("{line}"))

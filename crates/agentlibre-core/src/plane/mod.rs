@@ -502,12 +502,9 @@ impl Plane {
         let run_url = run_url.unwrap_or_else(|| settings.server_url.clone());
         settings.server_url = run_url.clone();
         let mut backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
-            Arc::new(Strata::new(&run_url))
+            Arc::new(Strata::with_ca(&run_url, settings.server.private_ca())?)
         } else {
-            Arc::new(Llama::with_ca(
-                &run_url,
-                settings.server.llama_private_ca.as_deref(),
-            )?)
+            Arc::new(Llama::with_ca(&run_url, settings.server.private_ca())?)
         };
         let mut autostart = Autostart {
             llama: Arc::clone(&backend),

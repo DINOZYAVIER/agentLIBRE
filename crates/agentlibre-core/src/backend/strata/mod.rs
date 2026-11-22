@@ -45,6 +45,17 @@ impl Strata {
             http: Http::new(ServerKind::Strata, url),
         }
     }
+
+    /// A client that trusts the CA in the file `ca`, when one is named
+    /// (AGL-121, D2), as `Llama::with_ca` does.
+    pub fn with_ca(url: &str, ca: Option<&str>) -> Result<Strata, Error> {
+        let Some(ca) = ca else {
+            return Ok(Strata::new(url));
+        };
+        Ok(Strata {
+            http: Http::with_ca(ServerKind::Strata, url, ca)?,
+        })
+    }
 }
 
 impl Backend for Strata {

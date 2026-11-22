@@ -466,10 +466,13 @@ impl Autostart {
     /// `Llama` or `Strata`, not stored. `rebind_to` stores it as `llama`.
     fn make_backend(&self, url: &str) -> Result<Arc<dyn Backend + Send + Sync>, Error> {
         Ok(match self.effective.kind() {
-            ServerKind::Strata => Arc::new(crate::backend::strata::Strata::new(url)),
+            ServerKind::Strata => Arc::new(crate::backend::strata::Strata::with_ca(
+                url,
+                self.effective.private_ca(),
+            )?),
             ServerKind::Llama => Arc::new(crate::backend::llama::Llama::with_ca(
                 url,
-                self.effective.llama_private_ca.as_deref(),
+                self.effective.private_ca(),
             )?),
         })
     }

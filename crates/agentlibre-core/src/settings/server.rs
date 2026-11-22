@@ -38,6 +38,8 @@ pub struct ServerFile {
     /// CA that signs an `https://` server; `None` is the bundled roots (AGL-058,
     /// D12).
     pub llama_private_ca: Option<String>,
+    /// `server.strata.private_ca`: the same for a Strata server (AGL-121, D2).
+    pub strata_private_ca: Option<String>,
     /// The inference engine's binary name, found on `PATH` (AGL-024, D5);
     /// `None` is the default `llama-server`.
     pub engine: Option<String>,
@@ -142,18 +144,19 @@ impl ServerFile {
             }
             None => (None, None, None),
         };
-        let strata_url = match server.section("strata")? {
+        let (strata_url, strata_private_ca) = match server.section("strata")? {
             Some(mut table) => {
-                table.check_keys(&["url"])?;
-                read_url(&mut table, path)?
+                table.check_keys(&["url", "private_ca"])?;
+                (read_url(&mut table, path)?, read_private_ca(&mut table)?)
             }
-            None => None,
+            None => (None, None),
         };
         Ok(ServerFile {
             llama_url,
             strata_url,
             llama_external,
             llama_private_ca,
+            strata_private_ca,
             engine,
             idle_stop,
             ..ServerFile::default()
@@ -175,6 +178,15 @@ impl ServerFile {
     /// (AGL-052, D4): the llama kind only.
     pub fn external(&self) -> bool {
         self.kind() == ServerKind::Llama && self.llama_external == Some(true)
+    }
+
+    /// The CA the server of the kind is trusted by: `private_ca` of its set
+    /// (AGL-058, D12; AGL-121, D2); `None` is the bundled roots.
+    pub fn private_ca(&self) -> Option<&str> {
+        match self.kind() {
+            ServerKind::Llama => self.llama_private_ca.as_deref(),
+            ServerKind::Strata => self.strata_private_ca.as_deref(),
+        }
     }
 
     /// Where the server of the kind listens (AGL-036, D2, D6; AGL-056, D5): the
@@ -204,6 +216,9 @@ impl ServerFile {
             llama_external: (kind == ServerKind::Llama).then_some(self.llama_external).flatten(),
             llama_private_ca: (kind == ServerKind::Llama)
                 .then(|| self.llama_private_ca.clone())
+                .flatten(),
+            strata_private_ca: (kind == ServerKind::Strata)
+                .then(|| self.strata_private_ca.clone())
                 .flatten(),
             engine: self.engine.clone(),
             idle_stop: self.idle_stop,
@@ -242,6 +257,10 @@ impl ServerFile {
                 .llama_private_ca
                 .clone()
                 .or_else(|| defaults.llama_private_ca.clone()),
+            strata_private_ca: self
+                .strata_private_ca
+                .clone()
+                .or_else(|| defaults.strata_private_ca.clone()),
             engine: self.engine.clone().or_else(|| defaults.engine.clone()),
             model: self.model.clone().or_else(|| defaults.model.clone()),
             context: self.context.or(defaults.context),
@@ -330,6 +349,7 @@ impl ServerFile {
             strata_url: text("strata_url")?,
             llama_external: value.get("llama_external").and_then(Value::as_bool),
             llama_private_ca: None,
+            strata_private_ca: None,
             engine: text("engine")?,
             model: text("model")?,
             context: number("context")?,

@@ -557,19 +557,14 @@ impl Daemon {
             // one-turn review to it (AGL-120, D5), as a session's open does.
             match rebind_url(self.paths.runtime.as_deref(), &settings.server) {
                 Some(found) if settings.server.kind() == ServerKind::Strata => {
-                    Arc::new(Strata::new(&found))
+                    Arc::new(Strata::with_ca(&found, settings.server.private_ca())?)
                 }
-                Some(found) => Arc::new(Llama::with_ca(
-                    &found,
-                    settings.server.llama_private_ca.as_deref(),
-                )?),
-                None if settings.server.kind() == ServerKind::Strata => {
-                    Arc::new(Strata::new(&settings.server_url))
-                }
-                None => Arc::new(Llama::with_ca(
+                Some(found) => Arc::new(Llama::with_ca(&found, settings.server.private_ca())?),
+                None if settings.server.kind() == ServerKind::Strata => Arc::new(Strata::with_ca(
                     &settings.server_url,
-                    settings.server.llama_private_ca.as_deref(),
+                    settings.server.private_ca(),
                 )?),
+                None => Arc::new(Llama::with_ca(&settings.server_url, settings.server.private_ca())?),
             };
         let workspace = file
             .directories
