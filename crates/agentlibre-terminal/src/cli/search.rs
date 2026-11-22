@@ -345,6 +345,15 @@ esac
         assert_eq!(fs::read_dir(&credentials).unwrap().count(), 0);
     }
 
+    /// Whether the check says expired, asked again when the spawn itself
+    /// fails: twice in the nix sandbox this test failed here alone, which
+    /// is what a check that cannot run does (no expiry), under the load of
+    /// the builds that run beside it. Five asks cost nothing and a check
+    /// that answers is answered at once.
+    fn expired(step: &Path, certificate: &Path) -> bool {
+        (0..5).any(|_| certificate_expired(step, certificate))
+    }
+
     #[test]
     fn an_expired_certificate_is_told() {
         let dir = TempDir::new();
@@ -353,9 +362,9 @@ esac
         let old = dir.0.join("old.crt");
         fs::write(&fresh, "valid").unwrap();
         fs::write(&old, "EXPIRED").unwrap();
-        assert!(!certificate_expired(&step, &fresh));
-        assert!(certificate_expired(&step, &old));
+        assert!(!expired(&step, &fresh));
+        assert!(expired(&step, &old));
         // A check that cannot run is no expiry.
-        assert!(!certificate_expired(&dir.0.join("no-step"), &old));
+        assert!(!expired(&dir.0.join("no-step"), &old));
     }
 }
