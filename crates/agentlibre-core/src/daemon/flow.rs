@@ -3,17 +3,16 @@
 use super::*;
 
 impl Daemon {
-    /// The daemon's holder of the plane `name` (AGL-118, D17): its store
-    /// gives the journals, its first directory the place a state's commands
-    /// run — where its builds are (D9).
+    /// The driver of the plane `name` (AGL-118, D17): the daemon holds the
+    /// plane (AGL-121, D38), making its thread when the name is first asked;
+    /// its store gives the journals, its first directory the place a state's
+    /// commands run — where its builds are (D9).
     pub(super) fn flow_holder(&self, name: &str) -> Result<plane::flow::holder::Holder, Error> {
+        if let Some(holder) = self.lock().plane_named(name).map(|plane| plane.holder.clone()) {
+            return Ok(holder);
+        }
         let file = plane::PlaneFile::open(&self.paths, name)?;
-        let workdir = file
-            .directories
-            .first()
-            .cloned()
-            .unwrap_or_else(|| file.dir.clone());
-        Ok(self.flows.holder(&file.dir, &workdir))
+        Ok(self.lock().hold(&file, None, &self.needs))
     }
 
     /// The daemon's arm for the turns its flows wait on (D18): wakes go to
@@ -25,7 +24,8 @@ impl Daemon {
             match need {
                 Need::Wake { plane_dir, wake } => {
                     let delivered = self.deliver_wake(&plane_dir, &wake);
-                    if let Some(handle) = self.flows.peek(&plane_dir) {
+                    let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
+                    if let Some(handle) = handle {
                         handle.post(if delivered {
                             Letter::Delivered {
                                 flow: wake.flow,
@@ -42,7 +42,8 @@ impl Daemon {
                 }
                 Need::Review { plane_dir, review } => {
                     let verdict = self.run_review(&plane_dir, &review);
-                    if let Some(handle) = self.flows.peek(&plane_dir) {
+                    let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
+                    if let Some(handle) = handle {
                         handle.post(match verdict {
                             Ok((answer, session)) => Letter::Verdict {
                                 flow: review.flow,
@@ -69,29 +70,24 @@ impl Daemon {
     /// and the flow stands (D20).
     pub(super) fn deliver_wake(&self, plane_dir: &Path, wake: &plane::flow::drive::Wake) -> bool {
         let mut state = self.lock();
-        let mut dirs: HashMap<String, PathBuf> = HashMap::new();
-        let mut ids: Vec<String> = state
-            .sessions
-            .iter()
-            .filter(|(_, entry)| {
-                let Some(name) = entry.plane.as_deref() else {
-                    return false;
-                };
-                let dir = dirs.entry(name.to_owned()).or_insert_with(|| {
-                    plane::PlaneFile::open(&self.paths, name)
-                        .map(|file| file.dir)
-                        .unwrap_or_default()
-                });
-                dir == plane_dir
-            })
-            .filter(|(id, entry)| match wake.session.as_str() {
-                "last" => true,
-                key => {
-                    entry.opened.session.name.as_deref() == Some(key) || id.starts_with(key)
-                }
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
+        // The plane holds its open sessions (AGL-121, D38); of those, the
+        // one the wake's name names (AGL-062).
+        let mut ids: Vec<String> = {
+            let Some(plane) = state.plane(plane_dir) else {
+                return false;
+            };
+            plane
+                .sessions
+                .iter()
+                .filter(|id| match wake.session.as_str() {
+                    "last" => true,
+                    key => state.sessions.get(*id).is_some_and(|entry| {
+                        entry.opened.session.name.as_deref() == Some(key) || id.starts_with(key)
+                    }),
+                })
+                .cloned()
+                .collect()
+        };
         // `last` of the open ones: session ids grow with time (AGL-062).
         ids.sort();
         let Some(id) = ids.pop() else { return false };
@@ -126,9 +122,12 @@ impl Daemon {
         review: &plane::flow::drive::Review,
     ) -> Result<(String, String), Error> {
         let user = UserFile::load(&self.paths.settings_file())?;
-        let file = plane::PlaneFile::list(&self.paths)?
-            .into_iter()
-            .find(|found| found.dir == plane_dir)
+        // The plane asked for is one the daemon holds (AGL-121, D38): only
+        // its driver asks for a review.
+        let file = self
+            .lock()
+            .plane(plane_dir)
+            .map(|plane| plane.file.clone())
             .ok_or_else(|| Error::PlaneNotFound {
                 name: plane_dir.display().to_string(),
             })?;
@@ -180,16 +179,18 @@ impl Daemon {
         Ok((answer, session.id))
     }
 
+    /// Holds `file` as a plane of the daemon and starts its driver (D12,
+    /// D17, AGL-121 D38): the timers of its flows run with no session open.
+    pub(super) fn plane_open(&self, file: &plane::PlaneFile) {
+        self.lock().hold(file, None, &self.needs);
+    }
+
     /// A word to the plane's flows that something of theirs may have moved
-    /// (D18): only a plane whose driver already runs is poked.
-    pub(super) fn poke(&self, plane: Option<&str>) {
+    /// (D18): only a plane whose driver already runs is poked (D38).
+    pub(super) fn poke(&self, holder: Option<&plane::flow::holder::Holder>) {
         use plane::flow::holder::Letter;
-        let Some(name) = plane else { return };
-        let Ok(file) = plane::PlaneFile::open(&self.paths, name) else {
-            return;
-        };
-        if let Some(handle) = self.flows.peek(&file.dir) {
-            handle.post(Letter::Poke);
+        if let Some(holder) = holder {
+            holder.post(Letter::Poke);
         }
     }
 }

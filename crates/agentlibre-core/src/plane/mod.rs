@@ -195,9 +195,6 @@ pub struct Opening<'a> {
     pub lang: Lang,
     pub stop: Stop,
     pub asker: Asker,
-    /// The daemon's flow holders (AGL-118, D17): a run in a plane takes
-    /// its one driver from here, and its agent's `flow` tool asks it.
-    pub flows: crate::plane::flow::holder::Shared,
 }
 
 /// A run opened, and what its surface needs of the opening.
@@ -253,7 +250,7 @@ pub struct Run {
     pub stop: Stop,
     /// The daemon's holder of this run's flows (AGL-118, D17): the agent's
     /// `flow` tool asks it — the one driver the CLI asks. None outside a
-    /// plane; the daemon sets it on the run it opens.
+    /// plane; the daemon sets it on the run when it opens its plane (D38).
     pub flows: Option<flow::holder::Holder>,
 }
 
@@ -277,7 +274,6 @@ impl Run {
             lang,
             stop,
             asker,
-            flows,
         } = opening;
         let say = |line: &str| (asker.say)(line);
         // AGL-103, D2-D3: what the opening says of this session stands in
@@ -498,11 +494,9 @@ impl Run {
             let _ = session.append(Event::System { text: line, failed: false });
         }
         let about = opened_about(&settings, env, paths, project, plane_file.as_ref(), &workspace, &user_path);
-        // A plane of a store drives its flows on the daemon's one holder
-        // for it, the same thread the CLI asks (AGL-118, D17).
-        let flows = plane_file
-            .as_ref()
-            .map(|file| flows.holder(&file.dir, &workspace));
+        // A run in a plane drives its flows on the daemon's holder for it
+        // (AGL-118, D17): the daemon opens its plane and sets it here (D38).
+        let flows = None;
         let run = Run {
             plane_forge: plane_file.as_ref().map(PlaneFile::forge_store),
             file: plane_file,

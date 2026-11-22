@@ -58,7 +58,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
     // The daemon's ear for the wakes its flows wait on (D18, D20).
     let (needs, inbox) = mpsc::channel();
     let daemon = Arc::new(Daemon {
-        flows: Arc::new(plane::flow::holder::Holders::with_delivery(needs)),
+        needs,
         paths,
         state: Mutex::new(State::default()),
     });
@@ -81,8 +81,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
     // after this moment waits for the verb that first asks for its thread.
     for file in plane::PlaneFile::list(&daemon.paths).unwrap_or_default() {
         if plane::flow::FlowFile::load(&file.dir).is_ok_and(|decls| !decls.flows.is_empty()) {
-            let workdir = file.directories.first().cloned().unwrap_or_else(|| file.dir.clone());
-            daemon.flows.holder(&file.dir, &workdir);
+            daemon.plane_open(&file);
         }
     }
     for stream in listener.incoming() {
@@ -118,11 +117,23 @@ fn bind(runtime: &Path) -> Result<UnixListener, Error> {
 }
 
 struct Daemon {
-    /// The flow holders, one per plane store, shared with the runs opened
-    /// here (AGL-118, D17).
-    flows: plane::flow::holder::Shared,
+    /// The daemon's ear for its flows' needs (AGL-118, D18): every holder
+    /// of a plane opened here asks its turns through this channel.
+    needs: Sender<plane::flow::holder::Need>,
     paths: Paths,
     state: Mutex<State>,
+}
+
+/// A plane of the daemon (AGL-121, D38): the human's plane (AGL-077) with
+/// the sessions of it that are open and its one flow driver (AGL-118, D17),
+/// the same thread the CLI verbs and the agent's tool ask.
+struct Plane {
+    /// Its store: id, name, directories (AGL-077).
+    file: plane::PlaneFile,
+    /// The sessions of it that are open here.
+    sessions: HashSet<String>,
+    /// Its driver, made once; the runs of this plane share it (D17).
+    holder: plane::flow::holder::Holder,
 }
 
 #[derive(Default)]
@@ -132,6 +143,9 @@ struct State {
     /// The clients that follow every session (D3).
     everyone: HashSet<u64>,
     sessions: HashMap<String, Entry>,
+    /// The planes the daemon holds, by their store (AGL-121, D38): a plane
+    /// with a session open, or with its flows driving, is held here.
+    planes: HashMap<PathBuf, Plane>,
     /// The questions that wait for their answer, and their client.
     questions: HashMap<u64, (u64, Sender<Option<String>>)>,
     /// The wake's pair (AGL-118, D22): (plane store, flow) to the session
@@ -143,6 +157,68 @@ struct State {
     /// The servers an idle stop watches (AGL-120, D2), by url: a server
     /// stops after its `idle` without a turn, any turn's end rewinding it.
     clocks: HashMap<String, Clock>,
+}
+
+impl State {
+    /// Holds `file` as a plane (AGL-121, D38) and gives its driver: made
+    /// when the plane is first held, and asking its turns of `needs` (D18).
+    /// `workdir` is where its states' commands run; the first to hold the
+    /// plane says it, as the registry did before (D17).
+    fn hold(
+        &mut self,
+        file: &plane::PlaneFile,
+        workdir: Option<PathBuf>,
+        needs: &Sender<plane::flow::holder::Need>,
+    ) -> plane::flow::holder::Holder {
+        if let Some(plane) = self.planes.get(&file.dir) {
+            return plane.holder.clone();
+        }
+        let workdir = workdir
+            .or_else(|| file.directories.first().cloned())
+            .unwrap_or_else(|| file.dir.clone());
+        let holder = plane::flow::holder::Holder::spawn(
+            file.dir.clone(),
+            workdir,
+            Some(needs.clone()),
+        );
+        self.planes.insert(
+            file.dir.clone(),
+            Plane {
+                file: file.clone(),
+                sessions: HashSet::new(),
+                holder: holder.clone(),
+            },
+        );
+        holder
+    }
+
+    /// The plane held at `dir` (D38): no driver is made by looking.
+    fn plane(&self, dir: &Path) -> Option<&Plane> {
+        self.planes.get(dir)
+    }
+
+    /// The plane the human names `name` (D38).
+    fn plane_named(&self, name: &str) -> Option<&Plane> {
+        self.planes.values().find(|plane| plane.file.name == name)
+    }
+
+    /// The plane `session` runs on, if any (D38).
+    fn plane_of(&self, session: &str) -> Option<&Plane> {
+        self.planes
+            .values()
+            .find(|plane| plane.sessions.contains(session))
+    }
+
+    /// The session joins its plane, or leaves it (`/new`, a release, D38).
+    fn follow(&mut self, dir: &Path, session: &str, open: bool) {
+        if let Some(plane) = self.planes.get_mut(dir) {
+            if open {
+                plane.sessions.insert(session.to_owned());
+            } else {
+                plane.sessions.remove(session);
+            }
+        }
+    }
 }
 
 /// The idle clock of a server (AGL-120, D2): the seconds of no turn that
@@ -159,7 +235,6 @@ struct Entry {
     commands: Sender<Command>,
     stop: Stop,
     opened: proto::Opened,
-    plane: Option<String>,
     /// The clients that opened it (D12) and those that follow it (D3).
     holders: HashSet<u64>,
     subscribers: HashSet<u64>,

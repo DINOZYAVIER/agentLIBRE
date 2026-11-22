@@ -30,13 +30,13 @@ impl Daemon {
             let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
             state
                 .sessions
-                .values()
-                .find(|entry| {
-                    entry.plane.as_deref() == plane
+                .iter()
+                .find(|(id, entry)| {
+                    state.plane_of(id).map(|held| held.file.name.as_str()) == plane
                         && std::fs::canonicalize(&entry.opened.workspace)
                             .is_ok_and(|workspace| workspace == dir)
                 })
-                .map(|entry| Arc::clone(&entry.voice))
+                .map(|(_, entry)| Arc::clone(&entry.voice))
                 .ok_or_else(|| Error::DaemonNoTranscriber { dir: dir.clone() })?
         };
         let source = wire::attached_of(audio).ok_or(Error::DaemonBadAudio)?.source;
@@ -102,8 +102,11 @@ impl Daemon {
             entry.holders.remove(&client);
             entry.subscribers.remove(&client);
             if entry.holders.is_empty() {
-                // Its commands dropped, the plane's thread ends once its
+                // Its commands dropped, the run's thread ends once its
                 // command is done; its turn is stopped first.
+                if let Some(dir) = state.plane_of(&id).map(|plane| plane.file.dir.clone()) {
+                    state.follow(&dir, &id, false);
+                }
                 let entry = state.sessions.remove(&id).expect("the entry");
                 entry.stop.request();
                 let url = entry.opened.server_url.clone();

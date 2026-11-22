@@ -96,15 +96,22 @@ impl Daemon {
             lang,
             stop: Stop::new(),
             asker,
-            flows: Arc::clone(&self.flows),
         })?;
         let plane::Opened {
-            run,
+            mut run,
             resumed,
             settings,
             observer,
         } = opened;
-        let plane_name = run.file.as_ref().map(|file| file.name.clone());
+        // A plane of the run is held by the daemon from here (AGL-121, D38):
+        // its driver, made once, is the one the run's `flow` tool asks (D17).
+        let plane = run.file.clone();
+        let flows = plane
+            .as_ref()
+            .map(|file| self.lock().hold(file, Some(run.workspace.clone()), &self.needs));
+        run.flows = flows.clone();
+        let plane_name = plane.as_ref().map(|file| file.name.clone());
+        let plane_dir = plane.as_ref().map(|file| file.dir.clone());
         let reply = proto::Opened {
             session: wire::view(&plane::SessionView::of(&run.session), plane_name.as_deref()),
             resumed,
@@ -138,7 +145,6 @@ impl Daemon {
             observer
         });
         let parts = run.start().into_parts();
-        let opened_plane = plane_name.clone();
         // The clock of D2: a server stops after `idle_stop` seconds
         // without a turn; 0, an external server (AGL-052, D4) has none.
         // The unit to stop is named by the id when the run moved to a
@@ -165,7 +171,6 @@ impl Daemon {
             commands: parts.commands,
             stop: parts.stop,
             opened: reply.clone(),
-            plane: plane_name,
             holders: HashSet::from([client]),
             subscribers: HashSet::from([client]),
             origins: VecDeque::new(),
@@ -178,12 +183,15 @@ impl Daemon {
         let url = reply.server_url.clone();
         let mut state = self.lock();
         state.sessions.insert(id.clone(), entry);
+        if let Some(dir) = &plane_dir {
+            state.follow(dir, &id, true);
+        }
         if let Some(clock) = clock {
             state.clocks.insert(url, clock);
         }
         drop(state);
         // A session of the plane opened: wakes that missed it may land now (D20).
-        self.poke(opened_plane.as_deref());
+        self.poke(flows.as_ref());
         let daemon = Arc::clone(self);
         let sent = parts.sent;
         thread::spawn(move || {
@@ -200,11 +208,15 @@ impl Daemon {
     /// end clears the session's turn and follows a new session's id.
     pub(super) fn tell(&self, id: &str, item: Sent) -> String {
         let mut state = self.lock();
+        // The plane this run is on, for the wire's name and its flows (D38).
+        let plane = state
+            .plane_of(id)
+            .map(|plane| (plane.file.dir.clone(), plane.file.name.clone()));
+        let plane_name = plane.as_ref().map(|(_, name)| name.clone());
         let Some(entry) = state.sessions.get_mut(id) else {
             return id.to_owned();
         };
         let mut targets: HashSet<u64> = entry.subscribers.clone();
-        let plane = entry.plane.clone();
         // The url of the server this session runs on, for its idle clock
         // (AGL-120, D2), taken before `entry`'s borrow of `state` ends.
         let server_url = entry.opened.server_url.clone();
@@ -220,11 +232,16 @@ impl Daemon {
                 // `/new`: the entry follows the new session.
                 if done.session.id != id {
                     next = done.session.id.clone();
-                    entry.opened.session = wire::view(&done.session, plane.as_deref());
+                    entry.opened.session = wire::view(&done.session, plane_name.as_deref());
                     let entry = state.sessions.remove(id).expect("the entry");
                     state.sessions.insert(next.clone(), entry);
+                    // The plane follows the session to its new id (D38).
+                    if let Some((dir, _)) = &plane {
+                        state.follow(dir, id, false);
+                        state.follow(dir, &next, true);
+                    }
                 } else {
-                    entry.opened.session = wire::view(&done.session, plane.as_deref());
+                    entry.opened.session = wire::view(&done.session, plane_name.as_deref());
                 }
                 Message::Done(Box::new(done))
             }
@@ -243,7 +260,7 @@ impl Daemon {
                 },
                 Message::Done(done) => Reply::Done {
                     session: id.to_owned(),
-                    done: wire::done(done, plane.as_deref(), to.lang),
+                    done: wire::done(done, plane_name.as_deref(), to.lang),
                     yours: origin == Some(client),
                 },
             };
@@ -268,11 +285,14 @@ impl Daemon {
                 .collect();
             for (dir, flow) in due {
                 state.flow_wakes.remove(&(dir.clone(), flow.clone()));
-                if let Some(handle) = self.flows.peek(&dir) {
+                if let Some(handle) = state.plane(&dir).map(|plane| plane.holder.clone()) {
                     handle.post(plane::flow::holder::Letter::TurnEnd { flow });
                 }
             }
-            self.poke(plane.as_deref());
+            if let Some((dir, _)) = &plane {
+                let holder = state.plane(dir).map(|plane| plane.holder.clone());
+                self.poke(holder.as_ref());
+            }
         }
         next
     }

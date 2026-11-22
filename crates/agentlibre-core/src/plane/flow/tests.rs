@@ -723,8 +723,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
 
     let dir = TempDir::new();
     let (to, from) = std::sync::mpsc::channel();
-    let registry = holder::Holders::with_delivery(to);
-    let handle = registry.holder(&dir.0, &dir.0);
+    let handle = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), Some(to));
     read(&dir, TALK).unwrap();
     handle.ask(Verb::Start { name: "talk".into() }, Lang::En);
     // The verb that left a flow standing in a `say` asked for its wake (D18).
@@ -765,8 +764,7 @@ fn a_review_verdict_moves_the_flow_and_names_its_session() {
 
     let dir = TempDir::new();
     let (to, from) = std::sync::mpsc::channel();
-    let registry = holder::Holders::with_delivery(to);
-    let handle = registry.holder(&dir.0, &dir.0);
+    let handle = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), Some(to));
     read(&dir, WORK).unwrap();
     handle.ask(Verb::Start { name: "work".into() }, Lang::En);
     // The check state asks the daemon for its turn (D19).

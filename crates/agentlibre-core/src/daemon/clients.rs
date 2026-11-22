@@ -98,7 +98,9 @@ impl Daemon {
                     .map(|entry| proto::SessionInfo {
                         id: entry.opened.session.id.clone(),
                         name: entry.opened.session.name.clone(),
-                        plane: entry.plane.clone(),
+                        plane: state
+                            .plane_of(&entry.opened.session.id)
+                            .map(|plane| plane.file.name.clone()),
                         workspace: entry.opened.workspace.clone(),
                         function: entry.opened.function.clone(),
                         pids: entry
