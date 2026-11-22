@@ -2,6 +2,34 @@
 
 use super::*;
 
+/// D58's gate (AGL-121): one model turn of the flows at a time over all
+/// planes. A review holds it while it turns; a wake holds it from its
+/// delivery to its session's `turn.end` (D22). The mechanical parts of a
+/// flow — commands, timers, `status`, `stop` — and a human's own turns
+/// are not gated.
+#[derive(Default)]
+pub(super) struct Gate {
+    busy: Mutex<bool>,
+    idle: std::sync::Condvar,
+}
+
+impl Gate {
+    /// Waits its turn, and takes it.
+    pub(super) fn acquire(&self) {
+        let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        while *busy {
+            busy = self.idle.wait(busy).unwrap_or_else(|e| e.into_inner());
+        }
+        *busy = true;
+    }
+
+    /// Gives the turn back; every waiter looks again.
+    pub(super) fn release(&self) {
+        *self.busy.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        self.idle.notify_all();
+    }
+}
+
 impl Daemon {
     /// The driver of the plane `name` (AGL-118, D17): the daemon holds the
     /// plane (AGL-121, D38), making its thread when the name is first asked;
@@ -15,50 +43,79 @@ impl Daemon {
         Ok(self.lock().hold(&file, None, &self.needs))
     }
 
-    /// The daemon's arm for the turns its flows wait on (D18): wakes go to
-    /// open sessions, and every ask gets its word back. Review turns (D19)
-    /// join here when the daemon runs one.
-    pub(super) fn flow_turns(&self, inbox: mpsc::Receiver<plane::flow::holder::Need>) {
-        use plane::flow::holder::{self, Letter, Need};
+    /// The daemon's routing of its flows' needs (AGL-118, D18; AGL-121,
+    /// D36): each plane gets a thread of its own, made when its first need
+    /// comes, so a review blocks only its plane; the model turns
+    /// themselves go one at a time over all planes by the gate of D58.
+    pub(super) fn flow_turns(self: &Arc<Self>, inbox: mpsc::Receiver<plane::flow::holder::Need>) {
+        let mut workers: HashMap<PathBuf, mpsc::Sender<plane::flow::holder::Need>> =
+            HashMap::new();
         for need in inbox {
-            match need {
-                Need::Wake { plane_dir, wake } => {
-                    let delivered = self.deliver_wake(&plane_dir, &wake);
-                    let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
-                    if let Some(handle) = handle {
-                        handle.post(if delivered {
-                            Letter::Delivered {
-                                flow: wake.flow,
-                                session: wake.session,
-                                text: wake.text,
-                            }
-                        } else {
-                            Letter::Miss {
-                                flow: wake.flow,
-                                kind: holder::WAKE,
-                            }
-                        });
+            let dir = need.plane_dir().to_path_buf();
+            let to = workers.entry(dir).or_insert_with(|| {
+                let (to, from) = mpsc::channel();
+                let daemon = Arc::clone(self);
+                thread::spawn(move || {
+                    for need in from {
+                        daemon.flow_need(need);
                     }
+                });
+                to
+            });
+            let _ = to.send(need);
+        }
+    }
+
+    /// One need of one plane, on that plane's thread (AGL-121, D36):
+    /// wakes go to open sessions, reviews turn, and every ask gets its
+    /// word back. The gate of D58 is taken for the model turn and given
+    /// back when it ends — for a wake, at its session's `turn.end` (D22),
+    /// which is what releases it (D58).
+    fn flow_need(&self, need: plane::flow::holder::Need) {
+        use plane::flow::holder::{self, Letter, Need};
+        match need {
+            Need::Wake { plane_dir, wake } => {
+                self.flow_gate.acquire();
+                let delivered = self.deliver_wake(&plane_dir, &wake);
+                if !delivered {
+                    self.flow_gate.release();
                 }
-                Need::Review { plane_dir, review } => {
-                    let verdict = self.run_review(&plane_dir, &review);
-                    let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
-                    if let Some(handle) = handle {
-                        handle.post(match verdict {
-                            Ok((answer, session)) => Letter::Verdict {
-                                flow: review.flow,
-                                event: crate::machine::Event::Verdict {
-                                    check: holder::REVIEW.into(),
-                                    answer,
-                                },
-                                note: Some(format!("session {session}")),
+                let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
+                if let Some(handle) = handle {
+                    handle.post(if delivered {
+                        Letter::Delivered {
+                            flow: wake.flow,
+                            session: wake.session,
+                            text: wake.text,
+                        }
+                    } else {
+                        Letter::Miss {
+                            flow: wake.flow,
+                            kind: holder::WAKE,
+                        }
+                    });
+                }
+            }
+            Need::Review { plane_dir, review } => {
+                self.flow_gate.acquire();
+                let verdict = self.run_review(&plane_dir, &review);
+                self.flow_gate.release();
+                let handle = self.lock().plane(&plane_dir).map(|plane| plane.holder.clone());
+                if let Some(handle) = handle {
+                    handle.post(match verdict {
+                        Ok((answer, session)) => Letter::Verdict {
+                            flow: review.flow,
+                            event: crate::machine::Event::Verdict {
+                                check: holder::REVIEW.into(),
+                                answer,
                             },
-                            Err(_) => Letter::Miss {
-                                flow: review.flow,
-                                kind: holder::REVIEW,
-                            },
-                        });
-                    }
+                            note: Some(format!("session {session}")),
+                        },
+                        Err(_) => Letter::Miss {
+                            flow: review.flow,
+                            kind: holder::REVIEW,
+                        },
+                    });
                 }
             }
         }

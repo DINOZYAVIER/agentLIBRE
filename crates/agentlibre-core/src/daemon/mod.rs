@@ -61,6 +61,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
         needs,
         paths,
         state: Mutex::new(State::default()),
+        flow_gate: flow::Gate::default(),
     });
     thread::spawn({
         let daemon = Arc::clone(&daemon);
@@ -122,6 +123,9 @@ struct Daemon {
     needs: Sender<plane::flow::holder::Need>,
     paths: Paths,
     state: Mutex<State>,
+    /// D58's gate (AGL-121): one model turn of the flows at a time over
+    /// all planes; the mechanical parts are not gated.
+    flow_gate: flow::Gate,
 }
 
 /// A plane of the daemon (AGL-121, D38): the human's plane (AGL-077) with

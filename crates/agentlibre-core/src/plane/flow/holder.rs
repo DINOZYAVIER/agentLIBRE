@@ -33,6 +33,16 @@ pub enum Need {
     Review { plane_dir: PathBuf, review: Review },
 }
 
+impl Need {
+    /// The plane that asked (AGL-121, D36): the daemon routes every need
+    /// to the one thread of its plane.
+    pub fn plane_dir(&self) -> &Path {
+        match self {
+            Need::Wake { plane_dir, .. } | Need::Review { plane_dir, .. } => plane_dir,
+        }
+    }
+}
+
 /// Which waiting turn a letter speaks of: a flow may stand on a `wake` and
 /// a `review` in one state (D9), and each asks its own once (D20).
 pub type Kind = &'static str;

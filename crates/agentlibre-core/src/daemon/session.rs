@@ -285,6 +285,8 @@ impl Daemon {
                 .collect();
             for (dir, flow) in due {
                 state.flow_wakes.remove(&(dir.clone(), flow.clone()));
+                // The woken turn is over: its gate goes back (D58).
+                self.flow_gate.release();
                 if let Some(handle) = state.plane(&dir).map(|plane| plane.holder.clone()) {
                     handle.post(plane::flow::holder::Letter::TurnEnd { flow });
                 }

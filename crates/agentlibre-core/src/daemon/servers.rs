@@ -109,6 +109,19 @@ impl Daemon {
                 }
                 let entry = state.sessions.remove(&id).expect("the entry");
                 entry.stop.request();
+                // A wake whose session died before its turn ended gives
+                // its gate back with it (D58), or no plane's flows would
+                // ever turn again.
+                let stale: Vec<(PathBuf, String)> = state
+                    .flow_wakes
+                    .iter()
+                    .filter(|(_, session)| **session == id)
+                    .map(|(pair, _)| pair.clone())
+                    .collect();
+                for pair in stale {
+                    state.flow_wakes.remove(&pair);
+                    self.flow_gate.release();
+                }
                 let url = entry.opened.server_url.clone();
                 if let Some(engine) = entry.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
                     state.engines.push((url, engine, entry.project_dir.clone()));
