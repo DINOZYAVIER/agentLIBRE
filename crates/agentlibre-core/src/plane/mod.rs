@@ -357,35 +357,17 @@ impl Plane {
         // made with, the Function file not needed. Without the snapshot (the
         // v1 files), the name lookup of today; a Function that is not found
         // continues loose.
-        let mut function = match session.as_ref().and_then(|s| s.run.clone()) {
-            Some(snapshot) => Function::from_snapshot(&snapshot)?,
-            None => {
-                // The Function's name (D58, D59, AGL-015); the Function loads
-                // before the settings, because its `[server]` table is the
-                // model side of the settings when the file declares it
-                // (AGL-033, D1, D3).
-                let name = function_name(
-                    resumed.or(cli_function),
-                    layered.function.as_deref(),
-                    user.function.as_deref(),
-                );
-                // The Function's tiers (AGL-028, D3): the workspace store's
-                // `functions/` directory, then the user's, then the built-ins.
-                match Function::load(&function_dirs, &name) {
-                    Ok(function) => function,
-                    Err(Error::FunctionNotFound { .. }) if session.is_some() => {
-                        // The Function the session was made with is gone: it
-                        // continues loose (AGL-063, D4), with a notice.
-                        let session = session.as_ref().expect("a resumed session");
-                        let line = tr!(lang, m::LOOSE_CONTINUE, function = &session.function);
-                        say(&line);
-                        opened_lines.push(line);
-                        Function::loose(&session.loose_tools(), session.last_budgets)
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        };
+        let mut function = opened_function(
+            session.as_ref(),
+            resumed,
+            cli_function,
+            &layered,
+            user,
+            &function_dirs,
+            &say,
+            &mut opened_lines,
+            lang,
+        )?;
         // The model the session was made with (AGL-063, D5): the snapshot's,
         // to compare with the model that runs; `None` without the snapshot.
         let session_model = session
@@ -394,37 +376,23 @@ impl Plane {
             .and_then(|_| model_name(&function.model));
         // A missing key of `search` names the file that has one, the plane's
         // first.
-        let settings_path = match &plane_file {
-            Some(plane) if !plane_settings.search.is_empty() => plane.settings_file(),
-            _ => project.dir.join(settings::SETTINGS_FILE),
-        };
-        let mut settings = Settings::resolve(
+        let models = wsl::own_models(paths.models())?;
+        let mut settings = opened_settings(
             user,
             &user_path,
-            (&settings_path, &layered),
-            resumed.or(cli_function),
+            plane_file.as_ref(),
+            &plane_settings,
+            &layered,
+            project,
             &function.model,
-        )?;
-        // The weights files become absolute paths before anything starts; a
-        // file found nowhere is asked for when somebody answers (AGL-039,
-        // D22-D24), and offered for download; a run of one request asks
-        // nobody (AGL-050, D10, D11).
-        let missing = match &asker.line {
-            Some(line) if !one_request => weights::Missing::Ask(&**line, &say),
-            _ => weights::Missing::Fail,
-        };
-        let models = wsl::own_models(paths.models())?;
-        weights::resolve(
-            &mut settings.server,
-            &mut settings.whisper,
-            &weights::Folders {
-                own: models.clone(),
-                listed: &user.models,
-                user_path: &user_path,
-            },
             &function.sources,
-            &missing,
+            resumed,
+            cli_function,
+            &asker,
+            one_request,
+            &models,
             lang,
+            &say,
         )?;
         // The model of the session's snapshot against the model that runs
         // (AGL-063, D5): a difference is told, never refused.
@@ -440,28 +408,7 @@ impl Plane {
         // tool, no grammar for it and no word of it in the prompt otherwise
         // (AGL-019, D5). An expired client certificate leaves the tool out
         // too, with a notice (AGL-043 F20).
-        let expired = settings.search.as_ref().is_some_and(|config| {
-            programs::program("step")
-                .is_ok_and(|step| search::certificate_expired(&step, &config.client_certificate))
-        });
-        let search: Box<dyn Searcher + Send> = match &settings.search {
-            Some(config) if !expired => Box::new(search::Curl::new(config.clone())?),
-            Some(config) => {
-                let line = tr!(
-                    lang,
-                    m::SEARCH_CERT_EXPIRED,
-                    cert = config.client_certificate.display()
-                );
-                say(&line);
-                opened_lines.push(line);
-                function.without_tool("search");
-                Box::new(search::NoSearch)
-            }
-            None => {
-                function.without_tool("search");
-                Box::new(search::NoSearch)
-            }
-        };
+        let search = opened_search(&mut function, &settings, &say, &mut opened_lines, lang)?;
         // A turn to continue needs its state in the Function (D105).
         if let Some(turn) = session.as_ref().and_then(Session::unfinished) {
             Machine::resume(function.table(), &settings.function, &turn)?;
@@ -475,20 +422,7 @@ impl Plane {
             .server
             .image_max_tokens
             .unwrap_or(settings::DEFAULT_IMAGE_TOKENS) as usize;
-        let store = memory::StoreHome {
-            workspace: workspace.clone(),
-            auto_rehome,
-            lang,
-        };
-        // In a plane, the plane's memory beside the workspace's (D8).
-        let memory: Arc<dyn Home> = match &plane_file {
-            Some(plane) => Arc::new(memory::PlaneHome {
-                name: plane.name.clone(),
-                dir: plane.memory_dir(),
-                workspace: Box::new(store),
-            }),
-            None => Arc::new(store),
-        };
+        let memory = opened_memory(plane_file.as_ref(), &workspace, auto_rehome, lang);
         // The settings' `server` is the effective one (the function's
         // `[server]` table when the file declares it, AGL-033, D1, D3), and
         // the backend and the url run on it. The backend is the Llama or the
@@ -501,27 +435,19 @@ impl Plane {
         let run_url = rebind_url(paths.runtime.as_deref(), &settings.server);
         let run_url = run_url.unwrap_or_else(|| settings.server_url.clone());
         settings.server_url = run_url.clone();
-        let mut backend: Arc<dyn Backend + Send + Sync> = if settings.server.kind() == ServerKind::Strata {
-            Arc::new(Strata::with_ca(&run_url, settings.server.private_ca())?)
-        } else {
-            Arc::new(Llama::with_ca(&run_url, settings.server.private_ca())?)
-        };
-        let mut autostart = Autostart {
-            llama: Arc::clone(&backend),
-            project: project.clone(),
-            effective: settings.server.clone(),
-            whisper: settings.whisper.clone(),
-            user_path: user_path.clone(),
+        let mut backend = opened_backend(&run_url, &settings.server)?;
+        let mut autostart = opened_autostart(
+            &backend,
+            project,
+            &settings,
+            &user_path,
             models,
-            path_var: env("PATH"),
-            runtime: paths.runtime.clone(),
+            paths,
+            env,
             lang,
-            // The consent of D2 (AGL-033): the restart asks, as the server
-            // commands do.
-            others: asker.others.clone(),
+            &asker,
             engine,
-            units: user_manager(),
-        };
+        );
         // A run of one request brings the server up now; the others do it
         // at their first request (AGL-015, D10), or as the REPL starts
         // (AGL-046), and take the context size if the server answers. The
@@ -571,11 +497,7 @@ impl Plane {
         for line in opened_lines {
             let _ = session.append(Event::System { text: line, failed: false });
         }
-        let about = settings
-            .about
-            .enabled
-            .unwrap_or(true)
-            .then(|| about_of(env, paths, project, plane_file.as_ref(), &settings, &workspace, &user_path));
+        let about = opened_about(&settings, env, paths, project, plane_file.as_ref(), &workspace, &user_path);
         // A plane of a store drives its flows on the daemon's one holder
         // for it, the same thread the CLI asks (AGL-118, D17).
         let flows = plane_file
@@ -903,6 +825,227 @@ impl Plane {
 }
 
 /// What the model is told of its environment and of this agl (AGL-048).
+/// The run's Function (AGL-121, D24): the `run` snapshot of a resumed
+/// session (AGL-063, D4) — the session runs on the configuration it was
+/// made with, the Function file not needed; without the snapshot (the v1
+/// files), the name lookup of today; a Function that is not found
+/// continues loose, with a notice.
+#[allow(clippy::too_many_arguments)]
+fn opened_function(
+    session: Option<&Session>,
+    resumed: Option<&str>,
+    cli_function: Option<&str>,
+    layered: &settings::ProjectFile,
+    user: &UserFile,
+    function_dirs: &[&Path],
+    say: &dyn Fn(&str),
+    opened_lines: &mut Vec<String>,
+    lang: Lang,
+) -> Result<Function, Error> {
+    match session.and_then(|s| s.run.clone()) {
+        Some(snapshot) => Function::from_snapshot(&snapshot),
+        None => {
+            // The Function's name (D58, D59, AGL-015); the Function loads
+            // before the settings, because its `[server]` table is the
+            // model side of the settings when the file declares it
+            // (AGL-033, D1, D3).
+            let name = function_name(
+                resumed.or(cli_function),
+                layered.function.as_deref(),
+                user.function.as_deref(),
+            );
+            // The Function's tiers (AGL-028, D3): the workspace store's
+            // `functions/` directory, then the user's, then the built-ins.
+            match Function::load(function_dirs, &name) {
+                Ok(function) => Ok(function),
+                Err(Error::FunctionNotFound { .. }) if session.is_some() => {
+                    // The Function the session was made with is gone: it
+                    // continues loose (AGL-063, D4), with a notice.
+                    let session = session.expect("a resumed session");
+                    let line = tr!(lang, m::LOOSE_CONTINUE, function = &session.function);
+                    say(&line);
+                    opened_lines.push(line);
+                    Ok(Function::loose(&session.loose_tools(), session.last_budgets))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
+/// The run's settings (AGL-121, D24): a missing key of `search` names
+/// the file that has one, the plane's first; the weights files become
+/// absolute paths before anything starts; a file found nowhere is asked
+/// for when somebody answers (AGL-039, D22-D24), and offered for
+/// download; a run of one request asks nobody (AGL-050, D10, D11).
+#[allow(clippy::too_many_arguments)]
+fn opened_settings(
+    user: &UserFile,
+    user_path: &Path,
+    plane_file: Option<&PlaneFile>,
+    plane_settings: &settings::ProjectFile,
+    layered: &settings::ProjectFile,
+    project: &Workspace,
+    model: &ServerFile,
+    sources: &[crate::download::FileSource],
+    resumed: Option<&str>,
+    cli_function: Option<&str>,
+    asker: &Asker,
+    one_request: bool,
+    models: &Path,
+    lang: Lang,
+    say: &dyn Fn(&str),
+) -> Result<Settings, Error> {
+    let settings_path = match plane_file {
+        Some(plane) if !plane_settings.search.is_empty() => plane.settings_file(),
+        _ => project.dir.join(settings::SETTINGS_FILE),
+    };
+    let mut settings = Settings::resolve(
+        user,
+        user_path,
+        (&settings_path, layered),
+        resumed.or(cli_function),
+        model,
+    )?;
+    let missing = match &asker.line {
+        Some(line) if !one_request => weights::Missing::Ask(&**line, say),
+        _ => weights::Missing::Fail,
+    };
+    weights::resolve(
+        &mut settings.server,
+        &mut settings.whisper,
+        &weights::Folders {
+            own: models.to_owned(),
+            listed: &user.models,
+            user_path,
+        },
+        sources,
+        &missing,
+        lang,
+    )?;
+    Ok(settings)
+}
+
+/// The run's searcher (AGL-121, D24): the tool `search` is there only
+/// where `[search]` is complete: no tool, no grammar for it and no word
+/// of it in the prompt otherwise (AGL-019, D5). An expired client
+/// certificate leaves the tool out too, with a notice (AGL-043 F20).
+fn opened_search(
+    function: &mut Function,
+    settings: &Settings,
+    say: &dyn Fn(&str),
+    opened_lines: &mut Vec<String>,
+    lang: Lang,
+) -> Result<Box<dyn Searcher + Send>, Error> {
+    let expired = settings.search.as_ref().is_some_and(|config| {
+        programs::program("step")
+            .is_ok_and(|step| search::certificate_expired(&step, &config.client_certificate))
+    });
+    let search: Box<dyn Searcher + Send> = match &settings.search {
+        Some(config) if !expired => Box::new(search::Curl::new(config.clone())?),
+        Some(config) => {
+            let line = tr!(
+                lang,
+                m::SEARCH_CERT_EXPIRED,
+                cert = config.client_certificate.display()
+            );
+            say(&line);
+            opened_lines.push(line);
+            function.without_tool("search");
+            Box::new(search::NoSearch)
+        }
+        None => {
+            function.without_tool("search");
+            Box::new(search::NoSearch)
+        }
+    };
+    Ok(search)
+}
+
+/// The backend of the run (AGL-121, D24), by the effective settings'
+/// `[server] kind` (AGL-030, D1): the Llama or the Strata backend, with
+/// the kind's CA when the settings name one (AGL-121, D2).
+fn opened_backend(url: &str, server: &ServerFile) -> Result<Arc<dyn Backend + Send + Sync>, Error> {
+    if server.kind() == ServerKind::Strata {
+        Ok(Arc::new(Strata::with_ca(url, server.private_ca())?))
+    } else {
+        Ok(Arc::new(Llama::with_ca(url, server.private_ca())?))
+    }
+}
+
+/// The start of the run's server (AGL-121, D24): the engine agl brings
+/// up on demand, with the consent of D2 (AGL-033) — the restart asks,
+/// as the server commands do.
+#[allow(clippy::too_many_arguments)]
+fn opened_autostart(
+    backend: &Arc<dyn Backend + Send + Sync>,
+    project: &Workspace,
+    settings: &Settings,
+    user_path: &Path,
+    models: PathBuf,
+    paths: &Paths,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    lang: Lang,
+    asker: &Asker,
+    engine: Arc<Mutex<Option<Engine>>>,
+) -> Autostart {
+    Autostart {
+        llama: Arc::clone(backend),
+        project: project.clone(),
+        effective: settings.server.clone(),
+        whisper: settings.whisper.clone(),
+        user_path: user_path.to_owned(),
+        models,
+        path_var: env("PATH"),
+        runtime: paths.runtime.clone(),
+        lang,
+        others: asker.others.clone(),
+        engine,
+        units: user_manager(),
+    }
+}
+
+/// The run's memory home (AGL-121, D24): in a plane, the plane's
+/// memory beside the workspace's (D8).
+fn opened_memory(
+    plane_file: Option<&PlaneFile>,
+    workspace: &Path,
+    auto_rehome: bool,
+    lang: Lang,
+) -> Arc<dyn Home> {
+    let store = memory::StoreHome {
+        workspace: workspace.to_owned(),
+        auto_rehome,
+        lang,
+    };
+    match plane_file {
+        Some(plane) => Arc::new(memory::PlaneHome {
+            name: plane.name.clone(),
+            dir: plane.memory_dir(),
+            workspace: Box::new(store),
+        }),
+        None => Arc::new(store),
+    }
+}
+
+/// What the model is told of its world (AGL-121, D24), when
+/// `[about] enabled` (AGL-048).
+fn opened_about(
+    settings: &Settings,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    paths: &Paths,
+    project: &Workspace,
+    plane: Option<&PlaneFile>,
+    workspace: &Path,
+    user_path: &Path,
+) -> Option<String> {
+    settings
+        .about
+        .enabled
+        .unwrap_or(true)
+        .then(|| about_of(env, paths, project, plane, settings, workspace, user_path))
+}
+
 fn about_of(
     env: &dyn Fn(&str) -> Option<OsString>,
     paths: &Paths,
