@@ -1,6 +1,8 @@
 //! Inference backends behind a minimal interface (D10, D29).
 
 mod http;
+
+pub(crate) use http::agent;
 pub mod llama;
 mod step;
 pub mod strata;

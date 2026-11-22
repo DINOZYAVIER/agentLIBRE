@@ -221,14 +221,7 @@ pub fn transcribe(
         url: url.into(),
         detail,
     };
-    let config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_connect(Some(std::time::Duration::from_secs(5)));
-    let agent: ureq::Agent = match private_ca {
-        Some(ca) => config.tls_config(crate::backend::private_ca(ca)?).build().into(),
-        None => config.build().into(),
-    };
-    let mut response = agent
+    let mut response = crate::backend::agent(url, private_ca)?
         .post(format!("{}/inference", url.trim_end_matches('/')))
         .header(
             "Content-Type",

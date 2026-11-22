@@ -11,6 +11,29 @@ use crate::settings::ServerKind;
 /// How long connecting may take (D97).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The settings of every client agl talks to its servers with, in one
+/// place (AGL-121, D19): a status is a reply, not an error; connecting may
+/// take [`CONNECT_TIMEOUT`] and nothing else is timed, as a long prefill is
+/// not a dead server; a redirect is not followed; an `https://` server is
+/// spoken to over https only.
+fn config(url: &str) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .max_redirects(0)
+        .https_only(url.starts_with("https://"))
+}
+
+/// A client of the server at `url`, which trusts only the CA in the file
+/// `ca` when one is named (AGL-058, D12): the agent of [`Http`] and of the
+/// whisper server's transcription (AGL-121, D19).
+pub(crate) fn agent(url: &str, ca: Option<&str>) -> Result<ureq::Agent, Error> {
+    Ok(match ca {
+        Some(ca) => config(url).tls_config(super::private_ca(ca)?).build().into(),
+        None => config(url).build().into(),
+    })
+}
+
 /// A client of the server of `kind` at `url`.
 pub(super) struct Http {
     kind: ServerKind,
@@ -24,23 +47,12 @@ pub(super) struct Http {
 impl Http {
     /// A client for the server at `url`, such as `http://127.0.0.1:18080`.
     pub(super) fn new(kind: ServerKind, url: &str) -> Http {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .build()
-            .into();
-        Http::of(kind, url, agent)
+        Http::of(kind, url, config(url).build().into())
     }
 
     /// A client that trusts only the CA in the file `ca` (AGL-058, D12).
     pub(super) fn with_ca(kind: ServerKind, url: &str, ca: &str) -> Result<Http, Error> {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .tls_config(super::private_ca(ca)?)
-            .build()
-            .into();
-        Ok(Http::of(kind, url, agent))
+        Ok(Http::of(kind, url, agent(url, Some(ca))?))
     }
 
     fn of(kind: ServerKind, url: &str, agent: ureq::Agent) -> Http {
@@ -138,6 +150,34 @@ impl Http {
 mod tests {
     use super::*;
     use crate::i18n::Lang;
+
+    #[test]
+    fn a_redirect_is_not_followed_and_https_stays_https() {
+        // AGL-121, D19.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/", elsewhere.local_addr().unwrap());
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.local_addr().unwrap());
+        let answer = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            );
+        });
+        let response = agent(&url, None).unwrap().get(format!("{url}/props")).call().unwrap();
+        answer.join().unwrap();
+        assert_eq!(response.status().as_u16(), 302);
+        assert!(elsewhere.accept().is_err(), "the redirect was followed");
+        assert!(agent("https://gpu.lan:18080", None).unwrap().config().https_only());
+        assert!(!agent(&url, None).unwrap().config().https_only());
+        assert_eq!(agent(&url, None).unwrap().config().max_redirects(), 0);
+    }
 
     #[test]
     fn a_certificate_failure_names_the_ca_setting_of_its_server() {
