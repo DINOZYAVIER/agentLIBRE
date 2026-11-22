@@ -59,9 +59,13 @@ pub fn start_chunked(limit: u32, vad: Vad) -> Result<Box<dyn Recording>, Error> 
 /// chunks (AGL-122, D6).
 #[derive(Clone, Copy, Debug)]
 pub struct Vad {
-    /// RMS at or above this (of 32767) is speech; −30 dB ≈ 1034.
+    /// RMS at or above this (of 32767) is speech; −41 dB ≈ 300 suits a
+    /// quiet studio mic: the room's hum sits near 200, speech peaks over
+    /// 700 — measured on the human's own recordings, not on ffmpeg's
+    /// book-example −30 dB, which their levels never reach.
     pub rms_on: i64,
-    /// A silence this long ends the speech segment.
+    /// A silence this long ends the speech segment; 0.5 s bridges the
+    /// pauses between words without letting chunks run on.
     pub silence_ms: u32,
     /// How much of the previous chunk's tail a new chunk repeats.
     pub overlap_ms: u32,
@@ -71,7 +75,7 @@ pub struct Vad {
 
 impl Default for Vad {
     fn default() -> Vad {
-        Vad { rms_on: 1034, silence_ms: 400, overlap_ms: 300, max_speech_ms: 12000 }
+        Vad { rms_on: 300, silence_ms: 500, overlap_ms: 300, max_speech_ms: 12000 }
     }
 }
 
@@ -302,8 +306,22 @@ mod chunker_tests {
     }
 
     #[test]
-    fn wav16k_carries_the_samples() {
-        let bytes = wav16k(&[1, -2]);
+    fn the_default_thresholds_hear_a_quiet_mic() {
+        // The human's levels: speech around 700 RMS, room hum around
+        // 190 — the chunker must cut on those, not on book volumes.
+        let mut c = Chunker::new(Vad::default());
+        let quiet: Vec<i16> = (0..200 * FRAME_SAMPLES)
+            .map(|i| if i / 32 % 2 == 0 { 700 } else { -700 })
+            .collect();
+        let hum: Vec<i16> = (0..40 * FRAME_SAMPLES).map(|i| if i / 8 % 2 == 0 { 190 } else { -190 }).collect();
+        let mut chunks = c.push(&quiet);
+        chunks.extend(c.push(&hum));
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].len() >= 190 * FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn wav16k_carries_the_samples() {        let bytes = wav16k(&[1, -2]);
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[12..16], b"fmt ");
