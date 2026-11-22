@@ -329,8 +329,8 @@ fn status(ws: &Workspace, lang: Lang, name: &str, state: &str) -> Result<ExitCod
             lang,
             m::FORGE_STATUS_CHANGED,
             name = name,
-            from = changed.from.name(),
-            to = changed.to.name()
+            from = changed.from.as_str(),
+            to = changed.to.as_str()
         )
     );
     let spec = task_spec::take(&changed.artifact)?;

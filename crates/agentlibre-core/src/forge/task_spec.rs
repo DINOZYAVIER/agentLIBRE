@@ -140,6 +140,32 @@ pub fn scaffold(name: &str, today: &str) -> Artifact {
     }
 }
 
+/// The `task-spec` entry of the forge's registry (AGL-121, D18): the
+/// lifecycle, scaffold and check above, named by the interface.
+pub struct SpecType;
+
+impl forge::ArtifactType for SpecType {
+    fn name(&self) -> &'static str {
+        TYPE
+    }
+
+    fn statuses(&self) -> &'static [&'static str] {
+        &["open", "in-progress", "done", "backlog", "canceled"]
+    }
+
+    fn allows(&self, from: &str, to: &str) -> bool {
+        Status::parse(from).is_some_and(|from| Status::parse(to).is_some_and(|to| from.allows(to)))
+    }
+
+    fn scaffold(&self, name: &str, today: &str) -> Artifact {
+        scaffold(name, today)
+    }
+
+    fn check(&self, artifact: &Artifact) -> Result<(), Error> {
+        check(artifact)
+    }
+}
+
 /// A computed state of a task-spec (never stored).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitFlag {

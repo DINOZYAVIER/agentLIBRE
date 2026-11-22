@@ -745,8 +745,8 @@ fn forge_status(
         lang,
         m::FORGE_STATUS_CHANGED,
         name = name,
-        from = changed.from.name(),
-        to = changed.to.name()
+        from = changed.from.as_str(),
+        to = changed.to.as_str()
     )
     .to_owned())
 }

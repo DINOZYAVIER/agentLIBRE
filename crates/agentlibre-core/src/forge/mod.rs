@@ -702,6 +702,36 @@ pub struct Artifact {
 
 /// The header of a store file for `list`: parsed (a known or an
 /// unknown type), an unknown schema (never parsed), or unparseable.
+/// One kind of artifact file of the forge (AGL-121, D18): the name it
+/// goes by in the `type` of the file, its lifecycle — the statuses and
+/// their edges —, its scaffold, its check. A second kind adds one entry
+/// to `TYPES` and no branch anywhere else.
+pub trait ArtifactType {
+    /// The value of the artifact's `type`.
+    fn name(&self) -> &'static str;
+    /// The statuses of the lifecycle, as written in `status`.
+    fn statuses(&self) -> &'static [&'static str];
+    /// Whether the status `from` may move to the status `to`.
+    fn allows(&self, from: &str, to: &str) -> bool;
+    /// Whether `status` ends the lifecycle: nothing moves from it.
+    fn terminal(&self, status: &str) -> bool {
+        self.statuses().iter().all(|to| !self.allows(status, to))
+    }
+    /// The scaffold of a new artifact named `name`, dated `today`.
+    fn scaffold(&self, name: &str, today: &str) -> Artifact;
+    /// The type's own check of `artifact`.
+    fn check(&self, artifact: &Artifact) -> Result<(), Error>;
+}
+
+/// The registry of artifact kinds (AGL-121, D18): `task-spec` is the
+/// first and only entry; a second kind adds one entry here.
+pub static TYPES: &[&(dyn ArtifactType + Send + Sync)] = &[&task_spec::SpecType];
+
+/// The artifact kind named `name`, read off the registry.
+pub fn type_of(name: &str) -> Option<&'static (dyn ArtifactType + Send + Sync)> {
+    TYPES.iter().copied().find(|kind| kind.name() == name)
+}
+
 #[derive(Debug)]
 pub enum Header {
     Artifact(Box<Artifact>),
@@ -849,8 +879,8 @@ fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Erro
         type_table,
         body,
     };
-    if artifact.type_name == task_spec::TYPE {
-        task_spec::check(&artifact)?;
+    if let Some(kind) = type_of(&artifact.type_name) {
+        kind.check(&artifact)?;
     }
     Ok(artifact)
 }

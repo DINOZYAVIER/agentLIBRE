@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use super::task_spec::{self, Status};
+use super::task_spec;
 use super::{Artifact, Header, Workspace};
 use crate::clock;
 use crate::error::Error;
@@ -79,12 +79,13 @@ pub fn new_task_spec(
             dir: ws.dir.join("forge"),
         });
     }
+    let kind = super::type_of(task_spec::TYPE).expect("task-spec is in the registry");
     let path = ws
         .dir
         .join("forge")
-        .join(task_spec::TYPE)
+        .join(kind.name())
         .join(format!("{name}.md"));
-    let mut artifact = task_spec::scaffold(&name, &clock::today());
+    let mut artifact = kind.scaffold(&name, &clock::today());
     artifact.path = path.clone();
     // The store is materialized on the first write.
     let lines = super::materialize(ws, lang)?;
@@ -97,8 +98,9 @@ pub fn new_task_spec(
 pub struct StatusChanged {
     /// As it was written.
     pub artifact: Artifact,
-    pub from: Status,
-    pub to: Status,
+    /// The status as it was, and as the type names it.
+    pub from: String,
+    pub to: String,
 }
 
 /// Moves the task-spec `name` of `ws` to `state`: validates the
@@ -106,35 +108,34 @@ pub struct StatusChanged {
 /// byte-identical.
 pub fn change_status(ws: &Workspace, name: &str, state: &str) -> Result<StatusChanged, Error> {
     let artifact = find_artifact(ws, name)?;
-    if artifact.type_name != task_spec::TYPE {
-        return Err(Error::NotTaskSpec {
-            name: name.to_owned(),
-            type_name: artifact.type_name,
-        });
+    let kind = super::type_of(&artifact.type_name).ok_or_else(|| Error::NotTaskSpec {
+        name: name.to_owned(),
+        type_name: artifact.type_name.clone(),
+    })?;
+    let from = artifact.status.clone();
+    if !kind.statuses().contains(&from.as_str()) {
+        return Err(Error::BadState { state: from });
     }
-    let from = Status::parse(&artifact.status).ok_or_else(|| Error::BadState {
-        state: artifact.status.clone(),
-    })?;
-    let to = Status::parse(state).ok_or_else(|| Error::BadState {
-        state: state.to_owned(),
-    })?;
-    if from == to || !from.allows(to) {
-        if matches!(from, Status::Done | Status::Canceled) {
+    if !kind.statuses().contains(&state) {
+        return Err(Error::BadState { state: state.to_owned() });
+    }
+    if from == state || !kind.allows(&from, state) {
+        if kind.terminal(&from) {
             return Err(Error::TerminalState {
                 name: name.to_owned(),
-                from: from.name().to_owned(),
+                from,
             });
         }
         return Err(Error::BadTransition {
-            from: from.name().to_owned(),
-            to: to.name().to_owned(),
+            from,
+            to: state.to_owned(),
         });
     }
     let mut artifact = artifact;
-    artifact.status = to.name().to_owned();
+    artifact.status = state.to_owned();
     artifact.updated = clock::today();
     super::write_artifact(&artifact)?;
-    Ok(StatusChanged { artifact, from, to })
+    Ok(StatusChanged { artifact, from, to: state.to_owned() })
 }
 
 #[cfg(test)]
