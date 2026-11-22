@@ -791,6 +791,8 @@ fn the_built_in_functions_differ_in_the_system_and_the_step_limit() {
         "You are an AI agent running on agentLIBRE (agl), an agentic system."
     );
     assert!(high.system.starts_with("You are DinoBot"));
+    // A commit goes by the repository's identity (AGL-121, D11).
+    assert!(high.system.contains("never set git's user.name or user.email yourself"));
     // The action's limit is told at the context of the run (AGL-043 F14).
     let told = high.system_at(131_072);
     assert!(told.contains(
