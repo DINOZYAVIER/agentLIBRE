@@ -35,7 +35,7 @@ impl Daemon {
                         } else {
                             Letter::Miss {
                                 flow: wake.flow,
-                                kind: holder::SAY,
+                                kind: holder::WAKE,
                             }
                         });
                     }
@@ -393,7 +393,7 @@ mod tests {
             r#"{ agl, ... }: {
   flow.talk = {
     initial = "stood";
-    state.stood = { action.say = "last"; next.message.done = "stood"; };
+    state.stood = { action.wake = "last"; next.message.done = "stood"; };
   };
 }
 "#,
@@ -422,11 +422,11 @@ mod tests {
             "no place: {:?}",
             said.lines
         );
-        // The wake lands: the holder wrote the journal's `said` line.
+        // The wake lands: the holder wrote the journal's `woke` line.
         let file = plane.dir.join("flow").join("talk.jsonl");
         let since = std::time::Instant::now();
         loop {
-            if std::fs::read_to_string(&file).is_ok_and(|text| text.contains("\"type\":\"said\"")) {
+            if std::fs::read_to_string(&file).is_ok_and(|text| text.contains("\"type\":\"woke\"")) {
                 break;
             }
             assert!(since.elapsed() < std::time::Duration::from_secs(10), "the wake never landed");
@@ -453,7 +453,7 @@ mod tests {
             r#"{ agl, ... }: {
   flow.talk = {
     initial = "stood";
-    state.stood = { action.say = "last"; next.turn.end = "gone"; };
+    state.stood = { action.wake = "last"; next.turn.end = "gone"; };
     state.gone = { };
   };
 }

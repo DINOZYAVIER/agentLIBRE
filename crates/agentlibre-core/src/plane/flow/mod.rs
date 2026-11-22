@@ -32,10 +32,10 @@ pub enum Action {
     Review { function: String, events: Vec<String> },
     /// `action.artifact = { dir; keep; }`: what a rollback may reach (D6).
     Artifact { dir: PathBuf, keep: u32 },
-    /// `action.say = "<session>"`, or `{ session; text? }` (D14): a wake
+    /// `action.wake = "<session>"`, or `{ session; text? }` (D14): a wake
     /// delivered to a session named as `Open.resume` names one (D6, D9),
     /// with the flow's own line when the declaration gives one.
-    Say {
+    Wake {
         session: String,
         text: Option<String>,
     },
@@ -226,7 +226,7 @@ fn read_actions(at: &mut Section) -> Result<Vec<Action>, Error> {
     let Some(mut actions) = at.section("action")? else {
         return Ok(Vec::new());
     };
-    actions.check_keys(&["command", "review", "artifact", "say", "launch"])?;
+    actions.check_keys(&["command", "review", "artifact", "wake", "launch"])?;
     let mut read = Vec::new();
     let wait = |one: &mut Section| -> Result<(String, Duration), Error> {
         one.check_keys(&["cmd", "timeout"])?;
@@ -263,15 +263,15 @@ fn read_actions(at: &mut Section) -> Result<Vec<Action>, Error> {
         };
         read.push(Action::Artifact { dir, keep });
     }
-    // `action.say` is a bare session name or `{ session; text? }` (D14).
-    if actions.is_object("say") {
-        let mut one = actions.section("say")?.expect("just seen");
+    // `action.wake` is a bare session name or `{ session; text? }` (D14).
+    if actions.is_object("wake") {
+        let mut one = actions.section("wake")?.expect("just seen");
         one.check_keys(&["session", "text"])?;
         let session = one.required_string("session")?;
         let text = one.string("text")?;
-        read.push(Action::Say { session, text });
-    } else if let Some(session) = actions.string("say")? {
-        read.push(Action::Say {
+        read.push(Action::Wake { session, text });
+    } else if let Some(session) = actions.string("wake")? {
+        read.push(Action::Wake {
             session,
             text: None,
         });
@@ -457,7 +457,7 @@ fn check_events(
             }
             // An artifact is pointed at, and a `say` starts a turn: neither
             // has an outcome of its own (D6, D10).
-            Action::Artifact { .. } | Action::Say { .. } => {}
+            Action::Artifact { .. } | Action::Wake { .. } => {}
         }
     }
     Ok(())

@@ -24,7 +24,7 @@ const DEV: &str = r#"{ agl, ... }: {
     state.launch = { next.otherwise = "halted"; };
     state.rollback = {
       action.artifact = { dir = "result"; keep = 3; };
-      action.say = "agl:dev";
+      action.wake = "agl:dev";
       max_visits = 2;
       on_limit = "halted";
       next.otherwise = "halted";
@@ -78,7 +78,7 @@ fn a_flow_loads_with_its_states_and_actions() {
                 dir: PathBuf::from("result"),
                 keep: 3,
             },
-            Action::Say {
+            Action::Wake {
                 session: "agl:dev".into(),
                 text: None,
             },
@@ -649,7 +649,7 @@ const TALK: &str = r#"{ agl, ... }: {
       next.exit.ok = "stood";
       next.exit.any = "end";
     };
-    state.stood = { action.say = "last"; next.message.done = "end"; };
+    state.stood = { action.wake = "last"; next.message.done = "end"; };
     state.end = { };
   };
 }
@@ -677,7 +677,7 @@ fn a_say_waits_until_its_wake_is_delivered() {
     let file = journal::path(&dir.0, "talk");
     journal::append(
         &file,
-        &journal::Entry::Said {
+        &journal::Entry::Woke {
             time: journal::now(),
             session: "last".into(),
             text: "woken".into(),
@@ -697,8 +697,8 @@ fn a_say_table_overrides_the_wakes_line() {
     fs::write(
         dir.0.join(FLOW_FILE),
         TALK.replace(
-            "action.say = \"last\"",
-            "action.say = { session = \"agl:dev\"; text = \"the build broke\"; }",
+            "action.wake = \"last\"",
+            "action.wake = { session = \"agl:dev\"; text = \"the build broke\"; }",
         ),
     )
     .unwrap();
@@ -752,7 +752,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     assert!(drive::wakeups(&dir.0).is_empty());
     let entries = journal::read(&journal::path(&dir.0, "talk")).unwrap();
     assert!(
-        matches!(entries.last(), Some(journal::Entry::Said { text, .. }) if text == &wake.text),
+        matches!(entries.last(), Some(journal::Entry::Woke { text, .. }) if text == &wake.text),
         "{entries:?}"
     );
 }

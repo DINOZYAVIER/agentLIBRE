@@ -34,10 +34,10 @@ pub enum Need {
     Review { plane_dir: PathBuf, review: Review },
 }
 
-/// Which waiting turn a letter speaks of: a flow may stand on a `say` and
+/// Which waiting turn a letter speaks of: a flow may stand on a `wake` and
 /// a `review` in one state (D9), and each asks its own once (D20).
 pub type Kind = &'static str;
-pub const SAY: Kind = "say";
+pub const WAKE: Kind = "wake";
 pub const REVIEW: Kind = "review";
 
 /// What reaches the holder's thread: a verb, and the daemon's word back.
@@ -48,7 +48,7 @@ pub enum Letter {
         lang: Lang,
         reply: Sender<Said>,
     },
-    /// A wake went to its session; the holder writes the journal's `said`
+    /// A wake went to its session; the holder writes the journal's `woke`
     /// line — no other hand writes it (D14, D20).
     Delivered {
         flow: String,
@@ -201,14 +201,14 @@ fn answer(
             session,
             text,
         } => {
-            pending.remove(&(flow.clone(), SAY));
-            // Only a delivery writes the `said` line (D14); a late word
+            pending.remove(&(flow.clone(), WAKE));
+            // Only a delivery writes the `woke` line (D14); a late word
             // about a reset flow finds no journal and goes unsaid.
             let file = journal::path(plane_dir, &flow);
             if file.is_file() {
                 let _ = journal::append(
                     &file,
-                    &Entry::Said {
+                    &Entry::Woke {
                         time: journal::now(),
                         session,
                         text,
@@ -241,7 +241,7 @@ fn issue(plane_dir: &Path, needs: &Option<Sender<Need>>, pending: &mut HashSet<(
         return;
     };
     for wake in drive::wakeups(plane_dir) {
-        if pending.insert((wake.flow.clone(), SAY)) {
+        if pending.insert((wake.flow.clone(), WAKE)) {
             let _ = needs.send(Need::Wake {
                 plane_dir: plane_dir.to_path_buf(),
                 wake,

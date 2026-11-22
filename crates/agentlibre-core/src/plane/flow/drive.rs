@@ -1,7 +1,7 @@
 //! Driving a flow above the turn (AGL-118, D3, D7; AGL-121, D39): the journal is the truth,
 //! so a run is folded from it when it is touched and set down again; what a
 //! state does by itself runs here, on the plane's thread. What needs a turn —
-//! a `say` or a review — waits for a session, and `status` says what waits
+//! a `wake` or a review — waits for a session, and `status` says what waits
 //! (D6, D7).
 //!
 //! A flow's commands run in `workdir`, the workspace of the session that
@@ -34,9 +34,9 @@ const MAX_WALK: usize = 32;
 /// which is not this layer's to start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Waiting {
-    /// `action.say = "<session>"`: a wake delivered to that session (D6,
+    /// `action.wake = "<session>"`: a wake delivered to that session (D6,
     /// D14), with the flow's own line when the declaration gives one.
-    Say {
+    Wake {
         session: String,
         text: Option<String>,
     },
@@ -198,7 +198,7 @@ pub fn said(lang: Lang, name: &str, place: &Place) -> String {
 /// A thing a state waits for, in one line (D6).
 fn text_of(wait: &Waiting) -> String {
     match wait {
-        Waiting::Say { session, .. } => format!("say {session}"),
+        Waiting::Wake { session, .. } => format!("wake {session}"),
         Waiting::Review { function, events } => format!("review {function}: {}", events.join("|")),
     }
 }
@@ -233,7 +233,7 @@ pub struct Wake {
 }
 
 /// What the flows of `plane_dir` stand waiting for a wake (D18, D20): a
-/// `say` whose current visit has no `said` line, since only a delivery
+/// `wake` whose current visit has no `woke` line, since only a delivery
 /// writes one. A stopped flow stands where the human left it (D7), and a
 /// declaration that does not load wakes nothing.
 pub fn wakeups(plane_dir: &Path) -> Vec<Wake> {
@@ -258,12 +258,12 @@ pub fn wakeups(plane_dir: &Path) -> Vec<Wake> {
             continue;
         };
         for action in decl.actions(at) {
-            let Action::Say { session, text } = action else { continue };
-            // One `say` per state (D9): a `said` line after the arrival is
+            let Action::Wake { session, text } = action else { continue };
+            // One `wake` per state (D9): a `woke` line after the arrival is
             // this visit's delivery, and the wake is no longer pending.
             if entries[entered + 1..]
                 .iter()
-                .any(|entry| matches!(entry, Entry::Said { .. }))
+                .any(|entry| matches!(entry, Entry::Woke { .. }))
             {
                 continue;
             }
@@ -412,9 +412,9 @@ fn walk(
                 Action::Launch { cmd, timeout } => {
                     Some(Event::Launch(act::run(workdir, cmd, *timeout)?))
                 }
-                // An artifact is pointed at; a `say` and a review are turns
+                // An artifact is pointed at; a `wake` and a review are turns
                 // of a session (D6, D10).
-                Action::Artifact { .. } | Action::Review { .. } | Action::Say { .. } => None,
+                Action::Artifact { .. } | Action::Review { .. } | Action::Wake { .. } => None,
             };
             let Some(event) = event else { continue };
             // The limit of the whole run ends it where it stands (D33).
@@ -490,7 +490,7 @@ fn waiting_of(decl: &FlowDecl, name: &str) -> Vec<Waiting> {
     decl.actions(at)
         .iter()
         .filter_map(|action| match action {
-            Action::Say { session, text } => Some(Waiting::Say {
+            Action::Wake { session, text } => Some(Waiting::Wake {
                 session: session.clone(),
                 text: text.clone(),
             }),
@@ -512,7 +512,7 @@ fn short(entry: &Entry) -> String {
             None => format!("{name} -> {into}"),
         },
         Entry::Stopped { state, .. } => format!("stopped {state}"),
-        Entry::Said { session, .. } => format!("said {session}"),
+        Entry::Woke { session, .. } => format!("woke {session}"),
     }
 }
 

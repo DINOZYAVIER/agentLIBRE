@@ -45,9 +45,11 @@ pub enum Entry {
     },
     /// A human stopped the flow; it stays where it stood (D7).
     Stopped { time: u64, state: String },
-    /// The wake of an `action.say` delivered to `session` (D14, D20): the
-    /// line went, the journal keeps which one. It moves nothing.
-    Said { time: u64, session: String, text: String },
+    /// The wake of an `action.wake` delivered to `session` (D14, D20): the
+    /// line went, the journal keeps which one. It moves nothing. The line
+    /// is `woke` (AGL-121, D39); a journal that holds the old `said` line
+    /// still folds it, by the human's word for this one name.
+    Woke { time: u64, session: String, text: String },
 }
 
 impl Entry {
@@ -58,7 +60,7 @@ impl Entry {
             Entry::Started { time, .. }
             | Entry::Event { time, .. }
             | Entry::Stopped { time, .. }
-            | Entry::Said { time, .. } => *time,
+            | Entry::Woke { time, .. } => *time,
         }
     }
 
@@ -90,8 +92,8 @@ impl Entry {
             Entry::Stopped { time, state } => {
                 json!({ "type": "stopped", "time": time, "state": state })
             }
-            Entry::Said { time, session, text } => json!({
-                "type": "said",
+            Entry::Woke { time, session, text } => json!({
+                "type": "woke",
                 "time": time,
                 "session": session,
                 "text": text,
@@ -118,7 +120,9 @@ impl Entry {
                 time,
                 state: value["state"].as_str()?.into(),
             }),
-            "said" => Some(Entry::Said {
+            // `said` is the name this line had before D39 named the action
+            // `wake`: an old journal folds, a new one writes `woke`.
+            "woke" | "said" => Some(Entry::Woke {
                 time,
                 session: value["session"].as_str()?.into(),
                 text: value["text"].as_str()?.into(),
@@ -237,7 +241,7 @@ pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinishe
             // A `stopped` line names a state without moving it; a `started`
             // after it belongs to the run this fold follows (D7). A `said`
             // line records a delivery, not a step (D14).
-            Entry::Started { .. } | Entry::Stopped { .. } | Entry::Said { .. } => {}
+            Entry::Started { .. } | Entry::Stopped { .. } | Entry::Woke { .. } => {}
         }
     }
     Ok(Unfinished {
@@ -327,7 +331,7 @@ impl<'d> FlowRun<'d> {
                 }
                 // A stopped line marks where the human left it, a `said`
                 // line a delivery; neither moves anything (D7, D14).
-                Entry::Stopped { .. } | Entry::Said { .. } => {}
+                Entry::Stopped { .. } | Entry::Woke { .. } => {}
             }
         }
         Ok(trail)
