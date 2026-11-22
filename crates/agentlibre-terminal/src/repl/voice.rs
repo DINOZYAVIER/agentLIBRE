@@ -49,15 +49,15 @@ impl DraftEngine for Draft {
 /// one by one, so the lines keep their order; when the last sender of
 /// the recording drops, it stops.
 struct DraftWorker {
-    chunks: MpscSender<Vec<u8>>,
-    texts: Receiver<String>,
+    chunks: MpscSender<(Vec<u8>, u64)>,
+    texts: Receiver<(String, u64)>,
     _thread: JoinHandle<()>,
 }
 
 impl DraftWorker {
     fn start(draft: Arc<dyn DraftEngine>) -> DraftWorker {
-        let (ctx, crx) = mpsc::channel::<Vec<u8>>();
-        let (tx, rx) = mpsc::channel::<String>();
+        let (ctx, crx) = mpsc::channel::<(Vec<u8>, u64)>();
+        let (tx, rx) = mpsc::channel::<(String, u64)>();
         let thread = thread::spawn(move || {
             while let Ok(mut chunk) = crx.recv() {
                 // The latest window when the engine falls behind the
@@ -68,15 +68,55 @@ impl DraftWorker {
                 }
                 // A chunk that failed or came out empty shows nothing:
                 // the final pass has the last word (D7).
-                if let Ok(text) = draft.transcribe(&chunk)
+                if let Ok(text) = draft.transcribe(&chunk.0)
                     && !text.is_empty()
-                    && tx.send(text).is_err()
+                    && tx.send((text, chunk.1)).is_err()
                 {
                     break;
                 }
             }
         });
         DraftWorker { chunks: ctx, texts: rx, _thread: thread }
+    }
+}
+
+/// A piece of the recording for the final pass (AGL-122, D12): the
+/// audio, the confirmed text before it as prompt, and where it ends.
+struct FinalSeg {
+    wav: Vec<u8>,
+    prompt: String,
+    end: u64,
+}
+
+/// The final engine at work while the human still speaks (AGL-122,
+/// D12): one thread turns pieces into confirmed text strictly in the
+/// order of the recording, each with the tail of the text before it as
+/// prompt; the answers carry the end position back.
+struct FinalWorker {
+    req: MpscSender<FinalSeg>,
+    res: Receiver<(u64, Result<String, Error>)>,
+    _thread: JoinHandle<()>,
+}
+
+impl FinalWorker {
+    fn start(dictation: Arc<dyn crate::whisper::Dictation>, warm: Option<JoinHandle<Result<(), Error>>>) -> FinalWorker {
+        let (ctx, crx) = mpsc::channel::<FinalSeg>();
+        let (tx, rx) = mpsc::channel::<(u64, Result<String, Error>)>();
+        let thread = thread::spawn(move || {
+            // The server must be up before the first piece asks (D6).
+            if let Some(warm) = warm {
+                let _ = warm.join();
+            }
+            for seg in crx.iter() {
+                let prompt = if seg.prompt.is_empty() { None } else { Some(seg.prompt.as_str()) };
+                let answer =
+                    dictation.transcribe(&seg.wav, prompt, &mut |_| {});
+                if tx.send((seg.end, answer)).is_err() {
+                    break;
+                }
+            }
+        });
+        FinalWorker { req: ctx, res: rx, _thread: thread }
     }
 }
 
@@ -112,6 +152,22 @@ fn merge_draft(text: &str, fresh: &str) -> String {
     out
 }
 
+/// What the live block says (AGL-122, D12): the confirmed pieces first,
+/// then the draft beyond the last of them; where confirmed and draft
+/// meet, the seam folds as between two windows.
+fn compose(confirmed: &str, drafts: &[(u64, String)], upto: u64) -> String {
+    let first = drafts.iter().position(|(end, _)| *end > upto).unwrap_or(drafts.len());
+    let mut tail = String::new();
+    for (_, text) in &drafts[first..] {
+        tail = merge_draft(&tail, text);
+    }
+    if confirmed.is_empty() {
+        tail
+    } else {
+        merge_draft(confirmed, &tail)
+    }
+}
+
 struct Active {
     recording: Box<dyn Recording>,
     since: Instant,
@@ -122,13 +178,24 @@ struct Active {
     /// The live draft of this recording, when a draft engine is set
     /// (AGL-122, D5).
     worker: Option<DraftWorker>,
-    /// The draft text spoken so far, shown by the dock in place.
-    text: String,
+    /// The draft windows answered so far, each ending at its position
+    /// in the recording; only those beyond the confirmed pieces show (D12).
+    drafts: Vec<(u64, String)>,
+    /// The final engine following the recording piece by piece (D12).
+    final_worker: Option<FinalWorker>,
+    /// The confirmed text of the pieces answered so far.
+    final_text: String,
+    /// Where the confirmed text reaches, in recording milliseconds.
+    final_upto: u64,
+    /// Pieces sent to the final engine, answers not all back yet.
+    final_sent: usize,
+    /// A piece failed: the confirmed text cannot answer for the whole.
+    final_failed: bool,
 }
 
 enum State {
     Idle,
-    Recording(Active),
+    Recording(Box<Active>),
     Transcribing,
 }
 
@@ -286,15 +353,27 @@ impl VoiceInput {
             })
         };
         let worker = self.draft.clone().map(DraftWorker::start);
+        // The final pass follows the recording piece by piece (D12);
+        // the server-warming thread reports to it before the first ask.
+        let (warm, final_worker) = if chunking {
+            (None, Some(FinalWorker::start(self.dictation.clone(), Some(warm))))
+        } else {
+            (Some(warm), None)
+        };
         self.dock.set_draft(None);
-        *self.lock() = State::Recording(Active {
+        *self.lock() = State::Recording(Box::new(Active {
             recording,
             since: Instant::now(),
-            warm: Some(warm),
+            warm,
             id,
             worker,
-            text: String::new(),
-        });
+            drafts: Vec::new(),
+            final_worker,
+            final_text: String::new(),
+            final_upto: 0,
+            final_sent: 0,
+            final_failed: false,
+        }));
         self.dock.set_voice(Some(VoiceLabel::Recording(0, mode)));
         let me = self.clone();
         thread::spawn(move || me.watch(id));
@@ -315,27 +394,65 @@ impl VoiceInput {
                             let mode = self.mode();
                             self.dock.set_voice(Some(VoiceLabel::Recording(seconds, mode)));
                         }
-                        // The live draft (AGL-122): finished chunks go
-                        // to the engine, its finished lines to the
-                        // transcript; the final pass replaces them (D7).
+                        // The live draft (AGL-122): finished windows go
+                        // to the engine; its finished text, with the
+                        // confirmed pieces under it, fills the block (D12).
+                        let mut grew = false;
                         if let Some(worker) = active.worker.as_ref() {
-                            while let Some(chunk) = active.recording.poll_chunk() {
-                                if worker.chunks.send(chunk).is_err() {
+                            while let Some((chunk, end)) = active.recording.poll_chunk() {
+                                if worker.chunks.send((chunk, end)).is_err() {
                                     break;
                                 }
                             }
-                            // The draft grows in place, not line after
-                            // line (AGL-122): the whole text is set
-                            // again and the dock shows its last rows.
-                            let mut grew = false;
-                            while let Ok(text) = worker.texts.try_recv() {
-                                active.text = merge_draft(&active.text, &text);
+                            while let Ok((text, end)) = worker.texts.try_recv() {
+                                active.drafts.push((end, text));
                                 grew = true;
                             }
-                            if grew {
-                                let text = active.text.clone();
-                                self.dock.set_draft(Some(text));
+                        }
+                        if let Some(finalw) = active.final_worker.as_ref() {
+                            // A piece of the recording leaves for the
+                            // final engine when its pause comes (D12).
+                            while let Some((piece, end)) = active.recording.take_final() {
+                                let seg = FinalSeg {
+                                    wav: piece,
+                                    prompt: active.final_text.clone(),
+                                    end,
+                                };
+                                if finalw.req.send(seg).is_err() {
+                                    break;
+                                }
+                                active.final_sent += 1;
                             }
+                            // A confirmed piece replaces the draft words
+                            // it covers; the block grows exact (D12).
+                            while let Ok((end, answer)) = finalw.res.try_recv() {
+                                match answer {
+                                    Ok(text) => {
+                                        active.final_text = merge_draft(&active.final_text, &text);
+                                        active.final_upto = active.final_upto.max(end);
+                                    }
+                                    Err(_) => active.final_failed = true,
+                                }
+                                // One answer less stands between the
+                                // pieces sent and the text gathered.
+                                active.final_sent -= 1;
+                                grew = true;
+                            }
+                            if active.final_upto > 0 {
+                                // Draft windows the confirmed text has
+                                // passed no longer show.
+                                let first = active
+                                    .drafts
+                                    .iter()
+                                    .position(|(end, _)| *end > active.final_upto)
+                                    .unwrap_or(active.drafts.len());
+                                active.drafts.drain(..first.saturating_sub(1));
+                            }
+                        }
+                        if grew {
+                            let text =
+                                compose(&active.final_text, &active.drafts, active.final_upto);
+                            self.dock.set_draft(Some(text));
                         }
                         active.recording.finished()
                     }
@@ -413,11 +530,39 @@ impl VoiceInput {
         *self.send.lock().unwrap_or_else(|e| e.into_inner()) = Some(send);
     }
 
-    fn text_of(&self, active: Active) -> Result<String, Error> {
+    fn text_of(&self, active: Box<Active>) -> Result<String, Error> {
         let Active {
-            recording, warm, ..
-        } = active;
+            mut recording, warm, mut final_worker, mut final_text, final_sent, final_failed, ..
+        } = *active;
+        // The last piece of the recording joins the rest (D12); the
+        // whole WAV is kept for the answer of the fallback pass.
+        let tail = recording.take_final_tail();
         let wav = recording.stop()?;
+        if final_worker.is_some() && (final_sent > 0 || tail.is_some()) && !final_failed {
+            let fw = final_worker.take().unwrap();
+            let mut pending = final_sent;
+            if let Some((piece, end)) = tail {
+                let seg = FinalSeg { wav: piece, prompt: final_text.clone(), end };
+                if fw.req.send(seg).is_ok() {
+                    pending += 1;
+                }
+            }
+            drop(fw.req);
+            let mut exact = true;
+            for _ in 0..pending {
+                match fw.res.recv() {
+                    Ok((_, Ok(text))) => final_text = merge_draft(&final_text, &text),
+                    _ => {
+                        exact = false;
+                        break;
+                    }
+                }
+            }
+            if exact {
+                return Ok(final_text.trim().to_owned());
+            }
+            // A piece that failed: the whole recording answers instead.
+        }
         if let Some(warm) = warm {
             // The server that was starting must answer first; if it could
             // not start, that is the error.
@@ -428,7 +573,7 @@ impl VoiceInput {
         }
         let text = self
             .dictation
-            .transcribe(&wav, &mut |line| self.notice(line, Role::Muted))?;
+            .transcribe(&wav, None, &mut |line| self.notice(line, Role::Muted))?;
         Ok(text.trim().to_owned())
     }
 
@@ -456,7 +601,19 @@ impl VoiceInput {
 
 #[cfg(test)]
 mod seam_tests {
-    use super::merge_draft;
+    use super::{compose, merge_draft};
+
+    #[test]
+    fn the_block_is_confirmed_text_then_the_draft_beyond() {
+        let drafts = vec![(1200, "пере проверка".to_string()), (2400, "проверка связи".to_string())];
+        // Nothing confirmed yet: the draft whole, seam folded.
+        assert_eq!(compose("", &drafts, 0), "пере проверка связи");
+        // A piece confirmed to 1200 ms: the draft words it covers leave,
+        // the later draft stays, the meeting seam folds once (D12).
+        assert_eq!(compose("Проверка", &drafts, 1200), "Проверка связи");
+        // All confirmed, nothing owed: no draft beyond.
+        assert_eq!(compose("проверка связи", &[], 2400), "проверка связи");
+    }
 
     #[test]
     fn the_words_on_the_seam_are_spoken_once() {

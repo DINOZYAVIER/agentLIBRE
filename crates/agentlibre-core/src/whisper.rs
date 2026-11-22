@@ -173,6 +173,7 @@ pub fn transcribe(
     url: &str,
     private_ca: Option<&str>,
     heard: &std::sync::OnceLock<String>,
+    prompt: Option<&str>,
     wav: &[u8],
 ) -> Result<String, Error> {
     let boundary = "----agentLIBREwhisper7f3a9c";
@@ -187,6 +188,11 @@ pub fn transcribe(
     ];
     if let Some(language) = language {
         fields.push(("language", language));
+    }
+    // The tail of what came before, so a piece cut from the middle of
+    // a dictation keeps its punctuation and its words (AGL-122, D12).
+    if let Some(prompt) = prompt.filter(|p| !p.is_empty()) {
+        fields.push(("prompt", prompt));
     }
     for (name, value) in fields {
         body.extend_from_slice(
@@ -250,8 +256,15 @@ pub trait Dictation: Send + Sync {
     fn ready(&self) -> Result<(), Error>;
     /// Brings the server up; returns when it answers (D6).
     fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error>;
-    /// The text of a 16 kHz mono WAV.
-    fn transcribe(&self, wav: &[u8], say: &mut dyn FnMut(&str)) -> Result<String, Error>;
+    /// The text of a 16 kHz mono WAV, `prompt` the tail of the text
+    /// that came before it when the WAV is a piece of a longer speech
+    /// (AGL-122, D12).
+    fn transcribe(
+        &self,
+        wav: &[u8],
+        prompt: Option<&str>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<String, Error>;
 }
 
 /// Who turns a recording into text (AGL-051): the model of the Function when
@@ -336,13 +349,18 @@ impl Dictation for Voice {
         }
     }
 
-    fn transcribe(&self, wav: &[u8], say: &mut dyn FnMut(&str)) -> Result<String, Error> {
+    fn transcribe(
+        &self,
+        wav: &[u8],
+        prompt: Option<&str>,
+        say: &mut dyn FnMut(&str),
+    ) -> Result<String, Error> {
         if let (Route::Model, Some((model, _))) = (self.route()?, &self.model) {
             return model.transcribe(wav);
         }
         let server = self.server()?;
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
-        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, wav)
+        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, prompt, wav)
     }
 }
 
@@ -352,7 +370,7 @@ impl Transcriber for Autostart {
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
         say(&tr!(self.lang, m::TRANSCRIBING, name = source.name));
         let wav = media::audio_to_wav(&source.bytes)?;
-        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, &wav)
+        transcribe(&server.url, server.private_ca.as_deref(), &server.heard, None, &wav)
     }
 }
 
@@ -415,7 +433,7 @@ impl Draft {
     /// when it sleeps (the first chunk pays the load, D9), ask, return.
     pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
         ensure(&self.server, &self.models, self.path_var.clone(), &mut |_| {}, Lang::En)?;
-        transcribe(&self.server.url, self.server.private_ca.as_deref(), &self.server.heard, wav)
+        transcribe(&self.server.url, self.server.private_ca.as_deref(), &self.server.heard, None, wav)
     }
 }
 
@@ -562,7 +580,7 @@ mod tests {
         assert_eq!(voice.route().unwrap(), Route::Model);
         assert!(voice.ready().is_ok());
         assert!(voice.warm_up(&mut |_| {}).is_ok());
-        assert_eq!(voice.transcribe(b"RIFF", &mut |_| {}).unwrap(), "words");
+        assert_eq!(voice.transcribe(b"RIFF", None, &mut |_| {}).unwrap(), "words");
         let request = kept.lock().unwrap().clone();
         assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
         assert!(request.contains("input_audio") && request.contains(&crate::media::base64(b"RIFF")));
@@ -674,7 +692,7 @@ mod tests {
     #[test]
     fn the_audio_goes_as_a_multipart_form_and_the_text_comes_back_trimmed() {
         let (url, handle) = one_reply(200, "{\"text\":\" And so my fellow Americans,\\n ask not\\n\"}");
-        let text = transcribe(&url, None, &std::sync::OnceLock::new(), b"RIFFwav").unwrap();
+        let text = transcribe(&url, None, &std::sync::OnceLock::new(), None, b"RIFFwav").unwrap();
         assert_eq!(text, "And so my fellow Americans, ask not");
         let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
         assert!(request.starts_with("POST /inference HTTP/1.1"), "{request}");
@@ -691,11 +709,11 @@ mod tests {
         // re-hearing.
         let heard = std::sync::OnceLock::new();
         let (url, handle) = one_reply(200, "{\"text\":\" hi\",\"language\":\"russian\"}");
-        transcribe(&url, None, &heard, b"x").unwrap();
+        transcribe(&url, None, &heard, None, b"x").unwrap();
         handle.join().unwrap();
         assert_eq!(heard.get().map(String::as_str), Some("russian"));
         let (url, handle) = one_reply(200, "{\"text\":\" again\"}");
-        transcribe(&url, None, &heard, b"x").unwrap();
+        transcribe(&url, None, &heard, None, b"x").unwrap();
         let request = String::from_utf8_lossy(&handle.join().unwrap()).to_string();
         assert!(request.contains("name=\"language\"\r\n\r\nrussian"), "{request}");
         assert!(request.contains("name=\"response_format\"\r\n\r\njson"));
@@ -704,11 +722,11 @@ mod tests {
     #[test]
     fn a_whisper_error_is_an_error_with_its_text() {
         let (url, handle) = one_reply(500, "{\"error\":\"boom\"}");
-        let error = transcribe(&url, None, &std::sync::OnceLock::new(), b"x").unwrap_err();
+        let error = transcribe(&url, None, &std::sync::OnceLock::new(), None, b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail.contains("500") && detail.contains("boom")));
         let (url, handle) = one_reply(200, "{\"error\":\"no audio\"}");
-        let error = transcribe(&url, None, &std::sync::OnceLock::new(), b"x").unwrap_err();
+        let error = transcribe(&url, None, &std::sync::OnceLock::new(), None, b"x").unwrap_err();
         handle.join().unwrap();
         assert!(matches!(&error, Error::Transcribe { detail, .. } if detail == "no audio"));
     }

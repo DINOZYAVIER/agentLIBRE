@@ -28,9 +28,22 @@ pub trait Recording: Send {
     /// Whether it ended by itself: the limit was reached, or `ffmpeg`
     /// stopped.
     fn finished(&mut self) -> bool;
-    /// A finished speech chunk as a 16 kHz mono WAV, without waiting
-    /// (AGL-122, D6); `None` — none yet, or this mode does not chunk.
-    fn poll_chunk(&mut self) -> Option<Vec<u8>> {
+    /// A finished speech chunk as a 16 kHz mono WAV and the millisecond
+    /// of the recording it ends at, without waiting (AGL-122, D6);
+    /// `None` — none yet, or this mode does not chunk.
+    fn poll_chunk(&mut self) -> Option<(Vec<u8>, u64)> {
+        None
+    }
+    /// A finished piece of the whole recording for the final pass
+    /// (AGL-122, D12): the audio since the last piece, ending at the
+    /// first pause six or more seconds in, forced at twelve; `None` —
+    /// none ready, or this mode keeps no whole.
+    fn take_final(&mut self) -> Option<(Vec<u8>, u64)> {
+        None
+    }
+    /// The last piece of the whole recording, up to the sample reached
+    /// so far (AGL-122, D12); `None` when nothing meaningful is left.
+    fn take_final_tail(&mut self) -> Option<(Vec<u8>, u64)> {
         None
     }
     /// Ends it and returns the WAV.
@@ -130,8 +143,9 @@ impl Chunker {
         Some(((sum / FRAME_SAMPLES as i64) as f64).sqrt() as i64)
     }
 
-    /// Feeds samples; every finished window comes out as it ends.
-    pub fn push(&mut self, samples: &[i16]) -> Vec<Vec<i16>> {
+    /// Feeds samples; every finished window comes out as it ends, with
+    /// the sample position it ends at.
+    pub fn push(&mut self, samples: &[i16]) -> Vec<(u64, Vec<i16>)> {
         let mut out = Vec::new();
         for frame in samples.chunks(FRAME_SAMPLES) {
             self.kept.extend(frame.iter().copied());
@@ -161,24 +175,24 @@ impl Chunker {
     }
 
     /// The pending window at the end of the recording: whatever speech
-    /// has no window yet goes out whole.
-    pub fn flush(&mut self) -> Option<Vec<i16>> {
+    /// has no window yet goes out whole, with its end position.
+    pub fn flush(&mut self) -> Option<(u64, Vec<i16>)> {
         let start = self.start?;
         self.start = None;
         self.voiced = false;
         if start >= self.written {
             return None;
         }
-        Some(self.take(start, self.written))
+        Some((self.written, self.take(start, self.written)))
     }
 
     /// Closes the window, from its start to now, and opens the next one
     /// `overlap_ms` before the cut, so no word is lost on the seam.
-    fn cut(&mut self) -> Vec<i16> {
+    fn cut(&mut self) -> (u64, Vec<i16>) {
         let start = self.start.take().unwrap_or(self.base).max(self.base);
         self.start = Some((self.written - self.tail_samples).max(self.base));
         self.voiced = false;
-        self.take(start, self.written)
+        (self.written, self.take(start, self.written))
     }
 
     /// A window of pure silence: nothing to hear, nothing to keep.
@@ -201,6 +215,40 @@ impl Chunker {
         }
         chunk
     }
+}
+
+/// The final-pass segmenter of the whole recording (AGL-122, D12): the
+/// first pause of a quarter second at least six seconds into the piece,
+/// a forced cut at twelve, and the next piece starting a second and a
+/// half back so no word stands on the seam alone. `scan` remembers how
+/// far the pauses were already sought; positions are samples of `full`.
+const FINAL_MIN: usize = 6 * 16000;
+const FINAL_MAX: usize = 12 * 16000;
+const FINAL_PAUSE_FRAMES: usize = 13;
+const FINAL_QUIET: i64 = 150;
+const FINAL_OVERLAP: usize = 1500 * 16;
+
+fn segment_cut(full: &[i16], next: usize, scan: &mut usize) -> Option<usize> {
+    let min = next + FINAL_MIN;
+    if full.len() < min {
+        return None;
+    }
+    *scan = (*scan).max(min);
+    let limit = (next + FINAL_MAX).min(full.len());
+    let mut quiet = 0;
+    while *scan + FRAME_SAMPLES <= limit {
+        let frame = Chunker::rms(&full[*scan..*scan + FRAME_SAMPLES]).unwrap_or(0);
+        if frame < FINAL_QUIET {
+            quiet += 1;
+        } else {
+            quiet = 0;
+        }
+        *scan += FRAME_SAMPLES;
+        if quiet >= FINAL_PAUSE_FRAMES {
+            return Some(*scan - quiet * FRAME_SAMPLES + FRAME_SAMPLES);
+        }
+    }
+    (full.len() >= next + FINAL_MAX).then(|| next + FINAL_MAX)
 }
 
 /// A 16 kHz mono WAV of `samples`.
@@ -286,7 +334,7 @@ mod chunker_tests {
         let mut chunks = c.push(&tone(30 * FRAME_SAMPLES));
         chunks.extend(c.push(&tone(40 * FRAME_SAMPLES)));
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].len() <= 80 * FRAME_SAMPLES, "{:?}", chunks[0].len());
+        assert!(chunks[0].1.len() <= 80 * FRAME_SAMPLES, "{:?}", chunks[0].1.len());
     }
 
     #[test]
@@ -297,7 +345,7 @@ mod chunker_tests {
         let mut c = Chunker::new(vad);
         let chunks = c.push(&tone(60 * FRAME_SAMPLES));
         assert!(chunks.len() >= 2, "{:?}", chunks.len());
-        assert_eq!(&chunks[0][chunks[0].len() - 4800..], &chunks[1][..4800]);
+        assert_eq!(&chunks[0].1[chunks[0].1.len() - 4800..], &chunks[1].1[..4800]);
     }
 
     #[test]
@@ -305,7 +353,7 @@ mod chunker_tests {
         let mut c = Chunker::new(Vad::default());
         assert!(c.push(&tone(2 * 20 * FRAME_SAMPLES)).is_empty());
         let tail = c.flush().unwrap();
-        assert!(tail.len() >= 2 * 20 * FRAME_SAMPLES);
+        assert!(tail.1.len() >= 2 * 20 * FRAME_SAMPLES);
         assert!(c.flush().is_none());
     }
 
@@ -330,6 +378,36 @@ mod chunker_tests {
         let mut hum_only = Chunker::new(Vad::default());
         let chunks = hum_only.push(&hum);
         assert!(chunks.is_empty(), "the room hum alone opens no window");
+    }
+
+    #[test]
+    fn a_final_piece_ends_at_a_pause_after_the_floor() {
+        // Eight seconds of speech, then a pause: the piece ends there,
+        // the pause being past the six-second floor (D12).
+        let mut full = tone(8 * 16000);
+        full.extend(silence(20 * FRAME_SAMPLES));
+        let mut scan = 0;
+        let cut = segment_cut(&full, 0, &mut scan).unwrap();
+        let pause = 8 * 16000;
+        assert!(pause as i64 - cut as i64 <= FRAME_SAMPLES as i64, "{cut}");
+    }
+
+    #[test]
+    fn a_pause_before_the_floor_is_not_the_end() {
+        // A pause at three seconds is too early for a piece's end; with
+        // no later pause the force at twelve cuts.
+        let mut full = tone(3 * 16000);
+        full.extend(silence(16000));
+        full.extend(tone(9 * 16000));
+        let mut scan = 0;
+        assert_eq!(segment_cut(&full, 0, &mut scan), Some(FINAL_MAX));
+    }
+
+    #[test]
+    fn no_piece_before_the_floor() {
+        let full = tone(5 * 16000);
+        let mut scan = 0;
+        assert_eq!(segment_cut(&full, 0, &mut scan), None);
     }
 
     #[test]
@@ -364,8 +442,13 @@ struct Ffmpeg {
     rx: Option<Receiver<Vec<i16>>>,
     chunker: Option<Chunker>,
     full: Vec<i16>,
-    /// Windows a single read cut but this poll has not given up yet.
-    pending: std::collections::VecDeque<Vec<i16>>,
+    /// Windows a single read cut but this poll has not given up yet,
+    /// each with the sample it ends at.
+    pending: std::collections::VecDeque<(Vec<i16>, u64)>,
+    /// Where the next final piece starts in `full` (AGL-122, D12).
+    final_next: usize,
+    /// How far the pauses for it were already sought.
+    final_scan: usize,
 }
 
 impl Ffmpeg {
@@ -410,6 +493,8 @@ impl Ffmpeg {
             chunker: None,
             full: Vec::new(),
             pending: std::collections::VecDeque::new(),
+            final_next: 0,
+            final_scan: 0,
         };
         // No source or no sound server: ffmpeg fails at once, and the
         // human is told before speaking.
@@ -480,6 +565,8 @@ impl Ffmpeg {
             chunker: Some(Chunker::new(vad)),
             full: Vec::new(),
             pending: std::collections::VecDeque::new(),
+            final_next: 0,
+            final_scan: 0,
         };
         // As in `start`: no source or no sound server fails at once.
         let watched = Instant::now();
@@ -525,9 +612,9 @@ impl Recording for Ffmpeg {
         self.child.is_none() || self.exited().is_some()
     }
 
-    fn poll_chunk(&mut self) -> Option<Vec<u8>> {
-        if let Some(chunk) = self.pending.pop_front() {
-            return Some(wav16k(&chunk));
+    fn poll_chunk(&mut self) -> Option<(Vec<u8>, u64)> {
+        if let Some((chunk, end)) = self.pending.pop_front() {
+            return Some((wav16k(&chunk), end / 16));
         }
         let rx = self.rx.as_mut()?;
         loop {
@@ -535,20 +622,45 @@ impl Recording for Ffmpeg {
                 Ok(samples) => {
                     self.full.extend(samples.iter().copied());
                     let chunks = self.chunker.as_mut()?.push(&samples);
-                    let mut queue = std::collections::VecDeque::from(chunks);
-                    if let Some(chunk) = queue.pop_front() {
+                    let mut queue = std::collections::VecDeque::<(Vec<i16>, u64)>::from(
+                        chunks.into_iter().map(|(end, chunk)| (chunk, end)).collect::<Vec<_>>(),
+                    );
+                    if let Some((chunk, end)) = queue.pop_front() {
                         self.pending = queue;
-                        return Some(wav16k(&chunk));
+                        return Some((wav16k(&chunk), end / 16));
                     }
                 }
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Disconnected) => {
                     self.rx = None;
-                    let tail = self.chunker.as_mut().and_then(|c| c.flush()).map(|c| wav16k(&c));
+                    let tail = self
+                        .chunker
+                        .as_mut()
+                        .and_then(|c| c.flush())
+                        .map(|(end, chunk)| (wav16k(&chunk), end / 16));
                     return tail;
                 }
             }
         }
+    }
+
+    fn take_final(&mut self) -> Option<(Vec<u8>, u64)> {
+        self.chunker.as_ref()?;
+        let cut = segment_cut(&self.full, self.final_next, &mut self.final_scan)?;
+        let piece = wav16k(&self.full[self.final_next..cut]);
+        self.final_next = cut.saturating_sub(FINAL_OVERLAP);
+        Some((piece, (cut / 16) as u64))
+    }
+
+    fn take_final_tail(&mut self) -> Option<(Vec<u8>, u64)> {
+        self.chunker.as_ref()?;
+        let len = self.full.len();
+        if len < self.final_next + FINAL_OVERLAP / 5 {
+            return None;
+        }
+        let piece = wav16k(&self.full[self.final_next..len]);
+        self.final_next = len;
+        Some((piece, (len / 16) as u64))
     }
 
     fn stop(mut self: Box<Self>) -> Result<Vec<u8>, Error> {
@@ -599,9 +711,9 @@ impl Recording for Ffmpeg {
                     }
                 }
             }
-            if let Some(tail) = self.chunker.as_mut().and_then(|c| c.flush()) {
-                self.full.extend(tail);
-            }
+            // The whole already holds every sample, the unfinished
+            // window too: the chunker's copy must not be added again
+            // (the final pass would hear those seconds twice).
             let bytes = wav16k(&self.full);
             if bytes.len() > 44 {
                 return Ok(bytes);
@@ -805,7 +917,7 @@ mod tests {
         let got = Instant::now();
         let mut chunks = Vec::new();
         while chunks.len() < 3 && got.elapsed() < Duration::from_secs(10) {
-            while let Some(chunk) = recording.poll_chunk() {
+            while let Some((chunk, _end)) = recording.poll_chunk() {
                 assert!(chunk.len() > 44);
                 assert_eq!(&chunk[0..4], b"RIFF");
                 chunks.push(chunk);

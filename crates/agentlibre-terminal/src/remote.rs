@@ -115,7 +115,12 @@ impl Dictation for RemoteVoice {
         Ok(())
     }
 
-    fn transcribe(&self, wav: &[u8], _say: &mut dyn FnMut(&str)) -> Result<String, Error> {
+    fn transcribe(
+        &self,
+        wav: &[u8],
+        _prompt: Option<&str>,
+        _say: &mut dyn FnMut(&str),
+    ) -> Result<String, Error> {
         let client = Client::connect(&self.paths, false, self.lang, true)?;
         let request = Request::Transcribe {
             dir: self.dir.clone(),

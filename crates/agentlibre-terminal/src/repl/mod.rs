@@ -1745,6 +1745,8 @@ mod tests {
         /// The chunks the fake recording still owes the draft (AGL-122).
         chunks: std::sync::atomic::AtomicUsize,
         drafts: std::sync::atomic::AtomicUsize,
+        /// The pieces the fake recording still owes the final pass (D12).
+        finals: std::sync::atomic::AtomicUsize,
     }
 
     /// The draft engine of the tests: every chunk becomes its number.
@@ -1775,14 +1777,23 @@ mod tests {
         fn cancel(self: Box<Self>) {
             self.0.log.lock().unwrap().push("cancel".into());
         }
-        fn poll_chunk(&mut self) -> Option<Vec<u8>> {
+        fn poll_chunk(&mut self) -> Option<(Vec<u8>, u64)> {
             // A chunk per call, as many as the test owed (AGL-122).
             let left = self.0.chunks.load(Ordering::SeqCst);
             if left == 0 {
                 return None;
             }
             self.0.chunks.store(left - 1, Ordering::SeqCst);
-            Some(vec![0u8; 45])
+            Some((vec![0u8; 45], 1200))
+        }
+        fn take_final(&mut self) -> Option<(Vec<u8>, u64)> {
+            // A finished piece per call, as many as the test owed (D12).
+            let left = self.0.finals.load(Ordering::SeqCst);
+            if left == 0 {
+                return None;
+            }
+            self.0.finals.store(left - 1, Ordering::SeqCst);
+            Some((vec![0u8; 45], 8000))
         }
     }
 
@@ -1802,7 +1813,12 @@ mod tests {
             self.0.log.lock().unwrap().push("warm".into());
             Ok(())
         }
-        fn transcribe(&self, wav: &[u8], _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+        fn transcribe(
+            &self,
+            wav: &[u8],
+            _prompt: Option<&str>,
+            _: &mut dyn FnMut(&str),
+        ) -> Result<String, Error> {
             while self.0.hold.load(Ordering::SeqCst) {
                 thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -2170,6 +2186,20 @@ mod tests {
         eventually("the send", || f.inner().texts() == ["hello world"]);
         // The final pass took the stage: no draft rows stand under it.
         assert!(!f.output().rsplit("hello world").next().unwrap().contains("draft1"));
+    }
+
+    #[test]
+    fn a_confirmed_piece_replaces_the_draft() {
+        // AGL-122, D12: whisper's text of a finished piece stands in
+        // the block in place of the draft words it covers, while the
+        // human still speaks.
+        let f = fixture();
+        f.fake.chunks.store(2, Ordering::SeqCst);
+        f.fake.finals.store(1, Ordering::SeqCst);
+        f.input.key(Key::Ctrl('r'));
+        eventually("the confirmed text", || f.output().contains("hello world"));
+        f.input.key(Key::Ctrl('r'));
+        eventually("the send", || f.inner().texts() == ["hello world"]);
     }
 
     #[test]

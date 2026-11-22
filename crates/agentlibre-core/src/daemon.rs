@@ -965,7 +965,7 @@ impl Daemon {
             crate::media::audio_to_wav(&source.bytes)?
         };
         voice.warm_up(&mut |_| {})?;
-        voice.transcribe(&wav, &mut |_| {})
+        voice.transcribe(&wav, None, &mut |_| {})
     }
 
     /// One look at the idle clocks (AGL-120, D2): a server whose clock
