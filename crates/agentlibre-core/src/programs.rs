@@ -10,7 +10,43 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::error::Error;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
+
+/// A helper program of agl's package cannot be found (AGL-040; AGL-121,
+/// D75).
+#[derive(Debug)]
+pub enum Error {
+    /// `AGENTLIBRE_TOOLS` is not set to an absolute directory: agl runs
+    /// outside its package's wrapper and the dev shell (AGL-040).
+    ToolsDirMissing,
+    /// A helper program is not in the `AGENTLIBRE_TOOLS` directory.
+    ToolMissing { name: String, dir: PathBuf },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::ToolsDirMissing => tr!(lang, TOOLS_DIR_MISSING, var = TOOLS_VAR),
+            Self::ToolMissing { name, dir } => {
+                tr!(lang, TOOL_MISSING, name = name, dir = dir.display())
+            }
+        }
+    }
+}
+
+/// `Error::ToolsDirMissing` (AGL-040), and nix's missing directories.
+pub(crate) const TOOLS_DIR_MISSING: Msg = Msg {
+    en: "{var} is not set: run agl from its Nix package or `nix develop`",
+    uk: "{var} не задано: запускай agl з його Nix-пакета або в `nix develop`",
+};
+
+/// `Error::ToolMissing` (AGL-040).
+const TOOL_MISSING: Msg = Msg {
+    en: "{name} is not in {dir}",
+    uk: "{name} немає в {dir}",
+};
 
 /// The variable of the helper programs' directory (AGL-040, D2).
 pub const TOOLS_VAR: &str = "AGENTLIBRE_TOOLS";

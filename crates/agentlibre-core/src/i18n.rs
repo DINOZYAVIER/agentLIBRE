@@ -2034,18 +2034,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Завантажую {name} ({size})",
     };
 
-    /// `Error::ToolsDirMissing` (AGL-040).
-    pub const TOOLS_DIR_MISSING: Msg = Msg {
-        en: "{var} is not set: run agl from its Nix package or `nix develop`",
-        uk: "{var} не задано: запускай agl з його Nix-пакета або в `nix develop`",
-    };
-
-    /// `Error::ToolMissing` (AGL-040).
-    pub const TOOL_MISSING: Msg = Msg {
-        en: "{name} is not in {dir}",
-        uk: "{name} немає в {dir}",
-    };
-
     /// `Error::Write`.
     pub const FORGE_WRITE: Msg = Msg {
         en: "cannot write {path}: {source}",
@@ -2452,12 +2440,7 @@ impl Error {
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
             Error::Nix(error) => error.message(lang),
-            Error::ToolsDirMissing => {
-                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::programs::TOOLS_VAR)
-            }
-            Error::ToolMissing { name, dir } => {
-                tr!(lang, m::TOOL_MISSING, name = name, dir = dir.display())
-            }
+            Error::Programs(error) => error.message(lang),
             Error::Write { path, source } => {
                 tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
             }

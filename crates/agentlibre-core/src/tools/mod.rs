@@ -108,7 +108,7 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
         Err(error) => {
             return ToolResult {
                 outcome: Outcome::Fail,
-                content: format!("Cannot run bash: {error}"),
+                content: format!("Cannot run bash: {}", error.message(Lang::En)),
             };
         }
     };

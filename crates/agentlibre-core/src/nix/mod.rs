@@ -50,11 +50,11 @@ impl Error {
     /// The message of `self` in `lang`.
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            // `TOOLS_DIR_MISSING` is shared with `Error::ToolsDirMissing`
-            // (AGL-121, D66), so it stays in `crate::i18n::m`.
-            Self::DirMissing => tr!(lang, crate::i18n::m::TOOLS_DIR_MISSING, var = NIX_VAR),
+            // `TOOLS_DIR_MISSING` is the text of
+            // `programs::Error::ToolsDirMissing`, shared (AGL-121, D66, D75).
+            Self::DirMissing => tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = NIX_VAR),
             Self::FunctionsDirMissing => {
-                tr!(lang, crate::i18n::m::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
+                tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
             }
             Self::NotFound { source } => tr!(lang, NIX_NOT_FOUND, source = source),
             Self::Eval { path, detail } => {

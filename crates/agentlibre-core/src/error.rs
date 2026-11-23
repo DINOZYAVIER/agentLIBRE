@@ -140,11 +140,9 @@ pub enum Error {
     /// file that is not a function (AGL-039, D6-D13, D38). Its own type,
     /// wrapped (AGL-121, D66).
     Nix(crate::nix::Error),
-    /// `AGENTLIBRE_TOOLS` is not set to an absolute directory: agl runs
-    /// outside its package's wrapper and the dev shell (AGL-040).
-    ToolsDirMissing,
-    /// A helper program is not in the `AGENTLIBRE_TOOLS` directory.
-    ToolMissing { name: String, dir: PathBuf },
+    /// A helper program of agl's package cannot be found (AGL-040). Its own
+    /// type, wrapped (AGL-121, D75).
+    Programs(crate::programs::Error),
     /// A forge file or directory cannot be written.
     Write { path: PathBuf, source: io::Error },
     /// A memory entry not found or not removed (AGL-060). Its own type,
@@ -248,6 +246,13 @@ impl From<crate::paths::Error> for Error {
     /// The paths' own error as agl's (AGL-121, D75).
     fn from(source: crate::paths::Error) -> Error {
         Error::Paths(source)
+    }
+}
+
+impl From<crate::programs::Error> for Error {
+    /// The programs' own error as agl's (AGL-121, D75).
+    fn from(source: crate::programs::Error) -> Error {
+        Error::Programs(source)
     }
 }
 
