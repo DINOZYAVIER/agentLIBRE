@@ -1119,12 +1119,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "перервано",
     };
 
-    /// `Error::OutsideGrammar`.
-    pub const OUTSIDE_GRAMMAR: Msg = Msg {
-        en: "llama-server generated text outside the grammar: {text:?}",
-        uk: "llama-server згенерував текст поза граматикою: {text:?}",
-    };
-
     /// `agl server stop` with `server.llama.external` (AGL-052, D4).
     pub const SERVER_OUTSIDE_NOT_STOPPED: Msg = Msg {
         en: "the server at {url} runs outside agl, and agl does not stop it",
@@ -2436,7 +2430,6 @@ impl Error {
             Error::Machine(error) => error.message(lang),
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
-            Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
             Error::Nix(error) => error.message(lang),

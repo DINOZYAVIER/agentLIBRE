@@ -38,6 +38,8 @@ pub enum Error {
     /// The prompt names a medium but the server has no multimodal
     /// projector (AGL-014).
     NoMultimodal,
+    /// The server generated text the grammar does not allow.
+    OutsideGrammar(String),
 }
 
 impl Error {
@@ -80,6 +82,7 @@ impl Error {
                 tr!(lang, SERVER_CERTIFICATE, url = url, detail = detail, key = key)
             }
             Self::NoMultimodal => tr!(lang, NO_MULTIMODAL).to_string(),
+            Self::OutsideGrammar(text) => tr!(lang, OUTSIDE_GRAMMAR, text = text),
         }
     }
 }
@@ -118,4 +121,10 @@ const SERVER_STATUS: Msg = Msg {
 const SERVER_UNREACHABLE: Msg = Msg {
     en: "cannot reach {server} at {url}: {detail}\nTo start it: agl server start",
     uk: "не вдалося з'єднатися з {server} за адресою {url}: {detail}\nЩоб запустити: agl server start",
+};
+
+/// `Error::OutsideGrammar`.
+const OUTSIDE_GRAMMAR: Msg = Msg {
+    en: "llama-server generated text outside the grammar: {text:?}",
+    uk: "llama-server згенерував текст поза граматикою: {text:?}",
 };

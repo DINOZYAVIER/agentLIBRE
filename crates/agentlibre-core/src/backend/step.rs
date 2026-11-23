@@ -195,7 +195,7 @@ fn completion<B: Backend + ?Sized>(
     }
     // The grammar allows nothing else, so the server broke it.
     let action = action::parse(format, input.actions, &output)
-        .map_err(|_| Error::OutsideGrammar(generated.text.clone()))?;
+        .map_err(|_| super::error::Error::OutsideGrammar(generated.text.clone()))?;
     Ok(Stepped::Action(action))
 }
 

@@ -193,13 +193,13 @@ impl Agent<'_> {
                 Ok(None) => continue,
                 Err(Error::Interrupted) => StopReason::Interrupted,
                 Err(
-                    error @ (Error::Backend(
+                    error @ Error::Backend(
                         BackendError::ServerUnreachable { .. }
                         | BackendError::ServerCertificate { .. }
                         | BackendError::ServerStatus { .. }
-                        | BackendError::ServerReply { .. },
-                    )
-                    | Error::OutsideGrammar(_)),
+                        | BackendError::ServerReply { .. }
+                        | BackendError::OutsideGrammar(_),
+                    ),
                 ) => {
                     self.session.append(Event::Stop(StopReason::ServerError))?;
                     return Err(error);

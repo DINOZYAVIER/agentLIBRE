@@ -83,8 +83,6 @@ pub enum Error {
     Terminal { source: io::Error },
     /// Ctrl-C stopped a generation (D111).
     Interrupted,
-    /// The server generated text the grammar does not allow.
-    OutsideGrammar(String),
     /// `--attach` without `-p` (AGL-014, D21).
     AttachWithoutPrompt,
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;

@@ -891,7 +891,7 @@ fn stops() {
 
     let script = Script::new(&[("<tool_call>\n<function=nope>", Stop::End)]);
     let (end, _, session) = run(&one_step, &script, &dir, "go");
-    assert!(matches!(end, Err(Error::OutsideGrammar(_))));
+    assert!(matches!(end, Err(Error::Backend(crate::backend::error::Error::OutsideGrammar(_)))));
     assert_eq!(
         session.events.last(),
         Some(&Event::Stop(StopReason::ServerError))
