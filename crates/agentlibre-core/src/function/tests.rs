@@ -80,7 +80,7 @@ fn plain(extra: &str) -> String {
 
 fn problem_of(result: Result<Function, Error>) -> (String, FunctionProblem) {
     match result {
-        Err(Error::Function { key, problem, .. }) => (key, problem),
+        Err(Error::Function(FunctionError::Invalid { key, problem, .. })) => (key, problem),
         other => panic!("expected a Function problem, got {other:?}"),
     }
 }
@@ -318,7 +318,7 @@ fn files_and_names() {
     let replaced = Function::load(&[&dir.0, none()], "fixture-high");
     let missing = Function::load(&[&dir.0, none()], "coder");
     assert_eq!(replaced.unwrap().states.len(), 3);
-    assert!(matches!(missing, Err(Error::FunctionNotFound { name, .. }) if name == "coder"));
+    assert!(matches!(missing, Err(Error::Function(FunctionError::NotFound { name, .. })) if name == "coder"));
     assert!(matches!(
         Function::load(&[none(), none()], "../default"),
         Err(Error::InvalidName(_))
@@ -364,7 +364,7 @@ fn the_load_tiers() {
     let missing = Function::load(&[&workspace.0, &user.0], "no-such");
     assert!(matches!(
         missing,
-        Err(Error::FunctionNotFound { ref name, ref paths })
+        Err(Error::Function(FunctionError::NotFound { ref name, ref paths }))
             if name == "no-such" && paths[0] == workspace.0 && paths[1] == user.0
     ));
 }

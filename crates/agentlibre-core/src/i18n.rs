@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected, FunctionProblem, NameProblem, ServerOwner};
+use crate::error::{Error, Expected, NameProblem, ServerOwner};
 use crate::function::Function;
 use crate::session::StopReason;
 
@@ -1023,29 +1023,11 @@ Forge (сховище артефактів робочої області, agentL
         uk: "некоректна назва `{name}`: назва непорожня, без `/` і не починається з `.`",
     };
 
-    /// A template or Function problem at `key` of `path` (`Error::Template`,
-    /// `Error::Function`).
+    /// A template or Function problem at `key` of `path` (`format::Error`,
+    /// `function::error::Error::Invalid`).
     pub const PROBLEM_IN_PATH: Msg = Msg {
         en: "`{key}` in {path}: {problem}",
         uk: "`{key}` у {path}: {problem}",
-    };
-
-    /// `Error::FunctionNotFound`.
-    pub const FUNCTION_NOT_FOUND: Msg = Msg {
-        en: "Function `{name}` not found: no {paths} and no built-in Function of that name",
-        uk: "Function `{name}` не знайдено: немає {paths} і вбудованої Function з такою назвою",
-    };
-
-    /// `Error::FunctionBuiltIn`.
-    pub const FUNCTION_BUILTIN: Msg = Msg {
-        en: "Function `{name}` is built-in: its file belongs to the repository; make your own with `/function new <name> {name}`",
-        uk: "Function `{name}` вбудована: її файл належить репозиторію; зробіть власну через `/function new <назва> {name}`",
-    };
-
-    /// `Error::FunctionExists`.
-    pub const FUNCTION_EXISTS: Msg = Msg {
-        en: "Function `{name}` already exists: nothing was written",
-        uk: "Function `{name}` уже є: нічого не записано",
     };
 
     /// `agl function new` copied a Function (AGL-102, D3).
@@ -1599,124 +1581,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const ENGINE_TIMEOUT: Msg = Msg {
         en: "the engine was not ready after {seconds} s; see {log}",
         uk: "движок не став готовим за {seconds} с; див. {log}",
-    };
-
-    /// `FunctionProblem::UnknownState`.
-    pub const FUNC_UNKNOWN_STATE: Msg = Msg {
-        en: "there is no state `{name}`",
-        uk: "стану `{name}` немає",
-    };
-
-    /// `FunctionProblem::BadTransitionKey`.
-    pub const FUNC_BAD_TRANSITION_KEY: Msg = Msg {
-        en: "a transition is `next.<tool>.ok`/`.fail`/`.timeout`/`.any` of a tool of the state, or `next.otherwise`",
-        uk: "перехід — це `next.<tool>.ok`/`.fail`/`.timeout`/`.any` для tool цього стану або `next.otherwise`",
-    };
-
-    /// `FunctionProblem::MissingTransition`.
-    pub const FUNC_MISSING_TRANSITION: Msg = Msg {
-        en: "no transition for `{tool}.{outcome}`; add it, `{tool}` or `else` to `next`",
-        uk: "немає переходу для `{tool}.{outcome}`; додай його, `{tool}` або `else` у `next`",
-    };
-
-    /// `FunctionProblem::NoActions`.
-    pub const FUNC_NO_ACTIONS: Msg = Msg {
-        en: "the state has no tools and no `answer = true`",
-        uk: "стан не має ні tools, ні `answer = true`",
-    };
-
-    /// `FunctionProblem::NextWithoutTools`.
-    pub const FUNC_NEXT_WITHOUT_TOOLS: Msg = Msg {
-        en: "`next` needs tools; an answer ends the turn",
-        uk: "`next` потребує tools; відповідь завершує хід",
-    };
-
-    /// `FunctionProblem::OnLimitWithoutLimit`.
-    pub const FUNC_ON_LIMIT_WITHOUT_LIMIT: Msg = Msg {
-        en: "`on_limit` needs `max_steps` or `max_visits`",
-        uk: "`on_limit` потребує `max_steps` або `max_visits`",
-    };
-
-    /// `FunctionProblem::OnLimitCycle`.
-    pub const FUNC_ON_LIMIT_CYCLE: Msg = Msg {
-        en: "`on_limit` states lead back to this state",
-        uk: "стани `on_limit` ведуть назад у цей стан",
-    };
-
-    /// `FunctionProblem::Unreachable`.
-    pub const FUNC_UNREACHABLE: Msg = Msg {
-        en: "no transition leads to this state",
-        uk: "у цей стан не веде жоден перехід",
-    };
-
-    /// `FunctionProblem::NoThinking`.
-    pub const FUNC_NO_THINKING: Msg = Msg {
-        en: "model format `{format}` has no thinking; remove `think = true`",
-        uk: "формат моделі `{format}` не має thinking; прибери `think = true`",
-    };
-
-    /// `FunctionProblem::PatternMayEndValue`.
-    pub const FUNC_PATTERN_MAY_END_VALUE: Msg = Msg {
-        en: "the pattern may produce {end:?}, which ends a value in this model format",
-        uk: "шаблон може дати {end:?}, а це кінець значення у форматі моделі",
-    };
-
-    /// `FunctionProblem::EmptyEnum`.
-    pub const FUNC_EMPTY_ENUM: Msg = Msg {
-        en: "`enum` needs at least one value",
-        uk: "`enum` потребує хоча б одного значення",
-    };
-
-    /// `FunctionProblem::BadRange`.
-    pub const FUNC_BAD_RANGE: Msg = Msg {
-        en: "needs `min <= max`, and `min >= 1` for `timeout`",
-        uk: "потрібно `min <= max`, а для `timeout` ще `min >= 1`",
-    };
-
-    /// `FunctionProblem::ConstraintKeys`.
-    pub const FUNC_CONSTRAINT_KEYS: Msg = Msg {
-        en: "a constraint has exactly one key",
-        uk: "обмеження має рівно один ключ",
-    };
-
-    /// `FunctionProblem::NotPositive`.
-    pub const FUNC_NOT_POSITIVE: Msg = Msg {
-        en: "must be at least 1",
-        uk: "має бути щонайменше 1",
-    };
-    /// The `model` of a Function of the llama kind has no `weights`
-    /// (AGL-033, D1; AGL-039, D19).
-    pub const FUNC_SERVER_MODEL_MISSING: Msg = Msg {
-        en: "the model of the llama kind needs `weights`",
-        uk: "модель llama-виду потребує `weights`",
-    };
-    /// The `model` of a Function of the strata kind lacks a key
-    /// (AGL-089, D5).
-    pub const FUNC_SERVER_STRATA_KEY_MISSING: Msg = Msg {
-        en: "the model of the strata kind needs `{key}`",
-        uk: "модель strata-виду потребує `{key}`",
-    };
-    /// `source.gguf` against `gguf` (AGL-089, D4).
-    pub const FUNC_SOURCE_SHARDS_MISMATCH: Msg = Msg {
-        en: "`source.gguf` needs one source for each file of `gguf`, in their order",
-        uk: "`source.gguf` потребує по одному джерелу на кожен файл `gguf`, у тому ж порядку",
-    };
-
-    pub const FUNC_BAD_WEIGHTS_NAME: Msg = Msg {
-        en: "a weights file is a file name (looked for in the weights folders) or an absolute path",
-        uk: "файл ваг — це ім'я файлу (шукається в теках ваг) або абсолютний шлях",
-    };
-
-    pub const FUNC_SOURCE_WITHOUT_FILE: Msg = Msg {
-        en: "`source` names a file the model does not set",
-        uk: "`source` називає файл, якого модель не задає",
-    };
-
-    /// A key of the Function's `model` that does not apply to its kind
-    /// (AGL-033, D1; AGL-034, D4).
-    pub const FUNC_SERVER_KEY_OF_OTHER_KIND: Msg = Msg {
-        en: "{key} belongs to the {kind} kind, not to the model's `kind`",
-        uk: "{key} належить до {kind}-виду, не до `kind` цієї моделі",
     };
 
     /// The label of streamed thinking (D109), in caps as the tool's
@@ -2471,24 +2335,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} немає в жодній теці ваг. У якій теці він? (абсолютний шлях; порожньо — зупинити)",
     };
 
-    /// `FunctionProblem::BadSourceUrl` (AGL-050, D8).
-    pub const FUNC_BAD_SOURCE_URL: Msg = Msg {
-        en: "a source is an https url",
-        uk: "джерело — це https-адреса",
-    };
-
-    /// `FunctionProblem::BadSourceSha256` (AGL-050, D8).
-    pub const FUNC_BAD_SOURCE_SHA256: Msg = Msg {
-        en: "a sha256 is 64 lowercase hex digits",
-        uk: "sha256 — це 64 шістнадцяткові цифри в нижньому регістрі",
-    };
-
-    /// `FunctionProblem::BadSourceSize` (AGL-050, D8).
-    pub const FUNC_BAD_SOURCE_SIZE: Msg = Msg {
-        en: "a size is a positive number of bytes",
-        uk: "розмір — це додатне число байтів",
-    };
-
     /// The offer of the weights a Function needs (AGL-050, D9, D10).
     pub const DOWNLOAD_OFFER: Msg = Msg {
         en: "This Function needs files that are not here:\n{files}\nDownload {total} to {dir}? [y/N]",
@@ -3107,30 +2953,7 @@ impl Error {
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
-            Error::FunctionNotFound { name, paths } => {
-                let paths = paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tr!(
-                    lang,
-                    m::FUNCTION_NOT_FOUND,
-                    name = name,
-                    paths = &paths
-                )
-            }
-            Error::FunctionBuiltIn { name } => tr!(lang, m::FUNCTION_BUILTIN, name = name),
-            Error::FunctionExists { name } => tr!(lang, m::FUNCTION_EXISTS, name = name),
-            Error::Function { path, key, problem } => {
-                tr!(
-                    lang,
-                    m::PROBLEM_IN_PATH,
-                    path = path.display(),
-                    key = key,
-                    problem = function_problem(problem, lang)
-                )
-            }
+            Error::Function(error) => error.message(lang),
             Error::RunSchema { expected, found } => {
                 tr!(lang, m::RUN_SCHEMA, expected = expected, found = found)
             }
@@ -3461,50 +3284,6 @@ pub fn stopped_why(why: &str, id: &str, lang: Lang) -> String {
     format!("{why}\n{}", tr!(lang, m::STOPPED_RESUME, id = id))
 }
 
-fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
-    use FunctionProblem as P;
-    match problem {
-        P::UnknownState(name) => tr!(lang, m::FUNC_UNKNOWN_STATE, name = name),
-        P::BadTransitionKey => tr!(lang, m::FUNC_BAD_TRANSITION_KEY).to_string(),
-        P::MissingTransition { tool, outcome } => {
-            tr!(
-                lang,
-                m::FUNC_MISSING_TRANSITION,
-                tool = tool,
-                outcome = outcome
-            )
-        }
-        P::NoActions => tr!(lang, m::FUNC_NO_ACTIONS).to_string(),
-        P::NextWithoutTools => tr!(lang, m::FUNC_NEXT_WITHOUT_TOOLS).to_string(),
-        P::OnLimitWithoutLimit => tr!(lang, m::FUNC_ON_LIMIT_WITHOUT_LIMIT).to_string(),
-        P::OnLimitCycle => tr!(lang, m::FUNC_ON_LIMIT_CYCLE).to_string(),
-        P::Unreachable => tr!(lang, m::FUNC_UNREACHABLE).to_string(),
-        P::NoThinking { format } => tr!(lang, m::FUNC_NO_THINKING, format = format),
-        P::Pattern(error) => error.message(lang),
-        P::PatternMayEndValue { end } => tr!(lang, m::FUNC_PATTERN_MAY_END_VALUE, end = end),
-        P::EmptyEnum => tr!(lang, m::FUNC_EMPTY_ENUM).to_string(),
-        P::BadRange => tr!(lang, m::FUNC_BAD_RANGE).to_string(),
-        P::ConstraintKeys => tr!(lang, m::FUNC_CONSTRAINT_KEYS).to_string(),
-        P::NotPositive => tr!(lang, m::FUNC_NOT_POSITIVE).to_string(),
-        P::ServerModelMissing => tr!(lang, m::FUNC_SERVER_MODEL_MISSING).to_string(),
-        P::ServerStrataKeyMissing(key) => tr!(lang, m::FUNC_SERVER_STRATA_KEY_MISSING, key = key),
-        P::ServerKeyOfOtherKind(key) => {
-            let kind = if crate::function::STRATA_MODEL_KEYS.contains(&key.as_str()) {
-                "strata"
-            } else {
-                "llama"
-            };
-            tr!(lang, m::FUNC_SERVER_KEY_OF_OTHER_KIND, key = key, kind = kind)
-        }
-        P::BadWeightsName => tr!(lang, m::FUNC_BAD_WEIGHTS_NAME).to_string(),
-        P::SourceWithoutFile => tr!(lang, m::FUNC_SOURCE_WITHOUT_FILE).to_string(),
-        P::SourceShardsMismatch => tr!(lang, m::FUNC_SOURCE_SHARDS_MISMATCH).to_string(),
-        P::BadSourceUrl => tr!(lang, m::FUNC_BAD_SOURCE_URL).to_string(),
-        P::BadSourceSha256 => tr!(lang, m::FUNC_BAD_SOURCE_SHA256).to_string(),
-        P::BadSourceSize => tr!(lang, m::FUNC_BAD_SOURCE_SIZE).to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3572,10 +3351,10 @@ mod tests {
             "невідомий параметр `--url`\nДив. `agl --help`."
         );
         assert!(
-            !Error::FunctionNotFound {
+            !Error::from(crate::function::error::Error::NotFound {
                 name: "x".into(),
                 paths: vec!["/p".into()]
-            }
+            })
             .message(Lang::En)
             .contains("--help")
         );

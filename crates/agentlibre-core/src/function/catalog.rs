@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::{check_name, Function};
 use crate::error::Error;
+use super::error::Error as FunctionError;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m};
 use crate::nix;
@@ -252,10 +253,11 @@ impl Catalog {
         // no Function at all.
         let path = nix::functions_dir()?.join("functions").join(format!("{name}.nix"));
         if !path.is_file() {
-            return Err(Error::FunctionNotFound {
+            return Err(FunctionError::NotFound {
                 name: name.into(),
                 paths: self.dirs().iter().map(|dir| dir.to_path_buf()).collect(),
-            });
+            }
+            .into());
         }
         Ok(FunctionFile { path, source: Source::BuiltIn })
     }
@@ -302,7 +304,7 @@ impl Catalog {
     pub fn create(&self, name: &str, text: &str) -> Result<PathBuf, Error> {
         check_name(name)?;
         if self.exists(name) {
-            return Err(Error::FunctionExists { name: name.into() });
+            return Err(FunctionError::Exists { name: name.into() }.into());
         }
         write_validated(&self.workspace_file(name), &self.workspace_dir, name, text)
     }
@@ -312,7 +314,7 @@ impl Catalog {
     /// a failure the file keeps its previous text.
     pub fn save(&self, file: &FunctionFile, text: &str) -> Result<(), Error> {
         if file.source == Source::BuiltIn {
-            return Err(Error::FunctionBuiltIn { name: file.stem() });
+            return Err(FunctionError::BuiltIn { name: file.stem() }.into());
         }
         write_validated(&file.path, file.path.parent().unwrap_or(Path::new(".")), &file.stem(), text)
             .map(|_| ())
@@ -466,8 +468,8 @@ mod tests {
         let catalog = catalog(&dir.0);
         write(&catalog.user_dir, "broken", &file(STRATA_NO_CONFIG));
         assert!(catalog.check("fixture-high").is_ok());
-        assert!(matches!(catalog.check("nope"), Err(Error::FunctionNotFound { .. })));
-        assert!(matches!(catalog.check("broken"), Err(Error::Function { .. })));
+        assert!(matches!(catalog.check("nope"), Err(Error::Function(FunctionError::NotFound { .. }))));
+        assert!(matches!(catalog.check("broken"), Err(Error::Function(FunctionError::Invalid { .. }))));
     }
 
     /// AGL-102, D2: the file of a Function is the one that wins; a name
@@ -503,10 +505,10 @@ mod tests {
         assert_eq!(path, catalog.workspace_file("twin"));
         assert!(catalog.check("twin").is_ok());
         // A name of any source, a built-in included, is refused.
-        assert!(matches!(catalog.create("mine", &file(LLAMA)), Err(Error::FunctionExists { .. })));
+        assert!(matches!(catalog.create("mine", &file(LLAMA)), Err(Error::Function(FunctionError::Exists { .. }))));
         assert!(matches!(
             catalog.create("fixture-minimal", &file(LLAMA)),
-            Err(Error::FunctionExists { .. })
+            Err(Error::Function(FunctionError::Exists { .. }))
         ));
         // A text that does not load never reaches the name.
         assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::Nix(nix::Error::Eval { .. }))));

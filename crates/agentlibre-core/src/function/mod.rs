@@ -11,7 +11,8 @@ use serde_json::{Value as Json, json};
 use crate::action::{self, Actions, Constraint, Kind, Tool};
 use crate::backend::RUNTIME_PREFIX;
 use crate::download::FileSource;
-use crate::error::{Error, FunctionProblem};
+use crate::error::Error;
+use crate::function::error::{Error as FunctionError, FunctionProblem};
 use crate::format::Format;
 use crate::grammar::pattern;
 use crate::machine::Transitions;
@@ -241,10 +242,11 @@ impl Function {
         let path = PathBuf::from(format!("<built-in>/functions/{name}.nix"));
         let value = nix::eval_with_agl(&path, &format!("agl.functions.{} or null", nix::key(name)))?;
         if value.is_null() {
-            return Err(Error::FunctionNotFound {
+            return Err(FunctionError::NotFound {
                 name: name.into(),
                 paths: dirs.iter().map(|dir| dir.to_path_buf()).collect(),
-            });
+            }
+            .into());
         }
         Function::from_value(&path, value)
     }
@@ -668,11 +670,12 @@ fn builtin_forge() -> Tool {
 }
 
 fn problem(section: &Section, key: &str, problem: FunctionProblem) -> Error {
-    Error::Function {
+    FunctionError::Invalid {
         path: section.path().into(),
         key: section.key(key),
         problem,
     }
+    .into()
 }
 
 /// Takes `key` as an integer of at least 1.
@@ -944,10 +947,12 @@ fn read_constraint(
 
 /// Rejects `on_limit` cycles (D83) and unreachable states (D91).
 fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Error> {
-    let error = |state: &State, key: &str, problem| Error::Function {
-        path: path.into(),
-        key: format!("policy.state.{}{key}", state.name),
-        problem,
+    let error = |state: &State, key: &str, problem| {
+        Error::from(FunctionError::Invalid {
+            path: path.into(),
+            key: format!("policy.state.{}{key}", state.name),
+            problem,
+        })
     };
     for (start, state) in states.iter().enumerate() {
         let mut current = state.transitions.on_limit;
@@ -976,6 +981,7 @@ fn check_graph(path: &Path, states: &[State], initial: usize) -> Result<(), Erro
 }
 
 pub mod catalog;
+pub mod error;
 
 #[cfg(test)]
 pub mod tests;

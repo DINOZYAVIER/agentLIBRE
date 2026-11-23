@@ -350,7 +350,7 @@ impl Error {
 }
 
 /// `Error::Template`'s problems, and the shared frame `PROBLEM_IN_PATH` of
-/// `crate::i18n`, also used by `Error::Function` (AGL-121, D66).
+/// `crate::i18n`, also used by `function::error::Error::Invalid` (AGL-121, D66).
 const TEMPLATE_MISSING: Msg = Msg {
     en: "needs {p}",
     uk: "потрібен {p}",

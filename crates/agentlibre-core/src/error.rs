@@ -3,7 +3,6 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::grammar::pattern::PatternError;
 use crate::settings::ServerKind;
 use crate::style::StyleError;
 
@@ -91,22 +90,9 @@ pub enum Error {
     /// A template or string of a format is unusable (D81). Its own type,
     /// wrapped (AGL-121, D66).
     Format(crate::format::Error),
-    /// Neither the looked-in `paths` nor a built-in Function is called
-    /// `name`.
-    FunctionNotFound { name: String, paths: Vec<PathBuf> },
-    /// `/function edit` was asked of a built-in (AGL-102, D3): its file
-    /// belongs to the Functions' repository.
-    FunctionBuiltIn { name: String },
-    /// `/function new` took a name one of the sources already has
-    /// (AGL-102, D3); nothing was written.
-    FunctionExists { name: String },
-    /// A Function is unusable; `key` locates the problem (D21, D42, D72,
-    /// D78, D82-D93).
-    Function {
-        path: PathBuf,
-        key: String,
-        problem: FunctionProblem,
-    },
+    /// A Function not found, built in, existing already, or unusable at a
+    /// key (D21; AGL-102). Its own type, wrapped (AGL-121, D66).
+    Function(crate::function::error::Error),
     /// The schema of a session's `run` snapshot is not the one this build
     /// reads (AGL-063, D4).
     RunSchema { expected: u64, found: String },
@@ -374,6 +360,13 @@ impl From<crate::media::Error> for Error {
     }
 }
 
+impl From<crate::function::error::Error> for Error {
+    /// A Function's own error as agl's (AGL-121, D66).
+    fn from(source: crate::function::error::Error) -> Error {
+        Error::Function(source)
+    }
+}
+
 impl From<crate::wsl::Error> for Error {
     /// The Windows engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::wsl::Error) -> Error {
@@ -454,65 +447,6 @@ pub enum NameProblem {
     TooLong,
     /// It is `last`, which `--resume` reads as the newest session.
     Reserved,
-}
-
-/// What is wrong with a Function.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FunctionProblem {
-    /// The value names a state that does not exist.
-    UnknownState(String),
-    /// A transition key is not a tool of the state, with or without an
-    /// outcome, nor `else`.
-    BadTransitionKey,
-    /// No transition for a tool and outcome of the state (D21).
-    MissingTransition { tool: String, outcome: String },
-    /// The state has neither tools nor `answer` (D87).
-    NoActions,
-    /// The state has `next` but no tools.
-    NextWithoutTools,
-    /// `on_limit` without `max_steps` or `max_visits`.
-    OnLimitWithoutLimit,
-    /// `on_limit` references lead back to this state (D83).
-    OnLimitCycle,
-    /// No transition leads to the state (D91).
-    Unreachable,
-    /// `think = true` with a format without thinking (D78).
-    NoThinking { format: String },
-    /// The pattern is not in the supported subset (D69, D75).
-    Pattern(PatternError),
-    /// The pattern may produce `end`, which ends values (D72).
-    PatternMayEndValue { end: char },
-    /// An empty `enum`.
-    EmptyEnum,
-    /// `min > max`, or `min < 1` for `timeout` (D93).
-    BadRange,
-    /// A constraint needs exactly one key (D88).
-    ConstraintKeys,
-    /// A limit below 1.
-    NotPositive,
-    /// The `model` of a Function of the llama kind has no `weights`
-    /// (AGL-033, D1; AGL-039, D19).
-    ServerModelMissing,
-    /// The `model` of a Function of the strata kind lacks one of
-    /// `strata`, `name`, `gguf` (AGL-089, D5).
-    ServerStrataKeyMissing(String),
-    /// A key of the Function's `model` that does not apply to its kind
-    /// (AGL-033, D1; AGL-034, D4).
-    ServerKeyOfOtherKind(String),
-    /// A weights file is neither a file name nor an absolute path
-    /// (AGL-039, D24a).
-    BadWeightsName,
-    /// A `source` names a file the model does not set (AGL-039, D5).
-    SourceWithoutFile,
-    /// `source.gguf` does not have one source for each of `gguf`
-    /// (AGL-089, D4).
-    SourceShardsMismatch,
-    /// A `source` url is not https (AGL-050, D8).
-    BadSourceUrl,
-    /// A `source` sha256 is not 64 lowercase hex digits (AGL-050, D8).
-    BadSourceSha256,
-    /// A `source` size is not a positive number of bytes (AGL-050, D8).
-    BadSourceSize,
 }
 
 /// Who launched a server that did not get ready (AGL-043 F5): the

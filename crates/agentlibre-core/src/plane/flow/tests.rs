@@ -46,7 +46,7 @@ fn problem_of(text: &str) -> (String, FunctionProblem) {
     let dir = TempDir::new();
     let error = read(&dir, text).expect_err("a flow that does not load");
     match &*error {
-        Error::Function { key, problem, .. } => (key.clone(), problem.clone()),
+        Error::Function(FunctionError::Invalid { key, problem, .. }) => (key.clone(), problem.clone()),
         other => panic!("not a load problem: {other:?}"),
     }
 }

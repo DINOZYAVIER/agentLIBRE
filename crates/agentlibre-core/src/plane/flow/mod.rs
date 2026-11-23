@@ -14,7 +14,8 @@ pub mod act;
 pub mod holder;
 pub mod drive;
 pub mod journal;
-use crate::error::{Error, FunctionProblem};
+use crate::error::Error;
+use crate::function::error::{Error as FunctionError, FunctionProblem};
 use crate::machine::{Table, Transitions};
 use crate::nix::{self, Section};
 
@@ -206,11 +207,12 @@ fn read_file(path: &Path) -> Result<FlowFile, Error> {
 
 /// The error of a flow file; `key` locates it in the file (D1).
 fn bad(at: &Section, key: &str, problem: FunctionProblem) -> Error {
-    Error::Function {
+    FunctionError::Invalid {
         path: at.path().into(),
         key: at.key(key),
         problem,
     }
+    .into()
 }
 
 /// A transition before the states have indices: the event's name and detail,

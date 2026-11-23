@@ -857,7 +857,7 @@ fn opened_function(
             // `functions/` directory, then the user's, then the built-ins.
             match Function::load(function_dirs, &name) {
                 Ok(function) => Ok(function),
-                Err(Error::FunctionNotFound { .. }) if session.is_some() => {
+                Err(Error::Function(crate::function::error::Error::NotFound { .. })) if session.is_some() => {
                     // The Function the session was made with is gone: it
                     // continues loose (AGL-063, D4), with a notice.
                     let session = session.expect("a resumed session");
