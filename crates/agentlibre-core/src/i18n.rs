@@ -861,12 +861,6 @@ Forge (сховище артефактів робочої області, agentL
              рівні — off, low, medium та xhigh",
     };
 
-    /// `Error::NoHome`.
-    pub const NO_HOME: Msg = Msg {
-        en: "HOME is not set and {var} is not an absolute path",
-        uk: "HOME не задано, а {var} не є абсолютним шляхом",
-    };
-
     /// `Error::CurrentDir`.
     pub const CURRENT_DIR: Msg = Msg {
         en: "cannot read the current directory: {source}",
@@ -2376,7 +2370,7 @@ impl Error {
             Error::BadReasoningLevel { value } => {
                 tr!(lang, m::BAD_REASONING_LEVEL, value = value)
             }
-            Error::NoHome { var } => tr!(lang, m::NO_HOME, var = var),
+            Error::Paths(error) => error.message(lang),
             Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
             Error::Read { path, source } => {
                 tr!(lang, m::READ, path = path.display(), source = source)

@@ -21,8 +21,9 @@ pub enum Error {
     PlaneWithResume,
     /// `--think` names a level outside the four (AGL-013).
     BadReasoningLevel { value: String },
-    /// Neither `var` nor `HOME` is an absolute path.
-    NoHome { var: &'static str },
+    /// agl's directories cannot be found. Its own type, wrapped (AGL-121,
+    /// D75).
+    Paths(crate::paths::Error),
     /// The current directory cannot be read.
     CurrentDir(io::Error),
     /// A settings file cannot be read.
@@ -240,6 +241,13 @@ impl From<crate::backend::error::Error> for Error {
     /// The backend's own error as agl's (AGL-121, D66).
     fn from(source: crate::backend::error::Error) -> Error {
         Error::Backend(source)
+    }
+}
+
+impl From<crate::paths::Error> for Error {
+    /// The paths' own error as agl's (AGL-121, D75).
+    fn from(source: crate::paths::Error) -> Error {
+        Error::Paths(source)
     }
 }
 

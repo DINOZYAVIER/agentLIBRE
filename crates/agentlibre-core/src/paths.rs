@@ -3,9 +3,31 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::error::Error;
-
+use crate::i18n::{Lang, Msg};
 use crate::settings::SETTINGS_FILE;
+use crate::tr;
+
+/// agl's directories cannot be found (AGL-121, D75).
+#[derive(Debug)]
+pub enum Error {
+    /// Neither `var` nor `HOME` is an absolute path.
+    NoHome { var: &'static str },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NoHome { var } => tr!(lang, NO_HOME, var = var),
+        }
+    }
+}
+
+/// `Error::NoHome`.
+const NO_HOME: Msg = Msg {
+    en: "HOME is not set and {var} is not an absolute path",
+    uk: "HOME не задано, а {var} не є абсолютним шляхом",
+};
 
 /// Directory below each XDG base directory.
 const APP_DIR: &str = "agentLIBRE";

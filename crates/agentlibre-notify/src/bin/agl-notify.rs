@@ -31,7 +31,7 @@ fn main() -> ExitCode {
     }
     let paths = match Paths::from_env(|name| std::env::var_os(name)) {
         Ok(paths) => paths,
-        Err(error) => return fail(error),
+        Err(error) => return fail(error.into()),
     };
     let lang = match lang {
         Some(lang) => lang,

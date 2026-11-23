@@ -121,7 +121,7 @@ fn run(
     args: impl IntoIterator<Item = OsString>,
     lang: &mut Lang,
 ) -> Result<ExitCode, Error> {
-    let loaded = Paths::from_env(&env).and_then(|paths| {
+    let loaded = Paths::from_env(&env).map_err(Error::from).and_then(|paths| {
         let user = UserFile::load(&paths.settings_file())?;
         Ok((paths, user))
     });
