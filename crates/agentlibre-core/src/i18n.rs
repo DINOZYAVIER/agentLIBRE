@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected, ServerOwner};
+use crate::error::{Error, Expected};
 use crate::function::Function;
 use crate::session::StopReason;
 
@@ -1155,18 +1155,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "llama-server згенерував текст поза граматикою: {text:?}",
     };
 
-    /// `Error::WeightsFileMissing` (AGL-043 F5).
-    pub const WEIGHTS_FILE_MISSING: Msg = Msg {
-        en: "{key}: no file {path}",
-        uk: "{key}: немає файлу {path}",
-    };
-
-    /// `Error::MissingSpecType`.
-    pub const MISSING_SPEC_TYPE: Msg = Msg {
-        en: "the draft {draft} is set but the spec_type is not: set the spec_type too",
-        uk: "draft {draft} задано, але spec_type ні: задано spec_type теж",
-    };
-
     /// `Error::ServerCa` (AGL-058, D12).
     pub const SERVER_CA: Msg = Msg {
         en: "the CA file {path} of `private_ca` cannot be used: {detail}",
@@ -1179,52 +1167,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сертифікату сервера за {url} немає довіри: {detail}\nЯкщо його підписує приватний CA, вкажи сертифікат CA у `{key}`",
     };
 
-    /// `Error::OutsideServerDown`.
-    pub const OUTSIDE_SERVER_DOWN: Msg = Msg {
-        en: "the server outside agl does not answer at {url}: start it there (`agl server command` prints the line), or check the address",
-        uk: "сервер поза agl не відповідає за {url}: запусти його там (рядок друкує `agl server command`) або перевір адресу",
-    };
-
-    /// `Error::OutsideModelDiffers`.
-    pub const OUTSIDE_MODEL_DIFFERS: Msg = Msg {
-        en: "the server at {url} serves {running}, and this Function needs {expected}: agl does not restart a server outside it",
-        uk: "сервер за {url} обслуговує {running}, а цій функції потрібна {expected}: agl не перезапускає сервер поза собою",
-    };
-
-    /// `Error::ServerCommandNotLlama`.
-    pub const SERVER_COMMAND_NOT_LLAMA: Msg = Msg {
-        en: "the Function {function} does not run on llama-server, so there is no line to print",
-        uk: "функція {function} працює не на llama-server, тож рядка для неї немає",
-    };
-
     /// `agl server stop` with `server.llama.external` (AGL-052, D4).
     pub const SERVER_OUTSIDE_NOT_STOPPED: Msg = Msg {
         en: "the server at {url} runs outside agl, and agl does not stop it",
         uk: "сервер за {url} працює поза agl, і agl його не зупиняє",
-    };
-
-    /// `Error::NotLocalServer`.
-    pub const NOT_LOCAL_SERVER: Msg = Msg {
-        en: "agl starts the server only on 127.0.0.1 or localhost, not at {url}",
-        uk: "agl запускає сервер лише на 127.0.0.1 або localhost, не за {url}",
-    };
-
-    /// `Error::EngineNotFound` (AGL-024, D5).
-    pub const ENGINE_NOT_FOUND: Msg = Msg {
-        en: "{engine} is not in PATH",
-        uk: "{engine} немає в PATH",
-    };
-
-    /// `Error::EngineSpawn` (AGL-024, D2).
-    pub const ENGINE_SPAWN: Msg = Msg {
-        en: "cannot run {engine}: {source}",
-        uk: "не вдалося запустити {engine}: {source}",
-    };
-
-    /// `Error::Systemd`.
-    pub const SYSTEMD: Msg = Msg {
-        en: "systemd failed: {detail}",
-        uk: "помилка systemd: {detail}",
     };
 
     pub const DAEMON_NO_RUNTIME: Msg = Msg {
@@ -1320,52 +1266,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "генерацію обрізано на її ліміті токенів",
     };
 
-    /// `Error::ProjectNotRegistered` (AGL-015, D14).
-    pub const PROJECT_NOT_REGISTERED: Msg = Msg {
-        en: "{project} is not a registered project, so it has no server of its own; run `agl init` there first",
-        uk: "{project} не є зареєстрованим проєктом, тож не має власного сервера; спершу виконай там `agl init`",
-    };
-
-    /// `Error::PortBusy` without a running unit (D7).
-    pub const PORT_BUSY: Msg = Msg {
-        en: "the address {url} is already in use by something that is not a unit of agl; free it or set another `server.llama.url` (or `server.strata.url`) in the project's settings.nix",
-        uk: "адреса {url} уже зайнята чимось, що не є unit-ом agl; звільни її або задай інший `server.llama.url` (чи `server.strata.url`) у settings.nix проєкту",
-    };
-
-    /// `Error::PortBusy` with running units (D7).
-    pub const PORT_BUSY_UNITS: Msg = Msg {
-        en: "the address {url} is already in use; the server units that run: {units}. Stop the one that holds it (agl server stop) or set another `server.llama.url` (or `server.strata.url`) in the project's settings.nix",
-        uk: "адреса {url} уже зайнята; працюють unit-и серверів: {units}. Зупини той, що її тримає (agl server stop), або задай інший `server.llama.url` (чи `server.strata.url`) у settings.nix проєкту",
-    };
-
-    /// `Error::ServerRunning` (D13).
-    pub const SERVER_RUNNING: Msg = Msg {
-        en: "a server of another project is running ({units}); to start one more, use --yes",
-        uk: "працює сервер іншого проєкту ({units}); щоб запустити ще один, додай --yes",
-    };
-
-    /// `Error::StartDeclined` (D9).
-    pub const START_DECLINED: Msg = Msg {
-        en: "the server was not started",
-        uk: "сервер не запущено",
-    };
-
-    /// `Error::RestartDeclined` (AGL-033, D2).
-    pub const RESTART_DECLINED: Msg = Msg {
-        en: "the server was not restarted",
-        uk: "сервер не перезапущено",
-    };
-
     /// The Strata server, as the texts name it (AGL-038, D1).
     pub const STRATA_SERVER: Msg = Msg {
         en: "the Strata server",
         uk: "сервер Strata",
-    };
-
-    /// `Error::SwitchDeclined` (AGL-036, D10).
-    pub const SWITCH_DECLINED: Msg = Msg {
-        en: "the server of the other kind was not stopped, so the new one was not started",
-        uk: "сервер іншого виду не зупинено, тож новий не запущено",
     };
 
     /// The first preparation of a Strata model, said before each step
@@ -1423,30 +1327,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const DRAFT: Msg = Msg {
         en: "the draft engine failed: {detail}",
         uk: "помилка чернового рушія: {detail}",
-    };
-
-    /// `Error::ServerFailed` of a unit.
-    pub const SERVER_FAILED: Msg = Msg {
-        en: "the server stopped before it was ready; see journalctl --user -u {unit}",
-        uk: "сервер зупинився, не встигнувши стати готовим; див. journalctl --user -u {unit}",
-    };
-
-    /// `Error::ServerTimeout` of a unit.
-    pub const SERVER_TIMEOUT: Msg = Msg {
-        en: "the server was not ready after {seconds} s; it keeps loading in the background (agl server status, journalctl --user -u {unit})",
-        uk: "сервер не став готовим за {seconds} с; він вантажиться далі у фоні (agl server status, journalctl --user -u {unit})",
-    };
-
-    /// `Error::ServerFailed` of agl's child (AGL-024, D2).
-    pub const ENGINE_DIED: Msg = Msg {
-        en: "the engine stopped before it was ready; see {log}",
-        uk: "движок зупинився, не встигнувши стати готовим; див. {log}",
-    };
-
-    /// `Error::ServerTimeout` of agl's child (AGL-024, D2).
-    pub const ENGINE_TIMEOUT: Msg = Msg {
-        en: "the engine was not ready after {seconds} s; see {log}",
-        uk: "движок не став готовим за {seconds} с; див. {log}",
     };
 
     /// The label of streamed thinking (D109), in caps as the tool's
@@ -2594,6 +2474,7 @@ impl Error {
             Error::SearchLogin { detail } => tr!(lang, m::SEARCH_LOGIN, detail = detail),
             Error::Settings(error) => error.message(lang),
             Error::Forge(error) => error.message(lang),
+            Error::Engine(error) => error.message(lang),
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
@@ -2605,38 +2486,13 @@ impl Error {
                 url = url,
                 detail = detail
             ),
-            Error::WeightsFileMissing { key, path } => {
-                tr!(lang, m::WEIGHTS_FILE_MISSING, path = path.display(), key = key)
-            }
-            Error::MissingSpecType { draft } => {
-                tr!(lang, m::MISSING_SPEC_TYPE, draft = draft)
-            }
-            Error::NotLocalServer { url } => tr!(lang, m::NOT_LOCAL_SERVER, url = url),
             Error::ServerCa { path, detail } => {
                 tr!(lang, m::SERVER_CA, path = path.display(), detail = detail)
             }
             Error::ServerCertificate { url, detail, key } => {
                 tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail, key = key)
             }
-            Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
             Error::Wsl(error) => error.message(lang),
-            Error::OutsideModelDiffers { url, expected, running } => tr!(
-                lang,
-                m::OUTSIDE_MODEL_DIFFERS,
-                url = url,
-                expected = expected,
-                running = running
-            ),
-            Error::ServerCommandNotLlama { function } => {
-                tr!(lang, m::SERVER_COMMAND_NOT_LLAMA, function = function)
-            }
-            Error::EngineNotFound { engine } => {
-                tr!(lang, m::ENGINE_NOT_FOUND, engine = engine).to_string()
-            }
-            Error::EngineSpawn { engine, source } => {
-                tr!(lang, m::ENGINE_SPAWN, engine = engine, source = source).to_string()
-            }
-            Error::Systemd { detail } => tr!(lang, m::SYSTEMD, detail = detail),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
             Error::Said { text } => text.clone(),
             Error::DaemonNoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
@@ -2658,34 +2514,6 @@ impl Error {
             Error::Bridge { detail } => tr!(lang, m::BRIDGE_FAILED, detail = detail),
             Error::Media(error) => error.message(lang),
             Error::Draft { detail } => tr!(lang, m::DRAFT, detail = detail),
-            Error::ServerFailed { owner } => match owner {
-                ServerOwner::Unit(unit) => tr!(lang, m::SERVER_FAILED, unit = unit),
-                ServerOwner::Child(log) => tr!(lang, m::ENGINE_DIED, log = log.display()),
-            },
-            Error::ServerTimeout { seconds, owner } => match owner {
-                ServerOwner::Unit(unit) => {
-                    tr!(lang, m::SERVER_TIMEOUT, seconds = seconds, unit = unit)
-                }
-                ServerOwner::Child(log) => {
-                    tr!(lang, m::ENGINE_TIMEOUT, seconds = seconds, log = log.display())
-                }
-            },
-            Error::ProjectNotRegistered { project } => {
-                tr!(lang, m::PROJECT_NOT_REGISTERED, project = project.display())
-            }
-            Error::PortBusy { url, units } => {
-                if units.is_empty() {
-                    tr!(lang, m::PORT_BUSY, url = url)
-                } else {
-                    tr!(lang, m::PORT_BUSY_UNITS, url = url, units = units.join(", "))
-                }
-            }
-            Error::ServerRunning { units } => {
-                tr!(lang, m::SERVER_RUNNING, units = units.join(", "))
-            }
-            Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
-            Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
-            Error::SwitchDeclined => tr!(lang, m::SWITCH_DECLINED).to_string(),
             Error::Strata(error) => error.message(lang),
             Error::ServerStatus {
                 kind,

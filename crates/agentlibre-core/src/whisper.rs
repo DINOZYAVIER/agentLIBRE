@@ -90,9 +90,9 @@ impl WhisperServer {
         settings: &WhisperFile,
         user_path: &Path,
     ) -> Result<WhisperServer, error::Error> {
-        let key = project.unit_key().ok_or_else(|| error::Error::ProjectNotRegistered {
+        let key = project.unit_key().ok_or_else(|| error::Error::from(crate::engine::error::Error::ProjectNotRegistered {
             project: project.project.clone(),
-        })?;
+        }))?;
         let (Some(url), Some(model)) = (&settings.url, &settings.model) else {
             return Err(error::Error::Whisper(Error::NotSet {
                 user_path: user_path.into(),
@@ -165,45 +165,48 @@ pub fn ensure(
     if unit_active(&server.unit)? {
         return wait_ready(&probe, Some(&server.unit), "whisper-server", say, lang);
     }
-    let (host, port) = local_address(&server.url).ok_or_else(|| error::Error::NotLocalServer {
+    let (host, port) = local_address(&server.url).ok_or_else(|| error::Error::from(crate::engine::error::Error::NotLocalServer {
         url: server.url.clone(),
-    })?;
+    }))?;
     if port_open(&host, port) {
-        return Err(error::Error::PortBusy {
+        return Err(crate::engine::error::Error::PortBusy {
             url: server.url.clone(),
             units: Vec::new(),
-        });
+        }
+        .into());
     }
     let model = models.join(&server.model);
     if !model.is_file() {
-        return Err(error::Error::WeightsFileMissing {
+        return Err(crate::engine::error::Error::WeightsFileMissing {
             key: "whisper.model".into(),
             path: model,
-        });
+        }
+        .into());
     }
     let program = match &server.program {
         Some(p) => {
             let path = PathBuf::from(p);
             if !path.is_file() {
-                return Err(error::Error::EngineNotFound { engine: p.clone() });
+                return Err(crate::engine::error::Error::EngineNotFound { engine: p.clone() }.into());
             }
             path
         }
-        None => find_program("whisper-server", path_var).ok_or_else(|| error::Error::EngineNotFound {
+        None => find_program("whisper-server", path_var).ok_or_else(|| error::Error::from(crate::engine::error::Error::EngineNotFound {
             engine: "whisper-server".into(),
-        })?,
+        }))?,
     };
     let output = Command::new("systemd-run")
         .args(systemd_run_args(server, &program, &model, &host, port))
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| error::Error::Systemd {
+        .map_err(|source| error::Error::from(crate::engine::error::Error::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if !output.status.success() {
-        return Err(error::Error::Systemd {
+        return Err(crate::engine::error::Error::Systemd {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
+        }
+        .into());
     }
     say(&tr!(
         lang,
@@ -527,7 +530,7 @@ mod tests {
         ws.origin = None;
         assert!(matches!(
             WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")),
-            Err(error::Error::ProjectNotRegistered { .. })
+            Err(error::Error::Engine(crate::engine::error::Error::ProjectNotRegistered { .. }))
         ));
     }
 

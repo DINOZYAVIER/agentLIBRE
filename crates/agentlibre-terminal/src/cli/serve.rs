@@ -11,6 +11,7 @@ use crate::cli::args::ServerAction;
 use crate::ask::ask_terminal;
 use crate::engine::*;
 use crate::error::Error;
+use crate::engine::error::Error as EngineError;
 use crate::i18n::{Lang, m, server as texts};
 use crate::settings::{ServerFile, ServerKind};
 use crate::outln;
@@ -136,7 +137,7 @@ pub fn print_command(
 ) -> Result<ExitCode, Error> {
     let model = &function.model;
     if model.kind() != ServerKind::Llama {
-        return Err(Error::ServerCommandNotLlama { function: name.to_owned() });
+        return Err(EngineError::ServerCommandNotLlama { function: name.to_owned() }.into());
     }
     outln!("{}", command_line(model, settings));
     for source in &function.sources {

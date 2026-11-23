@@ -433,7 +433,7 @@ impl crate::memory::Home for NoMemory {
         None
     }
     fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
-        Err(Error::NotLocalServer { url: "no store".into() })
+        Err(crate::engine::error::Error::NotLocalServer { url: "no store".into() }.into())
     }
 }
 
@@ -581,7 +581,7 @@ struct NoWhisper;
 
 impl crate::attach::Transcriber for NoWhisper {
     fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
-        Err(Error::EngineNotFound { engine: "whisper-server".into() })
+        Err(crate::engine::error::Error::EngineNotFound { engine: "whisper-server".into() }.into())
     }
 }
 

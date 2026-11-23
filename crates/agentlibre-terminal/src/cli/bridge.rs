@@ -13,6 +13,7 @@ use qrcode::{Color, EcLevel, QrCode};
 
 use crate::engine::{port_open, unit_active};
 use crate::error::Error;
+use crate::engine::error::Error as EngineError;
 use crate::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
@@ -196,13 +197,14 @@ fn start(program: &Path, listen: &Listen, dir: &Path, socket: &Path) -> Result<(
         .args(start_args(program, listen, dir, socket))
         .stdin(Stdio::null())
         .status()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| crate::error::Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if !status.success() {
-        return Err(Error::Systemd {
+        return Err(EngineError::Systemd {
             detail: format!("systemd-run: {status}"),
-        });
+        }
+        .into());
     }
     let started = Instant::now();
     while started.elapsed() < START_WAIT {
@@ -223,15 +225,16 @@ fn systemctl(args: &[&str]) -> Result<(), Error> {
         .args(args)
         .stdin(Stdio::null())
         .status()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| crate::error::Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if status.success() {
         Ok(())
     } else {
-        Err(Error::Systemd {
+        Err(EngineError::Systemd {
             detail: format!("systemctl {}: {status}", args.join(" ")),
-        })
+        }
+        .into())
     }
 }
 

@@ -57,6 +57,10 @@ pub enum Error {
     /// The forge: its git, its markers and stores, its artifacts and their
     /// states (AGL-005 and after). Its own type, wrapped (AGL-121, D66).
     Forge(crate::forge::error::Error),
+    /// The engine and its server: found, launched, its unit, its port, the
+    /// human's answers about it (D147, D149; AGL-024 and after). Its own type,
+    /// wrapped (AGL-121, D66).
+    Engine(crate::engine::error::Error),
     /// A credential file of `search` the policy refuses (AGL-019, D4). Its
     /// own type, wrapped (AGL-121, D66).
     Search(crate::search::Error),
@@ -101,34 +105,14 @@ pub enum Error {
     OutsideGrammar(String),
     /// `--attach` without `-p` (AGL-014, D21).
     AttachWithoutPrompt,
-    /// A weights file of the run is not there (AGL-043 F5): `key` is the
-    /// setting that names it (`model.weights`, `model.mmproj`,
-    /// `model.draft`, `whisper.model`) and `path` the file looked for.
-    WeightsFileMissing { key: String, path: PathBuf },
-    /// `model.draft` is set but `spec_type` is not (AGL-025, D4).
-    MissingSpecType { draft: String },
-    /// `agl server start` with a `url` whose host is not local (D148).
-    NotLocalServer { url: String },
     /// The file of `private_ca` cannot be used (AGL-058, D12).
     ServerCa { path: PathBuf, detail: String },
     /// The server's certificate is not trusted (AGL-058, D12); `key` is the
     /// setting that names a private CA for that server (AGL-121, D4).
     ServerCertificate { url: String, detail: String, key: &'static str },
-    /// `server.llama.external`, and nothing answers there (AGL-052, D4).
-    OutsideServerDown { url: String },
-    /// `server.llama.external`, and it serves another model (AGL-052, D5).
-    OutsideModelDiffers { url: String, expected: String, running: String },
-    /// `agl server command` of a Function on another kind of server (AGL-052, D12).
-    ServerCommandNotLlama { function: String },
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
     /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
     Wsl(crate::wsl::Error),
-    /// No engine binary in `PATH` (D147, AGL-024, D5).
-    EngineNotFound { engine: String },
-    /// The engine agl launched cannot be run (AGL-024, D2).
-    EngineSpawn { engine: String, source: io::Error },
-    /// `systemd-run` or `systemctl` failed.
-    Systemd { detail: String },
     /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
     Notify { detail: String },
     /// A plane's name, store, files or directories (AGL-077). Its own
@@ -146,26 +130,6 @@ pub enum Error {
     /// The thread of a run ended before it answered: a fault of agl's
     /// (AGL-075, D7).
     PlaneGone,
-    /// The server stopped before it was ready (D149; AGL-024, D2).
-    ServerFailed { owner: ServerOwner },
-    /// The server was not ready in time (D149; AGL-024, D2).
-    ServerTimeout { seconds: u64, owner: ServerOwner },
-    /// A server command or the autostart outside a registered project
-    /// (AGL-015, D14).
-    ProjectNotRegistered { project: PathBuf },
-    /// The port of the project's `url` is held by something that is not
-    /// its unit; `units` are the server units that run (D7).
-    PortBusy { url: String, units: Vec<String> },
-    /// The server of another project runs and nobody can be asked: `-p`
-    /// and the stdin session without `--yes` (D13).
-    ServerRunning { units: Vec<String> },
-    /// The human answered no to "start one more?" (D9).
-    StartDeclined,
-    /// The human answered no to the restart of D2 (AGL-033).
-    RestartDeclined,
-    /// The human answered no to the stop of the server of the other kind
-    /// (AGL-036, D10).
-    SwitchDeclined,
     /// The Strata engine's own error (AGL-089, D20, D9, D13). Its own type,
     /// wrapped (AGL-121, D66).
     Strata(crate::strata::Error),
@@ -295,6 +259,13 @@ impl From<crate::forge::error::Error> for Error {
     }
 }
 
+impl From<crate::engine::error::Error> for Error {
+    /// The engine's own error as agl's (AGL-121, D66).
+    fn from(source: crate::engine::error::Error) -> Error {
+        Error::Engine(source)
+    }
+}
+
 impl From<crate::wsl::Error> for Error {
     /// The Windows engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::wsl::Error) -> Error {
@@ -362,15 +333,6 @@ pub enum Expected {
     Strings,
     /// A list of sets (AGL-089).
     Tables,
-}
-
-/// Who launched a server that did not get ready (AGL-043 F5): the
-/// systemd unit, whose output is in its journal, or agl's own child,
-/// whose output is in its log (AGL-024, D2).
-#[derive(Debug)]
-pub enum ServerOwner {
-    Unit(String),
-    Child(PathBuf),
 }
 
 impl Error {

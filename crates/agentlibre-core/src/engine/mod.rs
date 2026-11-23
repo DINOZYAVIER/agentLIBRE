@@ -15,12 +15,15 @@ use std::time::{Duration, Instant};
 
 use crate::backend::llama::Llama;
 use crate::backend::Backend;
-use crate::error::{Error, ServerOwner};
+use crate::error::Error;
+use error::ServerOwner;
+use crate::engine::error::Error as EngineError;
 use crate::forge::Workspace;
 use crate::i18n::{Lang, m, server as texts};
 use crate::settings::{ServerFile, ServerKind};
 use crate::tr;
 
+pub mod error;
 mod registry;
 
 pub use registry::{read_record, rebind_url, remove_record, url_of_id};
@@ -93,9 +96,9 @@ impl Server {
         settings: &ServerFile,
         model: ServerFile,
     ) -> Result<Server, Error> {
-        let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
+        let key = project.unit_key().ok_or_else(|| Error::from(EngineError::ProjectNotRegistered {
             project: project.project.clone(),
-        })?;
+        }))?;
         let mut server = Server {
             unit: unit_name(&key),
             whisper_unit: format!("{}-{key}", crate::whisper::UNIT_PREFIX),
@@ -182,7 +185,7 @@ pub fn start(
     let url = &server.url;
     let effective = server.effective_settings()?;
     let (host, port) =
-        local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+        local_address(url).ok_or_else(|| Error::from(EngineError::NotLocalServer { url: url.into() }))?;
     let what = server.what()?;
     // The server of the other kind that agl owns stops first (AGL-036,
     // D10): the two do not fit the GPU together.
@@ -218,10 +221,11 @@ pub fn start(
         if ours {
             systemctl(&["stop", &server.unit])?;
         } else if running.is_empty() {
-            return Err(Error::PortBusy {
+            return Err(EngineError::PortBusy {
                 url: url.into(),
                 units: Vec::new(),
-            });
+            }
+            .into());
         } else {
             for unit in &running {
                 systemctl(&["stop", unit])?;
@@ -231,10 +235,11 @@ pub fn start(
         let started = Instant::now();
         while port_open(&host, port) {
             if started.elapsed() >= Duration::from_secs(10) {
-                return Err(Error::PortBusy {
+                return Err(EngineError::PortBusy {
                     url: url.into(),
                     units: running,
-                });
+                }
+                .into());
             }
             thread::sleep(POLL);
         }
@@ -267,7 +272,7 @@ fn launch_unit(
     let url = &server.url;
     let what = what_of(effective)?;
     let (host, port) =
-        local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+        local_address(url).ok_or_else(|| Error::from(EngineError::NotLocalServer { url: url.into() }))?;
     let args = match effective.kind() {
         ServerKind::Strata => {
             let launch = strata_launch(effective, url, models, say, lang)?;
@@ -282,16 +287,17 @@ fn launch_unit(
                 .expect("a llama Function has weights");
             let model = models.join(model);
             if !model.is_file() {
-                return Err(Error::WeightsFileMissing {
+                return Err(EngineError::WeightsFileMissing {
                     key: "model.weights".into(),
                     path: model,
-                });
+                }
+                .into());
             }
             // The engine the settings name, as the child's launch does
             // (AGL-024, D5; AGL-038, F27).
             let engine = effective.engine.as_deref().unwrap_or(DEFAULT_ENGINE);
             let program = engine_program(engine, path_var).ok_or_else(|| {
-                Error::EngineNotFound {
+                EngineError::EngineNotFound {
                     engine: engine.to_owned(),
                 }
             })?;
@@ -319,13 +325,14 @@ fn launch_unit(
         .args(&args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if !output.status.success() {
-        return Err(Error::Systemd {
+        return Err(EngineError::Systemd {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
+        }
+        .into());
     }
     say(&texts::starting(&what, url, &server.unit, lang));
     // The file says so from the start of the process, before the weights
@@ -364,15 +371,17 @@ pub fn wait_ready(
         if let Some(unit) = unit
             && !unit_active(unit)?
         {
-            return Err(Error::ServerFailed {
+            return Err(EngineError::ServerFailed {
                 owner: ServerOwner::Unit(unit.into()),
-            });
+            }
+            .into());
         }
         if started.elapsed() >= READY_TIMEOUT {
-            return Err(Error::ServerTimeout {
+            return Err(EngineError::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
                 owner: ServerOwner::Unit(unit.unwrap_or(UNIT_PREFIX).into()),
-            });
+            }
+            .into());
         }
         thread::sleep(POLL);
     }
@@ -484,7 +493,7 @@ impl Autostart {
     fn launch_at_fresh_url(&self, say: &mut dyn FnMut(&str)) -> Result<String, Error> {
         let url = self.llama.url().to_owned();
         let Some((host, port)) = local_address(&url) else {
-            return Err(Error::NotLocalServer { url });
+            return Err(EngineError::NotLocalServer { url }.into());
         };
         let mut fresh = url.clone();
         for next in port.saturating_add(1)..port.saturating_add(32) {
@@ -494,10 +503,11 @@ impl Autostart {
             }
         }
         if fresh == url {
-            return Err(Error::PortBusy {
+            return Err(EngineError::PortBusy {
                 url,
                 units: active_units()?,
-            });
+            }
+            .into());
         }
         let backend = self.make_backend(&fresh)?;
         let mut server = Server::of(
@@ -695,10 +705,11 @@ impl Autostart {
         let started = Instant::now();
         while port_open(&host, port) {
             if started.elapsed() >= Duration::from_secs(10) {
-                return Err(Error::PortBusy {
+                return Err(EngineError::PortBusy {
                     url: url.into(),
                     units: Vec::new(),
-                });
+                }
+                .into());
             }
             thread::sleep(POLL);
         }
@@ -773,12 +784,13 @@ impl Engine {
         log: &Path,
     ) -> Result<Engine, Error> {
         let (host, port) =
-            local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+            local_address(url).ok_or_else(|| Error::from(EngineError::NotLocalServer { url: url.into() }))?;
         if port_open(&host, port) {
-            return Err(Error::PortBusy {
+            return Err(EngineError::PortBusy {
                 url: url.into(),
                 units: Vec::new(),
-            });
+            }
+            .into());
         }
         // The Function loader requires `weights` of the llama kind
         // (AGL-039, D21; AGL-043 F5).
@@ -788,10 +800,11 @@ impl Engine {
             .expect("a llama Function has weights");
         let model = models.join(model);
         if !model.is_file() {
-            return Err(Error::WeightsFileMissing {
+            return Err(EngineError::WeightsFileMissing {
                 key: "model.weights".into(),
                 path: model,
-            });
+            }
+            .into());
         }
         let engine = settings
             .engine
@@ -799,7 +812,7 @@ impl Engine {
             .unwrap_or(DEFAULT_ENGINE)
             .to_owned();
         let program = engine_program(&engine, path_var)
-            .ok_or_else(|| Error::EngineNotFound { engine: engine.clone() })?;
+            .ok_or_else(|| Error::from(EngineError::EngineNotFound { engine: engine.clone() }))?;
         let windows = crate::wsl::WindowsEngine::new(&program, host.clone(), port)?;
         let context = settings.context.unwrap_or(DEFAULT_CONTEXT);
         let extra = settings.args.clone().unwrap_or_default();
@@ -836,10 +849,10 @@ impl Engine {
             .stdout(Stdio::from(log_out))
             .stderr(Stdio::from(log_err))
             .spawn()
-            .map_err(|source| Error::EngineSpawn {
+            .map_err(|source| Error::from(EngineError::EngineSpawn {
                 engine,
                 source,
-            })?;
+            }))?;
         Ok(Engine { child, dead: false, windows })
     }
 
@@ -946,12 +959,13 @@ fn strata_launch(
     lang: Lang,
 ) -> Result<StrataLaunch, Error> {
     let (host, port) =
-        local_address(url).ok_or_else(|| Error::NotLocalServer { url: url.into() })?;
+        local_address(url).ok_or_else(|| Error::from(EngineError::NotLocalServer { url: url.into() }))?;
     if port_open(&host, port) {
-        return Err(Error::PortBusy {
+        return Err(EngineError::PortBusy {
             url: url.into(),
             units: Vec::new(),
-        });
+        }
+        .into());
     }
     // The Function loader requires `strata` of the strata kind (AGL-089, D5).
     let variant = settings.strata.as_deref().expect("a strata Function has its variant");
@@ -1036,7 +1050,7 @@ impl Engine {
             .stderr(Stdio::from(log_err))
             .current_dir(&launch.cwd);
         let child = command.spawn().map_err(|source| {
-            Error::EngineSpawn {
+            EngineError::EngineSpawn {
                 engine: "the Strata server".to_owned(),
                 source,
             }
@@ -1097,7 +1111,7 @@ pub fn check_outside(
             if let Some(error) = certificate_refused(llama) {
                 return Err(error);
             }
-            return Err(Error::OutsideServerDown { url: llama.url().to_owned() });
+            return Err(EngineError::OutsideServerDown { url: llama.url().to_owned() }.into());
         }
         Health::Loading => wait_ready(llama, None, what, say, lang)?,
         Health::Ready => {}
@@ -1107,11 +1121,12 @@ pub fn check_outside(
     if let (Some(expected), Some(running)) = (expected, running.as_deref().map(file_name))
         && expected != running
     {
-        return Err(Error::OutsideModelDiffers {
+        return Err(EngineError::OutsideModelDiffers {
             url: llama.url().to_owned(),
             expected: expected.to_owned(),
             running: running.to_owned(),
-        });
+        }
+        .into());
     }
     Ok(())
 }
@@ -1246,15 +1261,17 @@ fn wait_child_ready(
             return Ok(());
         }
         if !engine.is_alive() {
-            return Err(Error::ServerFailed {
+            return Err(EngineError::ServerFailed {
                 owner: ServerOwner::Child(log.into()),
-            });
+            }
+            .into());
         }
         if started.elapsed() >= READY_TIMEOUT {
-            return Err(Error::ServerTimeout {
+            return Err(EngineError::ServerTimeout {
                 seconds: READY_TIMEOUT.as_secs(),
                 owner: ServerOwner::Child(log.into()),
-            });
+            }
+            .into());
         }
         thread::sleep(POLL);
     }
@@ -1270,10 +1287,10 @@ fn consent(question: &str, others: &Others, lang: Lang) -> Result<(), Error> {
             if ask(question, lang) {
                 Ok(())
             } else {
-                Err(Error::StartDeclined)
+                Err(EngineError::StartDeclined.into())
             }
         }
-        Others::Refuse => Err(Error::ServerRunning { units: Vec::new() }),
+        Others::Refuse => Err(EngineError::ServerRunning { units: Vec::new() }.into()),
     }
 }
 
@@ -1283,7 +1300,7 @@ fn consent(question: &str, others: &Others, lang: Lang) -> Result<(), Error> {
 fn restart_consent(what: &str, others: &Others, lang: Lang) -> Result<(), Error> {
     match consent(&texts::restart_question(what, lang), others, lang) {
         Ok(()) => Ok(()),
-        Err(Error::ServerRunning { .. } | Error::StartDeclined) => Err(Error::RestartDeclined),
+        Err(Error::Engine(EngineError::ServerRunning { .. } | EngineError::StartDeclined)) => Err(EngineError::RestartDeclined.into()),
         Err(error) => Err(error),
     }
 }
@@ -1346,7 +1363,7 @@ fn switch_kind(
     // the `SwitchDeclined`.
     match consent(&texts::switch_question(&old, at, what, lang), others, lang) {
         Ok(()) => {}
-        Err(Error::ServerRunning { .. } | Error::StartDeclined) => return Err(Error::SwitchDeclined),
+        Err(Error::Engine(EngineError::ServerRunning { .. } | EngineError::StartDeclined)) => return Err(EngineError::SwitchDeclined.into()),
         Err(error) => return Err(error),
     }
     // The pid of the server for its file (AGL-064, D3): the child in
@@ -1369,10 +1386,11 @@ fn switch_kind(
         let started = Instant::now();
         while port_open(&host, port) {
             if started.elapsed() >= Duration::from_secs(10) {
-                return Err(Error::PortBusy {
+                return Err(EngineError::PortBusy {
                     url: at.into(),
                     units: Vec::new(),
-                });
+                }
+                .into());
             }
             thread::sleep(POLL);
         }
@@ -1431,9 +1449,9 @@ pub fn unit_active(unit: &str) -> Result<bool, Error> {
         .args(["--user", "is-active", "--quiet", unit])
         .stdin(Stdio::null())
         .status()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     Ok(status.success())
 }
 
@@ -1452,13 +1470,14 @@ pub fn active_units() -> Result<Vec<String>, Error> {
         ])
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if !output.status.success() {
-        return Err(Error::Systemd {
+        return Err(EngineError::Systemd {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
+        }
+        .into());
     }
     Ok(parse_units(&String::from_utf8_lossy(&output.stdout)))
 }
@@ -1479,15 +1498,16 @@ pub fn systemctl(args: &[&str]) -> Result<(), Error> {
         .args(args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| Error::from(EngineError::Systemd {
             detail: source.to_string(),
-        })?;
+        }))?;
     if output.status.success() {
         Ok(())
     } else {
-        Err(Error::Systemd {
+        Err(EngineError::Systemd {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        })
+        }
+        .into())
     }
 }
 
@@ -1542,19 +1562,21 @@ pub fn spec(settings: &ServerFile, models: &Path) -> Result<Spec, Error> {
         Some(name) => {
             let path = models.join(name);
             if !path.is_file() {
-                return Err(Error::WeightsFileMissing {
+                return Err(EngineError::WeightsFileMissing {
                     key: "model.draft".into(),
                     path,
-                });
+                }
+                .into());
             }
             Some(path)
         }
         None => None,
     };
     if draft.is_some() && settings.spec_type.is_none() {
-        return Err(Error::MissingSpecType {
+        return Err(EngineError::MissingSpecType {
             draft: settings.draft.clone().unwrap_or_default(),
-        });
+        }
+        .into());
     }
     Ok(Spec {
         spec_type: settings.spec_type.clone(),
@@ -1567,10 +1589,11 @@ pub fn projector_args(settings: &ServerFile, models: &Path) -> Result<Vec<OsStri
     if let Some(name) = &settings.mmproj {
         let file = models.join(name);
         if !file.is_file() {
-            return Err(Error::WeightsFileMissing {
+            return Err(EngineError::WeightsFileMissing {
                 key: "model.mmproj".into(),
                 path: file,
-            });
+            }
+            .into());
         }
         projector = projector_flags(settings, file);
     }
@@ -1984,14 +2007,14 @@ mod tests {
         // A `draft` that names no file.
         assert!(matches!(
             spec(&settings(Some("draft-mtp"), Some("nope.gguf")), &models),
-            Err(Error::WeightsFileMissing { key, path })
+            Err(Error::Engine(EngineError::WeightsFileMissing { key, path }))
                 if key == "model.draft" && path == models.join("nope.gguf")
         ));
         // A `draft` without a `spec_type`: the build's default is `none`,
         // the draft would not run (AGL-025, D4).
         assert!(matches!(
             spec(&settings(None, Some("d.gguf")), &models),
-            Err(Error::MissingSpecType { draft }) if draft == "d.gguf"
+            Err(crate::error::Error::Engine(EngineError::MissingSpecType { draft })) if draft == "d.gguf"
         ));
     }
 
@@ -2054,7 +2077,7 @@ mod tests {
                 ) {
                     Ok(engine) => Some(engine),
                     // The port was taken between the free and the check.
-                    Err(Error::PortBusy { .. }) => None,
+                    Err(crate::error::Error::Engine(EngineError::PortBusy { .. })) => None,
                     Err(error) => panic!("the launch failed with {error:?}"),
                 }
             })
@@ -2095,7 +2118,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         assert!(matches!(
             result,
-            Err(Error::PortBusy { url: busy, .. }) if busy == url
+            Err(crate::error::Error::Engine(EngineError::PortBusy { url: busy, .. })) if busy == url
         ));
     }
 
@@ -2164,7 +2187,7 @@ mod tests {
         let ws = project(None, ServerFile::default());
         assert!(matches!(
             Server::of(&ws, None, &user, model("m.gguf", 4096)),
-            Err(Error::ProjectNotRegistered { project }) if project == Path::new("/p/agl-lite")
+            Err(crate::error::Error::Engine(EngineError::ProjectNotRegistered { project })) if project == Path::new("/p/agl-lite")
         ));
         // With no url anywhere, the llama-server's default address (AGL-056, D5).
         let origin = origin("60af300abea6");
@@ -2196,19 +2219,19 @@ mod tests {
         let no = |_question: &str, _lang: Lang| false;
         assert!(matches!(
             consent(question, &Others::Ask(Arc::new(no)), Lang::En),
-            Err(Error::StartDeclined)
+            Err(Error::Engine(EngineError::StartDeclined))
         ));
         // No terminal and no `--yes`: refused, no units named (AGL-033, D2).
         assert!(matches!(
             consent(question, &Others::Refuse, Lang::En),
-            Err(Error::ServerRunning { units }) if units.is_empty()
+            Err(crate::error::Error::Engine(EngineError::ServerRunning { units })) if units.is_empty()
         ));
         // The restart consent: the refusal is the `RestartDeclined`, also
         // the human's no in a terminal (AGL-034, F29).
         assert!(restart_consent("llama-server", &Others::Refuse, Lang::En)
-            .is_err_and(|error| matches!(error, Error::RestartDeclined)));
+            .is_err_and(|error| matches!(error, Error::Engine(EngineError::RestartDeclined))));
         assert!(restart_consent("llama-server", &Others::Ask(Arc::new(no)), Lang::En)
-            .is_err_and(|error| matches!(error, Error::RestartDeclined)));
+            .is_err_and(|error| matches!(error, Error::Engine(EngineError::RestartDeclined))));
         assert!(restart_consent("llama-server", &Others::Yes, Lang::En).is_ok());
     }
 
@@ -2286,12 +2309,12 @@ mod tests {
         assert!(check(&outside_server(200, "C:\\models\\a.gguf"), "a.gguf").is_ok());
         assert!(matches!(
             check(&outside_server(200, "/m/b.gguf"), "a.gguf"),
-            Err(Error::OutsideModelDiffers { expected, running, .. }) if expected == "a.gguf" && running == "b.gguf"
+            Err(crate::error::Error::Engine(EngineError::OutsideModelDiffers { expected, running, .. })) if expected == "a.gguf" && running == "b.gguf"
         ));
         // Nothing answers: an error, and no launch.
         assert!(matches!(
             check(&Llama::new("http://127.0.0.1:9"), "a.gguf"),
-            Err(Error::OutsideServerDown { .. })
+            Err(crate::error::Error::Engine(EngineError::OutsideServerDown { .. }))
         ));
     }
 
@@ -2495,7 +2518,7 @@ mod tests {
             });
         assert!(matches!(
             result,
-            Err(Error::WeightsFileMissing { key, path })
+            Err(Error::Engine(EngineError::WeightsFileMissing { key, path }))
                 if key == "model.weights" && path == Path::new("/m/m.gguf")
         ));
         assert!(said.is_empty());
@@ -2641,7 +2664,7 @@ mod tests {
             &mut |line| said.push(line.to_owned()),
             Lang::En,
         );
-        assert!(matches!(refused, Err(Error::SwitchDeclined)));
+        assert!(matches!(refused, Err(Error::Engine(EngineError::SwitchDeclined))));
         assert!(read_record(&dir).is_some());
         // The human's no in a terminal is the same refusal (AGL-034, F29).
         let no = |_question: &str, _lang: Lang| false;
@@ -2654,7 +2677,7 @@ mod tests {
             &mut |line| said.push(line.to_owned()),
             Lang::En,
         );
-        assert!(matches!(answered, Err(Error::SwitchDeclined)));
+        assert!(matches!(answered, Err(Error::Engine(EngineError::SwitchDeclined))));
         assert!(read_record(&dir).is_some());
         // Agreed: the owned server stops, the record goes, and it is told.
         switch_kind(
@@ -2729,7 +2752,7 @@ mod tests {
                     said.push(line.to_owned());
                 }
             }),
-            Err(Error::RestartDeclined)
+            Err(Error::Engine(EngineError::RestartDeclined))
         ));
         assert!(said.is_empty());
     }
