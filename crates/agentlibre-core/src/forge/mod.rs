@@ -874,7 +874,15 @@ fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Erro
             type_name: type_name.clone(),
         }))?
         .into_value();
-    file.check_empty()?;
+    // The known keys were read, so a remainder is an unknown key of the
+    // envelope.
+    if let Some(key) = file.keys().first() {
+        return Err(ForgeError::ArtifactKey {
+            path: path.into(),
+            key: file.key(key),
+        }
+        .into());
+    }
     let artifact = Artifact {
         path: path.into(),
         type_name,

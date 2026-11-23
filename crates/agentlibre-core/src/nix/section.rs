@@ -8,7 +8,6 @@ use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::nix::Expected;
-use crate::forge::error::Error as ForgeError;
 
 /// An attribute set being read. Keys are removed as they are read.
 pub struct Section {
@@ -56,19 +55,6 @@ impl Section {
     /// carried unparsed.
     pub fn into_value(self) -> Value {
         Value::Object(self.map)
-    }
-
-    /// Rejects any key left in the set: the known keys were read, so a
-    /// remainder is an unknown key of an artifact's envelope.
-    pub fn check_empty(&self) -> Result<(), Error> {
-        match self.map.keys().next() {
-            Some(key) => Err(ForgeError::ArtifactKey {
-                path: self.path.clone(),
-                key: self.key(key),
-            }
-            .into()),
-            None => Ok(()),
-        }
     }
 
     /// The full name of `key` in the file; with an empty `key`, the name of
