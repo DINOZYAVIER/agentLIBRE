@@ -256,7 +256,7 @@ fn anthropic_body(prompt: &Prompt) -> Json {
                 system.push_str(text);
             }
             Message::User(text) => messages.push(json!({"role": "user", "content": text})),
-            Message::Runtime(text) => messages
+            Message::Runtime(text) | Message::Wake(text) => messages
                 .push(json!({"role": "user", "content": format!("{RUNTIME_PREFIX} {text}")})),
             Message::Assistant {
                 thinking,
@@ -477,9 +477,9 @@ fn render_message(out: &mut String, format: &Format, message: &Message, keep_thi
             out.push_str(text);
             out.push_str("\n\n");
         }
-        Message::Runtime(text) => {
+        Message::Runtime(text) | Message::Wake(text) => {
             // A runtime message is the human's prefix line as a user turn
-            // (AGL-030, D2, AGL-009).
+            // (AGL-030, D2, AGL-009); a wake too, and a turn of its own (D55).
             out.push_str("User: ");
             out.push_str(RUNTIME_PREFIX);
             out.push(' ');

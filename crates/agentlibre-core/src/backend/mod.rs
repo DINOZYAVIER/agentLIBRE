@@ -29,6 +29,11 @@ pub enum Message {
     /// user role behind [`RUNTIME_PREFIX`]. It is not the human's: it
     /// does not move the thinking boundary of [`kept_thinking`].
     Runtime(String),
+    /// A flow's wake delivered to the session (AGL-121, D44, D55),
+    /// rendered as the user role behind [`RUNTIME_PREFIX`] like a runtime
+    /// message — and, unlike it, it opens a turn: it moves the thinking
+    /// boundary of [`kept_thinking`] as a human's message does.
+    Wake(String),
     /// One step of the model: its thinking, its text (an answer, or what
     /// it wrote before a call, D114) and its call.
     Assistant {
@@ -359,11 +364,11 @@ pub trait Backend {
 
 /// Whether the thinking of each message goes to the template. Without
 /// `preserve`, only the thinking after the last user message does (D98);
-/// a runtime message is not a user message (AGL-009).
+/// a runtime message is not a user message (AGL-009), a wake is (D55).
 pub fn kept_thinking(messages: &[Message], preserve: bool) -> Vec<bool> {
     let current = messages
         .iter()
-        .rposition(|m| matches!(m, Message::User(_)))
+        .rposition(|m| matches!(m, Message::User(_) | Message::Wake(_)))
         .map_or(0, |i| i + 1);
     (0..messages.len())
         .map(|i| preserve || i >= current)
@@ -380,6 +385,20 @@ mod tests {
             text: Some("a".into()),
             call: None,
         }
+    }
+
+    #[test]
+    fn a_wake_moves_the_thinking_boundary_like_a_user_message() {
+        // AGL-121, D55: a wake opens a turn, so the thinking of the turns
+        // before it leaves the prompt as it does for a human's message.
+        let messages = [
+            Message::System("s".into()),
+            Message::User("1".into()),
+            step("t1"),
+            Message::Wake("flow woke this".into()),
+            step("t2"),
+        ];
+        assert_eq!(kept_thinking(&messages, false), vec![false, false, false, false, true]);
     }
 
     #[test]

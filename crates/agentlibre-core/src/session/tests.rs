@@ -49,6 +49,7 @@ fn write_and_read_back() {
     let dir = TempDir::new();
     let events = [
         Event::User("Fix the test".into()),
+        Event::Wake { flow: "relaunch".into(), text: "flow `relaunch` woke this".into() },
         Event::State("explore".into()),
         Event::Thinking("Let me look".into()),
         call("c1", "ls"),
@@ -85,30 +86,31 @@ fn write_and_read_back() {
     assert_eq!(
         types,
         [
-            "session", "user", "state", "thinking", "call", "result", "stop", "answer", "compact",
-            "cut_off", "compact"
+            "session", "user", "wake", "state", "thinking", "call", "result", "stop", "answer",
+            "compact", "cut_off", "compact"
         ]
     );
     assert_eq!(lines.len(), events.len() + 1);
     // The new sessions are written with the version 2 (AGL-063, D2).
     assert_eq!(lines[0]["version"], 2);
     assert_eq!(lines[0]["workspace"], "/home/u/repos/a");
-    assert_eq!(lines[4]["args"], json!({"command": "ls", "timeout": 30}));
-    assert_eq!(lines[8]["summary"], "The test is fixed.");
+    assert_eq!(lines[2]["flow"], "relaunch");
+    assert_eq!(lines[5]["args"], json!({"command": "ls", "timeout": 30}));
+    assert_eq!(lines[9]["summary"], "The test is fixed.");
     assert_eq!(
-        lines[9],
+        lines[10],
         json!({
             "type": "cut_off",
             "limit": 12288,
             "thinking": 4000,
             "discarded": 8288,
             "call": true,
-            "time": lines[9]["time"]
+            "time": lines[10]["time"]
         })
     );
     // The kept question rides the summary and round-trips (F31).
-    assert_eq!(lines[10]["summary"], "It is fixed for good.");
-    assert_eq!(lines[10]["question"], "Fix the test");
+    assert_eq!(lines[11]["summary"], "It is fixed for good.");
+    assert_eq!(lines[11]["question"], "Fix the test");
     assert!(
         lines
             .iter()

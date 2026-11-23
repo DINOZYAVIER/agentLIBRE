@@ -383,6 +383,9 @@ impl Inspect {
     ) -> Vec<String> {
         match record {
             Record::User(message) => user_lines(theme, message, columns, Role::InputText),
+            Record::Wake { flow, text } => {
+                user_lines(theme, &format!("[{flow}] {text}"), columns, Role::InputText)
+            }
             Record::State(state) => vec![theme.paint(Role::Muted, &format!("[{state}]"))],
             Record::Notice { line, role, detail } => {
                 // A command keeps the message's look in the mode too,
@@ -475,7 +478,7 @@ impl Inspect {
 
 /// Whether the record is a message of the human (D5).
 fn is_user(record: &Record) -> bool {
-    matches!(record, Record::User(_))
+    matches!(record, Record::User(_) | Record::Wake { .. })
 }
 
 /// The tool's block (D19; AGL-098, D2): the text the model wrote before

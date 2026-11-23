@@ -31,6 +31,14 @@ pub enum Command {
         reasoning: Option<ReasoningLevel>,
         observer: Option<Observer>,
     },
+    /// A flow's wake delivered to this session (AGL-121, D44, D55): the
+    /// turn opens with a `wake` event, not the human's message, and the
+    /// model takes the line behind the runtime prefix.
+    Wake {
+        flow: String,
+        text: String,
+        observer: Option<Observer>,
+    },
     /// `/remember [--workspace] name | text` (AGL-006; AGL-077, D8).
     Remember { name: String, text: String, workspace: bool },
     /// `/memory remove <name>` once agreed (AGL-060, D7).
@@ -279,9 +287,28 @@ impl Run {
                 self.reasoning = reasoning;
                 let end = match (observer, self.context) {
                     (Some(mut observer), Some(context)) => {
-                        self.turn_on(context, &message, attached, &mut observer, &mut forward)
+                        self.turn_on(context, &message, None, attached, &mut observer, &mut forward)
                     }
-                    _ => self.turn(&message, attached, &mut forward),
+                    _ => self.turn(&message, None, attached, &mut forward),
+                };
+                (Some(end), None)
+            }
+            Command::Wake {
+                flow,
+                text,
+                observer,
+            } => {
+                self.stop.reset();
+                let end = match (observer, self.context) {
+                    (Some(mut observer), Some(context)) => self.turn_on(
+                        context,
+                        &text,
+                        Some(&flow),
+                        Vec::new(),
+                        &mut observer,
+                        &mut forward,
+                    ),
+                    _ => self.turn(&text, Some(&flow), Vec::new(), &mut forward),
                 };
                 (Some(end), None)
             }

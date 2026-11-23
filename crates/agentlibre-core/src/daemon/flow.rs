@@ -157,10 +157,11 @@ impl Daemon {
         let Some(entry) = state.sessions.get_mut(&id) else {
             return false;
         };
-        let command = Command::Say {
-            message: wake.text.clone(),
-            attached: Vec::new(),
-            reasoning: None,
+        // The wake opens a turn as a human's message does, and the
+        // session records it as a wake (AGL-121, D44, D55).
+        let command = Command::Wake {
+            flow: wake.flow.clone(),
+            text: wake.text.clone(),
             observer: entry.observer.take(),
         };
         if entry.commands.send(command).is_ok() {

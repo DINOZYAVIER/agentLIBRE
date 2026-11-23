@@ -88,6 +88,11 @@ impl Conversation {
         for event in events {
             match event {
                 Event::User(text) => conversation.push(Who::You, text.clone()),
+                // A wake speaks for a flow, not for the human and not for
+                // the agent (AGL-121, D55).
+                Event::Wake { flow, text } => {
+                    conversation.push(Who::Note, format!("wake from `{flow}`: {text}"));
+                }
                 Event::Answer(text) => conversation.push(Who::Agent, text.clone()),
                 Event::Call { text, call, summary } => {
                     if let Some(text) = text.as_ref().filter(|text| !text.trim().is_empty()) {

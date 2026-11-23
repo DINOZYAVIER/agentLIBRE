@@ -229,6 +229,7 @@ pub fn report_of(report: wire::Report) -> Report {
 pub fn event(event: Event) -> wire::Event {
     match event {
         Event::User(text) => wire::Event::User(text),
+        Event::Wake { flow, text } => wire::Event::Wake { flow, text },
         Event::State(name) => wire::Event::State(name),
         Event::Thinking(text) => wire::Event::Thinking(text),
         Event::Call { text, call } => {
@@ -297,6 +298,7 @@ pub fn event(event: Event) -> wire::Event {
 pub fn event_of(event: wire::Event) -> Event {
     match event {
         wire::Event::User(text) => Event::User(text),
+        wire::Event::Wake { flow, text } => Event::Wake { flow, text },
         wire::Event::State(name) => Event::State(name),
         wire::Event::Thinking(text) => Event::Thinking(text),
         wire::Event::Call { text, call, .. } => Event::Call {

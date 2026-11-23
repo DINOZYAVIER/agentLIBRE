@@ -139,7 +139,7 @@ impl Agent<'_> {
     ) -> Result<TurnEnd, Error> {
         let mut observer = Observer::new();
         observer.attach(self.session);
-        self.turn_observed(message, sink, &mut observer)
+        self.turn_observed(message, None, sink, &mut observer)
     }
 
     /// Runs the turn for the user `message`. A stop is logged; a server
@@ -149,11 +149,12 @@ impl Agent<'_> {
     pub fn turn_observed(
         &mut self,
         message: &str,
+        wake: Option<&str>,
         sink: &mut dyn Sink,
         observer: &mut Observer,
     ) -> Result<TurnEnd, Error> {
         let mut reports = Reports { observer, sink };
-        let end = self.run_turn(message, &mut reports);
+        let end = self.run_turn(message, wake, &mut reports);
         match &end {
             Ok(TurnEnd::Answer(_)) => {}
             Ok(TurnEnd::Stopped(reason)) => reports.end(PhaseEvent::Stop(*reason)),
@@ -162,8 +163,23 @@ impl Agent<'_> {
         end
     }
 
-    fn run_turn(&mut self, message: &str, report: &mut Reports<'_>) -> Result<TurnEnd, Error> {
-        self.session.append(Event::User(message.into()))?;
+    fn run_turn(
+        &mut self,
+        message: &str,
+        wake: Option<&str>,
+        report: &mut Reports<'_>,
+    ) -> Result<TurnEnd, Error> {
+        // A wake opens the turn as the human's message does, and the
+        // record keeps which of them spoke (AGL-121, D44, D55).
+        match wake {
+            Some(flow) => {
+                self.record(
+                    Event::Wake { flow: flow.into(), text: message.into() },
+                    report,
+                )?
+            }
+            None => self.session.append(Event::User(message.into()))?,
+        }
         let unfinished = self.session.unfinished().expect("the turn has a message");
         let mut machine = Machine::resume(self.function.table(), self.function_name, &unfinished)?;
         if unfinished.state.is_none() {
@@ -714,6 +730,7 @@ impl Agent<'_> {
                 .rev()
                 .find_map(|event| match event {
                     Event::User(text) => Some(text.clone()),
+                    Event::Wake { text, .. } => Some(text.clone()),
                     _ => None,
                 })
         });
@@ -794,7 +811,7 @@ fn cut_for_summary(messages: &mut Vec<Message>, over: usize) -> bool {
     }
     // The previous summary leads the history (`Session::history`).
     let first = match messages.get(1) {
-        Some(Message::Runtime(_)) => 2,
+        Some(Message::Runtime(_) | Message::Wake(_)) => 2,
         _ => 1,
     };
     let mut dropped = false;
@@ -802,7 +819,7 @@ fn cut_for_summary(messages: &mut Vec<Message>, over: usize) -> bool {
         let Some(next) = messages
             .iter()
             .skip(first + 1)
-            .position(|m| matches!(m, Message::User(_)))
+            .position(|m| matches!(m, Message::User(_) | Message::Wake(_)))
             .map(|i| first + 1 + i)
         else {
             break;
@@ -834,7 +851,9 @@ fn cut_result(content: &str) -> Option<String> {
 /// The characters of a message, for the estimate of a cut.
 fn message_chars(message: &Message) -> usize {
     match message {
-        Message::System(text) | Message::User(text) | Message::Runtime(text) => text.len(),
+        Message::System(text) | Message::User(text) | Message::Runtime(text) | Message::Wake(text) => {
+            text.len()
+        }
         Message::Assistant { thinking, text, call } => {
             thinking.as_deref().map_or(0, str::len)
                 + text.as_deref().map_or(0, str::len)

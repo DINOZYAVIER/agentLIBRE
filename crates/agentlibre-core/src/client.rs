@@ -96,6 +96,9 @@ impl Remote {
                 attached: attached.iter().map(wire::attached).collect(),
                 reasoning: reasoning.map(|level| level.name().to_owned()),
             },
+            // A wake is the daemon's own hand on a run it holds; no
+            // client sends one over the socket (AGL-121, D44).
+            Command::Wake { .. } => unreachable!("a wake is the daemon's"),
             Command::Remember { name, text, workspace } => Request::Remember {
                 session: session.clone(),
                 name,

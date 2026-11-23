@@ -143,6 +143,7 @@ impl Backend for Script {
                     Message::System(_) => "system",
                     Message::User(_) => "user",
                     Message::Runtime(_) => "runtime",
+                    Message::Wake(_) => "wake",
                     Message::Assistant { .. } => "assistant",
                     Message::Tool { .. } => "tool",
                 })
@@ -590,6 +591,7 @@ fn kinds(session: &Session) -> Vec<&'static str> {
         .iter()
         .map(|e| match e {
             Event::User(_) => "user",
+            Event::Wake { .. } => "wake",
             Event::State(_) => "state",
             Event::Thinking(_) => "thinking",
             Event::Call { .. } => "call",

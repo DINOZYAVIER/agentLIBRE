@@ -570,16 +570,18 @@ impl Run {
     pub fn turn(
         &mut self,
         message: &str,
+        wake: Option<&str>,
         attached: Vec<Pending>,
         surface: &mut dyn Turn,
     ) -> Result<TurnEnd, Error> {
         let stop = self.stop.clone();
-        stop.scope(|| self.turn_scoped(message, attached, surface))
+        stop.scope(|| self.turn_scoped(message, wake, attached, surface))
     }
 
     fn turn_scoped(
         &mut self,
         message: &str,
+        wake: Option<&str>,
         attached: Vec<Pending>,
         surface: &mut dyn Turn,
     ) -> Result<TurnEnd, Error> {
@@ -608,7 +610,7 @@ impl Run {
                 self.backend.context_size()
             });
         match ready {
-            Ok(size) => self.turn_on_scoped(size, message, attached, &mut observer, surface),
+            Ok(size) => self.turn_on_scoped(size, message, wake, attached, &mut observer, surface),
             Err(error) => {
                 // A start that failed never reached the agent.
                 observer.end(PhaseEvent::Failed, &mut *surface);
@@ -625,18 +627,20 @@ impl Run {
         &mut self,
         context: usize,
         message: &str,
+        wake: Option<&str>,
         attached: Vec<Pending>,
         observer: &mut Observer,
         surface: &mut dyn Turn,
     ) -> Result<TurnEnd, Error> {
         let stop = self.stop.clone();
-        stop.scope(|| self.turn_on_scoped(context, message, attached, observer, surface))
+        stop.scope(|| self.turn_on_scoped(context, message, wake, attached, observer, surface))
     }
 
     fn turn_on_scoped(
         &mut self,
         context: usize,
         message: &str,
+        wake: Option<&str>,
         attached: Vec<Pending>,
         observer: &mut Observer,
         surface: &mut dyn Turn,
@@ -659,7 +663,7 @@ impl Run {
         .and_then(|()| {
             surface.stored(attach::media_counts(&self.session));
             self.agent(context)
-                .turn_observed(message, &mut *surface, observer)
+                .turn_observed(message, wake, &mut *surface, observer)
         });
         surface.over();
         // A start that failed never reached the agent.

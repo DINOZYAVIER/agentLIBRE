@@ -119,6 +119,8 @@ pub enum Report {
 #[serde(rename_all = "snake_case")]
 pub enum Event {
     User(String),
+    /// A flow's wake delivered to the session (AGL-121, D44, D55).
+    Wake { flow: String, text: String },
     State(String),
     Thinking(String),
     Call {

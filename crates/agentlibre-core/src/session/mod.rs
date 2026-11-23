@@ -187,6 +187,14 @@ pub struct TransitionLine {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     User(String),
+    /// A flow's wake delivered to this session (AGL-121, D44, D55): the
+    /// flow that woke and the line it sent. It opens a turn as a human's
+    /// message does, and the model takes it behind the runtime prefix;
+    /// the record keeps who spoke.
+    Wake {
+        flow: String,
+        text: String,
+    },
     /// A visit of a state begins.
     State(String),
     Thinking(String),
@@ -701,7 +709,7 @@ impl Session {
     pub fn turns(&self) -> usize {
         self.events
             .iter()
-            .filter(|event| matches!(event, Event::User(_)))
+            .filter(|event| matches!(event, Event::User(_) | Event::Wake { .. }))
             .count()
     }
 
@@ -736,6 +744,10 @@ impl Session {
                 Event::User(text) => {
                     thinking = None;
                     messages.push(Message::User(text.clone()));
+                }
+                Event::Wake { text, .. } => {
+                    thinking = None;
+                    messages.push(Message::Wake(text.clone()));
                 }
                 Event::Thinking(text) => thinking = Some(text.clone()),
                 Event::Call { text, call } => messages.push(Message::Assistant {
@@ -840,6 +852,7 @@ impl Session {
                 matches!(
                     e,
                     Event::User(_)
+                        | Event::Wake { .. }
                         | Event::Call { .. }
                         | Event::Result { .. }
                         | Event::Answer(_)
@@ -857,7 +870,7 @@ impl Session {
             .rposition(|e| matches!(e, Event::Answer(_)))
             .map_or(0, |i| i + 1);
         let turn = &self.events[start..];
-        if !turn.iter().any(|e| matches!(e, Event::User(_))) {
+        if !turn.iter().any(|e| matches!(e, Event::User(_) | Event::Wake { .. })) {
             return None;
         }
         let mut unfinished = Unfinished {
@@ -1043,6 +1056,7 @@ fn find(dir: &Path, id: &str) -> Result<PathBuf, Error> {
 fn event_json(event: &Event) -> Json {
     match event {
         Event::User(text) => json!({"type": "user", "text": text}),
+        Event::Wake { flow, text } => json!({"type": "wake", "flow": flow, "text": text}),
         Event::State(state) => json!({"type": "state", "state": state}),
         Event::Thinking(text) => json!({"type": "thinking", "text": text}),
         Event::Call { text, call } => {
@@ -1163,6 +1177,7 @@ pub fn event_from_json(json: &Json) -> Option<Event> {
     let text = |key: &str| json[key].as_str().map(str::to_owned);
     Some(match json["type"].as_str()? {
         "user" => Event::User(text("text")?),
+        "wake" => Event::Wake { flow: text("flow")?, text: text("text")? },
         "state" => Event::State(text("state")?),
         "thinking" => Event::Thinking(text("text")?),
         "call" => {

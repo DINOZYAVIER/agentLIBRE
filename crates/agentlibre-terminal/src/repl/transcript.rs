@@ -321,6 +321,7 @@ impl Presenter {
         for record in records::group(events, transitions, self.lang) {
             match &record {
                 Record::User(message) => self.show_user(message),
+                Record::Wake { flow, text } => self.show_user(&format!("[{flow}] {text}")),
                 Record::State(state) => self.show_state(state),
                 Record::Tool {
                     call,

@@ -29,6 +29,9 @@ pub struct PhaseSpan {
 pub enum Record {
     /// A message of the human (D5: the inspect mode jumps between them).
     User(String),
+    /// A flow's wake, which opens a turn as the human's message does
+    /// (AGL-121, D55): the inspect mode jumps between them too.
+    Wake { flow: String, text: String },
     /// A visit of a state (D138): `[state]`.
     State(String),
     /// A step: the model's thinking and the text it wrote, then its tool
@@ -93,7 +96,7 @@ impl Record {
     /// and `ANSWER`; the rest is one block.
     pub fn blocks(&self) -> Vec<BlockKind> {
         match self {
-            Record::User(_) => vec![BlockKind::Message],
+            Record::User(_) | Record::Wake { .. } => vec![BlockKind::Message],
             Record::State(_) => vec![BlockKind::Line],
             Record::Tool { .. } => vec![BlockKind::Thinking, BlockKind::Tool, BlockKind::Result],
             Record::Answer { .. } => vec![BlockKind::Thinking, BlockKind::Answer],
@@ -296,6 +299,12 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 step = 0;
                 state_entered = false;
                 records.push(Record::User(text.clone()));
+            }
+            Event::Wake { flow, text } => {
+                turn += 1;
+                step = 0;
+                state_entered = false;
+                records.push(Record::Wake { flow: flow.clone(), text: text.clone() });
             }
             Event::State(state) => {
                 if std::mem::replace(&mut state_entered, true) {

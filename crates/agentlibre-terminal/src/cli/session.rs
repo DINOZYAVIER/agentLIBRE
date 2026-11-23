@@ -86,6 +86,7 @@ pub fn transcript(session: &Session, path: &Path, verbose: bool) -> Result<Strin
 fn event_text(event: &Event, out: &mut String) {
     match event {
         Event::User(text) => labeled(out, "user", text),
+        Event::Wake { flow, text } => labeled(out, &format!("wake {flow}"), text),
         Event::State(name) => out.push_str(&format!("state {name}\n")),
         Event::Thinking(text) => labeled(out, "thinking", text),
         Event::Call { text, call } => {

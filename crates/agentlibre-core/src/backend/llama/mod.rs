@@ -285,7 +285,7 @@ pub fn messages_json(prompt: &Prompt) -> Vec<Json> {
         .map(|(message, keep_thinking)| match message {
             Message::System(text) => json!({"role": "system", "content": text}),
             Message::User(text) => json!({"role": "user", "content": text}),
-            Message::Runtime(text) => {
+            Message::Runtime(text) | Message::Wake(text) => {
                 json!({"role": "user", "content": format!("{RUNTIME_PREFIX} {text}")})
             }
             Message::Assistant {

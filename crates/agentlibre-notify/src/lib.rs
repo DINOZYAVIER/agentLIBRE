@@ -310,6 +310,11 @@ impl Records {
                 Vec::new()
             }
             Sent::Report(Report::Event(Event::Answer(text))) => vec![Act::End(text.clone())],
+            // A wake opens a turn without a human: the live card says for
+            // what (AGL-121, D55).
+            Sent::Report(Report::Event(Event::Wake { text, .. })) => {
+                vec![Act::Live(cut(text, ARGUMENT_CHARS))]
+            }
             Sent::Report(Report::Event(Event::CutOff(_))) => {
                 vec![Act::Critical(tr!(lang, m::NOTIFY_CUT_OFF).to_string())]
             }
