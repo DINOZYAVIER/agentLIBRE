@@ -13,6 +13,7 @@ use crate::cli::args::{MemoryAction, memory_action};
 use crate::cli::commands;
 use crate::cli::report::StderrReport;
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::i18n::{Lang, m};
 use crate::backend::ReasoningLevel;
 use crate::interrupt;
@@ -56,7 +57,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 sent.give(&mut report);
             })
-            .ok_or(Error::PlaneGone)?;
+            .ok_or(Error::from(CoreError::PlaneGone))?;
         *session = done.session.clone();
         Ok(done)
     };
@@ -269,7 +270,7 @@ impl Record {
             record_error,
         } = said;
         if let Some(error) = record_error {
-            return Err(error);
+            return Err(error.into());
         }
         let mut answer = false;
         for told in lines {

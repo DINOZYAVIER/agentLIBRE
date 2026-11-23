@@ -13,6 +13,7 @@ use qrcode::{Color, EcLevel, QrCode};
 
 use crate::engine::{port_open, unit_active};
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::engine::error::Error as EngineError;
 use crate::i18n::{Lang, m};
 use crate::outln;
@@ -65,7 +66,7 @@ pub fn run(action: BridgeAction, user: &UserFile, paths: &Paths, lang: Lang) -> 
                 return Ok(ExitCode::SUCCESS);
             }
             store.certificate().map_err(store_error)?;
-            let runtime = paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?;
+            let runtime = paths.runtime.as_deref().ok_or(Error::from(CoreError::DaemonNoRuntime))?;
             // The daemon first: the bridge never starts one (D18).
             drop(client::connect(paths, false, lang, true)?);
             let program = program()?;

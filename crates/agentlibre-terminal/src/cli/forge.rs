@@ -10,6 +10,7 @@ use std::process::{ExitCode, Stdio};
 
 use crate::clock;
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::forge;
 use crate::forge::task_spec;
 use crate::forge::task_spec::GitFlag;
@@ -171,15 +172,15 @@ pub fn project_of(
     auto_rehome: bool,
     lang: Lang,
 ) -> Result<Workspace, Error> {
-    forge::project_of(paths, cwd, auto_rehome, lang, &|options| {
+    Ok(forge::project_of(paths, cwd, auto_rehome, lang, &|options| {
         ask_store(m::FORGE_ASK_STORE, options, lang)
-    })
+    })?)
 }
 
 /// The store ask: the names of the stores plus a new store. On a
 /// terminal the human picks one; off a terminal the error points at
 /// `forge rehome`.
-pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, Error> {
+pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, CoreError> {
     let stores = options[..options.len() - 1].to_vec();
     if !crate::tty::is_interactive() {
         return Err(crate::forge::error::Error::RehomeNoStore { stores }.into());
@@ -203,7 +204,7 @@ pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result
                 eprintln!("{}", tr!(lang, m::FORGE_ASK_INVALID, last = options.len()));
             }
             Err(source) => {
-                return Err(Error::Read { path: PathBuf::from("<stdin>"), source });
+                return Err(CoreError::Read { path: PathBuf::from("<stdin>"), source });
             }
         }
     }
@@ -607,18 +608,18 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
     // same clean error — the store must be the toplevel.
     let toplevel = match forge::toplevel(dir) {
         Ok(toplevel) => toplevel,
-        Err(crate::error::Error::Forge(crate::forge::error::Error::NotInRepository { .. })) => {
+        Err(CoreError::Forge(crate::forge::error::Error::NotInRepository { .. })) => {
             return Err(crate::forge::error::Error::StoreNotRepository {
                 dir: dir.to_path_buf(),
             }
             .into());
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
-    let store = fs::canonicalize(dir).map_err(|source| Error::Read {
+    let store = fs::canonicalize(dir).map_err(|source| Error::from(CoreError::Read {
         path: dir.to_path_buf(),
         source,
-    })?;
+    }))?;
     if toplevel != store {
         return Err(crate::forge::error::Error::StoreNotRepository {
             dir: dir.to_path_buf(),
@@ -939,7 +940,7 @@ mod tests {
         // Other types are not scaffolded.
         assert!(matches!(
             forge(&data, &repo, &["new", "note", "--title", "t"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::NewType { type_name })) if type_name == "note"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NewType { type_name }))) if type_name == "note"
         ));
         // `--title` is required and unique.
         assert!(matches!(
@@ -966,11 +967,11 @@ mod tests {
                 &repo,
                 &["new", "task-spec", "--title", "Again", "--name", "agl-001-first-task"]
             ),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::NameTaken { name, .. })) if name == "agl-001-first-task"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NameTaken { name, .. }))) if name == "agl-001-first-task"
         ));
         assert!(matches!(
             forge(&data, &repo, &["new", "task-spec", "--title", "Again", "--name", "a/b"]),
-            Err(Error::InvalidName(name)) if name == "a/b"
+            Err(Error::Core(CoreError::InvalidName(name))) if name == "a/b"
         ));
     }
 
@@ -998,11 +999,11 @@ mod tests {
         // new-spec convention with `supersedes` (D3).
         assert!(matches!(
             forge(&data, &repo, &["status", "agl-001-first-task", "open"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::TerminalState { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::TerminalState { .. })))
         ));
         assert!(matches!(
             forge(&data, &repo, &["status", "agl-001-first-task", "frozen"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::BadState { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::BadState { .. })))
         ));
         // The lifecycle is the task-spec's.
         let mut note = task_spec::scaffold("note", &clock::today());
@@ -1011,12 +1012,12 @@ mod tests {
         forge::write_artifact(&note).unwrap();
         assert!(matches!(
             forge(&data, &repo, &["status", "note", "in-progress"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::NotTaskSpec { name, .. })) if name == "note"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NotTaskSpec { name, .. }))) if name == "note"
         ));
         // An absent artifact.
         assert!(matches!(
             forge(&data, &repo, &["status", "ghost", "in-progress"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::ArtifactNotFound { name, .. })) if name == "ghost"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::ArtifactNotFound { name, .. }))) if name == "ghost"
         ));
     }
 
@@ -1162,7 +1163,7 @@ mod tests {
         let before = std::fs::read(&file).unwrap();
         assert!(matches!(
             forge(&data, &repo, &["range", name, "--last", "nope"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::CommitNotFound { id, .. })) if id == "nope"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::CommitNotFound { id, .. }))) if id == "nope"
         ));
         assert_eq!(std::fs::read(&file).unwrap(), before);
         // So is an anchor that is no ancestor of the last.
@@ -1219,7 +1220,7 @@ mod tests {
             let action = parse(&args.iter().map(OsString::from).collect::<Vec<_>>())?;
             run(action, None, &user, &paths, &to, Lang::En)
         };
-        assert!(matches!(run_with(&["list"]), Err(crate::error::Error::Forge(crate::forge::error::Error::RehomeNoStore { .. }))));
+        assert!(matches!(run_with(&["list"]), Err(Error::Core(CoreError::Forge(crate::forge::error::Error::RehomeNoStore { .. })))));
         let name = old_store.to_string_lossy().into_owned();
         assert_eq!(run_with(&["rehome", name.as_str()]).unwrap(), ExitCode::SUCCESS);
         // The store was renamed to the new home and the lookup finds it.
@@ -1245,11 +1246,11 @@ mod tests {
         // other store are refused; the same store is a no-op.
         assert!(matches!(
             forge(&data, &repo, &["rehome", "--new"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::RehomeInUse { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::RehomeInUse { .. })))
         ));
         assert!(matches!(
             forge(&data, &repo, &["rehome", "somewhere-else"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::RehomeInUse { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::RehomeInUse { .. })))
         ));
         assert_eq!(
             forge(&data, &repo, &["rehome", key.as_str()]).unwrap(),
@@ -1304,7 +1305,7 @@ mod tests {
         // A commit that does not resolve is a git failure.
         assert!(matches!(
             forge(&data, &repo, &["diff", "agl-001-first-task", "nope"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::GitFailed { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::GitFailed { .. })))
         ));
     }
 
@@ -1364,7 +1365,7 @@ mod tests {
         );
         assert!(matches!(
             forge(&data, &repo, &["diff", "agl-001-first-task", &option]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::GitFailed { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::GitFailed { .. })))
         ));
         assert!(!sneaky.exists());
     }
@@ -1386,7 +1387,7 @@ mod tests {
             let error = forge(&data, &repo, args).unwrap_err();
             assert!(matches!(
                 error,
-                Error::Forge(crate::forge::error::Error::StoreNotRepository { ref dir }) if dir == &store
+                Error::Core(CoreError::Forge(crate::forge::error::Error::StoreNotRepository { ref dir })) if dir == &store
             ));
             assert_eq!(
                 error.message(Lang::En),
@@ -1402,12 +1403,12 @@ mod tests {
         let error = forge(&data, &repo, &["log", "agl-001-first-task"]).unwrap_err();
         assert!(matches!(
             error,
-            Error::Forge(crate::forge::error::Error::StoreNotRepository { ref dir }) if dir == &store
+            Error::Core(CoreError::Forge(crate::forge::error::Error::StoreNotRepository { ref dir })) if dir == &store
         ));
         // An unknown artifact is still a not-found, before the git.
         assert!(matches!(
             forge(&data, &repo, &["log", "nope"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::ArtifactNotFound { .. }))
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::ArtifactNotFound { .. })))
         ));
     }
 }

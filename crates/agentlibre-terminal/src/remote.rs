@@ -11,7 +11,7 @@ use agentlibre_core::client::{self, Remote};
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
 use crate::backend::ReasoningLevel;
-use crate::error::Error;
+use crate::error::CoreError as Error;
 use crate::i18n::Lang;
 use crate::interrupt;
 use crate::paths::Paths;

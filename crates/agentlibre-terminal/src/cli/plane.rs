@@ -9,6 +9,7 @@ use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::cli::args::PlaneAction;
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::plane::error::Error as PlaneError;
 use crate::i18n::{Lang, m};
 use crate::outln;
@@ -136,13 +137,15 @@ fn flows(
         .iter()
         .map(|plane| {
             let reply =
-                client.ask(&Request::Flow { plane: plane.name.clone(), verb: verb.clone() }, &mut |_| {})?;
+                client
+                    .ask(&Request::Flow { plane: plane.name.clone(), verb: verb.clone() }, &mut |_| {})
+                    .map_err(CoreError::from)?;
             let Reply::Text { said, .. } = reply else {
-                return Err(Error::Said { text: format!("the daemon answered a flow with {reply:?}") });
+                return Err(CoreError::Said { text: format!("the daemon answered a flow with {reply:?}") }.into());
             };
             let text = said_text(&said);
             if said.failed {
-                return Err(Error::Said { text });
+                return Err(CoreError::Said { text }.into());
             }
             Ok(if many { format!("[{}] {text}", plane.name) } else { text })
         })
@@ -254,7 +257,7 @@ mod tests {
         let delete = || action(&["plane", "delete", "work"]);
         assert!(matches!(
             act(delete(), &paths, &cwd, None, Lang::En),
-            Err(Error::Plane(PlaneError::DeleteNeedsYes { .. }))
+            Err(Error::Core(CoreError::Plane(PlaneError::DeleteNeedsYes { .. })))
         ));
         // A no keeps it, a yes deletes it.
         let no = |_: &str| false;

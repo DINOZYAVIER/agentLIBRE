@@ -312,7 +312,7 @@ impl Browser {
 
     /// The file the row stands on: the one a run would load (AGL-102, D2).
     fn selected_file(&self, catalog: &Catalog) -> Result<PathBuf, crate::error::Error> {
-        catalog.file(&self.entries[self.at].name).map(|file| file.path)
+        Ok(catalog.file(&self.entries[self.at].name)?.path)
     }
 
     /// `d` answered twice: the file goes, the list is read anew

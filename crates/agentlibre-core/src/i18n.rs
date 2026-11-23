@@ -158,6 +158,24 @@ macro_rules! tr {
 
 /// Every CLI message of the program, defined once per language.
 pub mod m {
+
+    /// The pointer appended to usage errors.
+    pub const USAGE_POINTER: Msg = Msg {
+        en: "Run `agl --help` for usage.",
+        uk: "Див. `agl --help`.",
+    };
+
+    /// `Error::FunctionWithResume`.
+    pub const FUNCTION_WITH_RESUME: Msg = Msg {
+        en: "`--function` cannot go with `--resume`: the session keeps its Function",
+        uk: "`--function` не можна разом із `--resume`: сесія має свою Function",
+    };
+
+    /// `Error::PlaneWithResume`.
+    pub const PLANE_WITH_RESUME: Msg = Msg {
+        en: "`--plane` cannot go with `--resume`: the session keeps its plane",
+        uk: "`--plane` не можна разом із `--resume`: сесія має свій plane",
+    };
     use super::Msg;
 
     /// The word before the lines of usage of `--help` (AGL-061, D3); the
@@ -645,48 +663,6 @@ WireGuard; TLS з власним сертифікатом, токен на пр�
         uk: "жодного пристрою не спарено (agl bridge pair <назва>)",
     };
 
-    /// `Error::BridgeNotSet` (AGL-083, D20).
-    pub const BRIDGE_NOT_SET: Msg = Msg {
-        en: "the bridge needs `bridge.address` and `bridge.port`; add to {path}, with the address of this computer that WireGuard reaches:\n\nbridge = {{ address = \"10.0.0.5\"; port = 18443; }};",
-        uk: "мостові потрібні `bridge.address` і `bridge.port`; додай у {path}, з адресою цього комп'ютера, до якої доходить WireGuard:\n\nbridge = {{ address = \"10.0.0.5\"; port = 18443; }};",
-    };
-
-    /// `Error::BridgeProgramMissing` (AGL-083, D18).
-    pub const BRIDGE_PROGRAM_MISSING: Msg = Msg {
-        en: "no agl-bridge beside agl: {path}",
-        uk: "поруч з agl немає agl-bridge: {path}",
-    };
-
-    /// `Error::BridgeNotListening`.
-    pub const BRIDGE_NOT_LISTENING: Msg = Msg {
-        en: "the bridge did not start listening; see journalctl --user -u {unit}",
-        uk: "міст не почав слухати; дивись journalctl --user -u {unit}",
-    };
-
-    /// `Error::BridgeDeviceName` (AGL-083, D10).
-    pub const BRIDGE_DEVICE_NAME: Msg = Msg {
-        en: "{name:?} is no device name: 1 to 64 letters, digits, `.`, `_` or `-`",
-        uk: "{name:?} не назва пристрою: від 1 до 64 латинських літер, цифр, `.`, `_` або `-`",
-    };
-
-    /// `Error::BridgeDeviceExists`.
-    pub const BRIDGE_DEVICE_EXISTS: Msg = Msg {
-        en: "the device {name} is paired already; to pair it anew, agl bridge revoke {name} first",
-        uk: "пристрій {name} уже спарено; щоб спарити заново, спершу agl bridge revoke {name}",
-    };
-
-    /// `Error::BridgeDeviceUnknown`.
-    pub const BRIDGE_DEVICE_UNKNOWN: Msg = Msg {
-        en: "no device {name} is paired (agl bridge list)",
-        uk: "пристрою {name} не спарено (agl bridge list)",
-    };
-
-    /// `Error::Bridge`.
-    pub const BRIDGE_FAILED: Msg = Msg {
-        en: "the bridge: {detail}",
-        uk: "міст: {detail}",
-    };
-
     pub const HELP_SESSION_USAGE: Msg = Msg {
         en: "agl session show <id|name|last> [--verbose] [--plane <name>]",
         uk: "agl session show <id|назва|last> [--verbose] [--plane <назва>]",
@@ -799,52 +775,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "у цьому проєкті {path} називає {name}, і він важливіший за файл користувача",
     };
 
-    /// The pointer appended to usage errors.
-    pub const USAGE_POINTER: Msg = Msg {
-        en: "Run `agl --help` for usage.",
-        uk: "Див. `agl --help`.",
-    };
-
-    /// `Error::InvalidUnicode`.
-    pub const INVALID_UNICODE: Msg = Msg {
-        en: "arguments must be valid UTF-8",
-        uk: "аргументи мають бути коректним UTF-8",
-    };
-
-    /// `Error::UnknownOption`.
-    pub const UNKNOWN_OPTION: Msg = Msg {
-        en: "unknown option `{arg}`",
-        uk: "невідомий параметр `{arg}`",
-    };
-
-    /// `Error::MissingValue`.
-    pub const MISSING_VALUE: Msg = Msg {
-        en: "option `{arg}` needs a value",
-        uk: "параметру `{arg}` потрібне значення",
-    };
-
-    /// `Error::RepeatedOption`.
-    pub const REPEATED_OPTION: Msg = Msg {
-        en: "option `{arg}` is given twice",
-        uk: "параметр `{arg}` вказано двічі",
-    };
-
     /// `agl --resume` in a project with no session (AGL-058, D20).
     pub const NO_SESSIONS: Msg = Msg {
         en: "no sessions of this project",
         uk: "у цього проєкту немає сесій",
-    };
-
-    /// `Error::FunctionWithResume`.
-    pub const FUNCTION_WITH_RESUME: Msg = Msg {
-        en: "`--function` cannot go with `--resume`: the session keeps its Function",
-        uk: "`--function` не можна разом із `--resume`: сесія має свою Function",
-    };
-
-    /// `Error::PlaneWithResume`.
-    pub const PLANE_WITH_RESUME: Msg = Msg {
-        en: "`--plane` cannot go with `--resume`: the session keeps its plane",
-        uk: "`--plane` не можна разом із `--resume`: сесія має свій plane",
     };
 
     /// A resumed session whose plane's store is gone (AGL-077, D14).
@@ -853,36 +787,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "plane `{name}` цієї сесії вже немає; сесія триває без plane",
     };
 
-    /// `Error::BadReasoningLevel`.
-    pub const BAD_REASONING_LEVEL: Msg = Msg {
-        en: "invalid reasoning level `{value}` for `--think`: \
-             the levels are off, low, medium and xhigh",
-        uk: "некоректний рівень міркувань `{value}` для `--think`: \
-             рівні — off, low, medium та xhigh",
-    };
-
-    /// `Error::CurrentDir`.
-    pub const CURRENT_DIR: Msg = Msg {
-        en: "cannot read the current directory: {source}",
-        uk: "не вдалося визначити поточну теку: {source}",
-    };
-
     /// `Error::Read`.
     pub const READ: Msg = Msg {
         en: "cannot read {path}: {source}",
         uk: "не вдалося прочитати {path}: {source}",
-    };
-
-    /// `Error::SearchCaNotSet` (AGL-043 F20).
-    pub const SEARCH_CA_NOT_SET: Msg = Msg {
-        en: "agl search login needs `search.ca` with url, root and provisioner in {user_path}; `{key}` is not set:\n\nsearch.ca = {{ url = \"https://ca.example\"; root = \"/path/to/root.crt\"; provisioner = \"NAME\"; }};",
-        uk: "agl search login потребує `search.ca` з url, root і provisioner у {user_path}; `{key}` не задано:\n\nsearch.ca = {{ url = \"https://ca.example\"; root = \"/path/to/root.crt\"; provisioner = \"NAME\"; }};",
-    };
-
-    /// `Error::SearchLogin` (AGL-043 F20).
-    pub const SEARCH_LOGIN: Msg = Msg {
-        en: "agl search login failed: {detail}",
-        uk: "agl search login не вдався: {detail}",
     };
 
     /// `agl search login` is done (AGL-043 F20).
@@ -1047,12 +955,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "цю сесію зроблено з моделлю `{recorded}`, модель що працює — `{running}`",
     };
 
-    /// `Error::Terminal`.
-    pub const TERMINAL: Msg = Msg {
-        en: "cannot switch the terminal to raw mode: {source}",
-        uk: "не вдалося перемкнути термінал у raw-режим: {source}",
-    };
-
     /// `Error::Interrupted`; a turn stopped by Ctrl-C (`StopReason::Interrupted`).
     pub const INTERRUPTED: Msg = Msg {
         en: "interrupted",
@@ -1195,12 +1097,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const TRANSCRIBING: Msg = Msg {
         en: "transcribing {name}…",
         uk: "розпізнаю {name}…",
-    };
-
-    /// `Error::AttachWithoutPrompt`.
-    pub const ATTACH_WITHOUT_PROMPT: Msg = Msg {
-        en: "--attach goes with -p; in a session use /attach <path>",
-        uk: "--attach працює разом з -p; у сесії використовуй /attach <шлях>",
     };
 
     /// The label of streamed thinking (D109), in caps as the tool's
@@ -2023,12 +1919,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "створено сховище робочої області {path}",
     };
 
-    /// `Error::NotifySpawn`.
-    pub const NOTIFY_SPAWN: Msg = Msg {
-        en: "cannot start the notifier beside this executable: {source}",
-        uk: "не можна запустити нотифікатор поруч із цим файлом: {source}",
-    };
-
     /// The store ask of a forge command (a terminal only).
     pub const FORGE_ASK_STORE: Msg = Msg {
         en: "which store is this workspace?",
@@ -2277,27 +2167,12 @@ impl Error {
 
     fn text(&self, lang: Lang) -> String {
         match self {
-            Error::InvalidUnicode => tr!(lang, m::INVALID_UNICODE).to_string(),
-            Error::UnknownOption(arg) => tr!(lang, m::UNKNOWN_OPTION, arg = arg),
-            Error::MissingValue(arg) => tr!(lang, m::MISSING_VALUE, arg = arg),
-            Error::RepeatedOption(arg) => tr!(lang, m::REPEATED_OPTION, arg = arg),
             Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
             Error::PlaneWithResume => tr!(lang, m::PLANE_WITH_RESUME).to_string(),
-            Error::BadReasoningLevel { value } => {
-                tr!(lang, m::BAD_REASONING_LEVEL, value = value)
-            }
             Error::Paths(error) => error.message(lang),
-            Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
             Error::Read { path, source } => {
                 tr!(lang, m::READ, path = path.display(), source = source)
             }
-            Error::SearchCaNotSet { user_path, key } => tr!(
-                lang,
-                m::SEARCH_CA_NOT_SET,
-                user_path = user_path.display(),
-                key = key
-            ),
-            Error::SearchLogin { detail } => tr!(lang, m::SEARCH_LOGIN, detail = detail),
             Error::Settings(error) => error.message(lang),
             Error::Forge(error) => error.message(lang),
             Error::Engine(error) => error.message(lang),
@@ -2313,22 +2188,11 @@ impl Error {
             Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),
             Error::DaemonServer(error) => error.message(lang),
             Error::Plane(error) => error.message(lang),
-            Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::Whisper(error) => error.message(lang),
-            Error::BridgeNotSet { path } => tr!(lang, m::BRIDGE_NOT_SET, path = path.display()),
-            Error::BridgeProgramMissing { path } => {
-                tr!(lang, m::BRIDGE_PROGRAM_MISSING, path = path.display())
-            }
-            Error::BridgeNotListening { unit } => tr!(lang, m::BRIDGE_NOT_LISTENING, unit = unit),
-            Error::BridgeDeviceName { name } => tr!(lang, m::BRIDGE_DEVICE_NAME, name = name),
-            Error::BridgeDeviceExists { name } => tr!(lang, m::BRIDGE_DEVICE_EXISTS, name = name),
-            Error::BridgeDeviceUnknown { name } => tr!(lang, m::BRIDGE_DEVICE_UNKNOWN, name = name),
-            Error::Bridge { detail } => tr!(lang, m::BRIDGE_FAILED, detail = detail),
             Error::Media(error) => error.message(lang),
             Error::Strata(error) => error.message(lang),
             Error::Session(error) => error.message(lang),
             Error::Machine(error) => error.message(lang),
-            Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
@@ -2338,7 +2202,6 @@ impl Error {
                 tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
             }
             Error::Memory(error) => error.message(lang),
-            Error::NotifySpawn { source } => tr!(lang, m::NOTIFY_SPAWN, source = source),
         }
     }
 }
@@ -2445,27 +2308,6 @@ mod tests {
         assert_eq!(locale(&messages), Lang::Uk);
         let empty_all = [("LC_ALL", ""), ("LANG", "uk_UA.UTF-8")];
         assert_eq!(locale(&empty_all), Lang::Uk);
-    }
-
-    #[test]
-    fn usage_errors_point_to_help() {
-        let error = Error::UnknownOption("--url".into());
-        assert_eq!(
-            error.message(Lang::En),
-            "unknown option `--url`\nRun `agl --help` for usage."
-        );
-        assert_eq!(
-            error.message(Lang::Uk),
-            "невідомий параметр `--url`\nДив. `agl --help`."
-        );
-        assert!(
-            !Error::from(crate::function::error::Error::NotFound {
-                name: "x".into(),
-                paths: vec!["/p".into()]
-            })
-            .message(Lang::En)
-            .contains("--help")
-        );
     }
 
     #[test]

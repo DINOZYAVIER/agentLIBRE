@@ -1254,7 +1254,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_strs(&["forge", "new", "doc", "--help"]),
-            Err(crate::error::Error::Forge(crate::forge::error::Error::NewType { type_name })) if type_name == "doc"
+            Err(Error::Core(crate::error::CoreError::Forge(crate::forge::error::Error::NewType { type_name }))) if type_name == "doc"
         ));
     }
 

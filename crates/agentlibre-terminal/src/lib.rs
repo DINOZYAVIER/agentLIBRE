@@ -2,6 +2,7 @@
 
 mod ask;
 mod cli;
+mod error;
 mod interrupt;
 mod remote;
 mod repl;
@@ -16,7 +17,6 @@ pub(crate) use agentlibre_core::{
     backend,
     clock,
     engine,
-    error,
     forge,
     function,
     i18n,
@@ -51,7 +51,7 @@ use std::sync::Arc;
 use agent::TurnEnd;
 use cli::args::Command;
 use cli::report::StderrReport;
-use error::Error;
+use error::{CoreError, Error};
 use function::Function;
 use i18n::{Lang, m};
 use paths::Paths;
@@ -247,11 +247,11 @@ fn run(
             // so and exits 0 (AGL-120, D4), so a unit and a forked process
             // that lose the race for the socket leave no failed unit behind.
             if let Err(error) = agentlibre_core::daemon::serve(paths) {
-                if let Error::DaemonServer(agentlibre_core::daemon::error::Error::Running { path }) = error {
+                if let CoreError::DaemonServer(agentlibre_core::daemon::error::Error::Running { path }) = error {
                     println!("{}", tr!(*lang, m::DAEMON_SERVED, path = path.display()));
                     return Ok(ExitCode::SUCCESS);
                 } else {
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
             return Ok(ExitCode::SUCCESS);
@@ -280,7 +280,7 @@ fn run(
     }
     auto_init(&project, *lang)?;
     if args.resume.is_some() && args.function.is_some() {
-        return Err(Error::FunctionWithResume);
+        return Err(CoreError::FunctionWithResume.into());
     }
     // The engine agl launched is the daemon's now, stopped when no plane
     // uses it (AGL-076, D16).
@@ -420,7 +420,7 @@ fn agent_session(
             },
             &mut |sent| sent.give(&mut report),
         )
-        .ok_or(Error::PlaneGone)?;
+        .ok_or(Error::from(CoreError::PlaneGone))?;
     remote.close();
     match done.turn.expect("a message's turn")? {
         TurnEnd::Answer(text) => {

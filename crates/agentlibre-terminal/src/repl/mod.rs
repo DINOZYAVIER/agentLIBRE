@@ -42,6 +42,7 @@ use crate::cli::args::{MemoryAction, memory_action};
 use crate::tty::is_yes;
 use crate::whisper;
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::i18n::{Lang, m, repl as texts};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
@@ -1604,7 +1605,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         Some(Err(error)) => Err(error.message(lang)),
                         None => Ok(()),
                     },
-                    None => Err(Error::PlaneGone.message(lang)),
+                    None => Err(CoreError::PlaneGone.message(lang)),
                 };
                 match found {
                     Ok(()) => {
@@ -1726,7 +1727,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     voice.cancel();
     dock.finish();
     if gone {
-        return Err(Error::PlaneGone);
+        return Err(CoreError::PlaneGone.into());
     }
     Ok(end)
 }
@@ -1788,7 +1789,7 @@ mod tests {
     struct FakeDraft(Arc<Fake>);
 
     impl crate::repl::voice::DraftEngine for FakeDraft {
-        fn transcribe(&self, _wav: &[u8]) -> Result<String, Error> {
+        fn transcribe(&self, _wav: &[u8]) -> Result<String, CoreError> {
             Ok(format!("draft{}", self.0.drafts.fetch_add(1, Ordering::SeqCst) + 1))
         }
     }
@@ -1805,7 +1806,7 @@ mod tests {
         fn finished(&mut self) -> bool {
             self.0.ended.load(Ordering::SeqCst)
         }
-        fn stop(self: Box<Self>) -> Result<Vec<u8>, Error> {
+        fn stop(self: Box<Self>) -> Result<Vec<u8>, CoreError> {
             self.0.log.lock().unwrap().push("stop".into());
             Ok(b"WAV".to_vec())
         }
@@ -1835,16 +1836,16 @@ mod tests {
     struct FakeDictation(Arc<Fake>);
 
     impl crate::whisper::Dictation for FakeDictation {
-        fn ready(&self) -> Result<(), Error> {
+        fn ready(&self) -> Result<(), CoreError> {
             if self.0.not_ready.load(Ordering::SeqCst) {
-                return Err(Error::Whisper(crate::whisper::Error::NotSet {
+                return Err(CoreError::Whisper(crate::whisper::Error::NotSet {
                     user_path: "/c/settings.nix".into(),
                     project_path: "/d/settings.nix".into(),
                 }));
             }
             Ok(())
         }
-        fn warm_up(&self, _: &mut dyn FnMut(&str)) -> Result<(), Error> {
+        fn warm_up(&self, _: &mut dyn FnMut(&str)) -> Result<(), CoreError> {
             self.0.log.lock().unwrap().push("warm".into());
             Ok(())
         }
@@ -1853,7 +1854,7 @@ mod tests {
             wav: &[u8],
             _prompt: Option<&str>,
             _: &mut dyn FnMut(&str),
-        ) -> Result<String, Error> {
+        ) -> Result<String, CoreError> {
             while self.0.hold.load(Ordering::SeqCst) {
                 thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -2782,7 +2783,7 @@ mod tests {
         assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
         assert_eq!(role, Role::StatusFailure);
         assert_eq!(
-            notice(Err(Error::Interrupted)),
+            notice(Err(CoreError::Interrupted)),
             Some(("interrupted".into(), Role::StatusPending))
         );
     }

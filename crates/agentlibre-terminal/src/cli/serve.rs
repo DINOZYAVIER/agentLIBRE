@@ -57,6 +57,7 @@ pub fn run(
                 lang,
             )
             .map(|()| ExitCode::SUCCESS)
+            .map_err(Into::into)
         }
         ServerAction::Stop => {
             // The whisper server of the project goes with it (AGL-014);

@@ -18,7 +18,7 @@ use super::card::notice_lines;
 use super::transcript::Screen;
 use super::Notice;
 use crate::whisper::{Dictation, Draft};
-use crate::error::Error;
+use crate::error::CoreError as Error;
 use crate::i18n::{Lang, m};
 use crate::record::Recording;
 use crate::theme::Theme;

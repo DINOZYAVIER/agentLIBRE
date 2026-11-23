@@ -6,32 +6,15 @@ use std::path::PathBuf;
 /// An error that stops `agl`.
 #[derive(Debug)]
 pub enum Error {
-    /// An argument is not valid UTF-8.
-    InvalidUnicode,
-    /// An argument is not a known option.
-    UnknownOption(String),
-    /// An option is the last argument.
-    MissingValue(String),
-    /// An option is given twice.
-    RepeatedOption(String),
     /// `--function` with `--resume`: the session names its Function (D106).
     FunctionWithResume,
     /// `--plane` with `--resume`: the session keeps its plane (AGL-077).
     PlaneWithResume,
-    /// `--think` names a level outside the four (AGL-013).
-    BadReasoningLevel { value: String },
     /// agl's directories cannot be found. Its own type, wrapped (AGL-121,
     /// D75).
     Paths(crate::paths::Error),
-    /// The current directory cannot be read.
-    CurrentDir(io::Error),
     /// A settings file cannot be read.
     Read { path: PathBuf, source: io::Error },
-    /// `agl search login` without a complete `search.ca` in the user file
-    /// (AGL-043 F20); `key` is the first one missing.
-    SearchCaNotSet { user_path: PathBuf, key: String },
-    /// A step of `agl search login` failed (AGL-043 F20).
-    SearchLogin { detail: String },
     /// A value of the settings out of what agl takes: a style, a limit, a
     /// port, a language, a url, a level, a path. Its own type, wrapped
     /// (AGL-121, D66).
@@ -64,12 +47,8 @@ pub enum Error {
     /// The machine cannot continue a session's turn. Its own type, wrapped
     /// (AGL-121, D66).
     Machine(crate::machine::error::Error),
-    /// The terminal cannot be switched to raw mode.
-    Terminal { source: io::Error },
     /// Ctrl-C stopped a generation (D111).
     Interrupted,
-    /// `--attach` without `-p` (AGL-014, D21).
-    AttachWithoutPrompt,
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
     /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
     Wsl(crate::wsl::Error),
@@ -91,20 +70,6 @@ pub enum Error {
     /// The Strata engine's own error (AGL-089, D20, D9, D13). Its own type,
     /// wrapped (AGL-121, D66).
     Strata(crate::strata::Error),
-    /// `agl bridge` and `bridge` lacks `address` or `port` (AGL-083, D20).
-    BridgeNotSet { path: PathBuf },
-    /// No `agl-bridge` beside `agl` (AGL-083, D18).
-    BridgeProgramMissing { path: PathBuf },
-    /// The bridge's unit did not come to listen.
-    BridgeNotListening { unit: String },
-    /// A device's name the bridge does not take (AGL-083, D10).
-    BridgeDeviceName { name: String },
-    /// `agl bridge pair` of a device paired already.
-    BridgeDeviceExists { name: String },
-    /// `agl bridge revoke` of a device not paired.
-    BridgeDeviceUnknown { name: String },
-    /// The bridge's directory could not be read or written.
-    Bridge { detail: String },
     /// The whisper server was not set or could not transcribe (AGL-014,
     /// D22). Its own type, wrapped (AGL-121, D66).
     Whisper(crate::whisper::Error),
@@ -129,8 +94,6 @@ pub enum Error {
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
     Memory(crate::memory::Error),
-    /// `agl notify` cannot start the `agl-notify` beside it (AGL-121, D23).
-    NotifySpawn { source: io::Error },
 }
 
 impl From<agentlibre_client::Error> for Error {
@@ -294,19 +257,10 @@ impl From<crate::nix::Error> for Error {
 }
 
 impl Error {
-    /// Whether the error is in the command line rather than the setup.
+    /// Whether the error is in the command line rather than the setup:
+    /// the core's two, raised where a session opens (AGL-121, D76).
     pub fn is_usage(&self) -> bool {
-        matches!(
-            self,
-            Error::InvalidUnicode
-                | Error::UnknownOption(_)
-                | Error::MissingValue(_)
-                | Error::RepeatedOption(_)
-                | Error::FunctionWithResume
-                | Error::PlaneWithResume
-                | Error::BadReasoningLevel { .. }
-                | Error::AttachWithoutPrompt
-        )
+        matches!(self, Error::FunctionWithResume | Error::PlaneWithResume)
     }
 
     /// Process exit status for this error.

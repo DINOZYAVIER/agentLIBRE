@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::cli::args::SearchAction;
 use crate::error::Error;
+use crate::error::CoreError;
 use crate::i18n::{Lang, m};
 use crate::paths::Paths;
 use crate::settings::{self, SearchCa, UserFile};
@@ -78,10 +79,10 @@ pub fn login(step: &Path, user: &UserFile, user_path: &Path) -> Result<LoggedIn,
         .clone()
         .map_or_else(|| dir.join("client.key"), PathBuf::from);
     for parent in [certificate.parent(), key.parent()].into_iter().flatten() {
-        fs::create_dir_all(parent).map_err(|source| Error::Write {
+        fs::create_dir_all(parent).map_err(|source| Error::from(CoreError::Write {
             path: parent.into(),
             source,
-        })?;
+        }))?;
     }
     let new_certificate = with_suffix(&certificate, ".new");
     let new_key = with_suffix(&key, ".new");
@@ -201,23 +202,23 @@ fn write_search_paths(user_path: &Path, certificate: &Path, key: &Path) -> Resul
     let path = |file: &Path| Value::String(file.to_string_lossy().into_owned());
     search.insert("client_certificate".into(), path(certificate));
     search.insert("client_private_key".into(), path(key));
-    settings::set_top(user_path, "search", Value::Object(search))
+    Ok(settings::set_top(user_path, "search", Value::Object(search))?)
 }
 
 /// The credential policy of `[search]` wants the files readable by the
 /// user alone (AGL-019, D4).
 fn private(file: &Path) -> Result<(), Error> {
-    fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|source| Error::Write {
+    fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|source| Error::from(CoreError::Write {
         path: file.into(),
         source,
-    })
+    }))
 }
 
 fn rename(from: &Path, to: &Path) -> Result<(), Error> {
-    fs::rename(from, to).map_err(|source| Error::Write {
+    fs::rename(from, to).map_err(|source| Error::from(CoreError::Write {
         path: to.into(),
         source,
-    })
+    }))
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
