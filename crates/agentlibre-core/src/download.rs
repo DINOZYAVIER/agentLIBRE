@@ -8,10 +8,68 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::error::Error;
-use crate::i18n::{Lang, m};
+use crate::error;
+use crate::i18n::{Lang, Msg, m};
 use crate::programs;
 use crate::tr;
+
+/// What can go wrong fetching a weights file (AGL-050, D17; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// `curl` or the file system failed on a download (AGL-050, D17).
+    Failed { name: String, detail: String },
+    /// The disk has too little room for a download (AGL-050, D17).
+    NoSpace {
+        name: String,
+        needed: u64,
+        available: u64,
+        dir: PathBuf,
+    },
+    /// A downloaded file has another sha256 (AGL-050, D17).
+    Mismatch {
+        name: String,
+        expected: String,
+        got: String,
+    },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::Failed { name, detail } => tr!(lang, FAILED, name = name, detail = detail),
+            Self::NoSpace { name, needed, available, dir } => tr!(
+                lang,
+                NO_SPACE,
+                name = name,
+                needed = gigabytes(*needed),
+                dir = dir.display(),
+                available = gigabytes(*available)
+            ),
+            Self::Mismatch { name, expected, got } => {
+                tr!(lang, MISMATCH, name = name, got = got, expected = expected)
+            }
+        }
+    }
+}
+
+/// `Error::Failed`.
+const FAILED: Msg = Msg {
+    en: "the download of {name} failed: {detail}",
+    uk: "завантаження {name} не вдалось: {detail}",
+};
+
+/// `Error::NoSpace`.
+const NO_SPACE: Msg = Msg {
+    en: "{name} needs {needed} in {dir}, and {available} is free",
+    uk: "для {name} потрібно {needed} у {dir}, а вільно {available}",
+};
+
+/// `Error::Mismatch`.
+const MISMATCH: Msg = Msg {
+    en: "the sha256 of the downloaded {name} is {got}, not {expected}; it was not kept",
+    uk: "sha256 завантаженого {name} — {got}, а не {expected}; файл не збережено",
+};
 
 /// Where a weights file comes from: `source` of a model, under the local name
 /// of the file (AGL-039, D29).
@@ -40,7 +98,7 @@ pub fn fetch(
     dir: &Path,
     lang: Lang,
     say: &dyn Fn(&str),
-) -> Result<PathBuf, Error> {
+) -> Result<PathBuf, error::Error> {
     fs::create_dir_all(dir).map_err(|error| failed(source, &error.to_string()))?;
     let path = dir.join(&source.name);
     let part = dir.join(format!("{}.part", source.name));
@@ -67,17 +125,18 @@ pub fn fetch(
     let got = checksum(source, &part)?;
     if got != source.sha256 {
         remove(source, &part)?;
-        return Err(Error::DownloadMismatch {
+        return Err(Error::Mismatch {
             name: source.name.clone(),
             expected: source.sha256.clone(),
             got,
-        });
+        }
+        .into());
     }
     fs::rename(&part, &path).map_err(|error| failed(source, &error.to_string()))?;
     Ok(path)
 }
 
-fn run_curl(source: &FileSource, part: &Path) -> Result<(), Error> {
+fn run_curl(source: &FileSource, part: &Path) -> Result<(), error::Error> {
     let mut command = Command::new(programs::program("curl")?);
     programs::clean_env(&mut command);
     let status = command
@@ -92,10 +151,10 @@ fn run_curl(source: &FileSource, part: &Path) -> Result<(), Error> {
         // A server with no ranges would refuse every next try (AGL-058, D26).
         Some(CURL_NO_RANGES) => {
             remove(source, part)?;
-            Err(failed(source, "this server cannot resume, so the partial file is removed; run it again to start over"))
+            Err(failed(source, "this server cannot resume, so the partial file is removed; run it again to start over").into())
         }
-        Some(CURL_HTTP_ERROR) => Err(failed(source, "the server refuses the file")),
-        _ => Err(failed(source, &format!("curl: {status}; run it again and it resumes"))),
+        Some(CURL_HTTP_ERROR) => Err(failed(source, "the server refuses the file").into()),
+        _ => Err(failed(source, &format!("curl: {status}; run it again and it resumes")).into()),
     }
 }
 
@@ -108,7 +167,7 @@ enum Room {
 fn check_room(name: &str, needed: u64, dir: &Path) -> Result<(), Room> {
     let available = free_space(dir).map_err(|error| Room::Io(error.to_string()))?;
     if available < needed {
-        return Err(Room::No(Error::DownloadNoSpace {
+        return Err(Room::No(Error::NoSpace {
             name: name.to_owned(),
             needed,
             available,
@@ -121,7 +180,7 @@ fn check_room(name: &str, needed: u64, dir: &Path) -> Result<(), Room> {
 /// Whether all of `sources` fit in `dir`, what their parts hold counted: asked
 /// before the first file comes down, so that the last is not refused after it
 /// (AGL-050, D17; AGL-058, D26).
-pub fn check_space(sources: &[&FileSource], dir: &Path) -> Result<(), Error> {
+pub fn check_space(sources: &[&FileSource], dir: &Path) -> Result<(), error::Error> {
     let Some(first) = sources.first() else {
         return Ok(());
     };
@@ -135,10 +194,11 @@ pub fn check_space(sources: &[&FileSource], dir: &Path) -> Result<(), Error> {
     check_room(&names.join(", "), needed, dir).map_err(|error| match error {
         Room::Io(detail) => failed(first, &detail),
         Room::No(error) => error,
-    })
+    })?;
+    Ok(())
 }
 
-fn checksum(source: &FileSource, part: &Path) -> Result<String, Error> {
+fn checksum(source: &FileSource, part: &Path) -> Result<String, error::Error> {
     let mut command = Command::new(programs::program("sha256sum")?);
     programs::clean_env(&mut command);
     let output = command
@@ -147,7 +207,7 @@ fn checksum(source: &FileSource, part: &Path) -> Result<String, Error> {
         .map_err(|error| failed(source, &error.to_string()))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(failed(source, &detail));
+        return Err(failed(source, &detail).into());
     }
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(text.split_whitespace().next().unwrap_or_default().to_owned())
@@ -158,7 +218,7 @@ fn remove(source: &FileSource, path: &Path) -> Result<(), Error> {
 }
 
 fn failed(source: &FileSource, detail: &str) -> Error {
-    Error::DownloadFailed {
+    Error::Failed {
         name: source.name.clone(),
         detail: detail.to_owned(),
     }
@@ -236,7 +296,7 @@ mod tests {
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join("m.gguf"), b"the old one").unwrap();
         let error = fetch(&source, &models, Lang::En, &|_| {}).unwrap_err();
-        assert!(matches!(error, Error::DownloadMismatch { .. }), "{error:?}");
+        assert!(matches!(error, error::Error::Download(Error::Mismatch { .. })), "{error:?}");
         assert_eq!(fs::read(models.join("m.gguf")).unwrap(), b"the old one");
         assert!(!models.join("m.gguf.part").exists());
     }
@@ -258,7 +318,7 @@ mod tests {
         source.size = u64::MAX;
         let models = dir.0.join("models");
         let error = fetch(&source, &models, Lang::En, &|_| {}).unwrap_err();
-        assert!(matches!(error, Error::DownloadNoSpace { .. }), "{error:?}");
+        assert!(matches!(error, error::Error::Download(Error::NoSpace { .. })), "{error:?}");
         assert!(!models.join("m.gguf.part").exists());
     }
 
@@ -268,7 +328,7 @@ mod tests {
         let mut source = served(&dir.0.join("server"), b"the weights");
         source.url = "file:///nowhere".into();
         let error = fetch(&source, &dir.0.join("models"), Lang::En, &|_| {}).unwrap_err();
-        assert!(matches!(error, Error::DownloadFailed { name, .. } if name == "m.gguf"));
+        assert!(matches!(error, error::Error::Download(Error::Failed { name, .. }) if name == "m.gguf"));
     }
 
     #[test]
@@ -287,7 +347,7 @@ mod tests {
         assert!(check_space(&[&one], &dir).is_ok());
         assert!(matches!(
             check_space(&[&one, &two], &dir),
-            Err(Error::DownloadNoSpace { name, .. }) if name == "one, two"
+            Err(error::Error::Download(Error::NoSpace { name, .. })) if name == "one, two"
         ));
         let _ = fs::remove_dir_all(&dir);
     }

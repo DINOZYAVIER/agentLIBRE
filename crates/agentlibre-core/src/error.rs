@@ -290,21 +290,9 @@ pub enum Error {
     /// A weights file with a source is missing where nobody can be asked:
     /// a run with `-p` or without a terminal (AGL-050, D11).
     WeightsNotDownloaded { name: String, size: u64 },
-    /// `curl` or the file system failed on a download (AGL-050, D17).
-    DownloadFailed { name: String, detail: String },
-    /// The disk has too little room for a download (AGL-050, D17).
-    DownloadNoSpace {
-        name: String,
-        needed: u64,
-        available: u64,
-        dir: PathBuf,
-    },
-    /// A downloaded file has another sha256 (AGL-050, D17).
-    DownloadMismatch {
-        name: String,
-        expected: String,
-        got: String,
-    },
+    /// A weights file failed to download (AGL-050, D17). Its own type,
+    /// wrapped (AGL-121, D66).
+    Download(crate::download::Error),
     /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
     NixDirMissing,
     /// `AGENTLIBRE_FUNCTIONS` is not set to an absolute directory (AGL-053, D6).
@@ -412,6 +400,13 @@ impl From<crate::wsl::Error> for Error {
     /// The Windows engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::wsl::Error) -> Error {
         Error::Wsl(source)
+    }
+}
+
+impl From<crate::download::Error> for Error {
+    /// A download's own error as agl's (AGL-121, D66).
+    fn from(source: crate::download::Error) -> Error {
+        Error::Download(source)
     }
 }
 

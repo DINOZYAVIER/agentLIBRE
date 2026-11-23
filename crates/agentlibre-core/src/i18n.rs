@@ -2755,24 +2755,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} ({size}) не завантажено: запусти `agl` у терміналі, він запропонує завантажити",
     };
 
-    /// `Error::DownloadFailed` (AGL-050, D17).
-    pub const DOWNLOAD_FAILED: Msg = Msg {
-        en: "the download of {name} failed: {detail}",
-        uk: "завантаження {name} не вдалось: {detail}",
-    };
-
-    /// `Error::DownloadNoSpace` (AGL-050, D17).
-    pub const DOWNLOAD_NO_SPACE: Msg = Msg {
-        en: "{name} needs {needed} in {dir}, and {available} is free",
-        uk: "для {name} потрібно {needed} у {dir}, а вільно {available}",
-    };
-
-    /// `Error::DownloadMismatch` (AGL-050, D17).
-    pub const DOWNLOAD_MISMATCH: Msg = Msg {
-        en: "the sha256 of the downloaded {name} is {got}, not {expected}; it was not kept",
-        uk: "sha256 завантаженого {name} — {got}, а не {expected}; файл не збережено",
-    };
-
     /// `Error::WeightsNotFound` (AGL-039, D24c).
     pub const WEIGHTS_NOT_FOUND: Msg = Msg {
         en: "{name} is in none of the weights folders ({folders}); put it in one of them, add its folder to `models` of {user_path}, or name it by an absolute path",
@@ -3656,20 +3638,7 @@ impl Error {
                 name = name,
                 size = crate::download::gigabytes(*size)
             ),
-            Error::DownloadFailed { name, detail } => {
-                tr!(lang, m::DOWNLOAD_FAILED, name = name, detail = detail)
-            }
-            Error::DownloadNoSpace { name, needed, available, dir } => tr!(
-                lang,
-                m::DOWNLOAD_NO_SPACE,
-                name = name,
-                needed = crate::download::gigabytes(*needed),
-                dir = dir.display(),
-                available = crate::download::gigabytes(*available)
-            ),
-            Error::DownloadMismatch { name, expected, got } => {
-                tr!(lang, m::DOWNLOAD_MISMATCH, name = name, got = got, expected = expected)
-            }
+            Error::Download(error) => error.message(lang),
             Error::NixDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)
             }
