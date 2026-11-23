@@ -264,14 +264,9 @@ pub enum Error {
     BridgeDeviceUnknown { name: String },
     /// The bridge's directory could not be read or written.
     Bridge { detail: String },
-    /// An audio needs whisper and `whisper` lacks `url` or `model`
-    /// (AGL-014, D22).
-    WhisperNotSet {
-        user_path: PathBuf,
-        project_path: PathBuf,
-    },
-    /// The whisper server answered an error or nothing.
-    Transcribe { url: String, detail: String },
+    /// The whisper server was not set or could not transcribe (AGL-014,
+    /// D22). Its own type, wrapped (AGL-121, D66).
+    Whisper(crate::whisper::Error),
     /// The prompt names a medium but the server has no multimodal
     /// projector (AGL-014).
     NoMultimodal,
@@ -411,6 +406,13 @@ impl From<crate::weights::Error> for Error {
     /// A weights lookup's own error as agl's (AGL-121, D66).
     fn from(source: crate::weights::Error) -> Error {
         Error::Weights(source)
+    }
+}
+
+impl From<crate::whisper::Error> for Error {
+    /// The whisper server's own error as agl's (AGL-121, D66).
+    fn from(source: crate::whisper::Error) -> Error {
+        Error::Whisper(source)
     }
 }
 

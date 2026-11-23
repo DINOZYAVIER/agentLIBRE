@@ -1655,18 +1655,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Уже працює сервер іншого проєкту ({units}). Запустити ще один? [y/N]",
     };
 
-    /// `Error::WhisperNotSet` (AGL-014, D22).
-    pub const WHISPER_NOT_SET: Msg = Msg {
-        en: "an audio needs the whisper server, and `url` and `model` of `whisper` are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
-        uk: "аудіо потребує whisper-сервера, а `url` і `model` у `whisper` задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
-    };
-
-    /// `Error::Transcribe`.
-    pub const TRANSCRIBE: Msg = Msg {
-        en: "the whisper server at {url} could not transcribe: {detail}",
-        uk: "whisper-сервер за {url} не зміг розпізнати: {detail}",
-    };
-
     /// whisper-server begins (AGL-014).
     pub const WHISPER_STARTING: Msg = Msg {
         en: "starting whisper-server ({model}) at {url} as unit {unit}…",
@@ -3485,18 +3473,7 @@ impl Error {
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
-            Error::WhisperNotSet {
-                user_path,
-                project_path,
-            } => tr!(
-                lang,
-                m::WHISPER_NOT_SET,
-                user_path = user_path.display(),
-                project_path = project_path.display()
-            ),
-            Error::Transcribe { url, detail } => {
-                tr!(lang, m::TRANSCRIBE, url = url, detail = detail)
-            }
+            Error::Whisper(error) => error.message(lang),
             Error::BridgeNotSet { path } => tr!(lang, m::BRIDGE_NOT_SET, path = path.display()),
             Error::BridgeProgramMissing { path } => {
                 tr!(lang, m::BRIDGE_PROGRAM_MISSING, path = path.display())

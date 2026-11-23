@@ -1804,10 +1804,10 @@ mod tests {
     impl crate::whisper::Dictation for FakeDictation {
         fn ready(&self) -> Result<(), Error> {
             if self.0.not_ready.load(Ordering::SeqCst) {
-                return Err(Error::WhisperNotSet {
+                return Err(Error::Whisper(crate::whisper::Error::NotSet {
                     user_path: "/c/settings.nix".into(),
                     project_path: "/d/settings.nix".into(),
-                });
+                }));
             }
             Ok(())
         }

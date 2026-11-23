@@ -14,12 +14,51 @@ use crate::engine::{
     Autostart, Health, certificate_refused, find_program, health, local_address, port_open,
     unit_active, wait_ready,
 };
-use crate::error::Error;
+use crate::error;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, m};
+use crate::i18n::{Lang, Msg, m};
 use crate::media::{self, Source};
 use crate::settings::{ServerKind, WhisperFile};
 use crate::tr;
+
+/// What can go wrong with the whisper server (AGL-014, D22; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// An audio needs whisper and `whisper` lacks `url` or `model`
+    /// (AGL-014, D22).
+    NotSet { user_path: PathBuf, project_path: PathBuf },
+    /// The whisper server answered an error or nothing.
+    Transcribe { url: String, detail: String },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NotSet { user_path, project_path } => tr!(
+                lang,
+                NOT_SET,
+                user_path = user_path.display(),
+                project_path = project_path.display()
+            ),
+            Self::Transcribe { url, detail } => {
+                tr!(lang, TRANSCRIBE, url = url, detail = detail)
+            }
+        }
+    }
+}
+
+/// `Error::NotSet`.
+const NOT_SET: Msg = Msg {
+    en: "an audio needs the whisper server, and `url` and `model` of `whisper` are not both set; add to {project_path} (this project) or {user_path} (the default of every project):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
+    uk: "аудіо потребує whisper-сервера, а `url` і `model` у `whisper` задано не обидва; додай у {project_path} (цей проєкт) або {user_path} (типове для всіх проєктів):\n\nwhisper = {{ url = \"http://127.0.0.1:18081\"; model = \"ggml-large-v3-q8_0.bin\"; }};",
+};
+
+/// `Error::Transcribe`.
+const TRANSCRIBE: Msg = Msg {
+    en: "the whisper server at {url} could not transcribe: {detail}",
+    uk: "whisper-сервер за {url} не зміг розпізнати: {detail}",
+};
 
 /// The name every unit of a whisper server starts with (D22).
 pub const UNIT_PREFIX: &str = "agentLIBRE-whisper-server";
@@ -50,15 +89,15 @@ impl WhisperServer {
         project: &Workspace,
         settings: &WhisperFile,
         user_path: &Path,
-    ) -> Result<WhisperServer, Error> {
-        let key = project.unit_key().ok_or_else(|| Error::ProjectNotRegistered {
+    ) -> Result<WhisperServer, error::Error> {
+        let key = project.unit_key().ok_or_else(|| error::Error::ProjectNotRegistered {
             project: project.project.clone(),
         })?;
         let (Some(url), Some(model)) = (&settings.url, &settings.model) else {
-            return Err(Error::WhisperNotSet {
+            return Err(error::Error::Whisper(Error::NotSet {
                 user_path: user_path.into(),
                 project_path: project.dir.join(crate::settings::SETTINGS_FILE),
-            });
+            }));
         };
         Ok(WhisperServer {
             unit: format!("{UNIT_PREFIX}-{key}"),
@@ -109,7 +148,7 @@ pub fn ensure(
     path_var: Option<OsString>,
     say: &mut dyn FnMut(&str),
     lang: Lang,
-) -> Result<(), Error> {
+) -> Result<(), error::Error> {
     let probe =
         Llama::with_ca(&server.url, server.private_ca.as_deref())?.naming_ca("whisper.private_ca");
     match health(&probe) {
@@ -126,18 +165,18 @@ pub fn ensure(
     if unit_active(&server.unit)? {
         return wait_ready(&probe, Some(&server.unit), "whisper-server", say, lang);
     }
-    let (host, port) = local_address(&server.url).ok_or_else(|| Error::NotLocalServer {
+    let (host, port) = local_address(&server.url).ok_or_else(|| error::Error::NotLocalServer {
         url: server.url.clone(),
     })?;
     if port_open(&host, port) {
-        return Err(Error::PortBusy {
+        return Err(error::Error::PortBusy {
             url: server.url.clone(),
             units: Vec::new(),
         });
     }
     let model = models.join(&server.model);
     if !model.is_file() {
-        return Err(Error::WeightsFileMissing {
+        return Err(error::Error::WeightsFileMissing {
             key: "whisper.model".into(),
             path: model,
         });
@@ -146,11 +185,11 @@ pub fn ensure(
         Some(p) => {
             let path = PathBuf::from(p);
             if !path.is_file() {
-                return Err(Error::EngineNotFound { engine: p.clone() });
+                return Err(error::Error::EngineNotFound { engine: p.clone() });
             }
             path
         }
-        None => find_program("whisper-server", path_var).ok_or_else(|| Error::EngineNotFound {
+        None => find_program("whisper-server", path_var).ok_or_else(|| error::Error::EngineNotFound {
             engine: "whisper-server".into(),
         })?,
     };
@@ -158,11 +197,11 @@ pub fn ensure(
         .args(systemd_run_args(server, &program, &model, &host, port))
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| Error::Systemd {
+        .map_err(|source| error::Error::Systemd {
             detail: source.to_string(),
         })?;
     if !output.status.success() {
-        return Err(Error::Systemd {
+        return Err(error::Error::Systemd {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
         });
     }
@@ -183,7 +222,7 @@ pub fn transcribe(
     heard: &std::sync::OnceLock<String>,
     prompt: Option<&str>,
     wav: &[u8],
-) -> Result<String, Error> {
+) -> Result<String, error::Error> {
     let boundary = "----agentLIBREwhisper7f3a9c";
     let mut body: Vec<u8> = Vec::new();
     // Until the server names its language once, ask for the verbose
@@ -235,11 +274,11 @@ pub fn transcribe(
         .read_to_string()
         .map_err(|error| fail(error.to_string()))?;
     if status != 200 {
-        return Err(fail(format!("{status}: {}", text.trim())));
+        return Err(fail(format!("{status}: {}", text.trim())).into());
     }
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|error| fail(error.to_string()))?;
     if let Some(error) = json["error"].as_str() {
-        return Err(fail(error.into()));
+        return Err(fail(error.into()).into());
     }
     if let Some(detected) = json["language"].as_str() {
         let _ = heard.set(detected.to_owned());
@@ -247,16 +286,16 @@ pub fn transcribe(
     json["text"]
         .as_str()
         .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-        .ok_or_else(|| fail("no `text` in the reply".into()))
+        .ok_or_else(|| fail("no `text` in the reply".into())).map_err(Into::into)
 }
 
 /// What the REPL's voice input needs of whisper (AGL-016).
 pub trait Dictation: Send + Sync {
     /// Whether whisper is set up for this project; the error says what is
     /// missing, before the human speaks.
-    fn ready(&self) -> Result<(), Error>;
+    fn ready(&self) -> Result<(), error::Error>;
     /// Brings the server up; returns when it answers (D6).
-    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error>;
+    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), error::Error>;
     /// The text of a 16 kHz mono WAV, `prompt` the tail of the text
     /// that came before it when the WAV is a piece of a longer speech
     /// (AGL-122, D12).
@@ -265,7 +304,7 @@ pub trait Dictation: Send + Sync {
         wav: &[u8],
         prompt: Option<&str>,
         say: &mut dyn FnMut(&str),
-    ) -> Result<String, Error>;
+    ) -> Result<String, error::Error>;
 }
 
 /// Who turns a recording into text (AGL-051): the model of the Function when
@@ -313,11 +352,11 @@ impl Voice {
         }
     }
 
-    fn server(&self) -> Result<WhisperServer, Error> {
+    fn server(&self) -> Result<WhisperServer, error::Error> {
         WhisperServer::of(&self.project, &self.settings, &self.user_path)
     }
 
-    fn route(&self) -> Result<Route, Error> {
+    fn route(&self) -> Result<Route, error::Error> {
         let Some((model, _)) = &self.model else {
             return Ok(Route::Whisper);
         };
@@ -330,14 +369,14 @@ impl Voice {
 }
 
 impl Dictation for Voice {
-    fn ready(&self) -> Result<(), Error> {
+    fn ready(&self) -> Result<(), error::Error> {
         match self.route()? {
             Route::Whisper => self.server().map(|_| ()),
             Route::Model | Route::ModelLoading => Ok(()),
         }
     }
 
-    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), Error> {
+    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), error::Error> {
         match (self.route()?, &self.model) {
             (Route::ModelLoading, Some((model, what))) => {
                 wait_ready(model, None, what, say, self.lang)
@@ -355,7 +394,7 @@ impl Dictation for Voice {
         wav: &[u8],
         prompt: Option<&str>,
         say: &mut dyn FnMut(&str),
-    ) -> Result<String, Error> {
+    ) -> Result<String, error::Error> {
         if let (Route::Model, Some((model, _))) = (self.route()?, &self.model) {
             return model.transcribe(wav);
         }
@@ -366,7 +405,7 @@ impl Dictation for Voice {
 }
 
 impl Transcriber for Autostart {
-    fn transcribe(&self, source: &Source, say: &mut dyn FnMut(&str)) -> Result<String, Error> {
+    fn transcribe(&self, source: &Source, say: &mut dyn FnMut(&str)) -> Result<String, error::Error> {
         let server = WhisperServer::of(&self.project, &self.whisper, &self.user_path)?;
         ensure(&server, &self.models, self.path_var.clone(), say, self.lang)?;
         say(&tr!(self.lang, m::TRANSCRIBING, name = source.name));
@@ -432,7 +471,7 @@ impl Draft {
 
     /// The draft text of a 16 kHz mono WAV chunk: bring the server up
     /// when it sleeps (the first chunk pays the load, D9), ask, return.
-    pub fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
+    pub fn transcribe(&self, wav: &[u8]) -> Result<String, error::Error> {
         ensure(&self.server, &self.models, self.path_var.clone(), &mut |_| {}, Lang::En)?;
         transcribe(&self.server.url, self.server.private_ca.as_deref(), &self.server.heard, None, wav)
     }
@@ -481,14 +520,14 @@ mod tests {
         });
         assert!(matches!(
             WhisperServer::of(&ws, &partial, Path::new("/c/settings.nix")),
-            Err(Error::WhisperNotSet { .. })
+            Err(error::Error::Whisper(Error::NotSet { .. }))
         ));
         // Not registered: no unit, as for llama-server (AGL-015, D14).
         let (mut ws, settings) = registered(WhisperFile::default());
         ws.origin = None;
         assert!(matches!(
             WhisperServer::of(&ws, &settings, Path::new("/c/settings.nix")),
-            Err(Error::ProjectNotRegistered { .. })
+            Err(error::Error::ProjectNotRegistered { .. })
         ));
     }
 
@@ -504,7 +543,7 @@ mod tests {
             path_var: None,
             lang: Lang::En,
         };
-        assert!(matches!(voice.ready(), Err(Error::WhisperNotSet { .. })));
+        assert!(matches!(voice.ready(), Err(error::Error::Whisper(Error::NotSet { .. }))));
         voice.settings = WhisperFile {
             url: Some("http://127.0.0.1:18081".into()),
             model: Some("w.bin".into()),
@@ -592,7 +631,7 @@ mod tests {
         let (url, _) = model_server(200, false, "");
         let voice = voice_of(Some(&url), WhisperFile::default());
         assert_eq!(voice.route().unwrap(), Route::Whisper);
-        assert!(matches!(voice.ready(), Err(Error::WhisperNotSet { .. })));
+        assert!(matches!(voice.ready(), Err(error::Error::Whisper(Error::NotSet { .. }))));
         // The other kind of server, and one that is down, the same.
         let voice = voice_of(None, WhisperFile::default());
         assert_eq!(voice.route().unwrap(), Route::Whisper);
@@ -725,10 +764,10 @@ mod tests {
         let (url, handle) = one_reply(500, "{\"error\":\"boom\"}");
         let error = transcribe(&url, None, &std::sync::OnceLock::new(), None, b"x").unwrap_err();
         handle.join().unwrap();
-        assert!(matches!(&error, Error::Transcribe { detail, .. } if detail.contains("500") && detail.contains("boom")));
+        assert!(matches!(&error, error::Error::Whisper(Error::Transcribe { detail, .. }) if detail.contains("500") && detail.contains("boom")));
         let (url, handle) = one_reply(200, "{\"error\":\"no audio\"}");
         let error = transcribe(&url, None, &std::sync::OnceLock::new(), None, b"x").unwrap_err();
         handle.join().unwrap();
-        assert!(matches!(&error, Error::Transcribe { detail, .. } if detail == "no audio"));
+        assert!(matches!(&error, error::Error::Whisper(Error::Transcribe { detail, .. }) if detail == "no audio"));
     }
 }
