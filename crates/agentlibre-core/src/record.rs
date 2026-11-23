@@ -483,7 +483,7 @@ impl Ffmpeg {
                 Ok(())
             });
         }
-        let child = command.spawn().map_err(|source| Error::Ffmpeg {
+        let child = command.spawn().map_err(|source| crate::media::Error::Ffmpeg {
             detail: source.to_string(),
         })?;
         let mut recording = Ffmpeg {
@@ -501,9 +501,10 @@ impl Ffmpeg {
         let watched = Instant::now();
         while watched.elapsed() < START_WATCH {
             if recording.exited().is_some() {
-                return Err(Error::Ffmpeg {
+                return Err(crate::media::Error::Ffmpeg {
                     detail: recording.failure(),
-                });
+                }
+                .into());
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -531,10 +532,10 @@ impl Ffmpeg {
                 Ok(())
             });
         }
-        let mut child = command.spawn().map_err(|source| Error::Ffmpeg {
+        let mut child = command.spawn().map_err(|source| crate::media::Error::Ffmpeg {
             detail: source.to_string(),
         })?;
-        let stdout = child.stdout.take().ok_or(Error::Ffmpeg {
+        let stdout = child.stdout.take().ok_or(crate::media::Error::Ffmpeg {
             detail: "no stdout of the chunking recorder".into(),
         })?;
         let (tx, rx) = std::sync::mpsc::channel::<Vec<i16>>();
@@ -573,9 +574,10 @@ impl Ffmpeg {
         let mut recording = recording;
         while watched.elapsed() < START_WATCH {
             if recording.exited().is_some() {
-                return Err(Error::Ffmpeg {
+                return Err(crate::media::Error::Ffmpeg {
                     detail: recording.failure(),
-                });
+                }
+                .into());
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -665,9 +667,10 @@ impl Recording for Ffmpeg {
 
     fn stop(mut self: Box<Self>) -> Result<Vec<u8>, Error> {
         let Some(mut child) = self.child.take() else {
-            return Err(Error::Ffmpeg {
+            return Err(crate::media::Error::Ffmpeg {
                 detail: "ffmpeg stopped without a recording".into(),
-            });
+            }
+            .into());
         };
         // SIGINT lets ffmpeg finish the file; one that ended by itself
         // at the limit is done already.
@@ -718,17 +721,19 @@ impl Recording for Ffmpeg {
             if bytes.len() > 44 {
                 return Ok(bytes);
             }
-            return Err(Error::Ffmpeg {
+            return Err(crate::media::Error::Ffmpeg {
                 detail: "ffmpeg stopped without a recording".into(),
-            });
+            }
+            .into());
         }
         let bytes = fs::read(&self.path);
         let _ = fs::remove_file(&self.path);
         match (status, bytes) {
             (_, Ok(bytes)) if bytes.len() > 44 => Ok(bytes),
-            _ => Err(Error::Ffmpeg {
+            _ => Err(crate::media::Error::Ffmpeg {
                 detail: "ffmpeg stopped without a recording".into(),
-            }),
+            }
+            .into()),
         }
     }
 
@@ -787,7 +792,7 @@ mod tests {
         let mut tries = 0;
         loop {
             match Ffmpeg::start(fake.0.as_os_str(), limit) {
-                Err(Error::Ffmpeg { detail }) if detail.contains("busy") && tries < 50 => {
+                Err(Error::Media(crate::media::Error::Ffmpeg { detail })) if detail.contains("busy") && tries < 50 => {
                     tries += 1;
                     thread::sleep(Duration::from_millis(20));
                 }
@@ -873,9 +878,9 @@ mod tests {
     fn an_ffmpeg_that_fails_at_once_says_why_and_a_missing_one_is_an_error() {
         let fake = Fake::new("fail", "echo 'default: Connection refused' >&2\nexit 1");
         let error = start_fake(&fake, 60).map(|_| ()).unwrap_err();
-        assert!(matches!(&error, Error::Ffmpeg { detail } if detail.contains("Connection refused")));
+        assert!(matches!(&error, Error::Media(crate::media::Error::Ffmpeg { detail }) if detail.contains("Connection refused")));
         let missing = Ffmpeg::start("/no/such/ffmpeg".as_ref(), 60).map(|_| ()).unwrap_err();
-        assert!(matches!(missing, Error::Ffmpeg { .. }));
+        assert!(matches!(missing, Error::Media(crate::media::Error::Ffmpeg { .. })));
     }
 
     #[test]

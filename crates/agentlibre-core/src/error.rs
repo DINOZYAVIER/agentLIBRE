@@ -252,12 +252,9 @@ pub enum Error {
     /// The prompt names a medium but the server has no multimodal
     /// projector (AGL-014).
     NoMultimodal,
-    /// A medium the session keeps is not what its name says (AGL-014, D7).
-    MediaChanged { path: PathBuf },
-    /// A file to attach that is not an image, a video or an audio.
-    MediaKind { path: PathBuf },
-    /// `ffmpeg` or `ffprobe` cannot be run or failed.
-    Ffmpeg { detail: String },
+    /// A medium: changed, of no kind agl takes, or ffmpeg failing on it
+    /// (AGL-014). Its own type, wrapped (AGL-121, D66).
+    Media(crate::media::Error),
     /// The draft engine (AGL-122) cannot be run or failed: the draft is
     /// dropped, the final pass is untouched.
     Draft { detail: String },
@@ -367,6 +364,13 @@ impl From<crate::plane::error::Error> for Error {
     /// A plane's own error as agl's (AGL-121, D66).
     fn from(source: crate::plane::error::Error) -> Error {
         Error::Plane(source)
+    }
+}
+
+impl From<crate::media::Error> for Error {
+    /// A medium's own error as agl's (AGL-121, D66).
+    fn from(source: crate::media::Error) -> Error {
+        Error::Media(source)
     }
 }
 

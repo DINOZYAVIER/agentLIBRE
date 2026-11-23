@@ -13,8 +13,51 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::backend::{Backend, Message};
-use crate::error::Error;
+use crate::error;
 use crate::forge::sha256;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
+
+/// What goes wrong with a medium: its copy changed, a file of no kind agl
+/// takes, or `ffmpeg` and `ffprobe` failing on it (AGL-014; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// A medium the session keeps is not what its name says (AGL-014, D7).
+    Changed { path: PathBuf },
+    /// A file to attach that is not an image, a video or an audio.
+    Kind { path: PathBuf },
+    /// `ffmpeg` or `ffprobe` cannot be run or failed.
+    Ffmpeg { detail: String },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::Changed { path } => tr!(lang, CHANGED, path = path.display()),
+            Self::Kind { path } => tr!(lang, KIND, path = path.display()),
+            Self::Ffmpeg { detail } => tr!(lang, FFMPEG, detail = detail),
+        }
+    }
+}
+
+/// `Error::Changed` (AGL-014, D7).
+const CHANGED: Msg = Msg {
+    en: "{path} is not what its name says (the copy of a medium of the session was changed)",
+    uk: "{path} не те, що в його назві (копію медіа сесії змінено)",
+};
+
+/// `Error::Kind`.
+const KIND: Msg = Msg {
+    en: "{path} is not an image, a video or an audio",
+    uk: "{path} не є зображенням, відео чи аудіо",
+};
+
+/// `Error::Ffmpeg`.
+const FFMPEG: Msg = Msg {
+    en: "ffmpeg failed: {detail}",
+    uk: "помилка ffmpeg: {detail}",
+};
 
 /// The most frames taken from a video (D16).
 pub const MAX_FRAMES: usize = 32;
@@ -177,7 +220,7 @@ pub fn expand(
     table: &[&Media],
     dir: &Path,
     backend: &dyn Backend,
-) -> Result<Expanded, Error> {
+) -> Result<Expanded, error::Error> {
     let mut expanded = Expanded::default();
     let mut marker: Option<String> = None;
     let mut hears: Option<bool> = None;
@@ -202,7 +245,7 @@ pub fn expand(
             };
             out.push_str(&text[last..item.start]);
             last = item.end;
-            let mut stand = |expanded: &mut Expanded, uploads: Vec<String>| -> Result<String, Error> {
+            let mut stand = |expanded: &mut Expanded, uploads: Vec<String>| -> Result<String, error::Error> {
                 if marker.is_none() {
                     marker = Some(backend.media_marker()?);
                 }
@@ -255,34 +298,34 @@ fn file_in(dir: &Path, sha256: &str, ext: &str) -> PathBuf {
 
 /// Writes `bytes` to `dir` as `<sha256>.<ext>` unless it is there; returns
 /// the sha256 (D7).
-pub fn put(dir: &Path, bytes: &[u8], ext: &str) -> Result<String, Error> {
+pub fn put(dir: &Path, bytes: &[u8], ext: &str) -> Result<String, error::Error> {
     let sha = sha256_hex(bytes);
     let path = file_in(dir, &sha, ext);
     if path.is_file() {
         return Ok(sha);
     }
-    fs::create_dir_all(dir).map_err(|source| Error::Write {
+    fs::create_dir_all(dir).map_err(|source| error::Error::Write {
         path: dir.into(),
         source,
     })?;
     let temp = dir.join(format!(".{sha}.{}.tmp", std::process::id()));
-    fs::write(&temp, bytes).map_err(|source| Error::Write {
+    fs::write(&temp, bytes).map_err(|source| error::Error::Write {
         path: temp.clone(),
         source,
     })?;
-    fs::rename(&temp, &path).map_err(|source| Error::Write { path, source })?;
+    fs::rename(&temp, &path).map_err(|source| error::Error::Write { path, source })?;
     Ok(sha)
 }
 
 /// Reads `<sha256>.<ext>` from `dir` and checks it against its name.
-pub fn read(dir: &Path, sha256: &str, ext: &str) -> Result<Vec<u8>, Error> {
+pub fn read(dir: &Path, sha256: &str, ext: &str) -> Result<Vec<u8>, error::Error> {
     let path = file_in(dir, sha256, ext);
-    let bytes = fs::read(&path).map_err(|source| Error::Read {
+    let bytes = fs::read(&path).map_err(|source| error::Error::Read {
         path: path.clone(),
         source,
     })?;
     if sha256_hex(&bytes) != sha256 {
-        return Err(Error::MediaChanged { path });
+        return Err(Error::Changed { path }.into());
     }
     Ok(bytes)
 }
@@ -299,9 +342,9 @@ pub struct Source {
 
 impl Source {
     /// Reads the file at `path`; its kind comes from the extension.
-    pub fn from_file(path: &Path) -> Result<Source, Error> {
-        let kind = Kind::of_path(path).ok_or_else(|| Error::MediaKind { path: path.into() })?;
-        let bytes = fs::read(path).map_err(|source| Error::Read {
+    pub fn from_file(path: &Path) -> Result<Source, error::Error> {
+        let kind = Kind::of_path(path).ok_or_else(|| Error::Kind { path: path.into() })?;
+        let bytes = fs::read(path).map_err(|source| error::Error::Read {
             path: path.into(),
             source,
         })?;
@@ -337,7 +380,7 @@ pub fn frame_times(duration: f64) -> Vec<f64> {
 }
 
 /// The length of a video, from `ffprobe`.
-fn video_duration(path: &Path) -> Result<f64, Error> {
+fn video_duration(path: &Path) -> Result<f64, error::Error> {
     let output = Command::new(crate::programs::program("ffprobe")?)
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
         .arg(path)
@@ -349,19 +392,23 @@ fn video_duration(path: &Path) -> Result<f64, Error> {
     if !output.status.success() {
         return Err(Error::Ffmpeg {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
+        }
+        .into());
     }
     String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
-        .map_err(|_| Error::Ffmpeg {
-            detail: format!("no duration in {}", path.display()),
+        .map_err(|_| {
+            Error::Ffmpeg {
+                detail: format!("no duration in {}", path.display()),
+            }
+            .into()
         })
 }
 
 /// The frames of the video at `path` as JPEG pictures with their times
 /// (D8, D16).
-pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
+pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, error::Error> {
     let times = frame_times(video_duration(path)?);
     let ffmpeg = crate::programs::program("ffmpeg")?;
     let scale = format!(
@@ -381,7 +428,8 @@ pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
         if !output.status.success() {
             return Err(Error::Ffmpeg {
                 detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-            });
+            }
+            .into());
         }
         // A time past the last frame gives nothing: that frame is skipped.
         if !output.stdout.is_empty() {
@@ -391,7 +439,8 @@ pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, Error> {
     if frames.is_empty() {
         return Err(Error::Ffmpeg {
             detail: format!("no frames in {}", path.display()),
-        });
+        }
+        .into());
     }
     Ok(frames)
 }
@@ -414,7 +463,7 @@ pub fn wav_is_silent(wav: &[u8]) -> bool {
 }
 
 /// An audio as 16 kHz mono WAV, what whisper reads.
-pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, error::Error> {
     let mut child = Command::new(crate::programs::program("ffmpeg")?)
         .args(["-v", "error", "-i", "pipe:0", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1"])
         .stdin(Stdio::piped())
@@ -438,7 +487,8 @@ pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     if !output.status.success() || output.stdout.is_empty() {
         return Err(Error::Ffmpeg {
             detail: String::from_utf8_lossy(&output.stderr).trim().into(),
-        });
+        }
+        .into());
     }
     Ok(output.stdout)
 }
@@ -637,8 +687,8 @@ mod tests {
         assert_eq!(read(&media, &sha, "png").unwrap(), b"bytes");
         // A changed file fails the check; a missing one is a read error.
         fs::write(file_in(&media, &sha, "png"), b"other").unwrap();
-        assert!(matches!(read(&media, &sha, "png"), Err(Error::MediaChanged { .. })));
-        assert!(matches!(read(&media, &"0".repeat(64), "png"), Err(Error::Read { .. })));
+        assert!(matches!(read(&media, &sha, "png"), Err(error::Error::Media(Error::Changed { .. }))));
+        assert!(matches!(read(&media, &"0".repeat(64), "png"), Err(error::Error::Read { .. })));
         // No temporary file is left behind.
         let left: Vec<_> = fs::read_dir(&media).unwrap().flatten().collect();
         assert_eq!(left.len(), 1);
@@ -656,10 +706,10 @@ mod tests {
         assert_eq!(source.bytes, b"png");
         let text = dir.0.join("a.txt");
         fs::write(&text, b"x").unwrap();
-        assert!(matches!(Source::from_file(&text), Err(Error::MediaKind { .. })));
+        assert!(matches!(Source::from_file(&text), Err(error::Error::Media(Error::Kind { .. }))));
         assert!(matches!(
             Source::from_file(&dir.0.join("missing.png")),
-            Err(Error::Read { .. })
+            Err(error::Error::Read { .. })
         ));
     }
 

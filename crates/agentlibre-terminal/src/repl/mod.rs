@@ -1902,7 +1902,7 @@ mod tests {
                 let fake = fake.clone();
                 Box::new(move |limit| {
                     if let Some(detail) = fake.record_error.lock().unwrap().clone() {
-                        return Err(Error::Ffmpeg { detail });
+                        return Err(crate::media::Error::Ffmpeg { detail }.into());
                     }
                     fake.log.lock().unwrap().push(format!("start {limit}"));
                     Ok(Box::new(FakeRecording(fake.clone())))
@@ -1912,7 +1912,7 @@ mod tests {
                 let fake = fake.clone();
                 Box::new(move |limit| {
                     if let Some(detail) = fake.record_error.lock().unwrap().clone() {
-                        return Err(Error::Ffmpeg { detail });
+                        return Err(crate::media::Error::Ffmpeg { detail }.into());
                     }
                     fake.log.lock().unwrap().push(format!("start {limit}"));
                     Ok(Box::new(FakeRecording(fake.clone())))

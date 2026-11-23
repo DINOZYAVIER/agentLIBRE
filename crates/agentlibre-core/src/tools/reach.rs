@@ -208,7 +208,7 @@ fn view(call: &ToolCall, reach: &mut Reach<'_>) -> ToolResult {
     let path = reach.workspace.join(path);
     let source = match media::Source::from_file(&path) {
         Ok(source) => source,
-        Err(Error::MediaKind { .. }) => {
+        Err(Error::Media(crate::media::Error::Kind { .. })) => {
             return fail(format!(
                 "{} is not an image, a video or an audio.",
                 path.display()

@@ -1745,7 +1745,7 @@ fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
         .unwrap();
     fs::write(kept.path(&session.media_dir()), b"other").unwrap();
     let end = turn_in(&mut session, &script, &dir, "[Image#1]");
-    assert!(matches!(end, Err(Error::MediaChanged { .. })));
+    assert!(matches!(end, Err(Error::Media(crate::media::Error::Changed { .. }))));
 }
 
 fn view_call(path: &str) -> String {

@@ -1571,24 +1571,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у моделі Функції і перезапусти його (agl server stop)",
     };
 
-    /// `Error::MediaChanged` (AGL-014, D7).
-    pub const MEDIA_CHANGED: Msg = Msg {
-        en: "{path} is not what its name says (the copy of a medium of the session was changed)",
-        uk: "{path} не те, що в його назві (копію медіа сесії змінено)",
-    };
-
-    /// `Error::MediaKind`.
-    pub const MEDIA_KIND: Msg = Msg {
-        en: "{path} is not an image, a video or an audio",
-        uk: "{path} не є зображенням, відео чи аудіо",
-    };
-
-    /// `Error::Ffmpeg`.
-    pub const FFMPEG: Msg = Msg {
-        en: "ffmpeg failed: {detail}",
-        uk: "помилка ffmpeg: {detail}",
-    };
-
     /// `Error::Draft` (AGL-122).
     pub const DRAFT: Msg = Msg {
         en: "the draft engine failed: {detail}",
@@ -3216,9 +3198,7 @@ impl Error {
             Error::BridgeDeviceExists { name } => tr!(lang, m::BRIDGE_DEVICE_EXISTS, name = name),
             Error::BridgeDeviceUnknown { name } => tr!(lang, m::BRIDGE_DEVICE_UNKNOWN, name = name),
             Error::Bridge { detail } => tr!(lang, m::BRIDGE_FAILED, detail = detail),
-            Error::MediaChanged { path } => tr!(lang, m::MEDIA_CHANGED, path = path.display()),
-            Error::MediaKind { path } => tr!(lang, m::MEDIA_KIND, path = path.display()),
-            Error::Ffmpeg { detail } => tr!(lang, m::FFMPEG, detail = detail),
+            Error::Media(error) => error.message(lang),
             Error::Draft { detail } => tr!(lang, m::DRAFT, detail = detail),
             Error::ServerFailed { owner } => match owner {
                 ServerOwner::Unit(unit) => tr!(lang, m::SERVER_FAILED, unit = unit),
