@@ -4,5 +4,7 @@
 
 pub mod error;
 pub mod forge;
+pub mod memory;
+pub mod replace;
 
 pub use error::Error;

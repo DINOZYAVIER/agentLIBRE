@@ -14,7 +14,7 @@ use crate::agent::{Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
 use crate::backend::ReasoningLevel;
 use crate::error::Error;
-use crate::memory::MemoryAction;
+use agentlibre_forge::memory::MemoryAction;
 use crate::phase::Observer;
 use crate::session::{Event, Session};
 use crate::stop::Stop;
@@ -404,7 +404,7 @@ mod tests {
     use agentlibre_common::testutil::TempDir;
     use crate::function::Function;
     use agentlibre_common::i18n::Lang;
-    use crate::memory::StoreHome;
+    use agentlibre_forge::memory::StoreHome;
     use crate::search::NoSearch;
     use crate::session::StopReason;
 

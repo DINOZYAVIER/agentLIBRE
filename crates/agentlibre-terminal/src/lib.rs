@@ -20,7 +20,6 @@ pub(crate) use agentlibre_core::{
     function,
     i18n,
     media,
-    memory,
     phase,
     plane,
     record,
@@ -33,7 +32,7 @@ pub(crate) use agentlibre_core::{
     whisper,
     wsl,
 };
-pub(crate) use agentlibre_forge::forge;
+pub(crate) use agentlibre_forge::{forge, memory};
 
 use std::ffi::OsString;
 use std::io::{self, Write};

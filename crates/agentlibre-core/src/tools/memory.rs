@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::action::Outcome;
-use crate::memory::{self, Refusal, Write, hook_of};
+use agentlibre_forge::memory::{self, Refusal, Write, hook_of};
 use crate::tools::{Output, ToolResult, limited};
 
 /// The arguments of the `memory` tool (M32); a field that the action does
@@ -167,7 +167,7 @@ mod tests {
 
     use super::{Args, add, edit_entry, remember, remove, run, show, update};
     use crate::action::Outcome;
-    use crate::memory::*;
+    use agentlibre_forge::memory::*;
     use crate::tools::Output;
     use agentlibre_common::testutil::TempDir;
 
@@ -542,7 +542,7 @@ mod tests {
         added(&dir.0, "One", "first", "1");
         assert!(!exists(&dir.0, "MEMORY"));
         assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
-        assert!(matches!(whole(&dir.0, "MEMORY"), Err(crate::error::Error::Memory(Error::NoEntry { .. }))));
+        assert!(matches!(whole(&dir.0, "MEMORY"), Err(agentlibre_forge::Error::Memory(Error::NoEntry { .. }))));
         assert_eq!(list(&dir.0).unwrap().len(), 1);
         assert!(dir.0.join(INDEX).is_file());
     }

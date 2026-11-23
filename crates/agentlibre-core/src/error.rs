@@ -71,7 +71,7 @@ pub enum Error {
     Download(crate::download::Error),
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
-    Memory(crate::memory::Error),
+    Memory(agentlibre_forge::memory::Error),
 }
 
 impl From<agentlibre_client::Error> for Error {
@@ -129,9 +129,9 @@ impl From<crate::daemon::error::Error> for Error {
     }
 }
 
-impl From<crate::memory::Error> for Error {
+impl From<agentlibre_forge::memory::Error> for Error {
     /// The memory's own error as agl's (AGL-121, D66).
-    fn from(source: crate::memory::Error) -> Error {
+    fn from(source: agentlibre_forge::memory::Error) -> Error {
         Error::Memory(source)
     }
 }
@@ -142,6 +142,7 @@ impl From<agentlibre_forge::Error> for Error {
     fn from(source: agentlibre_forge::Error) -> Error {
         match source {
             agentlibre_forge::Error::Forge(error) => Error::Forge(error),
+            agentlibre_forge::Error::Memory(error) => Error::Memory(error),
             agentlibre_forge::Error::Common(error) => Error::Common(error),
         }
     }

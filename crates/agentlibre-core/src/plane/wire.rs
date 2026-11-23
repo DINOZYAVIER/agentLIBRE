@@ -15,7 +15,7 @@ use crate::attach::Pending;
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use agentlibre_common::i18n::Lang;
 use crate::media::{Frame, Kind, Media, Source};
-use crate::memory::{Kind as MemoryKind, Write};
+use agentlibre_forge::memory::{Kind as MemoryKind, Write};
 use crate::phase::{Phase, PhaseEvent, StepRecord, Transition};
 use crate::session::{CommandRun, CutOff, Event, ForgeKind, StopReason};
 

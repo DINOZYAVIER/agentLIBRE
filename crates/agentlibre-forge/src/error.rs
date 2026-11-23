@@ -10,6 +10,9 @@ use agentlibre_common::i18n::Lang;
 pub enum Error {
     /// The forge: git, markers, stores, an artifact's file and states.
     Forge(crate::forge::error::Error),
+    /// The memory's store: an entry of no name, a removal that needs a
+    /// yes (AGL-121, D66, D80).
+    Memory(crate::memory::Error),
     /// A file that cannot be read or written, Nix, a name (AGL-121, D78).
     Common(agentlibre_common::error::Error),
 }
@@ -19,6 +22,7 @@ impl Error {
     pub fn message(&self, lang: Lang) -> String {
         match self {
             Error::Forge(error) => error.message(lang),
+            Error::Memory(error) => error.message(lang),
             Error::Common(error) => error.message(lang),
         }
     }
@@ -27,6 +31,12 @@ impl Error {
 impl From<crate::forge::error::Error> for Error {
     fn from(source: crate::forge::error::Error) -> Error {
         Error::Forge(source)
+    }
+}
+
+impl From<crate::memory::Error> for Error {
+    fn from(source: crate::memory::Error) -> Error {
+        Error::Memory(source)
     }
 }
 

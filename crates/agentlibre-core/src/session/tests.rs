@@ -631,7 +631,7 @@ fn a_bad_media_event_is_a_bad_line() {
 
 #[test]
 fn the_memory_event_round_trips_and_is_not_part_of_the_history() {
-    use crate::memory::Kind as MemoryKind;
+    use agentlibre_forge::memory::Kind as MemoryKind;
     let dir = TempDir::new();
     let events = [
         Event::User("Remember the tests".into()),

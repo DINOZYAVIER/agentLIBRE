@@ -26,7 +26,7 @@ use agentlibre_forge::forge;
 use crate::function::Function;
 use crate::grammar::{Expr, Grammar};
 use agentlibre_common::i18n::{Lang, m};
-use crate::memory::MemoryAction;
+use agentlibre_forge::memory::MemoryAction;
 use agentlibre_common::paths::Paths;
 use crate::phase::Observer;
 use crate::plane::{self, Command, Run, Sent, wire};

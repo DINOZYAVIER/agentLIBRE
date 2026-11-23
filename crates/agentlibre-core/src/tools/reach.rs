@@ -11,7 +11,7 @@ use crate::error::Error;
 use agentlibre_common::i18n::{m, Lang};
 use agentlibre_common::tr;
 use crate::media;
-use crate::memory::{self, Home};
+use agentlibre_forge::memory::{self, Home};
 use crate::search::Searcher;
 use crate::session::Session;
 

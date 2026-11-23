@@ -21,7 +21,7 @@ use agentlibre_forge::forge::Workspace;
 use crate::function::Function;
 use agentlibre_common::i18n::{m, Lang};
 use crate::machine::Machine;
-use crate::memory::{self, Home, MemoryAction, Write};
+use agentlibre_forge::memory::{self, Home, MemoryAction, Write};
 use agentlibre_common::nix;
 use agentlibre_common::paths::Paths;
 use crate::phase::{Observer, PhaseEvent};
@@ -737,7 +737,7 @@ impl Run {
                 self.keep(&mut said, event);
                 said
             }
-            Err(error) => Text::fault(&error, self.lang),
+            Err(error) => Text::fault(&error.into(), self.lang),
         }
     }
 
@@ -752,7 +752,7 @@ impl Run {
                     ..Text::default()
                 }
             }
-            Err(error) => Text::fault(&error, self.lang),
+            Err(error) => Text::fault(&error.into(), self.lang),
         }
     }
 

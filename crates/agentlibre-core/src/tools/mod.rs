@@ -229,7 +229,7 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<std::process::Exit
 /// Replaces the only occurrence of `old` in the file at `path` with `new`
 /// (D25, D27, D101, D103).
 pub fn edit(workspace: &Path, path: &str, old: &str, new: &str) -> ToolResult {
-    match crate::replace::once(&workspace.join(path), old, new) {
+    match agentlibre_forge::replace::once(&workspace.join(path), old, new) {
         Ok(()) => ToolResult {
             outcome: Outcome::Ok,
             content: format!("Replaced 1 occurrence in {path}."),
@@ -547,7 +547,7 @@ fn forge_edit(
         .into());
     }
     let body = &artifact.body;
-    let starts = crate::replace::occurrences(body, old);
+    let starts = agentlibre_forge::replace::occurrences(body, old);
     match starts.as_slice() {
         [] => Err(format!("`old` was not found in {name}.").into()),
         [start] => {

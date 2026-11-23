@@ -122,7 +122,7 @@ pub struct Agent<'a> {
     /// has no such tool, so its searcher is never asked.
     pub search: &'a dyn Searcher,
     /// Where the memory of the workspace is (AGL-006).
-    pub memory: &'a dyn crate::memory::Home,
+    pub memory: &'a dyn agentlibre_forge::memory::Home,
     /// What the model is told of its environment and of this agl (AGL-048).
     pub about: Option<&'a str>,
     /// The daemon's holder of the plane's flows, which the `flow` tool asks;
@@ -746,7 +746,7 @@ impl Agent<'_> {
         // write it does not undo the compaction.
         if let Ok((dir, _)) = self.memory.write() {
             let date = agentlibre_common::clock::utc_now();
-            let _ = crate::memory::write_summary(
+            let _ = agentlibre_forge::memory::write_summary(
                 &dir,
                 &date[..10.min(date.len())],
                 &self.session.id,

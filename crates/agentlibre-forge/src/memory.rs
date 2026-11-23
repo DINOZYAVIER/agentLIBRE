@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::error;
-use agentlibre_forge::forge::task_spec::slug;
+use crate::forge::task_spec::slug;
 use agentlibre_common::file::write_atomic;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::tr;
@@ -146,7 +146,7 @@ pub const INDEX: &str = "MEMORY.md";
 pub const SUMMARIES: &str = "summaries";
 
 /// The most of the index that goes into a step's prompt (M33).
-pub(crate) const INDEX_CAP: usize = 4 * 1024;
+pub const INDEX_CAP: usize = 4 * 1024;
 
 /// What is shown of a line that does not fit `INDEX_CAP` by itself (AGL-058,
 /// D10): its name and the start of its text, leaving room for the other lines.
@@ -253,10 +253,9 @@ pub struct StoreHome {
 }
 
 impl StoreHome {
-    fn resolved(&self) -> Result<(agentlibre_forge::forge::Workspace, Vec<String>), error::Error> {
+    fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), error::Error> {
         let paths = agentlibre_common::paths::Paths::from_env(|name| std::env::var_os(name))?;
-        agentlibre_forge::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
-            .map_err(Into::into)
+        crate::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
     }
 }
 
@@ -272,7 +271,7 @@ impl Home for StoreHome {
 
     fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
         let (ws, mut lines) = self.resolved()?;
-        lines.extend(agentlibre_forge::forge::materialize(&ws, self.lang)?);
+        lines.extend(crate::forge::materialize(&ws, self.lang)?);
         Ok((ws.dir.join("memory"), lines))
     }
 }
@@ -281,7 +280,7 @@ impl Home for StoreHome {
 /// is created.
 pub fn of_store(store: &Path) -> Option<PathBuf> {
     store
-        .join(agentlibre_forge::forge::MARKER_FILE)
+        .join(crate::forge::MARKER_FILE)
         .is_file()
         .then(|| store.join("memory"))
 }

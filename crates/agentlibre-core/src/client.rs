@@ -112,7 +112,7 @@ impl Remote {
             Command::LookAt(action) => Request::Look {
                 session: session.clone(),
                 look: match action {
-                    crate::memory::MemoryAction::Show { name } => proto::Look::Show { name },
+                    agentlibre_forge::memory::MemoryAction::Show { name } => proto::Look::Show { name },
                     _ => proto::Look::List,
                 },
             },

@@ -8,6 +8,7 @@ description = "agentLIBRE's stores crate, above the core: the forge, memory's st
 
 [dependencies]
 agentlibre-common = { path = "../agentlibre-common" }
+libc = "0.2"
 ring = "0.17"
 serde_json = "1"
 

@@ -311,7 +311,7 @@ impl Log {
     fn compacted(&mut self) {
         self.0.push("[compacted]".into());
     }
-    fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+    fn memory(&mut self, name: &str, kind: agentlibre_forge::memory::Kind, text: Option<&str>) {
         self.0.push(format!("memory {}{name} {}", kind.sign(), text.unwrap_or("-")));
     }
     fn cut_off(&mut self) {
@@ -429,23 +429,27 @@ fn agent_searching<'a>(
 /// A workspace with no memory store.
 struct NoMemory;
 
-impl crate::memory::Home for NoMemory {
+impl agentlibre_forge::memory::Home for NoMemory {
     fn read(&self) -> Option<PathBuf> {
         None
     }
-    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
-        Err(crate::engine::error::Error::NotLocalServer { url: "no store".into() }.into())
+    fn write(&self) -> Result<(PathBuf, Vec<String>), agentlibre_forge::Error> {
+        Err(agentlibre_common::error::Error::Read {
+            path: "no store".into(),
+            source: std::io::Error::other("no store"),
+        }
+        .into())
     }
 }
 
 /// A memory directory of the test: read when it exists, made on a write.
 struct DirMemory(PathBuf);
 
-impl crate::memory::Home for DirMemory {
+impl agentlibre_forge::memory::Home for DirMemory {
     fn read(&self) -> Option<PathBuf> {
         self.0.is_dir().then(|| self.0.clone())
     }
-    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+    fn write(&self) -> Result<(PathBuf, Vec<String>), agentlibre_forge::Error> {
         fs::create_dir_all(&self.0).unwrap();
         Ok((self.0.clone(), vec!["the store was made".into()]))
     }
@@ -1871,7 +1875,7 @@ fn memory_call(fields: &[(&str, &str)]) -> String {
 }
 
 fn turn_with_memory(
-    memory: &dyn crate::memory::Home,
+    memory: &dyn agentlibre_forge::memory::Home,
     script: &Script,
     dir: &TempDir,
     message: &str,

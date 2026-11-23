@@ -17,7 +17,7 @@ use crate::backend::{Message, ToolCall};
 use crate::error::Error;
 use error::{Error as SessionError, NameProblem};
 use crate::media::{self, Frame, Kind, Media, Source};
-use crate::memory::Kind as MemoryKind;
+use agentlibre_forge::memory::Kind as MemoryKind;
 
 /// The session format version (D104, AGL-063, D2): the v1 files open as
 /// they are, and a new event line type or a changed field meaning bumps

@@ -101,7 +101,13 @@ macro_rules! from_core_file {
     };
 }
 
-from_core_file!(download, format, media, memory, search, strata, weights, whisper, wsl);
+from_core_file!(download, format, media, search, strata, weights, whisper, wsl);
+
+impl From<crate::memory::Error> for Error {
+    fn from(source: crate::memory::Error) -> Error {
+        Error::Core(source.into())
+    }
+}
 
 /// A common module's own error, wrapped by the core's.
 macro_rules! from_common {
