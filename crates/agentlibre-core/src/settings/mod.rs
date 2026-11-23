@@ -165,11 +165,12 @@ pub fn set_top(path: &Path, key: &str, value: Value) -> Result<(), Error> {
         match nix::eval_file(path)? {
             Value::Object(map) => map,
             _ => {
-                return Err(Error::WrongType {
+                return Err(crate::nix::Error::WrongType {
                     path: path.into(),
                     key: String::new(),
-                    expected: crate::error::Expected::Table,
-                });
+                    expected: crate::nix::Expected::Table,
+                }
+                .into());
             }
         }
     } else {
@@ -398,7 +399,7 @@ impl Settings {
         let server = project.server.over(&user.server).effective(model);
         let whisper = project.whisper.over(&user.whisper);
         let search_file = project.search.over(&user.search);
-        let search = search_file.complete().map_err(|key| Error::MissingKey {
+        let search = search_file.complete().map_err(|key| Error::from(crate::nix::Error::MissingKey {
             // The file that has a `search`, the project's first.
             path: if project.search.is_empty() {
                 user_path.into()
@@ -406,7 +407,7 @@ impl Settings {
                 project_path.into()
             },
             key: format!("search.{key}"),
-        })?;
+        }))?;
         // The url of the kind (AGL-036, D2, D6).
         let server_url = server.url();
         let function = function_name(cli_function, project.function.as_deref(), user.function.as_deref());

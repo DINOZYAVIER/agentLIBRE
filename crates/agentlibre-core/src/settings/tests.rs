@@ -1,6 +1,6 @@
 use super::*;
 use crate::settings::error::Error as SettingsError;
-use crate::error::Expected;
+use crate::nix::Expected;
 use crate::forge::testutil::TempDir;
 use std::fs;
 
@@ -87,11 +87,11 @@ fn user_file() {
     // A model key of a kind's set is unknown (AGL-039, D21).
     for key in ["model", "context", "kind"] {
         assert!(
-            matches!(user_of(&format!("server.llama.{key} = 1;")), Err(Error::UnknownKey { .. })),
+            matches!(user_of(&format!("server.llama.{key} = 1;")), Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { .. }))),
             "{key}"
         );
     }
-    assert!(matches!(user_of("server.kind = \"llama\";"), Err(Error::UnknownKey { key, .. }) if key == "server.kind"));
+    assert!(matches!(user_of("server.kind = \"llama\";"), Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "server.kind"));
     // The weights folders are absolute (D24b).
     assert!(matches!(user_of(r#"models = [ "gguf" ];"#), Err(Error::Settings(SettingsError::SearchPathNotAbsolute { .. }))));
     // A settings file is a function of `{ agl, ... }` (D8, D12).
@@ -137,7 +137,7 @@ fn the_whisper_table() {
     assert_eq!(settings.whisper.args, Some(Vec::new()));
     assert!(matches!(
         user_of("whisper.port = 1;"),
-        Err(Error::UnknownKey { key, .. }) if key == "whisper.port"
+        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "whisper.port"
     ));
     // http:// and https:// (AGL-043 F10); another scheme is refused.
     assert!(user_of(r#"whisper.url = "https://x";"#).is_ok());
@@ -186,7 +186,7 @@ fn the_step_ca_of_the_search() {
     ));
     assert!(matches!(
         user_of(r#"search.ca.port = 1;"#),
-        Err(Error::UnknownKey { key, .. }) if key == "search.ca.port"
+        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "search.ca.port"
     ));
     let partial = user_of(r#"search.ca.url = "https://ca.example";"#).unwrap();
     assert_eq!(partial.search.ca.complete(), Err("root"));
@@ -218,7 +218,7 @@ fn the_search_table() {
     assert_eq!(loaded, full_search());
     assert!(matches!(
         user_of("search.port = 1;"),
-        Err(Error::UnknownKey { key, .. }) if key == "search.port"
+        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "search.port"
     ));
     assert!(matches!(
         user_of(r#"search.url = "http://x";"#),
@@ -255,7 +255,7 @@ fn the_search_is_set_up_only_by_a_complete_table() {
     };
     assert!(matches!(
         resolve(partial.clone(), SearchFile::default()),
-        Err(Error::MissingKey { path, key })
+        Err(Error::Nix(crate::nix::Error::MissingKey { path, key }))
             if key == "search.client_certificate" && path == Path::new("/c/settings.nix")
     ));
     // The project completes the user's table per key...
@@ -268,7 +268,7 @@ fn the_search_is_set_up_only_by_a_complete_table() {
     // ...and a project's own partial table names its own file.
     assert!(matches!(
         resolve(SearchFile::default(), SearchFile { url: full_search().url, ..SearchFile::default() }),
-        Err(Error::MissingKey { path, key })
+        Err(Error::Nix(crate::nix::Error::MissingKey { path, key }))
             if key == "search.client_certificate" && path == Path::new("/d/settings.nix")
     ));
 }
@@ -399,7 +399,7 @@ fn invalid_values_are_errors() {
     ));
     assert!(matches!(
         user_of(r#"colors.mutd = "dim";"#),
-        Err(Error::UnknownKey { key, .. }) if key == "colors.mutd"
+        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "colors.mutd"
     ));
     assert!(matches!(
         user_of("repl.max_record_seconds = 0;"),
@@ -407,19 +407,19 @@ fn invalid_values_are_errors() {
     ));
     assert!(matches!(
         user_of("forge.auto_rehome = \"on\";"),
-        Err(Error::WrongType { key, .. }) if key == "forge.auto_rehome"
+        Err(crate::error::Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "forge.auto_rehome"
     ));
     assert!(matches!(
         user_of(r#"functon = "coder";"#),
-        Err(Error::UnknownKey { key, .. }) if key == "functon"
+        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "functon"
     ));
     assert!(matches!(
         user_of("function = 1;"),
-        Err(Error::WrongType { key, expected: Expected::String, .. }) if key == "function"
+        Err(crate::error::Error::Nix(crate::nix::Error::WrongType { key, expected: Expected::String, .. })) if key == "function"
     ));
     assert!(matches!(
         user_of(r#"server = "http://x";"#),
-        Err(Error::WrongType { key, expected: Expected::Table, .. }) if key == "server"
+        Err(crate::error::Error::Nix(crate::nix::Error::WrongType { key, expected: Expected::Table, .. })) if key == "server"
     ));
     assert!(matches!(
         user_of(r#"language = "de";"#),
@@ -451,7 +451,7 @@ fn the_project_file() {
     assert_eq!(project.whisper.model.as_deref(), Some("w.bin"));
     // The interface and the weights folders are the user's.
     fs::write(&path, "{ agl, ... }: { language = \"uk\"; }").unwrap();
-    assert!(matches!(load(&path), Err(Error::UnknownKey { key, .. }) if key == "language"));
+    assert!(matches!(load(&path), Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "language"));
 }
 
 #[test]

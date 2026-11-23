@@ -458,28 +458,28 @@ mod tests {
         artifact.type_table["branch"] = "x".into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::UnknownKey { key, .. }) if key == "task-spec.branch"
+            Err(Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "task-spec.branch"
         ));
         // anchor is required.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table.as_object_mut().unwrap().remove("anchor");
         assert!(matches!(
             take(&artifact),
-            Err(Error::MissingKey { key, .. }) if key == "task-spec.anchor"
+            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "task-spec.anchor"
         ));
         // last is a string.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table["last"] = 1.into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::WrongType { key, .. }) if key == "task-spec.last"
+            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "task-spec.last"
         ));
         // The set itself must be a set.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table = "x".into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::WrongType { key, .. }) if key == "task-spec"
+            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "task-spec"
         ));
     }
 

@@ -44,6 +44,20 @@ pub enum Error {
     /// A Function or settings file is not a function of `{ agl, ... }`
     /// (AGL-039, D8).
     NotAFunction { path: PathBuf },
+    /// A settings file has a key outside `allowed` (D60).
+    UnknownKey {
+        path: PathBuf,
+        key: String,
+        allowed: Vec<&'static str>,
+    },
+    /// A required key is missing.
+    MissingKey { path: PathBuf, key: String },
+    /// A settings value has the wrong type.
+    WrongType {
+        path: PathBuf,
+        key: String,
+        expected: Expected,
+    },
 }
 
 impl Error {
@@ -62,6 +76,39 @@ impl Error {
             }
             Self::NotAFunction { path } => {
                 tr!(lang, NIX_NOT_A_FUNCTION, path = path.display())
+            }
+            Self::UnknownKey { path, key, allowed } => {
+                tr!(
+                    lang,
+                    UNKNOWN_KEY,
+                    path = path.display(),
+                    key = key,
+                    allowed = allowed.join(", ")
+                )
+            }
+            Self::MissingKey { path, key } => {
+                tr!(lang, MISSING_KEY, path = path.display(), key = key)
+            }
+            Self::WrongType {
+                path,
+                key,
+                expected,
+            } => {
+                tr!(
+                    lang,
+                    WRONG_TYPE,
+                    path = path.display(),
+                    key = key,
+                    expected = match expected {
+                        Expected::String => tr!(lang, EXPECTED_STRING),
+                        Expected::Table => tr!(lang, EXPECTED_TABLE),
+                        Expected::Bool => tr!(lang, EXPECTED_BOOL),
+                        Expected::Integer => tr!(lang, EXPECTED_INTEGER),
+                        Expected::Number => tr!(lang, EXPECTED_NUMBER),
+                        Expected::Strings => tr!(lang, EXPECTED_STRINGS),
+                        Expected::Tables => tr!(lang, EXPECTED_TABLES),
+                    }
+                )
             }
         }
     }
@@ -83,6 +130,79 @@ const NIX_EVAL: Msg = Msg {
 const NIX_NOT_A_FUNCTION: Msg = Msg {
     en: "{path} is not a function of {{ agl, ... }}: write it as `{{ agl, ... }}: {{ … }}`",
     uk: "{path} не є функцією від {{ agl, ... }}: пиши його як `{{ agl, ... }}: {{ … }}`",
+};
+
+/// The type a key of a Nix file requires.
+#[derive(Debug)]
+pub enum Expected {
+    String,
+    Table,
+    Bool,
+    Integer,
+    Number,
+    Strings,
+    /// A list of sets (AGL-089).
+    Tables,
+}
+
+/// `Error::UnknownKey`.
+const UNKNOWN_KEY: Msg = Msg {
+    en: "unknown key `{key}` in {path}; allowed: {allowed}",
+    uk: "невідомий ключ `{key}` у {path}; дозволені: {allowed}",
+};
+
+/// `Error::MissingKey`.
+const MISSING_KEY: Msg = Msg {
+    en: "`{key}` is missing in {path}",
+    uk: "у {path} немає `{key}`",
+};
+
+/// `Error::WrongType`.
+const WRONG_TYPE: Msg = Msg {
+    en: "`{key}` in {path} must be {expected}",
+    uk: "`{key}` у {path} має бути {expected}",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_STRING: Msg = Msg {
+    en: "a string",
+    uk: "рядком",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_TABLE: Msg = Msg {
+    en: "a table",
+    uk: "таблицею",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_BOOL: Msg = Msg {
+    en: "true or false",
+    uk: "true або false",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_INTEGER: Msg = Msg {
+    en: "an integer",
+    uk: "цілим числом",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_NUMBER: Msg = Msg {
+    en: "a number",
+    uk: "числом",
+};
+
+/// What a value must be, for `WRONG_TYPE`.
+const EXPECTED_STRINGS: Msg = Msg {
+    en: "an array of strings",
+    uk: "масивом рядків",
+};
+
+/// `Expected::Tables` (AGL-089).
+const EXPECTED_TABLES: Msg = Msg {
+    en: "an array of attribute sets",
+    uk: "масивом наборів атрибутів",
 };
 
 /// agl's `nix/` directory: the built-in formats, policies and models, the

@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected};
+use crate::error::Error;
 use crate::function::Function;
 use crate::session::StopReason;
 
@@ -871,66 +871,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const READ: Msg = Msg {
         en: "cannot read {path}: {source}",
         uk: "не вдалося прочитати {path}: {source}",
-    };
-
-    /// `Error::UnknownKey`.
-    pub const UNKNOWN_KEY: Msg = Msg {
-        en: "unknown key `{key}` in {path}; allowed: {allowed}",
-        uk: "невідомий ключ `{key}` у {path}; дозволені: {allowed}",
-    };
-
-    /// `Error::MissingKey`.
-    pub const MISSING_KEY: Msg = Msg {
-        en: "`{key}` is missing in {path}",
-        uk: "у {path} немає `{key}`",
-    };
-
-    /// `Error::WrongType`.
-    pub const WRONG_TYPE: Msg = Msg {
-        en: "`{key}` in {path} must be {expected}",
-        uk: "`{key}` у {path} має бути {expected}",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_STRING: Msg = Msg {
-        en: "a string",
-        uk: "рядком",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_TABLE: Msg = Msg {
-        en: "a table",
-        uk: "таблицею",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_BOOL: Msg = Msg {
-        en: "true or false",
-        uk: "true або false",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_INTEGER: Msg = Msg {
-        en: "an integer",
-        uk: "цілим числом",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_NUMBER: Msg = Msg {
-        en: "a number",
-        uk: "числом",
-    };
-
-    /// What a value must be, for `WRONG_TYPE`.
-    pub const EXPECTED_STRINGS: Msg = Msg {
-        en: "an array of strings",
-        uk: "масивом рядків",
-    };
-
-    /// `Expected::Tables` (AGL-089).
-    pub const EXPECTED_TABLES: Msg = Msg {
-        en: "an array of attribute sets",
-        uk: "масивом наборів атрибутів",
     };
 
     /// `Error::SearchCaNotSet` (AGL-043 F20).
@@ -2356,39 +2296,6 @@ impl Error {
             Error::CurrentDir(source) => tr!(lang, m::CURRENT_DIR, source = source),
             Error::Read { path, source } => {
                 tr!(lang, m::READ, path = path.display(), source = source)
-            }
-            Error::UnknownKey { path, key, allowed } => {
-                tr!(
-                    lang,
-                    m::UNKNOWN_KEY,
-                    path = path.display(),
-                    key = key,
-                    allowed = allowed.join(", ")
-                )
-            }
-            Error::MissingKey { path, key } => {
-                tr!(lang, m::MISSING_KEY, path = path.display(), key = key)
-            }
-            Error::WrongType {
-                path,
-                key,
-                expected,
-            } => {
-                tr!(
-                    lang,
-                    m::WRONG_TYPE,
-                    path = path.display(),
-                    key = key,
-                    expected = match expected {
-                        Expected::String => tr!(lang, m::EXPECTED_STRING),
-                        Expected::Table => tr!(lang, m::EXPECTED_TABLE),
-                        Expected::Bool => tr!(lang, m::EXPECTED_BOOL),
-                        Expected::Integer => tr!(lang, m::EXPECTED_INTEGER),
-                        Expected::Number => tr!(lang, m::EXPECTED_NUMBER),
-                        Expected::Strings => tr!(lang, m::EXPECTED_STRINGS),
-                        Expected::Tables => tr!(lang, m::EXPECTED_TABLES),
-                    }
-                )
             }
             Error::SearchCaNotSet { user_path, key } => tr!(
                 lang,

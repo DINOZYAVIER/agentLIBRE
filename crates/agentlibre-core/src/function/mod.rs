@@ -642,10 +642,10 @@ fn read_source(mut file: Section, name: String) -> Result<FileSource, Error> {
     }
     let size = file
         .integer("size")?
-        .ok_or_else(|| Error::MissingKey {
+        .ok_or_else(|| Error::from(crate::nix::Error::MissingKey {
             path: file.path().into(),
             key: file.key("size"),
-        })
+        }))
         .and_then(|size| {
             u64::try_from(size)
                 .ok()
@@ -771,10 +771,11 @@ fn read_state(
         .transpose()?;
     let limited = max_steps.is_some() || max_visits.is_some();
     if limited && on_limit.is_none() {
-        return Err(Error::MissingKey {
+        return Err(crate::nix::Error::MissingKey {
             path: section.path().into(),
             key: section.key("on_limit"),
-        });
+        }
+        .into());
     }
     if !limited && on_limit.is_some() {
         return Err(problem(
@@ -933,10 +934,11 @@ fn read_constraint(
             let max = range.integer("max")?;
             let (Some(min), Some(max)) = (min, max) else {
                 let missing = if min.is_none() { "min" } else { "max" };
-                return Err(Error::MissingKey {
+                return Err(crate::nix::Error::MissingKey {
                     path: range.path().into(),
                     key: range.key(missing),
-                });
+                }
+                .into());
             };
             if min > max || (param == "timeout" && min < 1) {
                 return Err(problem(&section, "int", FunctionProblem::BadRange));

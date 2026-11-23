@@ -1295,7 +1295,7 @@ mod tests {
         ));
         assert!(matches!(
             take_marker("format = 1;"),
-            Err(Error::MissingKey { key, .. }) if key == "workspace_sha256"
+            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "workspace_sha256"
         ));
     }
 
@@ -1848,7 +1848,7 @@ mod tests {
         let hashes = format!(r#"format = 1; workspace_sha256 = [ "{}" ];"#, identity(1));
         assert!(matches!(
             take_marker(&hashes),
-            Err(Error::MissingKey { key, .. }) if key == "project"
+            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "project"
         ));
         assert!(matches!(
             take_marker(&format!(r#"{hashes} project = "relative";"#)),
@@ -2058,7 +2058,7 @@ body line
         let text = task_spec_text().replace("  status = \"open\";\n", "");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::MissingKey { key, .. }) if key == "status"
+            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "status"
         ));
         // A missing type table.
         let text = task_spec_text().replace("  task-spec = { anchor = \"\"; last = \"\"; };\n", "");
@@ -2071,13 +2071,13 @@ body line
         let text = task_spec_text().replace("task-spec = { ", "task-spec = { extra = 1; ");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::UnknownKey { key, .. }) if key == "task-spec.extra"
+            Err(Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "task-spec.extra"
         ));
         // A wrong type for a key.
         let text = task_spec_text().replace("deps = [ \"agl-000-a\" ]", "deps = 1");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::WrongType { key, .. }) if key == "deps"
+            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "deps"
         ));
         // A state outside the lifecycle (the task-spec check).
         let text = task_spec_text().replace("status = \"open\";", "status = \"draft\";");

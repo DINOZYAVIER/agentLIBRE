@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use crate::error::{Error, Expected};
+use crate::error::Error;
+use crate::nix::Expected;
 use crate::forge::error::Error as ForgeError;
 
 /// An attribute set being read. Keys are removed as they are read.
@@ -26,22 +27,23 @@ impl Section {
                 prefix: String::new(),
                 map,
             }),
-            _ => Err(Error::WrongType {
+            _ => Err(crate::nix::Error::WrongType {
                 path: path.into(),
                 key: String::new(),
                 expected: Expected::Table,
-            }),
+            }
+            .into()),
         }
     }
 
     /// The value `value` read at the location `prefix` of `path`, such as
     /// `task-spec`; it must be a set.
     pub fn at(path: &Path, prefix: &str, value: Value) -> Result<Section, Error> {
-        let mut section = Section::top(path, value).map_err(|_| Error::WrongType {
+        let mut section = Section::top(path, value).map_err(|_| Error::from(crate::nix::Error::WrongType {
             path: path.into(),
             key: prefix.into(),
             expected: Expected::Table,
-        })?;
+        }))?;
         section.prefix = format!("{prefix}.");
         Ok(section)
     }
@@ -81,11 +83,12 @@ impl Section {
     /// Rejects a key outside `allowed`.
     pub fn check_keys(&self, allowed: &[&'static str]) -> Result<(), Error> {
         match self.map.keys().find(|key| !allowed.contains(&key.as_str())) {
-            Some(key) => Err(Error::UnknownKey {
+            Some(key) => Err(crate::nix::Error::UnknownKey {
                 path: self.path.clone(),
                 key: self.key(key),
                 allowed: allowed.to_vec(),
-            }),
+            }
+            .into()),
             None => Ok(()),
         }
     }
@@ -237,19 +240,21 @@ impl Section {
 
     /// The error of a value of `key` that is not what it must be.
     pub fn wrong_type(&self, key: &str, expected: Expected) -> Error {
-        Error::WrongType {
+        crate::nix::Error::WrongType {
             path: self.path.clone(),
             key: self.key(key),
             expected,
         }
+        .into()
     }
 
     /// The error of a missing `key`.
     pub fn missing(&self, key: &str) -> Error {
-        Error::MissingKey {
+        crate::nix::Error::MissingKey {
             path: self.path.clone(),
             key: self.key(key),
         }
+        .into()
     }
 }
 
@@ -266,7 +271,7 @@ mod tests {
     fn keys_are_read_strictly_with_their_path() {
         let mut file = top(json!({ "a": { "b": { "c": 1 } }, "s": "x", "n": 2, "f": 0.5, "l": ["a"] }));
         file.check_keys(&["a", "s", "n", "f", "l"]).unwrap();
-        assert!(matches!(file.check_keys(&["a"]), Err(Error::UnknownKey { key, .. }) if key == "f" || key == "l" || key == "n" || key == "s"));
+        assert!(matches!(file.check_keys(&["a"]), Err(Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "f" || key == "l" || key == "n" || key == "s"));
         assert_eq!(file.string("s").unwrap().as_deref(), Some("x"));
         assert_eq!(file.integer("n").unwrap(), Some(2));
         // An integer is also a number; a float is not an integer.
@@ -274,10 +279,10 @@ mod tests {
         assert_eq!(file.strings("l").unwrap(), Some(vec!["a".to_owned()]));
         let mut a = file.required_section("a").unwrap();
         let mut b = a.required_section("b").unwrap();
-        assert!(matches!(b.string("c"), Err(Error::WrongType { key, .. }) if key == "a.b.c"));
-        assert!(matches!(b.required_string("d"), Err(Error::MissingKey { key, .. }) if key == "a.b.d"));
+        assert!(matches!(b.string("c"), Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "a.b.c"));
+        assert!(matches!(b.required_string("d"), Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "a.b.d"));
         let mut file = top(json!({ "f": 1.5 }));
-        assert!(matches!(file.integer("f"), Err(Error::WrongType { .. })));
+        assert!(matches!(file.integer("f"), Err(Error::Nix(crate::nix::Error::WrongType { .. }))));
         assert!(Section::top(Path::new("/f.nix"), json!([1])).is_err());
     }
 }

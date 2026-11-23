@@ -614,17 +614,17 @@ pub mod tests {
     fn keys_are_checked() {
         assert!(matches!(
             parse(json!({ "name": "x", "call": call() })),
-            Err(error::Error::UnknownKey { key, .. }) if key == "name"
+            Err(error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "name"
         ));
         assert!(matches!(
             parse(json!({ "call": { "begin": "<c {name}>", "end": "</c>" } })),
-            Err(error::Error::MissingKey { key, .. }) if key == "call.param"
+            Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "call.param"
         ));
         assert!(matches!(
             parse(json!({ "think": { "open": "<t>" }, "call": call() })),
-            Err(error::Error::MissingKey { key, .. }) if key == "think.close"
+            Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "think.close"
         ));
-        assert!(matches!(parse(json!({})), Err(error::Error::MissingKey { key, .. }) if key == "call"));
+        assert!(matches!(parse(json!({})), Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "call"));
     }
 
     #[test]

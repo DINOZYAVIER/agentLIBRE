@@ -430,10 +430,11 @@ fn resolve(
             .transpose()?;
         let limited = d.max_steps.is_some() || d.max_visits.is_some();
         if limited && on_limit.is_none() {
-            return Err(Error::MissingKey {
+            return Err(crate::nix::Error::MissingKey {
                 path: at.path().into(),
                 key: at.key(&format!("state.{}.on_limit", d.name)),
-            });
+            }
+            .into());
         }
         if !limited && on_limit.is_some() {
             return Err(bad(

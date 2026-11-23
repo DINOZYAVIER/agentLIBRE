@@ -3,7 +3,6 @@
 use std::io;
 use std::path::PathBuf;
 
-
 /// An error that stops `agl`.
 #[derive(Debug)]
 pub enum Error {
@@ -28,20 +27,6 @@ pub enum Error {
     CurrentDir(io::Error),
     /// A settings file cannot be read.
     Read { path: PathBuf, source: io::Error },
-    /// A settings file has a key outside `allowed` (D60).
-    UnknownKey {
-        path: PathBuf,
-        key: String,
-        allowed: Vec<&'static str>,
-    },
-    /// A required key is missing.
-    MissingKey { path: PathBuf, key: String },
-    /// A settings value has the wrong type.
-    WrongType {
-        path: PathBuf,
-        key: String,
-        expected: Expected,
-    },
     /// `agl search login` without a complete `search.ca` in the user file
     /// (AGL-043 F20); `key` is the first one missing.
     SearchCaNotSet { user_path: PathBuf, key: String },
@@ -308,19 +293,6 @@ impl From<crate::nix::Error> for Error {
     fn from(source: crate::nix::Error) -> Error {
         Error::Nix(source)
     }
-}
-
-/// TOML type a settings key requires.
-#[derive(Debug)]
-pub enum Expected {
-    String,
-    Table,
-    Bool,
-    Integer,
-    Number,
-    Strings,
-    /// A list of sets (AGL-089).
-    Tables,
 }
 
 impl Error {
