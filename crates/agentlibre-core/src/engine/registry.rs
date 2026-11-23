@@ -143,20 +143,28 @@ pub fn url_of_id(runtime: Option<&Path>, effective: &ServerFile, away: &str) -> 
     let model = model_of(effective).ok()??;
     let kind = effective.kind().name();
     for entry in fs::read_dir(dir).ok()?.flatten() {
-        let Ok(record) = fs::read_to_string(entry.path()) else {
+        // A file that does not parse or lacks a key is skipped, not the
+        // end of the scan (AGL-121, D63).
+        let Some(record) = fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|record| serde_json::from_str::<serde_json::Value>(&record).ok())
+        else {
             continue;
         };
-        let record: serde_json::Value = serde_json::from_str(&record).ok()?;
+        let field = |key: &str| record.get(key).and_then(|value| value.as_str());
+        let (Some(pid), Some(record_kind), Some(record_model), Some(url)) = (
+            record.get("pid").and_then(|pid| pid.as_u64()),
+            field("kind"),
+            field("model"),
+            field("url"),
+        ) else {
+            continue;
+        };
         // The process behind a file must still run (AGL-064, D4).
-        let pid = record.get("pid")?.as_u64()?;
         if !Path::new(&format!("/proc/{pid}")).exists() {
             continue;
         }
-        if record.get("kind")?.as_str()? != kind || record.get("model")?.as_str()? != model {
-            continue;
-        }
-        let url = record.get("url")?.as_str()?;
-        if url != away {
+        if record_kind == kind && record_model == model && url != away {
             return Some(url.to_owned());
         }
     }
@@ -206,6 +214,37 @@ mod tests {
         );
         // Away from that very url: nothing else serves my id.
         assert_eq!(url_of_id(Some(&runtime), &mine, "http://127.0.0.1:19001"), None);
+        fs::remove_dir_all(&runtime).unwrap();
+    }
+
+    #[test]
+    fn a_bad_registry_file_does_not_end_the_scan() {
+        // AGL-121, D63: a file that does not parse, or lacks a key, is
+        // skipped; a live server of my id behind it is still found. Several
+        // bad files, so one of them comes before the good one in any order
+        // the directory lists them.
+        let runtime = runtime_dir("registry-bad");
+        let servers = runtime.join("servers");
+        fs::create_dir_all(&servers).unwrap();
+        let pid = std::process::id();
+        for (name, text) in [
+            ("1.json", "not json".to_owned()),
+            ("2.json", serde_json::json!({"pid": pid, "kind": "llama"}).to_string()),
+            ("3.json", serde_json::json!({"kind": "llama", "url": "http://x", "model": "m.gguf"}).to_string()),
+            ("a.json", "{".to_owned()),
+            ("z.json", "[]".to_owned()),
+        ] {
+            fs::write(servers.join(name), text).unwrap();
+        }
+        fs::write(
+            servers.join(format!("{pid}.json")),
+            serde_json::json!({"pid": pid, "kind": "llama", "url": "http://127.0.0.1:19001", "model": "m.gguf"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            url_of_id(Some(&runtime), &model("m.gguf", 4096), "http://127.0.0.1:18080").as_deref(),
+            Some("http://127.0.0.1:19001")
+        );
         fs::remove_dir_all(&runtime).unwrap();
     }
 
