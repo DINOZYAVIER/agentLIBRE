@@ -215,7 +215,6 @@ roles! {
     MarkdownEmphasis "markdown_emphasis" "italic",
     MarkdownLink "markdown_link" "#8AA2D8",
     MarkdownQuote "markdown_quote" "dim",
-    MarkdownBullet "markdown_bullet" "#00FFFF",
     MarkdownRule "markdown_rule" "dim",
 }
 
