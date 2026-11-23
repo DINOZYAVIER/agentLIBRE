@@ -14,6 +14,7 @@ use crate::nix;
 use crate::paths::Paths;
 use crate::settings::{ServerFile, ServerKind, UserFile, function_name};
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 /// Where a Function comes from, in the order a run looks (AGL-028, D3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,7 +267,7 @@ impl Catalog {
     /// (AGL-102, D2).
     pub fn text(&self, name: &str) -> Result<String, Error> {
         let file = self.file(name)?;
-        fs::read_to_string(&file.path).map_err(|source| Error::Read { path: file.path, source })
+        fs::read_to_string(&file.path).map_err(|source| Error::from(CommonError::Read { path: file.path, source }))
     }
 
     /// The Function `name` of the workspace's `functions/`, whatever
@@ -334,16 +335,16 @@ impl Catalog {
 /// `target` (AGL-102, D3, D4): a text that does not load never reaches
 /// the name.
 fn write_validated(target: &Path, dir: &Path, name: &str, text: &str) -> Result<PathBuf, Error> {
-    fs::create_dir_all(dir).map_err(|source| Error::Write {
+    fs::create_dir_all(dir).map_err(|source| Error::from(CommonError::Write {
         path: dir.to_path_buf(),
         source,
-    })?;
+    }))?;
     let temp = dir.join(format!("{name}.nix.tmp"));
-    fs::write(&temp, text).map_err(|source| Error::Write { path: temp.clone(), source })?;
+    fs::write(&temp, text).map_err(|source| Error::from(CommonError::Write { path: temp.clone(), source }))?;
     match nix::eval_file(&temp).map_err(Into::into).and_then(|value| Function::from_value(&temp, value)) {
         Ok(_) => fs::rename(&temp, target)
             .map(|()| target.to_path_buf())
-            .map_err(|source| Error::Write { path: target.to_path_buf(), source }),
+            .map_err(|source| Error::from(CommonError::Write { path: target.to_path_buf(), source })),
         Err(error) => {
             let _ = fs::remove_file(&temp);
             Err(error)

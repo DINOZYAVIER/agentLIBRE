@@ -430,7 +430,7 @@ mod tests {
             // As the servers' streams do: the stop is asked before every read.
             loop {
                 if crate::stop::requested() {
-                    return Err(Error::Interrupted);
+                    return Err(Error::Common(agentlibre_common::error::Error::Interrupted));
                 }
                 if !self.hold.load(Ordering::SeqCst) {
                     break;
@@ -471,7 +471,7 @@ mod tests {
         let cwd = dir.0.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let (project, _) = crate::forge::resolve(&dir.0.join("data"), &cwd, Lang::En, true, &|_| {
-            Err(Error::Interrupted)
+            Err(Error::Common(agentlibre_common::error::Error::Interrupted))
         })
         .unwrap();
         let function =

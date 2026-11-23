@@ -359,10 +359,10 @@ pub fn render_lines(map: &Map<String, Value>) -> String {
 /// of the old file are not kept.
 pub fn write_settings(path: &Path, map: &Map<String, Value>) -> Result<(), error::Error> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|source| error::Error::Write {
+        std::fs::create_dir_all(dir).map_err(|source| error::Error::from(agentlibre_common::error::Error::Write {
             path: dir.into(),
             source,
-        })?;
+        }))?;
     }
     let text = format!("{{ agl, ... }}: {}\n", render_lines(map));
     crate::forge::write_atomic(path, &text)

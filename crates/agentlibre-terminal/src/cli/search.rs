@@ -13,12 +13,12 @@ use serde_json::{Map, Value};
 
 use crate::cli::args::SearchAction;
 use crate::error::Error;
-use crate::error::CoreError;
 use agentlibre_common::i18n::{Lang, m};
 use crate::paths::Paths;
 use crate::settings::{self, SearchCa, UserFile};
 use crate::outln;
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 /// Where the key and the certificate go when the user's `search` names no
 /// file of its own (AGL-043 F20), under the user's settings directory.
@@ -80,7 +80,7 @@ pub fn login(step: &Path, user: &UserFile, user_path: &Path) -> Result<LoggedIn,
         .clone()
         .map_or_else(|| dir.join("client.key"), PathBuf::from);
     for parent in [certificate.parent(), key.parent()].into_iter().flatten() {
-        fs::create_dir_all(parent).map_err(|source| Error::from(CoreError::Write {
+        fs::create_dir_all(parent).map_err(|source| Error::from(CommonError::Write {
             path: parent.into(),
             source,
         }))?;
@@ -209,14 +209,14 @@ fn write_search_paths(user_path: &Path, certificate: &Path, key: &Path) -> Resul
 /// The credential policy of `[search]` wants the files readable by the
 /// user alone (AGL-019, D4).
 fn private(file: &Path) -> Result<(), Error> {
-    fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|source| Error::from(CoreError::Write {
+    fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|source| Error::from(CommonError::Write {
         path: file.into(),
         source,
     }))
 }
 
 fn rename(from: &Path, to: &Path) -> Result<(), Error> {
-    fs::rename(from, to).map_err(|source| Error::from(CoreError::Write {
+    fs::rename(from, to).map_err(|source| Error::from(CommonError::Write {
         path: to.into(),
         source,
     }))

@@ -13,6 +13,7 @@ use crate::error::Error;
 use crate::plane::error::Error as PlaneError;
 use crate::nix;
 use crate::paths::Paths;
+use agentlibre_common::error::Error as CommonError;
 
 /// The file of a plane in its store (D16).
 pub const PLANE_FILE: &str = "plane.nix";
@@ -42,10 +43,10 @@ impl PlaneFile {
         if dir.exists() {
             return Err(PlaneError::Exists { name: name.into() }.into());
         }
-        let id = crate::session::uuid_v7().map_err(|source| Error::Write {
+        let id = crate::session::uuid_v7().map_err(|source| Error::from(CommonError::Write {
             path: dir.clone(),
             source,
-        })?;
+        }))?;
         let mut plane = PlaneFile {
             id,
             name: name.into(),
@@ -99,7 +100,7 @@ impl PlaneFile {
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => return Err(Error::Read { path: root, source }),
+            Err(source) => return Err(CommonError::Read { path: root, source }.into()),
         };
         let mut names: Vec<String> = entries
             .flatten()
@@ -133,10 +134,10 @@ impl PlaneFile {
         if dir.exists() {
             return Err(PlaneError::Exists { name: new.into() }.into());
         }
-        fs::rename(&plane.dir, &dir).map_err(|source| Error::Write {
+        fs::rename(&plane.dir, &dir).map_err(|source| Error::from(CommonError::Write {
             path: dir.clone(),
             source,
-        })?;
+        }))?;
         Ok(PlaneFile {
             name: new.into(),
             dir,
@@ -170,10 +171,10 @@ impl PlaneFile {
 
     /// Removes the plane's store (D14); the sessions keep their files.
     pub fn delete(self) -> Result<(), Error> {
-        fs::remove_dir_all(&self.dir).map_err(|source| Error::Write {
+        fs::remove_dir_all(&self.dir).map_err(|source| Error::from(CommonError::Write {
             path: self.dir,
             source,
-        })
+        }))
     }
 
     /// The plane's `settings.nix` (D1).
@@ -262,10 +263,10 @@ fn check_name(name: &str) -> Result<(), Error> {
 
 /// `directory` as the plane keeps it: absolute and canonical; it must exist.
 fn absolute(directory: &Path) -> Result<PathBuf, Error> {
-    fs::canonicalize(directory).map_err(|source| Error::Read {
+    fs::canonicalize(directory).map_err(|source| Error::from(CommonError::Read {
         path: directory.into(),
         source,
-    })
+    }))
 }
 
 #[cfg(test)]

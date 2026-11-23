@@ -10,6 +10,7 @@ use crate::error::Error;
 use crate::settings::ServerFile;
 
 use super::model_of;
+use agentlibre_common::error::Error as CommonError;
 
 /// The record of what the running server was launched with, beside the
 /// engine log in the project's store directory (AGL-035, D1).
@@ -24,7 +25,7 @@ const SERVERS_DIR: &str = "servers";
 pub(super) fn write_record(dir: &Path, pid: u32, effective: &ServerFile) -> Result<(), Error> {
     let path = dir.join(STATE_FILE);
     let record = serde_json::json!({ "pid": pid, "server": effective.to_json() });
-    fs::write(&path, format!("{record}\n")).map_err(|source| Error::Write { path, source })
+    fs::write(&path, format!("{record}\n")).map_err(|source| Error::from(CommonError::Write { path, source }))
 }
 
 /// What the running server was launched with (AGL-035, D1): `None` when
@@ -82,20 +83,20 @@ pub(super) fn write_runtime_file(runtime: Option<&Path>, pid: u32, effective: &S
         return Ok(());
     };
     let dir = servers_dir(runtime);
-    fs::create_dir_all(&dir).map_err(|source| Error::Write {
+    fs::create_dir_all(&dir).map_err(|source| Error::from(CommonError::Write {
         path: dir.clone(),
         source,
-    })?;
+    }))?;
     sweep_runtime_files(&dir);
     let temporary = dir.join(format!("{pid}.json.tmp"));
     let path = dir.join(format!("{pid}.json"));
     fs::write(&temporary, format!("{}\n", runtime_file(pid, effective)?)).map_err(|source| {
-        Error::Write {
+        CommonError::Write {
             path: temporary.clone(),
             source,
         }
     })?;
-    fs::rename(&temporary, &path).map_err(|source| Error::Write { path, source })
+    fs::rename(&temporary, &path).map_err(|source| Error::from(CommonError::Write { path, source }))
 }
 
 /// Takes the file of the server of `pid`, when the caller knows it, and

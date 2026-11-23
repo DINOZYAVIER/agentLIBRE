@@ -144,7 +144,7 @@ fn the_whisper_table() {
     assert!(matches!(user_of(r#"whisper.url = "ftp://x";"#), Err(Error::Settings(SettingsError::UnsupportedUrl { .. }))));
     // The model is a file name or an absolute path (AGL-039, D24a).
     assert!(user_of(r#"whisper.model = "/w/w.bin";"#).is_ok());
-    assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::InvalidName(_))));
+    assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::Common(agentlibre_common::error::Error::InvalidName(_)))));
 }
 
 fn full_search() -> SearchFile {

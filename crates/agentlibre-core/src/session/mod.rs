@@ -485,7 +485,7 @@ impl Session {
     /// left without a result gets one (D108).
     pub fn open(dir: &Path, id: &str) -> Result<Session, Error> {
         let path = find(dir, id)?;
-        let read_error = |source| Error::Read {
+        let read_error = |source| agentlibre_common::error::Error::Read {
             path: path.clone(),
             source,
         };
@@ -1033,10 +1033,11 @@ fn find(dir: &Path, id: &str) -> Result<PathBuf, Error> {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(not_found()),
         Err(source) => {
-            return Err(Error::Read {
+            return Err(agentlibre_common::error::Error::Read {
                 path: dir.into(),
                 source,
-            });
+            }
+            .into());
         }
     };
     let mut matches: Vec<PathBuf> = entries

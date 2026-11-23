@@ -100,7 +100,7 @@ macro_rules! from_common {
     };
 }
 
-from_common!(programs);
+from_common!(error, programs);
 
 impl Error {
     /// Whether the error is in the command line rather than the setup:

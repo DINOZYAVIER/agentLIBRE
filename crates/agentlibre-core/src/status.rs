@@ -198,7 +198,7 @@ pub fn compact_notice(
             tr!(lang, m::COMPACTION_FAILED, limit = limit),
             Role::StatusFailure,
         )),
-        Err(Error::Interrupted) => Some((
+        Err(Error::Common(agentlibre_common::error::Error::Interrupted)) => Some((
             texts::stopped(StopReason::Interrupted, function, lang),
             Role::StatusPending,
         )),

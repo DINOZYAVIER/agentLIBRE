@@ -17,6 +17,7 @@ use crate::error;
 use crate::forge::sha256;
 use agentlibre_common::i18n::{Lang, Msg};
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 /// What goes wrong with a medium: its copy changed, a file of no kind agl
 /// takes, or `ffmpeg` and `ffprobe` failing on it (AGL-014; AGL-121, D66).
@@ -304,26 +305,26 @@ pub fn put(dir: &Path, bytes: &[u8], ext: &str) -> Result<String, error::Error> 
     if path.is_file() {
         return Ok(sha);
     }
-    fs::create_dir_all(dir).map_err(|source| error::Error::Write {
+    fs::create_dir_all(dir).map_err(|source| error::Error::from(CommonError::Write {
         path: dir.into(),
         source,
-    })?;
+    }))?;
     let temp = dir.join(format!(".{sha}.{}.tmp", std::process::id()));
-    fs::write(&temp, bytes).map_err(|source| error::Error::Write {
+    fs::write(&temp, bytes).map_err(|source| error::Error::from(CommonError::Write {
         path: temp.clone(),
         source,
-    })?;
-    fs::rename(&temp, &path).map_err(|source| error::Error::Write { path, source })?;
+    }))?;
+    fs::rename(&temp, &path).map_err(|source| error::Error::from(CommonError::Write { path, source }))?;
     Ok(sha)
 }
 
 /// Reads `<sha256>.<ext>` from `dir` and checks it against its name.
 pub fn read(dir: &Path, sha256: &str, ext: &str) -> Result<Vec<u8>, error::Error> {
     let path = file_in(dir, sha256, ext);
-    let bytes = fs::read(&path).map_err(|source| error::Error::Read {
+    let bytes = fs::read(&path).map_err(|source| error::Error::from(CommonError::Read {
         path: path.clone(),
         source,
-    })?;
+    }))?;
     if sha256_hex(&bytes) != sha256 {
         return Err(Error::Changed { path }.into());
     }
@@ -344,10 +345,10 @@ impl Source {
     /// Reads the file at `path`; its kind comes from the extension.
     pub fn from_file(path: &Path) -> Result<Source, error::Error> {
         let kind = Kind::of_path(path).ok_or_else(|| Error::Kind { path: path.into() })?;
-        let bytes = fs::read(path).map_err(|source| error::Error::Read {
+        let bytes = fs::read(path).map_err(|source| error::Error::from(CommonError::Read {
             path: path.into(),
             source,
-        })?;
+        }))?;
         Ok(Source {
             kind,
             bytes,
@@ -688,7 +689,7 @@ mod tests {
         // A changed file fails the check; a missing one is a read error.
         fs::write(file_in(&media, &sha, "png"), b"other").unwrap();
         assert!(matches!(read(&media, &sha, "png"), Err(error::Error::Media(Error::Changed { .. }))));
-        assert!(matches!(read(&media, &"0".repeat(64), "png"), Err(error::Error::Read { .. })));
+        assert!(matches!(read(&media, &"0".repeat(64), "png"), Err(error::Error::Common(CommonError::Read { .. }))));
         // No temporary file is left behind.
         let left: Vec<_> = fs::read_dir(&media).unwrap().flatten().collect();
         assert_eq!(left.len(), 1);
@@ -709,7 +710,7 @@ mod tests {
         assert!(matches!(Source::from_file(&text), Err(error::Error::Media(Error::Kind { .. }))));
         assert!(matches!(
             Source::from_file(&dir.0.join("missing.png")),
-            Err(error::Error::Read { .. })
+            Err(error::Error::Common(CommonError::Read { .. }))
         ));
     }
 

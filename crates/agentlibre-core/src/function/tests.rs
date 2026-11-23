@@ -321,7 +321,7 @@ fn files_and_names() {
     assert!(matches!(missing, Err(Error::Function(FunctionError::NotFound { name, .. })) if name == "coder"));
     assert!(matches!(
         Function::load(&[none(), none()], "../default"),
-        Err(Error::InvalidName(_))
+        Err(Error::Common(agentlibre_common::error::Error::InvalidName(_)))
     ));
     // A file that is not a function of `{ agl, ... }` (AGL-039, D8).
     fs::write(dir.0.join("plain.nix"), format!("{{ policy = {CODER}; }}")).unwrap();

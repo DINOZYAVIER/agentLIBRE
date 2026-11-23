@@ -23,15 +23,12 @@ impl Error {
             Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
             Error::PlaneWithResume => tr!(lang, m::PLANE_WITH_RESUME).to_string(),
             Error::Paths(error) => error.message(lang),
-            Error::Read { path, source } => {
-                tr!(lang, m::READ, path = path.display(), source = source)
-            }
+            Error::Common(error) => error.message(lang),
             Error::Settings(error) => error.message(lang),
             Error::Forge(error) => error.message(lang),
             Error::Engine(error) => error.message(lang),
             Error::Backend(error) => error.message(lang),
             Error::Search(error) => error.message(lang),
-            Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
             Error::Function(error) => error.message(lang),
             Error::Wsl(error) => error.message(lang),
@@ -46,14 +43,9 @@ impl Error {
             Error::Strata(error) => error.message(lang),
             Error::Session(error) => error.message(lang),
             Error::Machine(error) => error.message(lang),
-            Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
             Error::Nix(error) => error.message(lang),
-            Error::Programs(error) => error.message(lang),
-            Error::Write { path, source } => {
-                tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
-            }
             Error::Memory(error) => error.message(lang),
         }
     }

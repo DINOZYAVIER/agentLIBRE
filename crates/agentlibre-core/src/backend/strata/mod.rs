@@ -122,11 +122,11 @@ impl Backend for Strata {
             // Ctrl-C interrupts the read (D111); dropping the response
             // closes the connection, and the server stops generating.
             if crate::stop::requested() {
-                return Err(Error::Interrupted);
+                return Err(Error::Common(agentlibre_common::error::Error::Interrupted));
             }
             let line = line.map_err(|error| {
                 if crate::stop::requested() {
-                    Error::Interrupted
+                    agentlibre_common::error::Error::Interrupted.into()
                 } else {
                     self.http.unreachable(error)
                 }

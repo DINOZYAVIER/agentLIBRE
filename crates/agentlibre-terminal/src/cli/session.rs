@@ -10,7 +10,6 @@ use std::process::ExitCode;
 use crate::action::Value;
 use crate::cli::args::SessionShow;
 use crate::error::Error;
-use crate::error::CoreError;
 use agentlibre_common::i18n::Lang;
 use crate::paths::Paths;
 use crate::session::{CommandRun, Event, Session};
@@ -77,7 +76,7 @@ pub fn transcript(session: &Session, path: &Path, verbose: bool) -> Result<Strin
     }
     if verbose {
         out.push_str("file\n");
-        let text = fs::read_to_string(path).map_err(|source| Error::from(CoreError::Read {
+        let text = fs::read_to_string(path).map_err(|source| Error::from(agentlibre_common::error::Error::Read {
             path: path.to_path_buf(),
             source,
         }))?;
@@ -436,7 +435,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let dir = data.join("sessions");
         match id_of(&dir, &project, "last") {
-            Err(Error::Core(CoreError::Session(crate::session::error::Error::NotFound { id, .. }))) => assert_eq!(id, "last"),
+            Err(Error::Core(crate::error::CoreError::Session(crate::session::error::Error::NotFound { id, .. }))) => assert_eq!(id, "last"),
             other => panic!("expected the not-found, got {other:?}"),
         }
     }

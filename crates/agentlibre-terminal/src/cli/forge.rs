@@ -20,6 +20,7 @@ use crate::paths::Paths;
 use crate::settings::UserFile;
 use agentlibre_common::tr;
 use crate::outln;
+use agentlibre_common::error::Error as CommonError;
 
 /// A `forge` command, parsed from the arguments after the word `forge`
 /// before any settings load, as the other commands are (AGL-061, D1).
@@ -204,7 +205,7 @@ pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result
                 eprintln!("{}", tr!(lang, m::FORGE_ASK_INVALID, last = options.len()));
             }
             Err(source) => {
-                return Err(CoreError::Read { path: PathBuf::from("<stdin>"), source });
+                return Err(CommonError::Read { path: PathBuf::from("<stdin>"), source }.into());
             }
         }
     }
@@ -616,7 +617,7 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
         }
         Err(error) => return Err(error.into()),
     };
-    let store = fs::canonicalize(dir).map_err(|source| Error::from(CoreError::Read {
+    let store = fs::canonicalize(dir).map_err(|source| Error::from(CommonError::Read {
         path: dir.to_path_buf(),
         source,
     }))?;
@@ -971,7 +972,7 @@ mod tests {
         ));
         assert!(matches!(
             forge(&data, &repo, &["new", "task-spec", "--title", "Again", "--name", "a/b"]),
-            Err(Error::Core(CoreError::InvalidName(name))) if name == "a/b"
+            Err(Error::Core(CoreError::Common(CommonError::InvalidName(name)))) if name == "a/b"
         ));
     }
 

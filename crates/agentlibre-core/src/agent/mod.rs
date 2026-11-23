@@ -191,7 +191,7 @@ impl Agent<'_> {
             let stop = match result {
                 Ok(Some(end)) => return Ok(end),
                 Ok(None) => continue,
-                Err(Error::Interrupted) => StopReason::Interrupted,
+                Err(Error::Common(agentlibre_common::error::Error::Interrupted)) => StopReason::Interrupted,
                 Err(
                     error @ Error::Backend(
                         BackendError::ServerUnreachable { .. }
@@ -456,7 +456,7 @@ impl Agent<'_> {
                 }
                 if crate::stop::requested() {
                     debug_assert_eq!(result.content, INTERRUPTED);
-                    return Err(Error::Interrupted);
+                    return Err(Error::Common(agentlibre_common::error::Error::Interrupted));
                 }
                 let progress = machine.after_call(&call.name, result.outcome);
                 if machine.entered() {

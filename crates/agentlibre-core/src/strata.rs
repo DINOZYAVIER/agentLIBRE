@@ -17,6 +17,7 @@ use crate::error;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::settings::ServerFile;
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 /// The folder of the Strata packages, by variant (D20).
 pub const STRATA_VAR: &str = "AGENTLIBRE_STRATA";
@@ -133,10 +134,10 @@ pub fn prepare(
     let (name, shard) = name_and_first_shard(settings);
     let data = Data::of(models, name);
     let created = |path: &Path| {
-        fs::create_dir_all(path).map_err(|source| error::Error::Write {
+        fs::create_dir_all(path).map_err(|source| error::Error::from(CommonError::Write {
             path: path.into(),
             source,
-        })
+        }))
     };
     created(&data.dir)?;
     let log = data.dir.join("prepare.log");
@@ -203,10 +204,10 @@ pub fn prepare(
         // The draft layer's token subset setup.py puts there, its default
         // (`data/draft_vocab.bin`, AGL-086's D6 runs on it).
         let vocab = package.join("share/strata/data/draft_vocab.bin");
-        fs::copy(&vocab, part.join("draft_vocab.bin")).map_err(|source| error::Error::Write {
+        fs::copy(&vocab, part.join("draft_vocab.bin")).map_err(|source| error::Error::from(CommonError::Write {
             path: part.join("draft_vocab.bin"),
             source,
-        })?;
+        }))?;
         replace(&part, &data.mtp.join("rt"))?;
     }
     Ok(data)
@@ -219,10 +220,10 @@ fn run(command: &mut Command, log: &Path, step: &str) -> Result<(), error::Error
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| error::Error::Write {
+            .map_err(|source| error::Error::from(CommonError::Write {
                 path: log.into(),
                 source,
-            })
+            }))
     };
     let failed = || Error::Prepare {
         step: step.to_owned(),
@@ -240,10 +241,10 @@ fn run(command: &mut Command, log: &Path, step: &str) -> Result<(), error::Error
 /// `part` renamed to `done`, an older `done` gone first.
 fn replace(part: &Path, done: &Path) -> Result<(), error::Error> {
     let _ = fs::remove_dir_all(done);
-    fs::rename(part, done).map_err(|source| error::Error::Write {
+    fs::rename(part, done).map_err(|source| error::Error::from(CommonError::Write {
         path: done.into(),
         source,
-    })
+    }))
 }
 
 /// The config the package's server reads (D5), written beside the model's
@@ -257,10 +258,10 @@ pub fn write_config(settings: &ServerFile, data: &Data, package: &Path) -> Resul
     let path = data.dir.join(format!("config-{variant}.json"));
     let mut text = serde_json::to_string_pretty(&config).expect("a JSON value serializes");
     text.push('\n');
-    fs::write(&path, text).map_err(|source| error::Error::Write {
+    fs::write(&path, text).map_err(|source| error::Error::from(CommonError::Write {
         path: path.clone(),
         source,
-    })?;
+    }))?;
     Ok(path)
 }
 

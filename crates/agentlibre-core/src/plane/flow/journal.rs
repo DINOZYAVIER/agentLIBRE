@@ -15,6 +15,7 @@ use crate::machine::{Event, Machine, Progress};
 use crate::session::Unfinished;
 
 use super::{FlowDecl, FlowState};
+use agentlibre_common::error::Error as CommonError;
 
 /// The directory of the journals in a plane's store, beside `flow.nix` (D1, D3).
 pub const JOURNAL_DIR: &str = "flow";
@@ -144,10 +145,11 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(Error::Read {
+        Err(source) => return Err(CommonError::Read {
             path: path.into(),
             source,
-        }),
+        }
+        .into()),
     };
     let mut entries = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -166,24 +168,24 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
 /// Appends `entry` as one line, making the directory when it is not there.
 pub fn append(path: &Path, entry: &Entry) -> Result<(), Error> {
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|source| Error::Write {
+        fs::create_dir_all(dir).map_err(|source| Error::from(CommonError::Write {
             path: dir.into(),
             source,
-        })?;
+        }))?;
     }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|source| Error::Write {
+        .map_err(|source| Error::from(CommonError::Write {
             path: path.into(),
             source,
-        })?;
+        }))?;
     let line = entry.to_line().to_string();
-    writeln!(file, "{line}").map_err(|source| Error::Write {
+    writeln!(file, "{line}").map_err(|source| Error::from(CommonError::Write {
         path: path.into(),
         source,
-    })
+    }))
 }
 
 /// The position the journal leaves the machine at: the fold of its lines over
@@ -262,10 +264,10 @@ pub fn reset(plane_dir: &Path, flow: &str) -> Result<(), Error> {
         return Ok(());
     }
     let old = PathBuf::from(format!("{}.old", file.display()));
-    fs::rename(&file, &old).map_err(|source| Error::Write {
+    fs::rename(&file, &old).map_err(|source| Error::from(CommonError::Write {
         path: old,
         source,
-    })
+    }))
 }
 
 /// A flow that runs: its machine, and the journal its steps are written to

@@ -66,7 +66,7 @@ pub fn new_task_spec(
     let name = match name {
         Some(name) => {
             if !valid_name(name) {
-                return Err(Error::InvalidName(name.to_owned()));
+                return Err(agentlibre_common::error::Error::InvalidName(name.to_owned()).into());
             }
             name.to_owned()
         }

@@ -80,10 +80,10 @@ fn start(dir: &Path, cmd: &str) -> Result<std::process::Child, Error> {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|source| Error::Write {
+        .map_err(|source| Error::from(agentlibre_common::error::Error::Write {
             path: dir.into(),
             source,
-        })?;
+        }))?;
     Ok(child)
 }
 

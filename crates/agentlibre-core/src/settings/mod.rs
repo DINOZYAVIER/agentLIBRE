@@ -186,7 +186,7 @@ fn check_weights_name(name: &str) -> Result<(), Error> {
     if Path::new(name).is_absolute() || !(name.is_empty() || name.contains('/') || name.starts_with('.')) {
         Ok(())
     } else {
-        Err(Error::InvalidName(name.into()))
+        Err(agentlibre_common::error::Error::InvalidName(name.into()).into())
     }
 }
 

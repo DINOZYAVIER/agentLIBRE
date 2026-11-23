@@ -1,6 +1,7 @@
 //! agentLIBRE's base crate, under the core (AGL-121, D77, D78, D79).
 
 pub mod clock;
+pub mod error;
 pub mod i18n;
 pub mod programs;
 pub mod style;

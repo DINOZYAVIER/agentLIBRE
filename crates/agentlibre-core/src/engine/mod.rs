@@ -24,6 +24,7 @@ use crate::i18n::server as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::settings::{ServerFile, ServerKind};
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 pub mod error;
 mod registry;
@@ -824,18 +825,18 @@ impl Engine {
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| Error::Write {
+            .map_err(|source| Error::from(CommonError::Write {
                 path: log.into(),
                 source,
-            })?;
+            }))?;
         let log_err = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| Error::Write {
+            .map_err(|source| Error::from(CommonError::Write {
                 path: log.into(),
                 source,
-            })?;
+            }))?;
         // `engine_args` is the single source of the command (D4): the
         // program first, then the arguments. `Command::new` takes the
         // program, the rest are the arguments.
@@ -1029,18 +1030,18 @@ impl Engine {
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| Error::Write {
+            .map_err(|source| Error::from(CommonError::Write {
                 path: log.into(),
                 source,
-            })?;
+            }))?;
         let log_err = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| Error::Write {
+            .map_err(|source| Error::from(CommonError::Write {
                 path: log.into(),
                 source,
-            })?;
+            }))?;
         let args = strata_args(launch);
         // The chain after `Command::new` returns `&mut Command`, so the
         // `Command` itself must outlive the statement: bind it first.

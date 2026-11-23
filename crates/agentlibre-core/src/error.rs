@@ -1,11 +1,11 @@
 //! Errors reported to the user. [`crate::i18n`] renders their messages.
 
-use std::io;
-use std::path::PathBuf;
-
 /// An error that stops `agl`.
 #[derive(Debug)]
 pub enum Error {
+    /// A file that cannot be read or written, a name, a stopped generation,
+    /// a helper program: agentlibre-common's (AGL-121, D78).
+    Common(agentlibre_common::error::Error),
     /// `--function` with `--resume`: the session names its Function (D106).
     FunctionWithResume,
     /// `--plane` with `--resume`: the session keeps its plane (AGL-077).
@@ -13,8 +13,6 @@ pub enum Error {
     /// agl's directories cannot be found. Its own type, wrapped (AGL-121,
     /// D75).
     Paths(crate::paths::Error),
-    /// A settings file cannot be read.
-    Read { path: PathBuf, source: io::Error },
     /// A value of the settings out of what agl takes: a style, a limit, a
     /// port, a language, a url, a level, a path. Its own type, wrapped
     /// (AGL-121, D66).
@@ -33,8 +31,6 @@ pub enum Error {
     /// A credential file of `search` the policy refuses (AGL-019, D4). Its
     /// own type, wrapped (AGL-121, D66).
     Search(crate::search::Error),
-    /// A format or Function name that cannot name a file.
-    InvalidName(String),
     /// A template or string of a format is unusable (D81). Its own type,
     /// wrapped (AGL-121, D66).
     Format(crate::format::Error),
@@ -47,8 +43,6 @@ pub enum Error {
     /// The machine cannot continue a session's turn. Its own type, wrapped
     /// (AGL-121, D66).
     Machine(crate::machine::error::Error),
-    /// Ctrl-C stopped a generation (D111).
-    Interrupted,
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
     /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
     Wsl(crate::wsl::Error),
@@ -86,11 +80,6 @@ pub enum Error {
     /// file that is not a function (AGL-039, D6-D13, D38). Its own type,
     /// wrapped (AGL-121, D66).
     Nix(crate::nix::Error),
-    /// A helper program of agl's package cannot be found (AGL-040). Its own
-    /// type, wrapped (AGL-121, D75).
-    Programs(agentlibre_common::programs::Error),
-    /// A forge file or directory cannot be written.
-    Write { path: PathBuf, source: io::Error },
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
     Memory(crate::memory::Error),
@@ -193,10 +182,17 @@ impl From<crate::paths::Error> for Error {
     }
 }
 
+impl From<agentlibre_common::error::Error> for Error {
+    /// agentlibre-common's error as agl's (AGL-121, D78).
+    fn from(source: agentlibre_common::error::Error) -> Error {
+        Error::Common(source)
+    }
+}
+
 impl From<agentlibre_common::programs::Error> for Error {
-    /// The programs' own error as agl's (AGL-121, D75).
+    /// The programs' own error as agl's, through common's (AGL-121, D78).
     fn from(source: agentlibre_common::programs::Error) -> Error {
-        Error::Programs(source)
+        Error::Common(source.into())
     }
 }
 
@@ -266,7 +262,7 @@ impl Error {
     /// Process exit status for this error.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Interrupted => crate::stop::EXIT_CODE,
+            Error::Common(agentlibre_common::error::Error::Interrupted) => crate::stop::EXIT_CODE,
             _ if self.is_usage() => 2,
             _ => 1,
         }

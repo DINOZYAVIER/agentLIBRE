@@ -2784,7 +2784,7 @@ mod tests {
         assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
         assert_eq!(role, Role::StatusFailure);
         assert_eq!(
-            notice(Err(CoreError::Interrupted)),
+            notice(Err(agentlibre_common::error::Error::Interrupted.into())),
             Some(("interrupted".into(), Role::StatusPending))
         );
     }

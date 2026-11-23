@@ -16,6 +16,7 @@ use crate::forge::task_spec::slug;
 use crate::forge::write_atomic;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::tr;
+use agentlibre_common::error::Error as CommonError;
 
 /// A memory entry not found or not removed (AGL-060; AGL-121, D66).
 #[derive(Debug)]
@@ -130,10 +131,10 @@ impl Home for PlaneHome {
     }
 
     fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
-        fs::create_dir_all(&self.dir).map_err(|source| error::Error::Write {
+        fs::create_dir_all(&self.dir).map_err(|source| error::Error::from(CommonError::Write {
             path: self.dir.clone(),
             source,
-        })?;
+        }))?;
         Ok((self.dir.clone(), Vec::new()))
     }
 
@@ -722,19 +723,20 @@ fn entry_files(dir: &Path) -> Result<BTreeSet<String>, error::Error> {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(source) => {
-            return Err(error::Error::Read {
+            return Err(CommonError::Read {
                 path: dir.to_path_buf(),
                 source,
-            });
+            }
+            .into());
         }
     };
     let mut names = BTreeSet::new();
     for entry in entries {
         let path = entry
-            .map_err(|source| error::Error::Read {
+            .map_err(|source| error::Error::from(CommonError::Read {
                 path: dir.to_path_buf(),
                 source,
-            })?
+            }))?
             .path();
         if path.is_file()
             && path.extension().is_some_and(|ext| ext == "md")
@@ -755,7 +757,7 @@ pub fn list(dir: &Path) -> Result<Vec<Listed>, error::Error> {
     let index = match fs::read_to_string(&path) {
         Ok(index) => index,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(source) => return Err(error::Error::Read { path, source }),
+        Err(source) => return Err(CommonError::Read { path, source }.into()),
     };
     let index = index.trim();
     let total = index.lines().count();
@@ -826,7 +828,7 @@ pub fn whole(dir: &Path, name: &str) -> Result<String, error::Error> {
     match fs::read_to_string(&path) {
         Ok(text) => Ok(text),
         Err(error) if error.kind() == ErrorKind::NotFound => Err(missing()),
-        Err(source) => Err(error::Error::Read { path, source }),
+        Err(source) => Err(CommonError::Read { path, source }.into()),
     }
 }
 
@@ -1483,7 +1485,7 @@ mod tests {
         let dir = TempDir::new();
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(dir.0.join(INDEX), b"\xff\n").unwrap();
-        assert!(matches!(list(&dir.0), Err(error::Error::Read { .. })));
+        assert!(matches!(list(&dir.0), Err(error::Error::Common(CommonError::Read { .. }))));
     }
 
     #[test]
@@ -1588,7 +1590,7 @@ mod listing_tests {
         assert_eq!(list_text(Some(&dir), Lang::En).unwrap(), empty);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(INDEX), b"\xff\n").unwrap();
-        assert!(matches!(list_text(Some(&dir), Lang::En), Err(error::Error::Read { .. })));
+        assert!(matches!(list_text(Some(&dir), Lang::En), Err(error::Error::Common(CommonError::Read { .. }))));
     }
 
     #[test]

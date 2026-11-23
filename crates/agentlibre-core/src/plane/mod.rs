@@ -794,7 +794,7 @@ impl Run {
                 .context_size()
                 .and_then(|context| self.agent(context).compact(sink))
         });
-        let interrupted = matches!(result, Err(Error::Interrupted));
+        let interrupted = matches!(result, Err(Error::Common(agentlibre_common::error::Error::Interrupted)));
         let mut said = Text {
             interrupted,
             ..Text::default()

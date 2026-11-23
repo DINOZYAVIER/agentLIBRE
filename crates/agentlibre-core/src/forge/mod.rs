@@ -26,6 +26,7 @@ use crate::error::Error;
 use crate::forge::error::Error as ForgeError;
 use crate::nix::{self, Section};
 use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
+use agentlibre_common::error::Error as CommonError;
 
 /// The name of the per-workspace marker file, in the data directory
 /// next to `forge/`: the store's `settings.nix`, which carries the
@@ -318,7 +319,7 @@ fn rehomed(
     let marker = Marker { hashes, project: project.to_path_buf() };
     if store.dir != new {
         fs::rename(&store.dir, &new)
-            .map_err(|source| Error::Write { path: new.clone(), source })?;
+            .map_err(|source| Error::from(CommonError::Write { path: new.clone(), source }))?;
     }
     marker.write(&new.join(MARKER_FILE))?;
     Ok((
@@ -376,10 +377,10 @@ pub fn resolve(
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
-    let cwd = fs::canonicalize(cwd).map_err(|source| Error::Read {
+    let cwd = fs::canonicalize(cwd).map_err(|source| Error::from(CommonError::Read {
         path: cwd.to_path_buf(),
         source,
-    })?;
+    }))?;
     outside_data(data, &cwd)?;
     let projects: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
     resolve_among(data, &projects, lang, auto_rehome, ask)
@@ -391,10 +392,10 @@ pub fn resolve(
 /// do those, and it must work where the lookup of [`resolve`] cannot
 /// choose (no terminal, `auto_rehome` off).
 pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
-    let cwd = fs::canonicalize(cwd).map_err(|source| Error::Read {
+    let cwd = fs::canonicalize(cwd).map_err(|source| Error::from(CommonError::Read {
         path: cwd.to_path_buf(),
         source,
-    })?;
+    }))?;
     outside_data(data, &cwd)?;
     let found = stores(data)?;
     for project in cwd.ancestors() {
@@ -438,10 +439,10 @@ pub fn resolve_dir(
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
-    let dir = fs::canonicalize(dir).map_err(|source| Error::Read {
+    let dir = fs::canonicalize(dir).map_err(|source| Error::from(CommonError::Read {
         path: dir.to_path_buf(),
         source,
-    })?;
+    }))?;
     outside_data(data, &dir)?;
     resolve_among(data, &[dir], lang, auto_rehome, ask)
 }
@@ -614,7 +615,7 @@ pub fn materialize(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Resul
         return Ok(Vec::new());
     }
     fs::create_dir_all(&ws.dir)
-        .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
+        .map_err(|source| Error::from(CommonError::Write { path: ws.dir.clone(), source }))?;
     Marker {
         hashes: vec![ws.identity.clone()],
         project: ws.project.clone(),
@@ -650,7 +651,7 @@ pub fn rehome_new(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Result
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     fs::create_dir_all(&ws.dir)
-        .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
+        .map_err(|source| Error::from(CommonError::Write { path: ws.dir.clone(), source }))?;
     Marker {
         hashes: vec![ws.identity.clone()],
         project: ws.project.clone(),
@@ -672,11 +673,11 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".{name}.{}.{}.tmp", std::process::id(), n));
-    fs::write(&tmp, text).map_err(|source| Error::Write {
+    fs::write(&tmp, text).map_err(|source| Error::from(CommonError::Write {
         path: tmp.clone(),
         source,
-    })?;
-    fs::rename(&tmp, path).map_err(|source| Error::Write { path: path.into(), source })?;
+    }))?;
+    fs::rename(&tmp, path).map_err(|source| Error::from(CommonError::Write { path: path.into(), source }))?;
     Ok(())
 }
 
@@ -924,10 +925,10 @@ fn header_of(path: &Path, value: Value, body: String) -> Header {
 /// Reads the header of the store file `path` for `list`: it does not
 /// fail on an unknown schema or an unparseable file, it marks them.
 pub fn read_header(path: &Path) -> Result<Header, Error> {
-    let text = fs::read_to_string(path).map_err(|source| Error::Read {
+    let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
         path: path.into(),
         source,
-    })?;
+    }))?;
     let (front, body) = match split_front_matter(path, &text) {
         Ok(split) => split,
         Err(error) => {
@@ -953,10 +954,10 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
 pub fn read_headers(paths: &[PathBuf]) -> Result<Vec<Header>, Error> {
     let mut split = Vec::new();
     for path in paths {
-        let text = fs::read_to_string(path).map_err(|source| Error::Read {
+        let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
             path: path.clone(),
             source,
-        })?;
+        }))?;
         split.push(split_front_matter(path, &text));
     }
     if split.iter().all(Result::is_ok) && !split.is_empty() {
@@ -1014,10 +1015,10 @@ pub fn render(artifact: &Artifact) -> String {
 
 /// Reads and parses the artifact file `path`.
 pub fn load_artifact(path: &Path) -> Result<Artifact, Error> {
-    let text = fs::read_to_string(path).map_err(|source| Error::Read {
+    let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
         path: path.into(),
         source,
-    })?;
+    }))?;
     parse_artifact(path, &text)
 }
 
@@ -1026,10 +1027,10 @@ pub fn load_artifact(path: &Path) -> Result<Artifact, Error> {
 /// when it is not there yet (the first write of a type).
 pub fn write_artifact(artifact: &Artifact) -> Result<(), Error> {
     if let Some(parent) = artifact.path.parent() {
-        fs::create_dir_all(parent).map_err(|source| Error::Write {
+        fs::create_dir_all(parent).map_err(|source| Error::from(CommonError::Write {
             path: parent.to_path_buf(),
             source,
-        })?;
+        }))?;
     }
     write_atomic(&artifact.path, &render(artifact))
 }
