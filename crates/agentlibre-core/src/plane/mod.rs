@@ -289,7 +289,7 @@ impl Run {
                     .into_iter()
                     .next()
                     .map(|session| session.id)
-                    .ok_or_else(|| Error::SessionNotFound {
+                    .ok_or_else(|| crate::session::error::Error::NotFound {
                         id: "last".into(),
                         dir: sessions_dir.clone(),
                     })?,

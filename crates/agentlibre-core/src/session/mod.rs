@@ -14,7 +14,8 @@ use crate::clock::utc_now;
 
 use crate::action::{Outcome, Value};
 use crate::backend::{Message, ToolCall};
-use crate::error::{Error, NameProblem};
+use crate::error::Error;
+use error::{Error as SessionError, NameProblem};
 use crate::media::{self, Frame, Kind, Media, Source};
 use crate::memory::Kind as MemoryKind;
 
@@ -336,7 +337,7 @@ impl Session {
         run: Option<&Json>,
         plane: Option<&SessionPlane>,
     ) -> Result<Session, Error> {
-        let write_error = |path: &Path, source| Error::SessionWrite {
+        let write_error = |path: &Path, source| SessionError::Write {
             path: path.into(),
             source,
         };
@@ -454,7 +455,7 @@ impl Session {
     /// the file, and the last one counts. A name that another session of the
     /// project at `project` has is refused; the session's own name is no change.
     pub fn rename(&mut self, project: &Path, name: &str) -> Result<(), Error> {
-        let name = check_name(name).map_err(|problem| Error::SessionName { problem })?;
+        let name = check_name(name).map_err(|problem| SessionError::Name { problem })?;
         if self.name.as_deref() == Some(name) {
             return Ok(());
         }
@@ -464,10 +465,11 @@ impl Session {
             .filter_map(|path| session_info(path, project))
             .find(|info| info.name.as_deref() == Some(name) && info.id != self.id);
         if let Some(other) = taken {
-            return Err(Error::SessionNameTaken {
+            return Err(SessionError::NameTaken {
                 name: name.into(),
                 id: other.id,
-            });
+            }
+            .into());
         }
         self.write_line(&json!({
             "type": "name",
@@ -498,10 +500,12 @@ impl Session {
             None => "",
         };
         let mut lines = complete.lines().enumerate();
-        let bad = |line: usize, detail: &str| Error::SessionLine {
-            path: path.clone(),
-            line: line + 1,
-            detail: detail.into(),
+        let bad = |line: usize, detail: &str| {
+            Error::from(SessionError::Line {
+                path: path.clone(),
+                line: line + 1,
+                detail: detail.into(),
+            })
         };
         let (_, header) = lines.next().ok_or_else(|| bad(0, "no header"))?;
         let header: Json = serde_json::from_str(header).map_err(|e| bad(0, &e.to_string()))?;
@@ -579,7 +583,7 @@ impl Session {
         let file = OpenOptions::new()
             .append(true)
             .open(&path)
-            .map_err(|source| Error::SessionWrite {
+            .map_err(|source| SessionError::Write {
                 path: path.clone(),
                 source,
             })?;
@@ -609,7 +613,7 @@ impl Session {
             session
                 .file
                 .set_len(complete.len() as u64)
-                .map_err(|source| Error::SessionWrite {
+                .map_err(|source| SessionError::Write {
                     path: session.path.clone(),
                     source,
                 })?;
@@ -718,10 +722,11 @@ impl Session {
         self.file
             .write_all(line.as_bytes())
             .and_then(|()| self.file.flush())
-            .map_err(|source| Error::SessionWrite {
+            .map_err(|source| SessionError::Write {
                 path: self.path.clone(),
                 source,
-            })
+            })?;
+        Ok(())
     }
 
     /// The conversation for the chat template, without the system prompt:
@@ -1015,9 +1020,11 @@ fn session_info_if(path: &Path, of: impl Fn(&Json) -> bool) -> Option<SessionInf
 
 /// The session file for `id`, a full id or a unique prefix.
 fn find(dir: &Path, id: &str) -> Result<PathBuf, Error> {
-    let not_found = || Error::SessionNotFound {
-        id: id.into(),
-        dir: dir.into(),
+    let not_found = || {
+        Error::from(SessionError::NotFound {
+            id: id.into(),
+            dir: dir.into(),
+        })
     };
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return Err(not_found());
@@ -1046,10 +1053,11 @@ fn find(dir: &Path, id: &str) -> Result<PathBuf, Error> {
     match matches.len() {
         0 => Err(not_found()),
         1 => Ok(matches.pop().unwrap()),
-        count => Err(Error::SessionAmbiguous {
+        count => Err(SessionError::Ambiguous {
             id: id.into(),
             count,
-        }),
+        }
+        .into()),
     }
 }
 
@@ -1343,6 +1351,8 @@ pub(crate) fn uuid_v7() -> io::Result<String> {
         &hex[20..]
     ))
 }
+
+pub mod error;
 
 #[cfg(test)]
 mod tests;

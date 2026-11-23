@@ -457,7 +457,7 @@ fn finding_sessions() {
     let dir = TempDir::new();
     assert!(matches!(
         Session::open(&dir.0, "0199"),
-        Err(Error::SessionNotFound { .. })
+        Err(Error::Session(SessionError::NotFound { .. }))
     ));
     fs::create_dir_all(&dir.0).unwrap();
     let header = "{\"type\":\"session\",\"version\":1,\"function\":\"minimal\",\"workspace\":\"/w\",\"time\":\"t\"}\n";
@@ -473,7 +473,7 @@ fn finding_sessions() {
     .unwrap();
     assert!(matches!(
         Session::open(&dir.0, "0199aaa"),
-        Err(Error::SessionAmbiguous { count: 2, .. })
+        Err(Error::Session(SessionError::Ambiguous { count: 2, .. }))
     ));
     assert_eq!(
         Session::open(&dir.0, "0199aaab").unwrap().id,
@@ -482,7 +482,7 @@ fn finding_sessions() {
     for bad in ["", "../x", "zz"] {
         assert!(matches!(
             Session::open(&dir.0, bad),
-            Err(Error::SessionNotFound { .. })
+            Err(Error::Session(SessionError::NotFound { .. }))
         ));
     }
 }
@@ -505,15 +505,15 @@ fn bad_files() {
     write("cc", "not json\n");
     assert!(matches!(
         Session::open(&dir.0, "aa"),
-        Err(Error::SessionLine { line: 1, detail, .. }) if detail.contains("version 3")
+        Err(Error::Session(SessionError::Line { line: 1, detail, .. })) if detail.contains("version 3")
     ));
     assert!(matches!(
         Session::open(&dir.0, "bb"),
-        Err(Error::SessionLine { line: 2, .. })
+        Err(Error::Session(SessionError::Line { line: 2, .. }))
     ));
     assert!(matches!(
         Session::open(&dir.0, "cc"),
-        Err(Error::SessionLine { line: 1, .. })
+        Err(Error::Session(SessionError::Line { line: 1, .. }))
     ));
 }
 
@@ -626,7 +626,7 @@ fn a_bad_media_event_is_a_bad_line() {
     let mut text = fs::read_to_string(&path).unwrap();
     text.push_str("{\"type\":\"media\",\"kind\":\"sound\",\"number\":1}\n");
     fs::write(&path, text).unwrap();
-    assert!(matches!(Session::open(&dir.0, &id), Err(Error::SessionLine { .. })));
+    assert!(matches!(Session::open(&dir.0, &id), Err(Error::Session(SessionError::Line { .. }))));
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn a_name_that_another_session_of_the_project_has_is_refused() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     let mut second = Session::create(&dir.0, "f", project).unwrap();
     match second.rename(project, "work") {
-        Err(Error::SessionNameTaken { name, id }) => {
+        Err(Error::Session(SessionError::NameTaken { name, id })) => {
             assert_eq!(name, "work");
             assert_eq!(id, first.id);
         }
@@ -904,7 +904,7 @@ fn what_is_no_name_is_refused() {
     let mut session = Session::create(&dir.0, "f", Path::new("/w/project")).unwrap();
     assert!(matches!(
         session.rename(Path::new("/w/project"), "last"),
-        Err(Error::SessionName { problem: NameProblem::Reserved })
+        Err(Error::Session(SessionError::Name { problem: NameProblem::Reserved }))
     ));
     assert_eq!(session.name, None);
 }

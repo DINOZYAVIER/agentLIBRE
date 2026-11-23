@@ -24,9 +24,12 @@ pub fn id_of(dir: &Path, project: &Path, key: &str) -> Result<String, Error> {
             .into_iter()
             .next()
             .map(|info| info.id)
-            .ok_or_else(|| Error::SessionNotFound {
-                id: "last".into(),
-                dir: dir.to_path_buf(),
+            .ok_or_else(|| {
+                crate::session::error::Error::NotFound {
+                    id: "last".into(),
+                    dir: dir.to_path_buf(),
+                }
+                .into()
             })
     } else {
         Ok(Session::id_named(dir, project, key).unwrap_or_else(|| key.to_owned()))
@@ -43,9 +46,12 @@ pub fn id_of_plane(dir: &Path, plane: &str, key: &str) -> Result<String, Error> 
             .into_iter()
             .next()
             .map(|info| info.id)
-            .ok_or_else(|| Error::SessionNotFound {
-                id: "last".into(),
-                dir: dir.to_path_buf(),
+            .ok_or_else(|| {
+                crate::session::error::Error::NotFound {
+                    id: "last".into(),
+                    dir: dir.to_path_buf(),
+                }
+                .into()
             })
     } else {
         Ok(Session::id_named_of_plane(dir, plane, key).unwrap_or_else(|| key.to_owned()))
@@ -429,7 +435,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let dir = data.join("sessions");
         match id_of(&dir, &project, "last") {
-            Err(Error::SessionNotFound { id, .. }) => assert_eq!(id, "last"),
+            Err(Error::Session(crate::session::error::Error::NotFound { id, .. })) => assert_eq!(id, "last"),
             other => panic!("expected the not-found, got {other:?}"),
         }
     }

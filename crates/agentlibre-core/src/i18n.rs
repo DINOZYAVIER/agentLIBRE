@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{Error, Expected, NameProblem, ServerOwner};
+use crate::error::{Error, Expected, ServerOwner};
 use crate::function::Function;
 use crate::session::StopReason;
 
@@ -1195,54 +1195,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const SERVER_REPLY: Msg = Msg {
         en: "unexpected reply from {server} at {url}: {detail}",
         uk: "неочікувана відповідь: {server} за адресою {url}: {detail}",
-    };
-
-    /// `Error::SessionNotFound`.
-    pub const SESSION_NOT_FOUND: Msg = Msg {
-        en: "no session in {dir} is named `{id}` or has an id that starts with it",
-        uk: "у {dir} немає сесії з іменем `{id}` чи з id, що з нього починається",
-    };
-
-    /// `Error::SessionName` (AGL-062, D6).
-    pub const SESSION_NAME_EMPTY: Msg = Msg {
-        en: "a name cannot be empty",
-        uk: "ім'я не може бути порожнім",
-    };
-    pub const SESSION_NAME_LINES: Msg = Msg {
-        en: "a name is one line",
-        uk: "ім'я — один рядок",
-    };
-    pub const SESSION_NAME_LONG: Msg = Msg {
-        en: "a name has at most {max} characters",
-        uk: "ім'я має щонайбільше {max} символів",
-    };
-    pub const SESSION_NAME_RESERVED: Msg = Msg {
-        en: "`last` is no name: `--resume last` is the newest session",
-        uk: "`last` не може бути іменем: `--resume last` — найновіша сесія",
-    };
-
-    /// `Error::SessionNameTaken` (AGL-062, D5).
-    pub const SESSION_NAME_TAKEN: Msg = Msg {
-        en: "the session {id} of this project is named `{name}` already",
-        uk: "сесія {id} цього проєкту вже має ім'я `{name}`",
-    };
-
-    /// `Error::SessionAmbiguous`.
-    pub const SESSION_AMBIGUOUS: Msg = Msg {
-        en: "{count} sessions start with `{id}`; give more of the id",
-        uk: "сесій, що починаються з `{id}`: {count}; вкажи довшу частину id",
-    };
-
-    /// `Error::SessionLine`.
-    pub const SESSION_LINE: Msg = Msg {
-        en: "line {line} of {path}: {detail}",
-        uk: "рядок {line} у {path}: {detail}",
-    };
-
-    /// `Error::SessionWrite`.
-    pub const SESSION_WRITE: Msg = Msg {
-        en: "cannot write {path}: {source}",
-        uk: "не вдалося записати {path}: {source}",
     };
 
     /// `Error::SessionState`.
@@ -3074,40 +3026,7 @@ impl Error {
                 url = url,
                 detail = detail
             ),
-            Error::SessionNotFound { id, dir } => {
-                tr!(lang, m::SESSION_NOT_FOUND, id = id, dir = dir.display())
-            }
-            Error::SessionAmbiguous { id, count } => {
-                tr!(lang, m::SESSION_AMBIGUOUS, id = id, count = count)
-            }
-            Error::SessionName { problem } => match problem {
-                NameProblem::Empty => tr!(lang, m::SESSION_NAME_EMPTY).to_string(),
-                NameProblem::Lines => tr!(lang, m::SESSION_NAME_LINES).to_string(),
-                NameProblem::TooLong => {
-                    tr!(lang, m::SESSION_NAME_LONG, max = crate::session::NAME_MAX)
-                }
-                NameProblem::Reserved => tr!(lang, m::SESSION_NAME_RESERVED).to_string(),
-            },
-            Error::SessionNameTaken { name, id } => {
-                tr!(lang, m::SESSION_NAME_TAKEN, name = name, id = id)
-            }
-            Error::SessionLine { path, line, detail } => {
-                tr!(
-                    lang,
-                    m::SESSION_LINE,
-                    path = path.display(),
-                    line = line,
-                    detail = detail
-                )
-            }
-            Error::SessionWrite { path, source } => {
-                tr!(
-                    lang,
-                    m::SESSION_WRITE,
-                    path = path.display(),
-                    source = source
-                )
-            }
+            Error::Session(error) => error.message(lang),
             Error::SessionState { state, function } => {
                 tr!(lang, m::SESSION_STATE, state = state, function = function)
             }

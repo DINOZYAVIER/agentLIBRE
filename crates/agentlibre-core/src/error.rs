@@ -117,23 +117,9 @@ pub enum Error {
         url: String,
         detail: String,
     },
-    /// No session in `dir` has an id that is or starts with `id`.
-    SessionNotFound { id: String, dir: PathBuf },
-    /// More than one session id starts with `id` (D107).
-    SessionAmbiguous { id: String, count: usize },
-    /// `/rename` to a text that is no name (AGL-062, D6).
-    SessionName { problem: NameProblem },
-    /// `/rename` to a name that another session of the project has
-    /// (AGL-062, D5).
-    SessionNameTaken { name: String, id: String },
-    /// Line `line` of a session file is not a valid event.
-    SessionLine {
-        path: PathBuf,
-        line: usize,
-        detail: String,
-    },
-    /// A session file cannot be written.
-    SessionWrite { path: PathBuf, source: io::Error },
+    /// A session not found, its name, its file's lines or its writing
+    /// (D107; AGL-062). Its own type, wrapped (AGL-121, D66).
+    Session(crate::session::error::Error),
     /// The session continues a turn in a state the Function no longer has.
     SessionState { state: String, function: String },
     /// The terminal cannot be switched to raw mode.
@@ -367,6 +353,13 @@ impl From<crate::function::error::Error> for Error {
     }
 }
 
+impl From<crate::session::error::Error> for Error {
+    /// A session's own error as agl's (AGL-121, D66).
+    fn from(source: crate::session::error::Error) -> Error {
+        Error::Session(source)
+    }
+}
+
 impl From<crate::wsl::Error> for Error {
     /// The Windows engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::wsl::Error) -> Error {
@@ -434,19 +427,6 @@ pub enum Expected {
     Strings,
     /// A list of sets (AGL-089).
     Tables,
-}
-
-/// Why a text is no name of a session (AGL-062, D6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NameProblem {
-    /// Nothing is left after trimming.
-    Empty,
-    /// It has more than one line.
-    Lines,
-    /// It is longer than `session::NAME_MAX`.
-    TooLong,
-    /// It is `last`, which `--resume` reads as the newest session.
-    Reserved,
 }
 
 /// Who launched a server that did not get ready (AGL-043 F5): the
