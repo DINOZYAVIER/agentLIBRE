@@ -1185,12 +1185,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "неочікувана відповідь: {server} за адресою {url}: {detail}",
     };
 
-    /// `Error::SessionState`.
-    pub const SESSION_STATE: Msg = Msg {
-        en: "the session continues in state `{state}`, which Function `{function}` no longer has",
-        uk: "сесія продовжується в стані `{state}`, якого Function `{function}` вже не має",
-    };
-
     /// `Error::Terminal`.
     pub const TERMINAL: Msg = Msg {
         en: "cannot switch the terminal to raw mode: {source}",
@@ -3011,9 +3005,7 @@ impl Error {
                 detail = detail
             ),
             Error::Session(error) => error.message(lang),
-            Error::SessionState { state, function } => {
-                tr!(lang, m::SESSION_STATE, state = state, function = function)
-            }
+            Error::Machine(error) => error.message(lang),
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),

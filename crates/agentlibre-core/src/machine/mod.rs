@@ -3,6 +3,7 @@
 
 use crate::action::Outcome;
 use crate::error::Error;
+use error::Error as MachineError;
 use crate::session::Unfinished;
 
 /// The transitions and the limits of a state, whatever runs the machine
@@ -172,7 +173,7 @@ impl<'f, S: State> Machine<'f, S> {
                 .states
                 .iter()
                 .position(|s| s.name() == name)
-                .ok_or_else(|| Error::SessionState {
+                .ok_or_else(|| MachineError::SessionState {
                     state: name.into(),
                     function: function_name.into(),
                 })
@@ -271,6 +272,8 @@ impl<'f, S: State> Machine<'f, S> {
         self.entered = true;
     }
 }
+
+pub mod error;
 
 #[cfg(test)]
 mod tests;

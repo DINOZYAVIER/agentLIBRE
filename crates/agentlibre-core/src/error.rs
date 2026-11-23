@@ -115,8 +115,9 @@ pub enum Error {
     /// A session not found, its name, its file's lines or its writing
     /// (D107; AGL-062). Its own type, wrapped (AGL-121, D66).
     Session(crate::session::error::Error),
-    /// The session continues a turn in a state the Function no longer has.
-    SessionState { state: String, function: String },
+    /// The machine cannot continue a session's turn. Its own type, wrapped
+    /// (AGL-121, D66).
+    Machine(crate::machine::error::Error),
     /// The terminal cannot be switched to raw mode.
     Terminal { source: io::Error },
     /// Ctrl-C stopped a generation (D111).
@@ -352,6 +353,13 @@ impl From<crate::session::error::Error> for Error {
     /// A session's own error as agl's (AGL-121, D66).
     fn from(source: crate::session::error::Error) -> Error {
         Error::Session(source)
+    }
+}
+
+impl From<crate::machine::error::Error> for Error {
+    /// The machine's own error as agl's (AGL-121, D66).
+    fn from(source: crate::machine::error::Error) -> Error {
+        Error::Machine(source)
     }
 }
 

@@ -180,6 +180,6 @@ fn resuming_without_a_state_starts_in_initial() {
     };
     assert!(matches!(
         Machine::resume(coder.table(), "coder", &gone),
-        Err(Error::SessionState { state, .. }) if state == "review"
+        Err(Error::Machine(crate::machine::error::Error::SessionState { state, .. })) if state == "review"
     ));
 }
