@@ -523,13 +523,12 @@ fn tool_block(
         Detail::Off,
         focused,
     ));
-    // D27, AGL-080, AGL-087 D1: the phases in the tool's color, no rule.
+    // D27, AGL-080; AGL-121, D16 d: the phases in the summary's role, no rule.
     let (status_text, status_role) = records::status(result.map(|result| result.outcome));
     lines.push(summary(
         theme,
         Some((status_text.as_str(), status_role)),
         &items,
-        Role::Tool,
     ));
     lines
 }
@@ -577,7 +576,7 @@ fn answer_block(
             m::WORKED_FOR,
             time = texts::duration(elapsed.as_secs())
         )];
-        summary(theme, None, &items, Role::Tool)
+        summary(theme, None, &items)
     });
     card::answer(theme, lang, columns, text, time, true)
 }

@@ -296,10 +296,9 @@ impl Presenter {
     /// The answer's block, with the row of its time when that is known.
     pub fn show_answer(&self, text: &str, elapsed: Option<Duration>) {
         let items: Vec<String> = elapsed.iter().map(|time| self.worked_for(*time)).collect();
-        // AGL-080, D2 and AGL-087 D1: the times of the answer are the tool's
-        // color, as `THINKING` and `TOOL bash` are; no time, no row.
-        let time = (!items.is_empty())
-            .then(|| self.summary(None, &items, Role::Tool));
+        // AGL-080, D2; AGL-121, D16 d: the times of the answer in the
+        // summary's role; no time, no row.
+        let time = (!items.is_empty()).then(|| self.summary(None, &items));
         self.screen.print(&self.answer_lines(text, time));
     }
 
@@ -425,13 +424,8 @@ impl Presenter {
     }
 
     /// A step's row: its status and items (AGL-045, AGL-080).
-    fn summary(
-        &self,
-        status: Option<(&str, Role)>,
-        items: &[String],
-        item_role: Role,
-    ) -> String {
-        summary(&self.theme, status, items, item_role)
+    fn summary(&self, status: Option<(&str, Role)>, items: &[String]) -> String {
+        summary(&self.theme, status, items)
     }
 
     /// The compact card of a finished step (AGL-066, D1, D2, D6; AGL-080,
@@ -456,15 +450,14 @@ impl Presenter {
             self.result_detail,
             false,
         );
-        // D27, AGL-080 and AGL-087 D1: the phases in the tool's color, with
-        // no rule; with no phase to name the row says nothing, and none.
+        // D27, AGL-080; AGL-121, D16 d: the phases in the summary's role,
+        // with no rule; with no phase to name the row says nothing, and none.
         if !items.is_empty() {
             let (status_text, status_role) =
                 records::status(result.map(|result| result.outcome));
             lines.push(self.summary(
                 Some((status_text.as_str(), status_role)),
                 items,
-                Role::Tool,
             ));
         }
         // AGL-085, D1: the card ends its block, and a blank row divides one
@@ -653,8 +646,8 @@ impl Presenter {
             items.push(texts::speed(speed, self.lang));
         }
         let status = Some(("OK", Role::StatusSuccess));
-        // D27, AGL-087 D1: the items are the tool's color, as the labels.
-        let time = Some(self.summary(status, &items, Role::Tool));
+        // AGL-121, D16 d: the items in the summary's role.
+        let time = Some(self.summary(status, &items));
         let block = self.answer_lines(text, time);
         self.replace_streamed(block);
         self.prefill = None;
@@ -712,7 +705,6 @@ impl Presenter {
         self.screen.print(&[self.summary(
             Some(("OK", Role::StatusSuccess)),
             &items,
-            Role::Tool,
         )]);
     }
 
@@ -1693,12 +1685,13 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_time_is_the_tool_color() {
-        // AGL-066, D27; AGL-080 D2 and AGL-087 D1: the answer's row of
-        // times — the phases, the time, the speed — is in the tool's color,
-        // as `THINKING` and `TOOL bash` are.
+    fn the_answer_time_is_the_summarys_color() {
+        // AGL-080 D2; AGL-121, D16 d: the answer's row of times — the
+        // phases, the time, the speed — takes the summary's role, not the
+        // tool's.
         let red = crate::style::Style::parse("#FF0000", false).expect("a color");
-        let theme = Theme::new(true, &[(Role::Tool, red)]);
+        let green = crate::style::Style::parse("#00FF00", false).expect("a color");
+        let theme = Theme::new(true, &[(Role::Summary, red), (Role::Tool, green)]);
         let (presenter, mock) = presenter();
         let presenter = Presenter {
             theme: theme.clone(),
@@ -1711,6 +1704,7 @@ mod tests {
             .find(|line| line.contains("Worked for"))
             .expect("the row");
         assert!(row.contains("\x1b[38;2;255;0;0m"), "{row:?}");
+        assert!(!row.contains("\x1b[38;2;0;255;0m"), "{row:?}");
     }
 
     #[test]

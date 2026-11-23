@@ -61,23 +61,19 @@ pub fn notice_lines(theme: &Theme, text: &str, columns: usize, role: Role) -> Ve
 }
 
 /// A step's row: its status and its items over ` · `, with no rule around
-/// them (AGL-066, D26; AGL-080, D1). A row longer than the width wraps as
-/// the terminal lets it (AGL-045).
-pub fn summary(
-    theme: &Theme,
-    status: Option<(&str, Role)>,
-    items: &[String],
-    item_role: Role,
-) -> String {
+/// them (AGL-066, D26; AGL-080, D1), the items in the summary's role
+/// (AGL-121, D16 d). A row longer than the width wraps as the terminal
+/// lets it (AGL-045).
+pub fn summary(theme: &Theme, status: Option<(&str, Role)>, items: &[String]) -> String {
     let mut parts: Vec<(String, Role)> = Vec::new();
     if let Some((text, status_role)) = status {
         parts.push((text.into(), status_role));
         if !items.is_empty() {
-            parts.push((" · ".into(), item_role));
+            parts.push((" · ".into(), Role::Summary));
         }
     }
     if !items.is_empty() {
-        parts.push((items.join(" · "), item_role));
+        parts.push((items.join(" · "), Role::Summary));
     }
     parts
         .iter()
