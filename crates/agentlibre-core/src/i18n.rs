@@ -1573,18 +1573,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер іншого виду не зупинено, тож новий не запущено",
     };
 
-    /// `Error::StrataNotInstalled` (AGL-089, D20).
-    pub const STRATA_NOT_INSTALLED: Msg = Msg {
-        en: "the Strata engine `{variant}` is not installed: on NixOS, add it to `programs.agl.strata` (e.g. programs.agl.strata = [ \"{variant}\" ];) and rebuild",
-        uk: "рушій Strata `{variant}` не встановлено: на NixOS додай його в `programs.agl.strata` (наприклад, programs.agl.strata = [ \"{variant}\" ];) і перебудуй систему",
-    };
-
-    /// `Error::StrataPrepare` (AGL-089, D9, D13).
-    pub const STRATA_PREPARE: Msg = Msg {
-        en: "the preparation of the Strata model failed at {step}; its output is in {log}",
-        uk: "підготовка моделі Strata не вдалася на кроці «{step}»; її вивід у {log}",
-    };
-
     /// The first preparation of a Strata model, said before each step
     /// (AGL-089, D9, D13).
     pub const STRATA_PREPARING: Msg = Msg {
@@ -3402,12 +3390,7 @@ impl Error {
             Error::StartDeclined => tr!(lang, m::START_DECLINED).to_string(),
             Error::RestartDeclined => tr!(lang, m::RESTART_DECLINED).to_string(),
             Error::SwitchDeclined => tr!(lang, m::SWITCH_DECLINED).to_string(),
-            Error::StrataNotInstalled { variant } => {
-                tr!(lang, m::STRATA_NOT_INSTALLED, variant = variant)
-            }
-            Error::StrataPrepare { step, log } => {
-                tr!(lang, m::STRATA_PREPARE, step = step, log = log.display())
-            }
+            Error::Strata(error) => error.message(lang),
             Error::ServerStatus {
                 kind,
                 url,

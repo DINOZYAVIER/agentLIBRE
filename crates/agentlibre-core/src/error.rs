@@ -238,12 +238,9 @@ pub enum Error {
     /// The human answered no to the stop of the server of the other kind
     /// (AGL-036, D10).
     SwitchDeclined,
-    /// The Strata package of the Function's variant is not installed: no
-    /// `<AGENTLIBRE_STRATA>/<variant>` (AGL-089, D20).
-    StrataNotInstalled { variant: String },
-    /// A step of the first preparation of a Strata model failed: the pack,
-    /// the MTP head (AGL-089, D9, D13); its output is in `log`.
-    StrataPrepare { step: String, log: PathBuf },
+    /// The Strata engine's own error (AGL-089, D20, D9, D13). Its own type,
+    /// wrapped (AGL-121, D66).
+    Strata(crate::strata::Error),
     /// `agl bridge` and `bridge` lacks `address` or `port` (AGL-083, D20).
     BridgeNotSet { path: PathBuf },
     /// No `agl-bridge` beside `agl` (AGL-083, D18).
@@ -421,6 +418,13 @@ impl From<crate::format::Error> for Error {
     /// A format template's own error as agl's (AGL-121, D66).
     fn from(source: crate::format::Error) -> Error {
         Error::Format(source)
+    }
+}
+
+impl From<crate::strata::Error> for Error {
+    /// A Strata engine's own error as agl's (AGL-121, D66).
+    fn from(source: crate::strata::Error) -> Error {
+        Error::Strata(source)
     }
 }
 

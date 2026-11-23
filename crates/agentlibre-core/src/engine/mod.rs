@@ -2804,7 +2804,7 @@ mod tests {
         };
         let models = std::env::temp_dir().join(format!("agentLIBRE-strata-none-{}", std::process::id()));
         let result = strata_launch(&settings, &free_url(3), &models, &mut |_| {}, Lang::En);
-        assert!(matches!(result, Err(Error::StrataNotInstalled { variant }) if variant == "rdna3"));
+        assert!(matches!(result, Err(Error::Strata(crate::strata::Error::NotInstalled { variant })) if variant == "rdna3"));
         assert!(!models.exists());
     }
 

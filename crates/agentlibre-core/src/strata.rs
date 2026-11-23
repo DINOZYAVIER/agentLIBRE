@@ -13,17 +13,52 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::error::Error;
-use crate::i18n::{Lang, m};
+use crate::error;
+use crate::i18n::{Lang, Msg, m};
 use crate::settings::ServerFile;
 use crate::tr;
 
 /// The folder of the Strata packages, by variant (D20).
 pub const STRATA_VAR: &str = "AGENTLIBRE_STRATA";
 
+/// What can go wrong with a Strata engine (AGL-089, D20; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// The Strata package of the Function's variant is not installed: no
+    /// `<AGENTLIBRE_STRATA>/<variant>` (AGL-089, D20).
+    NotInstalled { variant: String },
+    /// A step of the first preparation of a Strata model failed: the pack,
+    /// the MTP head (AGL-089, D9, D13); its output is in `log`.
+    Prepare { step: String, log: PathBuf },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NotInstalled { variant } => tr!(lang, NOT_INSTALLED, variant = variant),
+            Self::Prepare { step, log } => {
+                tr!(lang, PREPARE, step = step, log = log.display())
+            }
+        }
+    }
+}
+
+/// `Error::NotInstalled`.
+const NOT_INSTALLED: Msg = Msg {
+    en: "the Strata engine `{variant}` is not installed: on NixOS, add it to `programs.agl.strata` (e.g. programs.agl.strata = [ \"{variant}\" ];) and rebuild",
+    uk: "рушій Strata `{variant}` не встановлено: на NixOS додай його в `programs.agl.strata` (наприклад, programs.agl.strata = [ \"{variant}\" ];) і перебудуй систему",
+};
+
+/// `Error::Prepare`.
+const PREPARE: Msg = Msg {
+    en: "the preparation of the Strata model failed at {step}; its output is in {log}",
+    uk: "підготовка моделі Strata не вдалася на кроці «{step}»; її вивід у {log}",
+};
+
 /// The package of `variant`, from `AGENTLIBRE_STRATA`.
-pub fn package(variant: &str) -> Result<PathBuf, Error> {
-    package_in(std::env::var_os(STRATA_VAR).map(PathBuf::from).as_deref(), variant)
+pub fn package(variant: &str) -> Result<PathBuf, error::Error> {
+    Ok(package_in(std::env::var_os(STRATA_VAR).map(PathBuf::from).as_deref(), variant)?)
 }
 
 /// The package of `variant` in the folder `dir`: one with its server.
@@ -31,7 +66,7 @@ fn package_in(dir: Option<&Path>, variant: &str) -> Result<PathBuf, Error> {
     dir.filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(variant))
         .filter(|package| package.join("bin/strata-server").is_file())
-        .ok_or_else(|| Error::StrataNotInstalled {
+        .ok_or_else(|| Error::NotInstalled {
             variant: variant.to_owned(),
         })
 }
@@ -94,11 +129,11 @@ pub fn prepare(
     package: &Path,
     say: &mut dyn FnMut(&str),
     lang: Lang,
-) -> Result<Data, Error> {
+) -> Result<Data, error::Error> {
     let (name, shard) = name_and_first_shard(settings);
     let data = Data::of(models, name);
     let created = |path: &Path| {
-        fs::create_dir_all(path).map_err(|source| Error::Write {
+        fs::create_dir_all(path).map_err(|source| error::Error::Write {
             path: path.into(),
             source,
         })
@@ -168,7 +203,7 @@ pub fn prepare(
         // The draft layer's token subset setup.py puts there, its default
         // (`data/draft_vocab.bin`, AGL-086's D6 runs on it).
         let vocab = package.join("share/strata/data/draft_vocab.bin");
-        fs::copy(&vocab, part.join("draft_vocab.bin")).map_err(|source| Error::Write {
+        fs::copy(&vocab, part.join("draft_vocab.bin")).map_err(|source| error::Error::Write {
             path: part.join("draft_vocab.bin"),
             source,
         })?;
@@ -178,18 +213,18 @@ pub fn prepare(
 }
 
 /// Runs a step of the preparation, its output appended to `log`.
-fn run(command: &mut Command, log: &Path, step: &str) -> Result<(), Error> {
+fn run(command: &mut Command, log: &Path, step: &str) -> Result<(), error::Error> {
     let open = || {
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(log)
-            .map_err(|source| Error::Write {
+            .map_err(|source| error::Error::Write {
                 path: log.into(),
                 source,
             })
     };
-    let failed = || Error::StrataPrepare {
+    let failed = || Error::Prepare {
         step: step.to_owned(),
         log: log.into(),
     };
@@ -199,13 +234,13 @@ fn run(command: &mut Command, log: &Path, step: &str) -> Result<(), Error> {
         .stderr(Stdio::from(open()?))
         .status()
         .map_err(|_| failed())?;
-    if status.success() { Ok(()) } else { Err(failed()) }
+    if status.success() { Ok(()) } else { Err(failed().into()) }
 }
 
 /// `part` renamed to `done`, an older `done` gone first.
-fn replace(part: &Path, done: &Path) -> Result<(), Error> {
+fn replace(part: &Path, done: &Path) -> Result<(), error::Error> {
     let _ = fs::remove_dir_all(done);
-    fs::rename(part, done).map_err(|source| Error::Write {
+    fs::rename(part, done).map_err(|source| error::Error::Write {
         path: done.into(),
         source,
     })
@@ -216,13 +251,13 @@ fn replace(part: &Path, done: &Path) -> Result<(), Error> {
 /// (the pack, the first shard, the MTP head, the expert profile, the
 /// context), the environment with the hipBLASLt tuning of the package's
 /// hipBLASLt; its path.
-pub fn write_config(settings: &ServerFile, data: &Data, package: &Path) -> Result<PathBuf, Error> {
+pub fn write_config(settings: &ServerFile, data: &Data, package: &Path) -> Result<PathBuf, error::Error> {
     let config = config(settings, data, package);
     let variant = settings.strata.as_deref().unwrap_or_default();
     let path = data.dir.join(format!("config-{variant}.json"));
     let mut text = serde_json::to_string_pretty(&config).expect("a JSON value serializes");
     text.push('\n');
-    fs::write(&path, text).map_err(|source| Error::Write {
+    fs::write(&path, text).map_err(|source| error::Error::Write {
         path: path.clone(),
         source,
     })?;
@@ -300,7 +335,7 @@ mod tests {
         for (folder, variant) in [(Some(dir.0.as_path()), "upstream"), (None, "rdna3"), (Some(Path::new("rel")), "rdna3")] {
             assert!(matches!(
                 package_in(folder, variant),
-                Err(Error::StrataNotInstalled { variant: v }) if v == variant
+                Err(Error::NotInstalled { variant: v }) if v == variant
             ));
         }
     }
@@ -366,7 +401,7 @@ mod tests {
         let dir = TempDir::new();
         let log = dir.0.join("prepare.log");
         let error = run(Command::new("/bin/sh").args(["-c", "echo out; exit 3"]), &log, "the pack").unwrap_err();
-        assert!(matches!(error, Error::StrataPrepare { ref step, log: ref l } if step == "the pack" && *l == log));
+        assert!(matches!(error, error::Error::Strata(Error::Prepare { ref step, log: ref l }) if step == "the pack" && *l == log));
         assert_eq!(fs::read_to_string(&log).unwrap(), "out\n");
     }
 }
