@@ -12,6 +12,7 @@ use crate::backend::{
     StepLog, Stepped, Stop, ToolCall,
 };
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use crate::function::{Function, State};
 use crate::machine::{Machine, Progress};
 use crate::media;
@@ -192,10 +193,12 @@ impl Agent<'_> {
                 Ok(None) => continue,
                 Err(Error::Interrupted) => StopReason::Interrupted,
                 Err(
-                    error @ (Error::ServerUnreachable { .. }
-                    | Error::ServerCertificate { .. }
-                    | Error::ServerStatus { .. }
-                    | Error::ServerReply { .. }
+                    error @ (Error::Backend(
+                        BackendError::ServerUnreachable { .. }
+                        | BackendError::ServerCertificate { .. }
+                        | BackendError::ServerStatus { .. }
+                        | BackendError::ServerReply { .. },
+                    )
                     | Error::OutsideGrammar(_)),
                 ) => {
                     self.session.append(Event::Stop(StopReason::ServerError))?;

@@ -13,6 +13,7 @@ use super::{
 };
 use crate::action::{Kind, Value};
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use crate::tools::Spec;
 use crate::settings::ServerKind;
 
@@ -209,7 +210,7 @@ impl Backend for Llama {
         let vision = reply["modalities"]["vision"].as_bool().unwrap_or(false);
         match reply["media_marker"].as_str() {
             Some(marker) if vision => Ok(marker.to_owned()),
-            _ => Err(Error::NoMultimodal),
+            _ => Err(BackendError::NoMultimodal.into()),
         }
     }
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::Value as Json;
 
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use crate::settings::ServerKind;
 
 /// How long connecting may take (D97).
@@ -80,25 +81,28 @@ impl Http {
     pub(super) fn unreachable(&self, error: impl std::fmt::Display) -> Error {
         let detail = error.to_string();
         if super::is_certificate_problem(&detail) {
-            return Error::ServerCertificate {
+            return BackendError::ServerCertificate {
                 url: self.url.clone(),
                 detail,
                 key: self.ca_key,
-            };
+            }
+            .into();
         }
-        Error::ServerUnreachable {
+        BackendError::ServerUnreachable {
             kind: self.kind,
             url: self.url.clone(),
             detail,
         }
+        .into()
     }
 
     pub(super) fn bad_reply(&self, detail: impl Into<String>) -> Error {
-        Error::ServerReply {
+        BackendError::ServerReply {
             kind: self.kind,
             url: self.url.clone(),
             detail: detail.into(),
         }
+        .into()
     }
 
     /// Sends a request and returns the response if the status is 200.
@@ -127,12 +131,13 @@ impl Http {
             .ok()
             .and_then(|reply| reply["error"]["message"].as_str().map(str::to_owned))
             .unwrap_or(text);
-        Err(Error::ServerStatus {
+        Err(BackendError::ServerStatus {
             kind: self.kind,
             url: self.url.clone(),
             status,
             message,
-        })
+        }
+        .into())
     }
 
     /// Sends a request and parses the JSON reply.
@@ -184,7 +189,7 @@ mod tests {
         // AGL-121, D4: the key of the server that failed, not llama's alone.
         let refused = |http: Http| http.unreachable("invalid peer certificate: UnknownIssuer");
         let key = |http: Http| match refused(http) {
-            Error::ServerCertificate { key, .. } => key,
+            Error::Backend(BackendError::ServerCertificate { key, .. }) => key,
             other => panic!("{other:?}"),
         };
         assert_eq!(key(Http::new(ServerKind::Llama, "https://a")), "server.llama.private_ca");
@@ -194,7 +199,7 @@ mod tests {
         assert!(text.contains("`whisper.private_ca`"), "{text}");
         assert!(matches!(
             Http::new(ServerKind::Strata, "http://a").unreachable("connection refused"),
-            Error::ServerUnreachable { .. }
+            Error::Backend(BackendError::ServerUnreachable { .. })
         ));
     }
 }

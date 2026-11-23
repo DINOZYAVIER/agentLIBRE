@@ -1,5 +1,6 @@
 //! Inference backends behind a minimal interface (D10, D29).
 
+pub mod error;
 mod http;
 
 pub(crate) use http::agent;
@@ -13,6 +14,7 @@ pub use step::{Step, StepInput, StepLog, Stepped};
 use crate::action::Value;
 use crate::agent::Sink;
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use crate::function::Sampling;
 use crate::tools::Spec;
 
@@ -172,9 +174,11 @@ pub struct StructuredCall {
 
 /// The TLS of a client that trusts only the CA in the file `path` (AGL-058, D12).
 pub fn private_ca(path: &str) -> Result<ureq::tls::TlsConfig, Error> {
-    let fail = |detail: String| Error::ServerCa {
-        path: path.into(),
-        detail,
+    let fail = |detail: String| {
+        Error::from(BackendError::ServerCa {
+            path: path.into(),
+            detail,
+        })
     };
     let pem = std::fs::read(path).map_err(|error| fail(error.to_string()))?;
     let mut certificates = Vec::new();
@@ -339,7 +343,7 @@ pub trait Backend {
     /// it per start, and none without a multimodal projector (AGL-014,
     /// D6).
     fn media_marker(&self) -> Result<String, Error> {
-        Err(Error::NoMultimodal)
+        Err(BackendError::NoMultimodal.into())
     }
     /// Whether the model hears an audio itself (AGL-014, D19).
     fn hears_audio(&self) -> Result<bool, Error> {

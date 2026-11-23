@@ -19,6 +19,7 @@ use super::{
 use crate::action::{Kind, Value};
 use crate::agent::Sink;
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use crate::format::Format;
 use crate::settings::ServerKind;
 use crate::tools::Spec;
@@ -163,7 +164,7 @@ impl Backend for Strata {
                 Some(n) => Ok(n as usize),
                 None => self.count_tokens(flat),
             },
-            Err(Error::ServerStatus { .. }) => self.count_tokens(flat),
+            Err(Error::Backend(BackendError::ServerStatus { .. })) => self.count_tokens(flat),
             Err(error) => Err(error),
         }
     }
@@ -178,7 +179,7 @@ impl Backend for Strata {
             Ok(reply) => Ok(reply["input_tokens"]
                 .as_u64()
                 .map_or_else(|| estimate_tokens(text), |n| n as usize)),
-            Err(Error::ServerStatus { .. }) => Ok(estimate_tokens(text)),
+            Err(Error::Backend(BackendError::ServerStatus { .. })) => Ok(estimate_tokens(text)),
             Err(error) => Err(error),
         }
     }

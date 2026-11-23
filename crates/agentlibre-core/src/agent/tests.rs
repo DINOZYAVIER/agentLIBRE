@@ -193,11 +193,12 @@ impl Backend for Script {
             .expect("a scripted output");
         // A scripted request that the server does not answer.
         if generated.text == "!unreachable" {
-            return Err(Error::ServerUnreachable {
+            return Err(crate::backend::error::Error::ServerUnreachable {
                 kind: crate::settings::ServerKind::Llama,
                 url: "http://127.0.0.1:18080".into(),
                 detail: "connection refused".into(),
-            });
+            }
+            .into());
         }
         if let Some(thinking) = &generated.thinking {
             for piece in thinking.split_inclusive(' ') {
@@ -223,7 +224,7 @@ impl Backend for Script {
     }
 
     fn media_marker(&self) -> Result<String, Error> {
-        self.marker.clone().ok_or(Error::NoMultimodal)
+        self.marker.clone().ok_or(crate::error::Error::from(crate::backend::error::Error::NoMultimodal))
     }
 
     fn hears_audio(&self) -> Result<bool, Error> {
@@ -619,7 +620,7 @@ fn a_failed_action_request_after_a_thinking_keeps_the_thinking_and_the_grammar()
     let minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
     let script = Script::new(&[("I will list files", THOUGHT), ("!unreachable", Stop::End)]);
     let (end, _, session) = run(&minimal, &script, &dir, "Say hello");
-    assert!(matches!(end, Err(Error::ServerUnreachable { .. })), "{end:?}");
+    assert!(matches!(end, Err(crate::error::Error::Backend(crate::backend::error::Error::ServerUnreachable { .. }))), "{end:?}");
     assert_eq!(kinds(&session), ["user", "state", "thinking", "stop"]);
     let file = fs::read_to_string(session.file_path()).unwrap();
     let thinking = file.find("I will list files").unwrap();
@@ -1727,7 +1728,7 @@ fn an_image_without_a_projector_is_an_error_that_says_so() {
         .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
     let end = turn_in(&mut session, &script, &dir, "[Image#1]");
-    assert!(matches!(end, Err(Error::NoMultimodal)));
+    assert!(matches!(end, Err(Error::Backend(crate::backend::error::Error::NoMultimodal))));
     // A text without media never asks for the marker.
     let mut script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
     script.marker = None;

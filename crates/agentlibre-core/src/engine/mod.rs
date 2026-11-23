@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crate::backend::llama::Llama;
 use crate::backend::Backend;
 use crate::error::Error;
+use crate::backend::error::Error as BackendError;
 use error::ServerOwner;
 use crate::engine::error::Error as EngineError;
 use crate::forge::Workspace;
@@ -1094,7 +1095,7 @@ pub fn file_name(path: &str) -> &str {
 /// AGL-121, D4).
 pub fn certificate_refused(probe: &dyn Backend) -> Option<Error> {
     match probe.context_size() {
-        Err(error @ Error::ServerCertificate { .. }) => Some(error),
+        Err(error @ Error::Backend(BackendError::ServerCertificate { .. })) => Some(error),
         _ => None,
     }
 }
@@ -1749,19 +1750,25 @@ mod tests {
     #[test]
     fn a_certificate_not_trusted_is_the_cause_of_a_probe_down() {
         // AGL-121, D4: a remote whisper says why, not that it is not local.
-        let untrusted = Answers(|| Error::ServerCertificate {
-            url: "https://whisper.lan:18081".into(),
-            detail: "invalid peer certificate: UnknownIssuer".into(),
-            key: "whisper.private_ca",
+        let untrusted = Answers(|| {
+            BackendError::ServerCertificate {
+                url: "https://whisper.lan:18081".into(),
+                detail: "invalid peer certificate: UnknownIssuer".into(),
+                key: "whisper.private_ca",
+            }
+            .into()
         });
         assert!(matches!(
             certificate_refused(&untrusted),
-            Some(Error::ServerCertificate { key: "whisper.private_ca", .. })
+            Some(Error::Backend(BackendError::ServerCertificate { key: "whisper.private_ca", .. }))
         ));
-        let down = Answers(|| Error::ServerUnreachable {
-            kind: ServerKind::Llama,
-            url: "https://whisper.lan:18081".into(),
-            detail: "connection refused".into(),
+        let down = Answers(|| {
+            BackendError::ServerUnreachable {
+                kind: ServerKind::Llama,
+                url: "https://whisper.lan:18081".into(),
+                detail: "connection refused".into(),
+            }
+            .into()
         });
         assert!(certificate_refused(&down).is_none());
     }

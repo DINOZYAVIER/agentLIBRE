@@ -206,7 +206,7 @@ fn unreachable_server() {
     let llama = Llama::new("http://127.0.0.1:1/");
     assert!(matches!(
         llama.context_size(),
-        Err(Error::ServerUnreachable { url, .. }) if url == "http://127.0.0.1:1"
+        Err(crate::error::Error::Backend(crate::backend::error::Error::ServerUnreachable { url, .. })) if url == "http://127.0.0.1:1"
     ));
 }
 

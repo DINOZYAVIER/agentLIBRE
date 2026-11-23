@@ -3,7 +3,6 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::settings::ServerKind;
 
 /// An error that stops `agl`.
 #[derive(Debug)]
@@ -61,6 +60,10 @@ pub enum Error {
     /// human's answers about it (D147, D149; AGL-024 and after). Its own type,
     /// wrapped (AGL-121, D66).
     Engine(crate::engine::error::Error),
+    /// The model's server as the backend reaches it: unreachable, its status,
+    /// its reply, its certificate, no projector (D52; AGL-014; AGL-058). Its
+    /// own type, wrapped (AGL-121, D66).
+    Backend(crate::backend::error::Error),
     /// A credential file of `search` the policy refuses (AGL-019, D4). Its
     /// own type, wrapped (AGL-121, D66).
     Search(crate::search::Error),
@@ -72,25 +75,6 @@ pub enum Error {
     /// A Function not found, built in, existing already, or unusable at a
     /// key (D21; AGL-102). Its own type, wrapped (AGL-121, D66).
     Function(crate::function::error::Error),
-    /// The server of `kind` cannot be reached (D97; AGL-038, D1).
-    ServerUnreachable {
-        kind: ServerKind,
-        url: String,
-        detail: String,
-    },
-    /// The server of `kind` answered with an error status.
-    ServerStatus {
-        kind: ServerKind,
-        url: String,
-        status: u16,
-        message: String,
-    },
-    /// The server of `kind` answered something agl does not understand.
-    ServerReply {
-        kind: ServerKind,
-        url: String,
-        detail: String,
-    },
     /// A session not found, its name, its file's lines or its writing
     /// (D107; AGL-062). Its own type, wrapped (AGL-121, D66).
     Session(crate::session::error::Error),
@@ -105,11 +89,6 @@ pub enum Error {
     OutsideGrammar(String),
     /// `--attach` without `-p` (AGL-014, D21).
     AttachWithoutPrompt,
-    /// The file of `private_ca` cannot be used (AGL-058, D12).
-    ServerCa { path: PathBuf, detail: String },
-    /// The server's certificate is not trusted (AGL-058, D12); `key` is the
-    /// setting that names a private CA for that server (AGL-121, D4).
-    ServerCertificate { url: String, detail: String, key: &'static str },
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
     /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
     Wsl(crate::wsl::Error),
@@ -150,9 +129,6 @@ pub enum Error {
     /// The whisper server was not set or could not transcribe (AGL-014,
     /// D22). Its own type, wrapped (AGL-121, D66).
     Whisper(crate::whisper::Error),
-    /// The prompt names a medium but the server has no multimodal
-    /// projector (AGL-014).
-    NoMultimodal,
     /// A medium: changed, of no kind agl takes, or ffmpeg failing on it
     /// (AGL-014). Its own type, wrapped (AGL-121, D66).
     Media(crate::media::Error),
@@ -263,6 +239,13 @@ impl From<crate::engine::error::Error> for Error {
     /// The engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::engine::error::Error) -> Error {
         Error::Engine(source)
+    }
+}
+
+impl From<crate::backend::error::Error> for Error {
+    /// The backend's own error as agl's (AGL-121, D66).
+    fn from(source: crate::backend::error::Error) -> Error {
+        Error::Backend(source)
     }
 }
 

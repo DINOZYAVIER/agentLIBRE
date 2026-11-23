@@ -193,7 +193,7 @@ fn live_backend() {
         )
         .unwrap_err();
     assert!(
-        matches!(&error, Error::ServerStatus { status: 400, message, .. } if message.contains("grammar")),
+        matches!(&error, crate::error::Error::Backend(crate::backend::error::Error::ServerStatus { status: 400, message, .. }) if message.contains("grammar")),
         "{error:?}"
     );
 }

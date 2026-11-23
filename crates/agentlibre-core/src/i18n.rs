@@ -1119,24 +1119,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "цю сесію зроблено з моделлю `{recorded}`, модель що працює — `{running}`",
     };
 
-    /// `Error::ServerUnreachable`.
-    pub const SERVER_UNREACHABLE: Msg = Msg {
-        en: "cannot reach {server} at {url}: {detail}\nTo start it: agl server start",
-        uk: "не вдалося з'єднатися з {server} за адресою {url}: {detail}\nЩоб запустити: agl server start",
-    };
-
-    /// `Error::ServerStatus`.
-    pub const SERVER_STATUS: Msg = Msg {
-        en: "{server} at {url} answered {status}: {message}",
-        uk: "{server} за адресою {url} відповів {status}: {message}",
-    };
-
-    /// `Error::ServerReply`.
-    pub const SERVER_REPLY: Msg = Msg {
-        en: "unexpected reply from {server} at {url}: {detail}",
-        uk: "неочікувана відповідь: {server} за адресою {url}: {detail}",
-    };
-
     /// `Error::Terminal`.
     pub const TERMINAL: Msg = Msg {
         en: "cannot switch the terminal to raw mode: {source}",
@@ -1153,18 +1135,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const OUTSIDE_GRAMMAR: Msg = Msg {
         en: "llama-server generated text outside the grammar: {text:?}",
         uk: "llama-server згенерував текст поза граматикою: {text:?}",
-    };
-
-    /// `Error::ServerCa` (AGL-058, D12).
-    pub const SERVER_CA: Msg = Msg {
-        en: "the CA file {path} of `private_ca` cannot be used: {detail}",
-        uk: "файл CA {path} із `private_ca` не можна використати: {detail}",
-    };
-
-    /// `Error::ServerCertificate` (AGL-058, D12).
-    pub const SERVER_CERTIFICATE: Msg = Msg {
-        en: "the certificate of the server at {url} is not trusted: {detail}\nIf a private CA signs it, name its certificate in `{key}`",
-        uk: "сертифікату сервера за {url} немає довіри: {detail}\nЯкщо його підписує приватний CA, вкажи сертифікат CA у `{key}`",
     };
 
     /// `agl server stop` with `server.llama.external` (AGL-052, D4).
@@ -1315,12 +1285,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const ATTACH_WITHOUT_PROMPT: Msg = Msg {
         en: "--attach goes with -p; in a session use /attach <path>",
         uk: "--attach працює разом з -p; у сесії використовуй /attach <шлях>",
-    };
-
-    /// `Error::NoMultimodal` (AGL-014).
-    pub const NO_MULTIMODAL: Msg = Msg {
-        en: "the server has no multimodal projector, so it cannot take an image; set `mmproj` in the model of the Function and restart it (agl server stop)",
-        uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у моделі Функції і перезапусти його (agl server stop)",
     };
 
     /// `Error::Draft` (AGL-122).
@@ -2475,23 +2439,11 @@ impl Error {
             Error::Settings(error) => error.message(lang),
             Error::Forge(error) => error.message(lang),
             Error::Engine(error) => error.message(lang),
+            Error::Backend(error) => error.message(lang),
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
             Error::Function(error) => error.message(lang),
-            Error::ServerUnreachable { kind, url, detail } => tr!(
-                lang,
-                m::SERVER_UNREACHABLE,
-                server = server::name(*kind, lang),
-                url = url,
-                detail = detail
-            ),
-            Error::ServerCa { path, detail } => {
-                tr!(lang, m::SERVER_CA, path = path.display(), detail = detail)
-            }
-            Error::ServerCertificate { url, detail, key } => {
-                tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail, key = key)
-            }
             Error::Wsl(error) => error.message(lang),
             Error::PlaneGone => tr!(lang, m::PLANE_GONE).to_string(),
             Error::Said { text } => text.clone(),
@@ -2501,7 +2453,6 @@ impl Error {
             Error::Plane(error) => error.message(lang),
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
-            Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),
             Error::Whisper(error) => error.message(lang),
             Error::BridgeNotSet { path } => tr!(lang, m::BRIDGE_NOT_SET, path = path.display()),
             Error::BridgeProgramMissing { path } => {
@@ -2515,28 +2466,6 @@ impl Error {
             Error::Media(error) => error.message(lang),
             Error::Draft { detail } => tr!(lang, m::DRAFT, detail = detail),
             Error::Strata(error) => error.message(lang),
-            Error::ServerStatus {
-                kind,
-                url,
-                status,
-                message,
-            } => {
-                tr!(
-                    lang,
-                    m::SERVER_STATUS,
-                    server = server::name(*kind, lang),
-                    url = url,
-                    status = status,
-                    message = message
-                )
-            }
-            Error::ServerReply { kind, url, detail } => tr!(
-                lang,
-                m::SERVER_REPLY,
-                server = server::name(*kind, lang),
-                url = url,
-                detail = detail
-            ),
             Error::Session(error) => error.message(lang),
             Error::Machine(error) => error.message(lang),
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
@@ -2622,10 +2551,12 @@ mod tests {
     #[test]
     fn the_errors_of_a_backend_name_its_kind() {
         // AGL-038, D1: the Strata server is not called llama-server.
-        let reply = |kind| Error::ServerReply {
-            kind,
-            url: "http://127.0.0.1:18088".into(),
-            detail: "the engine stopped".into(),
+        let reply = |kind| {
+            Error::from(crate::backend::error::Error::ServerReply {
+                kind,
+                url: "http://127.0.0.1:18088".into(),
+                detail: "the engine stopped".into(),
+            })
         };
         let strata = reply(crate::settings::ServerKind::Strata);
         assert_eq!(
