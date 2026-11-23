@@ -19,7 +19,7 @@ use crate::error::Error;
 use crate::backend::error::Error as BackendError;
 use error::ServerOwner;
 use crate::engine::error::Error as EngineError;
-use crate::forge::Workspace;
+use agentlibre_forge::forge::Workspace;
 use crate::i18n::server as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::{ServerFile, ServerKind};
@@ -2131,7 +2131,7 @@ mod tests {
         ));
     }
 
-    use crate::forge::Workspace;
+    use agentlibre_forge::forge::Workspace;
 
     /// A project registered under `origin`, with its own `[server]`.
     fn project(origin: Option<&str>, server: ServerFile) -> Workspace {

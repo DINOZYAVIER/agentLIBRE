@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 
 use crate::backend::{Backend, Message};
 use crate::error;
-use crate::forge::sha256;
+use agentlibre_forge::forge::sha256;
 use agentlibre_common::i18n::{Lang, Msg};
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;

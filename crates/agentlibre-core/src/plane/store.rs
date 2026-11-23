@@ -16,7 +16,7 @@ use agentlibre_common::paths::Paths;
 use agentlibre_common::error::Error as CommonError;
 
 /// The file of a plane in its store (D16).
-pub const PLANE_FILE: &str = "plane.nix";
+pub use agentlibre_common::settings::PLANE_FILE;
 
 /// The only `format` of the file (D16).
 const FORMAT: i64 = 1;
@@ -204,8 +204,8 @@ impl PlaneFile {
 
     /// The plane's store as the forge acts on it (D9): its `forge/` is a
     /// workspace's, and the plane needs no workspace's marker.
-    pub fn forge_store(&self) -> crate::forge::Workspace {
-        crate::forge::Workspace {
+    pub fn forge_store(&self) -> agentlibre_forge::forge::Workspace {
+        agentlibre_forge::forge::Workspace {
             project: self.dir.clone(),
             identity: format!("plane:{}", self.id),
             key: self.name.clone(),

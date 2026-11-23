@@ -17,7 +17,6 @@ pub(crate) use agentlibre_core::{
     attach,
     backend,
     engine,
-    forge,
     function,
     i18n,
     media,
@@ -34,6 +33,7 @@ pub(crate) use agentlibre_core::{
     whisper,
     wsl,
 };
+pub(crate) use agentlibre_forge::forge;
 
 use std::ffi::OsString;
 use std::io::{self, Write};

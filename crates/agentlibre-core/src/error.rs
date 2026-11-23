@@ -12,7 +12,7 @@ pub enum Error {
     PlaneWithResume,
     /// The forge: its git, its markers and stores, its artifacts and their
     /// states (AGL-005 and after). Its own type, wrapped (AGL-121, D66).
-    Forge(crate::forge::error::Error),
+    Forge(agentlibre_forge::forge::error::Error),
     /// The engine and its server: found, launched, its unit, its port, the
     /// human's answers about it (D147, D149; AGL-024 and after). Its own type,
     /// wrapped (AGL-121, D66).
@@ -136,9 +136,20 @@ impl From<crate::memory::Error> for Error {
     }
 }
 
-impl From<crate::forge::error::Error> for Error {
+impl From<agentlibre_forge::Error> for Error {
+    /// The stores crate's error as agl's, each half kept as itself
+    /// (AGL-121, D77).
+    fn from(source: agentlibre_forge::Error) -> Error {
+        match source {
+            agentlibre_forge::Error::Forge(error) => Error::Forge(error),
+            agentlibre_forge::Error::Common(error) => Error::Common(error),
+        }
+    }
+}
+
+impl From<agentlibre_forge::forge::error::Error> for Error {
     /// The forge's own error as agl's (AGL-121, D66).
-    fn from(source: crate::forge::error::Error) -> Error {
+    fn from(source: agentlibre_forge::forge::error::Error) -> Error {
         Error::Forge(source)
     }
 }

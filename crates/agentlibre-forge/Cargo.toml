@@ -1,0 +1,15 @@
+[package]
+name = "agentlibre-forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "agentLIBRE's stores crate, above the core: the forge, memory's store half, the file replace (AGL-121, D77, D78, D79, D80)"
+
+[dependencies]
+agentlibre-common = { path = "../agentlibre-common" }
+ring = "0.17"
+serde_json = "1"
+
+[dev-dependencies]
+agentlibre-common = { path = "../agentlibre-common", features = ["testutil"] }

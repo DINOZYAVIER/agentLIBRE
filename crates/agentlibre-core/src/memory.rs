@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::error;
-use crate::forge::task_spec::slug;
+use agentlibre_forge::forge::task_spec::slug;
 use agentlibre_common::file::write_atomic;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::tr;
@@ -253,9 +253,10 @@ pub struct StoreHome {
 }
 
 impl StoreHome {
-    fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), error::Error> {
+    fn resolved(&self) -> Result<(agentlibre_forge::forge::Workspace, Vec<String>), error::Error> {
         let paths = agentlibre_common::paths::Paths::from_env(|name| std::env::var_os(name))?;
-        crate::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
+        agentlibre_forge::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
+            .map_err(Into::into)
     }
 }
 
@@ -271,7 +272,7 @@ impl Home for StoreHome {
 
     fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
         let (ws, mut lines) = self.resolved()?;
-        lines.extend(crate::forge::materialize(&ws, self.lang)?);
+        lines.extend(agentlibre_forge::forge::materialize(&ws, self.lang)?);
         Ok((ws.dir.join("memory"), lines))
     }
 }
@@ -280,7 +281,7 @@ impl Home for StoreHome {
 /// is created.
 pub fn of_store(store: &Path) -> Option<PathBuf> {
     store
-        .join(crate::forge::MARKER_FILE)
+        .join(agentlibre_forge::forge::MARKER_FILE)
         .is_file()
         .then(|| store.join("memory"))
 }

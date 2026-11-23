@@ -17,7 +17,7 @@ use crate::backend::strata::Strata;
 use crate::backend::{Backend, ReasoningLevel};
 use crate::engine::{Autostart, Engine, Others, ServerProgress, rebind_url, user_manager};
 use crate::error::Error;
-use crate::forge::Workspace;
+use agentlibre_forge::forge::Workspace;
 use crate::function::Function;
 use agentlibre_common::i18n::{m, Lang};
 use crate::machine::Machine;

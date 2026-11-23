@@ -32,6 +32,10 @@ use crate::style::{COLOR_KEYS, Role, Style};
 /// (AGL-039, D11).
 pub const SETTINGS_FILE: &str = "settings.nix";
 
+/// The file of a plane in its store (AGL-077, D16). A store that holds
+/// one is a plane's, not a workspace's, and takes no workspace marker.
+pub const PLANE_FILE: &str = "plane.nix";
+
 /// Function used when no settings name one (D39, D58; AGL-052, D16).
 const DEFAULT_FUNCTION: &str = "agentLIBRE-cpu-low";
 

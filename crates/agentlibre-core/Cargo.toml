@@ -13,6 +13,7 @@ testutil = ["agentlibre-common/testutil"]
 [dependencies]
 agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-common = { path = "../agentlibre-common" }
+agentlibre-forge = { path = "../agentlibre-forge" }
 agentlibre-proto = { path = "../agentlibre-proto" }
 base64 = "0.23"
 hex = "0.4"

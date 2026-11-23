@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use super::{check_name, Function};
 use crate::error::Error;
 use super::error::Error as FunctionError;
-use crate::forge::Workspace;
+use agentlibre_forge::forge::Workspace;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::nix;
 use agentlibre_common::paths::Paths;

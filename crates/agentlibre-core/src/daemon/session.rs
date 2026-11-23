@@ -42,7 +42,7 @@ impl Daemon {
         let cwd = PathBuf::from(&open.dir);
         let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
         let project = forge::project_of(&self.paths, &cwd, auto_rehome, lang, &|options| {
-            Err(crate::forge::error::Error::RehomeNoStore {
+            Err(agentlibre_forge::forge::error::Error::RehomeNoStore {
                 stores: options[..options.len().saturating_sub(1)].to_vec(),
             }
             .into())

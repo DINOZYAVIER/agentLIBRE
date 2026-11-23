@@ -612,7 +612,7 @@ pub fn materialize(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Resul
     let marker_path = ws.dir.join(MARKER_FILE);
     // A plane's store is made by `agl plane new`, with its own file, and
     // takes no workspace's marker (AGL-077, D9, D16).
-    if marker_path.is_file() || ws.dir.join(crate::plane::PLANE_FILE).is_file() {
+    if marker_path.is_file() || ws.dir.join(agentlibre_common::settings::PLANE_FILE).is_file() {
         return Ok(Vec::new());
     }
     fs::create_dir_all(&ws.dir)

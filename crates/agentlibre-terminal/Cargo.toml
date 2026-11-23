@@ -23,6 +23,7 @@ path = "src/bin/agentLIBRE.rs"
 agentlibre-bridge = { path = "../agentlibre-bridge" }
 agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-core = { path = "../agentlibre-core" }
+agentlibre-forge = { path = "../agentlibre-forge" }
 agentlibre-proto = { path = "../agentlibre-proto" }
 libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }

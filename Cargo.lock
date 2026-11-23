@@ -9,6 +9,7 @@ dependencies = [
  "agentlibre-bridge",
  "agentlibre-common",
  "agentlibre-core",
+ "agentlibre-forge",
  "agentlibre-proto",
  "libc",
  "pulldown-cmark",
@@ -53,6 +54,7 @@ version = "0.0.2"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
+ "agentlibre-forge",
  "agentlibre-proto",
  "base64",
  "hex",
@@ -60,6 +62,15 @@ dependencies = [
  "ring",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "agentlibre-forge"
+version = "0.0.2"
+dependencies = [
+ "agentlibre-common",
+ "ring",
+ "serde_json",
 ]
 
 [[package]]

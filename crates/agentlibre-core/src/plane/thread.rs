@@ -470,8 +470,8 @@ mod tests {
     fn run(dir: &TempDir, fake: Arc<Fake>) -> Run {
         let cwd = dir.0.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let (project, _) = crate::forge::resolve(&dir.0.join("data"), &cwd, Lang::En, true, &|_| {
-            Err(Error::Common(agentlibre_common::error::Error::Interrupted))
+        let (project, _) = agentlibre_forge::forge::resolve(&dir.0.join("data"), &cwd, Lang::En, true, &|_| {
+            Err(agentlibre_forge::Error::Common(agentlibre_common::error::Error::Interrupted))
         })
         .unwrap();
         let function =

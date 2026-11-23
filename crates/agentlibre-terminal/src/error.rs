@@ -74,7 +74,21 @@ macro_rules! from_core {
     };
 }
 
-from_core!(backend, daemon, engine, forge, function, machine, plane, session);
+from_core!(backend, daemon, engine, function, machine, plane, session);
+
+/// The stores crate's errors are the core's, and so the terminal's
+/// (AGL-121, D77).
+impl From<agentlibre_forge::forge::error::Error> for Error {
+    fn from(source: agentlibre_forge::forge::error::Error) -> Error {
+        Error::Core(source.into())
+    }
+}
+
+impl From<agentlibre_forge::Error> for Error {
+    fn from(source: agentlibre_forge::Error) -> Error {
+        Error::Core(source.into())
+    }
+}
 
 /// A core module whose error is `module::Error`.
 macro_rules! from_core_file {

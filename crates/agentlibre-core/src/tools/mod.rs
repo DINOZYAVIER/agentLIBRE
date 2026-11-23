@@ -49,7 +49,7 @@ pub struct ForgeEnv<'a> {
     pub data: &'a Path,
     /// The plane's forge, which the tool acts on in a plane; the
     /// workspace's by `store` (AGL-077, D9).
-    pub plane: Option<&'a crate::forge::Workspace>,
+    pub plane: Option<&'a agentlibre_forge::forge::Workspace>,
 }
 
 /// A successful write of the `forge` tool: the artifact it touched, as
@@ -295,7 +295,7 @@ pub fn forge(
     {
         return forge_run(plane, args, lang, output);
     }
-    match crate::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
+    match agentlibre_forge::forge::resolve_store(env.data, workspace, lang, env.auto_rehome) {
         Ok((ws, lines)) => {
             let (mut result, write) = forge_run(&ws, args, lang, output);
             // A store that moved or was adopted on the way: say so, once.
@@ -313,7 +313,7 @@ pub fn forge(
 /// result and, for a successful write, the artifact it touched; the
 /// entry of the tests.
 pub fn forge_run(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     args: &ForgeArgs,
     lang: agentlibre_common::i18n::Lang,
     output: &Output<'_>,
@@ -416,6 +416,12 @@ impl From<crate::error::Error> for Refusal {
     }
 }
 
+impl From<agentlibre_forge::Error> for Refusal {
+    fn from(error: agentlibre_forge::Error) -> Refusal {
+        Refusal::Error(error.into())
+    }
+}
+
 impl From<String> for Refusal {
     fn from(text: String) -> Refusal {
         Refusal::Text(text)
@@ -442,8 +448,8 @@ fn told(result: Result<String, Refusal>, lang: agentlibre_common::i18n::Lang) ->
 
 /// `forge list` (AGL-008): the store's artifacts, one line each — name,
 /// type, status, updated, deps; no git flags (they are the human's).
-fn forge_list(ws: &crate::forge::Workspace) -> Result<String, Refusal> {
-    use crate::forge::{self, Header};
+fn forge_list(ws: &agentlibre_forge::forge::Workspace) -> Result<String, Refusal> {
+    use agentlibre_forge::forge::{self, Header};
     let files = forge::artifact_files(&ws.dir)?;
     // One evaluation of all the front matters (AGL-041).
     let headers = forge::read_headers(&files)?;
@@ -476,12 +482,12 @@ fn forge_list(ws: &crate::forge::Workspace) -> Result<String, Refusal> {
 /// `forge show` (AGL-008): the rendered artifact, cut like any tool's output
 /// (AGL-049); the whole is the artifact's own file.
 fn forge_show(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
     output: &Output<'_>,
 ) -> Result<String, Refusal> {
-    use crate::forge;
+    use agentlibre_forge::forge;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "show", "name"))?;
     let artifact = forge::find_artifact(ws, name)?;
     let text = forge::render(&artifact);
@@ -491,7 +497,7 @@ fn forge_show(
 /// `forge new` (AGL-008): the scaffold of a new task-spec, the same
 /// engine path as the CLI's `forge new`; its name is the one the tool made.
 fn forge_new(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     title: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
@@ -500,7 +506,7 @@ fn forge_new(
     let title = title.as_deref().ok_or_else(|| missing_field(lang, "new", "title"))?;
     // The marker line of a store materialized by the write is not tool
     // output.
-    let created = crate::forge::new_task_spec(ws, lang, title, None)?;
+    let created = agentlibre_forge::forge::new_task_spec(ws, lang, title, None)?;
     let content = tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display()).to_owned();
     Ok((content, created.name))
 }
@@ -511,14 +517,14 @@ fn forge_new(
 /// which stays append-only through `append` (D4, AGL-032); `updated`
 /// is bumped and the file is re-rendered from the parsed form.
 fn forge_edit(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     old: &Option<String>,
     new: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use crate::forge::task_spec::Status;
-    use crate::forge;
+    use agentlibre_forge::forge::task_spec::Status;
+    use agentlibre_forge::forge;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "edit", "name"))?;
@@ -611,14 +617,14 @@ fn progress_range(body: &str) -> Option<(usize, usize)> {
 /// allowed while `open` or `in-progress` (D4, AGL-032); `updated` is
 /// bumped.
 fn forge_append(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     section: &Option<String>,
     text: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use crate::forge::task_spec::Status;
-    use crate::forge;
+    use agentlibre_forge::forge::task_spec::Status;
+    use agentlibre_forge::forge;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "append", "name"))?;
@@ -684,18 +690,17 @@ fn forge_append(
 /// from a terminal state (`done`, `canceled`) points to the new-spec
 /// convention with a `supersedes` link (D3, AGL-032).
 fn forge_status(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     state: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use crate::error::Error;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "status", "name"))?;
     let state = state.as_deref().ok_or_else(|| missing_field(lang, "status", "state"))?;
-    let changed = crate::forge::change_status(ws, name, state).map_err(|error| match error {
-        Error::Forge(crate::forge::error::Error::NotTaskSpec { name, type_name }) => {
+    let changed = agentlibre_forge::forge::change_status(ws, name, state).map_err(|error| match error {
+        agentlibre_forge::Error::Forge(agentlibre_forge::forge::error::Error::NotTaskSpec { name, type_name }) => {
             not_task_spec(lang, &name, type_name, "status")
         }
         error => error.into(),
@@ -715,11 +720,11 @@ fn forge_status(
 /// pointing to `status canceled` first; `done` refuses — a historical
 /// fact.
 fn forge_remove(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use crate::forge::task_spec::Status;
+    use agentlibre_forge::forge::task_spec::Status;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "remove", "name"))?;
@@ -732,7 +737,7 @@ fn forge_remove(
     if status == Status::Done {
         return Err(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name).into());
     }
-    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(crate::forge::error::Error::Remove {
+    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(agentlibre_forge::forge::error::Error::Remove {
         path: artifact.path.clone(),
         source,
     }))?;
@@ -757,13 +762,13 @@ fn rename_valid_name(name: &str) -> bool {
 /// and only then the old file removed, so a failure never leaves a
 /// dangling reference. The success reports the new name for the event.
 fn forge_rename(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     new: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
     use crate::error::Error;
-    use crate::forge;
+    use agentlibre_forge::forge;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "rename", "name"))?;
@@ -784,7 +789,7 @@ fn forge_rename(
     let taken = forge::store_names(ws)?;
     let new_path = artifact.path.with_file_name(format!("{new}.md"));
     if taken.iter().any(|taken| taken == new) || new_path.exists() {
-        return Err(Error::from(crate::forge::error::Error::NameTaken {
+        return Err(Error::from(agentlibre_forge::forge::error::Error::NameTaken {
             name: new.to_owned(),
             dir: ws.dir.join("forge"),
         })
@@ -818,7 +823,7 @@ fn forge_rename(
             forge::write_artifact(&other)?;
         }
     }
-    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(crate::forge::error::Error::Remove {
+    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(agentlibre_forge::forge::error::Error::Remove {
         path: artifact.path.clone(),
         source,
     }))?;
@@ -848,13 +853,13 @@ fn not_task_spec(
 /// The task-spec `name` of the store with its status, for a write of
 /// `action`; the writes apply to the `task-spec` type only.
 fn task_spec_of(
-    ws: &crate::forge::Workspace,
+    ws: &agentlibre_forge::forge::Workspace,
     name: &str,
     action: &str,
     lang: agentlibre_common::i18n::Lang,
-) -> Result<(crate::forge::Artifact, crate::forge::task_spec::Status), Refusal> {
-    use crate::forge::task_spec::{self, Status};
-    let artifact = crate::forge::find_artifact(ws, name)?;
+) -> Result<(agentlibre_forge::forge::Artifact, agentlibre_forge::forge::task_spec::Status), Refusal> {
+    use agentlibre_forge::forge::task_spec::{self, Status};
+    let artifact = agentlibre_forge::forge::find_artifact(ws, name)?;
     if artifact.type_name != task_spec::TYPE {
         return Err(not_task_spec(lang, name, artifact.type_name, action));
     }

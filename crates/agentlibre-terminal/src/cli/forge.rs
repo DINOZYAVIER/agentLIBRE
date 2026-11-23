@@ -10,6 +10,7 @@ use std::process::{ExitCode, Stdio};
 
 use agentlibre_common::clock;
 use crate::error::Error;
+#[cfg(test)]
 use crate::error::CoreError;
 use crate::forge;
 use crate::forge::task_spec;
@@ -181,7 +182,7 @@ pub fn project_of(
 /// The store ask: the names of the stores plus a new store. On a
 /// terminal the human picks one; off a terminal the error points at
 /// `forge rehome`.
-pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, CoreError> {
+pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, agentlibre_forge::Error> {
     let stores = options[..options.len() - 1].to_vec();
     if !agentlibre_common::tty::is_interactive() {
         return Err(crate::forge::error::Error::RehomeNoStore { stores }.into());
@@ -609,7 +610,7 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
     // same clean error — the store must be the toplevel.
     let toplevel = match forge::toplevel(dir) {
         Ok(toplevel) => toplevel,
-        Err(CoreError::Forge(crate::forge::error::Error::NotInRepository { .. })) => {
+        Err(agentlibre_forge::Error::Forge(crate::forge::error::Error::NotInRepository { .. })) => {
             return Err(crate::forge::error::Error::StoreNotRepository {
                 dir: dir.to_path_buf(),
             }

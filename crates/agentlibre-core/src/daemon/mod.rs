@@ -22,7 +22,7 @@ use crate::backend::strata::Strata;
 use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
 use crate::engine::{Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name, unit_name_id};
 use crate::error::Error;
-use crate::forge;
+use agentlibre_forge::forge;
 use crate::function::Function;
 use crate::grammar::{Expr, Grammar};
 use agentlibre_common::i18n::{Lang, m};
