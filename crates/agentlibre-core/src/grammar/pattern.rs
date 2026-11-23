@@ -3,6 +3,8 @@
 //! pattern covers the whole value.
 
 use super::Expr;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
 
 /// Why a pattern is rejected, at byte `offset` of the pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +37,63 @@ pub enum PatternErrorKind {
     /// end is `\d`, `\w` or `\s`.
     BadRange,
 }
+
+impl PatternError {
+    /// The message of `self` in `lang` (AGL-121, D66).
+    pub fn message(&self, lang: Lang) -> String {
+        use PatternErrorKind as K;
+        let at = self.offset;
+        match &self.kind {
+            K::Anchor => tr!(lang, PATTERN_ANCHOR, at = at),
+            K::GroupSyntax => tr!(lang, PATTERN_GROUP_SYNTAX, at = at),
+            K::Escape(c) => tr!(lang, PATTERN_ESCAPE, at = at, c = c),
+            K::TrailingBackslash => tr!(lang, PATTERN_TRAILING_BACKSLASH, at = at),
+            K::NothingToRepeat => tr!(lang, PATTERN_NOTHING_TO_REPEAT, at = at),
+            K::BadRepetition => tr!(lang, PATTERN_BAD_REPETITION, at = at),
+            K::UnbalancedGroup => tr!(lang, PATTERN_UNBALANCED_GROUP, at = at),
+            K::BadClass => tr!(lang, PATTERN_BAD_CLASS, at = at),
+            K::BadRange => tr!(lang, PATTERN_BAD_RANGE, at = at),
+        }
+    }
+}
+
+/// `PatternError`'s kinds, for `FunctionProblem::Pattern`.
+const PATTERN_ANCHOR: Msg = Msg {
+    en: "pattern byte {at}: remove `^`/`$`; a pattern covers the whole value",
+    uk: "шаблон, байт {at}: прибери `^`/`$`; шаблон і так охоплює все значення",
+};
+const PATTERN_GROUP_SYNTAX: Msg = Msg {
+    en: "pattern byte {at}: `(?` groups are not supported",
+    uk: "шаблон, байт {at}: групи `(?` не підтримуються",
+};
+const PATTERN_ESCAPE: Msg = Msg {
+    en: "pattern byte {at}: `\\{c}` is not supported",
+    uk: "шаблон, байт {at}: `\\{c}` не підтримується",
+};
+const PATTERN_TRAILING_BACKSLASH: Msg = Msg {
+    en: "pattern byte {at}: `\\` at the end",
+    uk: "шаблон, байт {at}: `\\` у кінці",
+};
+const PATTERN_NOTHING_TO_REPEAT: Msg = Msg {
+    en: "pattern byte {at}: nothing to repeat",
+    uk: "шаблон, байт {at}: нема чого повторювати",
+};
+const PATTERN_BAD_REPETITION: Msg = Msg {
+    en: "pattern byte {at}: use `{{n}}`, `{{n,}}` or `{{n,m}}` with n <= m",
+    uk: "шаблон, байт {at}: потрібно `{{n}}`, `{{n,}}` або `{{n,m}}` з n <= m",
+};
+const PATTERN_UNBALANCED_GROUP: Msg = Msg {
+    en: "pattern byte {at}: unbalanced parenthesis",
+    uk: "шаблон, байт {at}: незакрита або зайва дужка",
+};
+const PATTERN_BAD_CLASS: Msg = Msg {
+    en: "pattern byte {at}: bad class; escape `[` and `]` inside it",
+    uk: "шаблон, байт {at}: некоректний клас; екрануй `[` і `]` усередині",
+};
+const PATTERN_BAD_RANGE: Msg = Msg {
+    en: "pattern byte {at}: bad class range",
+    uk: "шаблон, байт {at}: некоректний діапазон у класі",
+};
 
 /// Parses `pattern` into an expression.
 pub fn parse(pattern: &str) -> Result<Expr, PatternError> {

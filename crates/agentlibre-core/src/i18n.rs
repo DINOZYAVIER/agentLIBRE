@@ -4,7 +4,6 @@ use std::ffi::OsString;
 
 use crate::error::{Error, Expected, FunctionProblem, NameProblem, ServerOwner};
 use crate::function::Function;
-use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
 
 /// A language of CLI messages.
@@ -1769,60 +1768,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const FUNC_SERVER_KEY_OF_OTHER_KIND: Msg = Msg {
         en: "{key} belongs to the {kind} kind, not to the model's `kind`",
         uk: "{key} належить до {kind}-виду, не до `kind` цієї моделі",
-    };
-
-    /// `PatternErrorKind::Anchor`.
-    pub const PATTERN_ANCHOR: Msg = Msg {
-        en: "pattern byte {at}: remove `^`/`$`; a pattern covers the whole value",
-        uk: "шаблон, байт {at}: прибери `^`/`$`; шаблон і так охоплює все значення",
-    };
-
-    /// `PatternErrorKind::GroupSyntax`.
-    pub const PATTERN_GROUP_SYNTAX: Msg = Msg {
-        en: "pattern byte {at}: `(?` groups are not supported",
-        uk: "шаблон, байт {at}: групи `(?` не підтримуються",
-    };
-
-    /// `PatternErrorKind::Escape`.
-    pub const PATTERN_ESCAPE: Msg = Msg {
-        en: "pattern byte {at}: `\\{c}` is not supported",
-        uk: "шаблон, байт {at}: `\\{c}` не підтримується",
-    };
-
-    /// `PatternErrorKind::TrailingBackslash`.
-    pub const PATTERN_TRAILING_BACKSLASH: Msg = Msg {
-        en: "pattern byte {at}: `\\` at the end",
-        uk: "шаблон, байт {at}: `\\` у кінці",
-    };
-
-    /// `PatternErrorKind::NothingToRepeat`.
-    pub const PATTERN_NOTHING_TO_REPEAT: Msg = Msg {
-        en: "pattern byte {at}: nothing to repeat",
-        uk: "шаблон, байт {at}: нема чого повторювати",
-    };
-
-    /// `PatternErrorKind::BadRepetition`.
-    pub const PATTERN_BAD_REPETITION: Msg = Msg {
-        en: "pattern byte {at}: use `{{n}}`, `{{n,}}` or `{{n,m}}` with n <= m",
-        uk: "шаблон, байт {at}: потрібно `{{n}}`, `{{n,}}` або `{{n,m}}` з n <= m",
-    };
-
-    /// `PatternErrorKind::UnbalancedGroup`.
-    pub const PATTERN_UNBALANCED_GROUP: Msg = Msg {
-        en: "pattern byte {at}: unbalanced parenthesis",
-        uk: "шаблон, байт {at}: незакрита або зайва дужка",
-    };
-
-    /// `PatternErrorKind::BadClass`.
-    pub const PATTERN_BAD_CLASS: Msg = Msg {
-        en: "pattern byte {at}: bad class; escape `[` and `]` inside it",
-        uk: "шаблон, байт {at}: некоректний клас; екрануй `[` і `]` усередині",
-    };
-
-    /// `PatternErrorKind::BadRange`.
-    pub const PATTERN_BAD_RANGE: Msg = Msg {
-        en: "pattern byte {at}: bad class range",
-        uk: "шаблон, байт {at}: некоректний діапазон у класі",
     };
 
     /// The label of streamed thinking (D109), in caps as the tool's
@@ -3601,7 +3546,7 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::OnLimitCycle => tr!(lang, m::FUNC_ON_LIMIT_CYCLE).to_string(),
         P::Unreachable => tr!(lang, m::FUNC_UNREACHABLE).to_string(),
         P::NoThinking { format } => tr!(lang, m::FUNC_NO_THINKING, format = format),
-        P::Pattern(error) => pattern_error(error, lang),
+        P::Pattern(error) => error.message(lang),
         P::PatternMayEndValue { end } => tr!(lang, m::FUNC_PATTERN_MAY_END_VALUE, end = end),
         P::EmptyEnum => tr!(lang, m::FUNC_EMPTY_ENUM).to_string(),
         P::BadRange => tr!(lang, m::FUNC_BAD_RANGE).to_string(),
@@ -3623,22 +3568,6 @@ fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {
         P::BadSourceUrl => tr!(lang, m::FUNC_BAD_SOURCE_URL).to_string(),
         P::BadSourceSha256 => tr!(lang, m::FUNC_BAD_SOURCE_SHA256).to_string(),
         P::BadSourceSize => tr!(lang, m::FUNC_BAD_SOURCE_SIZE).to_string(),
-    }
-}
-
-fn pattern_error(error: &PatternError, lang: Lang) -> String {
-    use PatternErrorKind as K;
-    let at = error.offset;
-    match &error.kind {
-        K::Anchor => tr!(lang, m::PATTERN_ANCHOR, at = at),
-        K::GroupSyntax => tr!(lang, m::PATTERN_GROUP_SYNTAX, at = at),
-        K::Escape(c) => tr!(lang, m::PATTERN_ESCAPE, at = at, c = c),
-        K::TrailingBackslash => tr!(lang, m::PATTERN_TRAILING_BACKSLASH, at = at),
-        K::NothingToRepeat => tr!(lang, m::PATTERN_NOTHING_TO_REPEAT, at = at),
-        K::BadRepetition => tr!(lang, m::PATTERN_BAD_REPETITION, at = at),
-        K::UnbalancedGroup => tr!(lang, m::PATTERN_UNBALANCED_GROUP, at = at),
-        K::BadClass => tr!(lang, m::PATTERN_BAD_CLASS, at = at),
-        K::BadRange => tr!(lang, m::PATTERN_BAD_RANGE, at = at),
     }
 }
 
