@@ -151,7 +151,7 @@ fn memory_tool(
     output_tokens: usize,
     backend: &dyn Backend,
 ) -> (ToolResult, Option<memory::Write>) {
-    let args = memory::Args::from_call(call);
+    let args = super::memory::Args::from_call(call);
     let fail = |content: String| {
         (
             ToolResult {
@@ -177,7 +177,7 @@ fn memory_tool(
             None => return fail("The memory of this workspace has no entries yet.".into()),
         }
     };
-    let (mut result, write) = memory::run(
+    let (mut result, write) = super::memory::run(
         &dir,
         &args,
         call_text,

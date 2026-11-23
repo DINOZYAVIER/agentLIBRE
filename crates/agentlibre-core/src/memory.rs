@@ -10,7 +10,6 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::action::Outcome;
 use crate::error;
 use crate::forge::task_spec::slug;
 use agentlibre_common::file::write_atomic;
@@ -57,7 +56,88 @@ const REMOVE_FAILED: Msg = Msg {
     en: "not removed: {reason}",
     uk: "не видалено: {reason}",
 };
-use crate::tools::{Output, ToolResult, edit, limited};
+
+/// Why the memory did not do what it was asked: a refusal of the store,
+/// in the words the model and the human both read (AGL-121, D80).
+#[derive(Debug)]
+pub enum Refusal {
+    /// `add` without some of its fields.
+    Missing { title: bool, hook: bool, text: bool },
+    /// `update` with neither a title nor a hook.
+    NoUpdate,
+    /// No entry of that name.
+    NoEntry { name: String },
+    /// The memory's folder cannot be made.
+    CreateDir { dir: PathBuf, source: std::io::Error },
+    /// The memory's folder cannot be locked (D49).
+    Lock { dir: PathBuf, source: std::io::Error },
+    /// The title has no letters or digits to make a file name.
+    NoFileName,
+    /// The entry cannot be written.
+    WriteEntry(CommonError),
+    /// The index cannot be written.
+    WriteIndex(CommonError),
+    /// The index cannot be read.
+    ReadIndex(std::io::Error),
+    /// The entry cannot be read.
+    ReadEntry { name: String },
+    /// The entry is empty.
+    EmptyEntry { name: String },
+    /// The entry has no `# ` heading.
+    NoHeading { name: String },
+    /// No index line for the entry.
+    NoIndexLine { name: String },
+    /// The entry cannot be removed.
+    RemoveEntry(std::io::Error),
+    /// The replace in the entry was refused.
+    Replace {
+        name: String,
+        refusal: crate::replace::Refusal,
+    },
+}
+
+impl Refusal {
+    /// The refusal in English, as the tool has always answered it.
+    pub fn text(self) -> String {
+        match self {
+            Refusal::Missing { title, hook, text } => {
+                let mut missing: Vec<&str> = Vec::new();
+                if title {
+                    missing.push("a title");
+                }
+                if hook {
+                    missing.push("a hook (one line)");
+                }
+                if text {
+                    missing.push("a text");
+                }
+                let list = match missing.split_last() {
+                    Some((last, rest)) if !rest.is_empty() => {
+                        format!("{} and {last}", rest.join(", "))
+                    }
+                    _ => missing.concat(),
+                };
+                format!("`add` needs {list}.")
+            }
+            Refusal::NoUpdate => "`update` needs a title and/or a hook.".into(),
+            Refusal::NoEntry { name } => format!("No memory entry `{name}`."),
+            Refusal::CreateDir { dir, source } => {
+                format!("Cannot create {}: {source}", dir.display())
+            }
+            Refusal::Lock { dir, source } => format!("Cannot lock {}: {source}", dir.display()),
+            Refusal::NoFileName => "The title needs letters or digits to make a file name.".into(),
+            Refusal::WriteEntry(error) => format!("Cannot write the entry: {error:?}"),
+            Refusal::WriteIndex(error) => format!("Cannot write the index: {error:?}"),
+            Refusal::ReadIndex(error) => format!("Cannot read the index: {error}"),
+            Refusal::ReadEntry { name } => format!("Cannot read the entry `{name}`."),
+            Refusal::EmptyEntry { name } => format!("The entry `{name}` is empty."),
+            Refusal::NoHeading { name } => format!("The entry `{name}` has no `# ` heading."),
+            Refusal::NoIndexLine { name } => format!("No index line for `{name}` in {INDEX}."),
+            Refusal::RemoveEntry(error) => format!("Cannot remove the entry: {error}"),
+            Refusal::Replace { name, refusal } => refusal.text(&format!("{name}.md")),
+        }
+    }
+}
 
 /// The index file of the memory directory (M31).
 pub const INDEX: &str = "MEMORY.md";
@@ -66,7 +146,7 @@ pub const INDEX: &str = "MEMORY.md";
 pub const SUMMARIES: &str = "summaries";
 
 /// The most of the index that goes into a step's prompt (M33).
-const INDEX_CAP: usize = 4 * 1024;
+pub(crate) const INDEX_CAP: usize = 4 * 1024;
 
 /// What is shown of a line that does not fit `INDEX_CAP` by itself (AGL-058,
 /// D10): its name and the start of its text, leaving room for the other lines.
@@ -244,79 +324,10 @@ pub struct Write {
     pub text: Option<String>,
 }
 
-/// The arguments of the `memory` tool (M32); a field that the action does
-/// not use is empty.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Args {
-    /// `workspace`: in a plane, the workspace's memory (AGL-077, D8).
-    pub store: String,
-    pub action: String,
-    pub name: String,
-    pub title: String,
-    pub hook: String,
-    pub text: String,
-    pub old: String,
-    pub new: String,
-}
 
-impl Args {
-    /// The tool's arguments from a parsed call: a field that is absent is
-    /// empty.
-    pub fn from_call(call: &crate::backend::ToolCall) -> Args {
-        let text = |name: &str| call.text(name).unwrap_or_default().to_owned();
-        Args {
-            store: text("store"),
-            action: text("action"),
-            name: text("name"),
-            title: text("title"),
-            hook: text("hook"),
-            text: text("text"),
-            old: text("old"),
-            new: text("new"),
-        }
-    }
-}
 
-fn fail(content: impl Into<String>) -> (ToolResult, Option<Write>) {
-    (
-        ToolResult {
-            outcome: Outcome::Fail,
-            content: content.into(),
-        },
-        None,
-    )
-}
 
-fn ok(content: impl Into<String>, write: Write) -> (ToolResult, Option<Write>) {
-    (
-        ToolResult {
-            outcome: Outcome::Ok,
-            content: content.into(),
-        },
-        Some(write),
-    )
-}
 
-/// Runs one action of the tool over the memory directory `dir` (M32).
-/// `call_text` is the text of the call that preceded it (AGL-029, D1): the
-/// body of `add` when its `text` field is empty; the other actions ignore it.
-pub fn run(
-    dir: &Path,
-    args: &Args,
-    call_text: Option<&str>,
-    output: &Output<'_>,
-) -> (ToolResult, Option<Write>) {
-    match args.action.as_str() {
-        "add" => add(dir, &args.title, &args.hook, &args.text, call_text),
-        "show" => (show(dir, &args.name, output), None),
-        "edit" => edit_entry(dir, &args.name, &args.old, &args.new),
-        "update" => update(dir, &args.name, &args.title, &args.hook),
-        "remove" => remove(dir, &args.name),
-        other => fail(format!(
-            "Unknown action `{other}`; use add, show, edit, update or remove."
-        )),
-    }
-}
 
 /// A line of the index, as one line of text.
 fn one_line(text: &str) -> String {
@@ -338,7 +349,7 @@ fn valid_name(name: &str) -> bool {
         && format!("{name}.md") != INDEX
 }
 
-fn entry_path(dir: &Path, name: &str) -> PathBuf {
+pub fn entry_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.md"))
 }
 
@@ -385,69 +396,42 @@ fn lock_folder(dir: &Path) -> std::io::Result<FolderLock> {
 
 /// The lock of `dir` for a change that needs the folder to exist: `None`
 /// when it does not, as there is nothing to change then.
-fn lock_existing(dir: &Path) -> Result<Option<FolderLock>, String> {
+fn lock_existing(dir: &Path) -> Result<Option<FolderLock>, Refusal> {
     match lock_folder(dir) {
         Ok(lock) => Ok(Some(lock)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Cannot lock {}: {error}", dir.display())),
+        Err(source) => Err(Refusal::Lock {
+            dir: dir.into(),
+            source,
+        }),
     }
 }
 
 /// `add title hook text` (M32): writes `<slug>.md` and appends its index
-/// line. The body is the `text`; when it is empty, the `call_text` that
-/// preceded the call (AGL-029, D1). A failure names the missing fields
-/// (AGL-029, D2).
-pub fn add(
-    dir: &Path,
-    title: &str,
-    hook: &str,
-    text: &str,
-    call_text: Option<&str>,
-) -> (ToolResult, Option<Write>) {
+/// line. A refusal names the missing fields (AGL-029, D2).
+pub fn add(dir: &Path, title: &str, hook: &str, body: &str) -> Result<Write, Refusal> {
     let title = clean_title(title);
     let hook = one_line(hook);
-    let call_body = call_text.map(str::trim).filter(|text| !text.is_empty());
-    let (body, from_call) = match text.trim() {
-        text if !text.is_empty() => (text.trim_end().to_owned(), false),
-        _ => match call_body {
-            Some(body) => (body.to_owned(), true),
-            None => (String::new(), false),
-        },
-    };
-    let mut missing: Vec<String> = Vec::new();
-    if title.is_empty() {
-        missing.push("a title".into());
+    let body = body.trim().trim_end().to_owned();
+    if title.is_empty() || hook.is_empty() || body.is_empty() {
+        return Err(Refusal::Missing {
+            title: title.is_empty(),
+            hook: hook.is_empty(),
+            text: body.is_empty(),
+        });
     }
-    if hook.is_empty() {
-        missing.push("a hook (one line)".into());
-    }
-    if body.is_empty() {
-        missing.push("a text".into());
-    }
-    if !missing.is_empty() {
-        let list = if missing.len() > 1 {
-            let last = missing.pop().unwrap();
-            format!("{} and {}", missing.join(", "), last)
-        } else {
-            missing.pop().unwrap()
-        };
-        return fail(format!("`add` needs {list}."));
-    }
-    if let Err(error) = fs::create_dir_all(dir) {
-        return fail(format!("Cannot create {}: {error}", dir.display()));
-    }
+    fs::create_dir_all(dir).map_err(|source| Refusal::CreateDir {
+        dir: dir.into(),
+        source,
+    })?;
     // Held from the choice of the name to the index line (D49).
-    let _lock = match lock_folder(dir) {
-        Ok(lock) => lock,
-        Err(error) => return fail(format!("Cannot lock {}: {error}", dir.display())),
-    };
-    let Some(name) = free_name(dir, &title) else {
-        return fail("The title needs letters or digits to make a file name.");
-    };
+    let _lock = lock_folder(dir).map_err(|source| Refusal::Lock {
+        dir: dir.into(),
+        source,
+    })?;
+    let name = free_name(dir, &title).ok_or(Refusal::NoFileName)?;
     let entry = format!("# {title}\n\n{body}\n");
-    if let Err(error) = write_atomic(&entry_path(dir, &name), &entry) {
-        return fail(format!("Cannot write the entry: {error:?}"));
-    }
+    write_atomic(&entry_path(dir, &name), &entry).map_err(Refusal::WriteEntry)?;
     let mut index = fs::read_to_string(dir.join(INDEX)).unwrap_or_default();
     if !index.is_empty() && !index.ends_with('\n') {
         index.push('\n');
@@ -455,21 +439,13 @@ pub fn add(
     index.push_str(&format!("- [{title}]({name}.md) — {hook}\n"));
     if let Err(error) = write_atomic(&dir.join(INDEX), &index) {
         let _ = fs::remove_file(entry_path(dir, &name));
-        return fail(format!("Cannot write the index: {error:?}"));
+        return Err(Refusal::WriteIndex(error));
     }
-    let note = if from_call {
-        " (the body was taken from the text of the call)"
-    } else {
-        ""
-    };
-    ok(
-        format!("Remembered `{name}`{note}."),
-        Write {
-            name,
-            kind: Kind::Added,
-            text: Some(body),
-        },
-    )
+    Ok(Write {
+        name,
+        kind: Kind::Added,
+        text: Some(body),
+    })
 }
 
 /// The index hook of a `/remember` text: the whole text on one line, not
@@ -478,48 +454,35 @@ pub fn hook_of(text: &str) -> String {
     one_line(text)
 }
 
-/// `/remember name | text` (M34, M37): the program writes the entry,
-/// its index hook being the text.
-pub fn remember(dir: &Path, name: &str, text: &str) -> (ToolResult, Option<Write>) {
-    add(dir, name, &hook_of(text), text, None)
-}
 
-/// `show name` (M32): the entry's text, cut like any tool's output when it is
-/// long (AGL-049); the whole is the entry's own file.
-pub fn show(dir: &Path, name: &str, output: &Output<'_>) -> ToolResult {
-    let missing = || ToolResult {
-        outcome: Outcome::Fail,
-        content: format!("No memory entry `{name}`."),
+/// The text of the entry `name` (M32).
+pub fn read(dir: &Path, name: &str) -> Result<String, Refusal> {
+    let missing = || Refusal::NoEntry {
+        name: name.to_owned(),
     };
     if !valid_name(name) {
-        return missing();
+        return Err(missing());
     }
-    let Ok(text) = fs::read_to_string(entry_path(dir, name)) else {
-        return missing();
-    };
-    let content = limited(&text, output.tokens, &entry_path(dir, name), output.count);
-    ToolResult {
-        outcome: Outcome::Ok,
-        content,
-    }
+    fs::read_to_string(entry_path(dir, name)).map_err(|_| missing())
 }
 
 /// `edit name old new` (M32): one unique occurrence in the entry's text, as
 /// the workspace `edit` does it.
-pub fn edit_entry(dir: &Path, name: &str, old: &str, new: &str) -> (ToolResult, Option<Write>) {
+pub fn edit(dir: &Path, name: &str, old: &str, new: &str) -> Result<Write, Refusal> {
     if !valid_name(name) || !entry_path(dir, name).is_file() {
-        return fail(format!("No memory entry `{name}`."));
+        return Err(Refusal::NoEntry {
+            name: name.to_owned(),
+        });
     }
-    let result = edit(dir, &format!("{name}.md"), old, new);
-    if result.outcome != Outcome::Ok {
-        return (result, None);
-    }
-    let write = Write {
+    crate::replace::once(&entry_path(dir, name), old, new).map_err(|refusal| Refusal::Replace {
+        name: name.to_owned(),
+        refusal,
+    })?;
+    Ok(Write {
         name: name.to_owned(),
         kind: Kind::Edited,
         text: Some(new.to_owned()),
-    };
-    (result, Some(write))
+    })
 }
 
 /// `update name title hook` (D6, AGL-032): rewrites the entry's first
@@ -528,27 +491,25 @@ pub fn edit_entry(dir: &Path, name: &str, old: &str, new: &str) -> (ToolResult, 
 /// touched — the file name is the entry's identity. The entry file is
 /// written before the index, as `add` does it: an index failure leaves
 /// the line stale, never an orphaned entry.
-pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, Option<Write>) {
-    let _lock = match lock_existing(dir) {
-        Ok(lock) => lock,
-        Err(error) => return fail(error),
-    };
+pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> Result<Write, Refusal> {
+    let _lock = lock_existing(dir)?;
+    let named = |refusal: fn(String) -> Refusal| refusal(name.to_owned());
     if !valid_name(name) || !entry_path(dir, name).is_file() {
-        return fail(format!("No memory entry `{name}`."));
+        return Err(named(|name| Refusal::NoEntry { name }));
     }
     let mut title = clean_title(title);
     let hook = one_line(hook);
     if title.is_empty() && hook.is_empty() {
-        return fail("`update` needs a title and/or a hook.");
+        return Err(Refusal::NoUpdate);
     }
     let Ok(text) = fs::read_to_string(entry_path(dir, name)) else {
-        return fail(format!("Cannot read the entry `{name}`."));
+        return Err(named(|name| Refusal::ReadEntry { name }));
     };
     let Some(first) = text.lines().next() else {
-        return fail(format!("The entry `{name}` is empty."));
+        return Err(named(|name| Refusal::EmptyEntry { name }));
     };
     let Some(old_title) = first.strip_prefix("# ") else {
-        return fail(format!("The entry `{name}` has no `# ` heading."));
+        return Err(named(|name| Refusal::NoHeading { name }));
     };
     if title.is_empty() {
         title = old_title.to_string();
@@ -559,7 +520,7 @@ pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, O
     let index = fs::read_to_string(dir.join(INDEX)).unwrap_or_default();
     let link = format!("]({name}.md)");
     let Some(line) = index.lines().find(|line| line.contains(&link)) else {
-        return fail(format!("No index line for `{name}` in {INDEX}."));
+        return Err(named(|name| Refusal::NoIndexLine { name }));
     };
     let after = &line[line.find(&link).unwrap() + link.len()..];
     let old_hook = after.strip_prefix(" — ").unwrap_or(after);
@@ -573,72 +534,61 @@ pub fn update(dir: &Path, name: &str, title: &str, hook: &str) -> (ToolResult, O
         // `first` is the heading without its newline; the rest of the
         // text keeps it, so no newline is added here.
         let entry = format!("# {title}{}", &text[first.len()..]);
-        if let Err(error) = write_atomic(&entry_path(dir, name), &entry) {
-            return fail(format!("Cannot write the entry: {error:?}"));
-        }
+        write_atomic(&entry_path(dir, name), &entry).map_err(Refusal::WriteEntry)?;
     }
     let mut new_index = String::with_capacity(index.len() + new_line.len());
     for l in index.lines() {
         new_index.push_str(if l == line { &new_line } else { l });
         new_index.push('\n');
     }
-    if let Err(error) = write_atomic(&dir.join(INDEX), &new_index) {
-        return fail(format!("Cannot write the index: {error:?}"));
-    }
-    ok(
-        format!("Updated `{name}`."),
-        Write {
-            name: name.to_owned(),
-            kind: Kind::Edited,
-            text: Some(new_line),
-        },
-    )
+    write_atomic(&dir.join(INDEX), &new_index).map_err(Refusal::WriteIndex)?;
+    Ok(Write {
+        name: name.to_owned(),
+        kind: Kind::Edited,
+        text: Some(new_line),
+    })
 }
 
 /// `remove name` (M32): deletes the file and its index line; either alone is
 /// enough, as a hand edit can leave one without the other (AGL-060, D8).
-pub fn remove(dir: &Path, name: &str) -> (ToolResult, Option<Write>) {
+pub fn remove(dir: &Path, name: &str) -> Result<Write, Refusal> {
+    let no_entry = || Refusal::NoEntry {
+        name: name.to_owned(),
+    };
     if !valid_name(name) {
-        return fail(format!("No memory entry `{name}`."));
+        return Err(no_entry());
     }
     // The entry's own line is the one whose link is its: a hook that quotes
     // another entry's link is not that entry's line (AGL-121, D7).
     let its = |line: &str| index_line(line).is_some_and(|(_, linked, _)| linked == name);
-    let _lock = match lock_existing(dir) {
-        Ok(lock) => lock,
-        Err(error) => return fail(error),
-    };
+    let _lock = lock_existing(dir)?;
     // An index that cannot be read is not an empty one: writing the lines
     // kept would lose all of them (AGL-060).
     let index = match fs::read_to_string(dir.join(INDEX)) {
         Ok(index) => index,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(error) => return fail(format!("Cannot read the index: {error}")),
+        Err(error) => return Err(Refusal::ReadIndex(error)),
     };
     let file = entry_path(dir, name).is_file();
     if !file && !index.lines().any(its) {
-        return fail(format!("No memory entry `{name}`."));
+        return Err(no_entry());
     }
     let kept: String = index
         .lines()
         .filter(|line| !its(line))
         .map(|line| format!("{line}\n"))
         .collect();
-    if let Err(error) = write_atomic(&dir.join(INDEX), &kept) {
-        return fail(format!("Cannot write the index: {error:?}"));
+    write_atomic(&dir.join(INDEX), &kept).map_err(Refusal::WriteIndex)?;
+    if file {
+        fs::remove_file(entry_path(dir, name)).map_err(Refusal::RemoveEntry)?;
     }
-    if file && let Err(error) = fs::remove_file(entry_path(dir, name)) {
-        return fail(format!("Cannot remove the entry: {error}"));
-    }
-    ok(
-        format!("Removed `{name}`."),
-        Write {
-            name: name.to_owned(),
-            kind: Kind::Removed,
-            text: None,
-        },
-    )
+    Ok(Write {
+        name: name.to_owned(),
+        kind: Kind::Removed,
+        text: None,
+    })
 }
+
 
 /// The index as the prompt carries it (M33): the lines of `MEMORY.md`, at
 /// most 4 KB, the newest kept, with `[memory truncated]` first when the
@@ -940,9 +890,9 @@ pub fn entry_dir<'a>(dir: Option<&'a Path>, name: &str) -> Result<&'a Path, erro
 /// for the model, and the write, for the session.
 pub fn remove_entry(dir: Option<&Path>, name: &str) -> Result<(String, Write), error::Error> {
     match remove(entry_dir(dir, name)?, name) {
-        (result, Some(write)) if result.outcome == Outcome::Ok => Ok((result.content, write)),
-        (result, _) => Err(Error::RemoveFailed {
-            reason: result.content,
+        Ok(write) => Ok((format!("Removed `{name}`."), write)),
+        Err(refusal) => Err(Error::RemoveFailed {
+            reason: refusal.text(),
         }
         .into()),
     }
@@ -980,107 +930,7 @@ mod tests {
     use agentlibre_common::testutil::TempDir;
 
     fn added(dir: &Path, title: &str, hook: &str, text: &str) -> String {
-        let (result, write) = add(dir, title, hook, text, None);
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        write.unwrap().name
-    }
-
-    #[test]
-    fn add_writes_the_entry_and_its_index_line() {
-        let dir = TempDir::new();
-        let (result, write) = add(&dir.0, "Build and test", "cargo build / cargo test", "Run `cargo build`.\nThen `cargo test`.\n", None);
-        assert_eq!(result.content, "Remembered `build-and-test`.");
-        assert_eq!(
-            write,
-            Some(Write {
-                name: "build-and-test".into(),
-                kind: Kind::Added,
-                text: Some("Run `cargo build`.\nThen `cargo test`.".into()),
-            })
-        );
-        // The entry: `# title`, a blank line, the text (M36).
-        assert_eq!(
-            fs::read_to_string(dir.0.join("build-and-test.md")).unwrap(),
-            "# Build and test\n\nRun `cargo build`.\nThen `cargo test`.\n"
-        );
-        // The index: one line per entry (M31).
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            "- [Build and test](build-and-test.md) — cargo build / cargo test\n"
-        );
-        added(&dir.0, "llama-server", "127.0.0.1:18080", "Qwen3.8-27B.");
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        assert_eq!(index.lines().count(), 2);
-        assert!(index.ends_with("- [llama-server](llama-server.md) — 127.0.0.1:18080\n"));
-    }
-
-    #[test]
-    fn a_clash_gets_a_number_and_a_bad_title_or_empty_field_is_refused() {
-        let dir = TempDir::new();
-        assert_eq!(added(&dir.0, "Setup", "one", "a"), "setup");
-        assert_eq!(added(&dir.0, "setup", "two", "b"), "setup-2");
-        assert_eq!(added(&dir.0, "SETUP!", "three", "c"), "setup-3");
-        // Brackets and newlines of a title and a hook do not break the line.
-        let name = added(&dir.0, "A [odd]\ntitle", "a hook\nover lines", "t");
-        assert_eq!(name, "a-odd-title");
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        assert!(index.contains("- [A (odd) title](a-odd-title.md) — a hook over lines\n"));
-        for (title, hook, text) in [("", "h", "t"), ("t", "", "t"), ("t", "h", "  "), ("!!!", "h", "t")] {
-            let (result, write) = add(&dir.0, title, hook, text, None);
-            assert_eq!(result.outcome, Outcome::Fail, "{title:?}");
-            assert!(write.is_none());
-        }
-        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 5);
-    }
-
-    #[test]
-    fn add_takes_the_body_from_the_text_of_the_call_when_the_parameter_is_empty() {
-        let dir = TempDir::new();
-        let (result, write) = add(&dir.0, "Note", "the hook", "", Some("The body text.\nMore."));
-        assert_eq!(
-            result.content,
-            "Remembered `note` (the body was taken from the text of the call)."
-        );
-        assert_eq!(
-            write,
-            Some(Write {
-                name: "note".into(),
-                kind: Kind::Added,
-                text: Some("The body text.\nMore.".into()),
-            })
-        );
-        assert_eq!(
-            fs::read_to_string(dir.0.join("note.md")).unwrap(),
-            "# Note\n\nThe body text.\nMore.\n"
-        );
-        // A non-empty parameter wins over the text of the call.
-        let (result, write) = add(&dir.0, "Other", "h", "The parameter body.", Some("ignored"));
-        assert_eq!(result.content, "Remembered `other`.");
-        assert_eq!(write.unwrap().text.as_deref(), Some("The parameter body."));
-        // A whitespace-only text of the call is no body.
-        let (result, write) = add(&dir.0, "Blank", "h", "", Some("   \n "));
-        assert_eq!(result.content, "`add` needs a text.");
-        assert!(write.is_none());
-    }
-
-    #[test]
-    fn add_names_the_missing_fields() {
-        let dir = TempDir::new();
-        fs::create_dir_all(&dir.0).unwrap();
-        for (title, hook, text, want) in [
-            ("", "h", "t", "`add` needs a title."),
-            ("t", "", "t", "`add` needs a hook (one line)."),
-            ("t", "h", "", "`add` needs a text."),
-            ("", "h", "", "`add` needs a title and a text."),
-            ("", "", "t", "`add` needs a title and a hook (one line)."),
-            ("", "", "", "`add` needs a title, a hook (one line) and a text."),
-        ] {
-            let (result, write) = add(&dir.0, title, hook, text, None);
-            assert_eq!(result.outcome, Outcome::Fail);
-            assert_eq!(result.content, want, "{title:?} {hook:?} {text:?}");
-            assert!(write.is_none());
-        }
-        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
+        add(dir, title, hook, text).expect("added").name
     }
 
     #[test]
@@ -1091,227 +941,6 @@ mod tests {
         assert!(!name.ends_with('-'));
         // Letters of any script make a name.
         assert_eq!(added(&dir.0, "Збірка і тести", "h", "t"), "збірка-і-тести");
-    }
-
-    #[test]
-    fn show_returns_the_text_and_cuts_a_long_one() {
-        let dir = TempDir::new();
-        let name = added(&dir.0, "Notes", "h", "short text");
-        let shown = show(&dir.0, &name, &out());
-        assert_eq!(shown.outcome, Outcome::Ok);
-        assert_eq!(shown.content, "# Notes\n\nshort text\n");
-        assert_eq!(show(&dir.0, "nope", &out()).outcome, Outcome::Fail);
-        assert_eq!(show(&dir.0, "../etc/passwd", &out()).outcome, Outcome::Fail);
-        assert_eq!(show(&dir.0, "", &out()).outcome, Outcome::Fail);
-        let long = added(&dir.0, "Long", "h", &"é".repeat(20_000));
-        let shown = show(&dir.0, &long, &out());
-        assert!(shown.content.contains("bytes omitted; the full output: "));
-        assert!(shown.content.len() <= 4096 * 4 + 300);
-        assert!(shown.content.ends_with("é\n"));
-    }
-
-    #[test]
-    fn edit_changes_one_unique_occurrence() {
-        let dir = TempDir::new();
-        let name = added(&dir.0, "Servers", "h", "port 18080 and port 18081");
-        let (result, write) = edit_entry(&dir.0, &name, "18080", "18090");
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        assert_eq!(
-            write,
-            Some(Write {
-                name: name.clone(),
-                kind: Kind::Edited,
-                text: Some("18090".into()),
-            })
-        );
-        assert!(show(&dir.0, &name, &out()).content.contains("port 18090 and port 18081"));
-        // Twice, or not at all: a failed call, nothing written.
-        let (twice, none) = edit_entry(&dir.0, &name, "port", "x");
-        assert_eq!(twice.outcome, Outcome::Fail);
-        assert!(none.is_none());
-        assert_eq!(edit_entry(&dir.0, &name, "absent", "x").0.outcome, Outcome::Fail);
-        assert_eq!(edit_entry(&dir.0, "nope", "a", "b").0.outcome, Outcome::Fail);
-        assert_eq!(edit_entry(&dir.0, "../x", "a", "b").0.outcome, Outcome::Fail);
-    }
-
-    #[test]
-    fn update_rewrites_the_heading_and_the_index_line() {
-        let dir = TempDir::new();
-        let name = added(&dir.0, "One", "the old hook", "body text");
-        let other = added(&dir.0, "Two", "second", "2");
-        // Title only: the hook is kept, the other entry's line is untouched.
-        let (result, write) = update(&dir.0, &name, "One, revised", "");
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        assert_eq!(result.content, "Updated `one`.");
-        assert_eq!(
-            write,
-            Some(Write {
-                name: name.clone(),
-                kind: Kind::Edited,
-                text: Some("- [One, revised](one.md) — the old hook".into()),
-            })
-        );
-        assert_eq!(
-            fs::read_to_string(entry_path(&dir.0, &name)).unwrap(),
-            "# One, revised\n\nbody text\n"
-        );
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        assert_eq!(
-            index,
-            "- [One, revised](one.md) — the old hook\n- [Two](two.md) — second\n".to_string()
-        );
-        assert_eq!(other, "two");
-        // Hook only: the title is kept, a hook over lines is one line.
-        let (result, write) = update(&dir.0, &name, "", "a hook\nover lines");
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        assert_eq!(
-            write.unwrap().text.as_deref(),
-            Some("- [One, revised](one.md) — a hook over lines")
-        );
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap().lines().next().unwrap(),
-            "- [One, revised](one.md) — a hook over lines"
-        );
-        // Both at once: title and hook.
-        let (result, _) = update(&dir.0, &name, "Final [Title]", "the final hook");
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        assert!(index.contains("- [Final (Title)](one.md) — the final hook\n"));
-        assert!(fs::read_to_string(entry_path(&dir.0, &name)).unwrap().starts_with("# Final (Title)\n"));
-        // A hook with ` — ` of its own is kept whole.
-        added(&dir.0, "Dash", "a — b — c", "d");
-        let (result, _) = update(&dir.0, "dash", "", "");
-        assert_eq!(result.outcome, Outcome::Fail, "{}", result.content);
-        let (result, write) = update(&dir.0, "dash", "Dash, v2", "");
-        assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-        assert_eq!(write.unwrap().text.as_deref(), Some("- [Dash, v2](dash.md) — a — b — c"));
-    }
-
-    #[test]
-    fn update_refuses_the_misfires() {
-        let dir = TempDir::new();
-        let name = added(&dir.0, "One", "the hook", "body");
-        // Neither field: nothing is written.
-        let (result, write) = update(&dir.0, &name, "", "");
-        assert_eq!(result.outcome, Outcome::Fail);
-        assert_eq!(result.content, "`update` needs a title and/or a hook.");
-        assert!(write.is_none());
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            "- [One](one.md) — the hook\n"
-        );
-        // No entry, or a bad name: the refusal of the other actions.
-        assert_eq!(update(&dir.0, "nope", "t", "").0.content, "No memory entry `nope`.");
-        assert_eq!(update(&dir.0, "../etc", "t", "").0.content, "No memory entry `../etc`.");
-        // An entry without its index line: the index is the record of the
-        // line, the refusal names the file.
-        let two = added(&dir.0, "Two", "h", "t");
-        fs::write(dir.0.join(INDEX), "- [One](one.md) — the hook\n").unwrap();
-        assert_eq!(
-            update(&dir.0, &two, "t", "").0.content,
-            "No index line for `two` in MEMORY.md."
-        );
-        // An entry without a `# ` heading: the first line is no heading.
-        let three = added(&dir.0, "Three", "h", "t");
-        fs::write(entry_path(&dir.0, &three), "no heading\n").unwrap();
-        assert_eq!(
-            update(&dir.0, &three, "t", "").0.content,
-            "The entry `three` has no `# ` heading."
-        );
-        // An empty entry file: no first line.
-        let four = added(&dir.0, "Four", "h", "t");
-        fs::write(entry_path(&dir.0, &four), "").unwrap();
-        assert_eq!(
-            update(&dir.0, &four, "t", "").0.content,
-            "The entry `four` is empty."
-        );
-    }
-
-    #[test]
-    fn remove_deletes_the_file_and_only_its_index_line() {
-        let dir = TempDir::new();
-        let one = added(&dir.0, "One", "first", "1");
-        let two = added(&dir.0, "Two", "second", "2");
-        let (result, write) = remove(&dir.0, &one);
-        assert_eq!(result.outcome, Outcome::Ok);
-        assert_eq!(write.unwrap().kind, Kind::Removed);
-        assert!(!entry_path(&dir.0, &one).exists());
-        assert!(entry_path(&dir.0, &two).exists());
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            "- [Two](two.md) — second\n"
-        );
-        assert_eq!(remove(&dir.0, &one).0.outcome, Outcome::Fail);
-        remove(&dir.0, &two);
-        assert_eq!(fs::read_to_string(dir.0.join(INDEX)).unwrap(), "");
-    }
-
-    #[test]
-    fn writers_at_once_keep_every_line_of_the_index() {
-        let dir = TempDir::new();
-        let threads: Vec<_> = (0..8)
-            .map(|t| {
-                let dir = dir.0.clone();
-                std::thread::spawn(move || {
-                    for i in 0..10 {
-                        let (result, _) =
-                            add(&dir, &format!("Entry {t} {i}"), "a hook", "a text", None);
-                        assert_eq!(result.outcome, Outcome::Ok);
-                    }
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        assert_eq!(index.lines().count(), 80);
-        for t in 0..8 {
-            for i in 0..10 {
-                assert!(index.contains(&format!("[Entry {t} {i}](entry-{t}-{i}.md)")));
-            }
-        }
-    }
-
-    #[test]
-    fn remove_keeps_a_hook_that_quotes_another_entrys_link() {
-        let dir = TempDir::new();
-        let one = added(&dir.0, "One", "first", "1");
-        let two = added(&dir.0, "Two", "see [One](one.md) first", "2");
-        let (result, _) = remove(&dir.0, &one);
-        assert_eq!(result.outcome, Outcome::Ok);
-        assert!(entry_path(&dir.0, &two).exists());
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            format!("- [Two]({two}.md) — see [One](one.md) first\n")
-        );
-    }
-
-    #[test]
-    fn run_picks_the_action_and_refuses_an_unknown_one() {
-        let dir = TempDir::new();
-        let args = Args {
-            action: "add".into(),
-            title: "T".into(),
-            hook: "h".into(),
-            text: "x".into(),
-            ..Args::default()
-        };
-        assert_eq!(run(&dir.0, &args, None, &out()).0.outcome, Outcome::Ok);
-        let show_args = Args {
-            action: "show".into(),
-            name: "t".into(),
-            ..Args::default()
-        };
-        assert_eq!(run(&dir.0, &show_args, None, &out()).0.content, "# T\n\nx\n");
-        let bad = Args {
-            action: "list".into(),
-            ..Args::default()
-        };
-        let (result, write) = run(&dir.0, &bad, None, &out());
-        assert_eq!(result.outcome, Outcome::Fail);
-        assert!(result.content.contains("Unknown action `list`"));
-        assert!(write.is_none());
     }
 
     #[test]
@@ -1341,94 +970,6 @@ mod tests {
         assert!(cut.ends_with("— xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
         assert!(cut.contains("Entry 199"));
         assert!(!cut.contains("Entry 0]"));
-    }
-
-    #[test]
-    fn a_line_over_the_cap_does_not_take_the_others_out() {
-        // AGL-058, D10.
-        let dir = TempDir::new();
-        remember(&dir.0, "Old one", "an old note");
-        let long = "пам'ять ".repeat(1500);
-        remember(&dir.0, "Long one", &long);
-        let index = index_text(&dir.0).unwrap();
-        assert!(index.starts_with("[memory truncated]\n"), "{}", &index[..80]);
-        assert!(index.contains("[Old one](old-one.md) — an old note"));
-        let line = index.lines().last().unwrap();
-        assert!(line.starts_with("- [Long one](long-one.md) — пам'ять"));
-        assert!(line.ends_with('…'));
-        assert!(index.len() <= INDEX_CAP);
-        // The file and the entry keep all of it.
-        assert!(fs::read_to_string(dir.0.join(INDEX)).unwrap().contains(long.trim_end()));
-    }
-
-    #[test]
-    fn remember_writes_an_entry_whose_hook_is_the_text() {
-        let dir = TempDir::new();
-        let (result, write) = remember(&dir.0, "Build and test", "cargo build / cargo test");
-        assert_eq!(result.outcome, Outcome::Ok);
-        assert_eq!(write.unwrap().name, "build-and-test");
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            "- [Build and test](build-and-test.md) — cargo build / cargo test\n"
-        );
-        // A long text is whole in the index too, on one line (AGL-043 F19).
-        let long = "word ".repeat(100);
-        remember(&dir.0, "Long one", &long);
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        let line = index.lines().last().unwrap();
-        assert!(line.ends_with(long.trim_end()));
-        assert!(show(&dir.0, "long-one", &out()).content.contains(long.trim_end()));
-        assert_eq!(hook_of("a\nb  c"), "a b c");
-        assert_eq!(remember(&dir.0, "", "t").0.outcome, Outcome::Fail);
-    }
-
-    #[test]
-    fn the_index_is_no_entry() {
-        // AGL-060: `remove MEMORY` would take every line with it.
-        let dir = TempDir::new();
-        added(&dir.0, "One", "first", "1");
-        assert!(!exists(&dir.0, "MEMORY"));
-        assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
-        assert!(matches!(whole(&dir.0, "MEMORY"), Err(error::Error::Memory(Error::NoEntry { .. }))));
-        assert_eq!(list(&dir.0).unwrap().len(), 1);
-        assert!(dir.0.join(INDEX).is_file());
-    }
-
-    #[test]
-    fn remove_takes_a_line_with_no_file_and_a_file_with_no_line() {
-        // AGL-060, D8.
-        let dir = TempDir::new();
-        added(&dir.0, "Gone", "first", "1");
-        added(&dir.0, "Kept", "second", "2");
-        added(&dir.0, "Stray", "third", "3");
-        fs::remove_file(entry_path(&dir.0, "gone")).unwrap();
-        let index = fs::read_to_string(dir.0.join(INDEX)).unwrap();
-        fs::write(dir.0.join(INDEX), index.replace("- [Stray](stray.md) — third\n", "")).unwrap();
-        assert!(exists(&dir.0, "gone") && exists(&dir.0, "stray"));
-        for name in ["gone", "stray"] {
-            let (result, write) = remove(&dir.0, name);
-            assert_eq!(result.content, format!("Removed `{name}`."));
-            assert_eq!(write.unwrap().kind, Kind::Removed);
-            assert!(!exists(&dir.0, name), "{name}");
-            assert_eq!(remove(&dir.0, name).0.outcome, Outcome::Fail, "{name}");
-        }
-        assert_eq!(
-            fs::read_to_string(dir.0.join(INDEX)).unwrap(),
-            "- [Kept](kept.md) — second\n"
-        );
-    }
-
-    #[test]
-    fn remove_does_not_empty_an_index_it_cannot_read() {
-        // AGL-060.
-        let dir = TempDir::new();
-        let one = added(&dir.0, "One", "first", "1");
-        fs::write(dir.0.join(INDEX), b"- [One](one.md) \xff\n").unwrap();
-        let (result, write) = remove(&dir.0, &one);
-        assert_eq!(result.outcome, Outcome::Fail);
-        assert!(write.is_none());
-        assert_eq!(fs::read(dir.0.join(INDEX)).unwrap(), b"- [One](one.md) \xff\n");
-        assert!(entry_path(&dir.0, &one).exists());
     }
 
     #[test]
@@ -1515,13 +1056,6 @@ mod tests {
         assert_eq!(index_text(&dir.0), None);
     }
 
-    fn out() -> Output<'static> {
-        Output {
-            tokens: 4096,
-            file: Default::default(),
-            count: &|text| Some(text.len() / 4),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1536,8 +1070,8 @@ mod listing_tests {
     /// A memory directory with the entries `one` and `two`.
     fn two_entries(root: &Path) -> PathBuf {
         let dir = root.join("memory");
-        add(&dir, "One", "first", "1", None);
-        add(&dir, "Two", "second", "2", None);
+        add(&dir, "One", "first", "1").unwrap();
+        add(&dir, "Two", "second", "2").unwrap();
         dir
     }
 
@@ -1567,7 +1101,7 @@ mod listing_tests {
         let root = TempDir::new();
         let dir = root.0.join("memory");
         for n in 0..200 {
-            add(&dir, &format!("Entry {n}"), &"x".repeat(40), "t", None);
+            add(&dir, &format!("Entry {n}"), &"x".repeat(40), "t").unwrap();
         }
         let text = list_text(Some(&dir), Lang::En).unwrap();
         let line = |name: &str| {
@@ -1598,7 +1132,7 @@ mod listing_tests {
         let root = TempDir::new();
         let dir = root.0.join("memory");
         let long = "word ".repeat(20_000);
-        add(&dir, "Long", "h", &long, None);
+        add(&dir, "Long", "h", &long).unwrap();
         let text = show_text(Some(&dir), "long").unwrap();
         assert!(text.contains(long.trim_end()));
         assert!(!text.contains("omitted"));
@@ -1722,8 +1256,7 @@ mod plane_tests {
         };
         assert_eq!(home.index(), None, "nothing in either");
         fs::create_dir_all(&workspace_dir).unwrap();
-        let (result, _) = add(&workspace_dir, "Build", "how to build", "cargo build", None);
-        assert_eq!(result.outcome, Outcome::Ok);
+        add(&workspace_dir, "Build", "how to build", "cargo build").unwrap();
         let index = home.index().unwrap();
         assert!(index.starts_with("memory of the plane work and of the workspace\n"), "{index}");
         assert!(index.contains("[the plane work; writes go here]\n(no entries)"), "{index}");

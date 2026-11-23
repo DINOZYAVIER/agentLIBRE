@@ -15,6 +15,7 @@ use crate::backend::ToolCall;
 use agentlibre_common::i18n::Lang;
 use crate::session::{ForgeKind, INTERRUPTED};
 
+pub mod memory;
 mod output;
 mod reach;
 pub mod spec;
@@ -225,62 +226,18 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<std::process::Exit
     }
 }
 
-/// The byte offsets of every occurrence of `old` in `text` (overlapping
-/// ones count too: `aa` in `aaa` is ambiguous).
-pub fn occurrences(text: &str, old: &str) -> Vec<usize> {
-    text.char_indices()
-        .map(|(i, _)| i)
-        .chain([text.len()])
-        .filter(|&i| text[i..].starts_with(old))
-        .collect()
-}
-
 /// Replaces the only occurrence of `old` in the file at `path` with `new`
 /// (D25, D27, D101, D103).
 pub fn edit(workspace: &Path, path: &str, old: &str, new: &str) -> ToolResult {
-    let fail = |content: String| ToolResult {
-        outcome: Outcome::Fail,
-        content,
-    };
-    let file = workspace.join(path);
-    let bytes = match fs::read(&file) {
-        Ok(bytes) => bytes,
-        Err(error) => return fail(format!("Cannot read {path}: {error}")),
-    };
-    let Ok(text) = String::from_utf8(bytes) else {
-        return fail(format!("{path} is not UTF-8 text."));
-    };
-    let starts = occurrences(&text, old);
-    match starts.as_slice() {
-        [] => fail(format!("`old` was not found in {path}.")),
-        [start] => {
-            let mut edited = String::with_capacity(text.len() + new.len());
-            edited.push_str(&text[..*start]);
-            edited.push_str(new);
-            edited.push_str(&text[start + old.len()..]);
-            match fs::write(&file, edited) {
-                Ok(()) => ToolResult {
-                    outcome: Outcome::Ok,
-                    content: format!("Replaced 1 occurrence in {path}."),
-                },
-                Err(error) => fail(format!("Cannot write {path}: {error}")),
-            }
-        }
-        starts => {
-            let mut lines: Vec<String> = starts
-                .iter()
-                .take(10)
-                .map(|&i| (text[..i].matches('\n').count() + 1).to_string())
-                .collect();
-            if starts.len() > 10 {
-                lines.push("…".into());
-            }
-            fail(format!(
-                "`old` appears {} times in {path} (lines {}); add context to make it unique.",
-                starts.len(),
-                lines.join(", ")
-            ))
-        }
+    match crate::replace::once(&workspace.join(path), old, new) {
+        Ok(()) => ToolResult {
+            outcome: Outcome::Ok,
+            content: format!("Replaced 1 occurrence in {path}."),
+        },
+        Err(refusal) => ToolResult {
+            outcome: Outcome::Fail,
+            content: refusal.text(path),
+        },
     }
 }
 
@@ -584,7 +541,7 @@ fn forge_edit(
         .into());
     }
     let body = &artifact.body;
-    let starts = occurrences(body, old);
+    let starts = crate::replace::occurrences(body, old);
     match starts.as_slice() {
         [] => Err(format!("`old` was not found in {name}.").into()),
         [start] => {

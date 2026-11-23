@@ -697,7 +697,7 @@ impl Run {
                 };
             }
         };
-        let (result, write) = memory::remember(&dir, name, text);
+        let (result, write) = crate::tools::memory::remember(&dir, name, text);
         let mut said = Text {
             lines: lines.into_iter().map(Told::Notice).collect(),
             content: Some(result.content),

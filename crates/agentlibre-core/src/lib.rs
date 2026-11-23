@@ -25,6 +25,7 @@ pub mod phase;
 pub mod plane;
 pub mod record;
 pub mod records;
+pub mod replace;
 pub mod search;
 pub mod session;
 pub mod status;
