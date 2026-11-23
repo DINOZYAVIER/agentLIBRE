@@ -1,8 +1,6 @@
 //! What can go wrong reaching the model's server: the connection, its
 //! status and reply, its certificate, a missing projector (AGL-121, D66).
 
-use std::path::PathBuf;
-
 use crate::i18n::{Lang, Msg, server};
 use crate::settings::ServerKind;
 use crate::tr;
@@ -30,8 +28,6 @@ pub enum Error {
         url: String,
         detail: String,
     },
-    /// The file of `private_ca` cannot be used (AGL-058, D12).
-    ServerCa { path: PathBuf, detail: String },
     /// The server's certificate is not trusted (AGL-058, D12); `key` is the
     /// setting that names a private CA for that server (AGL-121, D4).
     ServerCertificate { url: String, detail: String, key: &'static str },
@@ -75,9 +71,6 @@ impl Error {
                 url = url,
                 detail = detail
             ),
-            Self::ServerCa { path, detail } => {
-                tr!(lang, SERVER_CA, path = path.display(), detail = detail)
-            }
             Self::ServerCertificate { url, detail, key } => {
                 tr!(lang, SERVER_CERTIFICATE, url = url, detail = detail, key = key)
             }
@@ -93,11 +86,6 @@ const NO_MULTIMODAL: Msg = Msg {
     uk: "у сервера немає мультимодального проєктора, тож він не приймає зображень; задай `mmproj` у моделі Функції і перезапусти його (agl server stop)",
 };
 
-/// `Error::ServerCa` (AGL-058, D12).
-const SERVER_CA: Msg = Msg {
-    en: "the CA file {path} of `private_ca` cannot be used: {detail}",
-    uk: "файл CA {path} із `private_ca` не можна використати: {detail}",
-};
 
 /// `Error::ServerCertificate` (AGL-058, D12).
 const SERVER_CERTIFICATE: Msg = Msg {

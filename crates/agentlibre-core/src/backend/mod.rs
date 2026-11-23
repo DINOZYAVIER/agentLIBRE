@@ -175,7 +175,7 @@ pub struct StructuredCall {
 /// The TLS of a client that trusts only the CA in the file `path` (AGL-058, D12).
 pub fn private_ca(path: &str) -> Result<ureq::tls::TlsConfig, Error> {
     let fail = |detail: String| {
-        Error::from(BackendError::ServerCa {
+        Error::from(crate::settings::error::Error::ServerCa {
             path: path.into(),
             detail,
         })

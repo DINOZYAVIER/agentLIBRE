@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 
 use super::ServerKind;
 use crate::error::Error;
-use crate::backend::error::Error as BackendError;
 use crate::settings::error::Error as SettingsError;
 use crate::nix::Section;
 
@@ -113,7 +112,7 @@ pub(super) fn read_private_ca(section: &mut Section) -> Result<Option<String>, E
     if let Some(ca) = &ca
         && !Path::new(ca).is_absolute()
     {
-        return Err(BackendError::ServerCa {
+        return Err(SettingsError::ServerCa {
             path: ca.into(),
             detail: "it is not an absolute path".into(),
         }

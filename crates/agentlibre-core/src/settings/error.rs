@@ -11,6 +11,9 @@ use crate::tr;
 /// (AGL-121, D66).
 #[derive(Debug)]
 pub enum Error {
+    /// The file of `private_ca` cannot be used (AGL-058, D12; AGL-121,
+    /// D78).
+    ServerCa { path: PathBuf, detail: String },
     /// A value of `colors` is not a valid style (D121).
     InvalidStyle {
         path: PathBuf,
@@ -48,6 +51,9 @@ impl Error {
     /// The message of `self` in `lang`.
     pub fn message(&self, lang: Lang) -> String {
         match self {
+            Self::ServerCa { path, detail } => {
+                tr!(lang, SERVER_CA, path = path.display(), detail = detail)
+            }
             Self::InvalidStyle {
                 path,
                 key,
@@ -149,4 +155,10 @@ const UNSUPPORTED_SEARCH_URL: Msg = Msg {
 const SEARCH_PATH_NOT_ABSOLUTE: Msg = Msg {
     en: "`{key}` in {path} must be an absolute path, not `{value}`",
     uk: "`{key}` у {path} має бути абсолютним шляхом, а не `{value}`",
+};
+
+/// `Error::ServerCa` (AGL-058, D12).
+const SERVER_CA: Msg = Msg {
+    en: "the CA file {path} of `private_ca` cannot be used: {detail}",
+    uk: "файл CA {path} із `private_ca` не можна використати: {detail}",
 };
