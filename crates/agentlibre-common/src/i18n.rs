@@ -260,7 +260,7 @@ agl server command [--function <назва>]",
     /// The section of `agl server` in the help (AGL-061, D3).
     pub const HELP_SERVER: Msg = Msg {
         en: "\
-Server (systemd user unit agentLIBRE-server-<project>; the model of the
+Server (systemd user unit agl-engine-<id of the model>; the model of the
 Function, the url of its kind in `server` of settings.nix, the project's over
 the user's):
   server start        start the server and wait until it is ready; with
@@ -271,7 +271,7 @@ the user's):
   server status       show whether it runs and is ready (--function: the
                       server of that Function)",
         uk: "\
-Сервер (user-unit systemd agentLIBRE-server-<проєкт>; модель Функції, url її
+Сервер (user-unit systemd agl-engine-<id моделі>; модель Функції, url її
 виду в `server` у settings.nix, проєкту поверх користувача):
   server start        запустити сервер і дочекатися готовності; з
                       --function — сервер моделі цієї Функції

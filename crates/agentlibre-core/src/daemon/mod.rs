@@ -20,7 +20,7 @@ use agentlibre_proto::{self as proto, Ask, Lines, Read, Reply, Request};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
-use crate::engine::{Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name, unit_name_id};
+use crate::engine::{Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
 use crate::error::Error;
 use agentlibre_forge::forge;
 use crate::function::Function;

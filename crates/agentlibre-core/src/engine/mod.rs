@@ -33,9 +33,9 @@ pub use registry::{read_record, rebind_url, remove_record, url_of_id};
 
 use registry::{write_record, write_runtime_file, remove_runtime_file};
 
-/// The name every unit of the project's server starts with, both kinds
-/// (D8; AGL-038, D1); the project's key follows after a dash.
-pub const UNIT_PREFIX: &str = "agentLIBRE-server";
+/// The name every unit of an engine starts with, both kinds (AGL-120,
+/// D1, D6); the engine's id follows after a dash.
+pub const UNIT_PREFIX: &str = "agl-engine";
 
 /// `context` when `[server]` does not set it (D148).
 const DEFAULT_CONTEXT: u32 = 16384;
@@ -103,7 +103,7 @@ impl Server {
             project: project.project.clone(),
         }))?;
         let mut server = Server {
-            unit: unit_name(&key),
+            unit: String::new(),
             whisper_unit: format!("{}-{key}", crate::whisper::UNIT_PREFIX),
             settings: settings.clone(),
             url: String::new(),
@@ -111,8 +111,11 @@ impl Server {
             runtime,
             model,
         };
-        // The url of the effective kind (AGL-036, D2, D6).
-        server.url = server.effective_settings()?.url();
+        // The url of the effective kind (AGL-036, D2, D6), and the unit of
+        // its id (AGL-120, D6).
+        let effective = server.effective_settings()?;
+        server.url = effective.url();
+        server.unit = unit_name(&effective);
         Ok(server)
     }
 
@@ -131,23 +134,17 @@ impl Server {
     }
 }
 
-/// The unit of the project whose unit key is `key` (D8).
-pub fn unit_name(key: &str) -> String {
-    format!("{UNIT_PREFIX}-{key}")
-}
-
-/// The unit of the project's server of one id (AGL-120, D3, D5): a
-/// foreign port left for its owner means the engine of the id runs on a
-/// port of its own, and a second server of one project needs a unit name
-/// of its own — the id (kind, model, context) hashes into the suffix, so
-/// two models of one project hold two units, and the same id finds its
-/// unit again across a restart.
-pub fn unit_name_id(key: &str, effective: &ServerFile) -> String {
+/// The unit of the engine of `effective` (AGL-120, D1, D6):
+/// `agl-engine-<id>`, the id 8 hex of the sha256 of the kind, the model,
+/// the Strata name and the context. One id is one unit on the machine,
+/// whichever project and port asked for it (D5), and the same id finds
+/// its unit again across a restart.
+pub fn unit_name(effective: &ServerFile) -> String {
     let id = serde_json::json!(
         [effective.kind().name(), effective.model, effective.strata_name, effective.context]
     );
     let short = crate::media::sha256_hex(id.to_string().as_bytes());
-    format!("{}-{key}-{}", UNIT_PREFIX, &short[..8])
+    format!("{UNIT_PREFIX}-{}", &short[..8])
 }
 
 /// Asks the human a question of yes or no; `true` agrees.
@@ -442,22 +439,12 @@ impl Autostart {
         what_of(&self.effective)
     }
 
-    /// Whether this run's server sits on a url of its own — not the one
-    /// the settings name (AGL-120, D5): then its unit is named by the id
-    /// too, so a second server of one project holds a unit of its own (D3).
-    fn per_unit_id(&self) -> bool {
-        self.llama.url() != self.effective.url()
-    }
-
-    /// The unit of this run's server: the project's, or the project's by
-    /// id when the server runs on a url of its own (AGL-120, D3, D5).
+    /// The unit of this run's server, named by its id at the configured
+    /// port and at one of its own alike (AGL-120, D6); `None` for a
+    /// project that is not registered.
     fn unit(&self) -> Option<String> {
-        let key = self.project.unit_key()?;
-        Some(if self.per_unit_id() {
-            unit_name_id(&key, &self.effective)
-        } else {
-            unit_name(&key)
-        })
+        self.project.unit_key()?;
+        Some(unit_name(&self.effective))
     }
 
     /// A backend of `url` for the effective kind (AGL-120, D5): a new
@@ -519,12 +506,6 @@ impl Autostart {
             &self.effective,
             self.effective.clone(),
         )?;
-        // The server of a foreign id runs on a port of its own, so its
-        // unit is named by the id too (AGL-120, D3, D5): a second server
-        // of one project holds a unit of its own, not the project's.
-        if let Some(key) = self.project.unit_key() {
-            server.unit = unit_name_id(&key, &self.effective);
-        }
         server.url = fresh.clone();
         launch_unit(
             &server,
@@ -660,11 +641,7 @@ impl Autostart {
             &self.effective,
             self.effective.clone(),
         )?;
-        // The run's own url and unit: plain at the configured port, by the
-        // id at one of its own (AGL-120, D3, D5) — as `unit` names them.
-        if let Some(unit) = self.unit() {
-            server.unit = unit;
-        }
+        // The run's own url (AGL-120, D5); the unit is the id's (D6).
         server.url = self.llama.url().to_owned();
         launch_unit(
             &server,
@@ -1779,7 +1756,7 @@ mod tests {
     fn status_lines() {
         assert_eq!(
             texts::status(
-                "agentLIBRE-server-60af300abea6",
+                "agl-engine-0a1b2c3d",
                 true,
                 "http://127.0.0.1:18080",
                 None,
@@ -1787,12 +1764,12 @@ mod tests {
                 Health::Loading,
                 Lang::En
             ),
-            "unit: agentLIBRE-server-60af300abea6 (active)\nurl: http://127.0.0.1:18080\n\
+            "unit: agl-engine-0a1b2c3d (active)\nurl: http://127.0.0.1:18080\n\
              model: not set\nrunning: not running\nhealth: loading"
         );
         assert_eq!(
             texts::status(
-                "agentLIBRE-server-60af300abea6",
+                "agl-engine-0a1b2c3d",
                 false,
                 "http://x",
                 Some("q.gguf"),
@@ -1800,7 +1777,7 @@ mod tests {
                 Health::Down,
                 Lang::Uk
             ),
-            "unit: agentLIBRE-server-60af300abea6 (неактивний)\nадреса: http://x\n\
+            "unit: agl-engine-0a1b2c3d (неактивний)\nадреса: http://x\n\
              модель: q.gguf\nпрацює: не працює\nстан: не відповідає"
         );
     }
@@ -1847,7 +1824,7 @@ mod tests {
     #[test]
     fn the_unit_runs_llama_server_with_the_needed_arguments() {
         let args = systemd_run_args(
-            "agentLIBRE-server-60af300abea6",
+            "agl-engine-0a1b2c3d",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
@@ -1860,7 +1837,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agentLIBRE-server-60af300abea6",
+                "--unit=agl-engine-0a1b2c3d",
                 "--collect",
                 "--quiet",
                 "--",
@@ -1895,7 +1872,7 @@ mod tests {
         .map(OsString::from)
         .collect();
         let args = systemd_run_args(
-            "agentLIBRE-server-60af300abea6",
+            "agl-engine-0a1b2c3d",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (65536, "127.0.0.1", 18080),
@@ -1915,7 +1892,7 @@ mod tests {
     #[test]
     fn engine_args_are_the_systemd_tail_after_the_prefix() {
         let systemd = systemd_run_args(
-            "agentLIBRE-server-60af300abea6",
+            "agl-engine-0a1b2c3d",
             Path::new("/bin/llama-server"),
             Path::new("/m/q.gguf"),
             (8192, "127.0.0.1", 18080),
@@ -2178,7 +2155,7 @@ mod tests {
         let merged = ws.server.over(&user);
         let server =
             Server::of(&ws, None, &merged, model("big.gguf", 65536)).unwrap();
-        assert_eq!(server.unit, "agentLIBRE-server-60af300abea6");
+        assert_eq!(server.unit, unit_name(&server.effective_settings().unwrap()));
         assert_eq!(server.whisper_unit, "agentLIBRE-whisper-server-60af300abea6");
         assert_eq!(server.url, "http://127.0.0.1:18081");
         let effective = server.effective_settings().unwrap();
@@ -2207,11 +2184,11 @@ mod tests {
 
     #[test]
     fn systemctl_listing_gives_the_unit_names() {
-        let listing = "agentLIBRE-server-60af300abea6.service loaded active running llama\n\
-                       agentLIBRE-server-0123456789ab.service loaded active running llama\n";
+        let listing = "agl-engine-0a1b2c3d.service loaded active running llama\n\
+                       agl-engine-4e5f6a7b.service loaded active running llama\n";
         assert_eq!(
             parse_units(listing),
-            ["agentLIBRE-server-60af300abea6", "agentLIBRE-server-0123456789ab"]
+            ["agl-engine-0a1b2c3d", "agl-engine-4e5f6a7b"]
         );
         assert!(parse_units("").is_empty());
     }
@@ -2584,21 +2561,21 @@ mod tests {
     }
 
     #[test]
-    fn a_second_server_of_one_project_names_its_unit_by_id() {
-        // AGL-120, D3, D5: two servers of one project (different ids) hold
-        // two units; the same id finds its unit again across a restart.
-        let key = "60af300abea6";
+    fn an_engine_unit_is_named_by_its_id() {
+        // AGL-120, D6: `agl-engine-<id>`, no project key; two ids hold two
+        // units, the same id finds its unit again across a restart.
         let a = model("a.gguf", 4096);
         let a2 = model("a.gguf", 4096);
         let b = model("b.gguf", 4096);
         let c = model("a.gguf", 8192);
-        assert_eq!(unit_name_id(key, &a), unit_name_id(key, &a2));
-        assert_ne!(unit_name_id(key, &a), unit_name_id(key, &b));
+        assert_eq!(unit_name(&a), unit_name(&a2));
+        assert_ne!(unit_name(&a), unit_name(&b));
         // A different context is a different id, so a different unit.
-        assert_ne!(unit_name_id(key, &a), unit_name_id(key, &c));
-        assert!(unit_name_id(key, &a).starts_with(&format!("{UNIT_PREFIX}-{key}-")));
-        // And never the plain unit of the project.
-        assert_ne!(unit_name_id(key, &a), unit_name(key));
+        assert_ne!(unit_name(&a), unit_name(&c));
+        let name = unit_name(&a);
+        let id = name.strip_prefix("agl-engine-").unwrap();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -2799,7 +2776,7 @@ mod tests {
 
     #[test]
     fn the_systemd_run_arguments_carry_the_unit_the_cwd_and_the_server() {
-        let args: Vec<String> = strata_systemd_run_args("agentLIBRE-server-60af300abea6", &launch())
+        let args: Vec<String> = strata_systemd_run_args("agl-engine-0a1b2c3d", &launch())
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
@@ -2807,7 +2784,7 @@ mod tests {
             args,
             [
                 "--user",
-                "--unit=agentLIBRE-server-60af300abea6",
+                "--unit=agl-engine-0a1b2c3d",
                 "--collect",
                 "--quiet",
                 "--property=WorkingDirectory=/m/strata/tc",

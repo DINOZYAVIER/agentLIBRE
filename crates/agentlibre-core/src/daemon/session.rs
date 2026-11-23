@@ -148,9 +148,8 @@ impl Daemon {
         let parts = run.start().into_parts();
         // The clock of D2: a server stops after `idle_stop` seconds
         // without a turn; 0, an external server (AGL-052, D4) has none.
-        // The unit to stop is named by the id when the run moved to a
-        // server of its own (AGL-120, D3, D5), as `Autostart::unit` does:
-        // two servers of one project then stop their own, not each other's.
+        // The unit to stop is the id's (AGL-120, D6), as `Autostart::unit`
+        // names it: two servers of one project stop their own.
         let clock = settings
             .server
             .idle_stop
@@ -158,13 +157,7 @@ impl Daemon {
             .map(|seconds| Clock {
                 idle: Duration::from_secs(seconds),
                 last: Instant::now(),
-                unit: project.unit_key().map(|key| {
-                    if reply.server_url == settings.server.url() {
-                        unit_name(&key)
-                    } else {
-                        unit_name_id(&key, &settings.server)
-                    }
-                }),
+                unit: project.unit_key().map(|_| unit_name(&settings.server)),
                 engine: Arc::clone(&engine),
                 dir: project.dir.clone(),
             });
