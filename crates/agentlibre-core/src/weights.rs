@@ -11,10 +11,59 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::download::{self, FileSource};
-use crate::error::Error;
-use crate::i18n::{Lang, m};
+use crate::error;
+use crate::i18n::{Lang, Msg, m};
 use crate::settings::{self, ServerFile, WhisperFile};
 use crate::tr;
+
+/// What can go wrong resolving a weights file (AGL-039, D24c; AGL-050, D11;
+/// AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// A weights file is in none of the weights folders and nobody named
+    /// its folder (AGL-039, D24c).
+    NotFound { name: String, folders: Vec<PathBuf> },
+    /// A weights file with a source is missing where nobody can be asked
+    /// (AGL-050, D11).
+    NotDownloaded { name: String, size: u64 },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NotFound { name, folders } => {
+                let folders: Vec<String> =
+                    folders.iter().map(|folder| folder.display().to_string()).collect();
+                let user_path = crate::paths::Paths::from_env(|name| std::env::var_os(name))
+                    .map(|paths| paths.settings_file().display().to_string())
+                    .unwrap_or_else(|_| crate::settings::SETTINGS_FILE.into());
+                tr!(
+                    lang,
+                    NOT_FOUND,
+                    name = name,
+                    folders = folders.join(", "),
+                    user_path = user_path
+                )
+            }
+            Self::NotDownloaded { name, size } => {
+                tr!(lang, NOT_DOWNLOADED, name = name, size = download::gigabytes(*size))
+            }
+        }
+    }
+}
+
+/// `Error::NotFound`.
+const NOT_FOUND: Msg = Msg {
+    en: "{name} is in none of the weights folders ({folders}); put it in one of them, add its folder to `models` of {user_path}, or name it by an absolute path",
+    uk: "{name} немає в жодній теці ваг ({folders}); поклади його в одну з них, додай його теку до `models` у {user_path} або вкажи його абсолютним шляхом",
+};
+
+/// `Error::NotDownloaded`.
+const NOT_DOWNLOADED: Msg = Msg {
+    en: "{name} ({size}) is not downloaded: run `agl` in a terminal, it offers to download it",
+    uk: "{name} ({size}) не завантажено: запусти `agl` у терміналі, він запропонує завантажити",
+};
 
 /// What a file found nowhere does.
 pub enum Missing<'a> {
@@ -67,7 +116,7 @@ pub fn offer(
     ask: &dyn Fn(&str) -> Option<String>,
     say: &dyn Fn(&str),
     lang: Lang,
-) -> Result<(), Error> {
+) -> Result<(), error::Error> {
     let looked_in = folders.all();
     // The shards of a Strata model too (AGL-089, D4).
     let names: Vec<&str> = [&model.model, &model.draft, &model.mmproj]
@@ -131,7 +180,7 @@ pub fn resolve(
     sources: &[FileSource],
     missing: &Missing,
     lang: Lang,
-) -> Result<(), Error> {
+) -> Result<(), error::Error> {
     // The files of a server outside are where it runs (AGL-052, D4).
     let external = server.external();
     if !external && let Missing::Ask(ask, say) = missing {
@@ -177,21 +226,21 @@ fn place(
     sources: &[FileSource],
     missing: &Missing,
     lang: Lang,
-) -> Result<Option<String>, Error> {
+) -> Result<Option<String>, error::Error> {
     if let Some(path) = find(name, found) {
         return Ok(Some(path.to_string_lossy().into_owned()));
     }
     match missing {
         Missing::Keep => Ok(None),
         Missing::Fail => Err(match sources.iter().find(|source| source.name == name) {
-            Some(source) => Error::WeightsNotDownloaded {
+            Some(source) => error::Error::Weights(Error::NotDownloaded {
                 name: name.to_owned(),
                 size: source.size,
-            },
-            None => Error::WeightsNotFound {
+            }),
+            None => error::Error::Weights(Error::NotFound {
                 name: name.to_owned(),
                 folders: found.clone(),
-            },
+            }),
         }),
         Missing::Ask(ask, _) => {
             let question = tr!(lang, m::WEIGHTS_ASK, name = name);
@@ -199,10 +248,10 @@ fn place(
                 .map(|answer| PathBuf::from(answer.trim()))
                 .filter(|folder| folder.is_absolute() && folder.join(name).is_file());
             let Some(folder) = folder else {
-                return Err(Error::WeightsNotFound {
+                return Err(error::Error::Weights(Error::NotFound {
                     name: name.to_owned(),
                     folders: found.clone(),
-                });
+                }));
             };
             // The folder is kept for the next runs (D24c, D12).
             listed.push(folder.clone());
@@ -276,7 +325,7 @@ mod tests {
         assert_eq!(kept.model.as_deref(), Some("m.gguf"));
         let mut failed = server("m.gguf");
         match resolve(&mut failed, &mut whisper, &folders, &[], &Missing::Fail, Lang::En) {
-            Err(Error::WeightsNotFound { name, folders }) => {
+            Err(error::Error::Weights(Error::NotFound { name, folders })) => {
                 assert_eq!(name, "m.gguf");
                 assert_eq!(folders, [dir.0.join("own")]);
             }
@@ -323,12 +372,12 @@ mod tests {
         let mut other = server("n.gguf");
         assert!(matches!(
             resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&nothing, &|_| {}), Lang::En),
-            Err(Error::WeightsNotFound { .. })
+            Err(error::Error::Weights(Error::NotFound { .. }))
         ));
         let wrong = |_: &str| Some(answer.clone());
         assert!(matches!(
             resolve(&mut other, &mut WhisperFile::default(), &folders, &[], &Missing::Ask(&wrong, &|_| {}), Lang::En),
-            Err(Error::WeightsNotFound { .. })
+            Err(error::Error::Weights(Error::NotFound { .. }))
         ));
     }
 
@@ -390,7 +439,7 @@ mod tests {
         };
         let mut model = server("m.gguf");
         let result = resolve(&mut model, &mut WhisperFile::default(), &folders, &sources, &Missing::Ask(&ask, &|_| {}), Lang::En);
-        assert!(matches!(result, Err(Error::WeightsNotFound { .. })), "{result:?}");
+        assert!(matches!(result, Err(error::Error::Weights(Error::NotFound { .. }))), "{result:?}");
         assert_eq!(*asked.borrow(), 2);
         assert!(!dir.0.join("own/m.gguf").exists());
     }
@@ -402,7 +451,7 @@ mod tests {
         let user_path = dir.0.join("settings.nix");
         let folders = Folders { own: dir.0.join("own"), listed: &[], user_path: &user_path };
         let result = resolve(&mut server("m.gguf"), &mut WhisperFile::default(), &folders, &sources, &Missing::Fail, Lang::En);
-        assert!(matches!(result, Err(Error::WeightsNotDownloaded { size: 7, .. })), "{result:?}");
+        assert!(matches!(result, Err(error::Error::Weights(Error::NotDownloaded { size: 7, .. }))), "{result:?}");
         assert!(!dir.0.join("own/m.gguf").exists());
     }
 

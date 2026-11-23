@@ -2749,18 +2749,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Завантажую {name} ({size})",
     };
 
-    /// `Error::WeightsNotDownloaded` (AGL-050, D11).
-    pub const WEIGHTS_NOT_DOWNLOADED: Msg = Msg {
-        en: "{name} ({size}) is not downloaded: run `agl` in a terminal, it offers to download it",
-        uk: "{name} ({size}) не завантажено: запусти `agl` у терміналі, він запропонує завантажити",
-    };
-
-    /// `Error::WeightsNotFound` (AGL-039, D24c).
-    pub const WEIGHTS_NOT_FOUND: Msg = Msg {
-        en: "{name} is in none of the weights folders ({folders}); put it in one of them, add its folder to `models` of {user_path}, or name it by an absolute path",
-        uk: "{name} немає в жодній теці ваг ({folders}); поклади його в одну з них, додай його теку до `models` у {user_path} або вкажи його абсолютним шляхом",
-    };
-
     /// `Error::NixNotFound` (AGL-039, D38).
     pub const NIX_NOT_FOUND: Msg = Msg {
         en: "cannot run nix-instantiate: {source} (agl needs Nix)",
@@ -3618,26 +3606,7 @@ impl Error {
             Error::Terminal { source } => tr!(lang, m::TERMINAL, source = source),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
-            Error::WeightsNotFound { name, folders } => {
-                let folders: Vec<String> =
-                    folders.iter().map(|folder| folder.display().to_string()).collect();
-                let user_path = crate::paths::Paths::from_env(|name| std::env::var_os(name))
-                    .map(|paths| paths.settings_file().display().to_string())
-                    .unwrap_or_else(|_| crate::settings::SETTINGS_FILE.into());
-                tr!(
-                    lang,
-                    m::WEIGHTS_NOT_FOUND,
-                    name = name,
-                    folders = folders.join(", "),
-                    user_path = user_path
-                )
-            }
-            Error::WeightsNotDownloaded { name, size } => tr!(
-                lang,
-                m::WEIGHTS_NOT_DOWNLOADED,
-                name = name,
-                size = crate::download::gigabytes(*size)
-            ),
+            Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
             Error::NixDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)

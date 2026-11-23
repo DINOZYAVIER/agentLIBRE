@@ -284,12 +284,9 @@ pub enum Error {
     /// The draft engine (AGL-122) cannot be run or failed: the draft is
     /// dropped, the final pass is untouched.
     Draft { detail: String },
-    /// A weights file is in none of the weights folders and nobody named
-    /// its folder (AGL-039, D24c).
-    WeightsNotFound { name: String, folders: Vec<PathBuf> },
-    /// A weights file with a source is missing where nobody can be asked:
-    /// a run with `-p` or without a terminal (AGL-050, D11).
-    WeightsNotDownloaded { name: String, size: u64 },
+    /// A weights file was missing (AGL-039, D24c; AGL-050, D11). Its own
+    /// type, wrapped (AGL-121, D66).
+    Weights(crate::weights::Error),
     /// A weights file failed to download (AGL-050, D17). Its own type,
     /// wrapped (AGL-121, D66).
     Download(crate::download::Error),
@@ -407,6 +404,13 @@ impl From<crate::download::Error> for Error {
     /// A download's own error as agl's (AGL-121, D66).
     fn from(source: crate::download::Error) -> Error {
         Error::Download(source)
+    }
+}
+
+impl From<crate::weights::Error> for Error {
+    /// A weights lookup's own error as agl's (AGL-121, D66).
+    fn from(source: crate::weights::Error) -> Error {
+        Error::Weights(source)
     }
 }
 
