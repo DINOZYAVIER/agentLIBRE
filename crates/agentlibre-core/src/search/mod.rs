@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,12 +17,100 @@ use serde_json::Value as Json;
 
 use crate::action::Outcome;
 use crate::backend::ToolCall;
-use crate::error::{CredentialProblem, Error};
-use crate::i18n::Lang;
+use crate::i18n::{Lang, Msg};
 use crate::tools::signal_group;
 use crate::session::INTERRUPTED;
 use crate::settings::Search;
 use crate::tools::ToolResult;
+use crate::tr;
+
+/// What the credential policy of `[search]` finds wrong with a file
+/// (AGL-019, D4; AGL-121, D66).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CredentialProblem {
+    /// The file cannot be inspected or read; `detail` is the system's.
+    Unreadable(String),
+    /// Not a regular file (a link to one counts as not).
+    NotRegular,
+    /// Not owned by the user who runs `agl`.
+    NotOwn,
+    /// Readable or writable by the group or others.
+    OthersAccess,
+    /// More than one hard link.
+    OtherLinks,
+    Empty,
+    /// Over 1 MiB.
+    TooLarge,
+    /// Not a PEM of the type the key needs (`expected`).
+    WrongType { expected: &'static str },
+}
+
+/// What the credential policy of `[search]` refuses (AGL-019, D4; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// A credential file of `search` that the policy refuses.
+    Credential { file: PathBuf, problem: CredentialProblem },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        let Self::Credential { file, problem } = self;
+        let problem = match problem {
+            CredentialProblem::Unreadable(detail) => {
+                tr!(lang, CREDENTIAL_UNREADABLE, detail = detail)
+            }
+            CredentialProblem::NotRegular => tr!(lang, CREDENTIAL_NOT_REGULAR).to_string(),
+            CredentialProblem::NotOwn => tr!(lang, CREDENTIAL_NOT_OWN).to_string(),
+            CredentialProblem::OthersAccess => tr!(lang, CREDENTIAL_OTHERS_ACCESS).to_string(),
+            CredentialProblem::OtherLinks => tr!(lang, CREDENTIAL_OTHER_LINKS).to_string(),
+            CredentialProblem::Empty => tr!(lang, CREDENTIAL_EMPTY).to_string(),
+            CredentialProblem::TooLarge => tr!(lang, CREDENTIAL_TOO_LARGE).to_string(),
+            CredentialProblem::WrongType { expected } => {
+                tr!(lang, CREDENTIAL_WRONG_TYPE, expected = expected)
+            }
+        };
+        tr!(lang, SEARCH_CREDENTIAL, file = file.display(), problem = problem)
+    }
+}
+
+/// `Error::Credential`.
+const SEARCH_CREDENTIAL: Msg = Msg {
+    en: "the search credential {file} is refused: {problem}",
+    uk: "облікові дані пошуку {file} відхилено: {problem}",
+};
+const CREDENTIAL_UNREADABLE: Msg = Msg {
+    en: "it cannot be read ({detail})",
+    uk: "його не можна прочитати ({detail})",
+};
+const CREDENTIAL_NOT_REGULAR: Msg = Msg {
+    en: "it is not a regular file (a link does not count)",
+    uk: "це не звичайний файл (посилання не підходить)",
+};
+const CREDENTIAL_NOT_OWN: Msg = Msg {
+    en: "it is not owned by you",
+    uk: "він вам не належить",
+};
+const CREDENTIAL_OTHERS_ACCESS: Msg = Msg {
+    en: "the group or others can access it; make it mode 0600",
+    uk: "група або інші мають до нього доступ; зробіть режим 0600",
+};
+const CREDENTIAL_OTHER_LINKS: Msg = Msg {
+    en: "it has more than one hard link",
+    uk: "він має більше одного жорсткого посилання",
+};
+const CREDENTIAL_EMPTY: Msg = Msg {
+    en: "it is empty",
+    uk: "він порожній",
+};
+const CREDENTIAL_TOO_LARGE: Msg = Msg {
+    en: "it is larger than 1 MiB",
+    uk: "він більший за 1 МіБ",
+};
+const CREDENTIAL_WRONG_TYPE: Msg = Msg {
+    en: "it is not a PEM of the type {expected}",
+    uk: "це не PEM типу {expected}",
+};
 
 /// The sources and languages the service takes, and the bounds of a call
 /// (D6, the old tool's).
@@ -164,7 +252,7 @@ impl Pem {
 /// accessible by group or others, with a single link, not empty, at most
 /// 1 MiB, of the right PEM type.
 pub fn check_credential(path: &Path, kind: Pem) -> Result<(), Error> {
-    let refuse = |problem| Error::SearchCredential {
+    let refuse = |problem| Error::Credential {
         file: path.into(),
         problem,
     };

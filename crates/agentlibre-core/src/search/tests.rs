@@ -11,7 +11,7 @@ const KEY: &str = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\
 
 fn problem(path: &Path, kind: Pem) -> CredentialProblem {
     match check_credential(path, kind) {
-        Err(Error::SearchCredential { problem, file }) => {
+        Err(Error::Credential { problem, file }) => {
             assert_eq!(file, path);
             problem
         }
@@ -149,7 +149,7 @@ fn the_wrong_pem_type_is_refused() {
 
 #[test]
 fn the_refusal_reads_in_both_languages() {
-    let error = Error::SearchCredential {
+    let error = Error::Credential {
         file: "/c/client.crt".into(),
         problem: CredentialProblem::OthersAccess,
     };

@@ -83,12 +83,9 @@ pub enum Error {
         key: String,
         value: String,
     },
-    /// A credential file of `search` that the policy refuses
-    /// (AGL-019, D4).
-    SearchCredential {
-        file: PathBuf,
-        problem: CredentialProblem,
-    },
+    /// A credential file of `search` the policy refuses (AGL-019, D4). Its
+    /// own type, wrapped (AGL-121, D66).
+    Search(crate::search::Error),
     /// A format or Function name that cannot name a file.
     InvalidName(String),
     /// A template or string of a format is unusable (D81).
@@ -416,25 +413,11 @@ impl From<crate::whisper::Error> for Error {
     }
 }
 
-/// What the credential policy of `[search]` finds wrong with a file
-/// (AGL-019, D4).
-#[derive(Debug, PartialEq, Eq)]
-pub enum CredentialProblem {
-    /// The file cannot be inspected or read; `detail` is the system's.
-    Unreadable(String),
-    /// Not a regular file (a link to one counts as not).
-    NotRegular,
-    /// Not owned by the user who runs `agl`.
-    NotOwn,
-    /// Readable or writable by the group or others.
-    OthersAccess,
-    /// More than one hard link.
-    OtherLinks,
-    Empty,
-    /// Over 1 MiB.
-    TooLarge,
-    /// Not a PEM of the type the key needs (`expected`).
-    WrongType { expected: &'static str },
+impl From<crate::search::Error> for Error {
+    /// The search credential policy's own error as agl's (AGL-121, D66).
+    fn from(source: crate::search::Error) -> Error {
+        Error::Search(source)
+    }
 }
 
 /// TOML type a settings key requires.
