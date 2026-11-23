@@ -1,6 +1,7 @@
 //! The flow's half of the daemon: the wakes, the review's turns, the poke (AGL-121, D28): split off `daemon/mod.rs`.
 
 use super::*;
+use crate::plane::error::Error as PlaneError;
 
 /// D58's gate (AGL-121): one model turn of the flows at a time over all
 /// planes. A review holds it while it turns; a wake holds it from its
@@ -192,7 +193,7 @@ impl Daemon {
             .lock()
             .plane(plane_dir)
             .map(|plane| plane.file.clone())
-            .ok_or_else(|| Error::PlaneNotFound {
+            .ok_or_else(|| PlaneError::NotFound {
                 name: plane_dir.display().to_string(),
             })?;
         let plane_settings = file.settings()?;
@@ -326,10 +327,11 @@ fn review_answer(
     if events.iter().any(|event| event == &answer) {
         Ok(answer)
     } else {
-        Err(Error::PlaneFile {
+        Err(PlaneError::File {
             path: function.path.clone(),
             detail: format!("`{answer}` is no event of the review"),
-        })
+        }
+        .into())
     }
 }
 

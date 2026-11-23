@@ -486,12 +486,6 @@ Plane (де йде робота над проєктом: його сесії, fo
         uk: "plane: {name}\nid: {id}\nсховище: {dir}\nсесій: {sessions}\nтеки:",
     };
 
-    /// `Error::PlaneDeleteNeedsYes`.
-    pub const PLANE_DELETE_NEEDS_YES: Msg = Msg {
-        en: "the plane `{name}` is not deleted: there is no terminal to ask on; add --yes",
-        uk: "plane `{name}` не видалено: немає термінала, щоб спитати; додай --yes",
-    };
-
     /// The section of `agl memory` in the help (AGL-061, D3).
     pub const HELP_MEMORY: Msg = Msg {
         en: "\
@@ -939,7 +933,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "масивом рядків",
     };
 
-
     /// `Expected::Tables` (AGL-089).
     pub const EXPECTED_TABLES: Msg = Msg {
         en: "an array of attribute sets",
@@ -1364,32 +1357,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const SYSTEMD: Msg = Msg {
         en: "systemd failed: {detail}",
         uk: "помилка systemd: {detail}",
-    };
-
-    /// `agl notify` without `XDG_RUNTIME_DIR` (AGL-074, D3).
-    pub const PLANE_NAME: Msg = Msg {
-        en: "`{name}` cannot name a plane: a name is not empty, has no `/` and does not start with `.`",
-        uk: "`{name}` не може бути назвою plane: назва не порожня, без `/` і не починається з `.`",
-    };
-
-    pub const PLANE_EXISTS: Msg = Msg {
-        en: "a plane named `{name}` exists",
-        uk: "plane з назвою `{name}` уже є",
-    };
-
-    pub const PLANE_NOT_FOUND: Msg = Msg {
-        en: "no plane is named `{name}`; `agl plane list` lists them",
-        uk: "немає plane з назвою `{name}`; `agl plane list` покаже всі",
-    };
-
-    pub const PLANE_FILE: Msg = Msg {
-        en: "{path}: {detail}",
-        uk: "{path}: {detail}",
-    };
-
-    pub const PLANE_DIRECTORY_NOT_IN: Msg = Msg {
-        en: "the plane `{name}` does not have {directory}",
-        uk: "у plane `{name}` немає {directory}",
     };
 
     pub const DAEMON_NO_RUNTIME: Msg = Msg {
@@ -2447,7 +2414,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "сервер проєкту",
     };
 
-
     /// `agl server stop` stopped the whisper server too (AGL-014).
     pub const WHISPER_STOPPED: Msg = Msg {
         en: "whisper-server stopped",
@@ -3236,19 +3202,7 @@ impl Error {
                 tr!(lang, m::DAEMON_NO_TRANSCRIBER, dir = dir.display())
             }
             Error::DaemonBadAudio => tr!(lang, m::DAEMON_BAD_AUDIO).to_string(),
-            Error::PlaneName { name } => tr!(lang, m::PLANE_NAME, name = name),
-            Error::PlaneDeleteNeedsYes { name } => tr!(lang, m::PLANE_DELETE_NEEDS_YES, name = name),
-            Error::PlaneExists { name } => tr!(lang, m::PLANE_EXISTS, name = name),
-            Error::PlaneNotFound { name } => tr!(lang, m::PLANE_NOT_FOUND, name = name),
-            Error::PlaneFile { path, detail } => {
-                tr!(lang, m::PLANE_FILE, path = path.display(), detail = detail)
-            }
-            Error::PlaneDirectoryNotIn { name, directory } => tr!(
-                lang,
-                m::PLANE_DIRECTORY_NOT_IN,
-                name = name,
-                directory = directory.display()
-            ),
+            Error::Plane(error) => error.message(lang),
             Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::NoMultimodal => tr!(lang, m::NO_MULTIMODAL).to_string(),

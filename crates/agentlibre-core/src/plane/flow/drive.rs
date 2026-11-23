@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use crate::action::Outcome;
 use crate::error::Error;
+use crate::plane::error::Error as PlaneError;
 use crate::i18n::{m, Lang};
 use crate::machine::{Event, Progress};
 use crate::plane::{Text, Told};
@@ -629,13 +630,14 @@ fn walk(
     // The states handed the run to each other `MAX_WALK` times with no
     // outside event between: the declaration has no end, and the human has
     // to bound it (D9).
-    Err(Error::PlaneFile {
+    Err(PlaneError::File {
         path: journal::path(plane_dir, decl.name()),
         detail: format!(
             "`{}`: {MAX_WALK} steps in a row without an event from outside; give a state `max_visits` or the flow `max_steps_total`",
             decl.name()
         ),
-    })
+    }
+    .into())
 }
 
 /// Fires every flow whose `timer` has run out (D9, D16): a state's timer

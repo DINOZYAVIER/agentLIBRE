@@ -1,4 +1,5 @@
 use super::*;
+use crate::plane::error::Error as PlaneError;
 use super::journal;
 use std::time::Instant;
 use crate::machine::Event;
@@ -245,7 +246,7 @@ fn a_line_that_is_not_an_entry_is_named() {
     fs::create_dir_all(dir.0.join(journal::JOURNAL_DIR)).unwrap();
     fs::write(dir.0.join(journal::path(&dir.0, "one")), "not json\n").unwrap();
     let error = journal::read(&journal::path(&dir.0, "one")).unwrap_err();
-    assert!(matches!(error, Error::PlaneFile { .. }), "{error:?}");
+    assert!(matches!(error, Error::Plane(PlaneError::File { .. })), "{error:?}");
 }
 
 #[test]
@@ -381,7 +382,7 @@ fn an_edited_declaration_under_a_running_flow_is_refused() {
     let moved = read(&dir, MOVED).unwrap();
     let moved = moved.find("dev-loop").unwrap();
     let error = FlowRun::resume(moved, &dir.0).unwrap_err();
-    assert!(matches!(error, Error::PlaneFile { .. }), "{error:?}");
+    assert!(matches!(error, Error::Plane(PlaneError::File { .. })), "{error:?}");
 }
 
 #[test]
@@ -525,7 +526,7 @@ fn a_declaration_that_chases_its_tail_is_refused() {
     let decl = flows.find("tail").unwrap();
     let error = drive::start(decl, &dir.0, &dir.0, None).unwrap_err();
     assert!(
-        matches!(&error, Error::PlaneFile { detail, .. } if detail.contains("max_visits")),
+        matches!(&error, Error::Plane(PlaneError::File { detail, .. }) if detail.contains("max_visits")),
         "{error:?}"
     );
 }

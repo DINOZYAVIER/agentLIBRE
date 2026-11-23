@@ -188,18 +188,9 @@ pub enum Error {
     Systemd { detail: String },
     /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
     Notify { detail: String },
-    /// A plane's name that cannot be its store's directory (AGL-077, D5).
-    PlaneName { name: String },
-    /// `agl plane delete` with no terminal to ask on and no `--yes` (D14).
-    PlaneDeleteNeedsYes { name: String },
-    /// A plane of that name exists (AGL-077, D5).
-    PlaneExists { name: String },
-    /// No plane has that name (AGL-077).
-    PlaneNotFound { name: String },
-    /// A plane's `plane.nix` is not what agl writes (AGL-077, D16).
-    PlaneFile { path: PathBuf, detail: String },
-    /// `agl plane remove` of a directory the plane does not have.
-    PlaneDirectoryNotIn { name: String, directory: PathBuf },
+    /// A plane's name, store, files or directories (AGL-077). Its own
+    /// type, wrapped (AGL-121, D66).
+    Plane(crate::plane::error::Error),
     /// What the daemon refused, in its words (AGL-076).
     Said { text: String },
     /// `agl daemon` has no runtime directory for its socket (AGL-076, D7).
@@ -369,6 +360,13 @@ impl From<agentlibre_client::Error> for Error {
             agentlibre_client::Error::Said { text } => Error::Said { text },
             agentlibre_client::Error::Gone => Error::PlaneGone,
         }
+    }
+}
+
+impl From<crate::plane::error::Error> for Error {
+    /// A plane's own error as agl's (AGL-121, D66).
+    fn from(source: crate::plane::error::Error) -> Error {
+        Error::Plane(source)
     }
 }
 

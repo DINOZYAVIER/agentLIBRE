@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use crate::error::Error;
+use crate::plane::error::Error as PlaneError;
 use crate::nix;
 use crate::paths::Paths;
 
@@ -39,7 +40,7 @@ impl PlaneFile {
         check_name(name)?;
         let dir = paths.plane_dir(name);
         if dir.exists() {
-            return Err(Error::PlaneExists { name: name.into() });
+            return Err(PlaneError::Exists { name: name.into() }.into());
         }
         let id = crate::session::uuid_v7().map_err(|source| Error::Write {
             path: dir.clone(),
@@ -64,12 +65,14 @@ impl PlaneFile {
         let dir = paths.plane_dir(name);
         let file = dir.join(PLANE_FILE);
         if !file.is_file() {
-            return Err(Error::PlaneNotFound { name: name.into() });
+            return Err(PlaneError::NotFound { name: name.into() }.into());
         }
         let value = nix::eval_file(&file)?;
-        let bad = |detail: &str| Error::PlaneFile {
-            path: file.clone(),
-            detail: detail.into(),
+        let bad = |detail: &str| {
+            Error::from(PlaneError::File {
+                path: file.clone(),
+                detail: detail.into(),
+            })
         };
         let format = value["format"].as_i64().ok_or_else(|| bad("no format"))?;
         if format != FORMAT {
@@ -128,7 +131,7 @@ impl PlaneFile {
         check_name(new)?;
         let dir = paths.plane_dir(new);
         if dir.exists() {
-            return Err(Error::PlaneExists { name: new.into() });
+            return Err(PlaneError::Exists { name: new.into() }.into());
         }
         fs::rename(&plane.dir, &dir).map_err(|source| Error::Write {
             path: dir.clone(),
@@ -156,10 +159,11 @@ impl PlaneFile {
         let before = self.directories.len();
         self.directories.retain(|known| *known != directory);
         if self.directories.len() == before {
-            return Err(Error::PlaneDirectoryNotIn {
+            return Err(PlaneError::DirectoryNotIn {
                 name: self.name.clone(),
                 directory,
-            });
+            }
+            .into());
         }
         self.save()
     }
@@ -251,7 +255,7 @@ impl PlaneFile {
 /// `.` or `..`, and not hidden.
 fn check_name(name: &str) -> Result<(), Error> {
     if name.is_empty() || name.contains('/') || name.starts_with('.') || name.contains('\0') {
-        return Err(Error::PlaneName { name: name.into() });
+        return Err(PlaneError::Name { name: name.into() }.into());
     }
     Ok(())
 }
@@ -298,11 +302,11 @@ mod tests {
         assert_eq!(PlaneFile::list(&paths).unwrap(), std::slice::from_ref(&made));
         assert!(matches!(
             PlaneFile::create(&paths, "work", &[]),
-            Err(Error::PlaneExists { .. })
+            Err(Error::Plane(PlaneError::Exists { .. }))
         ));
-        assert!(matches!(PlaneFile::open(&paths, "none"), Err(Error::PlaneNotFound { .. })));
+        assert!(matches!(PlaneFile::open(&paths, "none"), Err(Error::Plane(PlaneError::NotFound { .. }))));
         for name in ["", "a/b", ".hidden", ".."] {
-            assert!(matches!(PlaneFile::create(&paths, name, &[]), Err(Error::PlaneName { .. })));
+            assert!(matches!(PlaneFile::create(&paths, name, &[]), Err(Error::Plane(PlaneError::Name { .. }))));
         }
     }
 
@@ -327,7 +331,7 @@ mod tests {
         one.remove(&a).unwrap();
         assert_eq!(names(&a), ["two"]);
         assert!(a.is_dir(), "its files are not touched");
-        assert!(matches!(one.remove(&a), Err(Error::PlaneDirectoryNotIn { .. })));
+        assert!(matches!(one.remove(&a), Err(Error::Plane(PlaneError::DirectoryNotIn { .. }))));
     }
 
     #[test]

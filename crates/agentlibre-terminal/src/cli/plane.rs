@@ -9,6 +9,7 @@ use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::cli::args::PlaneAction;
 use crate::error::Error;
+use crate::plane::error::Error as PlaneError;
 use crate::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
@@ -91,7 +92,7 @@ fn act(
         PlaneAction::Delete { name, yes } => {
             let plane = PlaneFile::open(paths, &name)?;
             if !yes {
-                let ask = ask.ok_or_else(|| Error::PlaneDeleteNeedsYes { name: name.clone() })?;
+                let ask = ask.ok_or_else(|| PlaneError::DeleteNeedsYes { name: name.clone() })?;
                 let question = tr!(lang, m::PLANE_DELETE_ASK, name = name, dir = plane.dir.display());
                 if !ask(&question) {
                     return Ok(tr!(lang, m::PLANE_KEPT, name = name).to_string());
@@ -253,7 +254,7 @@ mod tests {
         let delete = || action(&["plane", "delete", "work"]);
         assert!(matches!(
             act(delete(), &paths, &cwd, None, Lang::En),
-            Err(Error::PlaneDeleteNeedsYes { .. })
+            Err(Error::Plane(PlaneError::DeleteNeedsYes { .. }))
         ));
         // A no keeps it, a yes deletes it.
         let no = |_: &str| false;

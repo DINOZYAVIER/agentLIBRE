@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value as Json, json};
 
 use crate::error::Error;
+use crate::plane::error::Error as PlaneError;
 use crate::machine::{Event, Machine, Progress};
 use crate::session::Unfinished;
 
@@ -150,11 +151,11 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
     };
     let mut entries = Vec::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let value: Json = serde_json::from_str(line).map_err(|source| Error::PlaneFile {
+        let value: Json = serde_json::from_str(line).map_err(|source| PlaneError::File {
             path: path.into(),
             detail: source.to_string(),
         })?;
-        entries.push(Entry::from_line(&value).ok_or_else(|| Error::PlaneFile {
+        entries.push(Entry::from_line(&value).ok_or_else(|| PlaneError::File {
             path: path.into(),
             detail: "not an entry of a flow".into(),
         })?);
@@ -221,14 +222,15 @@ pub fn fold(decl: &FlowDecl, path: &Path, entries: &[Entry]) -> Result<Unfinishe
                     .next_option(name, detail.as_deref())
                     .unwrap_or(at);
                 if decl.state_name(next) != into.as_str() {
-                    return Err(Error::PlaneFile {
+                    return Err(PlaneError::File {
                         path: path.into(),
                         detail: format!(
                             "`{name}` in `{}` gives `{}`, the journal recorded `{into}`",
                             decl.state_name(at),
                             decl.state_name(next)
                         ),
-                    });
+                    }
+                    .into());
                 }
                 at = next;
                 let name = decl.state_name(at);

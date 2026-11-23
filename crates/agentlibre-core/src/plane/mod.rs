@@ -37,6 +37,7 @@ use crate::tr;
 use crate::weights;
 use crate::wsl;
 
+pub mod error;
 pub mod flow;
 mod store;
 pub mod wire;
