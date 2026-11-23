@@ -41,10 +41,50 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type as MessageType;
 use zbus::zvariant::Value;
 
-use agentlibre_core::error::Error;
-use agentlibre_core::i18n::{Lang, m};
+use agentlibre_core::error::Error as CoreError;
+use agentlibre_core::i18n::{Lang, Msg, m};
 use agentlibre_core::paths::Paths;
 use agentlibre_core::tr;
+
+/// What `agl-notify` fails on: an error of agl's core, or the session bus
+/// (AGL-074, D2; AGL-121, D73).
+#[derive(Debug)]
+pub enum Error {
+    /// An error of agl's core.
+    Core(CoreError),
+    /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
+    Notify { detail: String },
+}
+
+impl From<CoreError> for Error {
+    fn from(source: CoreError) -> Error {
+        Error::Core(source)
+    }
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Error::Core(error) => error.message(lang),
+            Error::Notify { detail } => tr!(lang, NOTIFY_FAILED, detail = detail),
+        }
+    }
+
+    /// The exit code of `agl-notify` failing with `self`: the core's, or 1.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Error::Core(error) => error.exit_code(),
+            Error::Notify { .. } => 1,
+        }
+    }
+}
+
+/// `Error::Notify`.
+const NOTIFY_FAILED: Msg = Msg {
+    en: "notify: the session bus: {detail}",
+    uk: "notify: сесійна шина: {detail}",
+};
 
 /// The notification server's names.
 const NAME: &str = "org.freedesktop.Notifications";
@@ -84,7 +124,7 @@ enum Input {
 pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
     // The socket and the connection are the clients' crate's (AGL-121, D29).
     let socket = agentlibre_client::socket_path(
-        paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?,
+        paths.runtime.as_deref().ok_or(CoreError::DaemonNoRuntime)?,
     );
     let failed = |error: zbus::Error| Error::Notify {
         detail: error.to_string(),

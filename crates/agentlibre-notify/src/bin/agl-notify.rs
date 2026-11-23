@@ -3,7 +3,8 @@
 
 use std::process::ExitCode;
 
-use agentlibre_core::error::Error;
+use agentlibre_core::error::Error as CoreError;
+use agentlibre_notify::Error;
 use agentlibre_core::i18n::Lang;
 use agentlibre_core::paths::Paths;
 use agentlibre_core::settings::UserFile;
@@ -31,13 +32,13 @@ fn main() -> ExitCode {
     }
     let paths = match Paths::from_env(|name| std::env::var_os(name)) {
         Ok(paths) => paths,
-        Err(error) => return fail(error.into()),
+        Err(error) => return fail(CoreError::from(error).into()),
     };
     let lang = match lang {
         Some(lang) => lang,
         None => match UserFile::load(&paths.settings_file()) {
             Ok(user) => user.language.unwrap_or(Lang::En),
-            Err(error) => return fail(error),
+            Err(error) => return fail(error.into()),
         },
     };
     match agentlibre_notify::run(&paths, lang) {

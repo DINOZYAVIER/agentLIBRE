@@ -1097,12 +1097,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "виконання сесії скінчилося, не відповівши; файл сесії зберігає зроблене",
     };
 
-    /// `agl notify` and the session bus (AGL-074, D2).
-    pub const NOTIFY_FAILED: Msg = Msg {
-        en: "notify: the session bus: {detail}",
-        uk: "notify: сесійна шина: {detail}",
-    };
-
     /// The cards of `agl notify` (AGL-074, D5, D8): what a turn does.
     pub const NOTIFY_THINKING: Msg = Msg {
         en: "thinking",
@@ -2319,7 +2313,6 @@ impl Error {
             Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),
             Error::DaemonServer(error) => error.message(lang),
             Error::Plane(error) => error.message(lang),
-            Error::Notify { detail } => tr!(lang, m::NOTIFY_FAILED, detail = detail),
             Error::AttachWithoutPrompt => tr!(lang, m::ATTACH_WITHOUT_PROMPT).to_string(),
             Error::Whisper(error) => error.message(lang),
             Error::BridgeNotSet { path } => tr!(lang, m::BRIDGE_NOT_SET, path = path.display()),

@@ -73,8 +73,6 @@ pub enum Error {
     /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
     /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
     Wsl(crate::wsl::Error),
-    /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
-    Notify { detail: String },
     /// A plane's name, store, files or directories (AGL-077). Its own
     /// type, wrapped (AGL-121, D66).
     Plane(crate::plane::error::Error),
