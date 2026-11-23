@@ -33,7 +33,7 @@ impl StyleError {
     }
 }
 
-/// `StyleError`'s problems, for `Error::InvalidStyle`.
+/// `StyleError`'s problems, for `settings::error::Error::InvalidStyle`.
 const STYLE_EMPTY: Msg = Msg {
     en: "a style cannot be empty",
     uk: "стиль не може бути порожнім",

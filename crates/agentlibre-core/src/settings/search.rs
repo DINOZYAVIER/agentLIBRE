@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::settings::error::Error as SettingsError;
 use crate::nix::Section;
 
 /// `[search]` of a settings file, the user's or the project's
@@ -54,20 +55,22 @@ impl SearchCaFile {
         if let Some(url) = &url
             && !url.starts_with("https://")
         {
-            return Err(Error::UnsupportedSearchUrl {
+            return Err(SettingsError::UnsupportedSearchUrl {
                 path: path.into(),
                 url: url.clone(),
-            });
+            }
+            .into());
         }
         let root = ca.string("root")?;
         if let Some(root) = &root
             && !Path::new(root).is_absolute()
         {
-            return Err(Error::SearchPathNotAbsolute {
+            return Err(SettingsError::SearchPathNotAbsolute {
                 path: path.into(),
                 key: ca.key("root"),
                 value: root.clone(),
-            });
+            }
+            .into());
         }
         Ok(SearchCaFile {
             url,
@@ -121,21 +124,23 @@ impl SearchFile {
         if let Some(url) = &url
             && !url.starts_with("https://")
         {
-            return Err(Error::UnsupportedSearchUrl {
+            return Err(SettingsError::UnsupportedSearchUrl {
                 path: path.into(),
                 url: url.clone(),
-            });
+            }
+            .into());
         }
         let mut file = |key: &str| -> Result<Option<String>, Error> {
             let value = search.string(key)?;
             if let Some(value) = &value
                 && !Path::new(value).is_absolute()
             {
-                return Err(Error::SearchPathNotAbsolute {
+                return Err(SettingsError::SearchPathNotAbsolute {
                     path: path.into(),
                     key: search.key(key),
                     value: value.clone(),
-                });
+                }
+                .into());
             }
             Ok(value)
         };

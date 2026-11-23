@@ -6,6 +6,7 @@
 //! services are modules of their own (AGL-043 F23): `server`, `whisper`,
 //! `search` and `repl`; the kind, the files and the assembly are here.
 
+pub mod error;
 mod repl;
 mod search;
 mod server;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::error::Error;
+use crate::settings::error::Error as SettingsError;
 use crate::i18n::Lang;
 use crate::nix::{self, Section};
 use crate::style::{COLOR_KEYS, Role, Style};
@@ -209,7 +211,7 @@ impl UserFile {
         let language = file
             .string("language")?
             .map(|code| {
-                Lang::from_code(&code).ok_or_else(|| Error::UnsupportedLanguage {
+                Lang::from_code(&code).ok_or_else(|| SettingsError::UnsupportedLanguage {
                     path: path.into(),
                     value: code,
                 })
@@ -226,7 +228,7 @@ impl UserFile {
                 for (key, value) in colors.string_entries()? {
                     let role = Role::from_key(&key).expect("keys are checked");
                     let style = Style::parse(&value, role.is_background()).map_err(|problem| {
-                        Error::InvalidStyle {
+                        SettingsError::InvalidStyle {
                             path: path.into(),
                             key: colors.key(&key),
                             value,
@@ -257,11 +259,12 @@ impl UserFile {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         if let Some(folder) = models.iter().find(|folder| !folder.is_absolute()) {
-            return Err(Error::SearchPathNotAbsolute {
+            return Err(SettingsError::SearchPathNotAbsolute {
                 path: path.into(),
                 key: "models".into(),
                 value: folder.display().to_string(),
-            });
+            }
+            .into());
         }
         Ok(UserFile {
             function,
@@ -299,11 +302,12 @@ impl AboutFile {
         about.check_keys(&["enabled", "source"])?;
         let source = about.string("source")?;
         if let Some(source) = source.as_ref().filter(|source| !Path::new(source).is_absolute()) {
-            return Err(Error::SearchPathNotAbsolute {
+            return Err(SettingsError::SearchPathNotAbsolute {
                 path: path.into(),
                 key: about.key("source"),
                 value: source.clone(),
-            });
+            }
+            .into());
         }
         Ok(AboutFile {
             enabled: about.bool("enabled")?,
@@ -333,7 +337,7 @@ impl BridgeFile {
                 u16::try_from(port)
                     .ok()
                     .filter(|port| *port > 0)
-                    .ok_or_else(|| Error::NotAPort {
+                    .ok_or_else(|| SettingsError::NotAPort {
                         path: path.into(),
                         key: bridge.key("port"),
                         value: port,

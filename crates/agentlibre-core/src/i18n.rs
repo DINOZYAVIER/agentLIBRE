@@ -939,52 +939,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "масивом наборів атрибутів",
     };
 
-    /// `Error::InvalidStyle`.
-    pub const INVALID_STYLE: Msg = Msg {
-        en: "invalid style `{value}` for `{key}` in {path}: {problem}",
-        uk: "некоректний стиль `{value}` для `{key}` у {path}: {problem}",
-    };
-
-    /// `Error::NotPositive`.
-    pub const NOT_POSITIVE: Msg = Msg {
-        en: "`{key}` in {path} must be at least 1",
-        uk: "`{key}` у {path} має бути не менше 1",
-    };
-
-    /// `Error::NotAPort` (AGL-083, D20).
-    pub const NOT_A_PORT: Msg = Msg {
-        en: "`{key}` in {path} must be a port, 1 to 65535, not {value}",
-        uk: "`{key}` у {path} має бути портом від 1 до 65535, а не {value}",
-    };
-
-    /// `Error::UnsupportedLanguage`.
-    pub const UNSUPPORTED_LANGUAGE: Msg = Msg {
-        en: "unsupported language `{value}` in {path}; supported: en, uk",
-        uk: "непідтримувана мова `{value}` у {path}; підтримуються: en, uk",
-    };
-
-    /// `Error::UnsupportedUrl`.
-    pub const UNSUPPORTED_URL: Msg = Msg {
-        en: "unsupported server address `{url}` in {path}; http:// and https:// are supported",
-        uk: "непідтримувана адреса сервера `{url}` у {path}; підтримуються http:// і https://",
-    };
-
     /// `Error::UnknownServerKind`.
     pub const UNKNOWN_SERVER_KIND: Msg = Msg {
         en: "`kind` in {path} is not `llama` or `strata`: `{value}`",
         uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
-    };
-
-    /// `Error::UnknownDetailLevel` (AGL-092, D2; AGL-095, D1).
-    pub const UNKNOWN_DETAIL_LEVEL: Msg = Msg {
-        en: "`repl.{key}` in {path} is not `off`, `flexible` or `full`: `{value}`",
-        uk: "`repl.{key}` у {path} не `off`, не `flexible` і не `full`: `{value}`",
-    };
-
-    /// `Error::UnsupportedSearchUrl`.
-    pub const UNSUPPORTED_SEARCH_URL: Msg = Msg {
-        en: "unsupported search address `{url}` in {path}; only https:// is supported",
-        uk: "непідтримувана адреса пошуку `{url}` у {path}; підтримується лише https://",
     };
 
     /// `Error::SearchCaNotSet` (AGL-043 F20).
@@ -1009,12 +967,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const SEARCH_CERT_EXPIRED: Msg = Msg {
         en: "the search certificate {cert} has expired: the search is off for this run (agl search login)",
         uk: "сертифікат пошуку {cert} прострочений: пошук у цьому запуску вимкнено (agl search login)",
-    };
-
-    /// `Error::SearchPathNotAbsolute`.
-    pub const SEARCH_PATH_NOT_ABSOLUTE: Msg = Msg {
-        en: "`{key}` in {path} must be an absolute path, not `{value}`",
-        uk: "`{key}` у {path} має бути абсолютним шляхом, а не `{value}`",
     };
 
     /// `Error::InvalidName`.
@@ -2803,50 +2755,8 @@ impl Error {
                     }
                 )
             }
-            Error::InvalidStyle {
-                path,
-                key,
-                value,
-                problem,
-            } => {
-                tr!(
-                    lang,
-                    m::INVALID_STYLE,
-                    path = path.display(),
-                    key = key,
-                    value = value,
-                    problem = problem.message(lang)
-                )
-            }
-            Error::NotPositive { path, key } => {
-                tr!(lang, m::NOT_POSITIVE, path = path.display(), key = key)
-            }
-            Error::NotAPort { path, key, value } => {
-                tr!(lang, m::NOT_A_PORT, path = path.display(), key = key, value = value)
-            }
-            Error::UnsupportedLanguage { path, value } => {
-                tr!(
-                    lang,
-                    m::UNSUPPORTED_LANGUAGE,
-                    path = path.display(),
-                    value = value
-                )
-            }
-            Error::UnsupportedUrl { path, url } => {
-                tr!(lang, m::UNSUPPORTED_URL, path = path.display(), url = url)
-            }
             Error::UnknownServerKind { path, value } => {
                 tr!(lang, m::UNKNOWN_SERVER_KIND, path = path.display(), value = value)
-            }
-            Error::UnknownDetailLevel { path, key, value } => tr!(
-                lang,
-                m::UNKNOWN_DETAIL_LEVEL,
-                path = path.display(),
-                key = key,
-                value = value
-            ),
-            Error::UnsupportedSearchUrl { path, url } => {
-                tr!(lang, m::UNSUPPORTED_SEARCH_URL, path = path.display(), url = url)
             }
             Error::SearchCaNotSet { user_path, key } => tr!(
                 lang,
@@ -2855,15 +2765,7 @@ impl Error {
                 key = key
             ),
             Error::SearchLogin { detail } => tr!(lang, m::SEARCH_LOGIN, detail = detail),
-            Error::SearchPathNotAbsolute { path, key, value } => {
-                tr!(
-                    lang,
-                    m::SEARCH_PATH_NOT_ABSOLUTE,
-                    path = path.display(),
-                    key = key,
-                    value = value
-                )
-            }
+            Error::Settings(error) => error.message(lang),
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),

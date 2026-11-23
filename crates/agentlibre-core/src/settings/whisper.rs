@@ -5,6 +5,7 @@ use std::path::Path;
 use super::check_weights_name;
 use super::server::is_http_url;
 use crate::error::Error;
+use crate::settings::error::Error as SettingsError;
 use crate::nix::Section;
 
 /// `whisper` of a settings file, the user's or the project's
@@ -44,10 +45,11 @@ impl WhisperFile {
         if let Some(url) = &url
             && !is_http_url(url)
         {
-            return Err(Error::UnsupportedUrl {
+            return Err(SettingsError::UnsupportedUrl {
                 path: path.into(),
                 url: url.clone(),
-            });
+            }
+            .into());
         }
         let model = whisper.string("model")?;
         if let Some(model) = &model {
@@ -61,10 +63,11 @@ impl WhisperFile {
         if let Some(draft_url) = &draft_url
             && !is_http_url(draft_url)
         {
-            return Err(Error::UnsupportedUrl {
+            return Err(SettingsError::UnsupportedUrl {
                 path: path.into(),
                 url: draft_url.clone(),
-            });
+            }
+            .into());
         }
         Ok(WhisperFile {
             url,

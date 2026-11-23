@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use crate::error::Error;
+use crate::settings::error::Error as SettingsError;
 use crate::nix::Section;
 
 /// The longest voice recording of the REPL's Ctrl-R, in seconds, when the
@@ -120,10 +121,10 @@ impl ReplFile {
                     repl.integer(key)?
                         .map(|n| {
                             usize::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
-                                Error::NotPositive {
+                                Error::from(SettingsError::NotPositive {
                                     path: path.into(),
                                     key: repl.key(key),
-                                }
+                                })
                             })
                         })
                         .transpose()
@@ -136,10 +137,13 @@ impl ReplFile {
                         None => Ok(None),
                         Some(name) => Detail::parse(&name)
                             .map(Some)
-                            .ok_or_else(|| Error::UnknownDetailLevel {
-                                path: path.into(),
-                                key: key.into(),
-                                value: name,
+                            .ok_or_else(|| {
+                                SettingsError::UnknownDetailLevel {
+                                    path: path.into(),
+                                    key: key.into(),
+                                    value: name,
+                                }
+                                .into()
                             }),
                     }
                 };

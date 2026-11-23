@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::ServerKind;
 use crate::error::Error;
+use crate::settings::error::Error as SettingsError;
 use crate::nix::Section;
 
 /// Where the llama-server listens when `server.llama.url` is not set (AGL-056, D5).
@@ -96,10 +97,11 @@ fn read_url(section: &mut Section, path: &Path) -> Result<Option<String>, Error>
     if let Some(url) = &url
         && !is_http_url(url)
     {
-        return Err(Error::UnsupportedUrl {
+        return Err(SettingsError::UnsupportedUrl {
             path: path.into(),
             url: url.clone(),
-        });
+        }
+        .into());
     }
     Ok(url)
 }

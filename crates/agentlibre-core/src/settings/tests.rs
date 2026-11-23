@@ -1,4 +1,5 @@
 use super::*;
+use crate::settings::error::Error as SettingsError;
 use crate::error::Expected;
 use crate::forge::testutil::TempDir;
 use std::fs;
@@ -92,7 +93,7 @@ fn user_file() {
     }
     assert!(matches!(user_of("server.kind = \"llama\";"), Err(Error::UnknownKey { key, .. }) if key == "server.kind"));
     // The weights folders are absolute (D24b).
-    assert!(matches!(user_of(r#"models = [ "gguf" ];"#), Err(Error::SearchPathNotAbsolute { .. })));
+    assert!(matches!(user_of(r#"models = [ "gguf" ];"#), Err(Error::Settings(SettingsError::SearchPathNotAbsolute { .. }))));
     // A settings file is a function of `{ agl, ... }` (D8, D12).
     assert!(matches!(user("{ function = \"x\"; }"), Err(Error::Nix(crate::nix::Error::NotAFunction { .. }))));
     assert!(matches!(user("{ agl, ... }: { function = ; }"), Err(Error::Nix(crate::nix::Error::Eval { .. }))));
@@ -140,7 +141,7 @@ fn the_whisper_table() {
     ));
     // http:// and https:// (AGL-043 F10); another scheme is refused.
     assert!(user_of(r#"whisper.url = "https://x";"#).is_ok());
-    assert!(matches!(user_of(r#"whisper.url = "ftp://x";"#), Err(Error::UnsupportedUrl { .. })));
+    assert!(matches!(user_of(r#"whisper.url = "ftp://x";"#), Err(Error::Settings(SettingsError::UnsupportedUrl { .. }))));
     // The model is a file name or an absolute path (AGL-039, D24a).
     assert!(user_of(r#"whisper.model = "/w/w.bin";"#).is_ok());
     assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::InvalidName(_))));
@@ -177,11 +178,11 @@ fn the_step_ca_of_the_search() {
     // The keys: an https:// address, an absolute root, a missing key named.
     assert!(matches!(
         user_of(r#"search.ca.url = "http://ca.example";"#),
-        Err(Error::UnsupportedSearchUrl { .. })
+        Err(Error::Settings(SettingsError::UnsupportedSearchUrl { .. }))
     ));
     assert!(matches!(
         user_of(r#"search.ca.root = "root.crt";"#),
-        Err(Error::SearchPathNotAbsolute { .. })
+        Err(Error::Settings(SettingsError::SearchPathNotAbsolute { .. }))
     ));
     assert!(matches!(
         user_of(r#"search.ca.port = 1;"#),
@@ -221,11 +222,11 @@ fn the_search_table() {
     ));
     assert!(matches!(
         user_of(r#"search.url = "http://x";"#),
-        Err(Error::UnsupportedSearchUrl { url, .. }) if url == "http://x"
+        Err(Error::Settings(SettingsError::UnsupportedSearchUrl { url, .. })) if url == "http://x"
     ));
     assert!(matches!(
         user_of(r#"search.private_ca = "ca.crt";"#),
-        Err(Error::SearchPathNotAbsolute { key, value, .. })
+        Err(Error::Settings(SettingsError::SearchPathNotAbsolute { key, value, .. }))
             if key == "search.private_ca" && value == "ca.crt"
     ));
 }
@@ -382,11 +383,11 @@ fn the_detail_levels() {
     assert_eq!(of("repl = { start_server = true; };"), (None, None, None));
     assert!(matches!(
         user_of(r#"repl = { thinking = "brief"; };"#),
-        Err(Error::UnknownDetailLevel { .. })
+        Err(Error::Settings(SettingsError::UnknownDetailLevel { .. }))
     ));
     assert!(matches!(
         user_of(r#"repl = { result = "brief"; };"#),
-        Err(Error::UnknownDetailLevel { .. })
+        Err(Error::Settings(SettingsError::UnknownDetailLevel { .. }))
     ));
 }
 
@@ -394,7 +395,7 @@ fn the_detail_levels() {
 fn invalid_values_are_errors() {
     assert!(matches!(
         user_of(r#"colors.muted = "red";"#),
-        Err(Error::InvalidStyle { key, .. }) if key == "colors.muted"
+        Err(Error::Settings(SettingsError::InvalidStyle { key, .. })) if key == "colors.muted"
     ));
     assert!(matches!(
         user_of(r#"colors.mutd = "dim";"#),
@@ -402,7 +403,7 @@ fn invalid_values_are_errors() {
     ));
     assert!(matches!(
         user_of("repl.max_record_seconds = 0;"),
-        Err(Error::NotPositive { key, .. }) if key == "repl.max_record_seconds"
+        Err(Error::Settings(SettingsError::NotPositive { key, .. })) if key == "repl.max_record_seconds"
     ));
     assert!(matches!(
         user_of("forge.auto_rehome = \"on\";"),
@@ -422,12 +423,12 @@ fn invalid_values_are_errors() {
     ));
     assert!(matches!(
         user_of(r#"language = "de";"#),
-        Err(Error::UnsupportedLanguage { value, .. }) if value == "de"
+        Err(Error::Settings(SettingsError::UnsupportedLanguage { value, .. })) if value == "de"
     ));
     assert!(user_of(r#"server.strata.url = "https://x";"#).is_ok());
     assert!(matches!(
         user_of(r#"server.llama.url = "unix:/run/llama";"#),
-        Err(Error::UnsupportedUrl { url, .. }) if url == "unix:/run/llama"
+        Err(Error::Settings(SettingsError::UnsupportedUrl { url, .. })) if url == "unix:/run/llama"
     ));
 }
 
@@ -538,7 +539,7 @@ fn the_bridge_is_read_and_its_port_must_be_one() {
         assert!(
             matches!(
                 user_of(&format!("bridge.port = {port};")),
-                Err(Error::NotAPort { key, .. }) if key == "bridge.port"
+                Err(Error::Settings(SettingsError::NotAPort { key, .. })) if key == "bridge.port"
             ),
             "{port}"
         );

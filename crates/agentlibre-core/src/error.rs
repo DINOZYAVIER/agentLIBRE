@@ -4,7 +4,6 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::settings::ServerKind;
-use crate::style::StyleError;
 
 /// An error that stops `agl`.
 #[derive(Debug)]
@@ -43,45 +42,18 @@ pub enum Error {
         key: String,
         expected: Expected,
     },
-    /// A value of `colors` is not a valid style (D121).
-    InvalidStyle {
-        path: PathBuf,
-        key: String,
-        value: String,
-        problem: StyleError,
-    },
-    /// A limit of `repl` below 1 (D130).
-    NotPositive { path: PathBuf, key: String },
-    /// `bridge.port` is not 1 to 65535 (AGL-083, D20).
-    NotAPort { path: PathBuf, key: String, value: i64 },
-    /// `language` names a language without translations.
-    UnsupportedLanguage { path: PathBuf, value: String },
-    /// `server.llama.url` or `server.strata.url` is not an `http://` or
-    /// `https://` URL (D52; AGL-036, D2; AGL-043 F10).
-    UnsupportedUrl { path: PathBuf, url: String },
     /// The kind of a Function's model is not `llama` or `strata` (AGL-030, D1;
     /// AGL-036, D1).
     UnknownServerKind { path: PathBuf, value: String },
-    /// `repl.thinking`, `repl.tool` or `repl.result` is not `off`,
-    /// `flexible` or `full` (AGL-092, D2; AGL-095, D1).
-    UnknownDetailLevel {
-        path: PathBuf,
-        key: String,
-        value: String,
-    },
-    /// `search.url` is not an `https://` URL (AGL-019, D3).
-    UnsupportedSearchUrl { path: PathBuf, url: String },
     /// `agl search login` without a complete `search.ca` in the user file
     /// (AGL-043 F20); `key` is the first one missing.
     SearchCaNotSet { user_path: PathBuf, key: String },
     /// A step of `agl search login` failed (AGL-043 F20).
     SearchLogin { detail: String },
-    /// A file path of `search` is not absolute (AGL-019, D3).
-    SearchPathNotAbsolute {
-        path: PathBuf,
-        key: String,
-        value: String,
-    },
+    /// A value of the settings out of what agl takes: a style, a limit, a
+    /// port, a language, a url, a level, a path. Its own type, wrapped
+    /// (AGL-121, D66).
+    Settings(crate::settings::error::Error),
     /// A credential file of `search` the policy refuses (AGL-019, D4). Its
     /// own type, wrapped (AGL-121, D66).
     Search(crate::search::Error),
@@ -361,6 +333,13 @@ impl From<crate::daemon::error::Error> for Error {
     /// The daemon's own error as agl's (AGL-121, D66).
     fn from(source: crate::daemon::error::Error) -> Error {
         Error::DaemonServer(source)
+    }
+}
+
+impl From<crate::settings::error::Error> for Error {
+    /// The settings' own error as agl's (AGL-121, D66).
+    fn from(source: crate::settings::error::Error) -> Error {
+        Error::Settings(source)
     }
 }
 
