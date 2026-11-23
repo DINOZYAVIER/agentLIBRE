@@ -365,7 +365,7 @@ pub fn write_settings(path: &Path, map: &Map<String, Value>) -> Result<(), error
         }))?;
     }
     let text = format!("{{ agl, ... }}: {}\n", render_lines(map));
-    crate::forge::write_atomic(path, &text)
+    Ok(agentlibre_common::file::write_atomic(path, &text)?)
 }
 
 #[cfg(test)]

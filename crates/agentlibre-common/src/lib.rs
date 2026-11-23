@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod error;
+pub mod file;
 pub mod i18n;
 pub mod programs;
 pub mod style;

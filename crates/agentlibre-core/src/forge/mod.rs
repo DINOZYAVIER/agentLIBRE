@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 use crate::error::Error;
 use crate::forge::error::Error as ForgeError;
 use crate::nix::{self, Section};
+use agentlibre_common::file::write_atomic;
 use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
 use agentlibre_common::error::Error as CommonError;
 
@@ -660,27 +661,6 @@ pub fn rehome_new(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Result
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
 }
 
-/// Writes `text` to `path`: a temp file in the same directory plus a
-/// rename, so a crash leaves no half-written file.
-pub fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.{}.{}.tmp", std::process::id(), n));
-    fs::write(&tmp, text).map_err(|source| Error::from(CommonError::Write {
-        path: tmp.clone(),
-        source,
-    }))?;
-    fs::rename(&tmp, path).map_err(|source| Error::from(CommonError::Write { path: path.into(), source }))?;
-    Ok(())
-}
-
 /// A parsed artifact: the `forge/v2` envelope, the raw `<type>` set
 /// table, and the body, verbatim.
 #[derive(Debug, Clone)]
@@ -1032,7 +1012,7 @@ pub fn write_artifact(artifact: &Artifact) -> Result<(), Error> {
             source,
         }))?;
     }
-    write_atomic(&artifact.path, &render(artifact))
+    Ok(write_atomic(&artifact.path, &render(artifact))?)
 }
 
 /// The artifact files of the store at `dir`: every `<type>/*.md`
@@ -2202,15 +2182,4 @@ a note
         assert!(artifact_files(&none).unwrap().is_empty());
     }
 
-    #[test]
-    fn write_atomic_leaves_no_temp_files() {
-        let dir = TempDir::new();
-        let path = dir.path().join("x.txt");
-        write_atomic(&path, "one").unwrap();
-        write_atomic(&path, "two").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
-        for entry in fs::read_dir(dir.path()).unwrap() {
-            assert_eq!(entry.unwrap().file_name().to_string_lossy().as_ref(), "x.txt");
-        }
-    }
 }
