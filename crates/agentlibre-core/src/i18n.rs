@@ -1369,24 +1369,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "draft {draft} задано, але spec_type ні: задано spec_type теж",
     };
 
-    /// `Error::WslNotMirrored`.
-    pub const WSL_NOT_MIRRORED: Msg = Msg {
-        en: "agl in WSL reaches the Windows llama-server only in the mirrored network, and this one is {mode}: put `networkingMode=mirrored` under `[wsl2]` in %UserProfile%\\.wslconfig, then run `wsl --shutdown`",
-        uk: "agl у WSL бачить llama-server на Windows лише в дзеркальній мережі, а ця мережа {mode}: додай `networkingMode=mirrored` у `[wsl2]` файлу %UserProfile%\\.wslconfig і виконай `wsl --shutdown`",
-    };
-
-    /// `Error::WslNoLocalAppData`.
-    pub const WSL_NO_LOCAL_APP_DATA: Msg = Msg {
-        en: "Windows does not say its %LOCALAPPDATA%, where the weights go; cmd.exe must run from WSL",
-        uk: "Windows не повідомляє свій %LOCALAPPDATA%, куди йдуть ваги; cmd.exe має запускатися з WSL",
-    };
-
-    /// `Error::WslPath`.
-    pub const WSL_PATH: Msg = Msg {
-        en: "wslpath did not convert {path}",
-        uk: "wslpath не перетворив {path}",
-    };
-
     /// `Error::ServerCa` (AGL-058, D12).
     pub const SERVER_CA: Msg = Msg {
         en: "the CA file {path} of `private_ca` cannot be used: {detail}",
@@ -3489,9 +3471,7 @@ impl Error {
                 tr!(lang, m::SERVER_CERTIFICATE, url = url, detail = detail, key = key)
             }
             Error::OutsideServerDown { url } => tr!(lang, m::OUTSIDE_SERVER_DOWN, url = url),
-            Error::WslNotMirrored { mode } => tr!(lang, m::WSL_NOT_MIRRORED, mode = mode),
-            Error::WslNoLocalAppData => tr!(lang, m::WSL_NO_LOCAL_APP_DATA).to_string(),
-            Error::WslPath { path } => tr!(lang, m::WSL_PATH, path = path.display()),
+            Error::Wsl(error) => error.message(lang),
             Error::OutsideModelDiffers { url, expected, running } => tr!(
                 lang,
                 m::OUTSIDE_MODEL_DIFFERS,

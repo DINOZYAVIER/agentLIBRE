@@ -183,12 +183,9 @@ pub enum Error {
     OutsideModelDiffers { url: String, expected: String, running: String },
     /// `agl server command` of a Function on another kind of server (AGL-052, D12).
     ServerCommandNotLlama { function: String },
-    /// The Windows engine in WSL without the mirrored network (AGL-052, D10).
-    WslNotMirrored { mode: String },
-    /// Windows did not say where the weights go (AGL-056, D8).
-    WslNoLocalAppData,
-    /// `wslpath` did not convert a path (AGL-052, D10).
-    WslPath { path: PathBuf },
+    /// The Windows engine in WSL could not start or run (AGL-052, D9, D10;
+    /// AGL-056, D8). Its own type, wrapped (AGL-121, D66).
+    Wsl(crate::wsl::Error),
     /// No engine binary in `PATH` (D147, AGL-024, D5).
     EngineNotFound { engine: String },
     /// The engine agl launched cannot be run (AGL-024, D2).
@@ -408,6 +405,13 @@ impl From<agentlibre_client::Error> for Error {
             agentlibre_client::Error::Said { text } => Error::Said { text },
             agentlibre_client::Error::Gone => Error::PlaneGone,
         }
+    }
+}
+
+impl From<crate::wsl::Error> for Error {
+    /// The Windows engine's own error as agl's (AGL-121, D66).
+    fn from(source: crate::wsl::Error) -> Error {
+        Error::Wsl(source)
     }
 }
 

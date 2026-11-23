@@ -7,7 +7,50 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::error::Error;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
+
+/// What can go wrong starting or driving the Windows engine of agl in WSL
+/// (AGL-052, D9, D10; AGL-056, D8; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// The network of WSL is not the mirrored one (AGL-052, D10).
+    NotMirrored { mode: String },
+    /// Windows did not say where the weights go (AGL-056, D8).
+    NoLocalAppData,
+    /// `wslpath` did not convert a path (AGL-052, D10).
+    Path { path: PathBuf },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NotMirrored { mode } => tr!(lang, NOT_MIRRORED, mode = mode),
+            Self::NoLocalAppData => tr!(lang, NO_LOCAL_APP_DATA).to_string(),
+            Self::Path { path } => tr!(lang, PATH, path = path.display()),
+        }
+    }
+}
+
+/// `Error::NotMirrored`.
+const NOT_MIRRORED: Msg = Msg {
+    en: "agl in WSL reaches the Windows llama-server only in the mirrored network, and this one is {mode}: put `networkingMode=mirrored` under `[wsl2]` in %UserProfile%\\.wslconfig, then run `wsl --shutdown`",
+    uk: "agl у WSL бачить llama-server на Windows лише в дзеркальній мережі, а ця мережа {mode}: додай `networkingMode=mirrored` у `[wsl2]` файлу %UserProfile%\\.wslconfig і виконай `wsl --shutdown`",
+};
+
+/// `Error::NoLocalAppData`.
+const NO_LOCAL_APP_DATA: Msg = Msg {
+    en: "Windows does not say its %LOCALAPPDATA%, where the weights go; cmd.exe must run from WSL",
+    uk: "Windows не повідомляє свій %LOCALAPPDATA%, куди йдуть ваги; cmd.exe має запускатися з WSL",
+};
+
+/// `Error::Path`.
+const PATH: Msg = Msg {
+    en: "wslpath did not convert {path}",
+    uk: "wslpath не перетворив {path}",
+};
+
 
 /// Whether `program` is a Windows one.
 fn is_windows_program(program: &Path) -> bool {
@@ -105,7 +148,7 @@ fn models_under(
         .filter(|local| !local.is_empty() && !local.contains('%'))
         .and_then(to_linux)
         .map(|local| local.join("agentLIBRE").join("models"))
-        .ok_or(Error::WslNoLocalAppData)
+        .ok_or(Error::NoLocalAppData)
 }
 
 /// The network of WSL must be the mirrored one (`wslinfo` tells).
@@ -121,7 +164,7 @@ fn check_network() -> Result<(), Error> {
     if mode == "mirrored" {
         Ok(())
     } else {
-        Err(Error::WslNotMirrored { mode })
+        Err(Error::NotMirrored { mode })
     }
 }
 
@@ -147,7 +190,7 @@ fn convert_paths(
             if arg == program || !Path::new(&arg).is_absolute() {
                 return Ok(arg);
             }
-            convert(&arg).ok_or_else(|| Error::WslPath { path: arg.into() })
+            convert(&arg).ok_or_else(|| Error::Path { path: arg.into() })
         })
         .collect()
 }
@@ -194,7 +237,7 @@ mod tests {
         // A path that cannot be converted is an error, not a wrong argument.
         assert!(matches!(
             convert_paths(command, program, &|_| None),
-            Err(Error::WslPath { path }) if path == Path::new("/m/a.gguf")
+            Err(Error::Path { path }) if path == Path::new("/m/a.gguf")
         ));
     }
 
@@ -211,10 +254,10 @@ mod tests {
         // Nothing to go by is an error, not the folder of Linux.
         let never = |_: &str| -> Option<PathBuf> { panic!("nothing to convert") };
         for local in [None, Some(""), Some("%LOCALAPPDATA%")] {
-            assert!(matches!(models_under(local, &never), Err(Error::WslNoLocalAppData)));
+            assert!(matches!(models_under(local, &never), Err(Error::NoLocalAppData)));
         }
         let cannot = |_: &str| None;
-        assert!(matches!(models_under(Some(r"C:\x"), &cannot), Err(Error::WslNoLocalAppData)));
+        assert!(matches!(models_under(Some(r"C:\x"), &cannot), Err(Error::NoLocalAppData)));
     }
 
     #[test]
