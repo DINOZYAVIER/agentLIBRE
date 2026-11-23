@@ -126,7 +126,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     Err(_) => said.fail(tr!(lang, m::MEMORY_USAGE).to_string()),
                     Ok(MemoryAction::Remove { name, yes: false }) => said.fail(format!(
                         "agl: {}",
-                        Error::MemoryRemoveNeedsYes { name }.message(lang)
+                        crate::memory::Error::RemoveNeedsYes { name }.message(lang)
                     )),
                     Ok(MemoryAction::Remove { name, yes: true }) => {
                         let done = ask(Command::Remove { name }, &mut session)?;

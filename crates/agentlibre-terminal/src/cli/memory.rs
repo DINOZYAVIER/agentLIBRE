@@ -84,7 +84,7 @@ mod tests {
             MemoryAction::Show { name: "x".into() },
             MemoryAction::Remove { name: "x".into(), yes: true },
         ] {
-            assert!(matches!(run_it(action), Err(Error::MemoryNoEntry { .. })));
+            assert!(matches!(run_it(action), Err(Error::Memory(crate::memory::Error::NoEntry { .. }))));
         }
         assert!(!data.exists());
     }

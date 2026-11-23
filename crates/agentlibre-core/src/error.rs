@@ -235,12 +235,9 @@ pub enum Error {
     InsideDataDir { dir: PathBuf, data: PathBuf },
     /// No store is named `name`.
     StoreNotFound { name: String, stores: Vec<String> },
-    /// `agl memory` or `/memory`: no entry `name` (AGL-060).
-    MemoryNoEntry { name: String },
-    /// A removal with no terminal to ask on and no `--yes` (AGL-060, D3, D7).
-    MemoryRemoveNeedsYes { name: String },
-    /// A removal that could not be done (AGL-060).
-    MemoryRemoveFailed { reason: String },
+    /// A memory entry not found or not removed (AGL-060). Its own type,
+    /// wrapped (AGL-121, D66).
+    Memory(crate::memory::Error),
     /// An artifact file has no `---` front-matter delimiters.
     ArtifactFrontMatter { path: PathBuf },
     /// An artifact file carries a schema the forge does not parse.
@@ -340,6 +337,13 @@ impl From<crate::settings::error::Error> for Error {
     /// The settings' own error as agl's (AGL-121, D66).
     fn from(source: crate::settings::error::Error) -> Error {
         Error::Settings(source)
+    }
+}
+
+impl From<crate::memory::Error> for Error {
+    /// The memory's own error as agl's (AGL-121, D66).
+    fn from(source: crate::memory::Error) -> Error {
+        Error::Memory(source)
     }
 }
 

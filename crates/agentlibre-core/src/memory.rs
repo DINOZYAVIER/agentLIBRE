@@ -11,11 +11,51 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::action::Outcome;
-use crate::error::Error;
+use crate::error;
 use crate::forge::task_spec::slug;
 use crate::forge::write_atomic;
-use crate::i18n::{Lang, m};
+use crate::i18n::{Lang, Msg, m};
 use crate::tr;
+
+/// A memory entry not found or not removed (AGL-060; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// `agl memory` or `/memory`: no entry `name` (AGL-060).
+    NoEntry { name: String },
+    /// A removal with no terminal to ask on and no `--yes` (AGL-060, D3, D7).
+    RemoveNeedsYes { name: String },
+    /// A removal that could not be done (AGL-060).
+    RemoveFailed { reason: String },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NoEntry { name } => tr!(lang, NO_ENTRY, name = name),
+            Self::RemoveNeedsYes { name } => tr!(lang, REMOVE_NEEDS_YES, name = name),
+            Self::RemoveFailed { reason } => tr!(lang, REMOVE_FAILED, reason = reason),
+        }
+    }
+}
+
+/// `Error::NoEntry`.
+const NO_ENTRY: Msg = Msg {
+    en: "no memory entry {name}",
+    uk: "немає запису пам'яті {name}",
+};
+
+/// `Error::RemoveNeedsYes`.
+const REMOVE_NEEDS_YES: Msg = Msg {
+    en: "{name} not removed: there is no terminal to ask on; add --yes",
+    uk: "{name} не видалено: немає термінала, щоб спитати; додай --yes",
+};
+
+/// `Error::RemoveFailed`.
+const REMOVE_FAILED: Msg = Msg {
+    en: "not removed: {reason}",
+    uk: "не видалено: {reason}",
+};
 use crate::tools::{Output, ToolResult, edit, limited};
 
 /// The index file of the memory directory (M31).
@@ -47,20 +87,20 @@ pub trait Home: Send + Sync {
     /// [`Home::read`] that tells a store that cannot be resolved from a
     /// workspace with no store (AGL-060): `/memory` must not show a failure
     /// as an empty memory.
-    fn look(&self) -> Result<Option<PathBuf>, Error> {
+    fn look(&self) -> Result<Option<PathBuf>, error::Error> {
         Ok(self.read())
     }
     /// The memory directory, the store registered first when it is not
     /// yet (M23); the lines say what the resolution did (a move, an
     /// adoption, the store made).
-    fn write(&self) -> Result<(PathBuf, Vec<String>), Error>;
+    fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error>;
     /// The workspace's memory to read, when a write or a look names it in
     /// a plane (AGL-077, D8); outside a plane, the same as [`Home::read`].
     fn read_workspace(&self) -> Option<PathBuf> {
         self.read()
     }
     /// The workspace's memory to write (AGL-077, D8).
-    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), Error> {
+    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
         self.write()
     }
     /// The memory message the model is shown (AGL-006, M27): its heading
@@ -89,8 +129,8 @@ impl Home for PlaneHome {
         Some(self.dir.clone())
     }
 
-    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
-        fs::create_dir_all(&self.dir).map_err(|source| Error::Write {
+    fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
+        fs::create_dir_all(&self.dir).map_err(|source| error::Error::Write {
             path: self.dir.clone(),
             source,
         })?;
@@ -101,7 +141,7 @@ impl Home for PlaneHome {
         self.workspace.read()
     }
 
-    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), Error> {
+    fn write_workspace(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
         self.workspace.write()
     }
 
@@ -132,7 +172,7 @@ pub struct StoreHome {
 }
 
 impl StoreHome {
-    fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), Error> {
+    fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), error::Error> {
         let paths = crate::paths::Paths::from_env(|name| std::env::var_os(name))?;
         crate::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
     }
@@ -143,12 +183,12 @@ impl Home for StoreHome {
         self.look().ok().flatten()
     }
 
-    fn look(&self) -> Result<Option<PathBuf>, Error> {
+    fn look(&self) -> Result<Option<PathBuf>, error::Error> {
         let (ws, _) = self.resolved()?;
         Ok(of_store(&ws.dir))
     }
 
-    fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+    fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
         let (ws, mut lines) = self.resolved()?;
         lines.extend(crate::forge::materialize(&ws, self.lang)?);
         Ok((ws.dir.join("memory"), lines))
@@ -677,12 +717,12 @@ fn index_line(line: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// The names of the entry files of `dir`; none when `dir` does not exist.
-fn entry_files(dir: &Path) -> Result<BTreeSet<String>, Error> {
+fn entry_files(dir: &Path) -> Result<BTreeSet<String>, error::Error> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(source) => {
-            return Err(Error::Read {
+            return Err(error::Error::Read {
                 path: dir.to_path_buf(),
                 source,
             });
@@ -691,7 +731,7 @@ fn entry_files(dir: &Path) -> Result<BTreeSet<String>, Error> {
     let mut names = BTreeSet::new();
     for entry in entries {
         let path = entry
-            .map_err(|source| Error::Read {
+            .map_err(|source| error::Error::Read {
                 path: dir.to_path_buf(),
                 source,
             })?
@@ -710,12 +750,12 @@ fn entry_files(dir: &Path) -> Result<BTreeSet<String>, Error> {
 /// Every entry of `dir` (AGL-060, D4): the lines of the index in their order,
 /// then the files with no line by name. An index that cannot be read is an
 /// error, not an empty memory.
-pub fn list(dir: &Path) -> Result<Vec<Listed>, Error> {
+pub fn list(dir: &Path) -> Result<Vec<Listed>, error::Error> {
     let path = dir.join(INDEX);
     let index = match fs::read_to_string(&path) {
         Ok(index) => index,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(source) => return Err(Error::Read { path, source }),
+        Err(source) => return Err(error::Error::Read { path, source }),
     };
     let index = index.trim();
     let total = index.lines().count();
@@ -773,9 +813,11 @@ pub fn exists(dir: &Path, name: &str) -> bool {
 
 /// The whole text of an entry, for the human: [`show`] cuts a long one for
 /// the model (AGL-060).
-pub fn whole(dir: &Path, name: &str) -> Result<String, Error> {
-    let missing = || Error::MemoryNoEntry {
-        name: name.to_owned(),
+pub fn whole(dir: &Path, name: &str) -> Result<String, error::Error> {
+    let missing = || {
+        error::Error::from(Error::NoEntry {
+            name: name.to_owned(),
+        })
     };
     if !valid_name(name) {
         return Err(missing());
@@ -784,7 +826,7 @@ pub fn whole(dir: &Path, name: &str) -> Result<String, Error> {
     match fs::read_to_string(&path) {
         Ok(text) => Ok(text),
         Err(error) if error.kind() == ErrorKind::NotFound => Err(missing()),
-        Err(source) => Err(Error::Read { path, source }),
+        Err(source) => Err(error::Error::Read { path, source }),
     }
 }
 
@@ -815,7 +857,7 @@ pub enum MemoryAction {
 
 /// `/memory list` and `/memory show`, of the store `home` finds; a removal
 /// is the caller's, which holds the session.
-pub fn looked_at(home: &dyn Home, action: &MemoryAction, lang: Lang) -> Result<String, Error> {
+pub fn looked_at(home: &dyn Home, action: &MemoryAction, lang: Lang) -> Result<String, error::Error> {
     let dir = home.look()?;
     match action {
         MemoryAction::Show { name } => show_text(dir.as_deref(), name),
@@ -825,7 +867,7 @@ pub fn looked_at(home: &dyn Home, action: &MemoryAction, lang: Lang) -> Result<S
 
 /// The lines of `list` (AGL-060, D4): `~` the prompt does not carry it, `?` a
 /// file with no line, `!` a line with no file, and what the marks mean.
-pub fn list_text(dir: Option<&Path>, lang: Lang) -> Result<String, Error> {
+pub fn list_text(dir: Option<&Path>, lang: Lang) -> Result<String, error::Error> {
     let entries = dir.map(list).transpose()?.unwrap_or_default();
     if entries.is_empty() {
         return Ok(tr!(lang, m::MEMORY_EMPTY).to_string());
@@ -876,27 +918,31 @@ fn marks(entry: &Listed) -> String {
 }
 
 /// The whole text of an entry; a workspace with no store has none.
-pub fn show_text(dir: Option<&Path>, name: &str) -> Result<String, Error> {
+pub fn show_text(dir: Option<&Path>, name: &str) -> Result<String, error::Error> {
     whole(entry_dir(dir, name)?, name)
 }
 
 /// The memory directory, when `name` is an entry in it, by its file or by its
 /// line (AGL-060, D8).
-pub fn entry_dir<'a>(dir: Option<&'a Path>, name: &str) -> Result<&'a Path, Error> {
+pub fn entry_dir<'a>(dir: Option<&'a Path>, name: &str) -> Result<&'a Path, error::Error> {
     dir.filter(|dir| exists(dir, name))
-        .ok_or_else(|| Error::MemoryNoEntry {
-            name: name.to_owned(),
+        .ok_or_else(|| {
+            Error::NoEntry {
+                name: name.to_owned(),
+            }
+            .into()
         })
 }
 
 /// Removes an entry the way the tool does (AGL-060): what the tool answers,
 /// for the model, and the write, for the session.
-pub fn remove_entry(dir: Option<&Path>, name: &str) -> Result<(String, Write), Error> {
+pub fn remove_entry(dir: Option<&Path>, name: &str) -> Result<(String, Write), error::Error> {
     match remove(entry_dir(dir, name)?, name) {
         (result, Some(write)) if result.outcome == Outcome::Ok => Ok((result.content, write)),
-        (result, _) => Err(Error::MemoryRemoveFailed {
+        (result, _) => Err(Error::RemoveFailed {
             reason: result.content,
-        }),
+        }
+        .into()),
     }
 }
 
@@ -909,13 +955,14 @@ pub fn remove_asked(
     yes: bool,
     ask: Option<&dyn Fn(&str) -> bool>,
     lang: Lang,
-) -> Result<String, Error> {
+) -> Result<String, error::Error> {
     entry_dir(dir, name)?;
     if !yes {
         let Some(ask) = ask else {
-            return Err(Error::MemoryRemoveNeedsYes {
+            return Err(Error::RemoveNeedsYes {
                 name: name.to_owned(),
-            });
+            }
+            .into());
         };
         if !ask(&tr!(lang, m::MEMORY_REMOVE_ASK, name = name)) {
             return Ok(tr!(lang, m::MEMORY_NOT_REMOVED, name = name));
@@ -1340,7 +1387,7 @@ mod tests {
         added(&dir.0, "One", "first", "1");
         assert!(!exists(&dir.0, "MEMORY"));
         assert_eq!(remove(&dir.0, "MEMORY").0.outcome, Outcome::Fail);
-        assert!(matches!(whole(&dir.0, "MEMORY"), Err(Error::MemoryNoEntry { .. })));
+        assert!(matches!(whole(&dir.0, "MEMORY"), Err(error::Error::Memory(Error::NoEntry { .. }))));
         assert_eq!(list(&dir.0).unwrap().len(), 1);
         assert!(dir.0.join(INDEX).is_file());
     }
@@ -1436,7 +1483,7 @@ mod tests {
         let dir = TempDir::new();
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(dir.0.join(INDEX), b"\xff\n").unwrap();
-        assert!(matches!(list(&dir.0), Err(Error::Read { .. })));
+        assert!(matches!(list(&dir.0), Err(error::Error::Read { .. })));
     }
 
     #[test]
@@ -1447,7 +1494,7 @@ mod tests {
         let name = added(&dir.0, "Long", "h", &long);
         assert_eq!(whole(&dir.0, &name).unwrap(), format!("# Long\n\n{long}\n"));
         for name in ["nope", "../etc/passwd", ""] {
-            assert!(matches!(whole(&dir.0, name), Err(Error::MemoryNoEntry { .. })), "{name}");
+            assert!(matches!(whole(&dir.0, name), Err(error::Error::Memory(Error::NoEntry { .. }))), "{name}");
         }
     }
 
@@ -1541,7 +1588,7 @@ mod listing_tests {
         assert_eq!(list_text(Some(&dir), Lang::En).unwrap(), empty);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(INDEX), b"\xff\n").unwrap();
-        assert!(matches!(list_text(Some(&dir), Lang::En), Err(Error::Read { .. })));
+        assert!(matches!(list_text(Some(&dir), Lang::En), Err(error::Error::Read { .. })));
     }
 
     #[test]
@@ -1553,8 +1600,8 @@ mod listing_tests {
         let text = show_text(Some(&dir), "long").unwrap();
         assert!(text.contains(long.trim_end()));
         assert!(!text.contains("omitted"));
-        assert!(matches!(show_text(Some(&dir), "nope"), Err(Error::MemoryNoEntry { .. })));
-        assert!(matches!(show_text(None, "long"), Err(Error::MemoryNoEntry { .. })));
+        assert!(matches!(show_text(Some(&dir), "nope"), Err(error::Error::Memory(Error::NoEntry { .. }))));
+        assert!(matches!(show_text(None, "long"), Err(error::Error::Memory(Error::NoEntry { .. }))));
     }
 
     #[test]
@@ -1596,7 +1643,7 @@ mod listing_tests {
         // No terminal and no `--yes`: refused, nothing touched.
         assert!(matches!(
             remove_asked(Some(&dir), "one", false, None, Lang::En),
-            Err(Error::MemoryRemoveNeedsYes { name }) if name == "one"
+            Err(error::Error::Memory(Error::RemoveNeedsYes { name })) if name == "one"
         ));
         assert!(dir.join("one.md").is_file());
         // `--yes`, with a terminal and without.
@@ -1611,7 +1658,7 @@ mod listing_tests {
         let root = TempDir::new();
         let dir = two_entries(&root.0);
         fs::remove_file(dir.join("one.md")).unwrap();
-        assert!(matches!(show_text(Some(&dir), "one"), Err(Error::MemoryNoEntry { .. })));
+        assert!(matches!(show_text(Some(&dir), "one"), Err(error::Error::Memory(Error::NoEntry { .. }))));
         assert_eq!(
             remove_asked(Some(&dir), "one", true, None, Lang::En).unwrap(),
             "removed: one"
@@ -1631,14 +1678,14 @@ mod listing_tests {
             assert!(
                 matches!(
                     remove_asked(Some(&dir), name, false, Some(&never), Lang::En),
-                    Err(Error::MemoryNoEntry { .. })
+                    Err(error::Error::Memory(Error::NoEntry { .. }))
                 ),
                 "{name}"
             );
         }
         assert!(matches!(
             remove_asked(None, "one", true, None, Lang::En),
-            Err(Error::MemoryNoEntry { .. })
+            Err(error::Error::Memory(Error::NoEntry { .. }))
         ));
     }
 }
@@ -1656,7 +1703,7 @@ mod plane_tests {
             self.0.clone()
         }
 
-        fn write(&self) -> Result<(PathBuf, Vec<String>), Error> {
+        fn write(&self) -> Result<(PathBuf, Vec<String>), error::Error> {
             Ok((self.0.clone().unwrap(), Vec::new()))
         }
     }

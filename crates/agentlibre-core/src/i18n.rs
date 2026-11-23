@@ -1823,24 +1823,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "видалено: {name}",
     };
 
-    /// `Error::MemoryNoEntry`.
-    pub const MEMORY_NO_ENTRY: Msg = Msg {
-        en: "no memory entry {name}",
-        uk: "немає запису пам'яті {name}",
-    };
-
-    /// `Error::MemoryRemoveNeedsYes`.
-    pub const MEMORY_REMOVE_NEEDS_YES: Msg = Msg {
-        en: "{name} not removed: there is no terminal to ask on; add --yes",
-        uk: "{name} не видалено: немає термінала, щоб спитати; додай --yes",
-    };
-
-    /// `Error::MemoryRemoveFailed`.
-    pub const MEMORY_REMOVE_FAILED: Msg = Msg {
-        en: "not removed: {reason}",
-        uk: "не видалено: {reason}",
-    };
-
     pub const CMD_THINK: Msg = Msg {
         en: "the reasoning level: off, low, medium or xhigh",
         uk: "рівень міркувань: off, low, medium або xhigh",
@@ -2939,13 +2921,7 @@ impl Error {
                 };
                 tr!(lang, m::STORE_NOT_FOUND, name = name, stores = stores)
             }
-            Error::MemoryNoEntry { name } => tr!(lang, m::MEMORY_NO_ENTRY, name = name),
-            Error::MemoryRemoveNeedsYes { name } => {
-                tr!(lang, m::MEMORY_REMOVE_NEEDS_YES, name = name)
-            }
-            Error::MemoryRemoveFailed { reason } => {
-                tr!(lang, m::MEMORY_REMOVE_FAILED, reason = reason)
-            }
+            Error::Memory(error) => error.message(lang),
             Error::ArtifactFrontMatter { path } => {
                 tr!(lang, m::ARTIFACT_FRONT_MATTER, path = path.display())
             }
