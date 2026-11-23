@@ -542,6 +542,7 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
                 return Edited::Saved { check: String::new(), error: false };
             }
             let checked = crate::nix::eval_file(path)
+                .map_err(Into::into)
                 .and_then(|value| Function::from_value(path, value))
                 .map_err(|error| error.message(lang));
             match checked {

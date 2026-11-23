@@ -200,10 +200,10 @@ impl crate::machine::State for State {
 pub fn builtin_names() -> Result<Vec<String>, Error> {
     let path = Path::new("<built-in>/functions");
     let value = nix::eval_with_agl(path, "builtins.attrNames agl.functions")?;
-    serde_json::from_value(value).map_err(|error| Error::NixEval {
+    serde_json::from_value(value).map_err(|error| Error::Nix(nix::Error::Eval {
         path: path.into(),
         detail: error.to_string(),
-    })
+    }))
 }
 
 /// Rejects a Function name that cannot name a file in its directory.

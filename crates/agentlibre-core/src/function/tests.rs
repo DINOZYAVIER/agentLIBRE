@@ -327,13 +327,13 @@ fn files_and_names() {
     fs::write(dir.0.join("plain.nix"), format!("{{ policy = {CODER}; }}")).unwrap();
     assert!(matches!(
         Function::load(&[&dir.0, none()], "plain"),
-        Err(Error::NixNotAFunction { .. })
+        Err(Error::Nix(crate::nix::Error::NotAFunction { .. }))
     ));
     // A file that does not evaluate names the file.
     fs::write(dir.0.join("broken.nix"), "{ agl, ... }: { policy = ; }").unwrap();
     assert!(matches!(
         Function::load(&[&dir.0, none()], "broken"),
-        Err(Error::NixEval { path, .. }) if path == dir.0.join("broken.nix")
+        Err(Error::Nix(crate::nix::Error::Eval { path, .. })) if path == dir.0.join("broken.nix")
     ));
 }
 

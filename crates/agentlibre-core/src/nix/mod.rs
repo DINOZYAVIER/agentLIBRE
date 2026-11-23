@@ -4,12 +4,15 @@
 
 pub mod section;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value};
 
-use crate::error::Error;
+use crate::error;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
 
 pub use section::Section;
 
@@ -27,13 +30,68 @@ const EVALUATOR: &str = "nix-instantiate";
 /// recognizes it in the evaluator's message.
 const NOT_A_FUNCTION: &str = "agentLIBRE: the file is not a function of { agl, ... }";
 
+/// What can go wrong evaluating Nix (AGL-039, D6-D13, D38; AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
+    DirMissing,
+    /// `AGENTLIBRE_FUNCTIONS` is not set to an absolute directory (AGL-053, D6).
+    FunctionsDirMissing,
+    /// The system's `nix-instantiate` cannot be run (AGL-039, D38).
+    NotFound { source: io::Error },
+    /// The evaluation of a Nix file failed; `detail` is Nix's message.
+    Eval { path: PathBuf, detail: String },
+    /// A Function or settings file is not a function of `{ agl, ... }`
+    /// (AGL-039, D8).
+    NotAFunction { path: PathBuf },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            // `TOOLS_DIR_MISSING` is shared with `Error::ToolsDirMissing`
+            // (AGL-121, D66), so it stays in `crate::i18n::m`.
+            Self::DirMissing => tr!(lang, crate::i18n::m::TOOLS_DIR_MISSING, var = NIX_VAR),
+            Self::FunctionsDirMissing => {
+                tr!(lang, crate::i18n::m::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
+            }
+            Self::NotFound { source } => tr!(lang, NIX_NOT_FOUND, source = source),
+            Self::Eval { path, detail } => {
+                tr!(lang, NIX_EVAL, path = path.display(), detail = detail)
+            }
+            Self::NotAFunction { path } => {
+                tr!(lang, NIX_NOT_A_FUNCTION, path = path.display())
+            }
+        }
+    }
+}
+
+/// `Error::NotFound`.
+const NIX_NOT_FOUND: Msg = Msg {
+    en: "cannot run nix-instantiate: {source} (agl needs Nix)",
+    uk: "не вдалося запустити nix-instantiate: {source} (agl потребує Nix)",
+};
+
+/// `Error::Eval`.
+const NIX_EVAL: Msg = Msg {
+    en: "{path} does not evaluate:\n{detail}",
+    uk: "{path} не обчислюється:\n{detail}",
+};
+
+/// `Error::NotAFunction`.
+const NIX_NOT_A_FUNCTION: Msg = Msg {
+    en: "{path} is not a function of {{ agl, ... }}: write it as `{{ agl, ... }}: {{ … }}`",
+    uk: "{path} не є функцією від {{ agl, ... }}: пиши його як `{{ agl, ... }}: {{ … }}`",
+};
+
 /// agl's `nix/` directory: the built-in formats, policies and models, the
 /// `agl` argument of every file (AGL-039, D7, D35).
 pub fn nix_dir() -> Result<PathBuf, Error> {
     std::env::var_os(NIX_VAR)
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .ok_or(Error::NixDirMissing)
+        .ok_or(Error::DirMissing)
 }
 
 /// The directory of the Functions behind `agl.functions` (AGL-053, D6).
@@ -68,19 +126,19 @@ pub fn eval_expr(path: &Path, expr: &str) -> Result<Value, Error> {
         .args(["--eval", "--strict", "--json", "--expr", expr])
         .stdin(Stdio::null())
         .output()
-        .map_err(|source| Error::NixNotFound { source })?;
+        .map_err(|source| Error::NotFound { source })?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         // The message itself, not the expression Nix quotes around it.
         if stderr.contains(&format!("error: {NOT_A_FUNCTION}")) {
-            return Err(Error::NixNotAFunction { path: path.into() });
+            return Err(Error::NotAFunction { path: path.into() });
         }
-        return Err(Error::NixEval {
+        return Err(Error::Eval {
             path: path.into(),
             detail: stderr.trim().to_owned(),
         });
     }
-    serde_json::from_slice(&output.stdout).map_err(|error| Error::NixEval {
+    serde_json::from_slice(&output.stdout).map_err(|error| Error::Eval {
         path: path.into(),
         detail: error.to_string(),
     })
@@ -179,9 +237,9 @@ pub fn render_lines(map: &Map<String, Value>) -> String {
 /// Writes the settings file `path` anew from `map` (AGL-039, D11, D12):
 /// `{ agl, ... }: { … }`, one key per line; comments, `let` and `import`
 /// of the old file are not kept.
-pub fn write_settings(path: &Path, map: &Map<String, Value>) -> Result<(), Error> {
+pub fn write_settings(path: &Path, map: &Map<String, Value>) -> Result<(), error::Error> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|source| Error::Write {
+        std::fs::create_dir_all(dir).map_err(|source| error::Error::Write {
             path: dir.into(),
             source,
         })?;
@@ -231,7 +289,7 @@ mod tests {
     #[test]
     fn an_evaluation_error_names_the_file() {
         match eval_expr(Path::new("/f.nix"), "{ a = ; }") {
-            Err(Error::NixEval { path, detail }) => {
+            Err(Error::Eval { path, detail }) => {
                 assert_eq!(path, Path::new("/f.nix"));
                 assert!(detail.contains("syntax error"), "{detail}");
             }

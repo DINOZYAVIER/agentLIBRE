@@ -2640,24 +2640,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Завантажую {name} ({size})",
     };
 
-    /// `Error::NixNotFound` (AGL-039, D38).
-    pub const NIX_NOT_FOUND: Msg = Msg {
-        en: "cannot run nix-instantiate: {source} (agl needs Nix)",
-        uk: "не вдалося запустити nix-instantiate: {source} (agl потребує Nix)",
-    };
-
-    /// `Error::NixEval` (AGL-039).
-    pub const NIX_EVAL: Msg = Msg {
-        en: "{path} does not evaluate:\n{detail}",
-        uk: "{path} не обчислюється:\n{detail}",
-    };
-
-    /// `Error::NixNotAFunction` (AGL-039, D8).
-    pub const NIX_NOT_A_FUNCTION: Msg = Msg {
-        en: "{path} is not a function of {{ agl, ... }}: write it as `{{ agl, ... }}: {{ … }}`",
-        uk: "{path} не є функцією від {{ agl, ... }}: пиши його як `{{ agl, ... }}: {{ … }}`",
-    };
-
     /// `Error::ToolsDirMissing` (AGL-040).
     pub const TOOLS_DIR_MISSING: Msg = Msg {
         en: "{var} is not set: run agl from its Nix package or `nix develop`",
@@ -3455,19 +3437,7 @@ impl Error {
             Error::OutsideGrammar(text) => tr!(lang, m::OUTSIDE_GRAMMAR, text = text),
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
-            Error::NixDirMissing => {
-                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::NIX_VAR)
-            }
-            Error::FunctionsDirMissing => {
-                tr!(lang, m::TOOLS_DIR_MISSING, var = crate::nix::FUNCTIONS_VAR)
-            }
-            Error::NixNotFound { source } => tr!(lang, m::NIX_NOT_FOUND, source = source),
-            Error::NixEval { path, detail } => {
-                tr!(lang, m::NIX_EVAL, path = path.display(), detail = detail)
-            }
-            Error::NixNotAFunction { path } => {
-                tr!(lang, m::NIX_NOT_A_FUNCTION, path = path.display())
-            }
+            Error::Nix(error) => error.message(lang),
             Error::ToolsDirMissing => {
                 tr!(lang, m::TOOLS_DIR_MISSING, var = crate::programs::TOOLS_VAR)
             }

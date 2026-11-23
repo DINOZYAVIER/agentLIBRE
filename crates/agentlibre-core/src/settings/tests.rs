@@ -94,8 +94,8 @@ fn user_file() {
     // The weights folders are absolute (D24b).
     assert!(matches!(user_of(r#"models = [ "gguf" ];"#), Err(Error::SearchPathNotAbsolute { .. })));
     // A settings file is a function of `{ agl, ... }` (D8, D12).
-    assert!(matches!(user("{ function = \"x\"; }"), Err(Error::NixNotAFunction { .. })));
-    assert!(matches!(user("{ agl, ... }: { function = ; }"), Err(Error::NixEval { .. })));
+    assert!(matches!(user("{ function = \"x\"; }"), Err(Error::Nix(crate::nix::Error::NotAFunction { .. }))));
+    assert!(matches!(user("{ agl, ... }: { function = ; }"), Err(Error::Nix(crate::nix::Error::Eval { .. }))));
 }
 
 #[test]

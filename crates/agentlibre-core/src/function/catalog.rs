@@ -338,7 +338,7 @@ fn write_validated(target: &Path, dir: &Path, name: &str, text: &str) -> Result<
     })?;
     let temp = dir.join(format!("{name}.nix.tmp"));
     fs::write(&temp, text).map_err(|source| Error::Write { path: temp.clone(), source })?;
-    match nix::eval_file(&temp).and_then(|value| Function::from_value(&temp, value)) {
+    match nix::eval_file(&temp).map_err(Into::into).and_then(|value| Function::from_value(&temp, value)) {
         Ok(_) => fs::rename(&temp, target)
             .map(|()| target.to_path_buf())
             .map_err(|source| Error::Write { path: target.to_path_buf(), source }),
@@ -509,7 +509,7 @@ mod tests {
             Err(Error::FunctionExists { .. })
         ));
         // A text that does not load never reaches the name.
-        assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::NixEval { .. })));
+        assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::Nix(nix::Error::Eval { .. }))));
         assert!(!catalog.workspace_file("twin2").exists());
     }
 }

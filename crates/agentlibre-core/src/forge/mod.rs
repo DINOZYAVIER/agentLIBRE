@@ -817,10 +817,10 @@ fn front_expr(front: &str) -> String {
 /// Evaluates the front matter `front` of `path` (AGL-041).
 fn eval_front(path: &Path, front: &str) -> Result<Value, Error> {
     nix::eval_expr(path, &front_expr(front)).map_err(|error| match error {
-        Error::NixEval { detail, .. } if detail.contains(&format!("error: {NOT_A_SET}")) => {
+        nix::Error::Eval { detail, .. } if detail.contains(&format!("error: {NOT_A_SET}")) => {
             Error::ArtifactFrontMatter { path: path.into() }
         }
-        error => error,
+        error => error.into(),
     })
 }
 
@@ -921,7 +921,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
     };
     match eval_front(path, &front) {
         Ok(value) => Ok(header_of(path, value, body)),
-        Err(error @ Error::NixNotFound { .. }) => Err(error),
+        Err(error @ Error::Nix(nix::Error::NotFound { .. })) => Err(error),
         Err(error) => Ok(Header::Broken {
             detail: error.to_string(),
         }),
@@ -1310,7 +1310,7 @@ mod tests {
         // A marker that does not evaluate is an error.
         fs::create_dir_all(data.join("broken")).unwrap();
         fs::write(data.join("broken").join(MARKER_FILE), "{ agl, ... }: { format = ; }\n").unwrap();
-        assert!(matches!(stores(&data), Err(Error::NixEval { .. })));
+        assert!(matches!(stores(&data), Err(Error::Nix(nix::Error::Eval { .. }))));
     }
 
     #[test]

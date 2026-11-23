@@ -276,17 +276,10 @@ pub enum Error {
     /// A weights file failed to download (AGL-050, D17). Its own type,
     /// wrapped (AGL-121, D66).
     Download(crate::download::Error),
-    /// `AGENTLIBRE_NIX` is not set to an absolute directory (AGL-039, D7).
-    NixDirMissing,
-    /// `AGENTLIBRE_FUNCTIONS` is not set to an absolute directory (AGL-053, D6).
-    FunctionsDirMissing,
-    /// The system's `nix-instantiate` cannot be run (AGL-039, D38).
-    NixNotFound { source: io::Error },
-    /// The evaluation of a Nix file failed; `detail` is Nix's message.
-    NixEval { path: PathBuf, detail: String },
-    /// A Function or settings file is not a function of `{ agl, ... }`
-    /// (AGL-039, D8).
-    NixNotAFunction { path: PathBuf },
+    /// Nix evaluation: the directory, the evaluator, a failed evaluation, a
+    /// file that is not a function (AGL-039, D6-D13, D38). Its own type,
+    /// wrapped (AGL-121, D66).
+    Nix(crate::nix::Error),
     /// `AGENTLIBRE_TOOLS` is not set to an absolute directory: agl runs
     /// outside its package's wrapper and the dev shell (AGL-040).
     ToolsDirMissing,
@@ -425,6 +418,13 @@ impl From<crate::strata::Error> for Error {
     /// A Strata engine's own error as agl's (AGL-121, D66).
     fn from(source: crate::strata::Error) -> Error {
         Error::Strata(source)
+    }
+}
+
+impl From<crate::nix::Error> for Error {
+    /// A Nix evaluation's own error as agl's (AGL-121, D66).
+    fn from(source: crate::nix::Error) -> Error {
+        Error::Nix(source)
     }
 }
 
