@@ -939,12 +939,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "масивом наборів атрибутів",
     };
 
-    /// `Error::UnknownServerKind`.
-    pub const UNKNOWN_SERVER_KIND: Msg = Msg {
-        en: "`kind` in {path} is not `llama` or `strata`: `{value}`",
-        uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
-    };
-
     /// `Error::SearchCaNotSet` (AGL-043 F20).
     pub const SEARCH_CA_NOT_SET: Msg = Msg {
         en: "agl search login needs `search.ca` with url, root and provisioner in {user_path}; `{key}` is not set:\n\nsearch.ca = {{ url = \"https://ca.example\"; root = \"/path/to/root.crt\"; provisioner = \"NAME\"; }};",
@@ -2425,9 +2419,6 @@ impl Error {
                         Expected::Tables => tr!(lang, m::EXPECTED_TABLES),
                     }
                 )
-            }
-            Error::UnknownServerKind { path, value } => {
-                tr!(lang, m::UNKNOWN_SERVER_KIND, path = path.display(), value = value)
             }
             Error::SearchCaNotSet { user_path, key } => tr!(
                 lang,

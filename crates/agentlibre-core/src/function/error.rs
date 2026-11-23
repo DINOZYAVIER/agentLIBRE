@@ -20,6 +20,9 @@ pub enum Error {
     /// `/function new` took a name one of the sources already has
     /// (AGL-102, D3); nothing was written.
     Exists { name: String },
+    /// The kind of a Function's model is not `llama` or `strata` (AGL-030, D1;
+    /// AGL-036, D1).
+    UnknownServerKind { path: PathBuf, value: String },
     /// The schema of a session's `run` snapshot is not the one this build
     /// reads (AGL-063, D4).
     RunSchema { expected: u64, found: String },
@@ -48,6 +51,9 @@ impl Error {
             }
             Self::BuiltIn { name } => tr!(lang, FUNCTION_BUILTIN, name = name),
             Self::Exists { name } => tr!(lang, FUNCTION_EXISTS, name = name),
+            Self::UnknownServerKind { path, value } => {
+                tr!(lang, UNKNOWN_SERVER_KIND, path = path.display(), value = value)
+            }
             Self::RunSchema { expected, found } => {
                 tr!(lang, RUN_SCHEMA, expected = expected, found = found)
             }
@@ -304,6 +310,12 @@ const FUNC_BAD_SOURCE_SHA256: Msg = Msg {
 const FUNC_BAD_SOURCE_SIZE: Msg = Msg {
     en: "a size is a positive number of bytes",
     uk: "розмір — це додатне число байтів",
+};
+
+/// `Error::UnknownServerKind`.
+const UNKNOWN_SERVER_KIND: Msg = Msg {
+    en: "`kind` in {path} is not `llama` or `strata`: `{value}`",
+    uk: "`kind` у {path} не `llama` і не `strata`: `{value}`",
 };
 
 /// `Error::RunSchema`.

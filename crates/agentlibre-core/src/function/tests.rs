@@ -506,7 +506,7 @@ fn the_model_is_checked_against_its_kind() {
     ] {
         assert_eq!(problem_of(model(body)).1, FunctionProblem::BadWeightsName, "{body}");
     }
-    assert!(matches!(model(r#"kind = "gemma"; weights = "m.gguf";"#), Err(Error::UnknownServerKind { .. })));
+    assert!(matches!(model(r#"kind = "gemma"; weights = "m.gguf";"#), Err(Error::Function(FunctionError::UnknownServerKind { .. }))));
     // A weights file is a file name or an absolute path (D24a).
     assert!(model(r#"weights = "/w/m.gguf";"#).is_ok());
     for name in ["dir/m.gguf", ".m", ""] {

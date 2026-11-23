@@ -503,7 +503,7 @@ impl Function {
 fn read_model(model: &mut Section) -> Result<ServerFile, Error> {
     let kind = match model.string("kind")? {
         None => ServerKind::Llama,
-        Some(kind) => ServerKind::parse(&kind).ok_or_else(|| Error::UnknownServerKind {
+        Some(kind) => ServerKind::parse(&kind).ok_or_else(|| FunctionError::UnknownServerKind {
             path: model.path().into(),
             value: kind,
         })?,

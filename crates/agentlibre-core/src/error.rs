@@ -41,9 +41,6 @@ pub enum Error {
         key: String,
         expected: Expected,
     },
-    /// The kind of a Function's model is not `llama` or `strata` (AGL-030, D1;
-    /// AGL-036, D1).
-    UnknownServerKind { path: PathBuf, value: String },
     /// `agl search login` without a complete `search.ca` in the user file
     /// (AGL-043 F20); `key` is the first one missing.
     SearchCaNotSet { user_path: PathBuf, key: String },
