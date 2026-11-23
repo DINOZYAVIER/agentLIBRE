@@ -21,7 +21,7 @@ use crate::agent::Sink;
 use crate::error::Error;
 use crate::backend::error::Error as BackendError;
 use crate::format::Format;
-use crate::settings::ServerKind;
+use agentlibre_common::settings::ServerKind;
 use crate::tools::Spec;
 
 /// The model name the OpenAI-dialect request carries; Strata has one model

@@ -9,8 +9,8 @@ use crate::error::Error;
 use crate::forge;
 use crate::function::Function;
 use agentlibre_common::i18n::{Lang, m};
-use crate::paths::Paths;
-use crate::settings::{self, UserFile};
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::{self, UserFile};
 use agentlibre_common::tr;
 use crate::outln;
 
@@ -76,7 +76,7 @@ pub fn run(
                 (
                     path.file_stem()
                         .map_or_else(|| target.clone(), |stem| stem.to_string_lossy().into_owned()),
-                    Function::from_value(path, crate::nix::eval_file(path)?)?,
+                    Function::from_value(path, agentlibre_common::nix::eval_file(path)?)?,
                 )
             } else {
                 (target.clone(), Function::load(&catalog.dirs(), &target)?)

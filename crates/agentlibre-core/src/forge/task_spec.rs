@@ -77,7 +77,7 @@ pub struct TaskSpec {
 /// Validates the `task-spec` set of `artifact` strictly and takes
 /// it.
 pub fn take(artifact: &Artifact) -> Result<TaskSpec, Error> {
-    let mut section = crate::nix::Section::at(
+    let mut section = agentlibre_common::nix::Section::at(
         &artifact.path,
         &artifact.type_name,
         artifact.type_table.clone(),
@@ -458,28 +458,28 @@ mod tests {
         artifact.type_table["branch"] = "x".into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "task-spec.branch"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "task-spec.branch"
         ));
         // anchor is required.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table.as_object_mut().unwrap().remove("anchor");
         assert!(matches!(
             take(&artifact),
-            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "task-spec.anchor"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "task-spec.anchor"
         ));
         // last is a string.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table["last"] = 1.into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "task-spec.last"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "task-spec.last"
         ));
         // The set itself must be a set.
         let mut artifact = scaffold("agl-001-x", "2026-10-17");
         artifact.type_table = "x".into();
         assert!(matches!(
             take(&artifact),
-            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "task-spec"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "task-spec"
         ));
     }
 

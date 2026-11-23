@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::engine::error::Error as EngineError;
 use crate::i18n::server as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::settings::{ServerFile, ServerKind};
+use agentlibre_common::settings::{ServerFile, ServerKind};
 use crate::outln;
 use agentlibre_common::tr;
 

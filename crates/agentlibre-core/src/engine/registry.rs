@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
-use crate::settings::ServerFile;
+use agentlibre_common::settings::ServerFile;
 
 use super::model_of;
 use agentlibre_common::error::Error as CommonError;

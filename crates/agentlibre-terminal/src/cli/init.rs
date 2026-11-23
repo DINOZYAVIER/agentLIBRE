@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use crate::error::Error;
 use crate::forge;
 use agentlibre_common::i18n::{Lang, m};
-use crate::paths::Paths;
-use crate::settings::UserFile;
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::UserFile;
 use agentlibre_common::tr;
 use crate::outln;
 

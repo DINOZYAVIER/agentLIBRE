@@ -229,7 +229,7 @@ fn the_forge_has_no_switch() {
             r#"{{ forge = {value}; system = "s"; initial = "a"; state.a = {{ tools.bash = {{ }}; next.otherwise = "a"; }}; }}"#
         ));
         assert!(
-            matches!(&result, Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "policy.forge"),
+            matches!(&result, Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "policy.forge"),
             "{value}: {result:?}"
         );
     }
@@ -327,13 +327,13 @@ fn files_and_names() {
     fs::write(dir.0.join("plain.nix"), format!("{{ policy = {CODER}; }}")).unwrap();
     assert!(matches!(
         Function::load(&[&dir.0, none()], "plain"),
-        Err(Error::Nix(crate::nix::Error::NotAFunction { .. }))
+        Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::NotAFunction { .. })))
     ));
     // A file that does not evaluate names the file.
     fs::write(dir.0.join("broken.nix"), "{ agl, ... }: { policy = ; }").unwrap();
     assert!(matches!(
         Function::load(&[&dir.0, none()], "broken"),
-        Err(Error::Nix(crate::nix::Error::Eval { path, .. })) if path == dir.0.join("broken.nix")
+        Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::Eval { path, .. }))) if path == dir.0.join("broken.nix")
     ));
 }
 
@@ -374,27 +374,27 @@ fn top_level_errors() {
     // Exactly `policy` and `model`, both required (AGL-039, D17, D21).
     assert!(matches!(
         evaluate(&format!("{{ agl, ... }}: {{ policy = {}; }}", plain(""))),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "model"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "model"
     ));
     assert!(matches!(
         evaluate(&format!("{{ agl, ... }}: {{ model = {MODEL}; }}")),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "policy"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "policy"
     ));
     assert!(matches!(
         evaluate(&format!("{{ agl, ... }}: {{ policy = {}; model = {MODEL}; server = {{ }}; }}", plain(""))),
-        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "server"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "server"
     ));
     assert!(matches!(
         function(r#"{ initial = "a"; state.a.answer = true; }"#),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "policy.system"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "policy.system"
     ));
     assert!(matches!(
         function_on(&plain(""), r#"{ kind = "llama"; weights = "m.gguf"; }"#),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "model.format"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "model.format"
     ));
     assert!(matches!(
         one_state("answer = true; model = 1;"),
-        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "policy.state.a.model"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "policy.state.a.model"
     ));
     assert_eq!(
         problem_of(function(r#"{ system = "s"; initial = "b"; state.a.answer = true; }"#)),
@@ -408,11 +408,11 @@ fn top_level_errors() {
     };
     assert!(matches!(
         sampling("seed = 1;"),
-        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "model.sampling.seed"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "model.sampling.seed"
     ));
     assert!(matches!(
         sampling("top_k = 2.5;"),
-        Err(crate::error::Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "model.sampling.top_k"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "model.sampling.top_k"
     ));
     assert_eq!(
         sampling("temperature = 1;").unwrap().sampling.temperature,
@@ -449,7 +449,7 @@ fn top_level_errors() {
     // The policy has none of them, nor the voice limit (AGL-039, D20).
     for key in ["compact_early = true;", "max_record_seconds = 15;", "sampling = { };"] {
         assert!(
-            matches!(function(&plain(key)), Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { .. }))),
+            matches!(function(&plain(key)), Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { .. })))),
             "{key}"
         );
     }
@@ -535,7 +535,7 @@ fn the_model_is_checked_against_its_kind() {
     );
     assert!(matches!(
         model(&format!(r#"weights = "m.gguf"; source.model = {};"#, file("https://x/m"))),
-        Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "model.source.model"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "model.source.model"
     ));
     // A source is pinned: a url alone is not one (AGL-050, D8).
     assert!(model(r#"weights = "m.gguf"; source.weights = "https://x/m";"#).is_err());
@@ -669,7 +669,7 @@ fn state_errors() {
     // `next.<tool>` is always a set (AGL-039, D41).
     assert!(matches!(
         one_state(r#"tools.bash = { }; next.bash = "a";"#),
-        Err(crate::error::Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "policy.state.a.next.bash"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "policy.state.a.next.bash"
     ));
 }
 
@@ -689,17 +689,17 @@ fn key_errors() {
     ] {
         let result = one_state(&format!(r#"{body} next.otherwise = "a";"#));
         assert!(
-            matches!(&result, Err(crate::error::Error::Nix(crate::nix::Error::UnknownKey { key: k, .. })) if k == key),
+            matches!(&result, Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key: k, .. }))) if k == key),
             "{body}: {result:?}"
         );
     }
     assert!(matches!(
         one_state("answer = true; max_steps = 2;"),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "policy.state.a.on_limit"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "policy.state.a.on_limit"
     ));
     assert!(matches!(
         one_state(r#"tools.bash.timeout.int.min = 1; next.otherwise = "a";"#),
-        Err(crate::error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "policy.state.a.tools.bash.timeout.int.max"
+        Err(crate::error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "policy.state.a.tools.bash.timeout.int.max"
     ));
 }
 
@@ -855,7 +855,7 @@ fn the_gemma_models_have_their_files_and_their_drafts() {
 
 #[test]
 fn every_source_of_a_model_is_at_a_fixed_version() {
-    let sources = crate::nix::eval_with_agl(
+    let sources = agentlibre_common::nix::eval_with_agl(
         Path::new("<built-in>/models"),
         "map (model: model.source) (builtins.attrValues agl.models)",
     )

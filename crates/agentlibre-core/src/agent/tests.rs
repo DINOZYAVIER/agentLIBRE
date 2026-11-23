@@ -194,7 +194,7 @@ impl Backend for Script {
         // A scripted request that the server does not answer.
         if generated.text == "!unreachable" {
             return Err(crate::backend::error::Error::ServerUnreachable {
-                kind: crate::settings::ServerKind::Llama,
+                kind: agentlibre_common::settings::ServerKind::Llama,
                 url: "http://127.0.0.1:18080".into(),
                 detail: "connection refused".into(),
             }

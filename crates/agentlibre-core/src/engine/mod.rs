@@ -22,7 +22,7 @@ use crate::engine::error::Error as EngineError;
 use crate::forge::Workspace;
 use crate::i18n::server as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::settings::{ServerFile, ServerKind};
+use agentlibre_common::settings::{ServerFile, ServerKind};
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;
 
@@ -414,7 +414,7 @@ pub struct Autostart {
     /// `[server]` table when the file declares it, else `settings`.
     pub effective: ServerFile,
     /// The project's `[whisper]` over the user's (AGL-014, D22).
-    pub whisper: crate::settings::WhisperFile,
+    pub whisper: agentlibre_common::settings::WhisperFile,
     pub user_path: PathBuf,
     pub models: PathBuf,
     pub path_var: Option<OsString>,
@@ -1136,7 +1136,7 @@ pub fn check_outside(
 
 /// The line of `agl server command`.
 pub fn command_line(model: &ServerFile, settings: &ServerFile) -> String {
-    let url = settings.llama_url.as_deref().unwrap_or(crate::settings::DEFAULT_LLAMA_URL);
+    let url = settings.llama_url.as_deref().unwrap_or(agentlibre_common::settings::DEFAULT_LLAMA_URL);
     let (host, port) = match local_address(url) {
         Some(address) => address,
         None => ("0.0.0.0".to_owned(), url_port(url).unwrap_or(18080)),
@@ -1611,7 +1611,7 @@ fn projector_flags(settings: &ServerFile, file: PathBuf) -> Vec<OsString> {
     }
     let tokens = settings
         .image_max_tokens
-        .unwrap_or(crate::settings::DEFAULT_IMAGE_TOKENS);
+        .unwrap_or(agentlibre_common::settings::DEFAULT_IMAGE_TOKENS);
     projector.extend(["--image-max-tokens".into(), tokens.to_string().into()]);
     projector
 }
@@ -2202,7 +2202,7 @@ mod tests {
         let origin = origin("60af300abea6");
         let ws = project(Some(&origin), ServerFile::default());
         let server = Server::of(&ws, None, &ServerFile::default(), model("m.gguf", 4096));
-        assert_eq!(server.unwrap().url, crate::settings::DEFAULT_LLAMA_URL);
+        assert_eq!(server.unwrap().url, agentlibre_common::settings::DEFAULT_LLAMA_URL);
     }
 
     #[test]
@@ -2422,7 +2422,7 @@ mod tests {
             llama: Arc::new(llama),
             project: project.clone(),
             effective: effective.clone(),
-            whisper: crate::settings::WhisperFile::default(),
+            whisper: agentlibre_common::settings::WhisperFile::default(),
             user_path: PathBuf::from("/c/settings.nix"),
             models: PathBuf::from("/m"),
             path_var: None,

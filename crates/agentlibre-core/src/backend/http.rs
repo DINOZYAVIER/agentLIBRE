@@ -7,7 +7,7 @@ use serde_json::Value as Json;
 
 use crate::error::Error;
 use crate::backend::error::Error as BackendError;
-use crate::settings::ServerKind;
+use agentlibre_common::settings::ServerKind;
 
 /// How long connecting may take (D97).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);

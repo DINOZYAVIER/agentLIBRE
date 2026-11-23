@@ -24,9 +24,9 @@ use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::settings::error::Error as SettingsError;
-use agentlibre_common::i18n::Lang;
+use crate::i18n::Lang;
 use crate::nix::{self, Section};
-use agentlibre_common::style::{COLOR_KEYS, Role, Style};
+use crate::style::{COLOR_KEYS, Role, Style};
 
 /// Name of the settings file, the user's and the project store's
 /// (AGL-039, D11).
@@ -186,7 +186,7 @@ fn check_weights_name(name: &str) -> Result<(), Error> {
     if Path::new(name).is_absolute() || !(name.is_empty() || name.contains('/') || name.starts_with('.')) {
         Ok(())
     } else {
-        Err(agentlibre_common::error::Error::InvalidName(name.into()).into())
+        Err(crate::error::Error::InvalidName(name.into()))
     }
 }
 

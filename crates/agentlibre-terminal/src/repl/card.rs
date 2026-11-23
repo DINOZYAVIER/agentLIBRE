@@ -11,7 +11,7 @@ use super::text::{clean, hard_wrap, width, wrap_line};
 use crate::backend::ToolCall;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records;
-use crate::settings::Detail;
+use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;

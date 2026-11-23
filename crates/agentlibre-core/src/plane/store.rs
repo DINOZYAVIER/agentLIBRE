@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 
 use crate::error::Error;
 use crate::plane::error::Error as PlaneError;
-use crate::nix;
-use crate::paths::Paths;
+use agentlibre_common::nix;
+use agentlibre_common::paths::Paths;
 use agentlibre_common::error::Error as CommonError;
 
 /// The file of a plane in its store (D16).
@@ -179,12 +179,12 @@ impl PlaneFile {
 
     /// The plane's `settings.nix` (D1).
     pub fn settings_file(&self) -> PathBuf {
-        self.dir.join(crate::settings::SETTINGS_FILE)
+        self.dir.join(agentlibre_common::settings::SETTINGS_FILE)
     }
 
     /// The plane's settings; none when it has no `settings.nix` (D1, D7).
-    pub fn settings(&self) -> Result<crate::settings::ProjectFile, Error> {
-        crate::settings::ProjectFile::read(&self.settings_file())
+    pub fn settings(&self) -> Result<agentlibre_common::settings::ProjectFile, Error> {
+        Ok(agentlibre_common::settings::ProjectFile::read(&self.settings_file())?)
     }
 
     /// The plane's `functions/` (D1, D7).
@@ -248,7 +248,7 @@ impl PlaneFile {
                     .collect(),
             ),
         );
-        nix::write_settings(&self.dir.join(PLANE_FILE), &map)
+        Ok(nix::write_settings(&self.dir.join(PLANE_FILE), &map)?)
     }
 }
 

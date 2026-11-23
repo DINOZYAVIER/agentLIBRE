@@ -174,7 +174,7 @@ pub struct StoreHome {
 
 impl StoreHome {
     fn resolved(&self) -> Result<(crate::forge::Workspace, Vec<String>), error::Error> {
-        let paths = crate::paths::Paths::from_env(|name| std::env::var_os(name))?;
+        let paths = agentlibre_common::paths::Paths::from_env(|name| std::env::var_os(name))?;
         crate::forge::resolve_store(&paths.data, &self.workspace, self.lang, self.auto_rehome)
     }
 }

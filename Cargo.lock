@@ -44,6 +44,7 @@ name = "agentlibre-common"
 version = "0.0.2"
 dependencies = [
  "libc",
+ "serde_json",
 ]
 
 [[package]]

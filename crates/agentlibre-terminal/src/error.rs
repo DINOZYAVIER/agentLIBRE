@@ -74,7 +74,7 @@ macro_rules! from_core {
     };
 }
 
-from_core!(backend, daemon, engine, forge, function, machine, plane, session, settings);
+from_core!(backend, daemon, engine, forge, function, machine, plane, session);
 
 /// A core module whose error is `module::Error`.
 macro_rules! from_core_file {
@@ -87,7 +87,7 @@ macro_rules! from_core_file {
     };
 }
 
-from_core_file!(download, format, media, memory, nix, paths, search, strata, weights, whisper, wsl);
+from_core_file!(download, format, media, memory, search, strata, weights, whisper, wsl);
 
 /// A common module's own error, wrapped by the core's.
 macro_rules! from_common {
@@ -100,7 +100,13 @@ macro_rules! from_common {
     };
 }
 
-from_common!(error, programs);
+from_common!(error, nix, paths, programs);
+
+impl From<agentlibre_common::settings::error::Error> for Error {
+    fn from(source: agentlibre_common::settings::error::Error) -> Error {
+        Error::Core(source.into())
+    }
+}
 
 impl Error {
     /// Whether the error is in the command line rather than the setup:

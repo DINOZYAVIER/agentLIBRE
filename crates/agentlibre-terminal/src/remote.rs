@@ -14,7 +14,7 @@ use crate::backend::ReasoningLevel;
 use crate::error::CoreError as Error;
 use agentlibre_common::i18n::Lang;
 use crate::interrupt;
-use crate::paths::Paths;
+use agentlibre_common::paths::Paths;
 use crate::whisper::Dictation;
 
 /// What the terminal opens.

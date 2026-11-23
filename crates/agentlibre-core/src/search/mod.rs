@@ -20,7 +20,7 @@ use crate::backend::ToolCall;
 use agentlibre_common::i18n::{Lang, Msg};
 use crate::tools::signal_group;
 use crate::session::INTERRUPTED;
-use crate::settings::Search;
+use agentlibre_common::settings::Search;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;
 

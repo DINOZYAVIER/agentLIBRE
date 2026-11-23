@@ -16,7 +16,7 @@ use super::ModeKeys;
 use crate::function::Function;
 use crate::function::catalog::{Catalog, Entry, Source};
 use agentlibre_common::i18n::{Lang, m};
-use crate::settings::UserFile;
+use agentlibre_common::settings::UserFile;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;
@@ -541,7 +541,7 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
             if path.file_name().is_some_and(|name| name == "settings.nix") {
                 return Edited::Saved { check: String::new(), error: false };
             }
-            let checked = crate::nix::eval_file(path)
+            let checked = agentlibre_common::nix::eval_file(path)
                 .map_err(Into::into)
                 .and_then(|value| Function::from_value(path, value))
                 .map_err(|error| error.message(lang));
@@ -694,7 +694,7 @@ mod tests {
     use super::*;
     use super::super::dock::Layout;
     use agentlibre_common::testutil::TempDir;
-    use crate::settings::ServerFile;
+    use agentlibre_common::settings::ServerFile;
 
     const LLAMA: &str = r#"{ kind = "llama"; format = agl.formats."qwen3.8"; weights = "p.gguf"; context = 4096; }"#;
 
@@ -724,7 +724,7 @@ mod tests {
             name: name.into(),
             source: Source::BuiltIn,
             shadows: Vec::new(),
-            kind: crate::settings::ServerKind::Llama,
+            kind: agentlibre_common::settings::ServerKind::Llama,
             model: Some("m.gguf".into()),
             description: None,
             error: None,

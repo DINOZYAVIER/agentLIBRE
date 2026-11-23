@@ -8,7 +8,7 @@ use serde_json::{Value as Json, json};
 use crate::action::{Kind, Value};
 use crate::error;
 use agentlibre_common::i18n::{Lang, Msg};
-use crate::nix::Section;
+use agentlibre_common::nix::Section;
 use agentlibre_common::tr;
 
 const NAME: &str = "{name}";
@@ -475,7 +475,7 @@ pub mod tests {
 
     #[test]
     fn builtin_qwen_is_the_nix_one() {
-        let evaluated = crate::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.\"qwen3.8\"").unwrap();
+        let evaluated = agentlibre_common::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.\"qwen3.8\"").unwrap();
         assert_eq!(evaluated, qwen_value());
     }
 
@@ -504,7 +504,7 @@ pub mod tests {
 
     #[test]
     fn builtin_gemma_is_the_nix_one() {
-        let evaluated = crate::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.gemma4").unwrap();
+        let evaluated = agentlibre_common::nix::eval_with_agl(Path::new("<built-in>"), "agl.formats.gemma4").unwrap();
         assert_eq!(evaluated, gemma_value());
     }
 
@@ -614,17 +614,17 @@ pub mod tests {
     fn keys_are_checked() {
         assert!(matches!(
             parse(json!({ "name": "x", "call": call() })),
-            Err(error::Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "name"
+            Err(error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "name"
         ));
         assert!(matches!(
             parse(json!({ "call": { "begin": "<c {name}>", "end": "</c>" } })),
-            Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "call.param"
+            Err(error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "call.param"
         ));
         assert!(matches!(
             parse(json!({ "think": { "open": "<t>" }, "call": call() })),
-            Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "think.close"
+            Err(error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "think.close"
         ));
-        assert!(matches!(parse(json!({})), Err(error::Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "call"));
+        assert!(matches!(parse(json!({})), Err(error::Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "call"));
     }
 
     #[test]

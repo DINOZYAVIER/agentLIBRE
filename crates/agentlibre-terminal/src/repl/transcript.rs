@@ -17,7 +17,7 @@ use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
-use crate::settings::{Detail, ReplSettings};
+use agentlibre_common::settings::{Detail, ReplSettings};
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;

@@ -37,7 +37,7 @@ use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
 use crate::function::catalog::Catalog;
-use crate::paths::Paths;
+use agentlibre_common::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
 use agentlibre_common::tty::is_yes;
 use crate::whisper;
@@ -895,7 +895,7 @@ impl Input {
                 },
                 browser::SettingsItem {
                     label: "settings.nix".into(),
-                    path: self.workspace.join(crate::settings::SETTINGS_FILE),
+                    path: self.workspace.join(agentlibre_common::settings::SETTINGS_FILE),
                     note: tr!(self.lang, m::BROWSER_SETTINGS_PROJECT).to_string(),
                 },
             ];
@@ -1949,7 +1949,7 @@ mod tests {
                 plane_dir: None,
                 workspace_dir: dir.join("functions"),
                 user_dir: dir.join("user"),
-                settings: crate::settings::ServerFile::default(),
+                settings: agentlibre_common::settings::ServerFile::default(),
                 current: "minimal".into(),
             }),
             theme: Theme::plain(),
@@ -2840,7 +2840,7 @@ mod tests {
             screen,
             Theme::plain(),
             Lang::En,
-            crate::settings::ReplSettings::default(),
+            agentlibre_common::settings::ReplSettings::default(),
         );
         presenter.begin_turn();
         let control = Control::new(Info::default(), None);

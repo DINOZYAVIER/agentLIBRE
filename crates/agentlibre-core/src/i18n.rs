@@ -22,9 +22,7 @@ impl Error {
         match self {
             Error::FunctionWithResume => tr!(lang, m::FUNCTION_WITH_RESUME).to_string(),
             Error::PlaneWithResume => tr!(lang, m::PLANE_WITH_RESUME).to_string(),
-            Error::Paths(error) => error.message(lang),
             Error::Common(error) => error.message(lang),
-            Error::Settings(error) => error.message(lang),
             Error::Forge(error) => error.message(lang),
             Error::Engine(error) => error.message(lang),
             Error::Backend(error) => error.message(lang),
@@ -45,7 +43,6 @@ impl Error {
             Error::Machine(error) => error.message(lang),
             Error::Weights(error) => error.message(lang),
             Error::Download(error) => error.message(lang),
-            Error::Nix(error) => error.message(lang),
             Error::Memory(error) => error.message(lang),
         }
     }
@@ -104,7 +101,7 @@ mod tests {
                 detail: "the engine stopped".into(),
             })
         };
-        let strata = reply(crate::settings::ServerKind::Strata);
+        let strata = reply(agentlibre_common::settings::ServerKind::Strata);
         assert_eq!(
             strata.message(Lang::En),
             "unexpected reply from the Strata server at http://127.0.0.1:18088: the engine stopped"
@@ -112,7 +109,7 @@ mod tests {
         assert!(strata.message(Lang::Uk).contains("сервер Strata"));
         // `Display` is the same text (AGL-058, D22).
         assert_eq!(strata.to_string(), strata.message(Lang::En));
-        let llama = reply(crate::settings::ServerKind::Llama);
+        let llama = reply(agentlibre_common::settings::ServerKind::Llama);
         assert!(llama.message(Lang::En).contains("from llama-server at"));
     }
 
@@ -124,7 +121,7 @@ pub mod server {
     use super::m;
     use agentlibre_common::tr;
     use crate::engine::Health;
-    use crate::settings::ServerKind;
+    use agentlibre_common::settings::ServerKind;
 
     /// `agl server start` begins (D146); `what` is the server, in a line
     /// (AGL-033, D2).

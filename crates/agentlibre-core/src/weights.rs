@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::download::{self, FileSource};
 use crate::error;
 use agentlibre_common::i18n::{Lang, Msg, m};
-use crate::settings::{self, ServerFile, WhisperFile};
+use agentlibre_common::settings::{self, ServerFile, WhisperFile};
 use agentlibre_common::tr;
 
 /// What can go wrong resolving a weights file (AGL-039, D24c; AGL-050, D11;
@@ -35,9 +35,9 @@ impl Error {
             Self::NotFound { name, folders } => {
                 let folders: Vec<String> =
                     folders.iter().map(|folder| folder.display().to_string()).collect();
-                let user_path = crate::paths::Paths::from_env(|name| std::env::var_os(name))
+                let user_path = agentlibre_common::paths::Paths::from_env(|name| std::env::var_os(name))
                     .map(|paths| paths.settings_file().display().to_string())
-                    .unwrap_or_else(|_| crate::settings::SETTINGS_FILE.into());
+                    .unwrap_or_else(|_| agentlibre_common::settings::SETTINGS_FILE.into());
                 tr!(
                     lang,
                     NOT_FOUND,
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(model.model, Some(elsewhere.join("m.gguf").to_string_lossy().into_owned()));
         assert_eq!(asked.borrow().len(), 1);
         assert!(asked.borrow()[0].contains("m.gguf"));
-        let user = crate::settings::UserFile::load(&user_path).unwrap();
+        let user = agentlibre_common::settings::UserFile::load(&user_path).unwrap();
         assert_eq!(user.models, [PathBuf::from("/first"), elsewhere.clone()]);
         // A folder without the file, or no answer, is the error.
         let nothing = |_: &str| None;

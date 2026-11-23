@@ -10,9 +10,9 @@ use crate::error::Error;
 use super::error::Error as FunctionError;
 use crate::forge::Workspace;
 use agentlibre_common::i18n::{Lang, m};
-use crate::nix;
-use crate::paths::Paths;
-use crate::settings::{ServerFile, ServerKind, UserFile, function_name};
+use agentlibre_common::nix;
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::{ServerFile, ServerKind, UserFile, function_name};
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;
 
@@ -105,7 +105,7 @@ impl Catalog {
         project: &Workspace,
         user: &UserFile,
         plane: &crate::plane::PlaneFile,
-        settings: &crate::settings::ProjectFile,
+        settings: &agentlibre_common::settings::ProjectFile,
     ) -> Catalog {
         Catalog {
             plane_dir: Some(plane.functions_dir()),
@@ -512,7 +512,7 @@ mod tests {
             Err(Error::Function(FunctionError::Exists { .. }))
         ));
         // A text that does not load never reaches the name.
-        assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::Nix(nix::Error::Eval { .. }))));
+        assert!(matches!(catalog.create("twin2", "{ nope"), Err(Error::Common(agentlibre_common::error::Error::Nix(nix::Error::Eval { .. })))));
         assert!(!catalog.workspace_file("twin2").exists());
     }
 }

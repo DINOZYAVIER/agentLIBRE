@@ -1,6 +1,6 @@
 //! The errors shared by the crates above: a file that cannot be read or
 //! written, a name that cannot name a file, a stopped generation, and the
-//! common modules' own (AGL-121, D78).
+//! common modules' own: programs, paths, Nix, settings (AGL-121, D78).
 
 use std::io;
 use std::path::PathBuf;
@@ -22,6 +22,13 @@ pub enum Error {
     Interrupted,
     /// A helper program of agl's package cannot be found (AGL-040).
     Programs(crate::programs::Error),
+    /// agl's directories cannot be found (AGL-121, D75).
+    Paths(crate::paths::Error),
+    /// Nix evaluation and the shape of a Nix file (AGL-039; AGL-121, D66,
+    /// D71).
+    Nix(crate::nix::Error),
+    /// A value of the settings out of what agl takes (AGL-121, D66).
+    Settings(crate::settings::error::Error),
 }
 
 impl Error {
@@ -37,6 +44,9 @@ impl Error {
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Interrupted => tr!(lang, m::INTERRUPTED).to_string(),
             Error::Programs(error) => error.message(lang),
+            Error::Paths(error) => error.message(lang),
+            Error::Nix(error) => error.message(lang),
+            Error::Settings(error) => error.message(lang),
         }
     }
 }
@@ -44,5 +54,23 @@ impl Error {
 impl From<crate::programs::Error> for Error {
     fn from(source: crate::programs::Error) -> Error {
         Error::Programs(source)
+    }
+}
+
+impl From<crate::paths::Error> for Error {
+    fn from(source: crate::paths::Error) -> Error {
+        Error::Paths(source)
+    }
+}
+
+impl From<crate::nix::Error> for Error {
+    fn from(source: crate::nix::Error) -> Error {
+        Error::Nix(source)
+    }
+}
+
+impl From<crate::settings::error::Error> for Error {
+    fn from(source: crate::settings::error::Error) -> Error {
+        Error::Settings(source)
     }
 }

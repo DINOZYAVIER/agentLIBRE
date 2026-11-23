@@ -4,7 +4,10 @@ pub mod clock;
 pub mod error;
 pub mod file;
 pub mod i18n;
+pub mod nix;
+pub mod paths;
 pub mod programs;
+pub mod settings;
 pub mod style;
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;

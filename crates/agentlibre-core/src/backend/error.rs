@@ -4,7 +4,7 @@
 use crate::i18n::server;
 
 use agentlibre_common::i18n::{Lang, Msg};
-use crate::settings::ServerKind;
+use agentlibre_common::settings::ServerKind;
 use agentlibre_common::tr;
 
 /// The backend's own error, wrapped by the core's `Error::Backend`

@@ -17,7 +17,7 @@ pub mod journal;
 use crate::error::Error;
 use crate::function::error::{Error as FunctionError, FunctionProblem};
 use crate::machine::{Table, Transitions};
-use crate::nix::{self, Section};
+use agentlibre_common::nix::{self, Section};
 
 /// The file of a plane's flows, beside `plane.nix` (D1).
 pub const FLOW_FILE: &str = "flow.nix";
@@ -430,7 +430,7 @@ fn resolve(
             .transpose()?;
         let limited = d.max_steps.is_some() || d.max_visits.is_some();
         if limited && on_limit.is_none() {
-            return Err(crate::nix::Error::MissingKey {
+            return Err(agentlibre_common::nix::Error::MissingKey {
                 path: at.path().into(),
                 key: at.key(&format!("state.{}.on_limit", d.name)),
             }

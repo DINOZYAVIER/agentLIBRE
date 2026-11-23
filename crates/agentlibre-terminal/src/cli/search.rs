@@ -14,8 +14,8 @@ use serde_json::{Map, Value};
 use crate::cli::args::SearchAction;
 use crate::error::Error;
 use agentlibre_common::i18n::{Lang, m};
-use crate::paths::Paths;
-use crate::settings::{self, SearchCa, UserFile};
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::{self, SearchCa, UserFile};
 use crate::outln;
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;
@@ -193,7 +193,7 @@ fn captured(mut command: Command, what: &str) -> Result<String, Error> {
 /// other keys stay (AGL-039, D12: the file is written anew).
 fn write_search_paths(user_path: &Path, certificate: &Path, key: &Path) -> Result<(), Error> {
     let mut search = if user_path.exists() {
-        match &crate::nix::eval_file(user_path)?["search"] {
+        match &agentlibre_common::nix::eval_file(user_path)?["search"] {
             Value::Object(map) => map.clone(),
             _ => Map::new(),
         }

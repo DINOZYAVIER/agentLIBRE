@@ -11,7 +11,7 @@ use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::error::Error;
 use agentlibre_common::i18n::Lang;
-use crate::paths::Paths;
+use agentlibre_common::paths::Paths;
 
 /// Connects to the daemon of `paths`, which is started when none answers
 /// and `start` says so (D6); `human` says whether a human answers the

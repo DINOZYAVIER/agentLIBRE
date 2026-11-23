@@ -11,9 +11,9 @@ use crate::action::Value;
 use crate::cli::args::SessionShow;
 use crate::error::Error;
 use agentlibre_common::i18n::Lang;
-use crate::paths::Paths;
+use agentlibre_common::paths::Paths;
 use crate::session::{CommandRun, Event, Session};
-use crate::settings::UserFile;
+use agentlibre_common::settings::UserFile;
 
 /// The id `key` names (AGL-063, D3): `last` is the newest session of the
 /// project, a name is looked up in the project first, and an id or the

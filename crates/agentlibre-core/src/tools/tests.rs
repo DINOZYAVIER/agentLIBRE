@@ -1440,8 +1440,8 @@ fn the_append_only_check() {
 }
 
 /// The paths of a temporary data directory.
-fn data_paths(dir: &Path) -> crate::paths::Paths {
-    crate::paths::Paths {
+fn data_paths(dir: &Path) -> agentlibre_common::paths::Paths {
+    agentlibre_common::paths::Paths {
         config: dir.to_path_buf(),
         data: dir.to_path_buf(),
         state: dir.to_path_buf(),
@@ -1534,7 +1534,7 @@ fn in_a_plane_the_forge_is_the_planes_and_the_workspaces_by_store() {
     // AGL-077, D9: the plane's forge, the workspace's by store=workspace;
     // a write makes no workspace's marker in the plane's store.
     let dir = TempDir::new();
-    let paths = crate::paths::Paths {
+    let paths = agentlibre_common::paths::Paths {
         config: dir.0.join("config"),
         data: dir.0.join("data"),
         state: dir.0.join("state"),
@@ -1561,7 +1561,7 @@ fn in_a_plane_the_forge_is_the_planes_and_the_workspaces_by_store() {
     };
     let made = call(&[("action", "new"), ("title", "In the plane")]);
     assert!(made.content.contains("planes/work/forge/task-spec/agl-001-in-the-plane.md"), "{}", made.content);
-    assert!(!plane.dir.join(crate::settings::SETTINGS_FILE).exists(), "no marker");
+    assert!(!plane.dir.join(agentlibre_common::settings::SETTINGS_FILE).exists(), "no marker");
     let theirs = call(&[("action", "new"), ("title", "In the workspace"), ("store", "workspace")]);
     assert_eq!(theirs.outcome, Outcome::Ok, "{}", theirs.content);
     assert!(!theirs.content.contains("planes/work"), "{}", theirs.content);

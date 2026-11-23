@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::error;
 use agentlibre_common::i18n::{Lang, Msg, m};
-use crate::settings::ServerFile;
+use agentlibre_common::settings::ServerFile;
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;
 

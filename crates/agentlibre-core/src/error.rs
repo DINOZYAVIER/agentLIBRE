@@ -10,13 +10,6 @@ pub enum Error {
     FunctionWithResume,
     /// `--plane` with `--resume`: the session keeps its plane (AGL-077).
     PlaneWithResume,
-    /// agl's directories cannot be found. Its own type, wrapped (AGL-121,
-    /// D75).
-    Paths(crate::paths::Error),
-    /// A value of the settings out of what agl takes: a style, a limit, a
-    /// port, a language, a url, a level, a path. Its own type, wrapped
-    /// (AGL-121, D66).
-    Settings(crate::settings::error::Error),
     /// The forge: its git, its markers and stores, its artifacts and their
     /// states (AGL-005 and after). Its own type, wrapped (AGL-121, D66).
     Forge(crate::forge::error::Error),
@@ -76,10 +69,6 @@ pub enum Error {
     /// A weights file failed to download (AGL-050, D17). Its own type,
     /// wrapped (AGL-121, D66).
     Download(crate::download::Error),
-    /// Nix evaluation: the directory, the evaluator, a failed evaluation, a
-    /// file that is not a function (AGL-039, D6-D13, D38). Its own type,
-    /// wrapped (AGL-121, D66).
-    Nix(crate::nix::Error),
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
     Memory(crate::memory::Error),
@@ -140,13 +129,6 @@ impl From<crate::daemon::error::Error> for Error {
     }
 }
 
-impl From<crate::settings::error::Error> for Error {
-    /// The settings' own error as agl's (AGL-121, D66).
-    fn from(source: crate::settings::error::Error) -> Error {
-        Error::Settings(source)
-    }
-}
-
 impl From<crate::memory::Error> for Error {
     /// The memory's own error as agl's (AGL-121, D66).
     fn from(source: crate::memory::Error) -> Error {
@@ -172,13 +154,6 @@ impl From<crate::backend::error::Error> for Error {
     /// The backend's own error as agl's (AGL-121, D66).
     fn from(source: crate::backend::error::Error) -> Error {
         Error::Backend(source)
-    }
-}
-
-impl From<crate::paths::Error> for Error {
-    /// The paths' own error as agl's (AGL-121, D75).
-    fn from(source: crate::paths::Error) -> Error {
-        Error::Paths(source)
     }
 }
 
@@ -245,13 +220,6 @@ impl From<crate::strata::Error> for Error {
     }
 }
 
-impl From<crate::nix::Error> for Error {
-    /// A Nix evaluation's own error as agl's (AGL-121, D66).
-    fn from(source: crate::nix::Error) -> Error {
-        Error::Nix(source)
-    }
-}
-
 impl Error {
     /// Whether the error is in the command line rather than the setup:
     /// the core's two, raised where a session opens (AGL-121, D76).
@@ -275,5 +243,26 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message(agentlibre_common::i18n::Lang::En))
+    }
+}
+
+impl From<agentlibre_common::paths::Error> for Error {
+    /// The paths' own error as agl's, through common's (AGL-121, D78).
+    fn from(source: agentlibre_common::paths::Error) -> Error {
+        Error::Common(source.into())
+    }
+}
+
+impl From<agentlibre_common::nix::Error> for Error {
+    /// The nix' own error as agl's, through common's (AGL-121, D78).
+    fn from(source: agentlibre_common::nix::Error) -> Error {
+        Error::Common(source.into())
+    }
+}
+
+impl From<agentlibre_common::settings::error::Error> for Error {
+    /// The settings' own error as agl's, through common's (AGL-121, D78).
+    fn from(source: agentlibre_common::settings::error::Error) -> Error {
+        Error::Common(source.into())
     }
 }

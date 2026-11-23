@@ -165,7 +165,7 @@ fn a_key_a_flow_has_not_is_refused() {
     )
     .expect_err("a flow that does not load");
     assert!(
-        matches!(&*error, Error::Nix(crate::nix::Error::UnknownKey { key, .. }) if key == "flow.one.state.a.tools"),
+        matches!(&*error, Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. })) if key == "flow.one.state.a.tools"),
         "{error:?}"
     );
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::settings::error::Error as SettingsError;
 use crate::nix::Expected;
-use agentlibre_common::testutil::TempDir;
+use crate::testutil::TempDir;
 use std::fs;
 
 use serde_json::json;
@@ -144,7 +144,7 @@ fn the_whisper_table() {
     assert!(matches!(user_of(r#"whisper.url = "ftp://x";"#), Err(Error::Settings(SettingsError::UnsupportedUrl { .. }))));
     // The model is a file name or an absolute path (AGL-039, D24a).
     assert!(user_of(r#"whisper.model = "/w/w.bin";"#).is_ok());
-    assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(Error::Common(agentlibre_common::error::Error::InvalidName(_)))));
+    assert!(matches!(user_of(r#"whisper.model = "a/w.bin";"#), Err(crate::error::Error::InvalidName(_))));
 }
 
 fn full_search() -> SearchFile {

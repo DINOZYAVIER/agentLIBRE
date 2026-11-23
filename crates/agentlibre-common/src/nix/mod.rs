@@ -11,8 +11,8 @@ use std::process::{Command, Stdio};
 use serde_json::{Map, Value};
 
 use crate::error;
-use agentlibre_common::i18n::{Lang, Msg};
-use agentlibre_common::tr;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
 
 pub use section::Section;
 
@@ -66,9 +66,9 @@ impl Error {
         match self {
             // `TOOLS_DIR_MISSING` is the text of
             // `programs::Error::ToolsDirMissing`, shared (AGL-121, D66, D75).
-            Self::DirMissing => tr!(lang, agentlibre_common::programs::TOOLS_DIR_MISSING, var = NIX_VAR),
+            Self::DirMissing => tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = NIX_VAR),
             Self::FunctionsDirMissing => {
-                tr!(lang, agentlibre_common::programs::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
+                tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
             }
             Self::NotFound { source } => tr!(lang, NIX_NOT_FOUND, source = source),
             Self::Eval { path, detail } => {
@@ -227,7 +227,7 @@ pub fn functions_dir() -> Result<PathBuf, Error> {
 /// does not break them (AGL-053, D8).
 #[cfg(any(test, feature = "testutil"))]
 pub fn functions_dir() -> Result<PathBuf, Error> {
-    Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/function/fixtures"))
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../agentlibre-core/src/function/fixtures"))
 }
 
 /// The `agl` argument, as a Nix expression.
@@ -359,13 +359,13 @@ pub fn render_lines(map: &Map<String, Value>) -> String {
 /// of the old file are not kept.
 pub fn write_settings(path: &Path, map: &Map<String, Value>) -> Result<(), error::Error> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|source| error::Error::from(agentlibre_common::error::Error::Write {
+        std::fs::create_dir_all(dir).map_err(|source| error::Error::Write {
             path: dir.into(),
             source,
-        }))?;
+        })?;
     }
     let text = format!("{{ agl, ... }}: {}\n", render_lines(map));
-    Ok(agentlibre_common::file::write_atomic(path, &text)?)
+    crate::file::write_atomic(path, &text)
 }
 
 #[cfg(test)]

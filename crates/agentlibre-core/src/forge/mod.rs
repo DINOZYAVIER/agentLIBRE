@@ -24,15 +24,15 @@ use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::forge::error::Error as ForgeError;
-use crate::nix::{self, Section};
+use agentlibre_common::nix::{self, Section};
 use agentlibre_common::file::write_atomic;
-use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
+use agentlibre_common::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
 use agentlibre_common::error::Error as CommonError;
 
 /// The name of the per-workspace marker file, in the data directory
 /// next to `forge/`: the store's `settings.nix`, which carries the
 /// identity beside the project settings (AGL-039, D13; AGL-041).
-pub const MARKER_FILE: &str = crate::settings::SETTINGS_FILE;
+pub const MARKER_FILE: &str = agentlibre_common::settings::SETTINGS_FILE;
 
 /// The schema of the artifact front matter (the v2 envelope, AGL-041).
 pub const SCHEMA: &str = "forge/v2";
@@ -161,7 +161,7 @@ impl Marker {
             Value::Array(self.hashes.iter().cloned().map(Value::String).collect()),
         );
         map.insert("project".into(), Value::from(self.project.to_string_lossy()));
-        nix::write_settings(path, &map)
+        Ok(nix::write_settings(path, &map)?)
     }
 }
 
@@ -919,7 +919,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
     };
     match eval_front(path, &front) {
         Ok(value) => Ok(header_of(path, value, body)),
-        Err(error @ Error::Nix(nix::Error::NotFound { .. })) => Err(error),
+        Err(error @ Error::Common(agentlibre_common::error::Error::Nix(nix::Error::NotFound { .. }))) => Err(error),
         Err(error) => Ok(Header::Broken {
             detail: error.to_string(),
         }),
@@ -1053,7 +1053,7 @@ pub fn artifact_files(dir: &Path) -> Result<Vec<PathBuf>, Error> {
 /// go to stderr: stdout carries the answer of `-p`. A project not registered
 /// yet says nothing, it is registered at its first write.
 pub fn project_of(
-    paths: &crate::paths::Paths,
+    paths: &agentlibre_common::paths::Paths,
     cwd: &Path,
     auto_rehome: bool,
     lang: agentlibre_common::i18n::Lang,
@@ -1226,7 +1226,7 @@ mod tests {
         let marker = Marker { hashes: vec![identity(1), identity(2)], project: "/gone".into() };
         marker.write(&path).unwrap();
         assert_eq!(super::tests::marker(dir.path()), marker);
-        let project = crate::settings::ProjectFile::from_section(
+        let project = agentlibre_common::settings::ProjectFile::from_section(
             {
                 let mut file = Section::top(&path, nix::eval_file(&path).unwrap()).unwrap();
                 Marker::take(&mut file).unwrap();
@@ -1246,7 +1246,7 @@ mod tests {
         ));
         assert!(matches!(
             take_marker("format = 1;"),
-            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "workspace_sha256"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "workspace_sha256"
         ));
     }
 
@@ -1270,7 +1270,7 @@ mod tests {
         // A marker that does not evaluate is an error.
         fs::create_dir_all(data.join("broken")).unwrap();
         fs::write(data.join("broken").join(MARKER_FILE), "{ agl, ... }: { format = ; }\n").unwrap();
-        assert!(matches!(stores(&data), Err(Error::Nix(nix::Error::Eval { .. }))));
+        assert!(matches!(stores(&data), Err(Error::Common(agentlibre_common::error::Error::Nix(nix::Error::Eval { .. })))));
     }
 
     #[test]
@@ -1799,7 +1799,7 @@ mod tests {
         let hashes = format!(r#"format = 1; workspace_sha256 = [ "{}" ];"#, identity(1));
         assert!(matches!(
             take_marker(&hashes),
-            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "project"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "project"
         ));
         assert!(matches!(
             take_marker(&format!(r#"{hashes} project = "relative";"#)),
@@ -1866,7 +1866,7 @@ mod tests {
         // D11), the identity beside it (AGL-041).
         fs::create_dir_all(&ws.dir).unwrap();
         fs::write(
-            ws.dir.join(crate::settings::SETTINGS_FILE),
+            ws.dir.join(agentlibre_common::settings::SETTINGS_FILE),
             "{ agl, ... }: { function = \"coder\"; }\n",
         )
         .unwrap();
@@ -1881,7 +1881,7 @@ mod tests {
         let (moved, lines) = auto(&data, &to);
         assert_eq!(lines.len(), 1);
         assert_eq!(moved.function.as_deref(), Some("coder"));
-        assert!(moved.dir.join(crate::settings::SETTINGS_FILE).is_file());
+        assert!(moved.dir.join(agentlibre_common::settings::SETTINGS_FILE).is_file());
     }
 
     #[test]
@@ -1901,7 +1901,7 @@ mod tests {
         let origin = identity_of(&from);
         fs::create_dir_all(&ws.dir).unwrap();
         fs::write(
-            ws.dir.join(crate::settings::SETTINGS_FILE),
+            ws.dir.join(agentlibre_common::settings::SETTINGS_FILE),
             "{ agl, ... }: { server.llama.url = \"http://127.0.0.1:18081\"; }\n",
         )
         .unwrap();
@@ -2009,7 +2009,7 @@ body line
         let text = task_spec_text().replace("  status = \"open\";\n", "");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::Nix(crate::nix::Error::MissingKey { key, .. })) if key == "status"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "status"
         ));
         // A missing type table.
         let text = task_spec_text().replace("  task-spec = { anchor = \"\"; last = \"\"; };\n", "");
@@ -2022,13 +2022,13 @@ body line
         let text = task_spec_text().replace("task-spec = { ", "task-spec = { extra = 1; ");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::Nix(crate::nix::Error::UnknownKey { key, .. })) if key == "task-spec.extra"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "task-spec.extra"
         ));
         // A wrong type for a key.
         let text = task_spec_text().replace("deps = [ \"agl-000-a\" ]", "deps = 1");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::Nix(crate::nix::Error::WrongType { key, .. })) if key == "deps"
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "deps"
         ));
         // A state outside the lifecycle (the task-spec check).
         let text = task_spec_text().replace("status = \"open\";", "status = \"draft\";");

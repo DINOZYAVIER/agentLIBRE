@@ -9,7 +9,7 @@ mod repl;
 mod theme;
 
 // The core's modules under the names the terminal's code always used.
-pub(crate) use agentlibre_common::tty;
+pub(crate) use agentlibre_common::{paths, settings, tty};
 pub(crate) use agentlibre_core::{
     about,
     action,
@@ -22,14 +22,11 @@ pub(crate) use agentlibre_core::{
     i18n,
     media,
     memory,
-    nix,
-    paths,
     phase,
     plane,
     record,
     records,
     session,
-    settings,
     status,
     stop,
     tools,

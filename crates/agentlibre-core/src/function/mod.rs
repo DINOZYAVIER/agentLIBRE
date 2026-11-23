@@ -17,8 +17,8 @@ use crate::format::Format;
 use crate::grammar::pattern;
 use crate::machine::Transitions;
 use crate::media::sha256_hex;
-use crate::nix::{self, Section};
-use crate::settings::{ServerFile, ServerKind};
+use agentlibre_common::nix::{self, Section};
+use agentlibre_common::settings::{ServerFile, ServerKind};
 
 /// The version of the `run` snapshot of a session header (AGL-063, D4):
 /// the evaluated Function, so a resume runs on the configuration the
@@ -201,10 +201,10 @@ impl crate::machine::State for State {
 pub fn builtin_names() -> Result<Vec<String>, Error> {
     let path = Path::new("<built-in>/functions");
     let value = nix::eval_with_agl(path, "builtins.attrNames agl.functions")?;
-    serde_json::from_value(value).map_err(|error| Error::Nix(nix::Error::Eval {
+    serde_json::from_value(value).map_err(|error| Error::Common(agentlibre_common::error::Error::Nix(nix::Error::Eval {
         path: path.into(),
         detail: error.to_string(),
-    }))
+    })))
 }
 
 /// Rejects a Function name that cannot name a file in its directory.
@@ -642,7 +642,7 @@ fn read_source(mut file: Section, name: String) -> Result<FileSource, Error> {
     }
     let size = file
         .integer("size")?
-        .ok_or_else(|| Error::from(crate::nix::Error::MissingKey {
+        .ok_or_else(|| Error::from(agentlibre_common::nix::Error::MissingKey {
             path: file.path().into(),
             key: file.key("size"),
         }))
@@ -771,7 +771,7 @@ fn read_state(
         .transpose()?;
     let limited = max_steps.is_some() || max_visits.is_some();
     if limited && on_limit.is_none() {
-        return Err(crate::nix::Error::MissingKey {
+        return Err(agentlibre_common::nix::Error::MissingKey {
             path: section.path().into(),
             key: section.key("on_limit"),
         }
@@ -934,7 +934,7 @@ fn read_constraint(
             let max = range.integer("max")?;
             let (Some(min), Some(max)) = (min, max) else {
                 let missing = if min.is_none() { "min" } else { "max" };
-                return Err(crate::nix::Error::MissingKey {
+                return Err(agentlibre_common::nix::Error::MissingKey {
                     path: range.path().into(),
                     key: range.key(missing),
                 }

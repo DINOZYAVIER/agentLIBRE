@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use agentlibre_core::error::Error as CoreError;
 use agentlibre_notify::Error;
 use agentlibre_common::i18n::Lang;
-use agentlibre_core::paths::Paths;
-use agentlibre_core::settings::UserFile;
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::UserFile;
 
 fn main() -> ExitCode {
     // `agl-notify [--lang en|uk]`; else the user file's language.
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         Some(lang) => lang,
         None => match UserFile::load(&paths.settings_file()) {
             Ok(user) => user.language.unwrap_or(Lang::En),
-            Err(error) => return fail(error.into()),
+            Err(error) => return fail(CoreError::from(error).into()),
         },
     };
     match agentlibre_notify::run(&paths, lang) {

@@ -18,7 +18,7 @@ use crate::error;
 use crate::forge::Workspace;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::media::{self, Source};
-use crate::settings::{ServerKind, WhisperFile};
+use agentlibre_common::settings::{ServerKind, WhisperFile};
 use agentlibre_common::tr;
 
 /// What can go wrong with the whisper server (AGL-014, D22; AGL-121, D66).
@@ -96,7 +96,7 @@ impl WhisperServer {
         let (Some(url), Some(model)) = (&settings.url, &settings.model) else {
             return Err(error::Error::Whisper(Error::NotSet {
                 user_path: user_path.into(),
-                project_path: project.dir.join(crate::settings::SETTINGS_FILE),
+                project_path: project.dir.join(agentlibre_common::settings::SETTINGS_FILE),
             }));
         };
         Ok(WhisperServer {

@@ -43,7 +43,7 @@ use zbus::zvariant::Value;
 
 use agentlibre_core::error::Error as CoreError;
 use agentlibre_common::i18n::{Lang, Msg, m};
-use agentlibre_core::paths::Paths;
+use agentlibre_common::paths::Paths;
 use agentlibre_common::tr;
 
 /// What `agl-notify` fails on: an error of agl's core, or the session bus

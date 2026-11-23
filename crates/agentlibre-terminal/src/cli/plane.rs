@@ -13,7 +13,7 @@ use crate::error::CoreError;
 use crate::plane::error::Error as PlaneError;
 use agentlibre_common::i18n::{Lang, m};
 use crate::outln;
-use crate::paths::Paths;
+use agentlibre_common::paths::Paths;
 use crate::plane::{self, PlaneFile};
 use crate::session::Session;
 use agentlibre_common::tr;

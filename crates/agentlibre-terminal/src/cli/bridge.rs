@@ -17,8 +17,8 @@ use crate::error::CoreError;
 use crate::engine::error::Error as EngineError;
 use agentlibre_common::i18n::{Lang, m};
 use crate::outln;
-use crate::paths::Paths;
-use crate::settings::{BridgeFile, UserFile};
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::{BridgeFile, UserFile};
 use agentlibre_common::tr;
 
 /// The bridge's unit: one a user.

@@ -22,7 +22,7 @@ use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
 use crate::session::{Event, TransitionLine};
-use crate::settings::Detail;
+use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;

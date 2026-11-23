@@ -422,7 +422,7 @@ fn a_profile_without_search_has_a_searcher_that_only_fails() {
 fn the_live_service_answers_web_and_wikipedia() {
     let home = std::env::var_os("HOME").expect("HOME");
     let path = Path::new(&home).join(".config/agentLIBRE/settings.nix");
-    let user = crate::settings::UserFile::load(&path).unwrap();
+    let user = agentlibre_common::settings::UserFile::load(&path).unwrap();
     let search = user.search.complete().unwrap().expect("search is set in the user file");
     let curl = Curl::new(search).unwrap();
     for (source, language, query) in [("web", "en", "rust programming language"), ("wikipedia", "en", "Kyiv")] {
