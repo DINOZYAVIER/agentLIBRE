@@ -117,7 +117,7 @@ pub fn run(
             outln!("{}", tr!(lang, m::FUNCTION_SET, name = name, path = path.display()));
             // The choice is made: what it needs is offered right away, and
             // a no is answered again at the first run (AGL-050, D10).
-            if crate::tty::is_interactive()
+            if agentlibre_common::tty::is_interactive()
                 && project.server.over(&user.server).llama_external != Some(true)
                 && let Ok(function) = Function::load(
                     &dirs.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>(),

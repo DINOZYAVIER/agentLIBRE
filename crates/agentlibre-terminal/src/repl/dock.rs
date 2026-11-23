@@ -17,7 +17,7 @@ use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::phase::Phase;
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;
 
@@ -822,7 +822,7 @@ mod tests {
     fn a_menu_row_divides_its_two_colors() {
         // D4: a command is the tool's bright color, its description the
         // color of a message's text; the picked row is the selection's.
-        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
+        let color = |hex: &str| agentlibre_common::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
@@ -997,7 +997,7 @@ mod tests {
         // workspace are both the tool's color, as the separator above them
         // and `THINKING` are; the usage is the text's at every share of the
         // context — the warn's orange and yellow are no more.
-        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
+        let color = |hex: &str| agentlibre_common::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
@@ -1034,7 +1034,7 @@ mod tests {
         // AGL-091, AGL-104, D2 and AGL-121 D16 c: `Ready`, `Starting server`
         // and the rest of the separator's words wear the activity's own
         // role — there is no rule left to color.
-        let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
+        let color = |hex: &str| agentlibre_common::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[

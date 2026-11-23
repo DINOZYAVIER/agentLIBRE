@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::action::Outcome;
 use crate::error::Error;
-use crate::programs::{clean_env, program};
+use agentlibre_common::programs::{clean_env, program};
 
 /// How long a command gets between SIGTERM and SIGKILL (D102, D103).
 const GRACE: Duration = Duration::from_secs(2);

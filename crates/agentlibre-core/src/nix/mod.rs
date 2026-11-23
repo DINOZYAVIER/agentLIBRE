@@ -66,9 +66,9 @@ impl Error {
         match self {
             // `TOOLS_DIR_MISSING` is the text of
             // `programs::Error::ToolsDirMissing`, shared (AGL-121, D66, D75).
-            Self::DirMissing => tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = NIX_VAR),
+            Self::DirMissing => tr!(lang, agentlibre_common::programs::TOOLS_DIR_MISSING, var = NIX_VAR),
             Self::FunctionsDirMissing => {
-                tr!(lang, crate::programs::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
+                tr!(lang, agentlibre_common::programs::TOOLS_DIR_MISSING, var = FUNCTIONS_VAR)
             }
             Self::NotFound { source } => tr!(lang, NIX_NOT_FOUND, source = source),
             Self::Eval { path, detail } => {

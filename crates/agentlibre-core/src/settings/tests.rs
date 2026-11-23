@@ -1,7 +1,7 @@
 use super::*;
 use crate::settings::error::Error as SettingsError;
 use crate::nix::Expected;
-use crate::forge::testutil::TempDir;
+use agentlibre_common::testutil::TempDir;
 use std::fs;
 
 use serde_json::json;

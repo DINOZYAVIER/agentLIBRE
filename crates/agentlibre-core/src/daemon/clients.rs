@@ -271,7 +271,7 @@ impl Daemon {
             Others::Yes
         } else if human {
             let ask = ask(Ask::Yes);
-            Others::Ask(Arc::new(move |text, _| ask(text).as_deref().is_some_and(crate::tty::is_yes)))
+            Others::Ask(Arc::new(move |text, _| ask(text).as_deref().is_some_and(agentlibre_common::tty::is_yes)))
         } else {
             Others::Refuse
         };
@@ -326,7 +326,7 @@ mod tests {
     use super::*;
 
     use crate::daemon::tests::{Client, daemon};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     #[test]
     fn a_client_of_another_version_is_refused() {

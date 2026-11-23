@@ -217,7 +217,7 @@ mod tests {
     use super::*;
     use crate::action::Outcome;
     use crate::backend::ToolCall;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use crate::media::{Kind as MediaKind, Media};
     use crate::memory::Kind as MemoryKind;
     use crate::session::{CutOff, ForgeKind, StopReason};

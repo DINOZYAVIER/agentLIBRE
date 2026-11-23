@@ -10,7 +10,7 @@ use crate::function::Function;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::session::{CutOff, StopReason};
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use agentlibre_common::tr;
 
 /// The line of a cut-off, in the transcript and on stderr (D154;

@@ -12,7 +12,7 @@ use crate::backend::ToolCall;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records;
 use crate::settings::Detail;
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;

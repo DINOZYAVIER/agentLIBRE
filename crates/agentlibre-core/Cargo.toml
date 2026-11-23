@@ -8,7 +8,7 @@ description = "agentLIBRE core: the agent, the Functions, the backends, the forg
 
 [features]
 # The helpers the tests of the terminal take from the core.
-testutil = []
+testutil = ["agentlibre-common/testutil"]
 
 [dependencies]
 agentlibre-client = { path = "../agentlibre-client" }
@@ -20,3 +20,6 @@ libc = "0.2"
 ring = "0.17"
 serde_json = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+agentlibre-common = { path = "../agentlibre-common", features = ["testutil"] }

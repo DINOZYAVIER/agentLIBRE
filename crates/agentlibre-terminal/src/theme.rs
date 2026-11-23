@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 
-use crate::style::{Role, Style};
+use agentlibre_common::style::{Role, Style};
 
 /// The styles of all roles and whether they are used at all (D122).
 #[derive(Clone, Debug)]
@@ -121,7 +121,7 @@ pub fn colors_enabled(env: impl Fn(&str) -> Option<OsString>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::{COLOR_KEYS, StyleError};
+    use agentlibre_common::style::{COLOR_KEYS, StyleError};
 
     fn style(spec: &str) -> Result<Style, StyleError> {
         Style::parse(spec, false)

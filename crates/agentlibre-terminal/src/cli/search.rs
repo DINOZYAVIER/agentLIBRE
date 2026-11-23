@@ -32,7 +32,7 @@ const SUBJECT: &str = "agentLIBRE";
 pub fn run(action: SearchAction, user: &UserFile, paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
     match action {
         SearchAction::Login => {
-            let step = crate::programs::program("step")?;
+            let step = agentlibre_common::programs::program("step")?;
             let done = login(&step, user, &paths.settings_file())?;
             outln!(
                 "{}",
@@ -122,7 +122,7 @@ fn issue(step: &Path, ca: &SearchCa, certificate: &Path, key: &Path) -> Result<(
         .arg(&ca.root)
         .args(["--kty", "EC", "--curve", "P-256"])
         .args(["--no-password", "--insecure", "--force"]);
-    crate::programs::clean_env(&mut command);
+    agentlibre_common::programs::clean_env(&mut command);
     let status = command.status().map_err(|source| Error::SearchLogin {
         detail: format!("cannot run {}: {source}", step.display()),
     })?;
@@ -145,7 +145,7 @@ fn to_pkcs8(step: &Path, sec1: &Path, pkcs8: &Path) -> Result<(), Error> {
         .arg("--out")
         .arg(pkcs8)
         .stdin(Stdio::null());
-    crate::programs::clean_env(&mut command);
+    agentlibre_common::programs::clean_env(&mut command);
     captured(command, "step crypto key format").map(|_| ())
 }
 
@@ -158,7 +158,7 @@ fn validity_end(step: &Path, certificate: &Path) -> Result<String, Error> {
         .arg(certificate)
         .args(["--format", "json"])
         .stdin(Stdio::null());
-    crate::programs::clean_env(&mut command);
+    agentlibre_common::programs::clean_env(&mut command);
     let output = captured(command, "step certificate inspect")?;
     let json: Value = serde_json::from_str(&output).map_err(|error| Error::SearchLogin {
         detail: format!("step certificate inspect: {error}"),
@@ -231,7 +231,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use agentlibre_core::search::certificate_expired;
     use std::os::unix::fs::PermissionsExt;
 

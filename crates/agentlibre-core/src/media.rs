@@ -381,7 +381,7 @@ pub fn frame_times(duration: f64) -> Vec<f64> {
 
 /// The length of a video, from `ffprobe`.
 fn video_duration(path: &Path) -> Result<f64, error::Error> {
-    let output = Command::new(crate::programs::program("ffprobe")?)
+    let output = Command::new(agentlibre_common::programs::program("ffprobe")?)
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
         .arg(path)
         .stdin(Stdio::null())
@@ -410,7 +410,7 @@ fn video_duration(path: &Path) -> Result<f64, error::Error> {
 /// (D8, D16).
 pub fn video_frames(path: &Path) -> Result<Vec<(f64, Vec<u8>)>, error::Error> {
     let times = frame_times(video_duration(path)?);
-    let ffmpeg = crate::programs::program("ffmpeg")?;
+    let ffmpeg = agentlibre_common::programs::program("ffmpeg")?;
     let scale = format!(
         "scale=w='if(gt(iw,ih),min({FRAME_EDGE},iw),-2)':h='if(gt(iw,ih),-2,min({FRAME_EDGE},ih))'"
     );
@@ -464,7 +464,7 @@ pub fn wav_is_silent(wav: &[u8]) -> bool {
 
 /// An audio as 16 kHz mono WAV, what whisper reads.
 pub fn audio_to_wav(bytes: &[u8]) -> Result<Vec<u8>, error::Error> {
-    let mut child = Command::new(crate::programs::program("ffmpeg")?)
+    let mut child = Command::new(agentlibre_common::programs::program("ffmpeg")?)
         .args(["-v", "error", "-i", "pipe:0", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -560,7 +560,7 @@ pub fn clipboard() -> Clip {
 }
 
 fn wl_paste(args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new(crate::programs::program("wl-paste").ok()?)
+    let output = Command::new(agentlibre_common::programs::program("wl-paste").ok()?)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -617,7 +617,7 @@ mod tests {
         assert!(!super::wav_is_silent(b"not a wav"));
     }
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     #[test]
     fn the_kind_comes_from_the_extension() {
@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn ffmpeg_cuts_frames_and_converts_audio() {
         // The tools' ffmpeg, as the code under test runs it (AGL-040).
-        let Ok(ffmpeg) = crate::programs::program("ffmpeg") else {
+        let Ok(ffmpeg) = agentlibre_common::programs::program("ffmpeg") else {
             return;
         };
         let dir = TempDir::new();

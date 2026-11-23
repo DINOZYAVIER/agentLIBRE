@@ -1,5 +1,5 @@
 use super::*;
-use crate::forge::testutil::TempDir;
+use agentlibre_common::testutil::TempDir;
 
 fn call(id: &str, command: &str) -> Event {
     Event::Call {
@@ -589,7 +589,7 @@ fn the_media_of_a_session_are_kept_numbered_by_kind_and_read_back() {
 #[test]
 fn the_frames_of_a_video_are_kept_with_their_times() {
     // The tools' ffmpeg, as the code under test runs it (AGL-040).
-    let Ok(ffmpeg) = crate::programs::program("ffmpeg") else {
+    let Ok(ffmpeg) = agentlibre_common::programs::program("ffmpeg") else {
         return;
     };
     let dir = TempDir::new();

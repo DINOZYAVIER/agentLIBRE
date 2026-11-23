@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use agentlibre_common::i18n::{Lang, Msg};
-use crate::style::StyleError;
+use agentlibre_common::style::StyleError;
 use agentlibre_common::tr;
 
 /// The settings' own error, wrapped by the core's `Error::Settings`

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::*;
 use crate::action::Value;
-use crate::forge::testutil::TempDir;
+use agentlibre_common::testutil::TempDir;
 
 const CERT: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
 const KEY: &str = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";

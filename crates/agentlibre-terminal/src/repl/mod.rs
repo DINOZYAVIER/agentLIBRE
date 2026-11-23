@@ -39,7 +39,7 @@ use crate::backend::ReasoningLevel;
 use crate::function::catalog::Catalog;
 use crate::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
-use crate::tty::is_yes;
+use agentlibre_common::tty::is_yes;
 use crate::whisper;
 use crate::error::Error;
 use crate::error::CoreError;
@@ -51,7 +51,7 @@ use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;
 

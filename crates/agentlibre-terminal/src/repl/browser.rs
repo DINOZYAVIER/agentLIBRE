@@ -17,7 +17,7 @@ use crate::function::Function;
 use crate::function::catalog::{Catalog, Entry, Source};
 use agentlibre_common::i18n::{Lang, m};
 use crate::settings::UserFile;
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;
 
@@ -693,7 +693,7 @@ pub fn run(
 mod tests {
     use super::*;
     use super::super::dock::Layout;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use crate::settings::ServerFile;
 
     const LLAMA: &str = r#"{ kind = "llama"; format = agl.formats."qwen3.8"; weights = "p.gguf"; context = 4096; }"#;

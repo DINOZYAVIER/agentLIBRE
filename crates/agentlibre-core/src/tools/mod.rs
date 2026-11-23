@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::action::Outcome;
-use crate::clock;
+use agentlibre_common::clock;
 use crate::backend::ToolCall;
 use agentlibre_common::i18n::Lang;
 use crate::session::{ForgeKind, INTERRUPTED};
@@ -103,7 +103,7 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
     };
     // The Nix `bash` of the tools, the human's environment without the
     // wrapper's variables (AGL-040, D3; AGL-039, D15).
-    let program = match crate::programs::program("bash") {
+    let program = match agentlibre_common::programs::program("bash") {
         Ok(program) => program,
         Err(error) => {
             return ToolResult {
@@ -114,7 +114,7 @@ pub fn bash(workspace: &Path, command: &str, timeout: Duration, output: &Output<
     };
     let mut child = {
         let mut command_line = Command::new(program);
-        crate::programs::clean_env(&mut command_line)
+        agentlibre_common::programs::clean_env(&mut command_line)
             .arg("-c")
             .arg(command)
             .current_dir(workspace)

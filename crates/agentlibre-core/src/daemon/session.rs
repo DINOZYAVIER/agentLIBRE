@@ -306,7 +306,7 @@ mod tests {
     use super::*;
 
     use crate::daemon::tests::{Client, daemon, open};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     #[test]
     fn history_gives_a_sessions_past() {

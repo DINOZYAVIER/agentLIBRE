@@ -41,7 +41,7 @@ pub fn run(user: &UserFile, paths: &Paths, cwd: &Path, lang: Lang) -> Result<Exi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     fn paths(data: &Path) -> Paths {
         Paths {

@@ -33,7 +33,7 @@ pub struct Opening<'a> {
 /// lines of the opening go to stderr and its questions to the human on the
 /// plain terminal when there is one (D11).
 pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>, proto::Opened), Error> {
-    let human = crate::tty::is_interactive();
+    let human = agentlibre_common::tty::is_interactive();
     let client = client::connect(paths, human, lang, true)?;
     let request = Request::Open(proto::Open {
         dir: opening.cwd.to_string_lossy().into_owned(),

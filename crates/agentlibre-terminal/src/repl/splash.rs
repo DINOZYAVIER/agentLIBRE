@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::text::width;
 use agentlibre_common::i18n::{Lang, m};
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;
 

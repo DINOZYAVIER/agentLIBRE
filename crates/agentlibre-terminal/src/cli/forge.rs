@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 
-use crate::clock;
+use agentlibre_common::clock;
 use crate::error::Error;
 use crate::error::CoreError;
 use crate::forge;
@@ -182,7 +182,7 @@ pub fn project_of(
 /// `forge rehome`.
 pub(super) fn ask_store(question: Msg, options: &[String], lang: Lang) -> Result<usize, CoreError> {
     let stores = options[..options.len() - 1].to_vec();
-    if !crate::tty::is_interactive() {
+    if !agentlibre_common::tty::is_interactive() {
         return Err(crate::forge::error::Error::RehomeNoStore { stores }.into());
     }
     outln!("{}", tr!(lang, question));
@@ -528,8 +528,8 @@ fn task_spec_table(spec: task_spec::TaskSpec) -> serde_json::Value {
 /// failure).
 fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> {
     for cmd in artifact.cmds.as_deref().unwrap_or_default() {
-        let mut command = std::process::Command::new(crate::programs::program("bash")?);
-        let status = crate::programs::clean_env(&mut command)
+        let mut command = std::process::Command::new(agentlibre_common::programs::program("bash")?);
+        let status = agentlibre_common::programs::clean_env(&mut command)
             .arg("-c")
             .arg(cmd)
             .current_dir(cwd)
@@ -626,7 +626,7 @@ fn git_scoped(dir: &Path, args: &[String]) -> Result<ExitCode, Error> {
         }
         .into());
     }
-    let status = std::process::Command::new(crate::programs::program("git")?)
+    let status = std::process::Command::new(agentlibre_common::programs::program("git")?)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::inherit())
@@ -712,7 +712,7 @@ fn rehome(
         return rehome_new(ws, lang, current);
     }
     let Some(name) = store else {
-        if !crate::tty::is_interactive() {
+        if !agentlibre_common::tty::is_interactive() {
             return Err(crate::forge::error::Error::RehomeNoStore {
                 stores: found.iter().map(forge::Store::name).collect(),
             }
@@ -772,7 +772,7 @@ fn rehome_to(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use std::os::unix::ffi::OsStringExt;
 
     /// The `run` of `args`, the settings of an empty user file, the

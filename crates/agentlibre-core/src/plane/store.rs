@@ -271,7 +271,7 @@ fn absolute(directory: &Path) -> Result<PathBuf, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     fn paths(dir: &TempDir) -> Paths {
         Paths {

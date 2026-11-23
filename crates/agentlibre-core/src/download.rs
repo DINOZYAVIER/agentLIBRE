@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::error;
 use agentlibre_common::i18n::{Lang, Msg, m};
-use crate::programs;
+use agentlibre_common::programs;
 use agentlibre_common::tr;
 
 /// What can go wrong fetching a weights file (AGL-050, D17; AGL-121, D66).
@@ -238,7 +238,7 @@ fn free_space(dir: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use crate::media::sha256_hex;
 
     /// A source served by `file://`, which `curl` resumes as it does https.

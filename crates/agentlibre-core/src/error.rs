@@ -88,7 +88,7 @@ pub enum Error {
     Nix(crate::nix::Error),
     /// A helper program of agl's package cannot be found (AGL-040). Its own
     /// type, wrapped (AGL-121, D75).
-    Programs(crate::programs::Error),
+    Programs(agentlibre_common::programs::Error),
     /// A forge file or directory cannot be written.
     Write { path: PathBuf, source: io::Error },
     /// A memory entry not found or not removed (AGL-060). Its own type,
@@ -193,9 +193,9 @@ impl From<crate::paths::Error> for Error {
     }
 }
 
-impl From<crate::programs::Error> for Error {
+impl From<agentlibre_common::programs::Error> for Error {
     /// The programs' own error as agl's (AGL-121, D75).
-    fn from(source: crate::programs::Error) -> Error {
+    fn from(source: agentlibre_common::programs::Error) -> Error {
         Error::Programs(source)
     }
 }

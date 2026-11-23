@@ -18,7 +18,7 @@ use agentlibre_common::i18n::{Lang, m};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
 use crate::settings::{Detail, ReplSettings};
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;
@@ -1275,7 +1275,7 @@ mod tests {
         // AGL-105, D1; AGL-107, D1: in the transcript only the thinking's
         // head keeps a color — the elbow and the Markdown of its body are
         // gray.
-        let style = |hex| crate::style::Style::parse(hex, false).expect("a color");
+        let style = |hex| agentlibre_common::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
@@ -1661,7 +1661,7 @@ mod tests {
         // AGL-066, D26: the line under the gutter, the tool's input, is
         // in the muted color, as the thinking's line; the tool's line
         // keeps the tool's and the status's colors.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Muted, red)]);
         let (presenter, mock) = presenter();
         let presenter = Presenter {
@@ -1690,8 +1690,8 @@ mod tests {
         // AGL-080 D2; AGL-121, D16 d: the answer's row of times — the
         // phases, the time, the speed — takes the summary's role, not the
         // tool's.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
-        let green = crate::style::Style::parse("#00FF00", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
+        let green = agentlibre_common::style::Style::parse("#00FF00", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Summary, red), (Role::Tool, green)]);
         let (presenter, mock) = presenter();
         let presenter = Presenter {
@@ -1896,7 +1896,7 @@ mod tests {
     fn a_command_takes_the_message_look() {
         // AGL-101: a run command echoes like a sent message, in the tool's
         // color as the menu paints it.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Tool, red)]);
         let (presenter, mock) = presenter();
         let presenter = Presenter {

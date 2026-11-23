@@ -65,7 +65,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 /// Runs `git <args>` in `cwd` and returns the trimmed stdout; a spawn
 /// failure or a nonzero exit is an error.
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
-    let output = Process::new(crate::programs::program("git")?)
+    let output = Process::new(agentlibre_common::programs::program("git")?)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -1079,60 +1079,15 @@ pub fn project_of(
     Ok(ws)
 }
 
-/// Test helpers of the forge tree: one counter for all the modules, so
-/// the temporary directories never collide between modules.
-#[cfg(any(test, feature = "testutil"))]
-pub mod testutil {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A directory removed when dropped.
-    #[derive(Debug)]
-    pub struct TempDir(pub std::path::PathBuf);
-
-    impl TempDir {
-        /// There is no `Default`: every `new()` takes the next number of
-        /// the counter.
-        #[allow(clippy::new_without_default)]
-        pub fn new() -> TempDir {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir()
-                .join(format!("agentLIBRE-forge-{}-{n}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-
-        /// A file `name` with `text` and `mode`.
-        pub fn file(&self, name: &str, text: &str, mode: u32) -> std::path::PathBuf {
-            use std::os::unix::fs::PermissionsExt;
-            let path = self.0.join(name);
-            std::fs::write(&path, text).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use super::*;
+
     use agentlibre_common::i18n::Lang;
     use std::sync::{Arc, Mutex};
 
     const EN: Lang = Lang::En;
-
-    impl TempDir {
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
 
     /// A git repository at `root/name` with `count` commits.
     fn git_repo(root: &Path, name: &str, count: u32) -> PathBuf {
@@ -1215,6 +1170,13 @@ mod tests {
     fn move_repo(from: &Path, to: &Path) {
         fs::create_dir_all(to.parent().unwrap()).unwrap();
         fs::rename(from, to).unwrap();
+    }
+
+    #[test]
+    fn today_is_a_calendar_date() {
+        use std::path::Path;
+        let today = agentlibre_common::clock::today();
+        assert!(check_date("today", &today, Path::new("/x")).is_ok());
     }
 
     #[test]

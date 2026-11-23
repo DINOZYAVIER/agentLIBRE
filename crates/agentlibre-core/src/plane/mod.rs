@@ -25,13 +25,13 @@ use crate::memory::{self, Home, MemoryAction, Write};
 use crate::nix;
 use crate::paths::Paths;
 use crate::phase::{Observer, PhaseEvent};
-use crate::programs;
+use agentlibre_common::programs;
 use crate::search::{self, Searcher};
 use crate::session::{Event, Session};
 use crate::settings::{self, ServerFile, ServerKind, Settings, UserFile, function_name};
 use crate::status::compact_notice;
 use crate::stop::Stop;
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::tools::ForgeEnv;
 use agentlibre_common::tr;
 use crate::weights;
@@ -1084,7 +1084,7 @@ fn about_of(
         in_wsl,
         wsl::engine_is_windows(),
     );
-    let now = crate::clock::utc_now();
+    let now = agentlibre_common::clock::utc_now();
     let version = about::version(env(about::REV_VAR).and_then(|rev| rev.into_string().ok()).as_deref());
     let (server_kind, model) = match settings.server.kind() {
         ServerKind::Strata => ("strata", settings.server.strata_name.as_deref()),

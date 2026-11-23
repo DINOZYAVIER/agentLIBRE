@@ -42,7 +42,7 @@ pub fn run(
         }
         MemoryAction::Remove { name, yes } => {
             let answer = |question: &str| crate::ask::ask_terminal(question, lang);
-            let ask: Option<&dyn Fn(&str) -> bool> = if crate::tty::is_interactive() {
+            let ask: Option<&dyn Fn(&str) -> bool> = if agentlibre_common::tty::is_interactive() {
                 Some(&answer)
             } else {
                 None
@@ -59,7 +59,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use crate::settings::UserFile;
     use std::process::ExitCode;
 

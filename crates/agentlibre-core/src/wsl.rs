@@ -59,7 +59,7 @@ fn is_windows_program(program: &Path) -> bool {
 
 /// Whether the engine of the package runs on Windows (AGL-052, D9).
 pub fn engine_is_windows() -> bool {
-    std::env::var_os(crate::programs::ENGINES_VAR)
+    std::env::var_os(agentlibre_common::programs::ENGINES_VAR)
         .is_some_and(|dir| Path::new(&dir).join("llama-server.exe").is_file())
 }
 

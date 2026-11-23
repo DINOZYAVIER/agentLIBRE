@@ -23,7 +23,7 @@ use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
 use crate::session::{Event, TransitionLine};
 use crate::settings::Detail;
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;
@@ -1077,7 +1077,7 @@ mod tests {
                 content: "a".into(),
             },
         ];
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::InputText, red)]);
         let mut inspect = Inspect::new(&events, &[], Lang::En);
         // The focus is on the result; two blocks up stands the thinking.
@@ -1110,7 +1110,7 @@ mod tests {
                 content: "out".into(),
             },
         ];
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::InputText, red)]);
         let mut inspect = Inspect::new(&events, &[], Lang::En);
         // The focus is on the result.
@@ -1230,7 +1230,7 @@ mod tests {
         // AGL-105, D1; AGL-107, D1: off the focus a thinking keeps its
         // head's color alone and its body gray; the focus's block paints
         // again with its accents.
-        let red = crate::style::Style::parse("#FF0000", false).expect("a color");
+        let red = agentlibre_common::style::Style::parse("#FF0000", false).expect("a color");
         let theme = Theme::new(true, &[(Role::Tool, red)]);
         let start = |role: Role| theme.start(role);
         let mut inspect = inspect();

@@ -4,7 +4,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::text::{clean, hard_wrap, width};
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::theme::Theme;
 
 /// The narrowest column text is wrapped in.

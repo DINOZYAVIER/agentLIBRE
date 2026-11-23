@@ -310,7 +310,7 @@ fn config(settings: &ServerFile, data: &Data, package: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     fn settings() -> ServerFile {
         ServerFile {

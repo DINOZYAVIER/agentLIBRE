@@ -130,7 +130,7 @@ pub fn offer(
         .filter(|source| names.contains(&source.name.as_str()));
     let (here, absent): (Vec<_>, Vec<_>) =
         of_model.partition(|source| find(&source.name, &looked_in).is_some());
-    let yes = |question: &str| ask(question).is_some_and(|answer| crate::tty::is_yes(&answer));
+    let yes = |question: &str| ask(question).is_some_and(|answer| agentlibre_common::tty::is_yes(&answer));
     if !absent.is_empty() {
         let files: Vec<String> = absent
             .iter()
@@ -270,7 +270,7 @@ fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use std::cell::RefCell;
     use std::fs;
 

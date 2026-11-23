@@ -340,7 +340,7 @@ mod tests {
     use super::*;
 
     use crate::daemon::tests::{Client, daemon};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     #[test]
     fn a_flow_verb_turns_with_no_session_open() {

@@ -975,7 +975,7 @@ pub fn remove_asked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     fn added(dir: &Path, title: &str, hook: &str, text: &str) -> String {
         let (result, write) = add(dir, title, hook, text, None);
@@ -1529,7 +1529,7 @@ mod listing_tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     /// A memory directory with the entries `one` and `two`.
     fn two_entries(root: &Path) -> PathBuf {
@@ -1693,7 +1693,7 @@ mod listing_tests {
 #[cfg(test)]
 mod plane_tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     /// The workspace's memory of a test: a directory, or none.
     struct Dir(Option<PathBuf>);

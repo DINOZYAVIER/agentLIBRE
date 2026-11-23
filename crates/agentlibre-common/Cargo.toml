@@ -7,3 +7,8 @@ publish.workspace = true
 description = "agentLIBRE's base under the core: languages and texts, settings, Nix, styles, paths, programs, the clock, the terminal's yes (AGL-121, D77, D78)"
 
 [dependencies]
+libc = "0.2"
+
+[features]
+# The helpers the tests of the crates above take from it.
+testutil = []

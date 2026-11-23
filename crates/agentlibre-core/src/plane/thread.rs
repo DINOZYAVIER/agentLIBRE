@@ -401,7 +401,7 @@ mod tests {
     use super::*;
     use crate::backend::{Backend, Generated, Prompt, Request};
     use crate::engine::{Autostart, Others};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use crate::function::Function;
     use agentlibre_common::i18n::Lang;
     use crate::memory::StoreHome;

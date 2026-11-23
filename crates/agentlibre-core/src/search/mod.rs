@@ -204,7 +204,7 @@ pub fn certificate_expired(step: &Path, certificate: &Path) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::programs::clean_env(&mut command);
+    agentlibre_common::programs::clean_env(&mut command);
     command.status().is_ok_and(|status| status.code() == Some(0))
 }
 
@@ -329,7 +329,7 @@ pub struct Curl {
 impl Curl {
     /// With the tools' `curl` (AGL-040).
     pub fn new(search: Search) -> Result<Curl, crate::error::Error> {
-        Ok(Curl::with_program(search, crate::programs::program("curl")?.into()))
+        Ok(Curl::with_program(search, agentlibre_common::programs::program("curl")?.into()))
     }
 
     /// With another program in place of `curl`, for the tests.

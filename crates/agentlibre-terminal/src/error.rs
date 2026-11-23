@@ -87,7 +87,20 @@ macro_rules! from_core_file {
     };
 }
 
-from_core_file!(download, format, media, memory, nix, paths, programs, search, strata, weights, whisper, wsl);
+from_core_file!(download, format, media, memory, nix, paths, search, strata, weights, whisper, wsl);
+
+/// A common module's own error, wrapped by the core's.
+macro_rules! from_common {
+    ($($module:ident),*) => {
+        $(impl From<agentlibre_common::$module::Error> for Error {
+            fn from(source: agentlibre_common::$module::Error) -> Error {
+                Error::Core(source.into())
+            }
+        })*
+    };
+}
+
+from_common!(programs);
 
 impl Error {
     /// Whether the error is in the command line rather than the setup:

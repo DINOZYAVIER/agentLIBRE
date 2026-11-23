@@ -12,7 +12,7 @@ use agentlibre_common::i18n::{Lang, m};
 use crate::media::{Kind as MediaKind, Media};
 use crate::memory::Kind as MemoryKind;
 use crate::session::{Event, ForgeKind, TransitionLine};
-use crate::style::Role;
+use agentlibre_common::style::Role;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;
 

@@ -42,6 +42,9 @@ dependencies = [
 [[package]]
 name = "agentlibre-common"
 version = "0.0.2"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "agentlibre-core"

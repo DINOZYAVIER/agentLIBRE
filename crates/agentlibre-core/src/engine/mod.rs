@@ -1618,7 +1618,7 @@ fn projector_flags(settings: &ServerFile, file: PathBuf) -> Vec<OsString> {
 /// The engine `name`: the one of the package when it came with one, as a
 /// Linux program or as a Windows one in WSL (AGL-052), else on `path_var`.
 fn engine_program(name: &str, path_var: Option<OsString>) -> Option<PathBuf> {
-    let packaged = std::env::var_os(crate::programs::ENGINES_VAR).map(PathBuf::from);
+    let packaged = std::env::var_os(agentlibre_common::programs::ENGINES_VAR).map(PathBuf::from);
     packaged_engine(packaged.as_deref(), name).or_else(|| find_program(name, path_var))
 }
 

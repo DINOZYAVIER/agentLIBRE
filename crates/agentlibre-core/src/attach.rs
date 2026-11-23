@@ -108,7 +108,7 @@ mod tests {
     use std::cell::RefCell;
     use super::*;
     use crate::backend::{Generated, Prompt, Request};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     /// A backend that only says whether it hears audio.
     struct Ears(bool);

@@ -373,7 +373,7 @@ fn names_in(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     /// A Function file on `model` (AGL-039, D8, D17).
     fn file(model: &str) -> String {

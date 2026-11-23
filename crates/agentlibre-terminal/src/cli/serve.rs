@@ -43,7 +43,7 @@ pub fn run(
         ServerAction::Start => {
             let others = if yes {
                 Others::Yes
-            } else if crate::tty::is_interactive() {
+            } else if agentlibre_common::tty::is_interactive() {
                 Others::Ask(std::sync::Arc::new(ask_terminal))
             } else {
                 Others::Refuse

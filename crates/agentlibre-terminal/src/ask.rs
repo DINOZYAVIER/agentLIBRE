@@ -14,7 +14,7 @@ pub fn ask_terminal(question: &str, _lang: Lang) -> bool {
     if io::stdin().lock().read_line(&mut line).is_err() {
         return false;
     }
-    agentlibre_core::tty::is_yes(&line)
+    agentlibre_common::tty::is_yes(&line)
 }
 
 /// Asks `question` in the terminal and returns the line answered, `None`

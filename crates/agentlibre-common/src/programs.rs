@@ -10,8 +10,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use agentlibre_common::i18n::{Lang, Msg};
-use agentlibre_common::tr;
+use crate::i18n::{Lang, Msg};
+use crate::tr;
 
 /// A helper program of agl's package cannot be found (AGL-040; AGL-121,
 /// D75).
@@ -37,7 +37,7 @@ impl Error {
 }
 
 /// `Error::ToolsDirMissing` (AGL-040), and nix's missing directories.
-pub(crate) const TOOLS_DIR_MISSING: Msg = Msg {
+pub const TOOLS_DIR_MISSING: Msg = Msg {
     en: "{var} is not set: run agl from its Nix package or `nix develop`",
     uk: "{var} не задано: запускай agl з його Nix-пакета або в `nix develop`",
 };
@@ -99,7 +99,7 @@ pub fn clean_env(command: &mut Command) -> &mut Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use crate::testutil::TempDir;
     use std::fs;
 
     #[test]

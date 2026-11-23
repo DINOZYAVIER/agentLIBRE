@@ -190,7 +190,7 @@ pub fn resolve_commit(repo: &Path, id: &str) -> Result<String, Error> {
 /// Whether `ancestor` is an ancestor of `descendant` in the
 /// repository at `repo`; both ids must resolve.
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Error> {
-    let output = std::process::Command::new(crate::programs::program("git")?)
+    let output = std::process::Command::new(agentlibre_common::programs::program("git")?)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo)
         .output()
@@ -282,7 +282,7 @@ fn numbered(name: &str) -> Option<(&str, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
     use std::fs;
 
     /// A git repository at `root` with `count` commits.

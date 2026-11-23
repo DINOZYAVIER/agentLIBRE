@@ -55,7 +55,7 @@ pub trait Recording: Send {
 /// Starts recording the default source for at most `limit` seconds (D4,
 /// D5).
 pub fn start(limit: u32) -> Result<Box<dyn Recording>, Error> {
-    let ffmpeg = crate::programs::program("ffmpeg")?;
+    let ffmpeg = agentlibre_common::programs::program("ffmpeg")?;
     Ffmpeg::start(ffmpeg.as_os_str(), limit).map(|recording| Box::new(recording) as Box<dyn Recording>)
 }
 
@@ -63,7 +63,7 @@ pub fn start(limit: u32) -> Result<Box<dyn Recording>, Error> {
 /// `poll_chunk` gives the speech chunks as they end, `stop` — the whole
 /// recording.
 pub fn start_chunked(limit: u32, vad: Vad) -> Result<Box<dyn Recording>, Error> {
-    let ffmpeg = crate::programs::program("ffmpeg")?;
+    let ffmpeg = agentlibre_common::programs::program("ffmpeg")?;
     Ffmpeg::start_chunked(ffmpeg.as_os_str(), limit, vad)
         .map(|recording| Box::new(recording) as Box<dyn Recording>)
 }

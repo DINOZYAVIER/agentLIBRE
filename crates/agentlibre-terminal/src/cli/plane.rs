@@ -20,7 +20,7 @@ use agentlibre_common::tr;
 
 pub fn run(action: PlaneAction, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
     let ask = |question: &str| crate::ask::ask_terminal(question, lang);
-    let ask: Option<&dyn Fn(&str) -> bool> = crate::tty::is_interactive().then_some(&ask);
+    let ask: Option<&dyn Fn(&str) -> bool> = agentlibre_common::tty::is_interactive().then_some(&ask);
     outln!("{}", act(action, paths, cwd, ask, lang)?);
     Ok(ExitCode::SUCCESS)
 }
@@ -192,7 +192,7 @@ mod tests {
 
     use super::*;
     use crate::cli::args::{Command, parse};
-    use crate::forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     fn paths(dir: &TempDir) -> Paths {
         Paths {

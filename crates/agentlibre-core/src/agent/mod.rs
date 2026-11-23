@@ -745,7 +745,7 @@ impl Agent<'_> {
         // index and not in the prompt (AGL-006, M9, M16); a failure to
         // write it does not undo the compaction.
         if let Ok((dir, _)) = self.memory.write() {
-            let date = crate::clock::utc_now();
+            let date = agentlibre_common::clock::utc_now();
             let _ = crate::memory::write_summary(
                 &dir,
                 &date[..10.min(date.len())],

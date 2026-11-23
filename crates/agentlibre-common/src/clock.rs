@@ -49,9 +49,3 @@ fn utc_times() {
     assert_eq!(utc(4_102_444_799), "2099-12-31T23:59:59Z");
 }
 
-#[test]
-fn today_is_a_calendar_date() {
-    use std::path::Path;
-    let today = today();
-    assert!(crate::forge::check_date("today", &today, Path::new("/x")).is_ok());
-}

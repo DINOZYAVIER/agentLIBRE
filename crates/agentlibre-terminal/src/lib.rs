@@ -9,13 +9,13 @@ mod repl;
 mod theme;
 
 // The core's modules under the names the terminal's code always used.
+pub(crate) use agentlibre_common::tty;
 pub(crate) use agentlibre_core::{
     about,
     action,
     agent,
     attach,
     backend,
-    clock,
     engine,
     forge,
     function,
@@ -26,16 +26,13 @@ pub(crate) use agentlibre_core::{
     paths,
     phase,
     plane,
-    programs,
     record,
     records,
     session,
     settings,
     status,
     stop,
-    style,
     tools,
-    tty,
     weights,
     whisper,
     wsl,
@@ -441,7 +438,7 @@ fn agent_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge::testutil::TempDir;
+    use agentlibre_common::testutil::TempDir;
 
     /// The workspace of a fresh, unregistered `cwd` under a fresh `data`
     /// (nothing stored there, so no choice is asked).
