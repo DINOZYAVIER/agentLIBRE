@@ -941,10 +941,13 @@ fn a_stop_ends_the_whole_group_and_writes_stopped_alone() {
         ask(Verb::Start { name: "long".into() }),
         "long: build\n  started build\n  stopped build\n  started build"
     );
-    until(|| pid_of(&dir, "pid").unwrap() != first);
+    // The command rewrites its file with `>`, so a read can find it empty
+    // between the truncation and the write: an empty read is not the answer.
+    until(|| pid_of(&dir, "pid").is_some_and(|pid| pid != first));
+    let second = pid_of(&dir, "pid").unwrap();
     // And out of the test's way again.
     ask(Verb::Stop { name: "long".into() });
-    until(|| !alive(pid_of(&dir, "pid").unwrap()));
+    until(|| !alive(second));
 }
 
 #[test]
