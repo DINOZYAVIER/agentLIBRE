@@ -203,6 +203,7 @@ roles! {
     FocusBackground "focus_background" "oklch(0.33 0 0)",
     Muted "muted" "dim",
     Thinking "thinking" "italic dim",
+    ThinkingMuted "thinking_muted" "dim",
     Tool "tool" "bold #00FFFF",
     Activity "activity" "bold #00FFFF",
     Summary "summary" "bold #00FFFF",
