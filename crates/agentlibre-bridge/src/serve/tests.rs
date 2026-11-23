@@ -228,3 +228,161 @@ fn a_frame_that_is_no_request_closes_with_1008() {
         }
     }
 }
+
+/// A daemon whose session `s` is busy while `busy` is set: it answers `open`
+/// with `s` opened and `sessions` with `s`; it tells each line it read, and
+/// `EOF` when a connection ends.
+fn busy_daemon(socket: &Path, busy: Arc<std::sync::atomic::AtomicBool>) -> Receiver<String> {
+    let listener = UnixListener::bind(socket).unwrap();
+    let (to, from) = mpsc::channel();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let to = to.clone();
+            let busy = Arc::clone(&busy);
+            thread::spawn(move || answer_as_busy(stream, &busy, &to));
+        }
+    });
+    from
+}
+
+fn answer_as_busy(stream: UnixStream, busy: &std::sync::atomic::AtomicBool, to: &mpsc::Sender<String>) {
+    let mut out = stream.try_clone().unwrap();
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        let reply = if line.contains("\"open\"") {
+            Some(Reply::Opened(proto::Opened {
+                session: proto::SessionView {
+                    id: "s".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))
+        } else if line.contains("\"sessions\"") {
+            Some(Reply::Sessions {
+                sessions: vec![proto::SessionInfo {
+                    id: "s".to_owned(),
+                    busy: busy.load(Ordering::SeqCst),
+                    ..Default::default()
+                }],
+            })
+        } else {
+            None
+        };
+        if let Some(reply) = reply
+            && proto::send(&mut out, &reply).is_err()
+        {
+            break;
+        }
+        if to.send(line).is_err() {
+            return;
+        }
+    }
+    let _ = to.send("EOF".to_owned());
+}
+
+/// The lines the daemon read until a connection ended, or none in `wait`.
+fn until_eof(daemon: &Receiver<String>, wait: Duration) -> Option<Vec<String>> {
+    let deadline = Instant::now() + wait;
+    let mut lines = Vec::new();
+    loop {
+        match daemon.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line == "EOF" => return Some(lines),
+            Ok(line) => lines.push(line),
+            Err(_) => return None,
+        }
+    }
+}
+
+
+#[test]
+fn a_device_gone_during_a_turn_keeps_its_daemon_connection_until_the_turn_ends() {
+    let bridge = bridge("kept");
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let daemon = busy_daemon(&bridge.socket, Arc::clone(&busy));
+    let mut client = connect(&bridge, Some(&bridge.token)).unwrap();
+    client.send(Message::text(open_request())).unwrap();
+    // The opened reply comes back before the device goes.
+    client.read().unwrap();
+    drop(client);
+    // The turn runs: the connection stays, and asks the daemon.
+    assert!(until_eof(&daemon, Duration::from_millis(500)).is_none());
+    busy.store(false, Ordering::SeqCst);
+    let lines = until_eof(&daemon, POLL * 3).expect("let go once the turn is over");
+    assert!(lines.iter().any(|line| line.contains("\"sessions\"")));
+}
+
+#[test]
+fn a_device_gone_with_no_session_open_lets_its_daemon_connection_go() {
+    let bridge = bridge("not-kept");
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let daemon = busy_daemon(&bridge.socket, busy);
+    let client = connect(&bridge, Some(&bridge.token)).unwrap();
+    drop(client);
+    assert_eq!(until_eof(&daemon, Duration::from_secs(5)), Some(Vec::new()));
+}
+
+#[test]
+fn a_device_that_closed_its_session_lets_its_daemon_connection_go() {
+    let bridge = bridge("closed");
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let daemon = busy_daemon(&bridge.socket, busy);
+    let mut client = connect(&bridge, Some(&bridge.token)).unwrap();
+    client.send(Message::text(open_request())).unwrap();
+    client.read().unwrap();
+    client
+        .send(Message::text(r#"{"request":"close","session":"s"}"#))
+        .unwrap();
+    // The close reaches the daemon before the device goes.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon.recv_timeout(Duration::from_secs(5)).unwrap().contains("\"close\"") {
+            break;
+        }
+    }
+    drop(client);
+    let lines = until_eof(&daemon, Duration::from_secs(5)).expect("let go at once");
+    assert!(!lines.iter().any(|line| line.contains("\"sessions\"")));
+}
+
+#[test]
+fn a_kept_connection_is_let_go_at_its_bound() {
+    let (bridge_end, daemon_end) = UnixStream::pair().unwrap();
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (to, daemon) = mpsc::channel();
+    thread::spawn(move || answer_as_busy(daemon_end, &busy, &to));
+    let kept = Kept {
+        device: "iphone".to_owned(),
+        from: lines_of(&bridge_end).unwrap(),
+        daemon: bridge_end,
+        held: HashSet::from(["s".to_owned()]),
+    };
+    let started = Instant::now();
+    assert_eq!(kept.hold(Duration::from_millis(20), Duration::from_millis(200)), "the bound");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(until_eof(&daemon, Duration::from_secs(5)).is_some());
+}
+
+#[test]
+fn a_busy_session_the_device_does_not_hold_keeps_nothing() {
+    let (bridge_end, daemon_end) = UnixStream::pair().unwrap();
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (to, _daemon) = mpsc::channel();
+    thread::spawn(move || answer_as_busy(daemon_end, &busy, &to));
+    let kept = Kept {
+        device: "iphone".to_owned(),
+        from: lines_of(&bridge_end).unwrap(),
+        daemon: bridge_end,
+        held: HashSet::from(["other".to_owned()]),
+    };
+    assert_eq!(kept.hold(Duration::from_millis(20), Duration::from_secs(5)), "the turn is over");
+}
+
+/// An `open` that resumes `s`, as the app sends it.
+fn open_request() -> String {
+    serde_json::to_string(&Request::Open(proto::Open {
+        resume: Some("s".to_owned()),
+        ..Default::default()
+    }))
+    .unwrap()
+}
