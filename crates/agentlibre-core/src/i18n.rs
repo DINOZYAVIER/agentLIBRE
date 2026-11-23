@@ -2,10 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::error::{
-    Error, Expected, FunctionProblem, NameProblem, ServerOwner,
-    TemplateProblem,
-};
+use crate::error::{Error, Expected, FunctionProblem, NameProblem, ServerOwner};
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
@@ -1687,48 +1684,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "движок не став готовим за {seconds} с; див. {log}",
     };
 
-    /// `TemplateProblem::Missing`.
-    pub const TEMPLATE_MISSING: Msg = Msg {
-        en: "needs {p}",
-        uk: "потрібен {p}",
-    };
-
-    /// `TemplateProblem::Repeated`.
-    pub const TEMPLATE_REPEATED: Msg = Msg {
-        en: "{p} appears more than once",
-        uk: "{p} трапляється більше одного разу",
-    };
-
-    /// `TemplateProblem::Unexpected`.
-    pub const TEMPLATE_UNEXPECTED: Msg = Msg {
-        en: "{p} does not belong here",
-        uk: "{p} тут не дозволений",
-    };
-
-    /// `TemplateProblem::ValueBeforeName`.
-    pub const TEMPLATE_VALUE_BEFORE_NAME: Msg = Msg {
-        en: "{value} comes before {name}",
-        uk: "{value} стоїть перед {name}",
-    };
-
-    /// `TemplateProblem::NothingBeforeName`.
-    pub const TEMPLATE_NOTHING_BEFORE_NAME: Msg = Msg {
-        en: "needs text before {name}, or answers cannot be told apart from calls",
-        uk: "потрібен текст перед {name}, інакше відповідь не відрізнити від виклику",
-    };
-
-    /// `TemplateProblem::NothingAfterValue`.
-    pub const TEMPLATE_NOTHING_AFTER_VALUE: Msg = Msg {
-        en: "needs text after {value}, or a value has no end",
-        uk: "потрібен текст після {value}, інакше значення не має кінця",
-    };
-
-    /// `TemplateProblem::Empty`.
-    pub const TEMPLATE_EMPTY: Msg = Msg {
-        en: "must not be empty",
-        uk: "не може бути порожнім",
-    };
-
     /// `FunctionProblem::UnknownState`.
     pub const FUNC_UNKNOWN_STATE: Msg = Msg {
         en: "there is no state `{name}`",
@@ -3311,15 +3266,7 @@ impl Error {
             }
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
-            Error::Template { path, key, problem } => {
-                tr!(
-                    lang,
-                    m::PROBLEM_IN_PATH,
-                    path = path.display(),
-                    key = key,
-                    problem = template_problem(problem, lang)
-                )
-            }
+            Error::Format(error) => error.message(lang),
             Error::FunctionNotFound { name, paths } => {
                 let paths = paths
                     .iter()
@@ -3703,22 +3650,6 @@ pub fn stopped(reason: StopReason, function: &Function, id: &str, lang: Lang) ->
 /// [`stopped`] from the reason's text a run told (AGL-075, D7).
 pub fn stopped_why(why: &str, id: &str, lang: Lang) -> String {
     format!("{why}\n{}", tr!(lang, m::STOPPED_RESUME, id = id))
-}
-
-fn template_problem(problem: &TemplateProblem, lang: Lang) -> String {
-    match problem {
-        TemplateProblem::Missing(p) => tr!(lang, m::TEMPLATE_MISSING, p = p),
-        TemplateProblem::Repeated(p) => tr!(lang, m::TEMPLATE_REPEATED, p = p),
-        TemplateProblem::Unexpected(p) => tr!(lang, m::TEMPLATE_UNEXPECTED, p = p),
-        TemplateProblem::ValueBeforeName => tr!(lang, m::TEMPLATE_VALUE_BEFORE_NAME).to_string(),
-        TemplateProblem::NothingBeforeName => {
-            tr!(lang, m::TEMPLATE_NOTHING_BEFORE_NAME).to_string()
-        }
-        TemplateProblem::NothingAfterValue => {
-            tr!(lang, m::TEMPLATE_NOTHING_AFTER_VALUE).to_string()
-        }
-        TemplateProblem::Empty => tr!(lang, m::TEMPLATE_EMPTY).to_string(),
-    }
 }
 
 fn function_problem(problem: &FunctionProblem, lang: Lang) -> String {

@@ -1,13 +1,15 @@
 //! Model formats: how a model writes thinking and tool calls (D12, D23,
 //! D77, D78, D81).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value as Json, json};
 
 use crate::action::{Kind, Value};
-use crate::error::{Error, TemplateProblem};
+use crate::error;
+use crate::i18n::{Lang, Msg};
 use crate::nix::Section;
+use crate::tr;
 
 const NAME: &str = "{name}";
 const VALUE: &str = "{value}";
@@ -136,7 +138,7 @@ impl Format {
     /// Reads the evaluated format `file` (the `model.format` of a
     /// Function: `agl.formats."qwen3.8"` or a file of its own, AGL-039,
     /// D18); agl looks no format up by name.
-    pub fn from_section(mut file: Section) -> Result<Format, Error> {
+    pub fn from_section(mut file: Section) -> Result<Format, error::Error> {
         file.check_keys(&["think", "call"])?;
         let think = match file.section("think")? {
             None => None,
@@ -292,12 +294,94 @@ impl Format {
     }
 }
 
-fn template_error(section: &Section, key: &str, problem: TemplateProblem) -> Error {
-    Error::Template {
-        path: section.path().into(),
-        key: section.key(key),
-        problem,
+/// What is wrong with a format template (D81).
+#[derive(Debug, PartialEq, Eq)]
+pub enum TemplateProblem {
+    /// A placeholder the template needs is absent.
+    Missing(&'static str),
+    /// A placeholder appears more than once.
+    Repeated(&'static str),
+    /// A placeholder that does not belong in this template.
+    Unexpected(&'static str),
+    /// `{value}` comes before `{name}`.
+    ValueBeforeName,
+    /// `begin` has no text before `{name}`, so answers cannot be told
+    /// apart from calls.
+    NothingBeforeName,
+    /// `param` has no text after `{value}`, so values have no end.
+    NothingAfterValue,
+    /// A `think` string is empty.
+    Empty,
+}
+
+/// A format template that cannot be read (D81). Its own type, wrapped by
+/// `crate::error::Error` (AGL-121, D66).
+#[derive(Debug)]
+pub enum Error {
+    /// A template or string of a format is unusable (D81).
+    Template { path: PathBuf, key: String, problem: TemplateProblem },
+}
+
+impl Error {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        let Self::Template { path, key, problem } = self;
+        let problem = match problem {
+            TemplateProblem::Missing(p) => tr!(lang, TEMPLATE_MISSING, p = p),
+            TemplateProblem::Repeated(p) => tr!(lang, TEMPLATE_REPEATED, p = p),
+            TemplateProblem::Unexpected(p) => tr!(lang, TEMPLATE_UNEXPECTED, p = p),
+            TemplateProblem::ValueBeforeName => tr!(lang, TEMPLATE_VALUE_BEFORE_NAME).to_string(),
+            TemplateProblem::NothingBeforeName => {
+                tr!(lang, TEMPLATE_NOTHING_BEFORE_NAME).to_string()
+            }
+            TemplateProblem::NothingAfterValue => {
+                tr!(lang, TEMPLATE_NOTHING_AFTER_VALUE).to_string()
+            }
+            TemplateProblem::Empty => tr!(lang, TEMPLATE_EMPTY).to_string(),
+        };
+        tr!(
+            lang,
+            crate::i18n::m::PROBLEM_IN_PATH,
+            path = path.display(),
+            key = key,
+            problem = problem
+        )
     }
+}
+
+/// `Error::Template`'s problems, and the shared frame `PROBLEM_IN_PATH` of
+/// `crate::i18n`, also used by `Error::Function` (AGL-121, D66).
+const TEMPLATE_MISSING: Msg = Msg {
+    en: "needs {p}",
+    uk: "потрібен {p}",
+};
+const TEMPLATE_REPEATED: Msg = Msg {
+    en: "{p} appears more than once",
+    uk: "{p} трапляється більше одного разу",
+};
+const TEMPLATE_UNEXPECTED: Msg = Msg {
+    en: "{p} does not belong here",
+    uk: "{p} тут не дозволений",
+};
+const TEMPLATE_VALUE_BEFORE_NAME: Msg = Msg {
+    en: "{value} comes before {name}",
+    uk: "{value} стоїть перед {name}",
+};
+const TEMPLATE_NOTHING_BEFORE_NAME: Msg = Msg {
+    en: "needs text before {name}, or answers cannot be told apart from calls",
+    uk: "потрібен текст перед {name}, інакше відповідь не відрізнити від виклику",
+};
+const TEMPLATE_NOTHING_AFTER_VALUE: Msg = Msg {
+    en: "needs text after {value}, or a value has no end",
+    uk: "потрібен текст після {value}, інакше значення не має кінця",
+};
+const TEMPLATE_EMPTY: Msg = Msg {
+    en: "must not be empty",
+    uk: "не може бути порожнім",
+};
+
+fn template_error(section: &Section, key: &str, problem: TemplateProblem) -> error::Error {
+    Error::Template { path: section.path().into(), key: section.key(key), problem }.into()
 }
 
 /// Splits `template` at each of `placeholders`, which must appear exactly
@@ -374,13 +458,13 @@ pub mod tests {
         parse(gemma_value()).unwrap()
     }
 
-    fn parse(value: Value) -> Result<Format, Error> {
+    fn parse(value: Value) -> Result<Format, error::Error> {
         Format::from_section(Section::top(Path::new("f.nix"), value).unwrap())
     }
 
     fn problem(value: Value) -> (String, TemplateProblem) {
         match parse(value) {
-            Err(Error::Template { key, problem, .. }) => (key, problem),
+            Err(error::Error::Format(Error::Template { key, problem, .. })) => (key, problem),
             other => panic!("expected a template error, got {other:?}"),
         }
     }
@@ -530,17 +614,17 @@ pub mod tests {
     fn keys_are_checked() {
         assert!(matches!(
             parse(json!({ "name": "x", "call": call() })),
-            Err(Error::UnknownKey { key, .. }) if key == "name"
+            Err(error::Error::UnknownKey { key, .. }) if key == "name"
         ));
         assert!(matches!(
             parse(json!({ "call": { "begin": "<c {name}>", "end": "</c>" } })),
-            Err(Error::MissingKey { key, .. }) if key == "call.param"
+            Err(error::Error::MissingKey { key, .. }) if key == "call.param"
         ));
         assert!(matches!(
             parse(json!({ "think": { "open": "<t>" }, "call": call() })),
-            Err(Error::MissingKey { key, .. }) if key == "think.close"
+            Err(error::Error::MissingKey { key, .. }) if key == "think.close"
         ));
-        assert!(matches!(parse(json!({})), Err(Error::MissingKey { key, .. }) if key == "call"));
+        assert!(matches!(parse(json!({})), Err(error::Error::MissingKey { key, .. }) if key == "call"));
     }
 
     #[test]

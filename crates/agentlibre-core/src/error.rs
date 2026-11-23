@@ -88,12 +88,9 @@ pub enum Error {
     Search(crate::search::Error),
     /// A format or Function name that cannot name a file.
     InvalidName(String),
-    /// A template or string of a format is unusable (D81).
-    Template {
-        path: PathBuf,
-        key: String,
-        problem: TemplateProblem,
-    },
+    /// A template or string of a format is unusable (D81). Its own type,
+    /// wrapped (AGL-121, D66).
+    Format(crate::format::Error),
     /// Neither the looked-in `paths` nor a built-in Function is called
     /// `name`.
     FunctionNotFound { name: String, paths: Vec<PathBuf> },
@@ -420,6 +417,13 @@ impl From<crate::search::Error> for Error {
     }
 }
 
+impl From<crate::format::Error> for Error {
+    /// A format template's own error as agl's (AGL-121, D66).
+    fn from(source: crate::format::Error) -> Error {
+        Error::Format(source)
+    }
+}
+
 /// TOML type a settings key requires.
 #[derive(Debug)]
 pub enum Expected {
@@ -431,26 +435,6 @@ pub enum Expected {
     Strings,
     /// A list of sets (AGL-089).
     Tables,
-}
-
-/// What is wrong with a format template (D81).
-#[derive(Debug, PartialEq, Eq)]
-pub enum TemplateProblem {
-    /// A placeholder the template needs is absent.
-    Missing(&'static str),
-    /// A placeholder appears more than once.
-    Repeated(&'static str),
-    /// A placeholder that does not belong in this template.
-    Unexpected(&'static str),
-    /// `{value}` comes before `{name}`.
-    ValueBeforeName,
-    /// `begin` has no text before `{name}`, so answers cannot be told
-    /// apart from calls.
-    NothingBeforeName,
-    /// `param` has no text after `{value}`, so values have no end.
-    NothingAfterValue,
-    /// A `think` string is empty.
-    Empty,
 }
 
 /// Why a text is no name of a session (AGL-062, D6).
