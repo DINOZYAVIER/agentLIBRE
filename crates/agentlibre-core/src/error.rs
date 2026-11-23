@@ -129,9 +129,6 @@ pub enum Error {
     /// A medium: changed, of no kind agl takes, or ffmpeg failing on it
     /// (AGL-014). Its own type, wrapped (AGL-121, D66).
     Media(crate::media::Error),
-    /// The draft engine (AGL-122) cannot be run or failed: the draft is
-    /// dropped, the final pass is untouched.
-    Draft { detail: String },
     /// A weights file was missing (AGL-039, D24c; AGL-050, D11). Its own
     /// type, wrapped (AGL-121, D66).
     Weights(crate::weights::Error),

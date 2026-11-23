@@ -1281,12 +1281,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "--attach працює разом з -p; у сесії використовуй /attach <шлях>",
     };
 
-    /// `Error::Draft` (AGL-122).
-    pub const DRAFT: Msg = Msg {
-        en: "the draft engine failed: {detail}",
-        uk: "помилка чернового рушія: {detail}",
-    };
-
     /// The label of streamed thinking (D109), in caps as the tool's
     /// label (AGL-066, D21).
     pub const THINKING: Msg = Msg {
@@ -2455,7 +2449,6 @@ impl Error {
             Error::BridgeDeviceUnknown { name } => tr!(lang, m::BRIDGE_DEVICE_UNKNOWN, name = name),
             Error::Bridge { detail } => tr!(lang, m::BRIDGE_FAILED, detail = detail),
             Error::Media(error) => error.message(lang),
-            Error::Draft { detail } => tr!(lang, m::DRAFT, detail = detail),
             Error::Strata(error) => error.message(lang),
             Error::Session(error) => error.message(lang),
             Error::Machine(error) => error.message(lang),
