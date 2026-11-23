@@ -93,11 +93,6 @@ pub enum Error {
     /// A Function not found, built in, existing already, or unusable at a
     /// key (D21; AGL-102). Its own type, wrapped (AGL-121, D66).
     Function(crate::function::error::Error),
-    /// The schema of a session's `run` snapshot is not the one this build
-    /// reads (AGL-063, D4).
-    RunSchema { expected: u64, found: String },
-    /// A session's `run` snapshot is not a snapshot (AGL-063, D4).
-    RunSnapshot { detail: String },
     /// The server of `kind` cannot be reached (D97; AGL-038, D1).
     ServerUnreachable {
         kind: ServerKind,

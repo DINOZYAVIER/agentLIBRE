@@ -1004,7 +1004,7 @@ fn the_run_snapshot_round_trips() {
 fn a_run_snapshot_of_another_schema_is_named() {
     let bad = json!({ "schema": 2, "source": { "path": "f.nix" }, "value": {} });
     match Function::from_snapshot(&bad) {
-        Err(Error::RunSchema { expected, found }) => {
+        Err(Error::Function(FunctionError::RunSchema { expected, found })) => {
             assert_eq!(expected, 1);
             assert_eq!(found, "2");
         }
@@ -1016,7 +1016,7 @@ fn a_run_snapshot_of_another_schema_is_named() {
 fn a_run_snapshot_without_a_value_is_named() {
     let bad = json!({ "schema": 1, "source": { "path": "f.nix" } });
     match Function::from_snapshot(&bad) {
-        Err(Error::RunSnapshot { detail }) => assert_eq!(detail, "the snapshot has no value"),
+        Err(Error::Function(FunctionError::RunSnapshot { detail })) => assert_eq!(detail, "the snapshot has no value"),
         other => panic!("expected the snapshot error, got {other:?}"),
     }
 }

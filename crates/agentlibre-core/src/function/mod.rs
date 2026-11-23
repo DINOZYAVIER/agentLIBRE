@@ -416,13 +416,14 @@ impl Function {
     /// The path is the one the snapshot records, for display and errors.
     pub fn from_snapshot(snapshot: &Json) -> Result<Function, Error> {
         if snapshot.get("schema").and_then(Json::as_u64) != Some(RUN_SCHEMA) {
-            return Err(Error::RunSchema {
+            return Err(FunctionError::RunSchema {
                 expected: RUN_SCHEMA,
                 found: snapshot
                     .get("schema")
                     .and_then(Json::as_u64)
                     .map_or_else(|| "unknown".into(), |v| v.to_string()),
-            });
+            }
+            .into());
         }
         let path = snapshot
             .get("source")
@@ -430,7 +431,7 @@ impl Function {
             .and_then(Json::as_str)
             .unwrap_or("<run>");
         let value = snapshot.get("value").cloned().ok_or_else(|| {
-            Error::RunSnapshot {
+            FunctionError::RunSnapshot {
                 detail: "the snapshot has no value".into(),
             }
         })?;

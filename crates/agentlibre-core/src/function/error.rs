@@ -20,6 +20,11 @@ pub enum Error {
     /// `/function new` took a name one of the sources already has
     /// (AGL-102, D3); nothing was written.
     Exists { name: String },
+    /// The schema of a session's `run` snapshot is not the one this build
+    /// reads (AGL-063, D4).
+    RunSchema { expected: u64, found: String },
+    /// A session's `run` snapshot is not a snapshot (AGL-063, D4).
+    RunSnapshot { detail: String },
     /// A Function is unusable; `key` locates the problem (D21, D42, D72,
     /// D78, D82-D93).
     Invalid {
@@ -43,6 +48,10 @@ impl Error {
             }
             Self::BuiltIn { name } => tr!(lang, FUNCTION_BUILTIN, name = name),
             Self::Exists { name } => tr!(lang, FUNCTION_EXISTS, name = name),
+            Self::RunSchema { expected, found } => {
+                tr!(lang, RUN_SCHEMA, expected = expected, found = found)
+            }
+            Self::RunSnapshot { detail } => tr!(lang, RUN_SNAPSHOT, detail = detail),
             Self::Invalid { path, key, problem } => tr!(
                 lang,
                 m::PROBLEM_IN_PATH,
@@ -295,6 +304,18 @@ const FUNC_BAD_SOURCE_SHA256: Msg = Msg {
 const FUNC_BAD_SOURCE_SIZE: Msg = Msg {
     en: "a size is a positive number of bytes",
     uk: "розмір — це додатне число байтів",
+};
+
+/// `Error::RunSchema`.
+const RUN_SCHEMA: Msg = Msg {
+    en: "the session's `run` snapshot is of the schema {found}, this build reads {expected}",
+    uk: "снапшот `run` сесії зі схемою {found}, цей збір читає {expected}",
+};
+
+/// `Error::RunSnapshot`.
+const RUN_SNAPSHOT: Msg = Msg {
+    en: "the session's `run` snapshot is unreadable: {detail}",
+    uk: "снапшот `run` сесії нечитабельний: {detail}",
 };
 
 /// `Error::NotFound`.

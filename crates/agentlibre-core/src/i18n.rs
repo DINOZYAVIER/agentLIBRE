@@ -1154,18 +1154,6 @@ Forge (сховище артефактів робочої області, agentL
         uk: "збережено {name}: завантажується, {kind}, {model}, {context} контексту",
     };
 
-    /// `Error::RunSchema`.
-    pub const RUN_SCHEMA: Msg = Msg {
-        en: "the session's `run` snapshot is of the schema {found}, this build reads {expected}",
-        uk: "снапшот `run` сесії зі схемою {found}, цей збір читає {expected}",
-    };
-
-    /// `Error::RunSnapshot`.
-    pub const RUN_SNAPSHOT: Msg = Msg {
-        en: "the session's `run` snapshot is unreadable: {detail}",
-        uk: "снапшот `run` сесії нечитабельний: {detail}",
-    };
-
     /// A resume whose Function is not found continues loose (AGL-063, D4).
     pub const LOOSE_CONTINUE: Msg = Msg {
         en: "the Function `{function}` of this session is not available; continuing loose: the tools it used, no grammar, the budgets of its last step",
@@ -2906,10 +2894,6 @@ impl Error {
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
             Error::Function(error) => error.message(lang),
-            Error::RunSchema { expected, found } => {
-                tr!(lang, m::RUN_SCHEMA, expected = expected, found = found)
-            }
-            Error::RunSnapshot { detail } => tr!(lang, m::RUN_SNAPSHOT, detail = detail),
             Error::ServerUnreachable { kind, url, detail } => tr!(
                 lang,
                 m::SERVER_UNREACHABLE,
