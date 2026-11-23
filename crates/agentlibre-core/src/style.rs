@@ -204,6 +204,7 @@ roles! {
     Muted "muted" "dim",
     Thinking "thinking" "italic dim",
     Tool "tool" "bold #00FFFF",
+    Activity "activity" "bold #00FFFF",
     StatusSuccess "status_success" "bold #7BD88F",
     StatusFailure "status_failure" "bold #FF0000",
     StatusWarn "status_warn" "bold #FFA500",

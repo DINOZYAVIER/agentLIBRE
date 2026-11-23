@@ -538,7 +538,7 @@ impl State {
             None => {}
         }
         self.theme
-            .paint(Role::Tool, &truncate(&label, self.columns))
+            .paint(Role::Activity, &truncate(&label, self.columns))
     }
 
     fn status_row(&self) -> String {
@@ -556,10 +556,11 @@ impl State {
         let usage = usage
             .map(|text| format!("{}{}", self.theme.paint(Role::InputText, &text), "  "))
             .unwrap_or_default();
-        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function, the workspace
-        // and the separator above them are all the tool's color, as
-        // `THINKING` and `Tool bash` are; the usage is the text's color,
-        // whatever share of the context it names.
+        // AGL-082, D2, AGL-084, D1 and AGL-091: the Function and the
+        // workspace are the tool's color, as `THINKING` and `Tool bash`
+        // are; the separator above them wears the activity's own role since
+        // AGL-121 D16 — the same color by default. The usage is the text's
+        // color, whatever share of the context it names.
         format!(
             "{}{}{}{}",
             self.theme.paint(Role::Tool, &left),
@@ -1028,15 +1029,15 @@ mod tests {
     }
 
     #[test]
-    fn the_separators_activity_takes_the_tools_color() {
-        // AGL-091, AGL-104, D2: `Ready`, `Starting server` and the rest of
-        // the separator's words are the tool's color alone — there is no
-        // rule left to color.
+    fn the_separators_activity_takes_the_activitys_color() {
+        // AGL-091, AGL-104, D2 and AGL-121 D16 c: `Ready`, `Starting server`
+        // and the rest of the separator's words wear the activity's own
+        // role — there is no rule left to color.
         let color = |hex: &str| crate::style::Style::parse(hex, false).expect("a color");
         let theme = Theme::new(
             true,
             &[
-                (Role::Tool, color("#FF0000")),
+                (Role::Activity, color("#FF0000")),
                 (Role::InputRule, color("#00FF00")),
             ],
         );
@@ -1052,7 +1053,7 @@ mod tests {
         let start = |role: Role| dock.lock().theme.start(role);
         dock.activity(Phase::StartingServer);
         let row = dock.lock().separator();
-        assert!(row.starts_with(&start(Role::Tool)), "{row}");
+        assert!(row.starts_with(&start(Role::Activity)), "{row}");
         assert!(row.contains("Starting the server"), "{row}");
         assert!(!row.contains('─'), "{row}");
         assert!(!row.contains(&start(Role::InputRule)), "{row}");
