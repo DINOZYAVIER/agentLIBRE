@@ -11,12 +11,12 @@ use crate::cli::args::PlaneAction;
 use crate::error::Error;
 use crate::error::CoreError;
 use crate::plane::error::Error as PlaneError;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
 use crate::plane::{self, PlaneFile};
 use crate::session::Session;
-use crate::tr;
+use agentlibre_common::tr;
 
 pub fn run(action: PlaneAction, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
     let ask = |question: &str| crate::ask::ask_terminal(question, lang);

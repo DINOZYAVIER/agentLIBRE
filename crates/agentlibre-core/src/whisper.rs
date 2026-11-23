@@ -16,10 +16,10 @@ use crate::engine::{
 };
 use crate::error;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::media::{self, Source};
 use crate::settings::{ServerKind, WhisperFile};
-use crate::tr;
+use agentlibre_common::tr;
 
 /// What can go wrong with the whisper server (AGL-014, D22; AGL-121, D66).
 #[derive(Debug)]

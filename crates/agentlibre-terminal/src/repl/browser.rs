@@ -15,11 +15,11 @@ use super::text::{hard_wrap, truncate};
 use super::ModeKeys;
 use crate::function::Function;
 use crate::function::catalog::{Catalog, Entry, Source};
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::settings::UserFile;
 use crate::style::Role;
 use crate::theme::Theme;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// What leaving the browser means (AGL-109, D3).
 pub enum Exit {

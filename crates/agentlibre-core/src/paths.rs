@@ -3,9 +3,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::i18n::{Lang, Msg};
+use agentlibre_common::i18n::{Lang, Msg};
 use crate::settings::SETTINGS_FILE;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// agl's directories cannot be found (AGL-121, D75).
 #[derive(Debug)]

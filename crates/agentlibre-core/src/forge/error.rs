@@ -4,8 +4,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::i18n::{Lang, Msg, m};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg, m};
+use agentlibre_common::tr;
 
 /// The forge's own error, wrapped by the core's `Error::Forge`
 /// (AGL-121, D66).

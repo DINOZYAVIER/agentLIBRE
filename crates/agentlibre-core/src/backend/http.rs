@@ -154,7 +154,7 @@ impl Http {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
 
     #[test]
     fn a_redirect_is_not_followed_and_https_stays_https() {

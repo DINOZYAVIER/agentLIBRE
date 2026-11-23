@@ -11,8 +11,8 @@ use std::process::{Command, Stdio};
 use serde_json::{Map, Value};
 
 use crate::error;
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 pub use section::Section;
 

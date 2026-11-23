@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use agentlibre_core::error::Error as CoreError;
 use agentlibre_notify::Error;
-use agentlibre_core::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use agentlibre_core::paths::Paths;
 use agentlibre_core::settings::UserFile;
 

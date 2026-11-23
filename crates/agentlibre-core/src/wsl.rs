@@ -7,8 +7,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// What can go wrong starting or driving the Windows engine of agl in WSL
 /// (AGL-052, D9, D10; AGL-056, D8; AGL-121, D66).

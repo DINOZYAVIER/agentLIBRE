@@ -25,7 +25,7 @@ use crate::error::Error;
 use crate::forge;
 use crate::function::Function;
 use crate::grammar::{Expr, Grammar};
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::memory::MemoryAction;
 use crate::paths::Paths;
 use crate::phase::Observer;
@@ -33,7 +33,7 @@ use crate::plane::{self, Command, Run, Sent, wire};
 use crate::session::Session;
 use crate::settings::{ServerKind, Settings, UserFile};
 use crate::stop::Stop;
-use crate::tr;
+use agentlibre_common::tr;
 use crate::whisper::{Dictation, Draft, Voice};
 
 use servers::{Clock, SWEEP_POLL};

@@ -20,9 +20,10 @@ use crate::backend::error::Error as BackendError;
 use error::ServerOwner;
 use crate::engine::error::Error as EngineError;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, m, server as texts};
+use crate::i18n::server as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::settings::{ServerFile, ServerKind};
-use crate::tr;
+use agentlibre_common::tr;
 
 pub mod error;
 mod registry;

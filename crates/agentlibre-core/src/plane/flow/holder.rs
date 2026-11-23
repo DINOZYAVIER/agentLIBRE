@@ -13,9 +13,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::Error;
-use crate::i18n::{m, Lang};
+use agentlibre_common::i18n::{m, Lang};
 use crate::plane::Text;
-use crate::tr;
+use agentlibre_common::tr;
 
 use super::drive::{self, Review, Wake, Word};
 use crate::machine::Event;

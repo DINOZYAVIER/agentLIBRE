@@ -14,8 +14,8 @@ use crate::action::Outcome;
 use crate::error;
 use crate::forge::task_spec::slug;
 use crate::forge::write_atomic;
-use crate::i18n::{Lang, Msg, m};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg, m};
+use agentlibre_common::tr;
 
 /// A memory entry not found or not removed (AGL-060; AGL-121, D66).
 #[derive(Debug)]

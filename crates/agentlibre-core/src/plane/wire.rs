@@ -13,7 +13,7 @@ use crate::action::{Outcome, Value};
 use crate::agent::{Report, TurnEnd};
 use crate::attach::Pending;
 use crate::backend::{Prefill, PromptProgress, ToolCall};
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::media::{Frame, Kind, Media, Source};
 use crate::memory::{Kind as MemoryKind, Write};
 use crate::phase::{Phase, PhaseEvent, StepRecord, Transition};

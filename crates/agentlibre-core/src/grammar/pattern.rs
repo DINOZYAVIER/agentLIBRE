@@ -3,8 +3,8 @@
 //! pattern covers the whole value.
 
 use super::Expr;
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// Why a pattern is rejected, at byte `offset` of the pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]

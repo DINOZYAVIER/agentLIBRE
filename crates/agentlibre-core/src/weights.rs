@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use crate::download::{self, FileSource};
 use crate::error;
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::settings::{self, ServerFile, WhisperFile};
-use crate::tr;
+use agentlibre_common::tr;
 
 /// What can go wrong resolving a weights file (AGL-039, D24c; AGL-050, D11;
 /// AGL-121, D66).

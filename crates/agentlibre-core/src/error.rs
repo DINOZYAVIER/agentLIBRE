@@ -278,6 +278,6 @@ impl Error {
 /// (AGL-058, D22).
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message(crate::i18n::Lang::En))
+        f.write_str(&self.message(agentlibre_common::i18n::Lang::En))
     }
 }

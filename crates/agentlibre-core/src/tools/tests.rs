@@ -250,7 +250,7 @@ fn the_workspace_tools_are_dispatched_by_name() {
 // The in-turn `forge` tool (AGL-008).
 
 use crate::forge::{self, Artifact, Workspace, task_spec};
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 
 /// A git repository initialized at `dir`.
 fn git_init(dir: &Path) {

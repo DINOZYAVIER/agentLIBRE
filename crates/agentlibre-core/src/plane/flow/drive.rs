@@ -17,10 +17,10 @@ use std::time::Duration;
 use crate::action::Outcome;
 use crate::error::Error;
 use crate::plane::error::Error as PlaneError;
-use crate::i18n::{m, Lang};
+use agentlibre_common::i18n::{m, Lang};
 use crate::machine::{Event, Progress};
 use crate::plane::{Text, Told};
-use crate::tr;
+use agentlibre_common::tr;
 
 use super::act;
 use super::journal::{self, Entry, FlowRun};

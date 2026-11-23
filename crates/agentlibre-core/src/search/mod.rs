@@ -17,12 +17,12 @@ use serde_json::Value as Json;
 
 use crate::action::Outcome;
 use crate::backend::ToolCall;
-use crate::i18n::{Lang, Msg};
+use agentlibre_common::i18n::{Lang, Msg};
 use crate::tools::signal_group;
 use crate::session::INTERRUPTED;
 use crate::settings::Search;
 use crate::tools::ToolResult;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// What the credential policy of `[search]` finds wrong with a file
 /// (AGL-019, D4; AGL-121, D66).

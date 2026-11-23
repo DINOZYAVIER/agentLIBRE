@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::error::Error;
 use crate::settings::error::Error as SettingsError;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::nix::{self, Section};
 use crate::style::{COLOR_KEYS, Role, Style};
 

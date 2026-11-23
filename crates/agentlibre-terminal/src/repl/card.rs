@@ -9,13 +9,13 @@
 use super::markdown;
 use super::text::{clean, hard_wrap, width, wrap_line};
 use crate::backend::ToolCall;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::records;
 use crate::settings::Detail;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// An event's notice as a block (AGL-099, D1): the label in the tool's
 /// color, the rest under the elbow — the look of the THINKING and RESULT

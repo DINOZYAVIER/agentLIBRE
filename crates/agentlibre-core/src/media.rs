@@ -15,8 +15,8 @@ use std::process::{Command, Stdio};
 use crate::backend::{Backend, Message};
 use crate::error;
 use crate::forge::sha256;
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// What goes wrong with a medium: its copy changed, a file of no kind agl
 /// takes, or `ffmpeg` and `ffprobe` failing on it (AGL-014; AGL-121, D66).

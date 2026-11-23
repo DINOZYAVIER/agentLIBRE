@@ -40,7 +40,6 @@ pub(crate) use agentlibre_core::{
     whisper,
     wsl,
 };
-pub(crate) use agentlibre_core::tr;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -53,7 +52,8 @@ use cli::args::Command;
 use cli::report::StderrReport;
 use error::{CoreError, Error};
 use function::Function;
-use i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
+use agentlibre_common::tr;
 use paths::Paths;
 use agentlibre_core::client::Remote;
 use agentlibre_proto as proto;

@@ -305,10 +305,10 @@ fn rehomed(
     key: &str,
     identity: &str,
     project: &Path,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<(PathBuf, String), Error> {
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let new = data.join(key);
     let mut hashes = store.hashes.clone();
     hashes.retain(|h| h != identity);
@@ -372,7 +372,7 @@ fn outside_data(data: &Path, dir: &Path) -> Result<(), Error> {
 pub fn resolve(
     data: &Path,
     cwd: &Path,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
@@ -434,7 +434,7 @@ pub fn locate(data: &Path, cwd: &Path) -> Result<Workspace, Error> {
 pub fn resolve_dir(
     data: &Path,
     dir: &Path,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
@@ -451,12 +451,12 @@ pub fn resolve_dir(
 fn resolve_among(
     data: &Path,
     projects: &[PathBuf],
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     auto_rehome: bool,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<(Workspace, Vec<String>), Error> {
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let found = stores(data)?;
     let workspace = |project: &Path,
                      identity: &str,
@@ -589,7 +589,7 @@ fn resolve_among(
 pub fn resolve_store(
     data: &Path,
     cwd: &Path,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     auto_rehome: bool,
 ) -> Result<(Workspace, Vec<String>), Error> {
     resolve(data, cwd, lang, auto_rehome, &|options| {
@@ -604,9 +604,9 @@ pub fn resolve_store(
 /// are missing: the workspace is materialized on its first write. A
 /// directory pre-created without a marker is adopted. Returns the line
 /// to print when a marker was written.
-pub fn materialize(ws: &Workspace, lang: crate::i18n::Lang) -> Result<Vec<String>, Error> {
-    use crate::i18n::m;
-    use crate::tr;
+pub fn materialize(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Result<Vec<String>, Error> {
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let marker_path = ws.dir.join(MARKER_FILE);
     // A plane's store is made by `agl plane new`, with its own file, and
     // takes no workspace's marker (AGL-077, D9, D16).
@@ -630,7 +630,7 @@ pub fn rehome_store(
     data: &Path,
     ws: &Workspace,
     store_name: &str,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Error> {
     let found = stores(data)?;
     let target = found
@@ -646,9 +646,9 @@ pub fn rehome_store(
 
 /// `forge rehome --new`: a fresh single-hash store at the current key.
 /// Returns the line naming it.
-pub fn rehome_new(ws: &Workspace, lang: crate::i18n::Lang) -> Result<String, Error> {
-    use crate::i18n::m;
-    use crate::tr;
+pub fn rehome_new(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Result<String, Error> {
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     fs::create_dir_all(&ws.dir)
         .map_err(|source| Error::Write { path: ws.dir.clone(), source })?;
     Marker {
@@ -1067,7 +1067,7 @@ pub fn project_of(
     paths: &crate::paths::Paths,
     cwd: &Path,
     auto_rehome: bool,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     ask: &dyn Fn(&[String]) -> Result<usize, Error>,
 ) -> Result<Workspace, Error> {
     let (ws, lines) = resolve(&paths.data, cwd, lang, auto_rehome, ask)?;
@@ -1123,7 +1123,7 @@ pub mod testutil {
 mod tests {
     use super::testutil::TempDir;
     use super::*;
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     use std::sync::{Arc, Mutex};
 
     const EN: Lang = Lang::En;

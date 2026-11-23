@@ -15,10 +15,10 @@ use crate::forge;
 use crate::forge::task_spec;
 use crate::forge::task_spec::GitFlag;
 use crate::forge::{Artifact, Header, Workspace};
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::paths::Paths;
 use crate::settings::UserFile;
-use crate::tr;
+use agentlibre_common::tr;
 use crate::outln;
 
 /// A `forge` command, parsed from the arguments after the word `forge`

@@ -13,14 +13,15 @@ use crate::records::{self, Record};
 use super::text::StreamWrap;
 use crate::agent::{Report, Sink};
 use crate::backend::{Prefill, PromptProgress, ToolCall};
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::phase::{Phase, Transition};
 use crate::session::{CutOff, Event, TransitionLine};
 use crate::settings::{Detail, ReplSettings};
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// A phase's name, in the dock and on the rule of a step (D135; AGL-045).
 pub fn label(phase: &Phase, lang: Lang) -> String {

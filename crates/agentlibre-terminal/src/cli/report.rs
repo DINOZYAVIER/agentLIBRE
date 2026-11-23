@@ -5,10 +5,10 @@ use std::io::{self, Write};
 use crate::action::Outcome;
 use crate::agent::{Report, Sink};
 use crate::backend::ToolCall;
-use crate::i18n::{self, Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::session::{CutOff, Event, ForgeKind};
 use crate::tools::{spec::call_summary, ToolResult};
-use crate::tr;
+use agentlibre_common::tr;
 
 /// How much of a command the progress line shows.
 const COMMAND_WIDTH: usize = 200;
@@ -178,7 +178,7 @@ pub fn result_summary(call: &ToolCall, result: &ToolResult, lang: Lang) -> Strin
     } else {
         result.content.lines().count()
     };
-    format!("{outcome}{ending}, {}", i18n::lines(lines, lang))
+    format!("{outcome}{ending}, {}", agentlibre_common::i18n::lines(lines, lang))
 }
 
 #[cfg(test)]

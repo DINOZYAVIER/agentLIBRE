@@ -403,7 +403,7 @@ mod tests {
     use crate::engine::{Autostart, Others};
     use crate::forge::testutil::TempDir;
     use crate::function::Function;
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     use crate::memory::StoreHome;
     use crate::search::NoSearch;
     use crate::session::StopReason;

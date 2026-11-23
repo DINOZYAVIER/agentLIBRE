@@ -1,7 +1,7 @@
 //! What can go wrong running a Function's machine (AGL-121, D66).
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// The machine's own error, wrapped by the core's `Error::Machine`
 /// (AGL-121, D66).

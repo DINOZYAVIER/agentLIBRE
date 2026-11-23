@@ -11,7 +11,7 @@ use crate::action::Value;
 use crate::cli::args::SessionShow;
 use crate::error::Error;
 use crate::error::CoreError;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::paths::Paths;
 use crate::session::{CommandRun, Event, Session};
 use crate::settings::UserFile;

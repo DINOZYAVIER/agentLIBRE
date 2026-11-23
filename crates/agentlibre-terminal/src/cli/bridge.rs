@@ -15,11 +15,11 @@ use crate::engine::{port_open, unit_active};
 use crate::error::Error;
 use crate::error::CoreError;
 use crate::engine::error::Error as EngineError;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::outln;
 use crate::paths::Paths;
 use crate::settings::{BridgeFile, UserFile};
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The bridge's unit: one a user.
 pub const UNIT: &str = "agentLIBRE-bridge";

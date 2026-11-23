@@ -7,9 +7,9 @@ use serde_json::{Value as Json, json};
 
 use crate::action::{Kind, Value};
 use crate::error;
-use crate::i18n::{Lang, Msg};
+use agentlibre_common::i18n::{Lang, Msg};
 use crate::nix::Section;
-use crate::tr;
+use agentlibre_common::tr;
 
 const NAME: &str = "{name}";
 const VALUE: &str = "{value}";
@@ -341,7 +341,7 @@ impl Error {
         };
         tr!(
             lang,
-            crate::i18n::m::PROBLEM_IN_PATH,
+            agentlibre_common::i18n::m::PROBLEM_IN_PATH,
             path = path.display(),
             key = key,
             problem = problem

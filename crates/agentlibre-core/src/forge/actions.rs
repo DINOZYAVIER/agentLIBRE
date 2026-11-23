@@ -9,7 +9,7 @@ use super::{Artifact, Header, Workspace};
 use crate::clock;
 use crate::error::Error;
 use crate::forge::error::Error as ForgeError;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 
 /// The artifact of the store of `ws` named `name`: the files are parsed
 /// one by one, the match is on the `name` field, the file is

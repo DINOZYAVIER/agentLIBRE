@@ -6,10 +6,10 @@
 use unicode_width::UnicodeWidthChar;
 
 use super::text::width;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::style::Role;
 use crate::theme::Theme;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The art, from the root file `splash` (D1).
 const ART: &str = include_str!("../../../../splash");

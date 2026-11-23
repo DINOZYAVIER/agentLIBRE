@@ -9,11 +9,11 @@ use super::{check_name, Function};
 use crate::error::Error;
 use super::error::Error as FunctionError;
 use crate::forge::Workspace;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::nix;
 use crate::paths::Paths;
 use crate::settings::{ServerFile, ServerKind, UserFile, function_name};
-use crate::tr;
+use agentlibre_common::tr;
 
 /// Where a Function comes from, in the order a run looks (AGL-028, D3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

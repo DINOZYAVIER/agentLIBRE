@@ -43,7 +43,8 @@ use crate::tty::is_yes;
 use crate::whisper;
 use crate::error::Error;
 use crate::error::CoreError;
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
 use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
@@ -52,7 +53,7 @@ use crate::status::{
 };
 use crate::style::Role;
 use crate::theme::Theme;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// A message that waits for its turn, with the media attached to it
 /// (AGL-014).

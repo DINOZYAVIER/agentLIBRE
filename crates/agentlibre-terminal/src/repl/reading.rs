@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use super::dock::grouped;
 use crate::backend::PromptProgress;
-use crate::i18n::{Lang, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::Lang;
 
 /// For this long after a figure of the server, the dock shows it as it is.
 const FRESH: Duration = Duration::from_millis(300);

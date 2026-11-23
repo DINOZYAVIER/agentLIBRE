@@ -19,7 +19,7 @@ use crate::engine::{Autostart, Engine, Others, ServerProgress, rebind_url, user_
 use crate::error::Error;
 use crate::forge::Workspace;
 use crate::function::Function;
-use crate::i18n::{m, Lang};
+use agentlibre_common::i18n::{m, Lang};
 use crate::machine::Machine;
 use crate::memory::{self, Home, MemoryAction, Write};
 use crate::nix;
@@ -33,7 +33,7 @@ use crate::status::compact_notice;
 use crate::stop::Stop;
 use crate::style::Role;
 use crate::tools::ForgeEnv;
-use crate::tr;
+use agentlibre_common::tr;
 use crate::weights;
 use crate::wsl;
 

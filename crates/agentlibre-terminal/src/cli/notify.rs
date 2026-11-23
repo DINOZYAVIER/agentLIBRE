@@ -6,7 +6,7 @@ use std::io;
 use std::process::{Command, ExitCode};
 
 use crate::error::Error;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 
 pub fn run(lang: Lang) -> Result<ExitCode, Error> {
     let exe = std::env::current_exe().map_err(|source| Error::NotifySpawn { source })?;

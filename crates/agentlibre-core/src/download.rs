@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error;
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::programs;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// What can go wrong fetching a weights file (AGL-050, D17; AGL-121, D66).
 #[derive(Debug)]

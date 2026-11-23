@@ -6,8 +6,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::i18n::{Lang, Msg, m};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg, m};
+use agentlibre_common::tr;
 
 /// The core's error.
 pub(crate) use agentlibre_core::error::Error as CoreError;

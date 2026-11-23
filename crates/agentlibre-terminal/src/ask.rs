@@ -3,7 +3,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use agentlibre_core::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 
 /// The answer to a question on a terminal (D9, D13; AGL-033): the
 /// question is a line, the answer a line of stdin, `y` or `yes` agrees.

@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// A plane's own error, wrapped by the core's `Error::Plane` (AGL-121, D66).
 #[derive(Debug)]

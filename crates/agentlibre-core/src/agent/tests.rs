@@ -411,7 +411,7 @@ fn agent_searching<'a>(
         workspace: &dir.0,
         context: 16384,
         forge: ForgeEnv {
-            lang: crate::i18n::Lang::En,
+            lang: agentlibre_common::i18n::Lang::En,
             auto_rehome: true,
             data: &dir.0,
             plane: None,

@@ -12,10 +12,11 @@ use crate::ask::ask_terminal;
 use crate::engine::*;
 use crate::error::Error;
 use crate::engine::error::Error as EngineError;
-use crate::i18n::{Lang, m, server as texts};
+use crate::i18n::server as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::settings::{ServerFile, ServerKind};
 use crate::outln;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// Runs a server command. `models` is the models directory.
 pub fn run(

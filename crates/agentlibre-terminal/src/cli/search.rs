@@ -14,10 +14,11 @@ use serde_json::{Map, Value};
 use crate::cli::args::SearchAction;
 use crate::error::Error;
 use crate::error::CoreError;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::paths::Paths;
 use crate::settings::{self, SearchCa, UserFile};
-use crate::{outln, tr};
+use crate::outln;
+use agentlibre_common::tr;
 
 /// Where the key and the certificate go when the user's `search` names no
 /// file of its own (AGL-043 F20), under the user's settings directory.

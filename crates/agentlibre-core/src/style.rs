@@ -2,8 +2,8 @@
 //! the role a piece of the screen is painted for and its default (D121, D122,
 //! D129). What paints them is the terminal's `theme` (AGL-067).
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// A style value such as `bold #7BD88F`, `dim` or `oklch(0.7 0.2 350)`.
 #[derive(Clone, Debug, PartialEq, Eq)]

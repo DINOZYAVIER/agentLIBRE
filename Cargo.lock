@@ -7,6 +7,7 @@ name = "agentLIBRE"
 version = "0.0.2"
 dependencies = [
  "agentlibre-bridge",
+ "agentlibre-common",
  "agentlibre-core",
  "agentlibre-proto",
  "libc",
@@ -39,10 +40,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentlibre-common"
+version = "0.0.2"
+
+[[package]]
 name = "agentlibre-core"
 version = "0.0.2"
 dependencies = [
  "agentlibre-client",
+ "agentlibre-common",
  "agentlibre-proto",
  "base64",
  "hex",
@@ -57,6 +63,7 @@ name = "agentlibre-notify"
 version = "0.0.2"
 dependencies = [
  "agentlibre-client",
+ "agentlibre-common",
  "agentlibre-core",
  "agentlibre-proto",
  "serde_json",

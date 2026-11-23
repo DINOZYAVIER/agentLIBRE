@@ -14,11 +14,12 @@ use super::term::Key;
 use super::transcript::{Screen, label};
 use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::phase::Phase;
 use crate::style::Role;
 use crate::theme::Theme;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The most input rows the dock shows.
 const MAX_INPUT_ROWS: usize = 6;

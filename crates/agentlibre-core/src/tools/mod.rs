@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::action::Outcome;
 use crate::clock;
 use crate::backend::ToolCall;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::session::{ForgeKind, INTERRUPTED};
 
 mod output;
@@ -358,11 +358,11 @@ pub fn forge(
 pub fn forge_run(
     ws: &crate::forge::Workspace,
     args: &ForgeArgs,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     output: &Output<'_>,
 ) -> (ToolResult, Option<ForgeWrite>) {
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     // A write of `kind` to the artifact the call named: the name matched
     // an artifact's `name` exactly, so it is the artifact's.
     let write = |result: Result<String, Refusal>, kind: ForgeKind, section: Option<String>| {
@@ -467,7 +467,7 @@ impl From<String> for Refusal {
 
 impl Refusal {
     /// The failed result the model reads.
-    fn told(self, lang: crate::i18n::Lang) -> ToolResult {
+    fn told(self, lang: agentlibre_common::i18n::Lang) -> ToolResult {
         match self {
             Refusal::Error(error) => forge_fail(error.message(lang)),
             Refusal::Text(text) => forge_fail(text),
@@ -476,7 +476,7 @@ impl Refusal {
 }
 
 /// The result of an action that gives its message or refuses.
-fn told(result: Result<String, Refusal>, lang: crate::i18n::Lang) -> ToolResult {
+fn told(result: Result<String, Refusal>, lang: agentlibre_common::i18n::Lang) -> ToolResult {
     match result {
         Ok(content) => done(content),
         Err(refusal) => refusal.told(lang),
@@ -521,7 +521,7 @@ fn forge_list(ws: &crate::forge::Workspace) -> Result<String, Refusal> {
 fn forge_show(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     output: &Output<'_>,
 ) -> Result<String, Refusal> {
     use crate::forge;
@@ -536,10 +536,10 @@ fn forge_show(
 fn forge_new(
     ws: &crate::forge::Workspace,
     title: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let title = title.as_deref().ok_or_else(|| missing_field(lang, "new", "title"))?;
     // The marker line of a store materialized by the write is not tool
     // output.
@@ -558,12 +558,12 @@ fn forge_edit(
     name: &Option<String>,
     old: &Option<String>,
     new: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
     use crate::forge;
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "edit", "name"))?;
     // An empty `old` would match everywhere: it is no `old`.
     let old = old
@@ -658,12 +658,12 @@ fn forge_append(
     name: &Option<String>,
     section: &Option<String>,
     text: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
     use crate::forge;
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "append", "name"))?;
     let section = section
         .as_deref()
@@ -730,11 +730,11 @@ fn forge_status(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
     state: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::error::Error;
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "status", "name"))?;
     let state = state.as_deref().ok_or_else(|| missing_field(lang, "status", "state"))?;
     let changed = crate::forge::change_status(ws, name, state).map_err(|error| match error {
@@ -760,11 +760,11 @@ fn forge_status(
 fn forge_remove(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
     use crate::forge::task_spec::Status;
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "remove", "name"))?;
     let (artifact, status) = task_spec_of(ws, name, "remove", lang)?;
     // D5, AGL-032: the live work is protected — an in-progress spec is
@@ -803,12 +803,12 @@ fn forge_rename(
     ws: &crate::forge::Workspace,
     name: &Option<String>,
     new: &Option<String>,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
     use crate::error::Error;
     use crate::forge;
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "rename", "name"))?;
     // `new` may be empty (the `edit` deletion) — empty is no name.
     let new = new
@@ -871,13 +871,13 @@ fn forge_rename(
 /// The forge tool's refusal of a write on a non-`task-spec` artifact
 /// (AGL-008): the writes apply to the `task-spec` type only.
 fn not_task_spec(
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
     name: &str,
     type_name: String,
     action: &str,
 ) -> Refusal {
-    use crate::i18n::m;
-    use crate::tr;
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     tr!(
         lang,
         m::FORGE_TOOL_NOT_TASK_SPEC,
@@ -894,7 +894,7 @@ fn task_spec_of(
     ws: &crate::forge::Workspace,
     name: &str,
     action: &str,
-    lang: crate::i18n::Lang,
+    lang: agentlibre_common::i18n::Lang,
 ) -> Result<(crate::forge::Artifact, crate::forge::task_spec::Status), Refusal> {
     use crate::forge::task_spec::{self, Status};
     let artifact = crate::forge::find_artifact(ws, name)?;
@@ -907,9 +907,9 @@ fn task_spec_of(
 }
 
 /// The forge tool's `missing field` refusal.
-fn missing_field(lang: crate::i18n::Lang, action: &str, field: &str) -> Refusal {
-    use crate::i18n::m;
-    use crate::tr;
+fn missing_field(lang: agentlibre_common::i18n::Lang, action: &str, field: &str) -> Refusal {
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
     // The fields the action takes: the model that sent a wrong one
     // learns the right ones.
     let fields = match action {

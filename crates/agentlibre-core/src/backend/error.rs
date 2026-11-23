@@ -1,9 +1,11 @@
 //! What can go wrong reaching the model's server: the connection, its
 //! status and reply, its certificate, a missing projector (AGL-121, D66).
 
-use crate::i18n::{Lang, Msg, server};
+use crate::i18n::server;
+
+use agentlibre_common::i18n::{Lang, Msg};
 use crate::settings::ServerKind;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The backend's own error, wrapped by the core's `Error::Backend`
 /// (AGL-121, D66).

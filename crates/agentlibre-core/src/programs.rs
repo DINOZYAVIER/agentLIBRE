@@ -10,8 +10,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// A helper program of agl's package cannot be found (AGL-040; AGL-121,
 /// D75).

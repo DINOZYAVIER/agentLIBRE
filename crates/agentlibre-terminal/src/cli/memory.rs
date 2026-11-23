@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use crate::memory::MemoryAction;
 use crate::error::Error;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::memory;
 use crate::paths::Paths;
 use crate::settings::UserFile;

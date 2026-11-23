@@ -4,8 +4,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::i18n::{Lang, Msg};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg};
+use agentlibre_common::tr;
 
 /// The engine's own error, wrapped by the core's `Error::Engine`
 /// (AGL-121, D66).

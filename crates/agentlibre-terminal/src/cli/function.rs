@@ -8,10 +8,10 @@ use std::process::ExitCode;
 use crate::error::Error;
 use crate::forge;
 use crate::function::Function;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::paths::Paths;
 use crate::settings::{self, UserFile};
-use crate::tr;
+use agentlibre_common::tr;
 use crate::outln;
 
 use super::args::FunctionAction;

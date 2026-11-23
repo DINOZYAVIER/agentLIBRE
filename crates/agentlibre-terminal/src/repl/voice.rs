@@ -19,10 +19,10 @@ use super::transcript::Screen;
 use super::Notice;
 use crate::whisper::{Dictation, Draft};
 use crate::error::CoreError as Error;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::record::Recording;
 use crate::theme::Theme;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// How often a recording is looked at: its time is shown and its end at
 /// the limit is seen.

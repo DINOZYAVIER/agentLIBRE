@@ -18,14 +18,15 @@ use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
 use super::ModeKeys;
 use crate::backend::ToolCall;
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
 use crate::session::{Event, TransitionLine};
 use crate::settings::Detail;
 use crate::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The rows the screen keeps for the blank one and the hint (D8).
 const RESERVE: usize = 2;

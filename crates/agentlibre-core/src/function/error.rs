@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use crate::grammar::pattern::PatternError;
-use crate::i18n::{Lang, Msg, m};
-use crate::tr;
+use agentlibre_common::i18n::{Lang, Msg, m};
+use agentlibre_common::tr;
 
 /// A Function's own error, wrapped by the core's `Error::Function`
 /// (AGL-121, D66).

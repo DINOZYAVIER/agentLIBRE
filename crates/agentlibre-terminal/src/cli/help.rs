@@ -2,7 +2,7 @@
 //! command alone, its lines of usage and its section.
 
 use crate::cli::args::HelpTopic;
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 
 /// The usage and the section of each command, in the order of the help.
 const COMMANDS: [(HelpTopic, Msg, Msg); 11] = [

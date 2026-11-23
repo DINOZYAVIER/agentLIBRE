@@ -14,7 +14,7 @@ use crate::cli::commands;
 use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::error::CoreError;
-use crate::i18n::{Lang, m};
+use agentlibre_common::i18n::{Lang, m};
 use crate::backend::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
@@ -24,7 +24,7 @@ use crate::session::{CommandRun, Event, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
-use crate::tr;
+use agentlibre_common::tr;
 use crate::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {

@@ -10,7 +10,7 @@ use agentlibre_client::Client;
 use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::error::Error;
-use crate::i18n::Lang;
+use agentlibre_common::i18n::Lang;
 use crate::paths::Paths;
 
 /// Connects to the daemon of `paths`, which is started when none answers

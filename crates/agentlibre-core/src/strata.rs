@@ -14,9 +14,9 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 use crate::error;
-use crate::i18n::{Lang, Msg, m};
+use agentlibre_common::i18n::{Lang, Msg, m};
 use crate::settings::ServerFile;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// The folder of the Strata packages, by variant (D20).
 pub const STRATA_VAR: &str = "AGENTLIBRE_STRATA";

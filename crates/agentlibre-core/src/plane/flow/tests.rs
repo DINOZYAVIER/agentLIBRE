@@ -550,7 +550,7 @@ fn told(said: crate::plane::Text) -> String {
 fn a_verb_answers_what_the_flow_does_and_where_it_stands() {
     let dir = TempDir::new();
     read(&dir, WORK).unwrap();
-    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, crate::i18n::Lang::En, None);
+    let run = |verb: Verb| drive::run(&dir.0, &dir.0, &verb, agentlibre_common::i18n::Lang::En, None);
     assert_eq!(told(run(Verb::List)), "work: not started");
     assert_eq!(
         told(run(Verb::Start { name: "work".into() })).replace('\n', " | "),
@@ -658,7 +658,7 @@ const TALK: &str = r#"{ agl, ... }: {
 
 #[test]
 fn a_say_waits_until_its_wake_is_delivered() {
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     let dir = TempDir::new();
     let flows = read(&dir, TALK).unwrap();
     let decl = flows.find("talk").unwrap();
@@ -719,7 +719,7 @@ fn a_say_table_overrides_the_wakes_line() {
 #[test]
 fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
     use super::holder::{self, Letter, Need};
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     use std::time::Duration;
 
     let dir = TempDir::new();
@@ -760,7 +760,7 @@ fn the_holder_asks_once_for_each_wake_and_records_the_delivery() {
 #[test]
 fn a_review_verdict_moves_the_flow_and_names_its_session() {
     use super::holder::{self, Letter, Need};
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     use std::time::Duration;
 
     let dir = TempDir::new();
@@ -810,7 +810,7 @@ const GATE: &str = r#"{ agl, ... }: {
 
 #[test]
 fn a_nudge_delivers_where_the_state_names_it() {
-    use crate::i18n::Lang;
+    use agentlibre_common::i18n::Lang;
     let dir = TempDir::new();
     let flows = read(&dir, GATE).unwrap();
     let decl = flows.find("gate").unwrap();
@@ -901,7 +901,7 @@ fn a_states_command_moves_the_flow_when_its_word_comes() {
     )
     .unwrap();
     let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
-    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    let ask = |verb: Verb| told(holder.ask(verb, agentlibre_common::i18n::Lang::En));
     assert_eq!(ask(Verb::Start { name: "quick".into() }), "quick: build\n  started build");
     until(|| {
         ask(Verb::Status { name: "quick".into() })
@@ -914,7 +914,7 @@ fn a_stop_ends_the_whole_group_and_writes_stopped_alone() {
     let dir = TempDir::new();
     fs::write(dir.0.join(FLOW_FILE), SLEEP).unwrap();
     let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
-    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    let ask = |verb: Verb| told(holder.ask(verb, agentlibre_common::i18n::Lang::En));
     // `start` answers at once, where the command stands (D35).
     assert_eq!(ask(Verb::Start { name: "long".into() }), "long: build\n  started build");
     until(|| pid_of(&dir, "pid").is_some() && pid_of(&dir, "child").is_some());
@@ -956,7 +956,7 @@ fn a_dropped_error_shows_as_a_warning_until_a_clean_pass() {
     let dir = TempDir::new();
     read(&dir, WORK).unwrap();
     let holder = holder::Holder::spawn(dir.0.clone(), dir.0.clone(), None);
-    let ask = |verb: Verb| told(holder.ask(verb, crate::i18n::Lang::En));
+    let ask = |verb: Verb| told(holder.ask(verb, agentlibre_common::i18n::Lang::En));
     ask(Verb::Start { name: "work".into() });
     until(|| ask(Verb::Status { name: "work".into() }).contains("check"));
     // The journal goes unwritable: a verdict arrives and cannot be written.

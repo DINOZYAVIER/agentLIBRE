@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use crate::action::{Outcome, Value};
 use crate::backend::ToolCall;
-use crate::i18n::{Lang, m, repl as texts};
+use crate::i18n::repl as texts;
+use agentlibre_common::i18n::{Lang, m};
 use crate::media::{Kind as MediaKind, Media};
 use crate::memory::Kind as MemoryKind;
 use crate::session::{Event, ForgeKind, TransitionLine};
 use crate::style::Role;
 use crate::tools::ToolResult;
-use crate::tr;
+use agentlibre_common::tr;
 
 /// A phase of a step and its time, in the order they were spent (D2).
 #[derive(Clone, Debug, PartialEq)]
