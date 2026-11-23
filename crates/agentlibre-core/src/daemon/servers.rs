@@ -59,17 +59,17 @@ impl Daemon {
             state
                 .clocks
                 .iter()
-                .filter(|(url, clock)| {
+                .filter(|(key, clock)| {
                     let busy = state
                         .sessions
                         .values()
-                        .any(|entry| &entry.opened.server_url == *url && entry.busy);
+                        .any(|entry| &entry.clock == *key && entry.busy);
                     due(clock.idle, clock.last.elapsed(), busy)
                 })
-                .map(|(url, clock)| (url.clone(), clock.clone()))
+                .map(|(key, clock)| (key.clone(), clock.clone()))
                 .collect()
         };
-        for (url, clock) in due {
+        for (key, clock) in due {
             // A child agl owns stops first; else the unit of the project.
             if let Some(engine) = clock.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 let pid = engine.pid();
@@ -84,7 +84,7 @@ impl Daemon {
             }
             // Rewind: the clock is spent, and only a running server earns
             // another stop. A turn rewinds it sooner (in `tell`).
-            if let Some(clock) = self.lock().clocks.get_mut(&url) {
+            if let Some(clock) = self.lock().clocks.get_mut(&key) {
                 clock.last = Instant::now();
             }
         }
@@ -134,9 +134,10 @@ impl Daemon {
             .values()
             .map(|entry| entry.opened.server_url.clone())
             .collect();
-        // Its clock goes with it (AGL-120, D2): with no session on the url,
-        // nothing rewinds the clock, and D16 has already stopped the engine.
-        state.clocks.retain(|url, _| used.contains(url));
+        // Its clock goes with it (AGL-120, D2): with no session on the
+        // engine, nothing rewinds the clock, and D16 has already stopped it.
+        let clocked: HashSet<String> = state.sessions.values().map(|entry| entry.clock.clone()).collect();
+        state.clocks.retain(|key, _| clocked.contains(key));
         let runtime = self.paths.runtime.clone();
         let (keep, stop): (Vec<_>, Vec<_>) =
             std::mem::take(&mut state.engines).into_iter().partition(|(url, _, _)| used.contains(url));

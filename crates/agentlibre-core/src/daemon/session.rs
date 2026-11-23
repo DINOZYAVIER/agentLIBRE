@@ -149,7 +149,12 @@ impl Daemon {
         // The clock of D2: a server stops after `idle_stop` seconds
         // without a turn; 0, an external server (AGL-052, D4) has none.
         // The unit to stop is the id's (AGL-120, D6), as `Autostart::unit`
-        // names it: two servers of one project stop their own.
+        // names it: two servers of one project stop their own. The clock is
+        // the engine's, keyed by that unit: a session that moved to a fresh
+        // port in the middle of a turn, and one opened there after it, share
+        // the one clock of the one engine (AGL-121, D43).
+        let unit = project.unit_key().map(|_| unit_name(&settings.server));
+        let clock_key = unit.clone().unwrap_or_else(|| reply.server_url.clone());
         let clock = settings
             .server
             .idle_stop
@@ -157,7 +162,7 @@ impl Daemon {
             .map(|seconds| Clock {
                 idle: Duration::from_secs(seconds),
                 last: Instant::now(),
-                unit: project.unit_key().map(|_| unit_name(&settings.server)),
+                unit,
                 engine: Arc::clone(&engine),
                 dir: project.dir.clone(),
             });
@@ -173,15 +178,15 @@ impl Daemon {
             voice,
             engine,
             project_dir: project.dir.clone(),
+            clock: clock_key.clone(),
         };
-        let url = reply.server_url.clone();
         let mut state = self.lock();
         state.sessions.insert(id.clone(), entry);
         if let Some(dir) = &plane_dir {
             state.follow(dir, &id, true);
         }
         if let Some(clock) = clock {
-            state.clocks.insert(url, clock);
+            state.clocks.insert(clock_key, clock);
         }
         drop(state);
         // A session of the plane opened: wakes that missed it may land now (D20).
@@ -211,9 +216,9 @@ impl Daemon {
             return id.to_owned();
         };
         let mut targets: HashSet<u64> = entry.subscribers.clone();
-        // The url of the server this session runs on, for its idle clock
-        // (AGL-120, D2), taken before `entry`'s borrow of `state` ends.
-        let server_url = entry.opened.server_url.clone();
+        // The key of its server's idle clock (AGL-120, D2), taken before
+        // `entry`'s borrow of `state` ends.
+        let clock_key = entry.clock.clone();
         let mut next = id.to_owned();
         let mut origin = None;
         let mut turn_ended = false;
@@ -266,7 +271,7 @@ impl Daemon {
         // through the pair the wake left (D22).
         if turn_ended {
             // Any turn on a server rewinds its idle clock (AGL-120, D2).
-            if let Some(clock) = state.clocks.get_mut(&server_url) {
+            if let Some(clock) = state.clocks.get_mut(&clock_key) {
                 clock.last = Instant::now();
             }
             // `state` is held here already: collect the due pairs as owned

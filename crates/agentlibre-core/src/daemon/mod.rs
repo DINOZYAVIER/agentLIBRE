@@ -254,6 +254,9 @@ struct Entry {
     /// The engine its run launched, if it did (D16), and its record's store.
     engine: Arc<Mutex<Option<Engine>>>,
     project_dir: PathBuf,
+    /// The key of its server's idle clock (AGL-120, D2, D6): the engine's
+    /// unit, whichever url the session reached it at, else that url.
+    clock: String,
 }
 
 impl Daemon {
