@@ -16,11 +16,11 @@ use super::editor::Outcome;
 use super::term::Key;
 use super::card::notice_lines;
 use super::transcript::Screen;
+use super::Notice;
 use crate::whisper::{Dictation, Draft};
 use crate::error::Error;
 use crate::i18n::{Lang, m};
 use crate::record::Recording;
-use crate::style::Role;
 use crate::theme::Theme;
 use crate::tr;
 
@@ -253,10 +253,10 @@ impl VoiceInput {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn notice(&self, text: &str, role: Role) {
+    fn notice(&self, text: &str, kind: Notice) {
         let columns = self.dock.columns();
         self.dock
-            .print(&notice_lines(&self.theme, text, columns, role));
+            .print(&notice_lines(&self.theme, text, columns, kind.role()));
     }
 
     /// Whether a recording is going.
@@ -307,7 +307,7 @@ impl VoiceInput {
         // What takes the recording must be set up: told before the human
         // speaks.
         if let Err(error) = self.dictation.ready() {
-            self.notice(&error.message(self.lang), Role::StatusFailure);
+            self.notice(&error.message(self.lang), Notice::Failure);
             return;
         }
         // With a draft engine the recording chunks (D5, D6); without it
@@ -325,16 +325,16 @@ impl VoiceInput {
                 // the plain one: the dictation matters more than the
                 // draft.
                 if !chunking {
-                    self.notice(&error.message(self.lang), Role::StatusFailure);
+                    self.notice(&error.message(self.lang), Notice::Failure);
                     return;
                 }
                 match (self.recorder)(self.limit) {
                     Ok(recording) => {
-                        self.notice(&error.message(self.lang), Role::Muted);
+                        self.notice(&error.message(self.lang), Notice::Info);
                         recording
                     }
                     Err(error) => {
-                        self.notice(&error.message(self.lang), Role::StatusFailure);
+                        self.notice(&error.message(self.lang), Notice::Failure);
                         return;
                     }
                 }
@@ -350,7 +350,7 @@ impl VoiceInput {
             let me = self.clone();
             thread::spawn(move || {
                 me.dictation
-                    .warm_up(&mut |line| me.notice(line, Role::Muted))
+                    .warm_up(&mut |line| me.notice(line, Notice::Info))
             })
         };
         let worker = self.draft.clone().map(DraftWorker::start);
@@ -494,7 +494,7 @@ impl VoiceInput {
             match result {
                 Ok(text) if text.is_empty() => {
                     // Silence never sends (AGL-123, D8).
-                    me.notice(tr!(me.lang, m::VOICE_NOTHING_HEARD), Role::StatusPending);
+                    me.notice(tr!(me.lang, m::VOICE_NOTHING_HEARD), Notice::Pending);
                 }
                 // Ask: the text goes in at the cursor, where the human was
                 // writing (D3). Auto: it goes whole and the message sends
@@ -511,7 +511,7 @@ impl VoiceInput {
                         }
                     }
                 }
-                Err(error) => me.notice(&error.message(me.lang), Role::StatusFailure),
+                Err(error) => me.notice(&error.message(me.lang), Notice::Failure),
             }
         });
     }
@@ -574,7 +574,7 @@ impl VoiceInput {
         }
         let text = self
             .dictation
-            .transcribe(&wav, None, &mut |line| self.notice(line, Role::Muted))?;
+            .transcribe(&wav, None, &mut |line| self.notice(line, Notice::Info))?;
         Ok(text.trim().to_owned())
     }
 

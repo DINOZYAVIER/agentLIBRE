@@ -347,6 +347,39 @@ struct InspectData {
     read_id: String,
 }
 
+/// What a notice means. Its color and whether it fails the message follow
+/// from this, not the other way round (AGL-121, D16 b).
+#[derive(Clone, Copy)]
+pub enum Notice {
+    /// Informational: help, a status line, progress. Never a failure.
+    Info,
+    /// A command used wrong.
+    Usage,
+    /// The thing a command asked for is held by another session.
+    Busy,
+    /// Nothing to act on right now: an empty clipboard, silence.
+    Pending,
+    /// A failure: a command or the model errored.
+    Failure,
+}
+
+impl Notice {
+    /// The role a notice of this kind is painted with.
+    fn role(self) -> Role {
+        match self {
+            Notice::Info => Role::Muted,
+            Notice::Usage => Role::StatusWarn,
+            Notice::Busy | Notice::Pending => Role::StatusPending,
+            Notice::Failure => Role::StatusFailure,
+        }
+    }
+
+    /// Whether a notice of this kind marks the message as failed.
+    fn failed(self) -> bool {
+        !matches!(self, Notice::Info)
+    }
+}
+
 /// Reacts to what the user does at the prompt (D118, D120).
 struct Input {
     dock: Arc<Dock>,
@@ -380,14 +413,14 @@ struct Input {
 }
 
 impl Input {
-    fn notice(&self, text: &str, role: Role) {
+    fn notice(&self, text: &str, kind: Notice) {
         if let Some(said) = self.said.lock().unwrap().as_mut() {
             said.lines.push(text.to_owned());
-            said.failed |= matches!(role, Role::StatusFailure | Role::StatusPending);
+            said.failed |= kind.failed();
         }
         let columns = self.dock.columns();
         self.dock
-            .print(&notice_lines(&self.theme, text, columns, role));
+            .print(&notice_lines(&self.theme, text, columns, kind.role()));
     }
 
     /// Enter.
@@ -448,7 +481,7 @@ impl Input {
     /// says so (AGL-060, D6).
     fn declined(&self, question: Question) {
         let text = tr!(self.lang, m::MEMORY_NOT_REMOVED, name = question.name);
-        self.notice(&text, Role::Muted);
+        self.notice(&text, Notice::Info);
         self.control.lock().commands.push(CommandRun {
             line: question.line,
             failed: false,
@@ -464,7 +497,7 @@ impl Input {
         let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
         match name {
             "/help" => {
-                self.notice(&help_text(self.lang, true), Role::Muted);
+                self.notice(&help_text(self.lang, true), Notice::Info);
                 false
             }
             "/status" => {
@@ -474,7 +507,7 @@ impl Input {
                 };
                 self.notice(
                     &status_text(&self.facts, &info, reasoning, self.lang),
-                    Role::Muted,
+                    Notice::Info,
                 );
                 false
             }
@@ -484,7 +517,7 @@ impl Input {
                     None => {
                         let level = self.control.lock().reasoning;
                         let shown = texts::reasoning_level(level, self.lang);
-                        self.notice(&tr!(self.lang, m::THINK_LEVEL, level = shown), Role::Muted);
+                        self.notice(&tr!(self.lang, m::THINK_LEVEL, level = shown), Notice::Info);
                     }
                     Some(value) => match ReasoningLevel::parse(value) {
                         Some(level) => {
@@ -492,12 +525,12 @@ impl Input {
                             let shown = texts::reasoning_level(Some(level), self.lang);
                             self.notice(
                                 &tr!(self.lang, m::THINK_LEVEL, level = shown),
-                                Role::Muted,
+                                Notice::Info,
                             );
                         }
                         None => self.notice(
                             &tr!(self.lang, m::REASONING_BAD, value = value),
-                            Role::StatusFailure,
+                            Notice::Failure,
                         ),
                     },
                 }
@@ -511,7 +544,7 @@ impl Input {
                     .or_else(|| path.strip_prefix('\'').and_then(|p| p.strip_suffix('\'')))
                     .unwrap_or(path);
                 if path.is_empty() {
-                    self.notice(tr!(self.lang, m::ATTACH_USAGE), Role::StatusPending);
+                    self.notice(tr!(self.lang, m::ATTACH_USAGE), Notice::Usage);
                 } else {
                     self.attach_files(&[std::path::PathBuf::from(path)]);
                 }
@@ -519,7 +552,7 @@ impl Input {
             }
             "/remember" => match parse_remember(trimmed["/remember".len()..].trim()) {
                 Remember::Usage => {
-                    self.notice(tr!(self.lang, m::REMEMBER_USAGE), Role::StatusPending);
+                    self.notice(tr!(self.lang, m::REMEMBER_USAGE), Notice::Usage);
                     false
                 }
                 // The entry is written by the main thread, which holds the
@@ -534,7 +567,7 @@ impl Input {
                         drop(inner);
                         self.notice(
                             &tr!(self.lang, m::BUSY, name = "/remember"),
-                            Role::StatusPending,
+                            Notice::Busy,
                         );
                         false
                     } else {
@@ -555,13 +588,13 @@ impl Input {
             "/rename" => {
                 let text = trimmed["/rename".len()..].trim();
                 if text.is_empty() {
-                    self.notice(tr!(self.lang, m::RENAME_USAGE), Role::StatusPending);
+                    self.notice(tr!(self.lang, m::RENAME_USAGE), Notice::Usage);
                     return false;
                 }
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Notice::Busy);
                     return false;
                 }
                 inner.requests.push(Request::Rename(text.to_owned()));
@@ -575,13 +608,13 @@ impl Input {
             "/memory" => {
                 let words = trimmed.split_whitespace().skip(1).map(str::to_owned);
                 let Ok(action) = memory_action(words) else {
-                    self.notice(tr!(self.lang, m::MEMORY_USAGE), Role::StatusPending);
+                    self.notice(tr!(self.lang, m::MEMORY_USAGE), Notice::Usage);
                     return false;
                 };
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Notice::Busy);
                     return false;
                 }
                 inner.requests.push(Request::Memory(trimmed.to_owned(), action));
@@ -597,7 +630,7 @@ impl Input {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Notice::Busy);
                     return false;
                 }
                 match plane {
@@ -625,7 +658,7 @@ impl Input {
                     match word {
                         "show" => self.function_show(tail.trim()),
                         "new" => self.function_new(tail),
-                        _ => self.notice(tr!(self.lang, m::FUNCTION_EDIT_GONE), Role::StatusPending),
+                        _ => self.notice(tr!(self.lang, m::FUNCTION_EDIT_GONE), Notice::Usage),
                     }
                     return false;
                 }
@@ -633,7 +666,7 @@ impl Input {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Notice::Busy);
                     return false;
                 }
                 match function {
@@ -648,7 +681,7 @@ impl Input {
                 let mut inner = self.control.lock();
                 if inner.busy() {
                     drop(inner);
-                    self.notice(&tr!(self.lang, m::BUSY, name = name), Role::StatusPending);
+                    self.notice(&tr!(self.lang, m::BUSY, name = name), Notice::Busy);
                     return false;
                 }
                 if name == "/new" {
@@ -666,7 +699,7 @@ impl Input {
             _ => {
                 self.notice(
                     &tr!(self.lang, m::UNKNOWN_COMMAND, name = name),
-                    Role::StatusPending,
+                    Notice::Usage,
                 );
                 false
             }
@@ -677,7 +710,7 @@ impl Input {
     /// whose name is given, and the file a run loads it from.
     fn function_show(&self, name: &str) {
         if name.is_empty() {
-            self.notice(tr!(self.lang, m::FUNCTION_SHOW_USAGE), Role::StatusPending);
+            self.notice(tr!(self.lang, m::FUNCTION_SHOW_USAGE), Notice::Usage);
             return;
         }
         let shown = self
@@ -686,10 +719,10 @@ impl Input {
             .and_then(|text| Ok((text, self.catalog.file(name)?.path)));
         match shown {
             Ok((text, path)) => {
-                self.notice(&text, Role::Muted);
-                self.notice(&path.display().to_string(), Role::Muted);
+                self.notice(&text, Notice::Info);
+                self.notice(&path.display().to_string(), Notice::Info);
             }
-            Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
+            Err(error) => self.notice(&error.message(self.lang), Notice::Failure),
         }
     }
 
@@ -699,7 +732,7 @@ impl Input {
     fn function_new(&self, rest: &str) {
         let mut words = rest.split_whitespace();
         let (Some(name), from) = (words.next(), words.next()) else {
-            self.notice(tr!(self.lang, m::FUNCTION_NEW_USAGE), Role::StatusPending);
+            self.notice(tr!(self.lang, m::FUNCTION_NEW_USAGE), Notice::Usage);
             return;
         };
         let source = from.unwrap_or(&self.catalog.current);
@@ -716,9 +749,9 @@ impl Input {
                     source = source,
                     path = path.display()
                 ),
-                Role::Muted,
+                Notice::Info,
             ),
-            Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
+            Err(error) => self.notice(&error.message(self.lang), Notice::Failure),
         }
     }
 
@@ -733,11 +766,11 @@ impl Input {
                     let placeholder = self.control.attach(source);
                     self.notice(
                         &tr!(self.lang, m::ATTACHED, placeholder = placeholder, name = name),
-                        Role::Muted,
+                        Notice::Info,
                     );
                     placeholders.push(placeholder);
                 }
-                Err(error) => self.notice(&error.message(self.lang), Role::StatusFailure),
+                Err(error) => self.notice(&error.message(self.lang), Notice::Failure),
             }
         }
         if !placeholders.is_empty() {
@@ -764,7 +797,7 @@ impl Input {
             Clip::Text(text) => {
                 self.dock.key(Key::Paste(text));
             }
-            Clip::Empty => self.notice(tr!(self.lang, m::CLIPBOARD_EMPTY), Role::StatusPending),
+            Clip::Empty => self.notice(tr!(self.lang, m::CLIPBOARD_EMPTY), Notice::Pending),
         }
     }
 
@@ -898,7 +931,7 @@ impl Input {
                 if self.control.lock().busy() {
                     self.notice(
                         &tr!(self.lang, m::BUSY, name = "Ctrl-D"),
-                        Role::StatusPending,
+                        Notice::Busy,
                     );
                 } else {
                     self.end_of_input();
