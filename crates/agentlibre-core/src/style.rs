@@ -2,6 +2,9 @@
 //! the role a piece of the screen is painted for and its default (D121, D122,
 //! D129). What paints them is the terminal's `theme` (AGL-067).
 
+use crate::i18n::{Lang, Msg};
+use crate::tr;
+
 /// A style value such as `bold #7BD88F`, `dim` or `oklch(0.7 0.2 350)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Style {
@@ -18,6 +21,31 @@ pub enum StyleError {
     /// `oklch(...)` needs three numbers, lightness in 0..1, chroma >= 0.
     Oklch,
 }
+
+impl StyleError {
+    /// The message of `self` in `lang` (AGL-121, D66).
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::Empty => tr!(lang, STYLE_EMPTY).to_string(),
+            Self::Color(color) => tr!(lang, STYLE_COLOR, color = color),
+            Self::Oklch => tr!(lang, STYLE_OKLCH).to_string(),
+        }
+    }
+}
+
+/// `StyleError`'s problems, for `Error::InvalidStyle`.
+const STYLE_EMPTY: Msg = Msg {
+    en: "a style cannot be empty",
+    uk: "стиль не може бути порожнім",
+};
+const STYLE_COLOR: Msg = Msg {
+    en: "`{color}` is not #RRGGBB or oklch(L C H)",
+    uk: "`{color}` не є #RRGGBB або oklch(L C H)",
+};
+const STYLE_OKLCH: Msg = Msg {
+    en: "oklch needs three numbers, lightness 0..1 and chroma >= 0",
+    uk: "oklch потребує трьох чисел, яскравість 0..1, насиченість >= 0",
+};
 
 impl Style {
     /// Parses a foreground style, or a background one when `background`.

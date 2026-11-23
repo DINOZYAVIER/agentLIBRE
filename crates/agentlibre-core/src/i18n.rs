@@ -6,7 +6,6 @@ use crate::error::{Error, Expected, FunctionProblem, NameProblem, ServerOwner};
 use crate::function::Function;
 use crate::grammar::pattern::{PatternError, PatternErrorKind};
 use crate::session::StopReason;
-use crate::style::StyleError;
 
 /// A language of CLI messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -952,24 +951,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const INVALID_STYLE: Msg = Msg {
         en: "invalid style `{value}` for `{key}` in {path}: {problem}",
         uk: "некоректний стиль `{value}` для `{key}` у {path}: {problem}",
-    };
-
-    /// What is wrong with a style, for `INVALID_STYLE`.
-    pub const STYLE_EMPTY: Msg = Msg {
-        en: "a style cannot be empty",
-        uk: "стиль не може бути порожнім",
-    };
-
-    /// What is wrong with a style, for `INVALID_STYLE`.
-    pub const STYLE_COLOR: Msg = Msg {
-        en: "`{color}` is not #RRGGBB or oklch(L C H)",
-        uk: "`{color}` не є #RRGGBB або oklch(L C H)",
-    };
-
-    /// What is wrong with a style, for `INVALID_STYLE`.
-    pub const STYLE_OKLCH: Msg = Msg {
-        en: "oklch needs three numbers, lightness 0..1 and chroma >= 0",
-        uk: "oklch потребує трьох чисел, яскравість 0..1, насиченість >= 0",
     };
 
     /// `Error::NotPositive`.
@@ -3181,11 +3162,7 @@ impl Error {
                     path = path.display(),
                     key = key,
                     value = value,
-                    problem = match problem {
-                        StyleError::Empty => tr!(lang, m::STYLE_EMPTY).to_string(),
-                        StyleError::Color(color) => tr!(lang, m::STYLE_COLOR, color = color),
-                        StyleError::Oklch => tr!(lang, m::STYLE_OKLCH).to_string(),
-                    }
+                    problem = problem.message(lang)
                 )
             }
             Error::NotPositive { path, key } => {
