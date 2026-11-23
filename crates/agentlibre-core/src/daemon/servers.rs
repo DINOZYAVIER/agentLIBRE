@@ -37,9 +37,9 @@ impl Daemon {
                             .is_ok_and(|workspace| workspace == dir)
                 })
                 .map(|(_, entry)| Arc::clone(&entry.voice))
-                .ok_or_else(|| Error::DaemonNoTranscriber { dir: dir.clone() })?
+                .ok_or_else(|| super::error::Error::NoTranscriber { dir: dir.clone() })?
         };
-        let source = wire::attached_of(audio).ok_or(Error::DaemonBadAudio)?.source;
+        let source = wire::attached_of(audio).ok_or(super::error::Error::BadAudio)?.source;
         let wav = if source.ext.eq_ignore_ascii_case("wav") {
             source.bytes
         } else {

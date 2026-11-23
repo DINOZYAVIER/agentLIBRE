@@ -40,6 +40,7 @@ use servers::{Clock, SWEEP_POLL};
 
 
 mod clients;
+pub mod error;
 mod flow;
 mod servers;
 mod session;
@@ -107,7 +108,7 @@ fn bind(runtime: &Path) -> Result<UnixListener, Error> {
     let path = socket_path(runtime);
     if path.exists() {
         if UnixStream::connect(&path).is_ok() {
-            return Err(Error::DaemonRunning { path });
+            return Err(error::Error::Running { path }.into());
         }
         std::fs::remove_file(&path).map_err(|source| fail(&path, source))?;
     }

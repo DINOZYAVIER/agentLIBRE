@@ -27,7 +27,7 @@ impl Daemon {
         let entry = state
             .sessions
             .get_mut(session)
-            .ok_or_else(|| Error::DaemonNoSession { id: session.into() })?;
+            .ok_or_else(|| super::error::Error::NoSession { id: session.into() })?;
         let command = make(entry);
         entry.commands.send(command).map_err(|_| Error::PlaneGone)?;
         entry.busy |= busy;

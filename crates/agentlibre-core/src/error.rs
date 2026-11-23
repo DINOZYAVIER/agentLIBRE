@@ -163,17 +163,11 @@ pub enum Error {
     Said { text: String },
     /// `agl daemon` has no runtime directory for its socket (AGL-076, D7).
     DaemonNoRuntime,
-    /// Another daemon answers on the socket.
-    DaemonRunning { path: PathBuf },
     /// The daemon's socket or a connection failed.
     Daemon { detail: String },
-    /// No session of that id is open in the daemon.
-    DaemonNoSession { id: String },
-    /// `transcribe` for a directory with no session open in the daemon
-    /// (AGL-076, D15).
-    DaemonNoTranscriber { dir: PathBuf },
-    /// `transcribe`'s audio is not base64.
-    DaemonBadAudio,
+    /// The daemon's own: its socket taken, a session or a transcriber it
+    /// does not hold, bad audio. Its own type, wrapped (AGL-121, D66).
+    DaemonServer(crate::daemon::error::Error),
     /// The thread of a run ended before it answered: a fault of agl's
     /// (AGL-075, D7).
     PlaneGone,
@@ -360,6 +354,13 @@ impl From<crate::machine::error::Error> for Error {
     /// The machine's own error as agl's (AGL-121, D66).
     fn from(source: crate::machine::error::Error) -> Error {
         Error::Machine(source)
+    }
+}
+
+impl From<crate::daemon::error::Error> for Error {
+    /// The daemon's own error as agl's (AGL-121, D66).
+    fn from(source: crate::daemon::error::Error) -> Error {
+        Error::DaemonServer(source)
     }
 }
 

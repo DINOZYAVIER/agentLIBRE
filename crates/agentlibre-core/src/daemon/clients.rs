@@ -123,7 +123,7 @@ impl Daemon {
                     entry.subscribers.insert(client);
                     Some(Reply::Ok)
                 }
-                None => refused(Error::DaemonNoSession { id }),
+                None => refused(super::error::Error::NoSession { id }.into()),
             },
             Request::Say {
                 session,

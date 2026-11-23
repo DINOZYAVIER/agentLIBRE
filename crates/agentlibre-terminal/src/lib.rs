@@ -247,7 +247,7 @@ fn run(
             // so and exits 0 (AGL-120, D4), so a unit and a forked process
             // that lose the race for the socket leave no failed unit behind.
             if let Err(error) = agentlibre_core::daemon::serve(paths) {
-                if let Error::DaemonRunning { path } = error {
+                if let Error::DaemonServer(agentlibre_core::daemon::error::Error::Running { path }) = error {
                     println!("{}", tr!(*lang, m::DAEMON_SERVED, path = path.display()));
                     return Ok(ExitCode::SUCCESS);
                 } else {
