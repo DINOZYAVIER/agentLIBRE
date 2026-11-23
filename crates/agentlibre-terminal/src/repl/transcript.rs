@@ -182,7 +182,7 @@ impl Presenter {
         self.close_thinking();
         if let Some(mut streamed) = self.action.take() {
             if let Some(rest) = streamed.wrap.finish() {
-                self.screen.print(&[rest]);
+                self.screen.print(&[self.theme.paint(Role::InputText, &rest)]);
             }
             self.screen.live(&[]);
         }
@@ -625,10 +625,16 @@ impl Presenter {
         });
         let lines = streamed.wrap.push(piece);
         streamed.lines += lines.len();
+        // The streamed text wears the message's color from the first
+        // piece, as the block replacing it will (AGL-068; AGL-121, D82).
+        let lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| self.theme.paint(Role::InputText, &line))
+            .collect();
         if !lines.is_empty() {
             self.screen.print(&lines);
         }
-        self.screen.live(&[streamed.wrap.live().to_owned()]);
+        self.screen.live(&[self.theme.paint(Role::InputText, streamed.wrap.live())]);
         self.piece();
     }
 
