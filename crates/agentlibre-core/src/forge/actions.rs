@@ -8,6 +8,7 @@ use super::task_spec;
 use super::{Artifact, Header, Workspace};
 use crate::clock;
 use crate::error::Error;
+use crate::forge::error::Error as ForgeError;
 use crate::i18n::Lang;
 
 /// The artifact of the store of `ws` named `name`: the files are parsed
@@ -21,10 +22,11 @@ pub fn find_artifact(ws: &Workspace, name: &str) -> Result<Artifact, Error> {
             return Ok(artifact);
         }
     }
-    Err(Error::ArtifactNotFound {
+    Err(ForgeError::ArtifactNotFound {
         name: name.to_owned(),
         dir: ws.dir.join("forge"),
-    })
+    }
+    .into())
 }
 
 /// The `name`s of the artifacts of the store of `ws`.
@@ -74,10 +76,11 @@ pub fn new_task_spec(
         }
     };
     if existing.contains(&name) {
-        return Err(Error::NameTaken {
+        return Err(ForgeError::NameTaken {
             name,
             dir: ws.dir.join("forge"),
-        });
+        }
+        .into());
     }
     let kind = super::type_of(task_spec::TYPE).expect("task-spec is in the registry");
     let path = ws
@@ -108,28 +111,30 @@ pub struct StatusChanged {
 /// byte-identical.
 pub fn change_status(ws: &Workspace, name: &str, state: &str) -> Result<StatusChanged, Error> {
     let artifact = find_artifact(ws, name)?;
-    let kind = super::type_of(&artifact.type_name).ok_or_else(|| Error::NotTaskSpec {
+    let kind = super::type_of(&artifact.type_name).ok_or_else(|| Error::from(ForgeError::NotTaskSpec {
         name: name.to_owned(),
         type_name: artifact.type_name.clone(),
-    })?;
+    }))?;
     let from = artifact.status.clone();
     if !kind.statuses().contains(&from.as_str()) {
-        return Err(Error::BadState { state: from });
+        return Err(ForgeError::BadState { state: from }.into());
     }
     if !kind.statuses().contains(&state) {
-        return Err(Error::BadState { state: state.to_owned() });
+        return Err(ForgeError::BadState { state: state.to_owned() }.into());
     }
     if from == state || !kind.allows(&from, state) {
         if kind.terminal(&from) {
-            return Err(Error::TerminalState {
+            return Err(ForgeError::TerminalState {
                 name: name.to_owned(),
                 from,
-            });
+            }
+            .into());
         }
-        return Err(Error::BadTransition {
+        return Err(ForgeError::BadTransition {
             from,
             to: state.to_owned(),
-        });
+        }
+        .into());
     }
     let mut artifact = artifact;
     artifact.status = state.to_owned();

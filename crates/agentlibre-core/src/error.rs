@@ -54,6 +54,9 @@ pub enum Error {
     /// port, a language, a url, a level, a path. Its own type, wrapped
     /// (AGL-121, D66).
     Settings(crate::settings::error::Error),
+    /// The forge: its git, its markers and stores, its artifacts and their
+    /// states (AGL-005 and after). Its own type, wrapped (AGL-121, D66).
+    Forge(crate::forge::error::Error),
     /// A credential file of `search` the policy refuses (AGL-019, D4). Its
     /// own type, wrapped (AGL-121, D66).
     Search(crate::search::Error),
@@ -207,75 +210,13 @@ pub enum Error {
     ToolsDirMissing,
     /// A helper program is not in the `AGENTLIBRE_TOOLS` directory.
     ToolMissing { name: String, dir: PathBuf },
-    /// `git` cannot be run.
-    GitSpawn { source: io::Error },
-    /// `git <args>` exited with a failure.
-    GitFailed { args: String, detail: String },
-    /// The cwd is not in a git repository; the forge works on the
-    /// workspace of the current directory.
-    NotInRepository { cwd: PathBuf },
-    /// The store directory is not itself a git repository (the
-    /// toplevel); `forge log` and `forge diff` need it to be.
-    StoreNotRepository { dir: PathBuf },
     /// A forge file or directory cannot be written.
     Write { path: PathBuf, source: io::Error },
-    /// The `format` of a workspace marker is not 1.
-    MarkerFormat { path: PathBuf, format: i64 },
-    /// A workspace marker lists a value that is not a `sha256:<hex>`
-    /// identity.
-    MarkerIdentity { path: PathBuf, value: String },
-    /// The marker's `project` is not an absolute path (AGL-055).
-    MarkerProject { path: PathBuf, project: PathBuf },
-    /// The current identity is in the markers of two stores: one was
-    /// copied by hand.
-    WorkspaceAmbiguous { dirs: Vec<String> },
-    /// `forge rehome` without a store off a TTY.
-    RehomeNoStore { stores: Vec<String> },
-    /// The cwd is agl's data directory or inside it (AGL-054).
-    InsideDataDir { dir: PathBuf, data: PathBuf },
-    /// No store is named `name`.
-    StoreNotFound { name: String, stores: Vec<String> },
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
     Memory(crate::memory::Error),
-    /// An artifact file has no `---` front-matter delimiters.
-    ArtifactFrontMatter { path: PathBuf },
-    /// An artifact file carries a schema the forge does not parse.
-    ArtifactUnknownSchema { path: PathBuf, schema: String },
-    /// The set of the type of an artifact is missing.
-    ArtifactTypeTableMissing { path: PathBuf, type_name: String },
-    /// An artifact front-matter key outside the envelope.
-    ArtifactKey { path: PathBuf, key: String },
-    /// An artifact date is not a `YYYY-MM-DD` calendar date.
-    ArtifactDate { path: PathBuf, key: String, value: String },
-    /// No artifact is named `name` in the store.
-    ArtifactNotFound { name: String, dir: PathBuf },
-    /// `forge status` asks for a state outside the lifecycle.
-    BadState { state: String },
-    /// `forge status` asks for a transition the lifecycle does not
-    /// allow.
-    BadTransition { from: String, to: String },
-    /// `forge status` from a terminal state (`done`, `canceled`, D3 of
-    /// AGL-032): the refusal points to the new-spec convention with a
-    /// `supersedes` link.
-    TerminalState { name: String, from: String },
-    /// `forge new` names a type it does not scaffold.
-    NewType { type_name: String },
-    /// `forge new` names an artifact that is already in the store.
-    NameTaken { name: String, dir: PathBuf },
-    /// `forge status` on an artifact that is not a `task-spec`.
-    NotTaskSpec { name: String, type_name: String },
-    /// `forge rehome` while the identity is already in a store: putting
-    /// it in a second one is the two-markers trap.
-    RehomeInUse { current: String, target: String },
-    /// A verification cmd of `forge check` cannot be run.
-    CmdSpawn { source: io::Error },
     /// `agl notify` cannot start the `agl-notify` beside it (AGL-121, D23).
     NotifySpawn { source: io::Error },
-    /// A task-spec id does not resolve in the workspace repository.
-    CommitNotFound { id: String, repo: PathBuf },
-    /// An artifact file cannot be removed.
-    Remove { path: PathBuf, source: io::Error },
 }
 
 impl From<agentlibre_client::Error> for Error {
@@ -344,6 +285,13 @@ impl From<crate::memory::Error> for Error {
     /// The memory's own error as agl's (AGL-121, D66).
     fn from(source: crate::memory::Error) -> Error {
         Error::Memory(source)
+    }
+}
+
+impl From<crate::forge::error::Error> for Error {
+    /// The forge's own error as agl's (AGL-121, D66).
+    fn from(source: crate::forge::error::Error) -> Error {
+        Error::Forge(source)
     }
 }
 

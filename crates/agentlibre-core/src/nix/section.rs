@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Expected};
+use crate::forge::error::Error as ForgeError;
 
 /// An attribute set being read. Keys are removed as they are read.
 pub struct Section {
@@ -59,10 +60,11 @@ impl Section {
     /// remainder is an unknown key of an artifact's envelope.
     pub fn check_empty(&self) -> Result<(), Error> {
         match self.map.keys().next() {
-            Some(key) => Err(Error::ArtifactKey {
+            Some(key) => Err(ForgeError::ArtifactKey {
                 path: self.path.clone(),
                 key: self.key(key),
-            }),
+            }
+            .into()),
             None => Ok(()),
         }
     }

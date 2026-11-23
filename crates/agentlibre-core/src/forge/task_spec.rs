@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::forge::error::Error as ForgeError;
 use crate::forge::{self, Artifact};
 
 /// The name of the type.
@@ -91,9 +92,10 @@ pub fn take(artifact: &Artifact) -> Result<TaskSpec, Error> {
 /// lifecycle state and the `task-spec` set is strict.
 pub fn check(artifact: &Artifact) -> Result<(), Error> {
     if Status::parse(&artifact.status).is_none() {
-        return Err(Error::BadState {
+        return Err(ForgeError::BadState {
             state: artifact.status.clone(),
-        });
+        }
+        .into());
     }
     take(artifact)?;
     Ok(())
@@ -179,10 +181,10 @@ pub enum GitFlag {
 /// `repo`; an error when it does not resolve.
 pub fn resolve_commit(repo: &Path, id: &str) -> Result<String, Error> {
     let arg = format!("{id}^{{commit}}");
-    forge::git(repo, &["rev-parse", "--verify", &arg]).map_err(|_| Error::CommitNotFound {
+    forge::git(repo, &["rev-parse", "--verify", &arg]).map_err(|_| Error::from(ForgeError::CommitNotFound {
         id: id.to_string(),
         repo: repo.into(),
-    })
+    }))
 }
 
 /// Whether `ancestor` is an ancestor of `descendant` in the
@@ -192,14 +194,15 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Er
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo)
         .output()
-        .map_err(|source| Error::GitSpawn { source })?;
+        .map_err(|source| Error::from(ForgeError::GitSpawn { source }))?;
     match output.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(Error::GitFailed {
+        _ => Err(ForgeError::GitFailed {
             args: "merge-base --is-ancestor".into(),
             detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        }),
+        }
+        .into()),
     }
 }
 
@@ -504,7 +507,7 @@ mod tests {
         let spec = TaskSpec { anchor: String::new(), last: "nope".into() };
         assert!(matches!(
             git_flag(&spec, &repo),
-            Err(Error::CommitNotFound { id, .. }) if id == "nope"
+            Err(crate::error::Error::Forge(ForgeError::CommitNotFound { id, .. })) if id == "nope"
         ));
     }
 }

@@ -9,6 +9,7 @@
 //! body). The `forge/v2` envelope lives here; the `task-spec` type is in
 //! [`task_spec`].
 
+pub mod error;
 mod actions;
 pub mod task_spec;
 
@@ -22,6 +23,7 @@ use std::process::Command as Process;
 use serde_json::{Map, Value};
 
 use crate::error::Error;
+use crate::forge::error::Error as ForgeError;
 use crate::nix::{self, Section};
 use crate::settings::{ProjectFile, SearchFile, ServerFile, WhisperFile};
 
@@ -67,13 +69,14 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, Error> {
         .args(args)
         .current_dir(cwd)
         .output()
-        .map_err(|source| Error::GitSpawn { source })?;
+        .map_err(|source| Error::from(ForgeError::GitSpawn { source }))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(Error::GitFailed {
+        return Err(ForgeError::GitFailed {
             args: args.join(" "),
             detail,
-        });
+        }
+        .into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -86,7 +89,7 @@ pub fn in_repository(dir: &Path) -> Result<bool, Error> {
     // repository it answers false.
     match git(dir, &["rev-parse", "--is-inside-work-tree"]) {
         Ok(answer) => Ok(answer == "true"),
-        Err(Error::GitFailed { .. }) => Ok(false),
+        Err(crate::error::Error::Forge(ForgeError::GitFailed { .. })) => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -94,13 +97,13 @@ pub fn in_repository(dir: &Path) -> Result<bool, Error> {
 /// The canonical git toplevel of `cwd`; an error outside a repository.
 pub fn toplevel(cwd: &Path) -> Result<PathBuf, Error> {
     if !in_repository(cwd)? {
-        return Err(Error::NotInRepository { cwd: cwd.to_path_buf() });
+        return Err(ForgeError::NotInRepository { cwd: cwd.to_path_buf() }.into());
     }
     let path = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?);
-    fs::canonicalize(&path).map_err(|source| Error::GitFailed {
+    fs::canonicalize(&path).map_err(|source| Error::from(ForgeError::GitFailed {
         args: "rev-parse --show-toplevel".into(),
         detail: source.to_string(),
-    })
+    }))
 }
 
 /// The identity of a store (AGL-010): the format, the list of the
@@ -120,20 +123,21 @@ impl Marker {
         let path = file.path().to_path_buf();
         let format = file.required_integer("format")?;
         if format != 1 {
-            return Err(Error::MarkerFormat { path, format });
+            return Err(ForgeError::MarkerFormat { path, format }.into());
         }
         let hashes = file.required_strings("workspace_sha256")?;
         for value in &hashes {
             if !is_identity(value) {
-                return Err(Error::MarkerIdentity {
+                return Err(ForgeError::MarkerIdentity {
                     path,
                     value: value.to_string(),
-                });
+                }
+                .into());
             }
         }
         let project = PathBuf::from(file.required_string("project")?);
         if !project.is_absolute() {
-            return Err(Error::MarkerProject { path, project });
+            return Err(ForgeError::MarkerProject { path, project }.into());
         }
         Ok(Marker { hashes, project })
     }
@@ -348,10 +352,11 @@ fn is_store_name(name: &str, basename: &str) -> bool {
 /// of the same name. A data directory that does not exist holds nothing.
 fn outside_data(data: &Path, dir: &Path) -> Result<(), Error> {
     match fs::canonicalize(data) {
-        Ok(data) if dir.starts_with(&data) => Err(Error::InsideDataDir {
+        Ok(data) if dir.starts_with(&data) => Err(ForgeError::InsideDataDir {
             dir: dir.to_path_buf(),
             data,
-        }),
+        }
+        .into()),
         _ => Ok(()),
     }
 }
@@ -520,9 +525,10 @@ fn resolve_among(
             }
             // The identity is in two markers: a store copied by hand.
             _ => {
-                return Err(Error::WorkspaceAmbiguous {
+                return Err(ForgeError::WorkspaceAmbiguous {
                     dirs: mine.iter().map(|store| store.name()).collect(),
-                });
+                }
+                .into());
             }
         }
     }
@@ -587,9 +593,10 @@ pub fn resolve_store(
     auto_rehome: bool,
 ) -> Result<(Workspace, Vec<String>), Error> {
     resolve(data, cwd, lang, auto_rehome, &|options| {
-        Err(Error::RehomeNoStore {
+        Err(ForgeError::RehomeNoStore {
             stores: options[..options.len() - 1].to_vec(),
-        })
+        }
+        .into())
     })
 }
 
@@ -629,10 +636,10 @@ pub fn rehome_store(
     let target = found
         .iter()
         .find(|store| store.name() == store_name)
-        .ok_or_else(|| Error::StoreNotFound {
+        .ok_or_else(|| Error::from(ForgeError::StoreNotFound {
             name: store_name.to_string(),
             stores: found.iter().map(Store::name).collect(),
-        })?;
+        }))?;
     let (_, line) = rehomed(data, target, &ws.key, &ws.identity, &ws.project, lang)?;
     Ok(line)
 }
@@ -742,7 +749,7 @@ pub enum Header {
 /// Splits `text` into the front-matter and the body: the text between
 /// the opening and the closing `---` line, and the rest, verbatim.
 fn split_front_matter(path: &Path, text: &str) -> Result<(String, String), Error> {
-    let bad = || Error::ArtifactFrontMatter { path: path.into() };
+    let bad = || Error::from(ForgeError::ArtifactFrontMatter { path: path.into() });
     if !text.starts_with("---\n") {
         return Err(bad());
     }
@@ -793,11 +800,12 @@ pub fn check_date(key: &str, value: &str, path: &Path) -> Result<(), Error> {
     if ok {
         Ok(())
     } else {
-        Err(Error::ArtifactDate {
+        Err(ForgeError::ArtifactDate {
             path: path.into(),
             key: key.to_string(),
             value: value.to_string(),
-        })
+        }
+        .into())
     }
 }
 
@@ -818,7 +826,7 @@ fn front_expr(front: &str) -> String {
 fn eval_front(path: &Path, front: &str) -> Result<Value, Error> {
     nix::eval_expr(path, &front_expr(front)).map_err(|error| match error {
         nix::Error::Eval { detail, .. } if detail.contains(&format!("error: {NOT_A_SET}")) => {
-            Error::ArtifactFrontMatter { path: path.into() }
+            ForgeError::ArtifactFrontMatter { path: path.into() }.into()
         }
         error => error.into(),
     })
@@ -837,10 +845,11 @@ fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Erro
     let mut file = Section::top(path, value)?;
     let schema = file.required_string("schema")?;
     if schema != SCHEMA {
-        return Err(Error::ArtifactUnknownSchema {
+        return Err(ForgeError::ArtifactUnknownSchema {
             path: path.into(),
             schema,
-        });
+        }
+        .into());
     }
     let type_name = file.required_string("type")?;
     let name = file.required_string("name")?;
@@ -860,10 +869,10 @@ fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Erro
     };
     let type_table = file
         .section(&type_name)?
-        .ok_or_else(|| Error::ArtifactTypeTableMissing {
+        .ok_or_else(|| Error::from(ForgeError::ArtifactTypeTableMissing {
             path: path.into(),
             type_name: type_name.clone(),
-        })?
+        }))?
         .into_value();
     file.check_empty()?;
     let artifact = Artifact {
@@ -1278,11 +1287,11 @@ mod tests {
         assert_eq!(project.function.as_deref(), Some("f"));
         assert!(matches!(
             take_marker("format = 2; workspace_sha256 = [ ];"),
-            Err(Error::MarkerFormat { format: 2, .. })
+            Err(crate::error::Error::Forge(ForgeError::MarkerFormat { format: 2, .. }))
         ));
         assert!(matches!(
             take_marker(r#"format = 1; workspace_sha256 = [ "sha256:xyz" ];"#),
-            Err(Error::MarkerIdentity { .. })
+            Err(crate::error::Error::Forge(ForgeError::MarkerIdentity { .. }))
         ));
         assert!(matches!(
             take_marker("format = 1;"),
@@ -1457,10 +1466,10 @@ mod tests {
         let to = dir.path().join("b/proj");
         move_repo(&from, &to);
         let error = resolve(&data, &to, EN, false, &|_| {
-            Err(Error::RehomeNoStore { stores: vec![] })
+            Err(ForgeError::RehomeNoStore { stores: vec![] }.into())
         })
         .unwrap_err();
-        assert!(matches!(error, Error::RehomeNoStore { .. }));
+        assert!(matches!(error, Error::Forge(ForgeError::RehomeNoStore { .. })));
     }
 
     #[test]
@@ -1536,7 +1545,7 @@ mod tests {
         let error = auto_err(&data, &repo).unwrap_err();
         assert!(matches!(
             error,
-            Error::WorkspaceAmbiguous { dirs } if dirs.len() == 2
+            Error::Forge(ForgeError::WorkspaceAmbiguous { dirs }) if dirs.len() == 2
         ));
     }
 
@@ -1571,7 +1580,7 @@ mod tests {
         let error = rehome_store(&data, &ws, "nope", EN).unwrap_err();
         assert!(matches!(
             error,
-            Error::StoreNotFound { name, .. } if name == "nope"
+            Error::Forge(ForgeError::StoreNotFound { name, .. }) if name == "nope"
         ));
     }
 
@@ -1723,7 +1732,7 @@ mod tests {
         let (data, ws, settings) = a_store_named_as_the_data_directory(dir.path());
         let refuses = |cwd: &Path| {
             let refused = |result: Result<Workspace, Error>| {
-                assert!(matches!(result, Err(Error::InsideDataDir { .. })), "{cwd:?}");
+                assert!(matches!(result, Err(crate::error::Error::Forge(ForgeError::InsideDataDir { .. }))), "{cwd:?}");
             };
             let never = |options: &[String]| -> Result<usize, Error> {
                 panic!("nothing to choose: {options:?}")
@@ -1750,7 +1759,7 @@ mod tests {
         let (data, ws, _) = a_store_named_as_the_data_directory(dir.path());
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&ws.dir, &link).unwrap();
-        assert!(matches!(auto_err(&data, &link), Err(Error::InsideDataDir { .. })));
+        assert!(matches!(auto_err(&data, &link), Err(crate::error::Error::Forge(ForgeError::InsideDataDir { .. }))));
     }
 
     #[test]
@@ -1843,7 +1852,7 @@ mod tests {
         ));
         assert!(matches!(
             take_marker(&format!(r#"{hashes} project = "relative";"#)),
-            Err(Error::MarkerProject { .. })
+            Err(crate::error::Error::Forge(ForgeError::MarkerProject { .. }))
         ));
         assert_eq!(
             take_marker(&format!(r#"{hashes} project = "/p";"#)).unwrap().project,
@@ -2043,7 +2052,7 @@ body line
         );
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::ArtifactKey { key, .. }) if key == "extra"
+            Err(crate::error::Error::Forge(ForgeError::ArtifactKey { key, .. })) if key == "extra"
         ));
         // A missing required key.
         let text = task_spec_text().replace("  status = \"open\";\n", "");
@@ -2055,7 +2064,7 @@ body line
         let text = task_spec_text().replace("  task-spec = { anchor = \"\"; last = \"\"; };\n", "");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::ArtifactTypeTableMissing { type_name, .. })
+            Err(crate::error::Error::Forge(ForgeError::ArtifactTypeTableMissing { type_name, .. }))
                 if type_name == "task-spec"
         ));
         // An unknown key in the type table (the task-spec check).
@@ -2074,7 +2083,7 @@ body line
         let text = task_spec_text().replace("status = \"open\";", "status = \"draft\";");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::BadState { state, .. }) if state == "draft"
+            Err(crate::error::Error::Forge(ForgeError::BadState { state, .. })) if state == "draft"
         ));
         // The dates are calendar dates.
         for (value, ok) in [
@@ -2125,7 +2134,7 @@ a note
         let text = task_spec_text().replace("schema = \"forge/v2\"", "schema = \"forge/v1\"");
         assert!(matches!(
             parse_artifact(path, &text),
-            Err(Error::ArtifactUnknownSchema { schema, .. }) if schema == "forge/v1"
+            Err(crate::error::Error::Forge(ForgeError::ArtifactUnknownSchema { schema, .. })) if schema == "forge/v1"
         ));
         // `list` marks it instead of failing.
         let dir = TempDir::new();
@@ -2157,7 +2166,7 @@ a note
         fs::write(&list, "---\n[ 1 ]\n---\nbody\n").unwrap();
         assert!(matches!(
             parse_artifact(&list, &fs::read_to_string(&list).unwrap()),
-            Err(Error::ArtifactFrontMatter { .. })
+            Err(crate::error::Error::Forge(ForgeError::ArtifactFrontMatter { .. }))
         ));
         // `list` reads them all in one evaluation, or file by file when one
         // is broken: the good ones are read either way (AGL-041).

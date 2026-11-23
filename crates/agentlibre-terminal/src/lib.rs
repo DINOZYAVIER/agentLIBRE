@@ -451,9 +451,10 @@ mod tests {
             cwd,
             Lang::En,
             true,
-            &|options| Err(Error::RehomeNoStore {
+            &|options| Err(crate::forge::error::Error::RehomeNoStore {
                 stores: options.to_vec(),
-            }),
+            }
+            .into()),
         )
         .unwrap();
         assert!(lines.is_empty());

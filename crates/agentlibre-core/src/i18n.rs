@@ -2220,135 +2220,10 @@ Forge (сховище артефактів робочої області, agentL
         uk: "{name} немає в {dir}",
     };
 
-    /// `Error::GitSpawn`.
-    pub const GIT_SPAWN: Msg = Msg {
-        en: "cannot run git: {source}",
-        uk: "не вдалося запустити git: {source}",
-    };
-
-    /// `Error::GitFailed`.
-    pub const GIT_FAILED: Msg = Msg {
-        en: "git {args} failed: {detail}",
-        uk: "git {args} завершився з помилкою: {detail}",
-    };
-
-    /// `Error::NotInRepository`.
-    pub const NOT_IN_REPOSITORY: Msg = Msg {
-        en: "{cwd} is not in a git repository; the forge works on the workspace of the current directory",
-        uk: "{cwd} не є git-репозиторієм; forge працює з робочою областю поточної теки",
-    };
-
-    /// `Error::StoreNotRepository`.
-    pub const STORE_NOT_REPOSITORY: Msg = Msg {
-        en: "the store directory is not a git repository: {dir}",
-        uk: "каталог сховища не є git-репозиторієм: {dir}",
-    };
-
     /// `Error::Write`.
     pub const FORGE_WRITE: Msg = Msg {
         en: "cannot write {path}: {source}",
         uk: "не вдалося записати {path}: {source}",
-    };
-
-    /// `Error::MarkerFormat`.
-    pub const MARKER_FORMAT: Msg = Msg {
-        en: "{path}: the marker format is {format}, expected 1",
-        uk: "{path}: формат маркера {format}, очікується 1",
-    };
-
-    /// `Error::MarkerProject`.
-    pub const MARKER_PROJECT: Msg = Msg {
-        en: "{path} names the project {project}, which is not an absolute path",
-        uk: "{path} називає проєкт {project}, а це не абсолютний шлях",
-    };
-    /// `Error::MarkerIdentity`.
-    pub const MARKER_IDENTITY: Msg = Msg {
-        en: "{path} lists {value}, which is not a sha256 identity",
-        uk: "{path} містить {value}, а це не sha256-ідентифікатор",
-    };
-
-    /// `Error::WorkspaceAmbiguous`.
-    pub const WORKSPACE_AMBIGUOUS: Msg = Msg {
-        en: "the workspace identity is in the markers of {dirs}; a store was copied by hand, remove the copy",
-        uk: "ідентифікатор робочої області є в маркерах {dirs}; сховище скопійовано вручну, прибери копію",
-    };
-
-    /// `Error::InsideDataDir`.
-    pub const INSIDE_DATA_DIR: Msg = Msg {
-        en: "{dir} is inside agl's data directory {data}, which is not a project: run agl from a project",
-        uk: "{dir} лежить у каталозі даних agl {data}, а це не проєкт: запускай agl із проєкту",
-    };
-    /// `Error::RehomeNoStore`.
-    pub const REHOME_NO_STORE: Msg = Msg {
-        en: "a store cannot be chosen without a terminal; stores: {stores} (run `agl forge rehome <store>`)",
-        uk: "без термінала не можна вибрати сховище; сховища: {stores} (запусти `agl forge rehome <store>`)",
-    };
-
-    /// `Error::StoreNotFound`.
-    pub const STORE_NOT_FOUND: Msg = Msg {
-        en: "no store is named {name}; stores: {stores}",
-        uk: "немає сховища на ім'я {name}; сховища: {stores}",
-    };
-
-    /// `Error::ArtifactFrontMatter`.
-    pub const ARTIFACT_FRONT_MATTER: Msg = Msg {
-        en: "{path} has no `---` front-matter",
-        uk: "у {path} немає `---` заголовка",
-    };
-
-    /// `Error::ArtifactUnknownSchema`.
-    pub const ARTIFACT_UNKNOWN_SCHEMA: Msg = Msg {
-        en: "{path} has schema {schema}, expected forge/v2",
-        uk: "у {path} схема {schema}, очікується forge/v2",
-    };
-
-    /// `Error::ArtifactTypeTableMissing`.
-    pub const ARTIFACT_TYPE_TABLE_MISSING: Msg = Msg {
-        en: "{path} has no [{type_name}] table",
-        uk: "у {path} немає таблиці [{type_name}]",
-    };
-
-    /// `Error::ArtifactKey`.
-    pub const ARTIFACT_KEY: Msg = Msg {
-        en: "{path} has an unknown key `{key}`",
-        uk: "у {path} невідомий ключ `{key}`",
-    };
-
-    /// `Error::ArtifactDate`.
-    pub const ARTIFACT_DATE: Msg = Msg {
-        en: "{path} has {key} = {value}, not a YYYY-MM-DD date",
-        uk: "у {path} {key} = {value}, а не дата YYYY-MM-DD",
-    };
-
-    /// `Error::ArtifactNotFound`.
-    pub const ARTIFACT_NOT_FOUND: Msg = Msg {
-        en: "no artifact is named {name} in {dir}",
-        uk: "артефакту на ім'я {name} немає в {dir}",
-    };
-
-    /// `Error::BadState`.
-    pub const BAD_STATE: Msg = Msg {
-        en: "{state} is not a task-spec state (open, in-progress, done, backlog, canceled)",
-        uk: "{state} не є станом task-spec (open, in-progress, done, backlog, canceled)",
-    };
-
-    /// `Error::BadTransition`.
-    pub const BAD_TRANSITION: Msg = Msg {
-        en: "a task-spec cannot go from {from} to {to}",
-        uk: "task-spec не може перейти з {from} у {to}",
-    };
-
-    /// `Error::TerminalState` (D3 of AGL-032): the refusal points to the
-    /// new-spec convention with a `supersedes` link.
-    pub const TERMINAL_STATE: Msg = Msg {
-        en: "{name} is {from}; {from} is a terminal state — to continue the work, make a new spec with `supersedes = [{name}]`",
-        uk: "{name} — {from}; {from} — термінальний стан — щоб продовжити роботу, створіть нову спеку з `supersedes = [{name}]`",
-    };
-
-    /// `Error::NewType`.
-    pub const NEW_TYPE: Msg = Msg {
-        en: "forge new does not scaffold {type_name}",
-        uk: "forge new не створює {type_name}",
     };
 
     /// `Error::CommitNotFound`.
@@ -2404,36 +2279,6 @@ Forge (сховище артефактів робочої області, agentL
     pub const FORGE_MARKER_WRITTEN: Msg = Msg {
         en: "created the workspace store {path}",
         uk: "створено сховище робочої області {path}",
-    };
-
-    /// `Error::NameTaken`.
-    pub const NAME_TAKEN: Msg = Msg {
-        en: "an artifact named {name} is already in {dir}",
-        uk: "артефакт на ім'я {name} вже є в {dir}",
-    };
-
-    /// `Error::NotTaskSpec`.
-    pub const NOT_TASK_SPEC: Msg = Msg {
-        en: "{name} is a {type_name}, not a task-spec; status applies to task-specs only",
-        uk: "{name} — це {type_name}, а не task-spec; status стосується лише task-spec",
-    };
-
-    /// `Error::RehomeInUse`.
-    pub const REHOME_IN_USE: Msg = Msg {
-        en: "the identity is already in the store {current}; it cannot also be in {target}",
-        uk: "ідентичність вже є в сховищі {current}; її не можна ще й в {target}",
-    };
-
-    /// `Error::Remove`.
-    pub const REMOVE: Msg = Msg {
-        en: "cannot remove {path}: {source}",
-        uk: "не вдалося прибрати {path}: {source}",
-    };
-
-    /// `Error::CmdSpawn`.
-    pub const CMD_SPAWN: Msg = Msg {
-        en: "the check command cannot be run: {source}",
-        uk: "команду перевірки не можна запустити: {source}",
     };
 
     /// `Error::NotifySpawn`.
@@ -2748,6 +2593,7 @@ impl Error {
             ),
             Error::SearchLogin { detail } => tr!(lang, m::SEARCH_LOGIN, detail = detail),
             Error::Settings(error) => error.message(lang),
+            Error::Forge(error) => error.message(lang),
             Error::Search(error) => error.message(lang),
             Error::InvalidName(name) => tr!(lang, m::INVALID_NAME, name = name),
             Error::Format(error) => error.message(lang),
@@ -2877,110 +2723,11 @@ impl Error {
             Error::ToolMissing { name, dir } => {
                 tr!(lang, m::TOOL_MISSING, name = name, dir = dir.display())
             }
-            Error::GitSpawn { source } => tr!(lang, m::GIT_SPAWN, source = source),
-            Error::GitFailed { args, detail } => {
-                tr!(lang, m::GIT_FAILED, args = args, detail = detail)
-            }
-            Error::NotInRepository { cwd } => {
-                tr!(lang, m::NOT_IN_REPOSITORY, cwd = cwd.display())
-            }
-            Error::StoreNotRepository { dir } => {
-                tr!(lang, m::STORE_NOT_REPOSITORY, dir = dir.display())
-            }
             Error::Write { path, source } => {
                 tr!(lang, m::FORGE_WRITE, path = path.display(), source = source)
             }
-            Error::MarkerFormat { path, format } => {
-                tr!(lang, m::MARKER_FORMAT, path = path.display(), format = format)
-            }
-            Error::MarkerProject { path, project } => {
-                tr!(lang, m::MARKER_PROJECT, path = path.display(), project = project.display())
-            }
-            Error::MarkerIdentity { path, value } => {
-                tr!(lang, m::MARKER_IDENTITY, path = path.display(), value = value)
-            }
-            Error::WorkspaceAmbiguous { dirs } => {
-                tr!(lang, m::WORKSPACE_AMBIGUOUS, dirs = dirs.join(", "))
-            }
-            Error::InsideDataDir { dir, data } => {
-                tr!(lang, m::INSIDE_DATA_DIR, dir = dir.display(), data = data.display())
-            }
-            Error::RehomeNoStore { stores } => {
-                let stores = if stores.is_empty() {
-                    "none".to_string()
-                } else {
-                    stores.join(", ")
-                };
-                tr!(lang, m::REHOME_NO_STORE, stores = stores)
-            }
-            Error::StoreNotFound { name, stores } => {
-                let stores = if stores.is_empty() {
-                    "none".to_string()
-                } else {
-                    stores.join(", ")
-                };
-                tr!(lang, m::STORE_NOT_FOUND, name = name, stores = stores)
-            }
             Error::Memory(error) => error.message(lang),
-            Error::ArtifactFrontMatter { path } => {
-                tr!(lang, m::ARTIFACT_FRONT_MATTER, path = path.display())
-            }
-            Error::ArtifactUnknownSchema { path, schema } => {
-                tr!(lang, m::ARTIFACT_UNKNOWN_SCHEMA, path = path.display(), schema = schema)
-            }
-            Error::ArtifactTypeTableMissing { path, type_name } => {
-                tr!(
-                    lang,
-                    m::ARTIFACT_TYPE_TABLE_MISSING,
-                    path = path.display(),
-                    type_name = type_name
-                )
-            }
-            Error::ArtifactKey { path, key } => {
-                tr!(lang, m::ARTIFACT_KEY, path = path.display(), key = key)
-            }
-            Error::ArtifactDate { path, key, value } => {
-                tr!(
-                    lang,
-                    m::ARTIFACT_DATE,
-                    path = path.display(),
-                    key = key,
-                    value = value
-                )
-            }
-            Error::ArtifactNotFound { name, dir } => {
-                tr!(
-                    lang,
-                    m::ARTIFACT_NOT_FOUND,
-                    name = name,
-                    dir = dir.display()
-                )
-            }
-            Error::BadState { state } => tr!(lang, m::BAD_STATE, state = state),
-            Error::BadTransition { from, to } => {
-                tr!(lang, m::BAD_TRANSITION, from = from, to = to)
-            }
-            Error::TerminalState { name, from } => {
-                tr!(lang, m::TERMINAL_STATE, name = name, from = from)
-            }
-            Error::NewType { type_name } => tr!(lang, m::NEW_TYPE, type_name = type_name),
-            Error::NameTaken { name, dir } => {
-                tr!(lang, m::NAME_TAKEN, name = name, dir = dir.display())
-            }
-            Error::NotTaskSpec { name, type_name } => {
-                tr!(lang, m::NOT_TASK_SPEC, name = name, type_name = type_name)
-            }
-            Error::RehomeInUse { current, target } => {
-                tr!(lang, m::REHOME_IN_USE, current = current, target = target)
-            }
-            Error::CmdSpawn { source } => tr!(lang, m::CMD_SPAWN, source = source),
             Error::NotifySpawn { source } => tr!(lang, m::NOTIFY_SPAWN, source = source),
-            Error::CommitNotFound { id, repo } => {
-                tr!(lang, m::COMMIT_NOT_FOUND, id = id, repo = repo.display())
-            }
-            Error::Remove { path, source } => {
-                tr!(lang, m::REMOVE, path = path.display(), source = source)
-            }
         }
     }
 }

@@ -738,7 +738,9 @@ fn forge_status(
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "status", "name"))?;
     let state = state.as_deref().ok_or_else(|| missing_field(lang, "status", "state"))?;
     let changed = crate::forge::change_status(ws, name, state).map_err(|error| match error {
-        Error::NotTaskSpec { name, type_name } => not_task_spec(lang, &name, type_name, "status"),
+        Error::Forge(crate::forge::error::Error::NotTaskSpec { name, type_name }) => {
+            not_task_spec(lang, &name, type_name, "status")
+        }
         error => error.into(),
     })?;
     Ok(tr!(
@@ -760,7 +762,6 @@ fn forge_remove(
     name: &Option<String>,
     lang: crate::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use crate::error::Error;
     use crate::forge::task_spec::Status;
     use crate::i18n::m;
     use crate::tr;
@@ -774,10 +775,10 @@ fn forge_remove(
     if status == Status::Done {
         return Err(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name).into());
     }
-    fs::remove_file(&artifact.path).map_err(|source| Error::Remove {
+    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(crate::forge::error::Error::Remove {
         path: artifact.path.clone(),
         source,
-    })?;
+    }))?;
     Ok(format!("removed {name}"))
 }
 
@@ -826,10 +827,10 @@ fn forge_rename(
     let taken = forge::store_names(ws)?;
     let new_path = artifact.path.with_file_name(format!("{new}.md"));
     if taken.iter().any(|taken| taken == new) || new_path.exists() {
-        return Err(Error::NameTaken {
+        return Err(Error::from(crate::forge::error::Error::NameTaken {
             name: new.to_owned(),
             dir: ws.dir.join("forge"),
-        }
+        })
         .into());
     }
     let mut renamed = artifact.clone();
@@ -860,10 +861,10 @@ fn forge_rename(
             forge::write_artifact(&other)?;
         }
     }
-    fs::remove_file(&artifact.path).map_err(|source| Error::Remove {
+    fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(crate::forge::error::Error::Remove {
         path: artifact.path.clone(),
         source,
-    })?;
+    }))?;
     Ok((format!("renamed {name} to {new}"), new.to_owned()))
 }
 
