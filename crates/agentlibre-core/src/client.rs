@@ -34,6 +34,14 @@ pub fn connect(paths: &Paths, human: bool, lang: Lang, start: bool) -> Result<Cl
 /// Who answers a plane's question: its kind and text in, the answer out.
 pub type Answer = Box<dyn Fn(proto::Ask, &str) -> Option<String> + Send + Sync>;
 
+/// A reply that came while the client waited for no command (AGL-078).
+pub enum AtPrompt {
+    /// What a session of this client did.
+    Sent(crate::plane::Sent),
+    /// A command of another client on it has ended.
+    OtherDone,
+}
+
 /// A session's plane in the daemon, taken as a plane's handle is (AGL-075,
 /// D7): a surface sends it the plane's commands and draws what it sends.
 pub struct Remote {
@@ -174,6 +182,26 @@ impl Remote {
                     return Some(done);
                 }
                 reply => self.unasked(&session, reply, each),
+            }
+        }
+    }
+
+    /// One reply that came while this client waited for no command (AGL-078):
+    /// what its session did, or the end of another client's command on it.
+    /// A plane's question is answered as it would be during a command, a
+    /// reply of no interest dropped; `None` when nothing waits.
+    pub fn at_prompt(&self) -> Option<AtPrompt> {
+        loop {
+            let reply = self.client.try_next()?;
+            let session = self.session();
+            match reply {
+                Reply::Sent { session: of, sent } if of == session => {
+                    return Some(AtPrompt::Sent(crate::plane::wire::sent_of(sent)));
+                }
+                Reply::Done { session: of, yours: false, .. } if of == session => {
+                    return Some(AtPrompt::OtherDone);
+                }
+                reply => self.unasked(&session, reply, &mut drop),
             }
         }
     }

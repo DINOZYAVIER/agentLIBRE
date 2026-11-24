@@ -1144,14 +1144,18 @@ fn take_commands(control: &Control) -> Vec<Event> {
         .collect()
 }
 
-fn wait_for_next(control: &Control) -> Next {
+/// What the main thread waits for at the prompt; `poll` runs every time
+/// the wait wakes, though nothing came of the human (AGL-078: it draws the
+/// turns another client started while this REPL sat at its prompt).
+fn wait_for_next(control: &Control, poll: &mut dyn FnMut()) -> Next {
     let mut inner = control.lock();
     loop {
         if inner.requests.quit() {
             return Next::Quit;
         }
         if inner.question.is_some() {
-            inner = control.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
+            // A question of `/memory remove` holds the queue (AGL-060, D7).
+            inner = wait_or_poll(control, inner, poll);
             continue;
         }
         if let Some(request) = inner.requests.take() {
@@ -1179,8 +1183,24 @@ fn wait_for_next(control: &Control) -> Next {
             interrupt::reset();
             return Next::Message(message);
         }
-        inner = control.wake.wait(inner).unwrap_or_else(|e| e.into_inner());
+        inner = wait_or_poll(control, inner, poll);
     }
+}
+
+/// Sleeps on the wake's word for one poll's span: the lock leaves the
+/// thread while `poll` runs, so it may touch what the lock guards.
+fn wait_or_poll<'c>(
+    control: &'c Control,
+    inner: MutexGuard<'c, Inner>,
+    poll: &mut dyn FnMut(),
+) -> MutexGuard<'c, Inner> {
+    drop(inner);
+    poll();
+    control
+        .wake
+        .wait_timeout(control.lock(), std::time::Duration::from_millis(150))
+        .unwrap_or_else(|e| e.into_inner())
+        .0
 }
 
 /// The interactive session in a terminal (D115-D138).
@@ -1465,8 +1485,38 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     };
     let mut gone = false;
     let mut end = End::Exit(ExitCode::SUCCESS);
+    // A turn another client started, drawn open at the prompt (AGL-078).
+    let mut foreign = false;
     loop {
-        let next = wait_for_next(&control);
+        // What the daemon sent while this REPL sat at its prompt: another
+        // client's turn, drawn as any other; the input line keeps its place.
+        let next = wait_for_next(&control, &mut || {
+            while let Some(what) = remote.at_prompt() {
+                match what {
+                    agentlibre_core::client::AtPrompt::Sent(sent) => {
+                        if !foreign {
+                            presenter.begin_turn();
+                            foreign = true;
+                        }
+                        sent.give(&mut ReplTurn {
+                            presenter: &mut presenter,
+                            control: &control,
+                            dock: &dock,
+                        });
+                    }
+                    agentlibre_core::client::AtPrompt::OtherDone => {
+                        presenter.close();
+                        presenter.set_ready();
+                        foreign = false;
+                    }
+                }
+            }
+        });
+        // A foreign turn that has not ended gives way to what this thread does.
+        if foreign {
+            presenter.close();
+            foreign = false;
+        }
         let commands = take_commands(&control);
         if !commands.is_empty() && ask(Command::Append(commands), &mut drop).is_none() {
             gone = true;
@@ -2385,7 +2435,7 @@ mod tests {
         // The main thread takes it before any message.
         f.inner().queue.push_back("later".into());
         assert!(matches!(
-            wait_for_next(&f.input.control),
+            wait_for_next(&f.input.control, &mut || {}),
             Next::Remember(name, text, _) if name == "Build and test" && text == "cargo build / cargo test"
         ));
         assert!(f.inner().requests.remember().is_none());
@@ -2430,7 +2480,7 @@ mod tests {
         // The main thread takes it before any message.
         f.inner().queue.push_back("later".into());
         assert!(matches!(
-            wait_for_next(&f.input.control),
+            wait_for_next(&f.input.control, &mut || {}),
             Next::Rename(name) if name == "gemma grammar"
         ));
         assert!(f.inner().requests.rename().is_none());
@@ -2466,7 +2516,7 @@ mod tests {
         );
         f.inner().queue.push_back("later".into());
         assert!(matches!(
-            wait_for_next(&f.input.control),
+            wait_for_next(&f.input.control, &mut || {}),
             Next::Memory(line, MemoryAction::List) if line == "/memory list"
         ));
         f.inner().queue.clear();
@@ -2549,12 +2599,31 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_polls_the_daemon_while_it_waits() {
+        // AGL-078: at the prompt `wait_for_next` runs `poll` on a beat, so
+        // the turns another client started get drawn without the human.
+        let f = fixture();
+        let control = f.input.control.clone();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let seen = polls.clone();
+        let waiter = thread::spawn(move || {
+            wait_for_next(&control, &mut || {
+                seen.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        thread::sleep(std::time::Duration::from_millis(200));
+        f.inner().requests.push(Request::Quit);
+        assert!(matches!(waiter.join().unwrap(), Next::Quit));
+        assert!(polls.load(Ordering::SeqCst) > 0, "the poll never ran");
+    }
+
+    #[test]
     fn no_turn_starts_while_the_question_waits() {
         // AGL-060, D7: a line typed before the question was shown stays queued.
         let f = asked();
         f.inner().queue.push_back("typed before".into());
         let control = f.input.control.clone();
-        let waiter = thread::spawn(move || wait_for_next(&control));
+        let waiter = thread::spawn(move || wait_for_next(&control, &mut || {}));
         thread::sleep(std::time::Duration::from_millis(50));
         assert!(!waiter.is_finished());
         f.type_text("y");
@@ -2793,23 +2862,23 @@ mod tests {
     fn the_main_thread_takes_what_the_user_sent() {
         let control = Control::new(Info::default(), None);
         control.lock().queue.push_back("one".into());
-        assert!(matches!(wait_for_next(&control), Next::Message(m) if m.text == "one"));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::Message(m) if m.text == "one"));
         assert!(control.lock().running);
         control.lock().running = false;
         control.lock().requests.push(Request::New);
-        assert!(matches!(wait_for_next(&control), Next::New));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::New));
         // `/function` (AGL-036, D4, D9).
         control.lock().requests.push(Request::Functions);
-        assert!(matches!(wait_for_next(&control), Next::Functions));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::Functions));
         control.lock().requests.push(Request::Switch("other".into()));
-        assert!(matches!(wait_for_next(&control), Next::Switch(name) if name == "other"));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::Switch(name) if name == "other"));
         assert!(!control.lock().running);
         // A compaction counts as running, so that Ctrl-C can stop it.
         control.lock().requests.push(Request::Compact);
-        assert!(matches!(wait_for_next(&control), Next::Compact));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::Compact));
         assert!(control.lock().running);
         control.lock().requests.push(Request::Quit);
-        assert!(matches!(wait_for_next(&control), Next::Quit));
+        assert!(matches!(wait_for_next(&control, &mut || {}), Next::Quit));
     }
 
     #[derive(Default)]
