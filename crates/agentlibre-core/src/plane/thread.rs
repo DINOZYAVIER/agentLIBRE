@@ -11,7 +11,8 @@ use std::thread::{self, JoinHandle};
 
 use super::{Run, Text, Turn};
 use crate::agent::{Report, Sink, TurnEnd};
-use crate::attach::{self, Pending};
+use crate::attach;
+use agentlibre_common::media::Pending;
 use agentlibre_common::reasoning::ReasoningLevel;
 use crate::error::Error;
 use agentlibre_forge::memory::MemoryAction;

@@ -217,7 +217,8 @@ mod tests {
     use crate::action::Outcome;
     use crate::backend::ToolCall;
     use agentlibre_common::testutil::TempDir;
-    use crate::media::{Kind as MediaKind, Media};
+    use crate::media::Media;
+    use agentlibre_common::media::Kind as MediaKind;
     use crate::memory::Kind as MemoryKind;
     use crate::session::{CutOff, ForgeKind, StopReason};
     use serde_json::json;

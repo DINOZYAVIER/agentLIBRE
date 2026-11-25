@@ -10,7 +10,8 @@ use agentlibre_client::Command;
 use agentlibre_proto::{self as proto, Done, SessionView, Text, Told, TurnEnd};
 
 use crate::Setup;
-use crate::attach::{self, Pending};
+use crate::attach;
+use agentlibre_common::media::{Pending, Source};
 use crate::cli::args::{MemoryAction, look_of, memory_action};
 use crate::cli::commands;
 use crate::cli::report::StderrReport;
@@ -20,7 +21,6 @@ use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::reasoning::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
-use crate::media::Source;
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };

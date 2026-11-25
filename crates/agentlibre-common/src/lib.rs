@@ -4,6 +4,7 @@ pub mod clock;
 pub mod error;
 pub mod file;
 pub mod i18n;
+pub mod media;
 pub mod nix;
 pub mod paths;
 pub mod programs;

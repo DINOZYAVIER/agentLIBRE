@@ -569,7 +569,7 @@ impl VoiceInput {
             // not start, that is the error.
             match warm.join() {
                 Ok(result) => result?,
-                Err(_) => return Err(crate::media::Error::Ffmpeg { detail: "the thread of the server failed".into() }.into()),
+                Err(_) => return Err(agentlibre_common::media::Error::Ffmpeg { detail: "the thread of the server failed".into() }.into()),
             }
         }
         let text = self

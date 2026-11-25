@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::about;
 use crate::agent::{Agent, Compaction, Sink, TurnEnd};
-use crate::attach::{self, Pending, Transcriber};
+use crate::attach::{self, Transcriber};
+use agentlibre_common::media::Pending;
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::Backend;

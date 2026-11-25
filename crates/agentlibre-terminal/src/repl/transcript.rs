@@ -1993,7 +1993,7 @@ mod tests {
                 text: Some("Run cargo test.".into()),
             },
             Event::Media(crate::media::Media {
-                kind: crate::media::Kind::Audio,
+                kind: agentlibre_common::media::Kind::Audio,
                 number: 1,
                 sha256: "a".repeat(64),
                 ext: "wav".into(),
@@ -2002,7 +2002,7 @@ mod tests {
                 frames: Vec::new(),
             }),
             Event::Media(crate::media::Media {
-                kind: crate::media::Kind::Video,
+                kind: agentlibre_common::media::Kind::Video,
                 number: 1,
                 sha256: "b".repeat(64),
                 ext: "mp4".into(),

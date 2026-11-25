@@ -94,6 +94,14 @@ impl From<crate::plane::error::Error> for Error {
     }
 }
 
+impl From<agentlibre_common::media::Error> for Error {
+    /// A medium's client-side error as agl's, in the medium's own wrapper
+    /// (AGL-127, D6).
+    fn from(source: agentlibre_common::media::Error) -> Error {
+        Error::Media(crate::media::Error::Common(source))
+    }
+}
+
 impl From<crate::media::Error> for Error {
     /// A medium's own error as agl's (AGL-121, D66).
     fn from(source: crate::media::Error) -> Error {

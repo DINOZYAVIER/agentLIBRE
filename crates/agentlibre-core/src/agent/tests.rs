@@ -585,7 +585,7 @@ fn without_search_the_tool_is_not_in_the_list_nor_the_grammar() {
 struct NoWhisper;
 
 impl crate::attach::Transcriber for NoWhisper {
-    fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+    fn transcribe(&self, _: &agentlibre_common::media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
         Err(crate::engine::error::Error::EngineNotFound { engine: "whisper-server".into() }.into())
     }
 }
@@ -1573,8 +1573,8 @@ fn compaction_on_request() {
     );
 }
 
-fn source(kind: media::Kind, bytes: &[u8], ext: &str) -> media::Source {
-    media::Source {
+fn source(kind: agentlibre_common::media::Kind, bytes: &[u8], ext: &str) -> agentlibre_common::media::Source {
+    agentlibre_common::media::Source {
         kind,
         bytes: bytes.to_vec(),
         ext: ext.into(),
@@ -1599,7 +1599,7 @@ fn an_image_becomes_the_marker_and_goes_with_the_request() {
     let script = Script::new(&[("I see it.", THOUGHT), ("A red square.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
     let end = turn_in(&mut session, &script, &dir, "look at [Image#1] and [Image#9]");
     assert!(matches!(end, Ok(TurnEnd::Answer(_))));
@@ -1622,7 +1622,7 @@ fn a_picture_is_counted_by_its_bound() {
     let script = Script::new(&[("Hm.", THOUGHT), ("Fine.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
     let minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
     let mut log = Log::default();
@@ -1648,7 +1648,7 @@ fn a_bound_that_does_not_fit_stops_the_turn() {
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     for number in 1..=20 {
         session
-            .store_media(&source(media::Kind::Image, &[number as u8], "png"), number, None)
+            .store_media(&source(agentlibre_common::media::Kind::Image, &[number as u8], "png"), number, None)
             .unwrap();
     }
     let all: Vec<String> = (1..=20).map(|n| format!("[Image#{n}]")).collect();
@@ -1667,7 +1667,7 @@ fn a_video_is_its_frames_each_after_its_time() {
     let clip = media::put(&media_dir, b"CLIP", "mp4").unwrap();
     session
         .append(Event::Media(media::Media {
-            kind: media::Kind::Video,
+            kind: agentlibre_common::media::Kind::Video,
             number: 1,
             sha256: clip,
             ext: "mp4".into(),
@@ -1697,7 +1697,7 @@ fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
     let script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, Some("hello there".into()))
+        .store_media(&source(agentlibre_common::media::Kind::Audio, b"WAV", "wav"), 1, Some("hello there".into()))
         .unwrap();
     turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
     assert_eq!(script.users.borrow()[0], "[Audio#1: \"hello there\"]");
@@ -1707,7 +1707,7 @@ fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
     script.hears = true;
     let mut session = Session::create(&dir.0.join("s2"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Audio, b"WAV", "wav"), 1, None)
         .unwrap();
     turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
     assert_eq!(script.users.borrow()[0], "<__media_TEST__>");
@@ -1716,7 +1716,7 @@ fn an_audio_is_its_transcript_or_the_audio_itself_when_the_model_hears() {
     let script = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
     let mut session = Session::create(&dir.0.join("s3"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Audio, b"WAV", "wav"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Audio, b"WAV", "wav"), 1, None)
         .unwrap();
     turn_in(&mut session, &script, &dir, "[Audio#1]").unwrap();
     assert_eq!(script.users.borrow()[0], "[Audio#1: not transcribed]");
@@ -1729,7 +1729,7 @@ fn an_image_without_a_projector_is_an_error_that_says_so() {
     script.marker = None;
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     session
-        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
     let end = turn_in(&mut session, &script, &dir, "[Image#1]");
     assert!(matches!(end, Err(Error::Backend(crate::backend::error::Error::NoMultimodal))));
@@ -1746,7 +1746,7 @@ fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
     let script = Script::new(&[]);
     let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
     let kept = session
-        .store_media(&source(media::Kind::Image, b"IMG", "png"), 1, None)
+        .store_media(&source(agentlibre_common::media::Kind::Image, b"IMG", "png"), 1, None)
         .unwrap();
     fs::write(kept.path(&session.media_dir()), b"other").unwrap();
     let end = turn_in(&mut session, &script, &dir, "[Image#1]");
@@ -1844,7 +1844,7 @@ fn view_of_an_image_without_a_projector_fails_before_the_file_is_kept() {
 fn view_of_an_audio_is_transcribed_when_the_model_does_not_hear() {
     struct Words;
     impl crate::attach::Transcriber for Words {
-        fn transcribe(&self, _: &media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
+        fn transcribe(&self, _: &agentlibre_common::media::Source, _: &mut dyn FnMut(&str)) -> Result<String, Error> {
             Ok("good morning".into())
         }
     }

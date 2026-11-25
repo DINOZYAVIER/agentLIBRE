@@ -330,7 +330,7 @@ fn agent_session(
     let sources = args
         .attach
         .iter()
-        .map(|path| media::Source::from_file(Path::new(path)))
+        .map(|path| agentlibre_common::media::Source::from_file(Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
     let interactive = tty::is_interactive();
     let repl_settings = ReplSettings::of(user);

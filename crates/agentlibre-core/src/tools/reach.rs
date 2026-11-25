@@ -7,10 +7,8 @@ use std::path::Path;
 use crate::action::Outcome;
 use crate::attach::Transcriber;
 use crate::backend::{Backend, ToolCall};
-use crate::error::Error;
 use agentlibre_common::i18n::{m, Lang};
 use agentlibre_common::tr;
-use crate::media;
 use agentlibre_forge::memory::{self, Home};
 use crate::search::Searcher;
 use crate::session::Session;
@@ -206,9 +204,9 @@ fn view(call: &ToolCall, reach: &mut Reach<'_>) -> ToolResult {
         return fail("view needs a path.".into());
     };
     let path = reach.workspace.join(path);
-    let source = match media::Source::from_file(&path) {
+    let source = match agentlibre_common::media::Source::from_file(&path) {
         Ok(source) => source,
-        Err(Error::Media(crate::media::Error::Kind { .. })) => {
+        Err(agentlibre_common::error::Error::Media(agentlibre_common::media::Error::Kind { .. })) => {
             return fail(format!(
                 "{} is not an image, a video or an audio.",
                 path.display()
@@ -217,10 +215,10 @@ fn view(call: &ToolCall, reach: &mut Reach<'_>) -> ToolResult {
         Err(error) => return fail(error.message(Lang::En)),
     };
     // The picture needs the projector; ask before the file is kept.
-    if source.kind != media::Kind::Audio && reach.backend.media_marker().is_err() {
+    if source.kind != agentlibre_common::media::Kind::Audio && reach.backend.media_marker().is_err() {
         return fail("The server has no multimodal projector, so it cannot take images.".into());
     }
-    let transcript = if source.kind == media::Kind::Audio {
+    let transcript = if source.kind == agentlibre_common::media::Kind::Audio {
         match reach.backend.hears_audio() {
             Ok(true) => None,
             Ok(false) => match reach.whisper.transcribe(&source, &mut |_| {}) {

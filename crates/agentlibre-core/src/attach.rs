@@ -5,21 +5,8 @@
 
 use crate::backend::Backend;
 use crate::error::Error;
-use crate::media::{self, Kind, Source};
+use agentlibre_common::media::{Found, Kind, Pending, Source, placeholders};
 use crate::session::Session;
-
-/// A medium the human attached that no message has sent yet.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Pending {
-    pub number: u32,
-    pub source: Source,
-}
-
-impl Pending {
-    pub fn placeholder(&self) -> String {
-        media::placeholder(self.source.kind, self.number)
-    }
-}
 
 /// Turns an audio into text (D22).
 pub trait Transcriber {
@@ -68,7 +55,7 @@ pub fn store(
     whisper: &dyn Transcriber,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
-    let named: Vec<media::Found> = media::placeholders(text);
+    let named: Vec<Found> = placeholders(text);
     let mut hears: Option<bool> = None;
     for item in pending {
         if !named

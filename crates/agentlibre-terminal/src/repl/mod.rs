@@ -35,7 +35,7 @@ use crate::Setup;
 use agentlibre_client::{Command, Surface};
 use agentlibre_proto::{self as proto, CommandLine, Done, Event, PhaseTime, Report, Sent, StopReason, Told, TurnEnd};
 
-use crate::attach::Pending;
+use agentlibre_common::media::{Kind, Pending, Source};
 use agentlibre_common::reasoning::ReasoningLevel;
 pub use functions::Functions;
 use agentlibre_common::paths::Paths;
@@ -47,7 +47,7 @@ use crate::error::CoreError;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
-use crate::media::{self, Clip, Kind, Source};
+use crate::media::{self, Clip};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -1920,7 +1920,7 @@ mod tests {
                 let fake = fake.clone();
                 Box::new(move |limit| {
                     if let Some(detail) = fake.record_error.lock().unwrap().clone() {
-                        return Err(crate::media::Error::Ffmpeg { detail }.into());
+                        return Err(agentlibre_common::media::Error::Ffmpeg { detail }.into());
                     }
                     fake.log.lock().unwrap().push(format!("start {limit}"));
                     Ok(Box::new(FakeRecording(fake.clone())))
@@ -1930,7 +1930,7 @@ mod tests {
                 let fake = fake.clone();
                 Box::new(move |limit| {
                     if let Some(detail) = fake.record_error.lock().unwrap().clone() {
-                        return Err(crate::media::Error::Ffmpeg { detail }.into());
+                        return Err(agentlibre_common::media::Error::Ffmpeg { detail }.into());
                     }
                     fake.log.lock().unwrap().push(format!("start {limit}"));
                     Ok(Box::new(FakeRecording(fake.clone())))

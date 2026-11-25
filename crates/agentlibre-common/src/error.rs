@@ -29,6 +29,8 @@ pub enum Error {
     Nix(crate::nix::Error),
     /// A value of the settings out of what agl takes (AGL-121, D66).
     Settings(crate::settings::error::Error),
+    /// A file that is no medium, or `ffmpeg` failing on one (AGL-127, D6).
+    Media(crate::media::Error),
 }
 
 impl Error {
@@ -47,6 +49,7 @@ impl Error {
             Error::Paths(error) => error.message(lang),
             Error::Nix(error) => error.message(lang),
             Error::Settings(error) => error.message(lang),
+            Error::Media(error) => error.message(lang),
         }
     }
 }
@@ -72,5 +75,11 @@ impl From<crate::nix::Error> for Error {
 impl From<crate::settings::error::Error> for Error {
     fn from(source: crate::settings::error::Error) -> Error {
         Error::Settings(source)
+    }
+}
+
+impl From<crate::media::Error> for Error {
+    fn from(source: crate::media::Error) -> Error {
+        Error::Media(source)
     }
 }

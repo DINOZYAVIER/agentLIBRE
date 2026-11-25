@@ -16,7 +16,8 @@ use crate::action::{Outcome, Value};
 use crate::backend::{Message, ToolCall};
 use crate::error::Error;
 use error::{Error as SessionError, NameProblem};
-use crate::media::{self, Frame, Kind, Media, Source};
+use crate::media::{self, Frame, Media};
+use agentlibre_common::media::{Kind, Source};
 use agentlibre_forge::memory::Kind as MemoryKind;
 
 /// The session format version (D104, AGL-063, D2): the v1 files open as

@@ -17,7 +17,8 @@ use crate::engine::{
 use crate::error;
 use agentlibre_forge::forge::Workspace;
 use agentlibre_common::i18n::{Lang, Msg, m};
-use crate::media::{self, Source};
+use crate::media;
+use agentlibre_common::media::Source;
 use agentlibre_common::settings::{ServerKind, WhisperFile};
 use agentlibre_common::tr;
 
