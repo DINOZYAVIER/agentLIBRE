@@ -85,6 +85,10 @@ pub enum Request {
         dir: String,
         plane: Option<String>,
         audio: Attached,
+        /// A chunk of a live dictation, for the draft server of the
+        /// session's whisper (AGL-127, D4); not the final pass.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        draft: bool,
     },
     /// The answer to a plane's question (D11); `None`, no answer.
     Answer { question: u64, answer: Option<String> },
@@ -243,21 +247,11 @@ pub struct Opened {
     /// The server's context, when it answered at the start.
     pub context: Option<usize>,
     pub reasoning: Option<String>,
-    /// The draft server of the live dictation (AGL-122, D9); `None` —
-    /// no drafts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft: Option<DraftSpec>,
-}
-
-/// The draft server as the daemon resolved it (AGL-122, D9): a
-/// whisper-server unit of its own, named, aimed, and idle-timed.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct DraftSpec {
-    pub url: String,
-    pub unit: String,
-    pub model: String,
-    pub program: Option<String>,
-    pub args: Vec<String>,
+    /// Whether a draft server is set for the live dictation (AGL-122, D9;
+    /// AGL-127, D4): the daemon runs it, and a `transcribe` with `draft`
+    /// asks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drafts: bool,
 }
 
 /// A session the daemon holds.

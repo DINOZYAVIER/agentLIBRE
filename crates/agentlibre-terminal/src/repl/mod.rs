@@ -27,7 +27,8 @@ use std::thread;
 
 use dock::{Dock, SendMode};
 use editor::{Editor, MenuItem, Outcome, save_history};
-use voice::{DraftEngine, Sender, VoiceInput};
+pub use voice::DraftEngine;
+use voice::{Sender, VoiceInput};
 use term::{Key, Parser, RawGuard};
 use card::{notice_lines, user_lines};
 use transcript::{Presenter, Screen};
@@ -42,7 +43,6 @@ pub use agentlibre_surface::daemon::Functions;
 use agentlibre_common::paths::Paths;
 use agentlibre_surface::commands::{Memory, look_of, memory};
 use agentlibre_common::tty::is_yes;
-use crate::whisper;
 use crate::error::Error;
 use crate::error::CoreError;
 use agentlibre_surface::words as texts;
@@ -1220,21 +1220,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // What the session holds, and what its turn is writing when it is
     // another client's (AGL-126, D10).
     let (events, transitions, writing) = remote.past().map_err(CoreError::from)?;
-    // The live draft engine of the dictation (AGL-122, D5), when the
-    // daemon found both program and model.
-    let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|spec| {
-        Arc::new(whisper::Draft {
-            server: whisper::WhisperServer {
-                unit: spec.unit,
-                url: spec.url,
-                private_ca: None,
-                model: spec.model,
-                args: spec.args,
-                program: spec.program,
-                heard: std::sync::OnceLock::new(),
-            },
-            models: PathBuf::new(),
-            path_var: std::env::var_os("PATH"),
+    // The live draft engine of the dictation (AGL-122, D5), when the daemon
+    // has a draft server set: it transcribes the chunks there (AGL-127, D4).
+    let draft: Option<Arc<dyn DraftEngine>> = opened.drafts.then(|| {
+        Arc::new(crate::remote::RemoteDraft {
+            paths: paths.clone(),
+            dir: opened.workspace.clone(),
+            plane: opened.session.plane.clone(),
+            lang,
         }) as Arc<dyn DraftEngine>
     });
     let voice = Arc::new(VoiceInput::new(

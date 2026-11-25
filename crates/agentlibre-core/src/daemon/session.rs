@@ -175,6 +175,21 @@ impl Daemon {
         run.flows = flows.clone();
         let plane_name = plane.as_ref().map(|file| file.name.clone());
         let plane_dir = plane.as_ref().map(|file| file.dir.clone());
+        // The draft server of the dictation is the daemon's (AGL-127, D4):
+        // made here once, with the run's `PATH`.
+        let draft = run
+            .autostart
+            .project
+            .unit_key()
+            .and_then(|key| {
+                Draft::of(
+                    &run.autostart.whisper,
+                    &run.autostart.models,
+                    &key,
+                    run.autostart.path_var.clone(),
+                )
+            })
+            .map(Arc::new);
         let reply = proto::Opened {
             session: wire::view(&plane::SessionView::of(&run.session), plane_name.as_deref()),
             resumed,
@@ -183,21 +198,7 @@ impl Daemon {
             server_url: settings.server_url.clone(),
             context: run.context,
             reasoning: run.reasoning.map(|level| level.name().to_owned()),
-            draft: run.autostart.project.unit_key().and_then(|key| {
-                Draft::of(
-                    &run.autostart.whisper,
-                    &run.autostart.models,
-                    &key,
-                    run.autostart.path_var.clone(),
-                )
-                .map(|draft| proto::DraftSpec {
-                    url: draft.server.url,
-                    unit: draft.server.unit,
-                    model: draft.server.model,
-                    program: draft.server.program,
-                    args: draft.server.args,
-                })
-            }),
+            drafts: draft.is_some(),
         };
         let voice = Arc::new(Voice::of(&run.autostart));
         let id = run.session.id.clone();
@@ -243,6 +244,7 @@ impl Daemon {
             past,
             observer,
             voice,
+            draft,
             engine,
             project_dir: project.dir.clone(),
             clock: clock_key.clone(),
@@ -406,6 +408,93 @@ mod tests {
             panic!("not opened")
         };
         (socket, project, client, opened.session.id)
+    }
+
+    /// What `open` answers in a daemon whose settings are `settings`, with
+    /// the weights `models` in its folder of them.
+    fn opened_with(dir: &TempDir, settings: &str, models: &[&str]) -> (Client, PathBuf, proto::Opened) {
+        let (paths, socket) = daemon(dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // A store of its own gives the project an origin, which names the
+        // unit of a draft server (AGL-122, D9).
+        let (workspace, _) = agentlibre_forge::forge::resolve(
+            &paths.data,
+            &project,
+            agentlibre_common::i18n::Lang::En,
+            true,
+            &|_| unreachable!("a fresh project asks nothing"),
+        )
+        .unwrap();
+        agentlibre_forge::forge::materialize(&workspace, agentlibre_common::i18n::Lang::En).unwrap();
+        std::fs::create_dir_all(paths.models()).unwrap();
+        for model in models {
+            std::fs::write(paths.models().join(model), b"weights").unwrap();
+        }
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            format!(
+                r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
+                crate::daemon::tests::holding_server()
+            ),
+        )
+        .unwrap();
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(opened) = client.ask(&open(&project, None)) else {
+            panic!("not opened")
+        };
+        (client, project, opened)
+    }
+
+    fn chunk(dir: &Path, draft: bool) -> Request {
+        Request::Transcribe {
+            dir: dir.to_string_lossy().into_owned(),
+            plane: None,
+            audio: proto::Attached {
+                number: 1,
+                kind: proto::MediaKind::Audio,
+                name: "chunk.wav".into(),
+                ext: "wav".into(),
+                base64: proto::base64::encode(b"RIFF"),
+            },
+            draft,
+        }
+    }
+
+    #[test]
+    fn the_drafts_are_set_with_a_url_a_model_and_the_file() {
+        // AGL-127, D4: `Opened.drafts` is true only with `draft_url`,
+        // `draft_model` and the weights there.
+        let whisper = r#"whisper = { draft_url = "http://127.0.0.1:9"; draft_model = "draft.bin"; };"#;
+        let dir = TempDir::new();
+        let (_, _, opened) = opened_with(&dir, whisper, &["draft.bin"]);
+        assert!(opened.drafts, "url, model and file");
+        let dir = TempDir::new();
+        let (_, _, opened) = opened_with(&dir, whisper, &[]);
+        assert!(!opened.drafts, "no file");
+        let dir = TempDir::new();
+        let url = r#"whisper = { draft_url = "http://127.0.0.1:9"; };"#;
+        let (_, _, opened) = opened_with(&dir, url, &["draft.bin"]);
+        assert!(!opened.drafts, "no model");
+        let dir = TempDir::new();
+        let model = r#"whisper = { draft_model = "draft.bin"; };"#;
+        let (_, _, opened) = opened_with(&dir, model, &["draft.bin"]);
+        assert!(!opened.drafts, "no url");
+        let dir = TempDir::new();
+        let (_, _, opened) = opened_with(&dir, "", &[]);
+        assert!(!opened.drafts, "no whisper settings");
+    }
+
+    #[test]
+    fn a_draft_with_none_set_is_refused() {
+        // AGL-127, D4.
+        let dir = TempDir::new();
+        let (mut client, project, opened) = opened_with(&dir, "", &[]);
+        assert!(!opened.drafts);
+        let Reply::Refused { error } = client.ask(&chunk(&project, true)) else {
+            panic!("a draft was taken")
+        };
+        assert_eq!(error, "no draft server is set for this session's whisper");
     }
 
     fn say(session: &str, message: &str) -> Request {

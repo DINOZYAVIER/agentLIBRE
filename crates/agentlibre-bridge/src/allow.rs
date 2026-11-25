@@ -15,7 +15,9 @@ pub fn allowed(request: &Request) -> bool {
         | Request::Say { .. }
         | Request::Stop { .. }
         | Request::Answer { .. }
-        | Request::Transcribe { .. }
+        // A chunk of a live dictation is the REPL's: the draft is not for a
+        // device (AGL-127, D5).
+        | Request::Transcribe { draft: false, .. }
         | Request::Close { .. }
         // The list of the past alone, of AGL-126's requests (its D5).
         | Request::Past { .. } => true,
@@ -27,6 +29,7 @@ pub fn allowed(request: &Request) -> bool {
         | Request::New { .. }
         | Request::Compact { .. }
         | Request::Record { .. }
+        | Request::Transcribe { draft: true, .. }
         | Request::Flow { .. }
         | Request::Planes { .. }
         | Request::Functions { .. }
@@ -78,6 +81,7 @@ mod tests {
                 dir: "/w".into(),
                 plane: None,
                 audio: audio(),
+                draft: false,
             },
             Request::Close { session: s() },
             Request::Past {
@@ -93,6 +97,19 @@ mod tests {
         ] {
             assert!(allowed(&request), "{request:?}");
         }
+    }
+
+    #[test]
+    fn a_chunk_of_a_draft_is_not_for_a_device() {
+        // AGL-127, D5: the final pass goes on, the draft does not.
+        let transcribe = |draft| Request::Transcribe {
+            dir: "/w".into(),
+            plane: None,
+            audio: audio(),
+            draft,
+        };
+        assert!(allowed(&transcribe(false)));
+        assert!(!allowed(&transcribe(true)));
     }
 
     #[test]

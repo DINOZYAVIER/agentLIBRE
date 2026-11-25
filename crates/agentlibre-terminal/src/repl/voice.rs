@@ -17,7 +17,7 @@ use super::term::Key;
 use super::card::notice_lines;
 use super::transcript::Screen;
 use super::Notice;
-use crate::whisper::{Dictation, Draft};
+use crate::whisper::Dictation;
 use crate::error::CoreError as Error;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_surface::record::Recording;
@@ -34,16 +34,10 @@ pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, agentlibre_sur
 /// Queues an auto-sent transcript (AGL-123, D1).
 pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
 
-/// What turns a chunk into draft text; `whisper::Draft` is the engine,
-/// the tests fake it (AGL-122).
+/// What turns a chunk into draft text; `RemoteDraft` asks the daemon's draft
+/// server, the tests fake it (AGL-122; AGL-127, D4).
 pub trait DraftEngine: Send + Sync {
     fn transcribe(&self, wav: &[u8]) -> Result<String, Error>;
-}
-
-impl DraftEngine for Draft {
-    fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
-        Draft::transcribe(self, wav)
-    }
 }
 
 /// The draft engine at work (AGL-122): one thread turns chunks into text

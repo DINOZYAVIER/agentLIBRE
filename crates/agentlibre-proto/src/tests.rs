@@ -84,6 +84,19 @@ fn every_request_round_trips_as_one_line() {
                 ext: "wav".into(),
                 base64: String::new(),
             },
+            draft: false,
+        },
+        Request::Transcribe {
+            dir: "/w".into(),
+            plane: Some("work".into()),
+            audio: Attached {
+                number: 1,
+                kind: MediaKind::Audio,
+                name: "chunk.wav".into(),
+                ext: "wav".into(),
+                base64: String::new(),
+            },
+            draft: true,
         },
         Request::Answer {
             question: 3,
@@ -145,6 +158,10 @@ fn what_a_plane_sends_round_trips() {
         Reply::Refused { error: "no".into() },
         Reply::Ok,
         Reply::Opened(Opened::default()),
+        Reply::Opened(Opened {
+            drafts: true,
+            ..Opened::default()
+        }),
         Reply::Past {
             sessions: vec![PastSession {
                 id: "s".into(),
@@ -313,4 +330,37 @@ fn a_past_with_no_times_and_nothing_being_written_is_as_it_was() {
     let (written, _) = round(&history);
     assert_eq!(written.trim_end(), line);
     assert_eq!(serde_json::from_str::<Reply>(line).unwrap(), history);
+}
+
+#[test]
+fn a_draft_is_said_only_when_it_is_so() {
+    // AGL-127, D4: no `draft` and no `drafts` on the wire when false, so that
+    // what has no draft says what it said before.
+    let audio = Attached {
+        number: 1,
+        kind: MediaKind::Audio,
+        name: "voice.wav".into(),
+        ext: "wav".into(),
+        base64: String::new(),
+    };
+    let transcribe = |draft| Request::Transcribe {
+        dir: "/w".into(),
+        plane: None,
+        audio: audio.clone(),
+        draft,
+    };
+    let (line, _) = round(&transcribe(false));
+    assert!(!line.contains("draft"), "{line}");
+    let (line, back) = round(&transcribe(true));
+    assert!(line.contains("\"draft\":true"), "{line}");
+    assert_eq!(back, transcribe(true));
+    let (line, _) = round(&Reply::Opened(Opened::default()));
+    assert!(!line.contains("draft"), "{line}");
+    let (line, back) = round(&Reply::Opened(Opened { drafts: true, ..Opened::default() }));
+    assert!(line.contains("\"drafts\":true"), "{line}");
+    assert!(matches!(back, Reply::Opened(Opened { drafts: true, .. })));
+    // A line of the old shape, with neither, reads as no draft.
+    let old = r#"{"request":"transcribe","dir":"/w","plane":null,"audio":{"number":1,"kind":"audio","name":"v.wav","ext":"wav","base64":""}}"#;
+    let read: Request = serde_json::from_str(old).unwrap();
+    assert!(matches!(read, Request::Transcribe { draft: false, .. }));
 }

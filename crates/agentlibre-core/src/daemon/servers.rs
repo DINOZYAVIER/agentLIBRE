@@ -30,8 +30,18 @@ fn due(idle: Duration, elapsed: Duration, busy: bool) -> bool {
 impl Daemon {
     /// An audio's text (D15), by the transcription of the plane of a session
     /// open on `dir` in `plane`.
-    pub(super) fn transcribe(&self, dir: &str, plane: Option<&str>, audio: proto::Attached) -> Result<String, Error> {
-        let voice = {
+    ///
+    /// With `draft` it is a chunk of a live dictation: the draft server of
+    /// the session's whisper hears it, with no warm-up and no whisper
+    /// (AGL-127, D4); a session with none refuses it.
+    pub(super) fn transcribe(
+        &self,
+        dir: &str,
+        plane: Option<&str>,
+        audio: proto::Attached,
+        draft: bool,
+    ) -> Result<String, Error> {
+        let (voice, drafter) = {
             let state = self.lock();
             let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
             state
@@ -42,8 +52,13 @@ impl Daemon {
                         && std::fs::canonicalize(&entry.opened.workspace)
                             .is_ok_and(|workspace| workspace == dir)
                 })
-                .map(|(_, entry)| Arc::clone(&entry.voice))
+                .map(|(_, entry)| (Arc::clone(&entry.voice), entry.draft.clone()))
                 .ok_or_else(|| super::error::Error::NoTranscriber { dir: dir.clone() })?
+        };
+        let drafter = if draft {
+            Some(drafter.ok_or(super::error::Error::NoDraft)?)
+        } else {
+            None
         };
         let source = wire::attached_of(audio).ok_or(super::error::Error::BadAudio)?.source;
         let wav = if source.ext.eq_ignore_ascii_case("wav") {
@@ -51,6 +66,9 @@ impl Daemon {
         } else {
             crate::media::audio_to_wav(&source.bytes)?
         };
+        if let Some(drafter) = drafter {
+            return drafter.transcribe(&wav);
+        }
         voice.warm_up(&mut |_| {})?;
         voice.transcribe(&wav, None, &mut |_| {})
     }

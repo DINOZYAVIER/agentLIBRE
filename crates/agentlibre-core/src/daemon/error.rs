@@ -19,6 +19,9 @@ pub enum Error {
     NoTranscriber { dir: PathBuf },
     /// `transcribe`'s audio is not base64.
     BadAudio,
+    /// `transcribe` of a draft for a session whose whisper has no draft
+    /// server set (AGL-127, D4).
+    NoDraft,
 }
 
 impl Error {
@@ -29,6 +32,7 @@ impl Error {
             Self::NoSession { id } => tr!(lang, NO_SESSION, id = id),
             Self::NoTranscriber { dir } => tr!(lang, NO_TRANSCRIBER, dir = dir.display()),
             Self::BadAudio => tr!(lang, BAD_AUDIO).to_string(),
+            Self::NoDraft => tr!(lang, NO_DRAFT).to_string(),
         }
     }
 }
@@ -55,4 +59,10 @@ const NO_TRANSCRIBER: Msg = Msg {
 const BAD_AUDIO: Msg = Msg {
     en: "the audio is not base64",
     uk: "аудіо не в base64",
+};
+
+/// `Error::NoDraft`.
+const NO_DRAFT: Msg = Msg {
+    en: "no draft server is set for this session's whisper",
+    uk: "для whisper цієї сесії не задано сервера чернетки",
 };

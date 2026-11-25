@@ -133,6 +133,42 @@ impl Dictation for RemoteVoice {
                 ext: "wav".into(),
                 base64: proto::base64::encode(wav),
             },
+            draft: false,
+        };
+        match client.ask(&request, &mut |_| {})? {
+            Reply::Transcribed { text } => Ok(text),
+            reply => Err(Error::Daemon {
+                detail: format!("an unexpected reply: {reply:?}"),
+            }),
+        }
+    }
+}
+
+/// The draft of the live dictation by the daemon's draft server (AGL-127,
+/// D4): each chunk goes on a connection of its own, as `RemoteVoice`'s
+/// does, and the worker's one thread keeps their order.
+pub struct RemoteDraft {
+    pub paths: Paths,
+    pub dir: String,
+    pub plane: Option<String>,
+    pub lang: Lang,
+}
+
+impl crate::repl::DraftEngine for RemoteDraft {
+    fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
+        let client = agentlibre_surface::daemon::connect(&self.paths, false, self.lang, true)
+            .map_err(crate::error::core_of)?;
+        let request = Request::Transcribe {
+            dir: self.dir.clone(),
+            plane: self.plane.clone(),
+            audio: proto::Attached {
+                number: 1,
+                kind: proto::MediaKind::Audio,
+                name: "chunk.wav".into(),
+                ext: "wav".into(),
+                base64: proto::base64::encode(wav),
+            },
+            draft: true,
         };
         match client.ask(&request, &mut |_| {})? {
             Reply::Transcribed { text } => Ok(text),

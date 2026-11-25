@@ -309,6 +309,10 @@ struct Entry {
     observer: Option<Observer>,
     /// The transcription of its run (D15).
     voice: Arc<Voice>,
+    /// The draft server of the live dictation, made once at `open` so that
+    /// what it heard is kept between the chunks (AGL-127, D4); none when
+    /// the whisper settings name none.
+    draft: Option<Arc<Draft>>,
     /// The engine its run launched, if it did (D16), and its record's store.
     engine: Arc<Mutex<Option<Engine>>>,
     project_dir: PathBuf,
