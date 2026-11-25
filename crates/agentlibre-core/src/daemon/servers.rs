@@ -3,8 +3,14 @@
 use super::*;
 
 /// How often the idle sweep looks at the clocks (AGL-120, D2).
-pub(super) const SWEEP_POLL: Duration = Duration::from_secs(5);
+pub(super) const SWEEP_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(5)
+};
 
+/// The idle clock of a server (AGL-120, D2): the seconds of no turn that
+/// stop it, the last turn's end, how to stop it (its unit, or the child
 /// agl owns), and the store of its record.
 #[derive(Clone)]
 pub(super) struct Clock {
@@ -99,33 +105,54 @@ impl Daemon {
         };
         for id in ids {
             let Some(entry) = state.sessions.get_mut(&id) else { continue };
-            entry.holders.remove(&client);
+            let held = entry.holders.remove(&client);
             entry.subscribers.remove(&client);
-            if entry.holders.is_empty() {
-                // Its commands dropped, the run's thread ends once its
-                // command is done; its turn is stopped first.
-                if let Some(dir) = state.plane_of(&id).map(|plane| plane.file.dir.clone()) {
-                    state.follow(&dir, &id, false);
-                }
-                let entry = state.sessions.remove(&id).expect("the entry");
-                entry.stop.request();
-                // A wake whose session died before its turn ended gives
-                // its gate back with it (D58), or no plane's flows would
-                // ever turn again.
-                let stale: Vec<(PathBuf, String)> = state
-                    .flow_wakes
-                    .iter()
-                    .filter(|(_, session)| **session == id)
-                    .map(|(pair, _)| pair.clone())
-                    .collect();
-                for pair in stale {
-                    state.flow_wakes.remove(&pair);
-                    self.flow_gate.release();
-                }
-                let url = entry.opened.server_url.clone();
-                if let Some(engine) = entry.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    state.engines.push((url, engine, entry.project_dir.clone()));
-                }
+            // The session lives on, its turn too (AGL-125, D1, D2): its idle
+            // clock begins as its last holder leaves.
+            if held && entry.holders.is_empty() {
+                entry.last = Instant::now();
+            }
+        }
+    }
+
+    /// The sessions that nobody holds and that have had nothing to do for
+    /// their `session_idle` are unloaded (AGL-125, D6); their files are their
+    /// record.
+    pub(super) fn unload(&self) {
+        let mut state = self.lock();
+        let idle: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(_, entry)| {
+                entry.holders.is_empty() && due(entry.asking.idle, entry.last.elapsed(), entry.busy)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if idle.is_empty() {
+            return;
+        }
+        for id in idle {
+            if let Some(dir) = state.plane_of(&id).map(|plane| plane.file.dir.clone()) {
+                state.follow(&dir, &id, false);
+            }
+            // Its commands dropped, the run's thread ends.
+            let entry = state.sessions.remove(&id).expect("the entry");
+            // A wake whose session died before its turn ended gives
+            // its gate back with it (D58), or no plane's flows would
+            // ever turn again.
+            let stale: Vec<(PathBuf, String)> = state
+                .flow_wakes
+                .iter()
+                .filter(|(_, session)| **session == id)
+                .map(|(pair, _)| pair.clone())
+                .collect();
+            for pair in stale {
+                state.flow_wakes.remove(&pair);
+                self.flow_gate.release();
+            }
+            let url = entry.opened.server_url.clone();
+            if let Some(engine) = entry.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                state.engines.push((url, engine, entry.project_dir.clone()));
             }
         }
         // An engine no plane uses any more is stopped (D16).

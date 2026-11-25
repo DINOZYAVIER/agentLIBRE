@@ -103,7 +103,14 @@ pub struct UserFile {
     /// `bridge`: where the bridge of the iPhone and the watch listens
     /// (AGL-083, D20).
     pub bridge: BridgeFile,
+    /// `session_idle`: the seconds a loaded session that nobody holds waits
+    /// with nothing to do before the daemon unloads it; 0 never (AGL-125, D6,
+    /// D8).
+    pub session_idle: Option<u64>,
 }
+
+/// `session_idle` when it is not set: 15 minutes (AGL-125, D6).
+pub const SESSION_IDLE: u64 = 900;
 
 /// The project's settings, `settings.nix` of its store (AGL-039, D11):
 /// the Function and the per-key overrides of the user's `server`,
@@ -210,7 +217,7 @@ impl UserFile {
         };
         file.check_keys(&[
             "function", "language", "server", "whisper", "search", "colors", "repl", "forge",
-            "models", "about", "bridge",
+            "models", "about", "bridge", "session_idle",
         ])?;
         let function = file.string("function")?;
         let language = file
@@ -248,6 +255,9 @@ impl UserFile {
         let repl = ReplFile::parse(file.section("repl")?, path)?;
         let about = AboutFile::parse(file.section("about")?, path)?;
         let bridge = BridgeFile::parse(file.section("bridge")?, path)?;
+        let session_idle = file
+            .integer("session_idle")?
+            .map(|seconds| u64::try_from(seconds).unwrap_or(0));
         let forge = match file.section("forge")? {
             None => ForgeFile::default(),
             Some(mut forge) => {
@@ -283,6 +293,7 @@ impl UserFile {
             about,
             models,
             bridge,
+            session_idle,
         })
     }
 }

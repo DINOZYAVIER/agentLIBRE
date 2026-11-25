@@ -40,6 +40,9 @@ pub enum Error {
     ServerRunning { units: Vec<String> },
     /// The human answered no to "start one more?" (D9).
     StartDeclined,
+    /// Nobody answered the question of an unwatched session in its time
+    /// (AGL-125, D7).
+    QuestionUnanswered { question: String },
     /// The human answered no to the restart of D2 (AGL-033).
     RestartDeclined,
     /// The human answered no to the stop of the server of the other kind
@@ -102,6 +105,9 @@ impl Error {
                 tr!(lang, SERVER_RUNNING, units = units.join(", "))
             }
             Self::StartDeclined => tr!(lang, START_DECLINED).to_string(),
+            Self::QuestionUnanswered { question } => {
+                tr!(lang, QUESTION_UNANSWERED, question = question)
+            }
             Self::RestartDeclined => tr!(lang, RESTART_DECLINED).to_string(),
             Self::SwitchDeclined => tr!(lang, SWITCH_DECLINED).to_string(),
             Self::WeightsFileMissing { key, path } => {
@@ -187,6 +193,12 @@ const PORT_BUSY_UNITS: Msg = Msg {
 const PROJECT_NOT_REGISTERED: Msg = Msg {
     en: "{project} is not a registered project, so it has no server of its own; run `agl init` there first",
     uk: "{project} не є зареєстрованим проєктом, тож не має власного сервера; спершу виконай там `agl init`",
+};
+
+/// `Error::QuestionUnanswered` (AGL-125, D7).
+const QUESTION_UNANSWERED: Msg = Msg {
+    en: "question unanswered: {question}",
+    uk: "питання без відповіді: {question}",
 };
 
 /// `Error::RestartDeclined` (AGL-033, D2).

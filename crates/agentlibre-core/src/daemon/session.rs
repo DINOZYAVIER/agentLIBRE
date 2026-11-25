@@ -52,9 +52,28 @@ impl Daemon {
         Ok(())
     }
 
+    /// Loads the session `id` from its file, as `--resume` does, for a client
+    /// that follows it and does not hold it (AGL-125, D1); its id.
+    pub(super) fn load(self: &Arc<Self>, client: u64, lang: Lang, id: &str) -> Result<String, Error> {
+        let session = Session::open(&self.paths.sessions(), id)?;
+        let open = proto::Open {
+            dir: session.workspace.to_string_lossy().into_owned(),
+            resume: Some(session.id.clone()),
+            ..proto::Open::default()
+        };
+        Ok(self.open(client, lang, open, false)?.session.id)
+    }
+
     /// Opens a session's run for `client`, or attaches it to the running
     /// one (D12).
-    pub(super) fn open(self: &Arc<Self>, client: u64, lang: Lang, open: proto::Open) -> Result<proto::Opened, Error> {
+    /// `hold` says whether `client` holds it or only follows it.
+    pub(super) fn open(
+        self: &Arc<Self>,
+        client: u64,
+        lang: Lang,
+        open: proto::Open,
+        hold: bool,
+    ) -> Result<proto::Opened, Error> {
         let user = UserFile::load(&self.paths.settings_file())?;
         let cwd = PathBuf::from(&open.dir);
         let auto_rehome = user.forge.auto_rehome.unwrap_or(true);
@@ -67,7 +86,9 @@ impl Daemon {
         if open.resume.is_some() && open.function.is_some() {
             return Err(Error::FunctionWithResume);
         }
-        // A running session is attached to (D12).
+        // A running session is attached to (D12); one that is not is loaded
+        // once, whoever asks for it meanwhile (AGL-125, D1).
+        let mut _loading = None;
         if let Some(key) = open.resume.as_deref() {
             let sessions = self.paths.sessions();
             let id = match key {
@@ -75,17 +96,29 @@ impl Daemon {
                     .into_iter()
                     .next()
                     .map(|info| info.id),
-                key => Some(Session::id_named(&sessions, &project.project, key).unwrap_or_else(|| key.into())),
+                key => Some(
+                    Session::id_named(&sessions, &project.project, key)
+                        .or_else(|| Session::full_id(&sessions, key).ok())
+                        .unwrap_or_else(|| key.into()),
+                ),
             };
+            _loading = id.as_deref().map(|id| self.load_alone(id));
             let mut state = self.lock();
             if let Some(entry) = id.as_ref().and_then(|id| state.sessions.get_mut(id)) {
-                entry.holders.insert(client);
+                if hold {
+                    entry.holders.insert(client);
+                }
                 entry.subscribers.insert(client);
                 // It was there before this client, whoever made it.
-                return Ok(proto::Opened {
+                let opened = proto::Opened {
                     resumed: true,
                     ..entry.opened.clone()
-                });
+                };
+                // A question that waits is the first thing it sees (AGL-125,
+                // D7), before the session's own reply: a terminal asks it
+                // while it is plain.
+                state.show_questions(client, &opened.session.id);
+                return Ok(opened);
             }
         }
         let (human, say) = {
@@ -99,7 +132,15 @@ impl Daemon {
                 say.line(client, &line);
             }
         }
-        let asker = self.asker(client, human, open.yes);
+        let stop = Stop::new();
+        let asking = Arc::new(Asking {
+            client,
+            human,
+            idle: Duration::from_secs(user.session_idle.unwrap_or(agentlibre_common::settings::SESSION_IDLE)),
+            stop: stop.clone(),
+            session: Mutex::new(None),
+        });
+        let asker = self.asker(&asking, open.yes);
         let engine = Arc::new(Mutex::new(None));
         let reasoning = open.reasoning.as_deref().and_then(ReasoningLevel::parse);
         let env = |name: &str| std::env::var_os(name);
@@ -116,7 +157,7 @@ impl Daemon {
             one_request: open.one_request,
             engine: Arc::clone(&engine),
             lang,
-            stop: Stop::new(),
+            stop,
             asker,
         })?;
         let plane::Opened {
@@ -160,6 +201,7 @@ impl Daemon {
         };
         let voice = Arc::new(Voice::of(&run.autostart));
         let id = run.session.id.clone();
+        asking.set_session(&id);
         let past = plane::Past::of(&run.session.events);
         // The FSM of a run of one request writes to the session from now.
         let observer = open.one_request.then(|| {
@@ -192,10 +234,12 @@ impl Daemon {
             commands: parts.commands,
             stop: parts.stop,
             opened: reply.clone(),
-            holders: HashSet::from([client]),
+            holders: if hold { HashSet::from([client]) } else { HashSet::new() },
             subscribers: HashSet::from([client]),
             origins: VecDeque::new(),
             busy: false,
+            asking,
+            last: Instant::now(),
             past,
             observer,
             voice,
@@ -252,10 +296,12 @@ impl Daemon {
                 turn_ended = true;
                 origin = entry.origins.pop_front();
                 entry.busy = !entry.origins.is_empty();
+                entry.last = Instant::now();
                 let done = *done;
                 // `/new`: the entry follows the new session.
                 if done.session.id != id {
                     next = done.session.id.clone();
+                    entry.asking.set_session(&next);
                     entry.opened.session = wire::view(&done.session, plane_name.as_deref());
                     let entry = state.sessions.remove(id).expect("the entry");
                     state.sessions.insert(next.clone(), entry);
@@ -340,13 +386,17 @@ mod tests {
 
     /// A session open in a daemon whose turns go on until they are stopped.
     fn held_turns(dir: &TempDir) -> (PathBuf, PathBuf, Client, String) {
+        held_turns_with(dir, "")
+    }
+
+    fn held_turns_with(dir: &TempDir, settings: &str) -> (PathBuf, PathBuf, Client, String) {
         let (paths, socket) = daemon(dir);
         let project = dir.0.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             paths.config.join("settings.nix"),
             format!(
-                r#"{{ agl, ... }}: {{ function = "fixture-minimal"; server.llama = {{ url = "{}"; external = true; }}; }}"#,
+                r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
                 crate::daemon::tests::holding_server()
             ),
         )
@@ -395,6 +445,84 @@ mod tests {
             panic!()
         };
         assert!(sessions[0].busy, "the turn runs");
+    }
+
+    /// Reads `client` until the turn of its session is in its step.
+    fn until_step(client: &mut Client) {
+        loop {
+            let reply = client.next();
+            assert!(!matches!(reply, Reply::Done { .. }), "{reply:?}");
+            if let Reply::Sent {
+                sent: proto::Sent::Report(proto::Report::Prefill),
+                ..
+            } = reply
+            {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_turn_goes_on_with_nobody_watching() {
+        // AGL-125, D1, D2.
+        let dir = TempDir::new();
+        let (socket, project, mut first, id) = held_turns(&dir);
+        proto::send(&mut first.out, &say(&id, "hello")).unwrap();
+        until_step(&mut first);
+        drop(first);
+        thread::sleep(Duration::from_millis(300));
+        let (mut second, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Sessions { sessions } = second.ask(&Request::Sessions) else {
+            panic!()
+        };
+        assert!(sessions[0].busy, "the turn runs");
+        assert!(sessions[0].pids.is_empty(), "nobody holds it");
+        // Whoever comes back has it, and may stop it.
+        let Reply::Opened(opened) = second.ask(&open(&project, Some(id.clone()))) else {
+            panic!("not attached")
+        };
+        assert!(opened.resumed);
+        proto::send(&mut second.out, &Request::Stop { session: id.clone() }).unwrap();
+        let done = loop {
+            if let Reply::Done { done, .. } = second.next() {
+                break done;
+            }
+        };
+        assert!(done.turn.is_some(), "{done:?}");
+    }
+
+    #[test]
+    fn a_message_to_a_session_that_is_not_loaded_loads_it_once() {
+        // AGL-125, D1, D4.
+        let dir = TempDir::new();
+        let (socket, _, first, id) = held_turns_with(&dir, "session_idle = 1;");
+        drop(first);
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let since = Instant::now();
+        loop {
+            let Reply::Sessions { sessions } = client.answer(&Request::Sessions) else {
+                panic!()
+            };
+            if sessions.is_empty() {
+                break;
+            }
+            assert!(since.elapsed() < Duration::from_secs(10), "it was never unloaded");
+            thread::sleep(Duration::from_millis(50));
+        }
+        // Two clients at once, one by the start of the id: one run.
+        let (mut other, _) = Client::new(&socket, proto::VERSION);
+        proto::send(&mut client.out, &say(&id, "one")).unwrap();
+        proto::send(&mut other.out, &say(&id[..24], "two")).unwrap();
+        until_step(&mut client);
+        let Reply::Sessions { sessions } = client.answer(&Request::Sessions) else {
+            panic!()
+        };
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].busy && sessions[0].pids.is_empty(), "sent, and not held");
+        assert!(matches!(
+            client.answer(&say("0000", "nothing")),
+            Reply::Refused { .. }
+        ));
     }
 
     #[test]
@@ -488,15 +616,16 @@ mod tests {
     }
 
     #[test]
-    fn a_second_open_of_a_session_attaches_and_the_last_close_ends_it() {
-        // D12: one run for the session, held by both clients.
+    fn a_second_open_of_a_session_attaches_and_its_idle_time_unloads_it() {
+        // D12: one run for the session, held by both clients; AGL-125, D6:
+        // it is unloaded once nobody has held it for its time.
         let dir = TempDir::new();
         let (paths, socket) = daemon(&dir);
         let project = dir.0.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             paths.config.join("settings.nix"),
-            r#"{ agl, ... }: { function = "fixture-minimal"; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
+            r#"{ agl, ... }: { function = "fixture-minimal"; session_idle = 1; server.llama = { url = "http://127.0.0.1:9"; external = true; }; }"#,
         )
         .unwrap();
         let (mut first, _) = Client::new(&socket, proto::VERSION);
@@ -536,8 +665,32 @@ mod tests {
             panic!()
         };
         assert_eq!(sessions.len(), 1, "the second still holds it");
+        // Attached by the start of its id, too, and no second run is made.
+        let (mut third, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(same) = third.ask(&open(&project, Some(id[..20].into()))) else {
+            panic!("not attached")
+        };
+        assert_eq!(same.session.id, id);
+        drop(third);
         drop(second);
-        thread::sleep(Duration::from_millis(100));
-        assert_eq!(first.ask(&Request::Sessions), Reply::Sessions { sessions: Vec::new() });
+        thread::sleep(Duration::from_millis(300));
+        let held = |client: &mut Client| {
+            let Reply::Sessions { sessions } = client.answer(&Request::Sessions) else {
+                panic!()
+            };
+            sessions.len()
+        };
+        assert_eq!(held(&mut first), 1, "nobody holds it, and it lives");
+        let since = Instant::now();
+        while held(&mut first) > 0 {
+            assert!(since.elapsed() < Duration::from_secs(10), "it was never unloaded");
+            thread::sleep(Duration::from_millis(50));
+        }
+        // Its file is its record.
+        let Reply::Opened(again) = first.answer(&open(&project, Some(id.clone()))) else {
+            panic!("not loaded again")
+        };
+        assert!(again.resumed);
+        assert_eq!(again.session.name.as_deref(), Some("both"));
     }
 }

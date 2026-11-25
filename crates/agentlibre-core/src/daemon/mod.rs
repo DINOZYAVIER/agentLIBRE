@@ -11,7 +11,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use agentlibre_proto::{self as proto, Ask, Lines, Read, Reply, Request};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
 use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
-use crate::engine::{Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
+use crate::engine::{Consent, Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
 use crate::error::Error;
 use agentlibre_forge::forge;
 use crate::function::Function;
@@ -63,6 +63,8 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
         needs,
         paths,
         state: Mutex::new(State::default()),
+        loading: Mutex::new(HashSet::new()),
+        loaded: Condvar::new(),
         flow_gate: flow::Gate::default(),
     });
     thread::spawn({
@@ -77,6 +79,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
         move || loop {
             thread::sleep(SWEEP_POLL);
             daemon.sweep();
+            daemon.unload();
         }
     });
     // Every plane that declares a flow gets its driver now (D12, D17): the
@@ -125,6 +128,10 @@ struct Daemon {
     needs: Sender<plane::flow::holder::Need>,
     paths: Paths,
     state: Mutex<State>,
+    /// The sessions being loaded from their files, so that one is loaded once
+    /// (AGL-125, D1).
+    loading: Mutex<HashSet<String>>,
+    loaded: Condvar,
     /// D58's gate (AGL-121): one model turn of the flows at a time over
     /// all planes; the mechanical parts are not gated.
     flow_gate: flow::Gate,
@@ -153,7 +160,7 @@ struct State {
     /// with a session open, or with its flows driving, is held here.
     planes: HashMap<PathBuf, Plane>,
     /// The questions that wait for their answer, and their client.
-    questions: HashMap<u64, (u64, Sender<Option<String>>)>,
+    questions: HashMap<u64, Question>,
     /// The wake's pair (AGL-118, D22): (plane store, flow) to the session
     /// its wake woke; the end of that turn carries `turn.end` back.
     flow_wakes: HashMap<(PathBuf, String), String>,
@@ -227,8 +234,6 @@ impl State {
     }
 }
 
-/// The idle clock of a server (AGL-120, D2): the seconds of no turn that
-/// stop it, the last turn's end, how to stop it (its unit, or the child
 /// Who a command of the daemon's own is from: no client has this number.
 const NO_CLIENT: u64 = 0;
 
@@ -237,6 +242,48 @@ struct Client {
     human: bool,
     lang: Lang,
     pid: u32,
+}
+
+/// A question that waits for its answer.
+struct Question {
+    /// Its session (AGL-125, D7); none while a run opens, when it is the
+    /// opening client's.
+    asking: Option<Arc<Asking>>,
+    /// The clients it was sent to that have not declined it.
+    asked: HashSet<u64>,
+    kind: Ask,
+    text: String,
+    tell: Sender<Option<String>>,
+}
+
+/// Whose a run's questions are (AGL-125, D7): the opening client's until
+/// there is a session, then whoever's hold it.
+struct Asking {
+    client: u64,
+    human: bool,
+    /// How long an unwatched question waits (D6, D7); 0, until it is answered.
+    idle: Duration,
+    stop: Stop,
+    /// The session's id, a new one after `/new`.
+    session: Mutex<Option<String>>,
+}
+
+impl Asking {
+    fn session(&self) -> Option<String> {
+        self.session.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_session(&self, id: &str) {
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_owned());
+    }
+}
+
+/// What a question got.
+#[derive(Debug, PartialEq)]
+enum Said {
+    Answer(Option<String>),
+    Nobody,
+    Unanswered,
 }
 
 /// A session's run in the daemon.
@@ -250,6 +297,9 @@ struct Entry {
     /// Who sent each command that waits for its end, in their order (D12).
     origins: VecDeque<u64>,
     busy: bool,
+    asking: Arc<Asking>,
+    /// When it was last held or last had something to do (AGL-125, D6).
+    last: Instant,
     /// The session's events as its run told them, and what its turn is
     /// writing (AGL-126, D10).
     past: plane::Past,
@@ -271,6 +321,38 @@ impl Daemon {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+}
+
+/// A session being loaded; its end wakes those who wait for it.
+struct Loading<'a> {
+    daemon: &'a Daemon,
+    id: String,
+}
+
+impl Drop for Loading<'_> {
+    fn drop(&mut self) {
+        self.daemon.loading().remove(&self.id);
+        self.daemon.loaded.notify_all();
+    }
+}
+
+impl Daemon {
+    fn loading(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.loading.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Begins to load the session `id`, once another that loads it is done.
+    fn load_alone(&self, id: &str) -> Loading<'_> {
+        let mut loading = self
+            .loaded
+            .wait_while(self.loading(), |loading| loading.contains(id))
+            .unwrap_or_else(|e| e.into_inner());
+        loading.insert(id.to_owned());
+        Loading {
+            daemon: self,
+            id: id.to_owned(),
+        }
+    }
 }
 
 fn write(out: &Mutex<UnixStream>, reply: &Reply) {

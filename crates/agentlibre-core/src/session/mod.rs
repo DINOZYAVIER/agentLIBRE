@@ -422,6 +422,13 @@ impl Session {
             .collect()
     }
 
+    /// The whole id of the session in `dir` that `id` is the id or the start
+    /// of.
+    pub fn full_id(dir: &Path, id: &str) -> Result<String, Error> {
+        let path = find(dir, id)?;
+        Ok(path.file_stem().map_or_else(|| id.to_owned(), |stem| stem.to_string_lossy().into_owned()))
+    }
+
     /// The latest sessions in `dir`, of every project (AGL-126, D9).
     pub fn latest_of_all(dir: &Path, limit: usize) -> Vec<SessionInfo> {
         session_files(dir)

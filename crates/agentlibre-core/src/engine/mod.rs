@@ -150,6 +150,20 @@ pub fn unit_name(effective: &ServerFile) -> String {
 /// Asks the human a question of yes or no; `true` agrees.
 pub type AskYes = Arc<dyn Fn(&str, Lang) -> bool + Send + Sync>;
 
+/// Asks whoever holds a session, which may be nobody.
+pub type AskSession = Arc<dyn Fn(&str, Lang) -> Consent + Send + Sync>;
+
+/// What a session's question gets (AGL-125, D7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consent {
+    Yes,
+    No,
+    /// Those who hold the session have no human (AGL-076, D11).
+    Nobody,
+    /// Nobody held the session until the question's time was over.
+    Unanswered,
+}
+
 /// The consent of the server commands (D9, D13; AGL-033, D2): what a
 /// question gets — the start of a server that another unit holds, or the
 /// restart of D2.
@@ -157,6 +171,8 @@ pub type AskYes = Arc<dyn Fn(&str, Lang) -> bool + Send + Sync>;
 pub enum Others {
     /// Ask the human; `true` agrees.
     Ask(AskYes),
+    /// Ask whoever holds the session the server is for (AGL-125, D7).
+    Session(AskSession),
     /// `--yes`: agree without asking.
     Yes,
     /// Nobody can answer and there is no `--yes`: refuse.
@@ -1270,6 +1286,15 @@ fn consent(question: &str, others: &Others, lang: Lang) -> Result<(), Error> {
                 Err(EngineError::StartDeclined.into())
             }
         }
+        Others::Session(ask) => match ask(question, lang) {
+            Consent::Yes => Ok(()),
+            Consent::No => Err(EngineError::StartDeclined.into()),
+            Consent::Nobody => Err(EngineError::ServerRunning { units: Vec::new() }.into()),
+            Consent::Unanswered => Err(EngineError::QuestionUnanswered {
+                question: question.into(),
+            }
+            .into()),
+        },
         Others::Refuse => Err(EngineError::ServerRunning { units: Vec::new() }.into()),
     }
 }
@@ -2219,6 +2244,22 @@ mod tests {
         assert!(restart_consent("llama-server", &Others::Ask(Arc::new(no)), Lang::En)
             .is_err_and(|error| matches!(error, Error::Engine(EngineError::RestartDeclined))));
         assert!(restart_consent("llama-server", &Others::Yes, Lang::En).is_ok());
+        // A session's holders (AGL-125, D7): their word, nobody's, and the
+        // question whose time was over, which keeps its name everywhere.
+        let says = |consent: Consent| Others::Session(Arc::new(move |_, _| consent));
+        assert!(consent(question, &says(Consent::Yes), Lang::En).is_ok());
+        assert!(matches!(
+            consent(question, &says(Consent::No), Lang::En),
+            Err(Error::Engine(EngineError::StartDeclined))
+        ));
+        assert!(matches!(
+            consent(question, &says(Consent::Nobody), Lang::En),
+            Err(Error::Engine(EngineError::ServerRunning { .. }))
+        ));
+        assert!(matches!(
+            restart_consent("llama-server", &says(Consent::Unanswered), Lang::En),
+            Err(Error::Engine(EngineError::QuestionUnanswered { .. }))
+        ));
     }
 
     #[test]
