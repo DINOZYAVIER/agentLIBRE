@@ -36,7 +36,7 @@ use crate::agent::{Report, Sink, TurnEnd};
 use crate::plane::{Command, Done, Sent, Told};
 use crate::plane::Turn;
 use crate::attach::Pending;
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 pub use functions::Functions;
 use agentlibre_common::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
@@ -1196,7 +1196,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     } = setup;
     let resumed = opened.resumed;
     let context = opened.context;
-    let reasoning = opened.reasoning.as_deref().and_then(crate::backend::ReasoningLevel::parse);
+    let reasoning = opened.reasoning.as_deref().and_then(ReasoningLevel::parse);
     let workspace = PathBuf::from(&opened.workspace);
     let facts = Facts {
         function: opened.function.clone(),

@@ -11,7 +11,7 @@ use agentlibre_core::client::{self, Remote};
 use agentlibre_core::plane::wire;
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::error::CoreError as Error;
 use crate::function::catalog::Entry;
 use crate::repl::Functions;

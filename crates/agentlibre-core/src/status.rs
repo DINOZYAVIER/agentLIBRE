@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::Compaction;
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::error::Error;
 use crate::function::Function;
 use crate::i18n::repl as texts;

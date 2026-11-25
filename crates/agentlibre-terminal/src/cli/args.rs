@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::cli::bridge::BridgeAction;
 use crate::cli::forge::ForgeAction;
 use crate::error::Error;

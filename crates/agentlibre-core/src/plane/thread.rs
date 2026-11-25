@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use super::{Run, Text, Turn};
 use crate::agent::{Report, Sink, TurnEnd};
 use crate::attach::{self, Pending};
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::error::Error;
 use agentlibre_forge::memory::MemoryAction;
 use crate::phase::Observer;

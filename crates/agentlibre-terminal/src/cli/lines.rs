@@ -15,7 +15,7 @@ use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::error::CoreError;
 use agentlibre_common::i18n::{Lang, m};
-use crate::backend::ReasoningLevel;
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
 use crate::media::Source;

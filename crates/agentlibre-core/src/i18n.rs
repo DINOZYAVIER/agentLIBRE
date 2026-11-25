@@ -212,7 +212,7 @@ pub mod repl {
     use agentlibre_common::tr;
     use super::Lang;
     use super::m;
-    use crate::backend::ReasoningLevel;
+    use agentlibre_common::reasoning::ReasoningLevel;
     use crate::session::StopReason;
 
     /// The description of a `/` command in the menu and in `/help`.

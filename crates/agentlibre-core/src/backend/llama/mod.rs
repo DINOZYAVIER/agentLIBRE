@@ -8,10 +8,11 @@ use serde_json::{Map, Value as Json, json};
 use super::http::Http;
 use super::{
     Prefill, PromptProgress, add_sampling,
-    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, Request, Stop,
     kept_thinking,
 };
 use crate::action::{Kind, Value};
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::error::Error;
 use crate::backend::error::Error as BackendError;
 use crate::tools::Spec;

@@ -19,7 +19,8 @@ use agentlibre_proto::{self as proto, Ask, Lines, Read, Reply, Request};
 
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
-use crate::backend::{Backend, Message as ChatMessage, Prompt, ReasoningLevel};
+use crate::backend::{Backend, Message as ChatMessage, Prompt};
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::engine::{Consent, Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
 use crate::error::Error;
 use agentlibre_forge::forge;

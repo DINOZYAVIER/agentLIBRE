@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::action::Action;
 use crate::attach::Transcriber;
 use crate::backend::{
-    Backend, Message, Prefill, Prompt, PromptProgress, ReasoningLevel, Request, Step, StepInput,
+    Backend, Message, Prefill, Prompt, PromptProgress, Request, Step, StepInput,
     StepLog, Stepped, Stop, ToolCall,
 };
 use crate::error::Error;

@@ -13,10 +13,11 @@ use super::http::Http;
 use super::{Step, StepInput, structured_step};
 use super::{
     Prefill, PromptProgress, add_sampling,
-    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, ReasoningLevel, Request, Stop,
+    Backend, Generated, Message, Prompt, RUNTIME_PREFIX, Request, Stop,
     StructuredCall, kept_thinking,
 };
 use crate::action::{Kind, Value};
+use agentlibre_common::reasoning::ReasoningLevel;
 use crate::agent::Sink;
 use crate::error::Error;
 use crate::backend::error::Error as BackendError;
