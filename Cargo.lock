@@ -93,7 +93,6 @@ version = "0.1.0"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
- "agentlibre-core",
  "agentlibre-proto",
  "serde_json",
  "zbus",

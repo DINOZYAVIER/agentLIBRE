@@ -41,24 +41,28 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type as MessageType;
 use zbus::zvariant::Value;
 
-use agentlibre_core::error::Error as CoreError;
+use agentlibre_common::error::Error as CommonError;
 use agentlibre_common::i18n::{Lang, Msg, m};
+use agentlibre_common::tty::INTERRUPTED_EXIT;
 use agentlibre_common::paths::Paths;
 use agentlibre_common::tr;
 
-/// What `agl-notify` fails on: an error of agl's core, or the session bus
-/// (AGL-074, D2; AGL-121, D73).
+/// What `agl-notify` fails on: a path or a setting, no place for the
+/// daemon's socket, or the session bus (AGL-074, D2; AGL-121, D73;
+/// AGL-131, D8).
 #[derive(Debug)]
 pub enum Error {
-    /// An error of agl's core.
-    Core(CoreError),
+    /// A path or a setting that cannot be read.
+    Common(CommonError),
+    /// There is no runtime directory, so no place for the daemon's socket.
+    NoRuntime,
     /// `agl notify` lost or could not reach the session bus (AGL-074, D2).
     Notify { detail: String },
 }
 
-impl From<CoreError> for Error {
-    fn from(source: CoreError) -> Error {
-        Error::Core(source)
+impl From<CommonError> for Error {
+    fn from(source: CommonError) -> Error {
+        Error::Common(source)
     }
 }
 
@@ -66,16 +70,18 @@ impl Error {
     /// The message of `self` in `lang`.
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            Error::Core(error) => error.message(lang),
+            Error::Common(error) => error.message(lang),
+            Error::NoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
             Error::Notify { detail } => tr!(lang, NOTIFY_FAILED, detail = detail),
         }
     }
 
-    /// The exit code of `agl-notify` failing with `self`: the core's, or 1.
+    /// The exit code of `agl-notify` failing with `self`: 130 for an
+    /// interrupt, or 1.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Core(error) => error.exit_code(),
-            Error::Notify { .. } => 1,
+            Error::Common(CommonError::Interrupted) => INTERRUPTED_EXIT,
+            Error::Common(_) | Error::NoRuntime | Error::Notify { .. } => 1,
         }
     }
 }
@@ -124,9 +130,7 @@ enum Input {
 pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
     // The socket and the connection are the clients' crate's (AGL-121, D29).
     let socket = agentlibre_client::socket_path(
-        paths.runtime.as_deref().ok_or_else(|| CoreError::Said {
-            text: tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
-        })?,
+        paths.runtime.as_deref().ok_or(Error::NoRuntime)?,
     );
     let failed = |error: zbus::Error| Error::Notify {
         detail: error.to_string(),
