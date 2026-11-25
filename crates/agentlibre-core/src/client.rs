@@ -4,12 +4,15 @@
 //! plane: `connect` with a `Paths`, and `Remote`, a session's plane held
 //! over the daemon's protocol.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use agentlibre_client::Client;
+pub use agentlibre_client::Client;
 use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::error::Error;
+use crate::plane::wire;
+use crate::session::{Event, TransitionLine};
 use agentlibre_common::i18n::Lang;
 use agentlibre_common::paths::Paths;
 
@@ -47,6 +50,8 @@ pub enum AtPrompt {
 pub struct Remote {
     pub client: Client,
     session: Mutex<String>,
+    /// What came before the past it was read with, and is not in it.
+    waiting: Mutex<VecDeque<Reply>>,
     /// Answers a plane's question during a command (D11); none, no answer.
     pub answer: Answer,
 }
@@ -56,8 +61,53 @@ impl Remote {
         Remote {
             client,
             session: Mutex::new(session),
+            waiting: Mutex::new(VecDeque::new()),
             answer: Box::new(|_, _| None),
         }
+    }
+
+    /// The session's past (AGL-126, D10): its events, its phases' times and
+    /// what its turn is writing. What the session did before it is in it and
+    /// is not given again; what the session does next follows it.
+    pub fn past(&self) -> Result<(Vec<Event>, Vec<TransitionLine>, proto::Writing), Error> {
+        let mut before = VecDeque::new();
+        let reply = self.client.ask(&Request::History { session: self.session() }, &mut |reply| {
+            let told = matches!(
+                &reply,
+                Reply::Sent {
+                    sent: proto::Sent::Report(
+                        proto::Report::Event(_)
+                            | proto::Report::Thinking(_)
+                            | proto::Report::ActionStarted
+                            | proto::Report::ActionText(_)
+                    ),
+                    ..
+                }
+            );
+            if !told {
+                before.push_back(reply);
+            }
+        })?;
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).extend(before);
+        match reply {
+            Reply::History {
+                events,
+                transitions,
+                writing,
+                ..
+            } => Ok((
+                events.into_iter().map(wire::event_of).collect(),
+                transitions.into_iter().map(wire::phase_time_of).collect(),
+                writing,
+            )),
+            reply => Err(Error::Daemon {
+                detail: format!("an unexpected reply: {reply:?}"),
+            }),
+        }
+    }
+
+    fn waited(&self) -> Option<Reply> {
+        self.waiting.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
     }
 
     /// The session's id, a new one after `/new`.
@@ -164,7 +214,7 @@ impl Remote {
         };
         // What a turn another client started sent while this one waited is
         // not drawn now as this command's: only a question is answered.
-        while let Some(reply) = self.client.try_next() {
+        while let Some(reply) = self.waited().or_else(|| self.client.try_next()) {
             if let Reply::Question { .. } = reply {
                 self.unasked(&session, reply, each);
             }
@@ -192,7 +242,7 @@ impl Remote {
     /// reply of no interest dropped; `None` when nothing waits.
     pub fn at_prompt(&self) -> Option<AtPrompt> {
         loop {
-            let reply = self.client.try_next()?;
+            let reply = self.waited().or_else(|| self.client.try_next())?;
             let session = self.session();
             match reply {
                 Reply::Sent { session: of, sent } if of == session => {
@@ -212,7 +262,7 @@ impl Remote {
     pub fn wait(&self, each: &mut dyn FnMut(crate::plane::Sent)) -> Option<crate::plane::Done> {
         let session = self.session();
         loop {
-            match self.client.next().ok()? {
+            match self.waited().map_or_else(|| self.client.next(), Ok).ok()? {
                 Reply::Done { session: of, done, yours: true } if of == session => return Some(done_of(done)),
                 reply => self.unasked(&session, reply, each),
             }

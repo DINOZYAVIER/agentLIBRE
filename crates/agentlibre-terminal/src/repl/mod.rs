@@ -5,6 +5,7 @@ mod browser;
 mod card;
 mod dock;
 mod editor;
+mod functions;
 mod inspect;
 mod markdown;
 mod reading;
@@ -36,7 +37,7 @@ use crate::plane::{Command, Done, Sent, Told};
 use crate::plane::Turn;
 use crate::attach::Pending;
 use crate::backend::ReasoningLevel;
-use crate::function::catalog::Catalog;
+pub use functions::Functions;
 use agentlibre_common::paths::Paths;
 use crate::cli::args::{MemoryAction, memory_action};
 use agentlibre_common::tty::is_yes;
@@ -47,7 +48,7 @@ use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
-use crate::session::{CommandRun, Event, Session, StopReason, TransitionLine};
+use crate::session::{CommandRun, Event, StopReason, TransitionLine};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -126,13 +127,6 @@ impl Control {
         placeholder
     }
 
-    /// Takes the counts of the media of `session` for the numbers of new
-    /// placeholders.
-    fn set_media_counts(&self, session: &Session) {
-        let mut inner = self.lock();
-        inner.media_counts = Kind::ALL.map(|kind| session.next_media_number(kind) - 1);
-    }
-
     fn set_state(&self, state: Option<String>) {
         self.lock().info.state = state;
     }
@@ -209,7 +203,7 @@ type OpenBrowser = Box<
             &Dock,
             Lang,
             &Theme,
-            &Catalog,
+            &dyn Functions,
             &[browser::SettingsItem],
             &ModeKeys,
         ) -> browser::Exit
@@ -332,21 +326,13 @@ struct Text {
 /// The open buffer of `/function edit` (AGL-102, D4): the file it edits,
 /// the lines as they are now, and the lines as saved — unequal says
 /// there are changes the file never got.
-/// What the inspect mode re-reads on its open (AGL-066, D4) and while it
-/// stands (AGL-113, D1): the session's id and directory, to read the file
-/// fresh — its events and the transitions the observer wrote — and, when
-/// the read fails, the copy kept in memory. `path` and `size` are the last
-/// read: a poll that sees the same length reads nothing; an id that left its
-/// path behind (a `/new`) makes the mode find the file again.
+/// What the inspect mode shows when the daemon cannot be asked (AGL-066,
+/// D4): the session's id, and what the last command left of it.
 struct InspectData {
     id: String,
-    sessions_dir: PathBuf,
     events: Vec<Event>,
     transitions: Vec<TransitionLine>,
     outputs: PathBuf,
-    path: Option<PathBuf>,
-    size: u64,
-    read_id: String,
 }
 
 /// What a notice means. Its color and whether it fails the message follow
@@ -388,7 +374,7 @@ struct Input {
     control: Arc<Control>,
     facts: Facts,
     /// The Functions of `/function show|new` (AGL-102, D2, D3).
-    catalog: Arc<Catalog>,
+    functions: Arc<dyn Functions>,
     /// The settings' paths for the browser's tab (AGL-109, D6).
     paths: Paths,
     workspace: PathBuf,
@@ -653,7 +639,7 @@ impl Input {
                 let rest = trimmed["/function".len()..].trim();
                 let word = rest.split_whitespace().next().unwrap_or("");
                 if matches!(word, "show" | "new" | "edit")
-                    && !self.catalog.entries(self.lang).iter().any(|e| e.name == word)
+                    && !self.functions.entries().is_ok_and(|all| all.iter().any(|e| e.name == word))
                 {
                     // The rest keeps its spaces: `/function new`'s words.
                     let tail = &rest[word.len()..];
@@ -715,11 +701,7 @@ impl Input {
             self.notice(tr!(self.lang, m::FUNCTION_SHOW_USAGE), Notice::Usage);
             return;
         }
-        let shown = self
-            .catalog
-            .text(name)
-            .and_then(|text| Ok((text, self.catalog.file(name)?.path)));
-        match shown {
+        match self.functions.show(name) {
             Ok((text, path)) => {
                 self.notice(&text, Notice::Info);
                 self.notice(&path.display().to_string(), Notice::Info);
@@ -737,12 +719,8 @@ impl Input {
             self.notice(tr!(self.lang, m::FUNCTION_NEW_USAGE), Notice::Usage);
             return;
         };
-        let source = from.unwrap_or(&self.catalog.current);
-        let made = self
-            .catalog
-            .text(source)
-            .and_then(|text| self.catalog.create(name, &text));
-        match made {
+        let source = from.unwrap_or(self.functions.current());
+        match self.functions.create(name, source) {
             Ok(path) => self.notice(
                 &tr!(
                     self.lang,
@@ -913,7 +891,7 @@ impl Input {
                     &self.dock,
                     self.lang,
                     &self.theme,
-                    &self.catalog,
+                    &*self.functions,
                     &items,
                     &keys,
                 )
@@ -1208,17 +1186,15 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let Setup {
         remote,
         opened,
-        session: file,
         lang,
         theme,
         repl,
         history_file,
-        catalog,
+        stores,
         paths,
         voice: dictation,
     } = setup;
     let resumed = opened.resumed;
-    let sessions_dir = paths.sessions();
     let context = opened.context;
     let reasoning = opened.reasoning.as_deref().and_then(crate::backend::ReasoningLevel::parse);
     let workspace = PathBuf::from(&opened.workspace);
@@ -1251,13 +1227,17 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     );
     let control = Arc::new(Control::new(
         Info {
-            session: file.id.clone(),
+            session: opened.session.id.clone(),
             context,
             ..Info::default()
         },
         reasoning,
     ));
-    control.set_media_counts(&file);
+    // The numbers of new placeholders follow the session's media.
+    control.lock().media_counts = opened.session.media;
+    // What the session holds, and what its turn is writing when it is
+    // another client's (AGL-126, D10).
+    let (events, transitions, writing) = remote.past()?;
     // The live draft engine of the dictation (AGL-122, D5), when the
     // daemon found both program and model.
     let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|spec| {
@@ -1295,71 +1275,36 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // wakes the thread of the turn itself (AGL-075).
     term::block_sigint();
     let done = Arc::new(AtomicBool::new(false));
-    // What the inspect mode re-reads on its open (AGL-066, D4).
+    // What the inspect mode shows when the daemon cannot be asked (AGL-066,
+    // D4): the session as the last command left it.
     let inspect_data = Arc::new(Mutex::new(InspectData {
-        id: file.id.clone(),
-        sessions_dir: sessions_dir.clone(),
-        events: file.events.clone(),
-        transitions: Vec::new(),
-        outputs: file.outputs_dir(),
-        path: Some(file.file_path().to_path_buf()),
-        size: std::fs::metadata(file.file_path()).map_or(0, |meta| meta.len()),
-        read_id: file.id.clone(),
+        id: opened.session.id.clone(),
+        events: events.clone(),
+        transitions: transitions.clone(),
+        outputs: PathBuf::from(&opened.session.outputs),
     }));
     let open_inspect = {
         let data = inspect_data.clone();
         let dock = dock.clone();
         let theme = theme.clone();
+        let paths = paths.clone();
         move |keys: &ModeKeys| {
-            // The file holds what the observer wrote of the phases; the
-            // in-memory copy is the fallback for when it cannot be read.
-            let (events, transitions, outputs) = {
-                let mut inner = data.lock().unwrap();
-                match Session::open(&inner.sessions_dir, &inner.id) {
-                    Ok(session) => {
-                        let outputs = session.outputs_dir();
-                        inner.path = Some(session.file_path().to_path_buf());
-                        inner.size = std::fs::metadata(session.file_path())
-                            .map_or(0, |meta| meta.len());
-                        inner.read_id = inner.id.clone();
-                        (session.events, session.transitions, outputs)
-                    }
-                    Err(_) => (
-                        inner.events.clone(),
-                        inner.transitions.clone(),
-                        inner.outputs.clone(),
-                    ),
-                }
+            let (id, kept, outputs) = {
+                let inner = data.lock().unwrap();
+                (
+                    inner.id.clone(),
+                    (inner.events.clone(), inner.transitions.clone()),
+                    inner.outputs.clone(),
+                )
             };
+            let follower = crate::remote::Follower::of(&paths, lang, &id).ok();
+            let (events, transitions) = follower
+                .as_ref()
+                .and_then(|follower| follower.past().ok())
+                .unwrap_or(kept);
             // The mode follows the session while the agent works (AGL-113,
-            // D1): an empty read asks the file's length, and only a
-            // different one reads it again; a failed read keeps what the
-            // screen already shows.
-            let poll = {
-                let data = data.clone();
-                move || {
-                    let mut inner = data.lock().unwrap();
-                    let path = match inner.path.as_ref() {
-                        Some(path) if inner.read_id == inner.id => path.clone(),
-                        // A `/new` left the path behind: find the file again.
-                        _ => Session::open(&inner.sessions_dir, &inner.id)
-                            .ok()?
-                            .file_path()
-                            .to_path_buf(),
-                    };
-                    let size = std::fs::metadata(&path).ok()?.len();
-                    if size == inner.size {
-                        return None;
-                    }
-                    let session = Session::open(&inner.sessions_dir, &inner.id).ok()?;
-                    inner.path = Some(path);
-                    inner.size = size;
-                    inner.read_id = inner.id.clone();
-                    inner.events = session.events.clone();
-                    inner.transitions = session.transitions.clone();
-                    Some((session.events, session.transitions))
-                }
-            };
+            // D1): an empty read asks whether it grew.
+            let poll = || follower.as_ref().and_then(crate::remote::Follower::grown);
             // The dock's rows of the moment (D14): the input prompt
             // stays on the alternate screen, and its rows come anew at
             // each redraw (AGL-098, D7).
@@ -1380,7 +1325,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         dock: dock.clone(),
         control: control.clone(),
         facts: facts.clone(),
-        catalog: Arc::clone(&catalog),
+        functions: Arc::clone(&stores) as Arc<dyn Functions>,
         paths: paths.clone(),
         workspace: workspace.clone(),
         theme: theme.clone(),
@@ -1395,12 +1340,12 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         voice: voice.clone(),
         open_inspect: Box::new(open_inspect),
         open_browser: Some(Box::new(
-            |control, dock, lang, theme, catalog, items, keys| {
+            |control, dock, lang, theme, functions, items, keys| {
                 browser::run(
                     &|text| dock.write_raw(text),
                     theme,
                     lang,
-                    catalog,
+                    functions,
                     items,
                     dock,
                     &|| control.lock().busy(),
@@ -1440,10 +1385,16 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             &crate::about::version(rev.as_deref()),
         ));
     }
-    presenter.show_notice(&tr!(lang, m::SESSION, id = file.id), Role::Muted);
+    presenter.show_notice(&tr!(lang, m::SESSION, id = opened.session.id), Role::Muted);
     if resumed {
-        presenter.replay(&file.events, &file.transitions);
-        if let Some(state) = file.unfinished().and_then(|turn| turn.state) {
+        presenter.replay(&events, &transitions);
+        if !writing.thinking.is_empty() {
+            presenter.send(Report::Thinking(writing.thinking));
+        }
+        if !writing.text.is_empty() {
+            presenter.send(Report::ActionText(writing.text));
+        }
+        if let Some(state) = opened.session.unfinished.clone() {
             control.lock().info.unfinished = Some(state.clone());
             presenter.show_notice(&tr!(lang, m::UNFINISHED, state = state), Role::Muted);
         }
@@ -1522,8 +1473,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             gone = true;
             break;
         }
-        // The inspect mode re-reads the file, this is the fallback and
-        // the new id of a `/new` (AGL-066).
+        // What the inspect mode falls back on, and the new id of a `/new`
+        // (AGL-066).
         {
             let mut inner = inspect_data.lock().unwrap();
             inner.id = session.borrow().id.clone();
@@ -1540,14 +1491,23 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 break;
             }
             Next::Functions => {
-                let list = catalog.lines(lang).join("\n");
-                presenter.show_notice(&list, Role::Muted);
-                record("/function".into(), false, Some(list))
+                let list = stores
+                    .entries()
+                    .map(|entries| crate::function::catalog::lines(&entries, lang).join("\n"));
+                match list {
+                    Ok(list) => {
+                        presenter.show_notice(&list, Role::Muted);
+                        record("/function".into(), false, Some(list))
+                    }
+                    Err(error) => {
+                        let text = error.message(lang);
+                        presenter.show_notice(&text, Role::StatusFailure);
+                        record("/function".into(), true, Some(text))
+                    }
+                }
             }
             Next::Planes => {
-                let here = crate::plane::PlaneFile::of_directory(&paths, &workspace)
-                    .map(|planes| planes.into_iter().map(|plane| plane.name).collect::<Vec<_>>());
-                match here {
+                match stores.planes(None) {
                     Ok(names) => {
                         let none = "—".to_owned();
                         let text = tr!(
@@ -1568,7 +1528,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             }
             // The plane must be there before the session is left (AGL-077,
             // D12): a refusal keeps this session as it is.
-            Next::PlaneSwitch(name) => match crate::plane::PlaneFile::open(&paths, &name) {
+            Next::PlaneSwitch(name) => match stores.planes(Some(&name)) {
                 Ok(_) => {
                     presenter.show_notice(&tr!(lang, m::PLANE_SWITCH, name = name), Role::Muted);
                     record(format!("/plane {name}"), false, None);
@@ -1586,8 +1546,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             },
             // The Function must load and fit before the session is left
             // (AGL-036, D4): a refusal keeps this session as it is.
-            Next::Switch(name) => match catalog.check(&name) {
-                Ok(()) => {
+            Next::Switch(name) => match stores.check(&name) {
+                Ok(_) => {
                     presenter.show_notice(&tr!(lang, m::FUNCTION_SWITCH, name = name), Role::Muted);
                     record(format!("/function {name}"), false, None);
                     end = End::Function {
@@ -1995,7 +1955,7 @@ mod tests {
                 plane: None,
                 server: "http://127.0.0.1:18080".into(),
             },
-            catalog: Arc::new(Catalog {
+            functions: Arc::new(crate::function::catalog::Catalog {
                 plane_dir: None,
                 workspace_dir: dir.join("functions"),
                 user_dir: dir.join("user"),

@@ -13,8 +13,8 @@ use super::dock::{Dock, Layout};
 use super::term::{self, Key};
 use super::text::{hard_wrap, truncate};
 use super::ModeKeys;
-use crate::function::Function;
-use crate::function::catalog::{Catalog, Entry, Source};
+use super::Functions;
+use crate::function::catalog::{Entry, Source};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::UserFile;
 use agentlibre_common::style::Role;
@@ -124,7 +124,7 @@ impl Browser {
     pub fn key(
         &mut self,
         key: Key,
-        catalog: &Catalog,
+        functions: &dyn Functions,
         settings: &[SettingsItem],
         lang: Lang,
         busy: bool,
@@ -143,7 +143,7 @@ impl Browser {
                 Key::Enter | Key::Newline => {
                     let name = std::mem::take(typed);
                     self.clone = None;
-                    self.clone_as(&name, catalog, lang);
+                    self.clone_as(&name, functions, lang);
                 }
                 Key::Char(c) if !c.is_control() => typed.push(c),
                 _ => {}
@@ -154,7 +154,7 @@ impl Browser {
         if self.delete {
             self.delete = false;
             if key == Key::Char('d') {
-                self.erase(catalog, lang);
+                self.erase(functions, lang);
             }
             return KeyOutcome::Stay;
         }
@@ -187,8 +187,8 @@ impl Browser {
             }
             Key::Enter => {
                 if let Some(name) = self.name() {
-                    match catalog.text(name) {
-                        Ok(text) => self.source = Some((text, 0)),
+                    match functions.show(name) {
+                        Ok((text, _)) => self.source = Some((text, 0)),
                         Err(error) => self.note(error.message(lang), true),
                     }
                 }
@@ -208,7 +208,7 @@ impl Browser {
                         self.note(tr!(lang, m::BROWSER_BUILTIN, name = name), false);
                         KeyOutcome::Stay
                     }
-                    Some((_, _, None)) => match self.selected_file(catalog) {
+                    Some((_, _, None)) => match self.selected_file(functions) {
                         Ok(path) => KeyOutcome::Edit(path),
                         Err(error) => {
                             self.note(error.message(lang), true);
@@ -311,49 +311,50 @@ impl Browser {
     }
 
     /// The file the row stands on: the one a run would load (AGL-102, D2).
-    fn selected_file(&self, catalog: &Catalog) -> Result<PathBuf, crate::error::Error> {
-        Ok(catalog.file(&self.entries[self.at].name)?.path)
+    fn selected_file(&self, functions: &dyn Functions) -> Result<PathBuf, crate::error::Error> {
+        Ok(functions.show(&self.entries[self.at].name)?.1)
     }
 
     /// `d` answered twice: the file goes, the list is read anew
     /// (AGL-109, D3). The settings' files are not deletable here.
-    fn erase(&mut self, catalog: &Catalog, lang: Lang) {
+    fn erase(&mut self, functions: &dyn Functions, lang: Lang) {
         let name = match self.name() {
             Some(name) => name.to_owned(),
             None => return,
         };
-        let path = match catalog.file(&name) {
-            Ok(file) => file.path,
-            Err(error) => {
-                self.note(error.message(lang), true);
-                return;
-            }
-        };
-        match fs::remove_file(&path) {
+        match functions.delete(&name) {
             Ok(()) => {
                 self.note(tr!(lang, m::BROWSER_DELETED, name = name.clone()), false);
-                self.entries = catalog.entries(lang);
+                self.reread(functions, lang);
                 self.at = self
                     .entries
                     .iter()
                     .position(|e| e.name == name)
                     .unwrap_or_else(|| self.at.min(self.entries.len().saturating_sub(1)));
             }
-            Err(error) => self.note(format!("{}: {error}", path.display()), true),
+            Err(error) => self.note(error.message(lang), true),
+        }
+    }
+
+    /// The list read anew; one that cannot be read stays as it was.
+    fn reread(&mut self, functions: &dyn Functions, lang: Lang) {
+        match functions.entries() {
+            Ok(entries) => self.entries = entries,
+            Err(error) => self.note(error.message(lang), true),
         }
     }
 
     /// `c` answered: the copy goes to the workspace's `functions/`, the
     /// same way `agl function new` puts it (AGL-102, D3).
-    fn clone_as(&mut self, name: &str, catalog: &Catalog, lang: Lang) {
+    fn clone_as(&mut self, name: &str, functions: &dyn Functions, lang: Lang) {
         let from = self.entries[self.at].name.clone();
-        match catalog.text(&from).and_then(|text| catalog.create(name, &text)) {
+        match functions.create(name, &from) {
             Ok(path) => {
                 self.note(
                     tr!(lang, m::BROWSER_CLONED, name = name.to_owned(), path = path.display()),
                     false,
                 );
-                self.entries = catalog.entries(lang);
+                self.reread(functions, lang);
                 if let Some(at) = self.entries.iter().position(|e| e.name == name) {
                     self.at = at;
                 }
@@ -363,7 +364,7 @@ impl Browser {
     }
 
     /// What the editor left of a Function (AGL-109, D4).
-    pub fn note_edited(&mut self, name: &str, edited: Edited, catalog: &Catalog, lang: Lang) {
+    pub fn note_edited(&mut self, name: &str, edited: Edited, functions: &dyn Functions, lang: Lang) {
         match edited {
             Edited::Failed(reason) => {
                 self.note(tr!(lang, m::BROWSER_EDITOR_FAILED, editor = editor_command().join(" "), reason = reason), true);
@@ -373,7 +374,7 @@ impl Browser {
             }
             Edited::Saved { check, error } => {
                 self.note(check, error);
-                self.entries = catalog.entries(lang);
+                self.reread(functions, lang);
             }
         }
     }
@@ -509,7 +510,7 @@ pub fn editor_command() -> Vec<String> {
 /// Hands the screen to the editor and checks what it left (AGL-109, D4,
 /// D5): the cooked terminal and the main screen go to the child, as to
 /// `git commit`, and the raw mode and the alternate screen return after.
-pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
+pub fn spawn_editor(write: &dyn Fn(&str), path: &Path) -> Edited {
     let before = fs::read_to_string(path).unwrap_or_default();
     let command = editor_command();
     let shown = command.join(" ");
@@ -536,39 +537,35 @@ pub fn spawn_editor(write: &dyn Fn(&str), path: &Path, lang: Lang) -> Edited {
             if after == before {
                 return Edited::Unchanged;
             }
-            // A `settings.nix` is the settings' own to answer; a Function
-            // is checked the way `agl function check` checks it (D5).
-            if path.file_name().is_some_and(|name| name == "settings.nix") {
-                return Edited::Saved { check: String::new(), error: false };
-            }
-            let checked = agentlibre_common::nix::eval_file(path)
-                .map_err(Into::into)
-                .and_then(|value| Function::from_value(path, value))
-                .map_err(|error| error.message(lang));
-            match checked {
-                Ok(function) => {
-                    let name = path
-                        .file_stem()
-                        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-                    Edited::Saved {
-                        check: tr!(
-                            lang,
-                            m::BROWSER_SAVED,
-                            name = name,
-                            kind = function.model.kind().name(),
-                            model = crate::engine::model_of(&function.model)
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default(),
-                            context = function.model.context.unwrap_or_default()
-                        )
-                        .to_string(),
-                        error: false,
-                    }
-                }
-                Err(problem) => Edited::Saved { check: problem, error: true },
-            }
+            // What the file is then, the caller asks (D5, D6).
+            Edited::Saved { check: String::new(), error: false }
         }
+    }
+}
+
+/// What the editor left of the Function `name`, checked the way `agl function
+/// check` checks it (AGL-109, D5).
+fn checked(edited: Edited, name: &str, functions: &dyn Functions, lang: Lang) -> Edited {
+    let Edited::Saved { .. } = edited else {
+        return edited;
+    };
+    match functions.check(name) {
+        Ok(load) => Edited::Saved {
+            check: tr!(
+                lang,
+                m::BROWSER_SAVED,
+                name = name,
+                kind = load.kind,
+                model = load.model.unwrap_or_default(),
+                context = load.context.unwrap_or_default()
+            )
+            .to_string(),
+            error: false,
+        },
+        Err(problem) => Edited::Saved {
+            check: problem.message(lang),
+            error: true,
+        },
     }
 }
 
@@ -599,14 +596,16 @@ pub fn run(
     write: &dyn Fn(&str),
     theme: &Theme,
     lang: Lang,
-    catalog: &Catalog,
+    functions: &dyn Functions,
     settings: &[SettingsItem],
     dock: &Dock,
     busy: &dyn Fn() -> bool,
     submit: &dyn Fn(&str),
     keys: &ModeKeys,
 ) -> Exit {
-    let mut browser = Browser::new(catalog.entries(lang));
+    let mut browser = Browser::new(Vec::new());
+    browser.reread(functions, lang);
+    browser.at = browser.entries.iter().position(|e| e.current).unwrap_or(0);
     let mut parser = term::Parser::default();
     let mut buffer = [0u8; 4096];
     let mut size = term::size();
@@ -656,7 +655,7 @@ pub fn run(
             }
             // On the settings' tab `e` answers through the settings' load.
             let on_settings = browser.settings;
-            match browser.key(key, catalog, settings, lang, busy()) {
+            match browser.key(key, functions, settings, lang, busy()) {
                 KeyOutcome::Stay => {}
                 KeyOutcome::Leave => {
                     open = false;
@@ -668,14 +667,15 @@ pub fn run(
                     break;
                 }
                 KeyOutcome::Edit(path) => {
-                    let edited = spawn_editor(write, &path, lang);
+                    let edited = spawn_editor(write, &path);
                     if on_settings {
                         browser.note_settings_edited(&path, edited, lang);
                     } else {
                         let name = path
                             .file_stem()
                             .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-                        browser.note_edited(&name, edited, catalog, lang);
+                        let edited = checked(edited, &name, functions, lang);
+                        browser.note_edited(&name, edited, functions, lang);
                     }
                 }
             }
@@ -693,6 +693,7 @@ pub fn run(
 mod tests {
     use super::*;
     use super::super::dock::Layout;
+    use crate::function::catalog::Catalog;
     use agentlibre_common::testutil::TempDir;
     use agentlibre_common::settings::ServerFile;
 

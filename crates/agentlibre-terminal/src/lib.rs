@@ -50,7 +50,6 @@ use agentlibre_common::tr;
 use paths::Paths;
 use agentlibre_core::client::Remote;
 use agentlibre_proto as proto;
-use plane::PlaneFile;
 use session::{Session, StopReason};
 use settings::{function_name, ReplSettings, UserFile};
 use theme::Theme;
@@ -80,16 +79,15 @@ const SESSIONS_LISTED: usize = 20;
 pub struct Setup {
     pub remote: Arc<Remote>,
     pub opened: proto::Opened,
-    /// The session's file as it is, for the replay and the inspect mode.
-    pub session: Session,
     pub lang: Lang,
     pub theme: Theme,
     pub repl: ReplSettings,
     pub history_file: PathBuf,
-    /// The Functions of the REPL's `/function` (AGL-036, D3); the input
-    /// thread reads it too (AGL-102, D2).
-    pub catalog: Arc<function::catalog::Catalog>,
-    /// agentLIBRE's directories, for the planes of `/plane` (AGL-077, D12).
+    /// The Functions of the REPL's `/function` (AGL-036, D3) and the planes
+    /// of its `/plane` (AGL-077, D12), by the daemon (AGL-126, D2).
+    pub stores: Arc<remote::Stores>,
+    /// agentLIBRE's directories, for the settings of Ctrl-F (AGL-109, D6) and
+    /// the daemon's socket.
     pub paths: Paths,
     /// The REPL's voice, by the daemon (AGL-076, D15).
     pub voice: Arc<dyn whisper::Dictation>,
@@ -279,7 +277,7 @@ fn run(
     // uses it (AGL-076, D16).
     let mut args = args;
     loop {
-        match agent_session(&env, &paths, &user, &cwd, &project, &args, *lang)? {
+        match agent_session(&env, &paths, &user, &cwd, &args, *lang)? {
             repl::End::Exit(code) => return Ok(code),
             // `/function <name>` (AGL-036, D4): a new session with that
             // Function, the reasoning level kept.
@@ -319,7 +317,6 @@ fn agent_session(
     paths: &Paths,
     user: &UserFile,
     cwd: &Path,
-    project: &forge::Workspace,
     args: &cli::args::Args,
     lang: Lang,
 ) -> Result<repl::End, Error> {
@@ -348,21 +345,14 @@ fn agent_session(
     )?;
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
-        // The Functions of `/function` (AGL-036, D3, D9), the run's one
-        // marked; in a plane, its Functions first (AGL-077, D7).
         let plane = opened.session.plane.clone();
-        let catalog = match &plane {
-            Some(name) => {
-                let file = PlaneFile::open(paths, name)?;
-                function::catalog::Catalog::in_plane(paths, project, user, &file, &file.settings()?)
-            }
-            None => function::catalog::Catalog::of(paths, project, user),
-        };
-        let catalog = function::catalog::Catalog {
-            current: opened.function.clone(),
-            ..catalog
-        };
-        let session = Session::open(&paths.sessions(), &opened.session.id)?;
+        let stores = Arc::new(remote::Stores {
+            paths: paths.clone(),
+            lang,
+            dir: opened.workspace.clone(),
+            plane: plane.clone(),
+            function: opened.function.clone(),
+        });
         let voice = Arc::new(remote::RemoteVoice {
             paths: paths.clone(),
             dir: opened.workspace.clone(),
@@ -372,12 +362,11 @@ fn agent_session(
         let setup = Setup {
             remote: Arc::clone(&remote),
             opened,
-            session,
             lang,
             theme: Theme::new(interactive && theme::colors_enabled(env), &user.colors),
             repl: repl_settings,
             history_file: paths.history_file(),
-            catalog: Arc::new(catalog),
+            stores,
             paths: paths.clone(),
             voice,
         };

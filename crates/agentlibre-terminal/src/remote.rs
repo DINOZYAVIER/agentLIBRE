@@ -2,16 +2,20 @@
 //! opened there, the questions of its plane asked of the human, its
 //! Ctrl-C sent as `stop`, and its voice transcribed there (D15).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use agentlibre_core::client::{self, Remote};
+use agentlibre_core::plane::wire;
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
 use crate::backend::ReasoningLevel;
 use crate::error::CoreError as Error;
+use crate::function::catalog::Entry;
+use crate::repl::Functions;
+use crate::session::{Event, TransitionLine};
 use agentlibre_common::i18n::Lang;
 use crate::interrupt;
 use agentlibre_common::paths::Paths;
@@ -95,6 +99,151 @@ pub fn forward_stop(remote: &Arc<Remote>) {
             thread::sleep(Duration::from_millis(50));
         }
     });
+}
+
+/// What the REPL asks of the stores (AGL-126, D2), each request on a
+/// connection of its own: the input thread and the main thread ask both.
+pub struct Stores {
+    pub paths: Paths,
+    pub lang: Lang,
+    pub dir: String,
+    pub plane: Option<String>,
+    /// The Function the session runs.
+    pub function: String,
+}
+
+impl Stores {
+    fn ask(&self, request: &Request) -> Result<Reply, Error> {
+        let client = client::connect(&self.paths, false, self.lang, true)?;
+        Ok(client.ask(request, &mut |_| {})?)
+    }
+
+    fn function(&self, verb: proto::FunctionVerb) -> Result<proto::FunctionView, Error> {
+        match self.ask(&Request::Function {
+            dir: self.dir.clone(),
+            plane: self.plane.clone(),
+            verb,
+        })? {
+            Reply::Function(view) => Ok(view),
+            reply => Err(unexpected(&reply)),
+        }
+    }
+
+    /// The planes of the session's directory, or the plane `name` alone,
+    /// refused when there is none.
+    pub fn planes(&self, name: Option<&str>) -> Result<Vec<String>, Error> {
+        match self.ask(&Request::Planes {
+            dir: self.dir.clone(),
+            name: name.map(str::to_owned),
+        })? {
+            Reply::Planes { planes } => Ok(planes),
+            reply => Err(unexpected(&reply)),
+        }
+    }
+}
+
+fn unexpected(reply: &Reply) -> Error {
+    Error::Daemon {
+        detail: format!("an unexpected reply: {reply:?}"),
+    }
+}
+
+impl Functions for Stores {
+    fn current(&self) -> &str {
+        &self.function
+    }
+
+    fn entries(&self) -> Result<Vec<Entry>, Error> {
+        match self.ask(&Request::Functions {
+            dir: self.dir.clone(),
+            plane: self.plane.clone(),
+        })? {
+            Reply::Functions { functions } => Ok(functions
+                .into_iter()
+                .filter_map(wire::function_entry_of)
+                .map(|entry| Entry {
+                    current: entry.name == self.function,
+                    ..entry
+                })
+                .collect()),
+            reply => Err(unexpected(&reply)),
+        }
+    }
+
+    fn show(&self, name: &str) -> Result<(String, PathBuf), Error> {
+        let view = self.function(proto::FunctionVerb::Show { name: name.into() })?;
+        Ok((view.text.unwrap_or_default(), view.path.into()))
+    }
+
+    fn check(&self, name: &str) -> Result<proto::FunctionLoad, Error> {
+        let view = self.function(proto::FunctionVerb::Check { name: name.into() })?;
+        Ok(view.load.unwrap_or_default())
+    }
+
+    fn create(&self, name: &str, from: &str) -> Result<PathBuf, Error> {
+        let verb = proto::FunctionVerb::New {
+            name: name.into(),
+            from: from.into(),
+        };
+        Ok(self.function(verb)?.path.into())
+    }
+
+    fn delete(&self, name: &str) -> Result<(), Error> {
+        self.function(proto::FunctionVerb::Delete { name: name.into() }).map(drop)
+    }
+}
+
+/// A session read while its turn runs (AGL-126, D2): what the inspect mode
+/// shows, and whether it grew, on a connection of its own.
+pub struct Follower {
+    client: client::Client,
+    session: String,
+}
+
+/// A session's events and its phases' times.
+pub type Past = (Vec<Event>, Vec<TransitionLine>);
+
+impl Follower {
+    pub fn of(paths: &Paths, lang: Lang, session: &str) -> Result<Follower, Error> {
+        let client = client::connect(paths, false, lang, false)?;
+        let subscribe = Request::Subscribe {
+            session: Some(session.to_owned()),
+        };
+        client.ask(&subscribe, &mut |_| {})?;
+        Ok(Follower {
+            client,
+            session: session.to_owned(),
+        })
+    }
+
+    pub fn past(&self) -> Result<Past, Error> {
+        let request = Request::History {
+            session: self.session.clone(),
+        };
+        match self.client.ask(&request, &mut |_| {})? {
+            Reply::History { events, transitions, .. } => Ok((
+                events.into_iter().map(wire::event_of).collect(),
+                transitions.into_iter().map(wire::phase_time_of).collect(),
+            )),
+            reply => Err(unexpected(&reply)),
+        }
+    }
+
+    /// The past, when the session grew since it was last read.
+    pub fn grown(&self) -> Option<Past> {
+        let mut grew = false;
+        while let Some(reply) = self.client.try_next() {
+            grew |= matches!(
+                reply,
+                Reply::Done { .. }
+                    | Reply::Sent {
+                        sent: proto::Sent::Report(proto::Report::Event(_) | proto::Report::Transition(_)),
+                        ..
+                    }
+            );
+        }
+        if grew { self.past().ok() } else { None }
+    }
 }
 
 /// The REPL's voice by the daemon's transcription (D15), on a connection

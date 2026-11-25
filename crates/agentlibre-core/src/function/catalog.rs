@@ -179,55 +179,9 @@ impl Catalog {
             .collect()
     }
 
-    /// The list as lines (AGL-036, D3): the current Function marked, the
-    /// columns aligned.
+    /// [`lines`] of every Function.
     pub fn lines(&self, lang: Lang) -> Vec<String> {
-        let entries = self.entries(lang);
-        let name_width = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(0);
-        let source_width = entries
-            .iter()
-            .map(|e| e.source.label(lang).chars().count())
-            .max()
-            .unwrap_or(0);
-        let no_model = tr!(lang, m::FUNCTION_NO_MODEL);
-        let model_width = entries
-            .iter()
-            .filter(|e| e.error.is_none())
-            .map(|e| e.model.as_deref().unwrap_or(no_model).chars().count())
-            .max()
-            .unwrap_or(0);
-        entries
-            .iter()
-            .map(|entry| {
-                let mark = if entry.current { '*' } else { ' ' };
-                let mut line = format!(
-                    "{mark} {:name_width$}  {:source_width$}  ",
-                    entry.name,
-                    entry.source.label(lang),
-                );
-                match &entry.error {
-                    Some(error) => line.push_str(error),
-                    None => {
-                        line.push_str(&format!("{:6}  ", entry.kind.name()));
-                        let model = entry.model.as_deref().unwrap_or(no_model);
-                        // What it is made for (AGL-089, D12, D14), in a
-                        // column after the models.
-                        match &entry.description {
-                            Some(description) => {
-                                line.push_str(&format!("{model:model_width$}  {description}"));
-                            }
-                            None => line.push_str(model),
-                        }
-                    }
-                }
-                if !entry.shadows.is_empty() {
-                    let hidden: Vec<&str> = entry.shadows.iter().map(|s| s.label(lang)).collect();
-                    line.push(' ');
-                    line.push_str(&tr!(lang, m::FUNCTION_SHADOWS, sources = hidden.join(", ")));
-                }
-                line.trim_end().to_owned()
-            })
-            .collect()
+        lines(&self.entries(lang), lang)
     }
 
     /// The Function `name` loads and its model fits the settings
@@ -344,6 +298,56 @@ impl Catalog {
         let server = self.settings.effective(&function.model);
         Ok((server.kind(), crate::engine::model_of(&server)?, function.description))
     }
+}
+
+/// The list as lines (AGL-036, D3): the current Function marked, the
+/// columns aligned.
+pub fn lines(entries: &[Entry], lang: Lang) -> Vec<String> {
+    let name_width = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(0);
+    let source_width = entries
+        .iter()
+        .map(|e| e.source.label(lang).chars().count())
+        .max()
+        .unwrap_or(0);
+    let no_model = tr!(lang, m::FUNCTION_NO_MODEL);
+    let model_width = entries
+        .iter()
+        .filter(|e| e.error.is_none())
+        .map(|e| e.model.as_deref().unwrap_or(no_model).chars().count())
+        .max()
+        .unwrap_or(0);
+    entries
+        .iter()
+        .map(|entry| {
+            let mark = if entry.current { '*' } else { ' ' };
+            let mut line = format!(
+                "{mark} {:name_width$}  {:source_width$}  ",
+                entry.name,
+                entry.source.label(lang),
+            );
+            match &entry.error {
+                Some(error) => line.push_str(error),
+                None => {
+                    line.push_str(&format!("{:6}  ", entry.kind.name()));
+                    let model = entry.model.as_deref().unwrap_or(no_model);
+                    // What it is made for (AGL-089, D12, D14), in a
+                    // column after the models.
+                    match &entry.description {
+                        Some(description) => {
+                            line.push_str(&format!("{model:model_width$}  {description}"));
+                        }
+                        None => line.push_str(model),
+                    }
+                }
+            }
+            if !entry.shadows.is_empty() {
+                let hidden: Vec<&str> = entry.shadows.iter().map(|s| s.label(lang)).collect();
+                line.push(' ');
+                line.push_str(&tr!(lang, m::FUNCTION_SHADOWS, sources = hidden.join(", ")));
+            }
+            line.trim_end().to_owned()
+        })
+        .collect()
 }
 
 /// Writes `text` to `target` as a temp file next to it, loads that file
